@@ -26,7 +26,6 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { IconMicroscope } from "@tabler/icons-react"
 import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -762,6 +761,8 @@ export function ChatScreen() {
     pendingPrdTab,
     setPendingPrdTab,
     openPrdTab,
+    pendingReportFocus,
+    setPendingReportFocus,
     showToast,
     openContentPanel,
     closeContentPanel,
@@ -2030,6 +2031,52 @@ export function ChatScreen() {
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, setContent])
+
+  // Mirror the active tab's CONVERSATION id into content, so the panel knows
+  // which thread it's showing (the Reports tab lists that thread's reports).
+  // Kept separate from the artifact sync above because it must also fire when a
+  // tab GAINS its id — a brand-new chat has none until its first ask persists,
+  // and keying on activeTabId alone would leave the panel on a stale thread.
+  const activeConvId = tabs.find((t) => t.id === activeTabId)?.dbConvId ?? null
+  useEffect(() => {
+    setContent({ conversationId: activeConvId })
+  }, [activeConvId, setContent])
+
+  // This thread's captured reports, newest first — fetched once by
+  // useThreadReportsSync (AppShell). Defaulted for the surfaces/tests that render
+  // ChatScreen against partial content.
+  const threadReports = content.threadReports ?? []
+
+  // Open the report a CHAT TURN is about, from its title.
+  //
+  // Title is the join key because the reply the thread holds carries no report
+  // id: capture runs after the ask completes, deliberately (it must never delay
+  // the answer), so the id doesn't exist yet when the reply is stored. Both sides
+  // derive the title from the document's own <h1> — the client via
+  // reportTitleFromHtml, the server via report_capture.report_title — so they
+  // agree by construction.
+  //
+  // Matched exactly first, then leniently (case/whitespace, then either side
+  // being a prefix of the other) — a title that drifts by a dash or a truncation
+  // should still open the right document rather than dumping the reader on a
+  // list, which is the failure this whole path exists to avoid.
+  //
+  // No match at all means capture hasn't landed yet (or the row is gone): open
+  // the tab and let it show what it has, rather than pointing at a report that
+  // isn't there.
+  const openReportByTitle = useCallback((title: string) => {
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
+    const want = norm(title)
+    const match =
+      threadReports.find((r) => r.title === title) ??
+      threadReports.find((r) => norm(r.title) === want) ??
+      threadReports.find((r) => {
+        const have = norm(r.title)
+        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
+      })
+    if (match) setContent({ reportFocusId: match.id })
+    openContentPanel("reports")
+  }, [threadReports, setContent, openContentPanel])
 
   // Chat-task PRDs generate an Evidence artifact server-side (semantic KG
   // retrieval over the task — skipped when the KG has no backing). Once a tab
@@ -3450,7 +3497,11 @@ export function ChatScreen() {
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
-    if (!switchedTab || prdPanelPending) return
+    // `pendingReportFocus` suppresses the reconcile for the same reason
+    // `prdPanelPending` does: a report opened from Artifacts resumes its thread,
+    // which IS a tab switch, and that thread often carries no PRD — so this would
+    // close the very panel the hand-off below is about to open.
+    if (!switchedTab || prdPanelPending || pendingReportFocus) return
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
@@ -3487,7 +3538,62 @@ export function ChatScreen() {
     } else if (contentPanelTab) {
       closeContentPanel()
     }
-  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, chatInsightState, handleOpenPrd, closeContentPanel, openContentPanel, setContent])
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, pendingReportFocus, chatInsightState, handleOpenPrd, closeContentPanel, openContentPanel, setContent])
+
+  // ── Report → its own thread hand-off ──────────────────────────────────────
+  // Clicking a report in Artifacts writes the ordinary `sprntly_resume_conv`
+  // hand-off and fills `pendingReportFocus`: checkResume spawns/refocuses that
+  // conversation's tab, and this lands the panel on the report once that tab is
+  // ACTUALLY active. Gated on the id matching so the panel can never open over a
+  // different thread — if the resume fails, nothing opens rather than the wrong
+  // thing. Declared after the reconcile above so that, on the commit where both
+  // run, this open is the last word.
+  // Tabs whose Reports panel has already been opened for them once. Shared by
+  // the hand-off below and the auto-open further down, so that between them they
+  // open a thread's reports exactly once — and a panel the user then CLOSES
+  // stays closed instead of being reopened by the other path.
+  const reportsAutoOpenedRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (!pendingReportFocus) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.dbConvId !== pendingReportFocus.conversationId) return
+    setContent({ reportFocusId: pendingReportFocus.reportId })
+    setPendingReportFocus(null)
+    // Claim the tab: this IS its one auto-open, so closing the panel here must
+    // not hand straight over to the auto-open effect below.
+    reportsAutoOpenedRef.current.add(tab.id)
+    openContentPanel("reports")
+  }, [pendingReportFocus, setPendingReportFocus, activeTabId, tabs, setContent, openContentPanel])
+
+  // ── A thread whose only artifact is reports opens on them ──────────────────
+  // Opening a chat should SHOW what that chat produced. The PRD-bound paths
+  // above already do that for PRDs; this covers the thread whose artifact is a
+  // report, which otherwise came back with the panel shut and no sign the
+  // document existed.
+  //
+  // Lands on the NEWEST report, not a list — the list is what "All reports"
+  // is for, and a thread with several still has one that was just written.
+  //
+  // A PRD in the thread takes precedence and is left as the active tab — it's
+  // the document the chat is about, and Reports is one click away in the tab bar
+  // (that ordering is the explicit ask). Fires at most once per tab, so a manual
+  // close is never undone, and never over an already-open panel.
+  useEffect(() => {
+    if (!activeTabId || isBriefTab || pendingReportFocus) return
+    if (reportsAutoOpenedRef.current.has(activeTabId)) return
+    // Only act on a KNOWN list — "not loaded yet" must not read as "no reports".
+    if (content.threadReportsStatus !== "ready" || threadReports.length === 0) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (tab?.prd || tab?.prdGenerating || tab?.prdId != null) return
+    if (contentPanelTab) return // something is already open — don't hijack it
+    reportsAutoOpenedRef.current.add(activeTabId)
+    setContent({ reportFocusId: threadReports[0].id })
+    openContentPanel("reports")
+  }, [
+    activeTabId, isBriefTab, pendingReportFocus, contentPanelTab,
+    threadReports, content.threadReportsStatus, setContent, openContentPanel,
+  ])
 
   // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
   // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
@@ -4035,28 +4141,55 @@ export function ChatScreen() {
   // scrolls. The in-thread button stays where it is; this is an additional way
   // in, not a replacement.
   //
-  // Prefers the PRD when the tab has one — it's the artifact the panel is
-  // named for — and falls back to Evidence for an insight tab that only ever
-  // generated a brief. Null (hidden) when the panel is already open, on the
-  // brief tab (BriefChat owns its own panel wiring, and handleOpenPrd no-ops
-  // there since BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact
-  // to reopen.
+  // ONE button for every artifact this thread has — PRD, report, or evidence.
+  // It opens whichever was written LAST, so it always means "show me what I was
+  // just working on" rather than being a PRD button that a report thread has to
+  // duplicate. Null (hidden) when the panel is already open, on the brief tab
+  // (BriefChat owns its own panel wiring, and handleOpenPrd no-ops there since
+  // BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact to reopen.
   //
-  // `kind` picks the icon: the button is icon-only (the strip is chrome, and a
-  // labelled pill competed with the tabs for attention), so the icon is the only
-  // thing distinguishing "reopen the PRD" from "reopen the evidence" at a glance.
-  // Each matches the panel tab it reopens — the label survives as the tooltip and
-  // the accessible name.
+  // The button is icon-only and the icon is FIXED (the strip is chrome, and a
+  // labelled pill competed with the tabs for attention). Which document it opens
+  // is carried by the tooltip and the accessible name, not by a changing glyph —
+  // a glyph that swaps per artifact reads as a different button appearing.
   const reopenArtifact = useMemo(() => {
     if (isBriefTab || contentPanelTab || !activeTabId) return null
-    if (chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading) {
-      return { label: "View PRD", kind: "prd" as const, onClick: handleOpenPrd }
+    const prdInScope = chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading
+    const newestReport = threadReports[0] ?? null
+
+    // With a PRD *and* reports in the same thread, the button opens whichever was
+    // written LAST — that's the document the user was just working on, and one
+    // button that opens "the current artifact" beats two competing ones. Reports
+    // are newest-first, so [0] is the thread's newest. A PRD still in flight has
+    // no timestamp yet but is by definition the newest thing here, so it wins;
+    // otherwise a missing timestamp (a streaming draft) never beats a real one.
+    const reportIsNewer = (() => {
+      if (!newestReport) return false
+      if (!prdInScope) return true
+      if (activeTab?.prdGenerating || activeTab?.prdLoading) return false
+      const prdAt = activeTab?.prd?.generatedAt
+      if (!prdAt) return true
+      return new Date(newestReport.created_at).getTime() > new Date(prdAt).getTime()
+    })()
+
+    if (reportIsNewer && newestReport) {
+      return {
+        label: threadReports.length > 1 ? "View reports" : "View report",
+        onClick: () => {
+          // Reopening lands on the newest report rather than a list — same as the
+          // auto-open. The list is behind "All reports" when there's more than one.
+          setContent({ reportFocusId: newestReport.id })
+          openContentPanel("reports")
+        },
+      }
     }
-    if (chatEvidenceExists) return { label: "View Evidence", kind: "evidence" as const, onClick: handleOpenEvidence }
+    if (prdInScope) return { label: "View PRD", onClick: handleOpenPrd }
+    if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
     return null
   }, [
     isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
-    activeTab?.prdGenerating, activeTab?.prdLoading, handleOpenPrd, handleOpenEvidence,
+    activeTab?.prdGenerating, activeTab?.prdLoading, activeTab?.prd?.generatedAt,
+    handleOpenPrd, handleOpenEvidence, threadReports, setContent, openContentPanel,
   ])
 
   // ── Tab strip overflow ──────────────────────────────────────────────────────
@@ -4279,9 +4412,11 @@ export function ChatScreen() {
                 aria-label={reopenArtifact.label}
                 onClick={() => { void reopenArtifact.onClick() }}
               >
-                {reopenArtifact.kind === "evidence"
-                  ? <IconMicroscope size={15} />
-                  : <IconDocument size={15} />}
+                {/* ONE control, one icon, whatever it opens. The strip is chrome:
+                    a glyph that changes per artifact type reads as a different
+                    button appearing, when it is the same "open what this thread
+                    has" affordance throughout. The label says which document. */}
+                <IconDocument size={15} />
               </button>
             ) : null}
           </div>
@@ -4575,6 +4710,11 @@ export function ChatScreen() {
                                 reply={turn.reply}
                                 animateIn={hasFreshReply}
                                 simulateTyping={hasFreshReply}
+                                // A report answer is an ARTIFACT: it reads in the
+                                // panel's Reports tab like every other artifact of
+                                // this thread, and the turn itself is just the card
+                                // that opens it — on THIS report, not on a list.
+                                onOpenReport={openReportByTitle}
                               />
                             ) : null}
                             {isLast && turn.reply && activeTab?.prdCommandThinking ? (

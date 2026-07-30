@@ -5084,6 +5084,12 @@
     overflow: hidden;
   }
 
+  /* Reports tab — a report is a full-bleed HTML document in an iframe, so the
+     panel's 24px reading gutter only shrinks the page it is trying to show. */
+  .cpanel-body:has(.reports-panel) {
+    padding: 10px;
+  }
+
   .cpanel-empty {
     display: flex;
     flex-direction: column;

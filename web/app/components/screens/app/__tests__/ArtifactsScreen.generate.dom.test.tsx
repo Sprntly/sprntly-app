@@ -4,6 +4,12 @@
 // ask with the skill pinned → poll → refresh the library. Generation goes through
 // the ordinary ask pipeline, so this asserts the pinning and the polling rather
 // than a bespoke generate route.
+//
+// SKIPPED: the "+ New report" button is hidden (SHOW_NEW_REPORT_BUTTON in
+// ArtifactsScreen.tsx) — reports are asked for in chat and read in that thread's
+// Reports tab. The generation path itself is untouched, so these run again the
+// moment that flag flips back; they are kept rather than deleted for exactly
+// that reason.
 
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
@@ -80,7 +86,7 @@ async function openPicker() {
   await waitFor(() => expect(reportKinds).toHaveBeenCalled())
 }
 
-describe("ArtifactsScreen — New report", () => {
+describe.skip("ArtifactsScreen — New report (button hidden)", () => {
   it("offers the server's report kinds", async () => {
     await openPicker()
     const menu = screen.getByTestId("new-report-menu")

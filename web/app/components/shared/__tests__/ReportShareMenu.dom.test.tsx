@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 //
-// Tests for the report viewer's Share menu: PDF download (the only format) and
-// the opt-in link. The api module is stubbed so this exercises the menu's wiring.
+// Tests for the report's Share menu: PDF download (the only format) and the
+// opt-in link. The api module is stubbed so this exercises the menu's wiring.
+//
+// Rendered directly rather than through a viewer: the menu is the unit, and the
+// report now reads inside the shared content panel's Reports tab rather than in
+// a drawer of its own.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -24,7 +28,7 @@ vi.mock("../../../lib/saveBlob", () => ({
   saveBlob: (...a: unknown[]) => saveBlob(...a),
 }))
 
-import { ReportPanel } from "../ReportPanel"
+import { ReportShareMenu } from "../ReportShareMenu"
 // Type-only import: erased at runtime, so it does not defeat the module mock.
 import type { ReportDoc } from "../../../lib/api"
 
@@ -51,10 +55,8 @@ afterEach(() => {
 
 function openMenu(report = DOC) {
   render(
-    <ReportPanel
+    <ReportShareMenu
       report={report}
-      loading={false}
-      onClose={() => {}}
       onToast={onToast}
       onShareChange={onShareChange}
     />,
@@ -62,7 +64,7 @@ function openMenu(report = DOC) {
   fireEvent.click(screen.getByTestId("report-share-button"))
 }
 
-describe("ReportPanel — share menu", () => {
+describe("ReportShareMenu", () => {
   it("offers PDF as the only download format", () => {
     openMenu()
     expect(screen.getByTestId("report-download-pdf")).toBeTruthy()

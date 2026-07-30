@@ -86,6 +86,10 @@ function renderPanel(opts: {
   prd?: PrdState | null
   prdMeta?: typeof META | null
   prdGenerating?: boolean
+  /** A loaded evidence brief. Puts the Evidence → PRD → Tickets pipeline in
+   *  scope (the panel only shows tabs whose artifact exists) without supplying
+   *  an insight to resolve a PRD from. */
+  evidence?: unknown
 }) {
   navMock.tab = opts.tab ?? "evidence"
   contentMock.value = {
@@ -93,7 +97,7 @@ function renderPanel(opts: {
     prd: opts.prd ?? null,
     prdMeta: opts.prdMeta ?? null,
     prdGenerating: opts.prdGenerating ?? false,
-    evidence: null,
+    evidence: opts.evidence ?? null,
     evidenceGenerating: false,
   }
   return render(React.createElement(ContentPanel))
@@ -149,7 +153,10 @@ describe("ContentPanel — the PRD tab resolves the insight's PRD on click", () 
   })
 
   it("does nothing but switch tabs when there is no insight to resolve against", () => {
-    renderPanel({ tab: "evidence", detail: null, prdMeta: null })
+    // Evidence is loaded (so the pipeline's tabs exist at all — the panel only
+    // shows tabs whose artifact does), but there is no insight behind it, so the
+    // PRD tab has nothing to resolve from.
+    renderPanel({ tab: "evidence", detail: null, prdMeta: null, evidence: { html: "<h1>e</h1>" } })
 
     fireEvent.click(prdTab())
 

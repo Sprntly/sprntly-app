@@ -5,6 +5,7 @@ import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
+import { reportKindLabel, reportTitleFromHtml } from "../../lib/reportKind"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
 import { HtmlReportView } from "./HtmlReportView"
 import { JiraChangeConfirm } from "./JiraChangeConfirm"
@@ -56,11 +57,81 @@ const askMarkdownComponents: Components = {
   },
 }
 
+/**
+ * A report answer, as it appears IN THE THREAD: a card naming the document, with
+ * the way to read it. The document itself lives in the panel's Reports tab —
+ * that's where every artifact of a thread reads, and printing it here as well
+ * meant scrolling past the same report twice to find the conversation.
+ */
+function ReportAnswerCard({
+  html,
+  skill,
+  onOpen,
+}: {
+  html: string
+  skill?: string | null
+  onOpen: (title: string) => void
+}) {
+  const title = reportTitleFromHtml(html, skill)
+  // `reportKindLabel` falls back to a bare "Report" when the turn carries no
+  // skill (persisted turns don't), and "Report report" is nonsense — say it once.
+  const kind = reportKindLabel(skill)
+  const kindLine = kind === "Report" ? "Report" : `${kind} report`
+  return (
+    <div
+      className="ask-report-card"
+      data-testid="report-answer-card"
+      style={{
+        display: "flex", alignItems: "center", gap: 14,
+        padding: "14px 16px", borderRadius: 12,
+        border: "1px solid var(--line, #E8E6E0)", background: "var(--paper, #fff)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: "#EDE9FE", color: "#6D28D9",
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="4" y1="20" x2="20" y2="20" />
+          <rect x="6" y="11" width="3.4" height="6" rx="1" />
+          <rect x="11.4" y="7" width="3.4" height="10" rx="1" />
+          <rect x="16.8" y="13" width="3.4" height="4" rx="1" />
+        </svg>
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--ink, #1A1A17)" }}>
+          {title}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)", marginTop: 2 }}>
+          {kindLine} · opens on the right
+        </div>
+      </div>
+      <button
+        type="button"
+        className="bc-action-btn"
+        data-testid="open-report-btn"
+        // The TITLE identifies which document this turn is: it's derived from the
+        // report's own <h1>, exactly as the captured artifact's title is (see
+        // report_capture.report_title), so the panel can open THIS report rather
+        // than dropping the reader on a list of the thread's reports.
+        onClick={() => onOpen(title)}
+      >
+        View report
+      </button>
+    </div>
+  )
+}
+
 export function AskReplyBody({
   reply,
   animateIn,
   simulateTyping = false,
   omitCitations = false,
+  onOpenReport,
 }: {
   reply: AskResponse
   /** Short fade/slide when the reply block first mounts. */
@@ -69,6 +140,22 @@ export function AskReplyBody({
   simulateTyping?: boolean
   /** Hide citation/source cards (e.g. right AI rail). */
   omitCitations?: boolean
+  /**
+   * Where a report answer READS, on surfaces that have the content panel.
+   *
+   * A report is an artifact, and artifacts open in the panel — so the chat turn
+   * becomes a compact card that opens it there, instead of printing the whole
+   * document into the thread (which showed the same report twice, once inline
+   * and once in the panel, and buried the conversation under it).
+   *
+   * Receives the report's title, which is how the panel resolves WHICH of the
+   * thread's reports this turn is — a thread can hold several, and landing the
+   * reader on a list when they clicked one specific document is a step backwards.
+   *
+   * Omitted on surfaces with no panel to open — the staff transcript viewer, the
+   * AI rail — where the inline document is still the only way to read it.
+   */
+  onOpenReport?: (title: string) => void
 }) {
   const { visible, done, isStreaming } = useAnswerSimulatedStream(reply.answer, simulateTyping)
 
@@ -79,7 +166,15 @@ export function AskReplyBody({
   if (looksLikeHtmlBrief(reply.answer)) {
     const reportTitle =
       REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
-    const report = <HtmlReportView html={reply.answer} title={reportTitle} />
+    const report = onOpenReport ? (
+      <ReportAnswerCard
+        html={reply.answer}
+        skill={reply._skill}
+        onOpen={onOpenReport}
+      />
+    ) : (
+      <HtmlReportView html={reply.answer} title={reportTitle} />
+    )
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>
     ) : (

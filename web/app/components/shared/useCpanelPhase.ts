@@ -19,8 +19,8 @@ export const CPANEL_OUT_MS = 200
  * matching class; "idle" is the settled, open panel with NO transform on it
  * (see the .cpanel--in comment in globals.css for why that matters).
  *
- * Shared by ContentPanel (the PRD/evidence/tickets drawer) and ReportPanel (the
- * report viewer) so both drawers slide identically.
+ * Used by ContentPanel — the ONE slide-over, which every artifact (evidence,
+ * PRD, tickets, reports) opens into as a tab rather than bringing its own drawer.
  */
 export function useCpanelPhase(open: boolean) {
   const [mounted, setMounted] = useState(open)

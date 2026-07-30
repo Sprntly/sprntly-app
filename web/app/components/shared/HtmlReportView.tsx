@@ -17,10 +17,41 @@ import { stripHtmlCodeFence } from "../../lib/htmlBrief"
  * through ReactMarkdown (which would escape the tags). Strips a wrapping ```html
  * fence defensively so a fenced payload still renders as a document.
  */
-export function HtmlReportView({ html, title = "Report" }: { html: string; title?: string }) {
+/**
+ * Injected when the document is read inside the side panel.
+ *
+ * These reports lay themselves out for a full page — `.page` carries a wide
+ * reading gutter that makes sense at full width and only squeezes the content
+ * when the same document is shown in a ~700px panel. Appended AFTER the
+ * document's own styles so it wins without editing the skill's template, and
+ * scoped to this one rule so nothing else about the layout changes.
+ *
+ * Not applied on the standalone `/r/<token>` page, where the document has the
+ * whole viewport and its own gutter is exactly right.
+ */
+const PANEL_STYLE = "<style>.page{padding:0px 0px !important;}</style>"
+
+/** Put the override inside <head> when there is one, else append it. */
+function withPanelStyle(doc: string): string {
+  if (/<\/head>/i.test(doc)) return doc.replace(/<\/head>/i, `${PANEL_STYLE}</head>`)
+  return doc + PANEL_STYLE
+}
+
+export function HtmlReportView({
+  html,
+  title = "Report",
+  fitPanel = false,
+}: {
+  html: string
+  title?: string
+  /** Trim the document's own page gutter — see PANEL_STYLE. Set by the content
+   *  panel's Reports tab, which has far less width than a full page. */
+  fitPanel?: boolean
+}) {
   const ref = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
-  const doc = stripHtmlCodeFence(html)
+  const stripped = stripHtmlCodeFence(html)
+  const doc = fitPanel ? withPanelStyle(stripped) : stripped
 
   const resize = () => {
     const cdoc = ref.current?.contentDocument

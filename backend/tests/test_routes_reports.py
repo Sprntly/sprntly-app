@@ -90,6 +90,72 @@ def test_foreign_report_404s_rather_than_403s(isolated_settings, monkeypatch):
     assert own.json()["title"] == "Rival VoC"
 
 
+# ─── Per-thread listing (the chat panel's Reports tab) ───────────────────────
+
+
+def test_lists_the_reports_captured_in_one_thread_newest_first(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    first = _seed_report(company_id=ctx.company_id, title="VoC v1", conversation_id=42)
+    second = _seed_report(company_id=ctx.company_id, title="VoC v2", conversation_id=42)
+    _seed_report(company_id=ctx.company_id, title="Other thread", conversation_id=43)
+    _seed_report(company_id=ctx.company_id, title="Unattached")
+
+    r = ctx.client.get("/v1/reports?conversation_id=42")
+    assert r.status_code == 200
+    reports = r.json()["reports"]
+    assert [x["id"] for x in reports] == [second, first], "newest first"
+    assert [x["title"] for x in reports] == ["VoC v2", "VoC v1"]
+    assert reports[0]["skill"] == "voice-of-customer-report"
+    assert reports[0]["conversation_id"] == 42
+    assert reports[0]["share_mode"] == "private"
+
+
+def test_listing_omits_the_bodies(isolated_settings, monkeypatch):
+    """A list of N reports must not carry N full documents — the reader opens
+    one, and GET /v1/reports/{id} serves that one."""
+    ctx = company_client(monkeypatch)
+    _seed_report(company_id=ctx.company_id, conversation_id=42)
+
+    reports = ctx.client.get("/v1/reports?conversation_id=42").json()["reports"]
+    assert reports
+    assert "html" not in reports[0]
+
+
+def test_thread_with_no_reports_lists_empty(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_report(company_id=ctx.company_id, conversation_id=42)
+
+    assert ctx.client.get("/v1/reports?conversation_id=999").json()["reports"] == []
+
+
+def test_listing_is_company_scoped(isolated_settings, monkeypatch):
+    """A conversation id guessed from another tenant reads as an empty thread,
+    never as their reports."""
+    ctx = company_client(monkeypatch)
+    other_company_id = seed_company(user_id="intruder", slug="rival")
+    _seed_report(company_id=other_company_id, title="Rival VoC", conversation_id=42)
+
+    assert ctx.client.get("/v1/reports?conversation_id=42").json()["reports"] == []
+
+    # The rival sees their own — proving the row exists and the empty list above
+    # is the tenant gate, not a missing seed.
+    theirs = ctx.client.get(
+        "/v1/reports?conversation_id=42", headers=supabase_bearer("intruder")
+    ).json()["reports"]
+    assert [x["title"] for x in theirs] == ["Rival VoC"]
+
+
+def test_listing_requires_a_conversation_id(isolated_settings, monkeypatch):
+    """Without the filter this would be an unbounded company-wide report dump —
+    that listing is GET /v1/artifacts, not this route."""
+    ctx = company_client(monkeypatch)
+    assert ctx.client.get("/v1/reports").status_code == 422
+
+
+def test_listing_requires_auth(unauth_client, isolated_settings):
+    assert unauth_client.get("/v1/reports?conversation_id=42").status_code == 401
+
+
 # ─── Report kinds (the "New report" picker) ──────────────────────────────────
 
 

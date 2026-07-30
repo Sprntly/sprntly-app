@@ -1,5 +1,8 @@
 """HTTP layer for captured report artifacts.
 
+  GET  /v1/reports?conversation_id=  -> the reports captured in one chat thread,
+                                        without their bodies. Backs the chat
+                                        panel's Reports tab.
   GET  /v1/reports/kinds             -> the report kinds the "New report" picker
                                         offers, and the prompt each one runs.
   GET  /v1/reports/{report_id}       -> one report: its HTML document plus the
@@ -32,7 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
-from app.db import get_report, set_report_share_config
+from app.db import get_report, list_reports_for_conversation, set_report_share_config
 from app.design_agent.rate_limit import SlidingWindowLimiter
 from app.design_agent.url_slug import url_slugify
 from app.report_kinds import available_report_kinds, prompt_for_kind
@@ -65,6 +68,41 @@ def list_report_kinds(company: CompanyContext = Depends(require_company)):  # no
         "kinds": [
             {**k, "prompt": prompt_for_kind(k["skill"])}
             for k in available_report_kinds()
+        ]
+    }
+
+
+@router.get("")
+def list_conversation_reports(
+    conversation_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """The reports captured in one chat thread, newest first.
+
+    A thread can accumulate several reports (each ask that runs a report skill
+    captures one), which is why this returns a list rather than the single row a
+    caller might expect — the panel shows them as a list and opens one at a time.
+
+    Bodies are omitted: the reader opens one report, so shipping N documents to
+    render a list of titles would be pure waste. `GET /v1/reports/{id}` serves the
+    one they pick.
+
+    Scoped to the caller's company, so an id from another tenant reads as a thread
+    with no reports rather than 403ing (or leaking that it exists at all).
+    """
+    return {
+        "reports": [
+            {
+                "id": r["id"],
+                "skill": r.get("skill") or "",
+                "title": r.get("title") or "",
+                "question": r.get("question") or "",
+                "created_at": r.get("created_at"),
+                "conversation_id": r.get("conversation_id"),
+                "prd_id": r.get("prd_id"),
+                "share_mode": r.get("share_mode") or "private",
+            }
+            for r in list_reports_for_conversation(conversation_id, company.company_id)
         ]
     }
 

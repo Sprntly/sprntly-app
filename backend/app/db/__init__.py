@@ -89,6 +89,7 @@ from app.db.public_feedback_runs import (
 from app.db.reports import (
     find_report_by_share_token,
     get_report,
+    list_reports_for_conversation,
     save_report,
     set_report_share_config,
 )
@@ -243,6 +244,7 @@ __all__ = [
     # reports (captured HTML report documents)
     "find_report_by_share_token",
     "get_report",
+    "list_reports_for_conversation",
     "save_report",
     "set_report_share_config",
     # website-analysis jobs

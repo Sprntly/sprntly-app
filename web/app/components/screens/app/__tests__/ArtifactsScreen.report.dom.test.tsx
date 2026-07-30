@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 //
-// Integration test for opening a report from ArtifactsScreen: clicking a report
-// row fetches the document by id and slides it into the report drawer — NOT the
-// PRD-pipeline ContentPanel. The api + contexts are stubbed so this exercises the
-// screen's wiring, not the network.
+// Integration test for opening a report from ArtifactsScreen.
+//
+// A report's home is the chat it was generated in, so clicking one hands off to
+// that thread (the ordinary `sprntly_resume_conv` payload) and asks ChatScreen to
+// land the panel's Reports tab on the document. Only a report with no surviving
+// chat opens in the standalone drawer here. The api + contexts are stubbed so
+// this exercises the screen's wiring, not the network.
 
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
@@ -13,7 +16,7 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
-const REPORT_ROW = {
+const ATTACHED_ROW = {
   type: "report" as const,
   id: 4,
   title: "Voice of Customer Report · Q2",
@@ -32,7 +35,24 @@ const REPORT_ROW = {
   open: { report_id: 4 },
 }
 
-const artifactsList = vi.fn((..._a: unknown[]) => Promise.resolve([REPORT_ROW]))
+/** No chat to open — the report stands alone. */
+const UNATTACHED_ROW = {
+  ...ATTACHED_ROW,
+  id: 5,
+  source: { ...ATTACHED_ROW.source, conversation_id: null, conversation_title: null },
+  open: { report_id: 5 },
+}
+
+/** The chat was deleted: the id survives on the row but the title doesn't
+ *  resolve, so there is no thread left to open. */
+const ORPHANED_ROW = {
+  ...ATTACHED_ROW,
+  id: 6,
+  source: { ...ATTACHED_ROW.source, conversation_id: 88, conversation_title: null },
+  open: { report_id: 6 },
+}
+
+const artifactsList = vi.fn((..._a: unknown[]) => Promise.resolve<unknown[]>([ATTACHED_ROW]))
 const reportGet = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
 const reportShare = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
 
@@ -50,9 +70,12 @@ vi.mock("../../../../lib/api", () => ({
 const setContent = vi.fn()
 const openContentPanel = vi.fn()
 const openPrdTab = vi.fn()
+const openReportTab = vi.fn()
 const showToast = vi.fn()
 vi.mock("../../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ openContentPanel, openPrdTab, showToast, contentPanelTab: null }),
+  useNavigation: () => ({
+    openContentPanel, openPrdTab, openReportTab, showToast, contentPanelTab: null,
+  }),
 }))
 vi.mock("../../../../context/ContentContext", () => ({
   useContent: () => ({ setContent }),
@@ -70,96 +93,68 @@ vi.mock("../AppLayout", () => ({
 
 import { ArtifactsScreen } from "../ArtifactsScreen"
 
-const DOC = {
-  id: 4,
-  skill: "voice-of-customer-report",
-  title: "Voice of Customer Report · Q2",
-  question: "what are customers saying?",
-  html: "<!DOCTYPE html><html><body><h1>VoC</h1></body></html>",
-  created_at: new Date().toISOString(),
-  conversation_id: 77,
-  prd_id: null,
-  share_mode: "private",
-  share_token: null,
-}
-
 afterEach(() => {
   cleanup()
+  localStorage.clear()
   vi.clearAllMocks()
 })
 
-async function renderAndClickReport() {
+async function renderAndClickReport(row: unknown = ATTACHED_ROW) {
+  artifactsList.mockResolvedValue([row])
   await act(async () => { render(<ArtifactsScreen />) })
   await waitFor(() => expect(artifactsList).toHaveBeenCalled())
-  const row = await waitFor(() =>
+  const el = await waitFor(() =>
     document.querySelector('[data-artifact-type="report"]') as HTMLElement,
   )
-  await act(async () => { fireEvent.click(row) })
-  return row
+  await act(async () => { fireEvent.click(el) })
+  return el
 }
 
-describe("ArtifactsScreen — opening a report", () => {
-  it("fetches the document by id and shows it in the report drawer", async () => {
-    reportGet.mockResolvedValue(DOC)
-
+describe("ArtifactsScreen — opening a report attached to a chat", () => {
+  it("hands off to the report's own thread and asks for it in the panel", async () => {
     await renderAndClickReport()
 
-    expect(reportGet).toHaveBeenCalledWith(4)
-    await waitFor(() =>
-      expect(screen.getByTestId("report-panel-title").textContent).toBe(
-        "Voice of Customer Report · Q2",
-      ),
-    )
-    const frame = document.querySelector("iframe") as HTMLIFrameElement
-    expect(frame.getAttribute("srcdoc")).toContain("<h1>VoC</h1>")
-    // A report is NOT part of the PRD pipeline — it must not touch that drawer.
-    expect(openContentPanel).not.toHaveBeenCalled()
+    expect(openReportTab).toHaveBeenCalledWith({ conversationId: 77, reportId: 4 })
+    // The document is fetched by the panel's Reports tab, not here.
+    expect(reportGet).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("report-panel")).toBeNull()
   })
 
-  it("carries the row's attachment into the viewer header without a second fetch", async () => {
-    reportGet.mockResolvedValue(DOC)
-
+  it("writes the ordinary resume hand-off so ChatScreen reopens that chat", async () => {
     await renderAndClickReport()
 
-    await waitFor(() =>
-      expect(screen.getByTestId("report-panel-attachment").textContent).toBe(
-        "from Q2 customer themes",
-      ),
-    )
-    expect(reportGet).toHaveBeenCalledTimes(1)
+    const payload = JSON.parse(localStorage.getItem("sprntly_resume_conv") ?? "{}")
+    expect(payload.dbId).toBe(77)
+    expect(payload.title).toBe("Q2 customer themes")
+  })
+})
+
+describe("ArtifactsScreen — a report with no chat to open", () => {
+  it("opens an unattached report in the SAME panel, on its Reports tab", async () => {
+    // There is one slide-over. A report with no thread behind it still reads
+    // there — as a focused document with no list — rather than in a second
+    // drawer of its own.
+    await renderAndClickReport(UNATTACHED_ROW)
+
+    expect(openReportTab).not.toHaveBeenCalled()
+    expect(setContent).toHaveBeenCalledWith({ conversationId: null, reportFocusId: 5 })
+    expect(openContentPanel).toHaveBeenCalledWith("reports")
+  })
+
+  it("does the same when the report's chat was deleted", async () => {
+    // The conversation id survives on the row, but there is no chat left to
+    // resume — opening a tab for it would land the user in an empty thread.
+    await renderAndClickReport(ORPHANED_ROW)
+
+    expect(openReportTab).not.toHaveBeenCalled()
+    expect(localStorage.getItem("sprntly_resume_conv")).toBeNull()
+    expect(setContent).toHaveBeenCalledWith({ conversationId: null, reportFocusId: 6 })
+    expect(openContentPanel).toHaveBeenCalledWith("reports")
   })
 
   it("marks the clicked row as the selected one", async () => {
-    reportGet.mockResolvedValue(DOC)
-
-    const row = await renderAndClickReport()
+    const row = await renderAndClickReport(UNATTACHED_ROW)
 
     await waitFor(() => expect(row.getAttribute("data-active")).toBe("true"))
-  })
-
-  it("closes the drawer and deselects the row on close", async () => {
-    reportGet.mockResolvedValue(DOC)
-
-    const row = await renderAndClickReport()
-    await waitFor(() => expect(screen.getByTestId("report-panel")).toBeTruthy())
-
-    await act(async () => {
-      fireEvent.click(document.querySelector(".cpanel-close") as HTMLElement)
-    })
-
-    // The drawer animates out before unmounting, so assert the selection
-    // released — that is immediate and is what ties the row to the panel.
-    await waitFor(() => expect(row.getAttribute("data-active")).toBeNull())
-  })
-
-  it("toasts and leaves no drawer behind when the fetch fails", async () => {
-    reportGet.mockRejectedValue(new Error("boom"))
-
-    await renderAndClickReport()
-
-    await waitFor(() => expect(showToast).toHaveBeenCalled())
-    expect(showToast.mock.calls[0][0]).toContain("Couldn't open artifact")
-    // No half-open drawer stuck in its loading state.
-    expect(screen.queryByTestId("report-panel-loading")).toBeNull()
   })
 })

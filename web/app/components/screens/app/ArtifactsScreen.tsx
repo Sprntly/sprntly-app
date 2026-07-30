@@ -10,9 +10,7 @@ import {
   askApi,
   prdApi,
   evidenceApi,
-  reportsApi,
   type ArtifactItem,
-  type ReportDoc,
   type ReportKindOption,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
@@ -20,7 +18,6 @@ import { prototypePath } from "../../../lib/routes"
 import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-import { ReportPanel } from "../../shared/ReportPanel"
 import { NewReportMenu } from "./NewReportMenu"
 
 // ── Artifacts ──
@@ -43,6 +40,12 @@ const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
 // Poll cadence for a panel-started report run. These skills read every source, so
 // a run is minutes long — a slow poll keeps the wait honest without hammering.
 const REPORT_POLL_MS = 4000
+
+// "+ New report" is hidden: reports are asked for in chat, where the answer and
+// the document live together, and they're read in that thread's Reports tab.
+// The generation path below (NewReportMenu + generateReport) is left intact and
+// tested, so bringing the button back is this one flag.
+const SHOW_NEW_REPORT_BUTTON = false
 
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
   prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
@@ -403,7 +406,7 @@ export function ArtifactsView({
 // ── Screen ──
 
 export function ArtifactsScreen() {
-  const { openContentPanel, openPrdTab, showToast, contentPanelTab } = useNavigation()
+  const { openContentPanel, openPrdTab, openReportTab, showToast, contentPanelTab } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
   const router = useRouter()
@@ -419,24 +422,6 @@ export function ArtifactsScreen() {
   useEffect(() => {
     if (contentPanelTab == null) setActiveArtifactKey(null)
   }, [contentPanelTab])
-
-  // Report viewer state. Reports open in their OWN drawer (ReportPanel), not in
-  // the PRD-pipeline ContentPanel — so the open row is tracked here rather than
-  // via `contentPanelTab`. `reportAttachment` carries the chat/PRD titles the
-  // list row already resolved, so the viewer needs no second fetch.
-  const [report, setReport] = useState<ReportDoc | null>(null)
-  const [reportLoading, setReportLoading] = useState(false)
-  const [reportAttachment, setReportAttachment] = useState<{
-    conversationTitle?: string | null
-    prdTitle?: string | null
-  }>({})
-
-  const closeReport = useCallback(() => {
-    setReport(null)
-    setReportLoading(false)
-    setReportAttachment({})
-    setActiveArtifactKey(null)
-  }, [])
 
   // "New report" run in flight — the label of the kind being generated, or null.
   // Drives the pending row so a multi-minute run is visible rather than silent.
@@ -466,6 +451,10 @@ export function ArtifactsScreen() {
   //  - prd      → openPrdTab (kind:"load") — a chat tab + the PRD panel over
   //               it, exactly like the brief's "View PRD" (never a bare panel
   //               floating over the artifacts list)
+  //  - report   → the chat thread it was generated in + the panel's Reports tab
+  //               on that document (openReportTab). Every artifact opens over
+  //               its thread; only a report with no surviving chat falls back to
+  //               the standalone drawer.
   //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
   //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
   //
@@ -498,25 +487,39 @@ export function ArtifactsScreen() {
         return
       }
       if (a.type === "report") {
-        // Same posture as evidence: the drawer opens IMMEDIATELY in its loading
-        // state and the fetch fills it in, so the click is never silent while
-        // the document (which can be large) comes over the wire.
-        setActiveArtifactKey(`${a.type}-${a.id}`)
-        setReport(null)
-        setReportAttachment({
-          conversationTitle: a.source.conversation_title,
-          prdTitle: a.source.prd_title,
-        })
-        setReportLoading(true)
-        try {
-          setReport(await reportsApi.get(a.open.report_id))
-          setReportLoading(false)
-        } catch (e) {
-          // Close the drawer and deselect the row, then let the shared handler
-          // below raise the single "couldn't open" toast.
-          closeReport()
-          throw e
+        // A report's home is the chat it was generated in, so opening one opens
+        // THAT THREAD with the panel's Reports tab on the document — the same
+        // posture as a PRD row, and the reason the whole thread's other reports
+        // are one click away once you're there.
+        //
+        // `conversation_title` is what the resumed tab is keyed by, and a null
+        // title means the chat row is gone (`on delete set null` hasn't fired /
+        // the conversation was deleted) — there is no thread left to open, so
+        // those fall through to the standalone drawer below.
+        if (a.source.conversation_id != null && a.source.conversation_title) {
+          // The ordinary "reopen this chat" hand-off — the same payload
+          // ChatsScreen and the command palette write. ChatScreen's checkResume
+          // spawns the tab and hydrates its turns in the background.
+          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+            dbId: a.source.conversation_id,
+            title: a.source.conversation_title,
+            fallbackTurns: [],
+            prdId: a.source.prd_id ?? null,
+          }))
+          openReportTab({
+            conversationId: a.source.conversation_id,
+            reportId: a.open.report_id,
+          })
+          return
         }
+        // An UNATTACHED report (no chat, or the chat was deleted) has no thread
+        // to open — so it reads in the SAME panel, on the same Reports tab, just
+        // without a thread's list behind it. Same posture as evidence above: the
+        // panel opens immediately and the tab fetches the document by id, so the
+        // click is never silent while it comes over the wire.
+        setActiveArtifactKey(`${a.type}-${a.id}`)
+        setContent({ conversationId: null, reportFocusId: a.open.report_id })
+        openContentPanel("reports")
         return
       }
       // prototype — open the in-tab canvas for its parent PRD.
@@ -527,7 +530,7 @@ export function ArtifactsScreen() {
       setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, openPrdTab, router, showToast, closeReport])
+  }, [setContent, openContentPanel, openPrdTab, openReportTab, router, showToast])
 
   // Generate a report straight from this panel. The run goes through the ORDINARY
   // ask pipeline with the skill pinned, so the result is identical to asking for
@@ -595,11 +598,13 @@ export function ArtifactsScreen() {
         {/* Upload a PRD → parsed + converted into our format server-side. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
           {/* Start a report without composing a prompt in chat. */}
-          <NewReportMenu
-            disabled={!activeCompany}
-            generating={generatingKind != null}
-            onGenerate={(kind) => void generateReport(kind)}
-          />
+          {SHOW_NEW_REPORT_BUTTON && (
+            <NewReportMenu
+              disabled={!activeCompany}
+              generating={generatingKind != null}
+              onGenerate={(kind) => void generateReport(kind)}
+            />
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -653,22 +658,6 @@ export function ArtifactsScreen() {
           onOpen={openArtifact}
         />
       </div>
-
-      {/* The report viewer drawer. Self-unmounting: it renders nothing unless a
-          report is open or loading. */}
-      <ReportPanel
-        report={report}
-        loading={reportLoading}
-        attachment={reportAttachment}
-        onClose={closeReport}
-        onToast={showToast}
-        // Keep the open document truthful after a share toggle, and refresh the
-        // list so the row's shared marker matches what the menu just did.
-        onShareChange={(next) => {
-          setReport((cur) => (cur ? { ...cur, ...next } : cur))
-          refreshArtifacts()
-        }}
-      />
     </AppLayout>
   )
 }

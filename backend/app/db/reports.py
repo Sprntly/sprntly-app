@@ -38,6 +38,18 @@ _READ_COLUMNS = (
     "ask_id, conversation_id, prd_id, created_at, share_mode, share_token, shared_at"
 )
 
+# Columns a LISTING returns. `html` is deliberately absent — a list of N reports
+# must not carry N full documents (same posture as db/artifacts.py); the body is
+# fetched by id once the reader opens one.
+_LIST_COLUMNS = (
+    "id, skill, title, question, created_at, conversation_id, prd_id, share_mode"
+)
+
+# A chat thread accumulates reports one ask at a time, so this ceiling is far
+# above any real thread — it exists so a pathological row count can't turn one
+# panel open into an unbounded response.
+_CONVERSATION_LIST_CAP = 100
+
 
 @retry_on_disconnect
 def save_report(
@@ -91,6 +103,31 @@ def get_report(report_id: int, company_id: str) -> dict | None:
         .execute()
     )
     return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
+def list_reports_for_conversation(conversation_id: int, company_id: str) -> list[dict]:
+    """Every report captured in one chat thread, newest first.
+
+    This is what the chat panel's Reports tab reads: a report's ATTACHMENT
+    (`conversation_id`) is what makes it belong to a thread, and the column is
+    indexed for exactly this query (`reports_conversation_idx`).
+
+    Company-filtered like every other read here, so a conversation id guessed
+    from another tenant returns an empty list rather than their reports. Bodies
+    are omitted (see `_LIST_COLUMNS`).
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select(_LIST_COLUMNS)
+        .eq("conversation_id", conversation_id)
+        .eq("company_id", company_id)
+        .order("id", desc=True)
+        .limit(_CONVERSATION_LIST_CAP)
+        .execute()
+    )
+    return resp.data or []
 
 
 @retry_on_disconnect

@@ -3930,10 +3930,22 @@ export type ReportKindOption = {
   prompt: string
 }
 
+/** One row in a thread's report list (GET /v1/reports?conversation_id=…) — the
+ *  same document as `ReportDoc` minus the body, which the list never carries. */
+export type ReportSummary = Omit<ReportDoc, "html" | "share_token">
+
 export const reportsApi = {
   /** One captured report including its HTML body. The artifact listing omits the
    *  body (it would carry N full documents), so the viewer fetches it on open. */
   get: (reportId: number) => api.get<ReportDoc>(`/v1/reports/${reportId}`),
+
+  /** Every report captured in one chat thread, newest first — what the chat
+   *  panel's Reports tab lists. Bodies are omitted; opening a row fetches that
+   *  one document via `get`. */
+  listForConversation: (conversationId: number) =>
+    api
+      .get<{ reports: ReportSummary[] }>(`/v1/reports?conversation_id=${conversationId}`)
+      .then((r) => r.reports),
 
   /**
    * Download the report as a PDF. Rendered SERVER-side (headless Chromium over
