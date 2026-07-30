@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.graph.facade import GraphFacade
-from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal
+from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def retrieve_context(
         kept = 0
         for sid in edge_ids:
             sig = signals_by_id.get(sid)
-            if sig is None or (sig.properties or {}).get("superseded_by"):
+            if sig is None or signal_is_retired(sig.properties):
                 continue
             rank = _signal_rank(sig, now, boost)
             payload = _signal_payload(sig, theme_label=theme.canonical_label, rank=rank)
@@ -206,7 +206,7 @@ def retrieve_context(
         recent = []
     recent.sort(key=lambda s: s.transaction_at, reverse=True)
     for sig in recent[:_RECENT_SIGNALS]:
-        if (sig.properties or {}).get("superseded_by"):
+        if signal_is_retired(sig.properties):
             continue
         if sig.id in by_id:
             continue
@@ -436,7 +436,7 @@ def insight_evidence_trail(
     #    hypothesis. These are the strongest evidence for the insight.
     for sid in support_ids:
         sig = signals_by_id.get(sid)
-        if sig is None or (sig.properties or {}).get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         by_id[sig.id] = _trail_signal_payload(sig, edge_type="SUPPORTS")
 
@@ -446,7 +446,7 @@ def insight_evidence_trail(
     kept = 0
     for sid in theme_edge_ids:
         sig = signals_by_id.get(sid)
-        if sig is None or (sig.properties or {}).get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         if sig.id not in by_id:
             by_id[sig.id] = _trail_signal_payload(sig, edge_type="theme")

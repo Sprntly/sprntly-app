@@ -11,14 +11,24 @@ to.
 Three properties worth stating explicitly, because they're what makes a roadmap
 different from every other ingest source:
 
-1. ``origin=None`` — DELIBERATE. A roadmap is the company's OWN plan, not
-   evidence that a problem exists. Stamping ``origin="upload"`` would let a
-   tenant who uploaded nothing but a roadmap satisfy the brief evidence gate
-   (convergence.is_upload_only → has_sufficient_evidence) and receive a brief
-   built entirely out of its own stated intentions. So roadmap signals carry no
-   origin at all — the gate counts them as neither upload nor connector
-   evidence, exactly like onboarding metadata. What downstream code filters and
-   attributes on is ``provenance["channel"] == "roadmap"``.
+1. NOT EVIDENCE — enforced on BOTH axes the brief sufficiency gate reads.
+   A roadmap is the company's OWN plan, not evidence that a problem exists; a
+   tenant whose only data is a roadmap must still be refused a brief rather than
+   handed one built out of its own stated intentions.
+
+   * ``origin=None`` — keeps roadmap signals out of the upload-only relaxation
+     (convergence.is_upload_only → has_sufficient_evidence). They count as
+     neither upload nor connector evidence, exactly like onboarding metadata.
+   * ``force_source_type="pm_manual"`` — the gate's PRIMARY path counts signals
+     by source_type (CONNECTED_SOURCE_TYPES → connected_breadth >= 2, or >= 3
+     connected signals), and origin does not affect it at all. Roadmaps quote
+     their own metrics ("ARR $2M", "churn 9%", "clear the Zendesk backlog"), and
+     the extractor otherwise keeps model-picked evidence types on merit — so a
+     mere default would let those bullets register as revenue/analytics evidence
+     and open the gate. Pinning makes that structurally impossible.
+
+   What downstream code filters and attributes on is
+   ``provenance["channel"] == "roadmap"``.
 
 2. REPLACE semantics, not append. There is exactly ONE roadmap per workspace and
    the latest upload wins (`roadmap_doc` is upserted on workspace_id). So when
@@ -28,6 +38,12 @@ different from every other ingest source:
    from the previous version keep their existing (live) signals untouched,
    because extraction is content-keyed: the same sentence re-derives the same
    signal id, which comes back in the extractor's keep-set as a duplicate.
+
+   Expiry is deliberately conservative — it is skipped entirely when the
+   extraction produced ZERO signals (we failed to read v2; that is not evidence
+   v1's bets were dropped), when the upload was an unparseable binary stub, and
+   when the stored roadmap changed while we were extracting. Retiring a live bet
+   by mistake is far worse than carrying a stale one for one more cycle.
 
 3. A per-version content-hash ledger (kg_source rows, source_type
    ``roadmap_doc``) makes re-ingest free. The same roadmap reaching us twice —
@@ -45,12 +61,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import uuid
 from typing import Optional
 
 from app.graph.extractor import _NS, extract_document
 from app.graph.facade import GraphFacade
 from app.graph.types import Source
+from app.ingest import is_unparsed_stub
 from app.roadmap_doc import load_roadmap_doc
 
 logger = logging.getLogger(__name__)
@@ -78,10 +96,43 @@ _SOURCE_HINT = (
     "(bets, timelines, goals), not customer evidence"
 )
 
-#: Seeded (non-evidence) source type for anything the model didn't pick an
-#: evidence type for on merit. 60-day staleness window (graph/types.py) suits a
-#: roadmap: it stays relevant for a quarter-ish, then ages out on its own.
-_SOURCE_TYPE_DEFAULT = "pm_manual"
+#: Source type FORCED onto every roadmap signal — not a default, a pin.
+#:
+#: The brief sufficiency gate counts signals by source_type
+#: (convergence.CONNECTED_SOURCE_TYPES → connected_breadth >= 2 or >= 3 connected
+#: signals). A roadmap routinely quotes its own metrics ("ARR $2M", "churn 9%",
+#: "clear the Zendesk backlog"), and the extractor keeps model-picked evidence
+#: types on merit — so DEFAULTING would let a roadmap contribute
+#: revenue/analytics/customer_voice "evidence" and open the gate on the company's
+#: own stated plans. Pinning to pm_manual (a non-connected, seeded type, 60-day
+#: window per graph/types.py) makes that structurally impossible, and is the
+#: source_type half of the same decision as origin=None.
+_FORCE_SOURCE_TYPE = "pm_manual"
+
+#: Per-company lock. Roadmap ingest is READ-MODIFY-WRITE across several
+#: statements (snapshot live signals → extract → expire the difference → record
+#: the ledger), and it runs from two places that can overlap: the upload kickoff
+#: and a brief's incremental seed. Without serialization the worst interleaving
+#: expires the CURRENT roadmap's signals — the seed snapshots v3's ids as
+#: "previous" while its keep-set is v2's. Reentrant so the auto_sync wrapper can
+#: hold it and still call in.
+#:
+#: LIMIT: this is an in-process lock, so it serializes within ONE uvicorn worker.
+#: Two workers (or the scheduler process) can still interleave. The version/sha
+#: re-check immediately before the expiry pass is what makes that case safe —
+#: the lock is the cheap fast path, the re-check is the actual guarantee.
+_ingest_locks: dict[str, threading.RLock] = {}
+_ingest_locks_guard = threading.Lock()
+
+
+def ingest_lock(company_id: str) -> threading.RLock:
+    """The per-company roadmap-ingest lock (reentrant)."""
+    with _ingest_locks_guard:
+        lock = _ingest_locks.get(company_id)
+        if lock is None:
+            lock = threading.RLock()
+            _ingest_locks[company_id] = lock
+        return lock
 
 
 def _chunks(text: str) -> list[str]:
@@ -137,6 +188,32 @@ def _live_roadmap_signal_ids(
     return out
 
 
+def _roadmap_unchanged_since(
+    company_id: str, workspace_id: Optional[str], version: int, sha: str
+) -> bool:
+    """Is the STORED roadmap still the one we just extracted?
+
+    Re-read immediately before the expiry pass. The per-company lock only covers
+    one process, so a second uvicorn worker (or the scheduler) can replace the
+    roadmap mid-extraction; expiring a keep-set computed from a superseded
+    version could retire the CURRENT roadmap's signals. Fails CLOSED — any read
+    error returns False, which skips expiry (keeping stale bets is recoverable on
+    the next ingest; wiping live ones is not)."""
+    try:
+        current = load_roadmap_doc(company_id, workspace_id=workspace_id)
+    except Exception:  # noqa: BLE001 — fail closed
+        logger.exception("roadmap-ingest: re-read failed for %s (ws=%s)",
+                         company_id, workspace_id)
+        return False
+    if current is None:
+        return False
+    if current.version != version:
+        return False
+    return content_sha(
+        company_id, workspace_id, (current.extracted_text or "").strip()
+    ) == sha
+
+
 def ingest_roadmap(
     company_id: str,
     workspace_id: Optional[str] = None,
@@ -149,8 +226,10 @@ def ingest_roadmap(
     on every upload AND on every brief seed costs one extraction per version.
 
     Returns a status dict:
-      * ``{"status": "no_text"}``   — no roadmap stored, or nothing extractable
-        from it (a scanned-image PDF / binary upload converts to empty text).
+      * ``{"status": "no_text"}``   — no roadmap stored, or nothing usable in it:
+        empty extracted text (scanned-image PDF) OR the unparsed-binary
+        placeholder stub (legacy .doc/.ppt/.xls). No ledger row either way, so a
+        readable re-upload is tried again.
       * ``{"status": "unchanged", "content_sha": …}`` — this version is already
         in the KG; zero model calls.
       * ``{"status": "ingested", signals, themes, duplicates, chunks, expired,
@@ -159,12 +238,35 @@ def ingest_roadmap(
 
     Raises on extraction failure (bad API key, provider outage) WITHOUT writing
     the ledger row, so the next touch retries. Both call sites isolate.
+
+    Serialized per company (``ingest_lock``) and re-validated against the stored
+    roadmap immediately before the expiry pass, so a concurrent upload can never
+    make this expire the CURRENT roadmap's signals.
     """
     facade = facade or GraphFacade()
+    with ingest_lock(company_id):
+        return _ingest_roadmap_locked(company_id, workspace_id, facade)
+
+
+def _ingest_roadmap_locked(
+    company_id: str, workspace_id: Optional[str], facade: GraphFacade
+) -> dict:
     doc = load_roadmap_doc(company_id, workspace_id=workspace_id)
     if doc is None:
         return {"status": "no_text"}
     text = (doc.extracted_text or "").strip()
+    # The unparsed-binary stub is NON-EMPTY (app.ingest.fallback_to_md), so a
+    # plain `if not text` misses it. Extracting it would yield ~0 signals and an
+    # empty keep-set, which — before this guard — expired every signal from the
+    # PREVIOUS roadmap and then recorded a ledger row for the useless stub. Treat
+    # it exactly like no text: no model call, no ledger row, no expiry.
+    if is_unparsed_stub(text):
+        logger.info(
+            "roadmap-ingest: %r is an unparsed binary stub for company=%s ws=%s "
+            "— skipping (previous roadmap signals left intact)",
+            doc.filename, company_id, workspace_id,
+        )
+        return {"status": "no_text", "reason": "unparsed_binary"}
     parts = _chunks(text)
     if not parts:
         # Stored fine, nothing to extract (unparseable/binary upload). No ledger
@@ -202,7 +304,9 @@ def ingest_roadmap(
             source_hint=_SOURCE_HINT,
             # origin=None is the whole point — see module docstring (1).
             origin=None,
-            source_type_default=_SOURCE_TYPE_DEFAULT,
+            # FORCED, not defaulted: a roadmap's own quoted metrics must never
+            # count as connected evidence in the brief gate. See _FORCE_SOURCE_TYPE.
+            force_source_type=_FORCE_SOURCE_TYPE,
             provenance_extra=provenance_extra,
         )
         totals["signals"] += r["signals"]
@@ -210,11 +314,37 @@ def ingest_roadmap(
         totals["duplicates"] += r["skipped"]
         keep.update(r.get("signal_ids") or [])
 
-    # Replace semantics: retire whatever the old roadmap asserted and this one
-    # doesn't. Only reached when EVERY chunk extracted cleanly — a partial run
-    # would have a partial keep-set and would wrongly expire live bets.
+    # ── Replace semantics, with two safety gates ─────────────────────────────
+    # Retire whatever the old roadmap asserted and this one doesn't. Only reached
+    # when EVERY chunk extracted cleanly — a partial run would have a partial
+    # keep-set and would wrongly expire live bets.
     dropped = sorted(previous_ids - keep)
-    expired = facade.expire_signals(company_id, dropped) if dropped else 0
+    expired = 0
+    if not dropped:
+        pass
+    elif not keep:
+        # Zero-signal extraction. Whatever the cause (a roadmap the model found
+        # nothing extractable in, an empty template, a format that converted to
+        # noise), a v2 that asserts NOTHING is not evidence that v1's bets were
+        # dropped — it's evidence we failed to read v2. Never wipe on empty.
+        logger.warning(
+            "roadmap-ingest: extraction produced ZERO signals for company=%s "
+            "ws=%s v%s — skipping expiry, keeping %d previous signal(s)",
+            company_id, workspace_id, doc.version, len(dropped),
+        )
+    elif not _roadmap_unchanged_since(company_id, workspace_id, doc.version, sha):
+        # Someone replaced the roadmap while we were extracting (another worker /
+        # the scheduler — the in-process lock can't see them). Our keep-set
+        # describes a roadmap that is no longer current, so expiring against it
+        # could retire the CURRENT roadmap's signals. Skip; the newer version's
+        # own ingest run owns the expiry.
+        logger.warning(
+            "roadmap-ingest: roadmap for company=%s ws=%s changed during "
+            "extraction (was v%s) — skipping expiry, newer ingest will handle it",
+            company_id, workspace_id, doc.version,
+        )
+    else:
+        expired = facade.expire_signals(company_id, dropped)
 
     # Ledger LAST: a version is only "done" once its signals are in the graph.
     facade.create_source(company_id, Source(

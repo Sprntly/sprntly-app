@@ -325,17 +325,17 @@ def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
 # isolation because synthesis_brief.seed_incremental re-runs it on the next brief
 # anyway (it doubles as the retry + grandfather path).
 
-_roadmap_ingest_locks: dict[str, threading.Lock] = {}
-_roadmap_ingest_locks_guard = threading.Lock()
+def _roadmap_ingest_lock(company_id: str) -> "threading.RLock":
+    """The per-company roadmap-ingest lock.
 
+    Owned by kg_ingest.roadmap so EVERY entry point serializes on the same
+    object — this kickoff AND synthesis_brief's seed leg, which calls
+    ingest_roadmap directly. A lock private to this module would leave the seed
+    leg racing the upload. Reentrant, so holding it here and re-acquiring inside
+    ingest_roadmap is safe."""
+    from app.kg_ingest.roadmap import ingest_lock
 
-def _roadmap_ingest_lock(company_id: str) -> threading.Lock:
-    with _roadmap_ingest_locks_guard:
-        lock = _roadmap_ingest_locks.get(company_id)
-        if lock is None:
-            lock = threading.Lock()
-            _roadmap_ingest_locks[company_id] = lock
-        return lock
+    return ingest_lock(company_id)
 
 
 def _run_roadmap_ingest(company_id: str, workspace_id: str | None) -> None:

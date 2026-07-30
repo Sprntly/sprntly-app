@@ -288,6 +288,10 @@ def _seed_from_roadmap(facade: GraphFacade, company_id: str, slug: str) -> dict:
     every roadmap uploaded BEFORE roadmap→KG ingest shipped (backfilled on the
     next brief, no migration needed), and any kickoff that failed or lost its
     thread. Error-isolated — a roadmap problem must never block a brief.
+
+    Concurrency: ingest_roadmap takes the per-company roadmap lock itself (the
+    same object auto_sync's kickoff uses), so this leg cannot interleave with an
+    in-flight upload ingest and expire the current roadmap's signals.
     """
     from app.kg_ingest.roadmap import ingest_roadmap
 

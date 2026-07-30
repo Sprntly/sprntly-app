@@ -160,15 +160,24 @@ class GraphFacade:
         )
 
     def expire_signals(self, enterprise_id: str, signal_ids: list[str]) -> int:
-        """Immediately expire the given signals — set ``stale_after`` to now so
-        every stale-filtering reader (``active_signals``, convergence, retrieval)
-        stops seeing them. Returns the number of rows expired.
+        """Immediately retire the given signals. Returns the number expired.
 
         This is the "replace semantics" primitive: a versioned document (today
         the workspace roadmap) that no longer asserts a fact must retire that
         fact without deleting history — the row stays, bitemporally closed.
         Distinct from ``supersede_signal``, which points one signal at its
         replacement; here there is no successor, the bet was simply dropped.
+
+        Writes BOTH markers, because they reach different readers:
+
+          * ``stale_after = now`` — what ``active_signals`` (and everything built
+            on it, e.g. retrieval's recent-signals pass) filters on.
+          * ``properties["expired_at"] = now`` — what the content readers filter
+            on via ``signal_is_retired``. They deliberately read UNFILTERED
+            signals (``all_signals`` / ``get_signals``) and would otherwise keep
+            a merely-stale signal in briefs, Ask answers and PRD evidence at
+            near-full weight until its source_type window elapsed (60 days for
+            pm_manual). ``stale_after`` alone is NOT enough — see graph.types.
 
         Tenant-scoped read-modify-write (same pattern as supersede_signal): ids
         belonging to another enterprise are silently ignored, never touched.
@@ -182,15 +191,20 @@ class GraphFacade:
         for i in range(0, len(ids), chunk):
             batch = ids[i:i + chunk]
             rows = (
-                self._tbl("kg_signal").select("id")
+                self._tbl("kg_signal").select("id, properties")
                 .eq("enterprise_id", enterprise_id)
                 .in_("id", batch)
                 .execute().data or []
             )
+            # Per-row (not one bulk `.in_()` update) because each row's
+            # `properties` jsonb has to be merged, not overwritten — a bulk
+            # update would clobber whatever else the signal carries.
             for row in rows:
+                props = row.get("properties") or {}
+                props["expired_at"] = now
                 (
                     self._tbl("kg_signal")
-                    .update({"stale_after": now})
+                    .update({"stale_after": now, "properties": props})
                     .eq("enterprise_id", enterprise_id)
                     .eq("id", row["id"])
                     .execute()

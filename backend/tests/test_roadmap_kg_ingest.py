@@ -157,15 +157,23 @@ def _ledger_rows(facade: GraphFacade, company_id: str) -> list:
 
 # ── 1. happy path ───────────────────────────────────────────────────────────
 
-def test_ingest_stamps_roadmap_channel_and_defaults_source_type(isolated_settings):
+def test_ingest_stamps_roadmap_channel_and_pins_source_type(isolated_settings):
+    """Every roadmap signal is PINNED to pm_manual — including ones the model
+    typed as connected evidence on merit.
+
+    This replaces an earlier "merit-keep" test. Merit-keep is wrong for a
+    roadmap: the brief sufficiency gate counts by source_type, so letting a
+    roadmap's own quoted metrics through as revenue/analytics evidence is exactly
+    the hole origin=None was supposed to close. Both axes have to be pinned.
+    """
     db = isolated_settings["supabase"]
     _seed_company(db, "co-1")
     _store_roadmap("co-1", _roadmap_text("A", "B"), workspace_id="ws-1",
                    filename="H2.md", version=3)
     facade = GraphFacade()
 
-    # One extra item whose source_type the model picked on MERIT — a revenue
-    # fact quoted inside the roadmap stays revenue, it is not flattened.
+    # The model types this one as `revenue` on merit — a roadmap quoting its own
+    # ARR. It must STILL land as pm_manual.
     with _Extraction(extra_items=[
         _item("Self-serve is worth $1.2M ARR", "Onboarding", "revenue")
     ]) as fx:
@@ -179,9 +187,9 @@ def test_ingest_stamps_roadmap_channel_and_defaults_source_type(isolated_setting
     sigs = _roadmap_signals(facade, "co-1")
     assert set(sigs) == {_BETS["A"][0], _BETS["B"][0],
                          "Self-serve is worth $1.2M ARR"}
+    # EVERY signal is pm_manual — no connected type survives a roadmap.
+    assert {s.source_type for s in sigs.values()} == {"pm_manual"}
     bet = sigs[_BETS["A"][0]]
-    assert bet.source_type == "pm_manual"              # seeded type kept/defaulted
-    assert sigs["Self-serve is worth $1.2M ARR"].source_type == "revenue"  # merit
     prov = bet.provenance
     assert prov["channel"] == "roadmap"
     assert prov["workspace_id"] == "ws-1"
@@ -322,9 +330,27 @@ def test_second_ingest_of_same_roadmap_is_a_ledger_noop(isolated_settings):
 
 # ── 4. replace semantics ────────────────────────────────────────────────────
 
+def _convergence_contents(facade: GraphFacade, company_id: str) -> set[str]:
+    """Every signal content COMPUTE_CONVERGENCE actually feeds to the brief.
+
+    This — not active_signals — is the check that matters for "a dropped bet
+    stops steering the product": compute_convergence reads facade.all_signals
+    (documented as unfiltered) so a signal that is only `stale_after`-expired
+    still lands in briefs at near-full weight for its whole staleness window.
+    """
+    from app.synthesis.convergence import compute_convergence
+
+    return {
+        e["content"]
+        for tc in compute_convergence(facade, company_id)
+        for e in tc.evidence
+    }
+
+
 def test_replace_stales_dropped_bets_keeps_survivors_writes_new(isolated_settings):
-    """v1 = bets A+B, v2 = bets B+C. A is dropped → staled immediately; B
-    survives untouched; C is written. Convergence then sees only B and C."""
+    """v1 = bets A+B, v2 = bets B+C. A is dropped → retired immediately; B
+    survives untouched; C is written. Asserted through COMPUTE_CONVERGENCE, the
+    reader that actually composes the brief."""
     db = isolated_settings["supabase"]
     _seed_company(db, "co-3")
     facade = GraphFacade()
@@ -334,6 +360,7 @@ def test_replace_stales_dropped_bets_keeps_survivors_writes_new(isolated_setting
         v1 = rm.ingest_roadmap("co-3", "ws-1", facade=facade)
     assert v1["signals"] == 2 and v1["expired"] == 0
     b_id_v1 = _roadmap_signals(facade, "co-3")[_BETS["B"][0]].id
+    assert _convergence_contents(facade, "co-3") == {_BETS["A"][0], _BETS["B"][0]}
 
     _store_roadmap("co-3", _roadmap_text("B", "C"), workspace_id="ws-1", version=2)
     with _Extraction():
@@ -347,6 +374,9 @@ def test_replace_stales_dropped_bets_keeps_survivors_writes_new(isolated_setting
     live = _roadmap_signals(facade, "co-3")
     assert set(live) == {_BETS["B"][0], _BETS["C"][0]}
     assert _BETS["A"][0] not in live
+    # THE assertion that matters: the dropped bet is gone from the brief input,
+    # not merely marked stale.
+    assert _convergence_contents(facade, "co-3") == {_BETS["B"][0], _BETS["C"][0]}
     # B kept its EXISTING signal (not rewritten under a new id).
     assert live[_BETS["B"][0]].id == b_id_v1
     # A's row still exists — bitemporally closed, not deleted.
@@ -357,6 +387,33 @@ def test_replace_stales_dropped_bets_keeps_survivors_writes_new(isolated_setting
     assert _BETS["A"][0] in all_contents
     # Two ledger rows: one per version.
     assert len(_ledger_rows(facade, "co-3")) == 2
+
+
+def test_expired_signals_are_invisible_to_retrieval_and_evidence(isolated_settings):
+    """A retired bet must disappear from Ask retrieval and PRD evidence too, not
+    just the brief — those readers also fetch signals unfiltered and previously
+    only skipped `superseded_by`."""
+    from app.graph.types import signal_is_retired
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-3r")
+    facade = GraphFacade()
+    _store_roadmap("co-3r", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-3r", "ws-1", facade=facade)
+    _store_roadmap("co-3r", _roadmap_text("B"), workspace_id="ws-1", version=2)
+    with _Extraction():
+        assert rm.ingest_roadmap("co-3r", "ws-1", facade=facade)["expired"] == 1
+
+    by_content = {s.content: s for s in facade.all_signals("co-3r")}
+    dropped = by_content[_BETS["A"][0]]
+    survivor = by_content[_BETS["B"][0]]
+    # The properties marker is what the unfiltered content readers check.
+    assert dropped.properties.get("expired_at")
+    assert signal_is_retired(dropped.properties) is True
+    assert signal_is_retired(survivor.properties) is False
+    # …and stale_after is set too, for the active_signals-based readers.
+    assert dropped.stale_after is not None
 
 
 def test_replace_never_touches_non_roadmap_signals(isolated_settings):
@@ -420,6 +477,139 @@ def test_unextractable_upload_stores_but_ingest_is_a_noop(isolated_settings):
     assert out == {"status": "no_text"}
     assert fx.calls == []
     assert _ledger_rows(facade, "co-bin") == []       # retried on next upload
+
+
+def test_legacy_binary_stub_never_wipes_the_previous_roadmap(isolated_settings):
+    """A legacy .doc/.ppt/.xls converts to a NON-EMPTY "not yet parsed"
+    placeholder (app.ingest.fallback_to_md), so an `if not text` guard misses it.
+
+    Before the stub guard, uploading one as v2 extracted ~0 signals → empty
+    keep-set → EVERY v1 roadmap signal expired, and a ledger row was written for
+    the stub so it never retried. It must be treated as no_text: no model call,
+    no ledger row, no expiry.
+    """
+    from app.ingest import fallback_to_md, is_unparsed_stub
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-stub")
+    facade = GraphFacade()
+
+    _store_roadmap("co-stub", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-stub", "ws-1", facade=facade)
+    assert len(_roadmap_signals(facade, "co-stub")) == 2
+    ledger_before = len(_ledger_rows(facade, "co-stub"))
+
+    # v2 is an old binary .doc — the real converter output, not a hand-written string.
+    stub = fallback_to_md("old-roadmap.doc", bytes(range(256)) * 40)
+    assert stub.strip() and is_unparsed_stub(stub)      # non-empty, but a stub
+    _store_roadmap("co-stub", stub, workspace_id="ws-1",
+                   filename="old-roadmap.doc", version=2)
+
+    with _Extraction() as fx:
+        out = rm.ingest_roadmap("co-stub", "ws-1", facade=facade)
+
+    assert out["status"] == "no_text"
+    assert out["reason"] == "unparsed_binary"
+    assert fx.calls == []                                     # no model spend
+    assert len(_ledger_rows(facade, "co-stub")) == ledger_before   # no ledger row
+    # v1's bets are untouched — and still reach the brief.
+    assert set(_roadmap_signals(facade, "co-stub")) == {_BETS["A"][0], _BETS["B"][0]}
+    assert _convergence_contents(facade, "co-stub") == {_BETS["A"][0], _BETS["B"][0]}
+
+
+def test_zero_signal_extraction_never_expires_previous_signals(isolated_settings):
+    """Belt-and-braces for the same class of bug from the OTHER direction: text
+    that is genuinely readable but from which the model extracts nothing.
+
+    A v2 that asserts NOTHING is evidence we failed to read v2, not evidence that
+    v1's bets were dropped. Expiry is skipped; the ledger IS written so we don't
+    re-extract the same barren text forever.
+    """
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-zero")
+    facade = GraphFacade()
+
+    _store_roadmap("co-zero", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-zero", "ws-1", facade=facade)
+    assert len(_roadmap_signals(facade, "co-zero")) == 2
+
+    # Readable prose with no recognizable bets → the fake emits zero signals.
+    _store_roadmap("co-zero", "Roadmap TBD — planning offsite next week.",
+                   workspace_id="ws-1", version=2)
+    with _Extraction() as fx:
+        out = rm.ingest_roadmap("co-zero", "ws-1", facade=facade)
+
+    assert len(fx.calls) == 1               # it DID try
+    assert out["status"] == "ingested"
+    assert out["signals"] == 0
+    assert out["expired"] == 0             # ← the guard
+    assert set(_roadmap_signals(facade, "co-zero")) == {_BETS["A"][0], _BETS["B"][0]}
+    assert len(_ledger_rows(facade, "co-zero")) == 2   # ledger written, won't retry
+
+
+def test_expiry_is_skipped_when_the_roadmap_changed_mid_extraction(isolated_settings):
+    """The upload/seed race (in-process locks only cover one worker).
+
+    If the stored roadmap is replaced while we're extracting, our keep-set
+    describes a roadmap that is no longer current — expiring against it could
+    retire the CURRENT roadmap's signals. The pre-expiry re-check must abort the
+    expiry and leave it to the newer version's own ingest.
+    """
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-race")
+    facade = GraphFacade()
+
+    _store_roadmap("co-race", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-race", "ws-1", facade=facade)
+
+    # v2 drops A and B for C. Mid-extraction, another worker stores v3.
+    _store_roadmap("co-race", _roadmap_text("C"), workspace_id="ws-1", version=2)
+
+    real_extract = rm.extract_document
+
+    def racing_extract(*a, **k):
+        result = real_extract(*a, **k)
+        _store_roadmap("co-race", _roadmap_text("D"), workspace_id="ws-1", version=3)
+        return result
+
+    with _Extraction():
+        with patch.object(rm, "extract_document", side_effect=racing_extract):
+            out = rm.ingest_roadmap("co-race", "ws-1", facade=facade)
+
+    assert out["status"] == "ingested"
+    assert out["expired"] == 0        # ← expiry aborted, nothing retired
+    # A and B are still live; the v3 ingest will do the retiring.
+    live = set(_roadmap_signals(facade, "co-race"))
+    assert {_BETS["A"][0], _BETS["B"][0]} <= live
+
+
+def test_seed_leg_and_upload_kickoff_share_one_lock(isolated_settings):
+    """Both entry points must serialize on the SAME lock object, or the seed leg
+    races an in-flight upload ingest."""
+    import app.synthesis_brief as sb
+
+    lock = rm.ingest_lock("co-lock")
+    assert auto_sync._roadmap_ingest_lock("co-lock") is lock
+
+    # ingest_roadmap acquires it itself, so the seed leg is covered without
+    # needing its own locking.
+    held: list[bool] = []
+    real = rm._ingest_roadmap_locked
+
+    def probe(company_id, workspace_id, facade):
+        # Re-entrant acquire proves we're inside the lock on this thread.
+        held.append(lock.acquire(blocking=False))
+        if held[-1]:
+            lock.release()
+        return real(company_id, workspace_id, facade)
+
+    _seed_company(isolated_settings["supabase"], "co-lock")
+    with patch.object(rm, "_ingest_roadmap_locked", side_effect=probe):
+        sb._seed_from_roadmap(GraphFacade(), "co-lock", "acme")
+    assert held == [True]
 
 
 def test_whitespace_only_roadmap_is_a_noop(isolated_settings):
@@ -767,14 +957,35 @@ def test_ledger_is_per_workspace(isolated_settings):
 
 # ── 12. GATE INVARIANCE — the design decision ──────────────────────────────
 
-def test_roadmap_only_tenant_still_gets_no_brief(isolated_settings):
-    """REGRESSION GUARD for the origin=None decision.
+#: A roadmap that quotes its own metrics — exactly the content that would be
+#: extracted as CONNECTED evidence (revenue / analytics / customer_voice /
+#: project_mgmt) if the roadmap path merely DEFAULTED source_type instead of
+#: pinning it. Four distinct connected types across four signals: enough for both
+#: gate fast-paths (connected_breadth >= 2 AND total_connected >= 3).
+_METRIC_ITEMS = [
+    _item("ARR is $2.0M, up 14% this quarter", "Revenue", "revenue"),
+    _item("Churn is 9% on the self-serve plan", "Retention", "analytics"),
+    _item("Clear the Zendesk onboarding backlog", "Support", "customer_voice"),
+    _item("Ship the importer epic this sprint", "Importer", "project_mgmt"),
+]
 
-    A company whose ONLY data is an uploaded roadmap must still fail the brief
-    evidence gate. If roadmap signals ever start carrying origin="upload", the
-    upload-only relaxation fires and this tenant gets a brief composed entirely
-    of its own stated plans — which is exactly the failure mode origin=None
-    exists to prevent.
+
+def test_roadmap_only_tenant_still_gets_no_brief(isolated_settings):
+    """REGRESSION GUARD for "a roadmap is not evidence" — on BOTH axes.
+
+    A company whose only data is an uploaded roadmap must be refused a brief.
+    Two independent ways that can break, both covered here by driving the REAL
+    ingest path with a metric-quoting roadmap:
+
+      1. source_type (the gate's PRIMARY path): compute_convergence counts
+         signals whose source_type is in CONNECTED_SOURCE_TYPES, and
+         has_sufficient_evidence opens on connected_breadth >= 2 or >= 3 connected
+         signals. origin plays NO part in that. If the roadmap path ever goes back
+         to source_type_default (merit-keep), these four bullets become
+         revenue+analytics+customer_voice+project_mgmt evidence and the gate opens
+         on the company's own plans.
+      2. origin (the upload-only relaxation): if roadmap signals ever carry
+         origin="upload", is_upload_only fires and 2+ signals suffice.
     """
     from app.synthesis.convergence import (
         compute_convergence,
@@ -784,21 +995,55 @@ def test_roadmap_only_tenant_still_gets_no_brief(isolated_settings):
 
     db = isolated_settings["supabase"]
     _seed_company(db, "co-gate")
-    # A roadmap with plenty of bets — volume must not buy its way past the gate.
+    # Plenty of bets AND plenty of quoted metrics — neither volume nor the
+    # metric-shaped content may buy a way past the gate.
     _store_roadmap("co-gate", _roadmap_text("A", "B", "C", "D"),
                    workspace_id="ws-1")
     facade = GraphFacade()
-    with _Extraction():
+    with _Extraction(extra_items=_METRIC_ITEMS):
         out = rm.ingest_roadmap("co-gate", "ws-1", facade=facade)
-    assert out["signals"] == 4
+    assert out["signals"] == 8       # 4 bets + 4 metric bullets
+
+    # Every one landed as pm_manual, so NOTHING is connected evidence.
+    stored = _roadmap_signals(facade, "co-gate")
+    assert len(stored) == 8
+    assert {s.source_type for s in stored.values()} == {"pm_manual"}
 
     convergence = compute_convergence(facade, "co-gate")
     assert convergence, "roadmap signals should still form themes"
-    # Neither upload nor connector evidence — origin is absent by design.
+    # Axis 1 — source_type: zero connected signals, zero connected breadth.
+    assert sum(tc.connected_signal_count for tc in convergence) == 0
+    assert max(tc.connected_breadth for tc in convergence) == 0
+    # Axis 2 — origin: neither upload nor connector evidence.
     assert all(tc.upload_signal_count == 0 for tc in convergence)
     assert all(tc.connector_signal_count == 0 for tc in convergence)
     assert is_upload_only(convergence) is False
+    # The verdict that actually matters.
     assert has_sufficient_evidence(convergence) is False
+
+
+def test_gate_would_open_on_the_same_items_without_the_pin(isolated_settings):
+    """Proves the guard above is not vacuous.
+
+    The SAME four metric bullets, extracted the way every other caller does
+    (source_type_default → merit-keep), DO open the gate. That is the bug
+    force_source_type prevents; if this test ever starts failing, the gate test
+    above has stopped proving anything and both need re-examining.
+    """
+    from app.synthesis.convergence import compute_convergence, has_sufficient_evidence
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-gate-ctl")
+    facade = GraphFacade()
+    with _Extraction(extra_items=_METRIC_ITEMS):
+        # Same items, but the ordinary connector-upload stamping.
+        ex.extract_document(
+            facade, "co-gate-ctl", doc_name="roadmap.md",
+            text=_roadmap_text("A"), source_type_default="pm_manual",
+        )
+    convergence = compute_convergence(facade, "co-gate-ctl")
+    assert sum(tc.connected_signal_count for tc in convergence) == 4
+    assert has_sufficient_evidence(convergence) is True
 
 
 def test_roadmap_does_not_add_a_brief_data_source(isolated_settings):

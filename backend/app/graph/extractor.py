@@ -80,6 +80,7 @@ def extract_document(
     source_hint: str | None = None,
     origin: str | None = None,
     source_type_default: str | None = None,
+    force_source_type: str | None = None,
     # jsonb-shaped: str values in the connector paths, plus ints/None from the
     # roadmap path (roadmap_version, workspace_id).
     provenance_extra: dict[str, object] | None = None,
@@ -112,6 +113,18 @@ def extract_document(
     uploads: a doc dropped into "Customer Voice & Support" must count as
     customer_voice evidence deterministically, while an evidence type the LLM
     picked on merit (e.g. a revenue fact inside a call transcript) is kept.
+
+    ``force_source_type`` is the STRONGER form: every signal gets this type, no
+    matter what the model chose. Use it when the DOCUMENT CLASS — not the
+    sentence — determines evidentiary weight, and a model-picked connected type
+    would be a security/integrity problem rather than a nicety. The brief
+    sufficiency gate counts signals by ``source_type``
+    (convergence.CONNECTED_SOURCE_TYPES → connected_breadth / connected count),
+    so a document that must never count as connected evidence has to be pinned,
+    not merely defaulted: a roadmap bullet reading "ARR $2M, churn 9%" would
+    otherwise be extracted as revenue+analytics evidence and could open the gate
+    on the company's own stated plans. Takes precedence over
+    ``source_type_default``; the value must be in SIGNAL_SOURCE_TYPES.
 
     ``provenance_extra`` is merged into each signal's provenance verbatim
     (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
@@ -169,7 +182,10 @@ def extract_document(
         # cannot duplicate the same fact under a different doc name.
         sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
         source_type = item["source_type"]
-        if source_type_default and (
+        if force_source_type:
+            # Document-class pinning wins outright — see the docstring.
+            source_type = force_source_type
+        elif source_type_default and (
             source_type in _SEEDED_SOURCE_TYPES
             or source_type not in SIGNAL_SOURCE_TYPES
         ):
