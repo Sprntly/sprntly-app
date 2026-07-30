@@ -159,6 +159,45 @@ class GraphFacade:
             .execute()
         )
 
+    def expire_signals(self, enterprise_id: str, signal_ids: list[str]) -> int:
+        """Immediately expire the given signals — set ``stale_after`` to now so
+        every stale-filtering reader (``active_signals``, convergence, retrieval)
+        stops seeing them. Returns the number of rows expired.
+
+        This is the "replace semantics" primitive: a versioned document (today
+        the workspace roadmap) that no longer asserts a fact must retire that
+        fact without deleting history — the row stays, bitemporally closed.
+        Distinct from ``supersede_signal``, which points one signal at its
+        replacement; here there is no successor, the bet was simply dropped.
+
+        Tenant-scoped read-modify-write (same pattern as supersede_signal): ids
+        belonging to another enterprise are silently ignored, never touched.
+        """
+        ids = [i for i in dict.fromkeys(signal_ids) if i]
+        if not ids:
+            return 0
+        now = _iso(datetime.now(timezone.utc))
+        expired = 0
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(ids), chunk):
+            batch = ids[i:i + chunk]
+            rows = (
+                self._tbl("kg_signal").select("id")
+                .eq("enterprise_id", enterprise_id)
+                .in_("id", batch)
+                .execute().data or []
+            )
+            for row in rows:
+                (
+                    self._tbl("kg_signal")
+                    .update({"stale_after": now})
+                    .eq("enterprise_id", enterprise_id)
+                    .eq("id", row["id"])
+                    .execute()
+                )
+                expired += 1
+        return expired
+
     def update_entity_properties(
         self, enterprise_id: str, entity_id: str, patch: dict[str, Any]
     ) -> dict[str, Any]:

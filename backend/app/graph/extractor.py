@@ -80,9 +80,20 @@ def extract_document(
     source_hint: str | None = None,
     origin: str | None = None,
     source_type_default: str | None = None,
-    provenance_extra: dict[str, str] | None = None,
+    # jsonb-shaped: str values in the connector paths, plus ints/None from the
+    # roadmap path (roadmap_version, workspace_id).
+    provenance_extra: dict[str, object] | None = None,
 ) -> dict:
-    """Extract one document into the KG. Returns {signals, themes, skipped}.
+    """Extract one document into the KG.
+
+    Returns ``{signals, themes, skipped, signal_ids}``. ``signal_ids`` is the
+    ADDITIVE key (added for roadmap replace semantics): every signal id this
+    document accounts for — the ones newly written PLUS the ones skipped as
+    duplicates of an already-extracted identical fact. Callers that need to
+    know "which signals does the current version of this document assert?"
+    (roadmap re-upload expiry — see kg_ingest.roadmap) use it as the keep-set;
+    every pre-existing caller reads only signals/themes/skipped and is
+    unaffected.
 
     ``origin`` records HOW this document reached us, stamped onto each extracted
     signal's provenance as ``provenance["origin"]``. The two values the brief
@@ -116,7 +127,7 @@ def extract_document(
     )
     items = result.output.get("signals", [])
     if not items:
-        return {"signals": 0, "themes": 0, "skipped": 0}
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
     # Batch-embed signal contents + theme labels.
     theme_labels = sorted({i["theme"].strip() for i in items if i.get("theme")})
@@ -150,6 +161,9 @@ def extract_document(
             new_themes += 1
 
     written = skipped = 0
+    # Every id this document asserts (written + duplicate-skipped) — the
+    # keep-set for replace semantics. See the docstring.
+    signal_ids: list[str] = []
     for item, vec in zip(items, sig_vecs):
         # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
         # cannot duplicate the same fact under a different doc name.
@@ -178,6 +192,10 @@ def extract_document(
             facade.write_signal(enterprise_id, signal)
         except Exception:  # noqa: BLE001 — duplicate id ⇒ already extracted
             skipped += 1
+            # A duplicate is still a fact THIS document asserts, so it belongs
+            # in the keep-set (a re-uploaded roadmap that repeats a bet must not
+            # expire that bet's live signal).
+            signal_ids.append(sig_id)
             continue
         rel_type = item["relationship"]
         facade.write_relationship(enterprise_id, Relationship(
@@ -190,5 +208,7 @@ def extract_document(
             confidence=float(item.get("confidence", 0.8)),
         ))
         written += 1
+        signal_ids.append(sig_id)
 
-    return {"signals": written, "themes": new_themes, "skipped": skipped}
+    return {"signals": written, "themes": new_themes, "skipped": skipped,
+            "signal_ids": signal_ids}
