@@ -111,10 +111,15 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     # (products, positioning, pricing, market, recent news) → KG signals.
     # Deliberately ABOVE the competitive-intelligence rule so "research our
     # market" is an inward ask, while a bare "market position(ing)" (no
-    # research verb) still falls through to CIR below. Both patterns REQUIRE a
-    # first-person possessive, so "research our competitors" also falls
-    # through: "competitors" is not in the noun list.
-    (re.compile(r"\b(?:deep\s+)?research\b.{0,30}\b(our|my|the)\s+"
+    # research verb) still falls through to CIR below.
+    #
+    # Both patterns require a FIRST-PERSON possessive (our|my) — never "the".
+    # "the" would hijack outward asks: "research the pricing of Salesforce",
+    # "can you research the company Datadog", "research the positioning of our
+    # top competitor" (which would have beaten CIR from up here), and "run deep
+    # research on the market leaders". The noun list also omits "competitors",
+    # so "research our competitors" falls through as well.
+    (re.compile(r"\b(?:deep\s+)?research\b.{0,30}\b(our|my)\s+"
                 r"(compan(?:y|ies)|product|market|pricing|positioning)\b", re.I),
      "company-research", "Deep company research", 0.85),
     (re.compile(r"\bwhat\s+do(?:es)?\s+(we|our\s+(?:company|product))\b.{0,20}"

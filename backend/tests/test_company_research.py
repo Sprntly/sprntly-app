@@ -5,13 +5,21 @@ gateway `llm_call` and the extractor are patched in the `company_research`
 namespace (or their source module for lazy imports), and the fake Supabase
 client from conftest backs `company_research_runs` + `companies`.
 
-The load-bearing assertion in this file is the KG provenance origin: research
-signals MUST carry `origin="web_research"` and must never carry `"upload"` or
-`"connector"`, because the brief evidence gate matches those two by equality
-(app/synthesis/convergence.py). If that ever regresses, a company that merely
-typed a URL at onboarding starts producing briefs built out of its own marketing
-site — which is exactly what #846/#923 closed. See
-`test_research_signals_never_count_as_brief_evidence`.
+The load-bearing assertions in this file are the two mechanisms that keep
+scraped web facts out of the brief evidence gate:
+
+  1. the source_type CLAMP (`force_source_type="agent_inferred"`) — the primary
+     defense, because `has_sufficient_evidence` keys on source_type
+     (CONNECTED_SOURCE_TYPES), NOT on origin; and
+  2. the origin exclusion (`origin="web_research"` ∈
+     `convergence.NON_EVIDENCE_ORIGINS`) — the belt, for a signal that reaches
+     the graph mis-stamped.
+
+If either regresses, a company that merely typed a URL at onboarding starts
+producing briefs built out of its own marketing site — exactly what #846/#923
+closed. The gate tests run the REAL `compute_convergence` +
+`has_sufficient_evidence` over signals deliberately stamped
+`revenue`/`customer_voice`; see `test_scraped_facts_mis_stamped_as_evidence_stay_gated`.
 """
 from __future__ import annotations
 
@@ -192,6 +200,16 @@ def _iso(minutes_ago: int) -> str:
             - timedelta(minutes=minutes_ago)).isoformat()
 
 
+def _seed_other_company(cid: str) -> str:
+    """A second companies row — company_research_runs.company_id is a FK."""
+    c = require_client()
+    if not c.table("companies").select("id").eq("id", cid).execute().data:
+        c.table("companies").insert({
+            "id": cid, "slug": cid, "display_name": cid,
+        }).execute()
+    return cid
+
+
 # --------------------------------------------------------------------------- #
 # 1. Happy path
 # --------------------------------------------------------------------------- #
@@ -216,17 +234,28 @@ def test_happy_path_runs_every_stage_and_writes_kg(seeded_company, monkeypatch):
     assert set(out["stages"]) == {s for s, _ in cr._STAGES}
 
 
-def test_signals_carry_web_research_origin_and_run_provenance(
+def test_signals_are_clamped_and_carry_web_research_origin(
     seeded_company, monkeypatch
 ):
+    from app.synthesis.convergence import (
+        CONNECTED_SOURCE_TYPES,
+        NON_EVIDENCE_ORIGINS,
+    )
+
     _captures, extracts, _ctx, _l = _full_stack(monkeypatch)
 
     cr.run_company_research(
         _COMPANY_ID, url="https://acme.com", trigger="chat", run_id=11)
 
     for e in extracts:
+        # (1) PRIMARY defense — the source_type clamp. The gate keys on
+        # source_type, so this is what actually keeps research out of it.
+        assert e["force_source_type"] == "agent_inferred" == cr.RESEARCH_SOURCE_TYPE
+        assert e["force_source_type"] not in CONNECTED_SOURCE_TYPES
+        # (2) BELT — the origin exclusion.
         assert e["origin"] == "web_research" == cr.RESEARCH_ORIGIN
-        # The two values the brief evidence gate matches by equality.
+        assert e["origin"] in NON_EVIDENCE_ORIGINS
+        # And never the two origins the upload-only relaxation looks for.
         assert e["origin"] not in ("upload", "connector")
         assert e["provenance_extra"]["research_url"] == "https://acme.com"
         assert e["provenance_extra"]["run_id"] == "11"
@@ -234,8 +263,57 @@ def test_signals_carry_web_research_origin_and_run_provenance(
         assert e["agent"] == "company_research"
         assert e["doc_name"].startswith("company-research-")
         assert e["doc_name"].endswith("acme.com")
-        # No source_type_default: research must not be re-stamped as evidence.
+        # source_type_default would only *upgrade* seeded types — the wrong tool.
         assert e.get("source_type_default") is None
+
+
+def test_extractor_clamp_overrides_whatever_the_model_picked(
+    seeded_company, monkeypatch
+):
+    """End-to-end through the REAL extractor: the model labels its findings
+    `revenue` and `customer_voice`, and every stored signal still lands
+    `agent_inferred`. The clamp is code, not prompt wording."""
+    from app.graph import GraphFacade
+    from app.graph.extractor import extract_document
+
+    facade = GraphFacade()
+    model_output = {"signals": [
+        {"kind": "finding", "content": "Growth plan is $49 per seat.",
+         "source_type": "revenue", "theme": "Pricing",
+         "relationship": "SUPPORTS", "confidence": 0.9},
+        {"kind": "sentiment", "content": "A reviewer called setup painful.",
+         "source_type": "customer_voice", "theme": "Onboarding",
+         "relationship": "AFFECTS", "confidence": 0.8},
+    ]}
+    monkeypatch.setattr(
+        "app.graph.extractor.llm_call", lambda **kw: _llm_result(model_output))
+    monkeypatch.setattr(
+        "app.graph.extractor.embed_texts",
+        lambda texts, **kw: [[0.01] * 1536 for _ in texts])
+
+    out = extract_document(
+        facade, _COMPANY_ID, doc_name="company-research-pricing-acme.com",
+        text="whatever", agent="company_research",
+        force_source_type=cr.RESEARCH_SOURCE_TYPE, origin=cr.RESEARCH_ORIGIN,
+    )
+    assert out["signals"] == 2
+
+    rows = require_client().table("kg_signal").select("*") \
+        .eq("enterprise_id", _COMPANY_ID).execute().data
+    assert len(rows) == 2
+    assert {r["source_type"] for r in rows} == {"agent_inferred"}
+    assert {r["provenance"]["origin"] for r in rows} == {"web_research"}
+
+
+def test_extractor_rejects_an_invalid_clamp(seeded_company):
+    from app.graph import GraphFacade
+    from app.graph.extractor import extract_document
+
+    with pytest.raises(ValueError, match="not a valid"):
+        extract_document(
+            GraphFacade(), _COMPANY_ID, doc_name="d", text="t",
+            force_source_type="totally_made_up",
+        )
 
 
 def test_business_context_gap_fill_never_overwrites_user_leaves(
@@ -452,13 +530,16 @@ def test_orphan_sweep_fails_only_old_running_rows(seeded_company):
         fail_orphan_company_research_runs,
     )
 
+    # Two companies, because the one-live-run unique index (correctly) forbids
+    # two 'running' rows for the SAME company.
+    other = _seed_other_company("co-research-2")
     c = require_client()
     old = c.table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
         "status": "running", "stages": {}, "created_at": _iso(120),
     }).execute().data[0]["id"]
     young = c.table("company_research_runs").insert({
-        "company_id": _COMPANY_ID, "url": "u", "trigger": "chat",
+        "company_id": other, "url": "u", "trigger": "chat",
         "status": "running", "stages": {}, "created_at": _iso(2),
     }).execute().data[0]["id"]
 
@@ -490,14 +571,22 @@ def test_live_run_makes_a_second_trigger_a_noop(seeded_company, monkeypatch):
 
 
 def test_stale_running_row_does_not_block_a_new_run(seeded_company, monkeypatch):
+    """A restart mid-run leaves an orphan `running` row. The one-live-run unique
+    index has no age condition, so without the insert-conflict heal that dead row
+    would lock this company out of research until the periodic sweep caught it."""
     _full_stack(monkeypatch)
-    require_client().table("company_research_runs").insert({
+    stale = require_client().table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
         "status": "running", "stages": {}, "created_at": _iso(120),
-    }).execute()
+    }).execute().data[0]["id"]
 
     out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
-    assert out["ok"] is True and out["run_id"]
+
+    assert out["ok"] is True and out["run_id"] and out["run_id"] != stale
+    # The orphan was healed on the way through, not left dangling.
+    healed = require_client().table("company_research_runs").select("*") \
+        .eq("id", stale).execute().data[0]
+    assert healed["status"] == "failed"
 
 
 def test_chat_reports_an_already_running_sweep(seeded_company, monkeypatch):
@@ -541,6 +630,293 @@ def test_later_stage_failure_keeps_the_earlier_stages(seeded_company, monkeypatc
     assert len(extracts) == len(cr._STAGES) - 1
 
 
+def test_partial_run_is_recorded_as_partial_not_completed(
+    seeded_company, monkeypatch
+):
+    """A run that lost a stage must not read as a clean one — the status says
+    `completed_partial` and the summary names the stage that failed."""
+    _full_stack(monkeypatch, raises_on="pricing")
+
+    out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
+
+    assert out["ok"] is True and out["partial"] is True
+    row = require_client().table("company_research_runs").select("*") \
+        .eq("company_id", _COMPANY_ID).execute().data[-1]
+    assert row["status"] == "completed_partial"
+    assert "pricing" in row["summary"]
+    assert "partial picture" in row["summary"]
+
+
+def test_clean_run_is_not_marked_partial(seeded_company, monkeypatch):
+    _full_stack(monkeypatch)
+    out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
+
+    assert out["partial"] is False
+    row = require_client().table("company_research_runs").select("*") \
+        .eq("company_id", _COMPANY_ID).execute().data[-1]
+    assert row["status"] == "completed"
+    assert "partial" not in (row["summary"] or "")
+
+
+# ── cancellation ─────────────────────────────────────────────────────────────
+
+def test_stop_between_stages_aborts_the_remaining_sweep(
+    seeded_company, monkeypatch
+):
+    """Each stage is a paid multi-search call, so a user Stop must actually stop
+    it — not run all four and throw the result away."""
+    from app.qa_agent import AskCancelled
+
+    captures, extracts, _c, _l = _full_stack(monkeypatch)
+    calls = {"n": 0}
+
+    def cancelled_after_first() -> bool:
+        # Called at each stage boundary; False before stage 1, True after.
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    with pytest.raises(AskCancelled):
+        cr.run_company_research(
+            _COMPANY_ID, url="https://acme.com", trigger="chat",
+            is_cancelled=cancelled_after_first,
+        )
+    assert len(captures) == 1        # only the first stage was paid for
+    assert len(extracts) == 1        # and its findings were kept
+
+
+def test_cancelled_run_leaves_a_terminal_row_not_a_stuck_one(
+    seeded_company, monkeypatch
+):
+    """A stranded `running` row would block this company's next run until the
+    orphan sweep aged it out."""
+    from app.qa_agent import AskCancelled
+
+    _full_stack(monkeypatch)
+    with pytest.raises(AskCancelled):
+        cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat",
+                       is_cancelled=lambda: True)
+
+    row = require_client().table("company_research_runs").select("*") \
+        .eq("company_id", _COMPANY_ID).execute().data[-1]
+    assert row["status"] == "failed"
+    assert "Cancelled" in (row["error"] or "")
+
+
+def test_chat_propagates_a_stop_rather_than_reporting_a_failure(
+    seeded_company, monkeypatch
+):
+    from app.qa_agent import AskCancelled
+
+    _full_stack(monkeypatch)
+    with pytest.raises(AskCancelled):
+        cr.answer(enterprise_id=_COMPANY_ID, question="research our company",
+                  is_cancelled=lambda: True)
+
+
+# ── atomic one-live-run guard ────────────────────────────────────────────────
+
+def test_insert_conflict_is_read_as_already_running(seeded_company, monkeypatch):
+    """The race the advisory pre-check cannot close: two triggers both pass the
+    check, then both insert. The partial unique index rejects the second, and
+    that rejection — not the pre-check — is what prevents a double sweep."""
+    captures, _e, _c, _l = _full_stack(monkeypatch)
+    require_client().table("company_research_runs").insert({
+        "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
+        "status": "running", "stages": {}, "created_at": _iso(1),
+    }).execute()
+    # Simulate losing the race: the pre-check saw nothing, the DB disagrees.
+    monkeypatch.setattr(
+        "app.db.company_research_runs.company_research_run_in_flight",
+        lambda _cid: False)
+
+    out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
+
+    assert out["reason"] == "already_running"
+    assert captures == []            # no second sweep paid for
+    rows = require_client().table("company_research_runs").select("id") \
+        .eq("company_id", _COMPANY_ID).execute().data
+    assert len(rows) == 1            # and no second row
+
+
+def test_start_run_reraises_a_genuine_insert_error(seeded_company):
+    """An insert failure is only reported as "already running" when a live row
+    actually exists — a real error must still surface."""
+    from app.db.company_research_runs import start_company_research_run
+
+    with pytest.raises(Exception):
+        # trigger violates the CHECK constraint; no live row exists.
+        start_company_research_run(_COMPANY_ID, url="u", trigger="not-a-trigger")
+
+
+def test_a_finished_run_does_not_block_the_next_one(seeded_company, monkeypatch):
+    """The unique index is partial (`where status='running'`), so completed rows
+    accumulate freely — otherwise a company could only ever be researched once."""
+    _full_stack(monkeypatch)
+    first = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
+    second = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
+
+    assert first["ok"] is True and second["ok"] is True
+    assert first["run_id"] != second["run_id"]
+
+
+# ── freshness gate ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("q,expected", [
+    ("research our company again", True),
+    ("can you re-run the research on our pricing", True),
+    ("refresh our company research", True),
+    ("re-research our product", True),
+    ("I need up-to-date pricing", True),
+    ("do it from scratch", True),
+    ("what do we sell?", False),
+    ("research our company", False),
+    ("what's in our pricing tiers", False),
+])
+def test_refresh_request_detection(q, expected):
+    assert cr.is_refresh_request(q) is expected
+
+
+def _seed_completed_run(records=None, *, days_ago=0, status="completed"):
+    return require_client().table("company_research_runs").insert({
+        "company_id": _COMPANY_ID, "url": "https://acme.com", "trigger": "chat",
+        "status": status, "stages": {},
+        "records": records if records is not None
+        else [r for rs in STAGE_RECORDS.values() for r in rs],
+        "summary": "prior sweep", "created_at": _iso(days_ago * 24 * 60),
+        "completed_at": _iso(days_ago * 24 * 60),
+    }).execute().data[0]["id"]
+
+
+def _patch_query_answer(monkeypatch):
+    """Patch the gateway call the stored-run answer uses."""
+    calls: list[dict] = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return _llm_result({
+            "answer": "You charge $49 per technician per month (acme.com).",
+            "key_points": [], "citations": [], "confidence": 0.7,
+            "unanswered": "",
+        })
+
+    monkeypatch.setattr(cr, "llm_call", fake)
+    return calls
+
+
+def test_fresh_run_answers_without_a_new_sweep(seeded_company, monkeypatch):
+    """The finding this fixes: "what do we sell?" used to pay for a full
+    5-10-minute sweep every single time it was asked."""
+    _patch_profile(monkeypatch)
+    _patch_facade(monkeypatch)
+    captures = _patch_capture(monkeypatch)
+    extracts = _patch_extractor(monkeypatch)
+    query_calls = _patch_query_answer(monkeypatch)
+    _seed_completed_run(days_ago=1)
+
+    out = cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+
+    assert captures == []            # ZERO web-search calls
+    assert extracts == []            # and no re-extraction
+    assert len(query_calls) == 1     # one cheap call over the stored records
+    assert query_calls[0]["skill"] == "company-research"
+    assert "$49 per technician" in out["answer"]
+    assert out["_skill_source"] == "company-research-query"
+    assert "sweep" in out["_skill_action"]
+    # The stored records were what it read.
+    assert "Growth plan is $49" in query_calls[0]["input"]
+    # No second run row was created.
+    assert len(require_client().table("company_research_runs").select("id")
+               .eq("company_id", _COMPANY_ID).execute().data) == 1
+
+
+def test_stale_run_triggers_a_fresh_sweep(seeded_company, monkeypatch):
+    captures, extracts, _c, _l = _full_stack(monkeypatch)
+    _seed_completed_run(days_ago=cr.FRESH_RUN_DAYS + 1)
+
+    out = cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+
+    assert len(captures) == len(cr._STAGES)   # swept
+    assert len(extracts) == len(cr._STAGES)
+    assert out["_skill_source"] == "company-research"
+
+
+def test_explicit_refresh_bypasses_a_fresh_run(seeded_company, monkeypatch):
+    captures, _e, _c, _l = _full_stack(monkeypatch)
+    _seed_completed_run(days_ago=1)
+
+    out = cr.answer(
+        enterprise_id=_COMPANY_ID,
+        question="research our company again — I want up-to-date pricing",
+    )
+
+    assert len(captures) == len(cr._STAGES)   # the escape hatch works
+    assert out["_skill_source"] == "company-research"
+
+
+def test_empty_prior_run_does_not_satisfy_the_freshness_gate(
+    seeded_company, monkeypatch
+):
+    """A run that found nothing can answer nothing — sweep again rather than
+    reporting "no information" forever."""
+    captures, _e, _c, _l = _full_stack(monkeypatch)
+    _seed_completed_run(records=[], days_ago=1)
+
+    cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+    assert len(captures) == len(cr._STAGES)
+
+
+def test_failed_prior_run_does_not_satisfy_the_freshness_gate(
+    seeded_company, monkeypatch
+):
+    captures, _e, _c, _l = _full_stack(monkeypatch)
+    _seed_completed_run(days_ago=1, status="failed")
+
+    cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+    assert len(captures) == len(cr._STAGES)
+
+
+def test_partial_prior_run_answers_but_flags_its_gaps(seeded_company, monkeypatch):
+    _patch_profile(monkeypatch)
+    _patch_facade(monkeypatch)
+    captures = _patch_capture(monkeypatch)
+    query_calls = _patch_query_answer(monkeypatch)
+    _seed_completed_run(days_ago=1, status="completed_partial")
+
+    cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+
+    assert captures == []
+    assert "PARTIAL" in query_calls[0]["input"]
+
+
+def test_stored_run_answer_failure_falls_back_to_a_sweep(
+    seeded_company, monkeypatch
+):
+    _patch_profile(monkeypatch)
+    _patch_facade(monkeypatch)
+    captures = _patch_capture(monkeypatch)
+    _patch_extractor(monkeypatch)
+    _seed_completed_run(days_ago=1)
+
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("gateway down")   # the query-mode call
+        return _llm_result(dict(CONTEXT_OUTPUT))  # the context-fill call
+
+    monkeypatch.setattr(cr, "llm_call", flaky)
+    monkeypatch.setattr(
+        "app.db.kg_ingest_ledger.seen_hashes", lambda *a, **k: set())
+    monkeypatch.setattr(
+        "app.db.kg_ingest_ledger.record_hashes", lambda *a, **k: None)
+
+    out = cr.answer(enterprise_id=_COMPANY_ID, question="what do we charge?")
+
+    assert len(captures) == len(cr._STAGES)   # degraded to a real sweep
+    assert out["_skill_source"] == "company-research"
+
+
 def test_chat_is_graceful_when_the_web_tool_is_down(seeded_company, monkeypatch):
     _full_stack(monkeypatch, raises_on="products")
     out = cr.answer(enterprise_id=_COMPANY_ID, question="research our company")
@@ -581,7 +957,10 @@ def test_chat_answer_reports_findings_and_signal_count(seeded_company, monkeypat
 @pytest.mark.parametrize("q", [
     "do some deep research on our company and pricing",
     "research our product please",
-    "can you research the market we're in?",
+    # NB: "research THE market we're in" is deliberately NOT here — the rule
+    # requires our|my, because "the" also matches "research the market leaders".
+    # The LLM router still catches those phrasings from the SKILL.md description.
+    "can you research our pricing and packaging",
     "deep research on my company",
     "research our positioning",
     "what do we offer?",
@@ -621,6 +1000,20 @@ def test_company_research_does_not_steal_neighbouring_intents(q, expected):
     "analyze my data",
 ])
 def test_company_research_never_claims_a_non_inward_ask(q):
+    m = detect_intent(q)
+    assert m is None or m.skill_id != "company-research", q
+
+
+@pytest.mark.parametrize("q", [
+    # These are why the rule requires our|my and NOT "the": every one of them is
+    # about somebody ELSE's company, and "the" would have handed them all to the
+    # inward skill from above the CIR rule.
+    "research the pricing of Salesforce",
+    "can you research the company Datadog",
+    "research the positioning of our top competitor",
+    "run deep research on the market leaders",
+])
+def test_the_alternation_does_not_hijack_outward_research(q):
     m = detect_intent(q)
     assert m is None or m.skill_id != "company-research", q
 
@@ -679,23 +1072,122 @@ def test_qa_agent_falls_through_when_research_returns_none(monkeypatch):
     assert out["answer"] == "generic"
 
 
-def test_research_signals_never_count_as_brief_evidence():
-    """REGRESSION GUARD (#846/#923). A tenant whose ONLY KG signals came from
-    web research must stay evidence-less: the gate counts `upload` and
-    `connector` origins by equality, and `web_research` is neither. If someone
-    ever "simplifies" the origin to one of those, the brief starts being built
-    out of the company's own marketing site."""
-    from app.synthesis.convergence import ThemeConvergence, is_upload_only
+# ── the brief evidence gate, exercised for real ──────────────────────────────
+# These call the ACTUAL compute_convergence + has_sufficient_evidence over
+# signals written to the graph — no dataclass poking. The bar they defend: a
+# tenant whose only KG content is scraped web research must not be able to
+# generate a Top Insights brief (#846/#923), for ANY source_type the extracting
+# model might have chosen.
 
-    assert cr.RESEARCH_ORIGIN not in ("upload", "connector")
+def _seed_research_theme(facade, ent, label, specs):
+    """specs: list of (source_type, origin). Writes a theme + signals wired to
+    it, exactly as extract_document does."""
+    from app.graph.types import Entity, Relationship, Signal
 
-    tc = ThemeConvergence(theme_id="t1", theme_label="Pricing")
-    tc.signal_count = 5
-    # What convergence.compute would produce for web_research-origin signals:
-    # neither counter is incremented, because origin matches neither branch.
-    assert tc.upload_signal_count == 0
-    assert tc.connector_signal_count == 0
-    assert is_upload_only([tc]) is False
+    theme = Entity(enterprise_id=ent, type="theme", canonical_label=label)
+    facade.create_entity(ent, theme)
+    for i, (st, origin) in enumerate(specs):
+        sig = Signal(
+            enterprise_id=ent, source_type=st, kind="finding",
+            content=f"{label} fact {i}",
+            provenance={"source": "extractor", "doc": "company-research-x",
+                        **({"origin": origin} if origin else {})},
+        )
+        facade.write_signal(ent, sig)
+        facade.write_relationship(ent, Relationship(
+            enterprise_id=ent, type="SUPPORTS", source_kind="signal",
+            source_id=sig.id, target_kind="entity", target_id=theme.id))
+    return theme
+
+
+def test_research_only_tenant_cannot_generate_a_brief(isolated_settings):
+    """The shipped configuration: every research signal is clamped to
+    agent_inferred. Ten of them across two themes still leave the tenant
+    evidence-less."""
+    from app.graph import GraphFacade
+    from app.synthesis.convergence import (
+        compute_convergence,
+        has_sufficient_evidence,
+        is_upload_only,
+    )
+
+    facade = GraphFacade()
+    _seed_research_theme(facade, "ent-cr", "Pricing", [
+        (cr.RESEARCH_SOURCE_TYPE, cr.RESEARCH_ORIGIN)] * 5)
+    _seed_research_theme(facade, "ent-cr", "Products", [
+        (cr.RESEARCH_SOURCE_TYPE, cr.RESEARCH_ORIGIN)] * 5)
+
+    conv = compute_convergence(facade, "ent-cr")
+    assert sum(tc.signal_count for tc in conv) == 10       # the signals ARE there
+    assert sum(tc.research_signal_count for tc in conv) == 10
+    assert sum(tc.connected_signal_count for tc in conv) == 0
+    assert all(tc.connected_breadth == 0 for tc in conv)
+    assert is_upload_only(conv) is False                   # no upload relaxation
+    assert has_sufficient_evidence(conv) is False           # ← the gate stays shut
+
+
+def test_scraped_facts_mis_stamped_as_evidence_stay_gated(isolated_settings):
+    """THE test the origin defense exists for. Suppose the clamp is bypassed —
+    a future caller forgets `force_source_type`, or rows are backfilled — and
+    scraped facts land stamped `revenue` and `customer_voice`, which ARE
+    connected source types. Two of them on one theme is `connected_breadth == 2`,
+    the gate's strongest fast-path.
+
+    The origin exclusion must still hold the line, on both the breadth path and
+    the count path."""
+    from app.graph import GraphFacade
+    from app.synthesis.convergence import (
+        CONNECTED_SOURCE_TYPES,
+        compute_convergence,
+        has_sufficient_evidence,
+    )
+
+    assert {"revenue", "customer_voice"} <= CONNECTED_SOURCE_TYPES  # premise
+
+    facade = GraphFacade()
+    # breadth path: 2 distinct CONNECTED source types on one theme.
+    _seed_research_theme(facade, "ent-mis", "Pricing", [
+        ("revenue", cr.RESEARCH_ORIGIN),
+        ("customer_voice", cr.RESEARCH_ORIGIN),
+    ])
+    # count path: 4 more connected-typed research signals across a second theme.
+    _seed_research_theme(facade, "ent-mis", "Products", [
+        ("analytics", cr.RESEARCH_ORIGIN),
+        ("revenue", cr.RESEARCH_ORIGIN),
+        ("communication", cr.RESEARCH_ORIGIN),
+        ("project_mgmt", cr.RESEARCH_ORIGIN),
+    ])
+
+    conv = compute_convergence(facade, "ent-mis")
+    assert sum(tc.signal_count for tc in conv) == 6
+    assert sum(tc.research_signal_count for tc in conv) == 6
+    # Excluded from every dimension the gate reads...
+    assert sum(tc.connected_signal_count for tc in conv) == 0
+    assert all(tc.connected_breadth == 0 for tc in conv)
+    assert all(tc.source_types == set() for tc in conv)
+    # ...so no "2 sources converging" claim either.
+    assert all(tc.breadth == 0 for tc in conv)
+    assert has_sufficient_evidence(conv) is False  # ← the gate STILL stays shut
+
+
+def test_real_evidence_still_opens_the_gate_alongside_research(isolated_settings):
+    """The exclusion must be narrow: research signals sitting next to genuine
+    connected evidence must not suppress it."""
+    from app.graph import GraphFacade
+    from app.synthesis.convergence import compute_convergence, has_sufficient_evidence
+
+    facade = GraphFacade()
+    _seed_research_theme(facade, "ent-mix", "Pricing", [
+        ("revenue", cr.RESEARCH_ORIGIN),          # research — excluded
+        ("revenue", "connector"),                  # real evidence
+        ("customer_voice", "connector"),           # real evidence
+    ])
+    conv = compute_convergence(facade, "ent-mix")
+    tc = conv[0]
+    assert tc.research_signal_count == 1
+    assert tc.connected_signal_count == 2
+    assert tc.connected_breadth == 2
+    assert has_sufficient_evidence(conv) is True
 
 
 # --------------------------------------------------------------------------- #

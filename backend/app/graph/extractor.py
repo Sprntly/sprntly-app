@@ -80,6 +80,7 @@ def extract_document(
     source_hint: str | None = None,
     origin: str | None = None,
     source_type_default: str | None = None,
+    force_source_type: str | None = None,
     provenance_extra: dict[str, str] | None = None,
 ) -> dict:
     """Extract one document into the KG. Returns {signals, themes, skipped}.
@@ -102,8 +103,27 @@ def extract_document(
     customer_voice evidence deterministically, while an evidence type the LLM
     picked on merit (e.g. a revenue fact inside a call transcript) is kept.
 
+    ``force_source_type`` CLAMPS every extracted signal to one source_type,
+    overriding whatever the LLM picked — the inverse of ``source_type_default``
+    (which only *upgrades* seeded/invalid types and otherwise trusts the model).
+    This exists because ``origin`` alone cannot keep non-evidence out of the
+    brief: ``has_sufficient_evidence`` keys on source_type
+    (``CONNECTED_SOURCE_TYPES``), not on origin, so a document whose facts the
+    model plausibly labels ``revenue`` or ``customer_voice`` would open the
+    evidence gate no matter what origin it carried. Callers ingesting
+    NON-EVIDENCE text — scraped web research about the company's own public
+    footprint being the motivating case — pass
+    ``force_source_type="agent_inferred"`` so the clamp is enforced in CODE and
+    cannot be talked out of it by a prompt. Must be a member of
+    SIGNAL_SOURCE_TYPES.
+
     ``provenance_extra`` is merged into each signal's provenance verbatim
     (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
+    if force_source_type and force_source_type not in SIGNAL_SOURCE_TYPES:
+        raise ValueError(
+            f"force_source_type={force_source_type!r} is not a valid "
+            f"signal source_type"
+        )
     cfg = resolve_config(enterprise_id)
     tau_high = cfg["resolution"]["tau_high"]
 
@@ -155,7 +175,12 @@ def extract_document(
         # cannot duplicate the same fact under a different doc name.
         sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
         source_type = item["source_type"]
-        if source_type_default and (
+        if force_source_type:
+            # Unconditional clamp — the model's choice is discarded. See the
+            # docstring: this is the only mechanism that keeps non-evidence text
+            # out of the CONNECTED_SOURCE_TYPES the brief gate counts.
+            source_type = force_source_type
+        elif source_type_default and (
             source_type in _SEEDED_SOURCE_TYPES
             or source_type not in SIGNAL_SOURCE_TYPES
         ):

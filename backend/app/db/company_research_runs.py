@@ -47,10 +47,22 @@ INTERRUPTED_RUN_ERROR = (
 @retry_on_disconnect
 def start_company_research_run(
     company_id: str, *, url: str | None, trigger: str
-) -> int:
-    """Persist a `running` row and return its id."""
+) -> int | None:
+    """Persist a `running` row and return its id, or None when a run is already
+    live for this company.
+
+    The None case is the ATOMIC guard. `company_research_runs_one_live_idx` is a
+    partial unique index on (company_id) where status='running', so the second
+    of two racing inserts — a double POST, or the onboarding kick overlapping a
+    chat ask — is rejected by the DATABASE. A check-then-insert in Python cannot
+    close that window; this can.
+
+    Any insert failure is re-checked against the table before being reported as
+    "already running", so a genuine error (bad payload, outage) still raises
+    rather than being silently swallowed as a duplicate.
+    """
     c = require_client()
-    resp = c.table(_TABLE).insert({
+    row = {
         "company_id": company_id,
         "url": url or "",
         "trigger": trigger,
@@ -60,21 +72,55 @@ def start_company_research_run(
         # both age comparisons below are string/timestamp comparisons against
         # an ISO-8601 UTC cutoff — the two must be the same format.
         "created_at": _now(),
-    }).execute()
+    }
+    try:
+        resp = c.table(_TABLE).insert(row).execute()
+    except Exception:
+        # Distinguish three cases. The unique index has no age condition, so it
+        # rejects an insert whenever ANY 'running' row exists:
+        #   1. a genuinely live run → we lost the race, report it;
+        #   2. an ORPHAN 'running' row (owner died mid-run) → heal it and retry,
+        #      otherwise a dead row would wedge this company until the periodic
+        #      sweep aged it out;
+        #   3. anything else → a real error, re-raise.
+        if _live_run_id(company_id) is not None:
+            logger.info(
+                "company_research: insert lost the one-live-run race for %s "
+                "(%s trigger)", company_id, trigger,
+            )
+            return None
+        if not _fail_stale_running_rows(company_id):
+            raise
+        try:
+            resp = c.table(_TABLE).insert(row).execute()
+        except Exception:
+            # Raced with someone else's heal + insert.
+            logger.info(
+                "company_research: insert lost the race after healing a stale "
+                "row for %s", company_id,
+            )
+            return None
     return resp.data[0]["id"]
 
 
+@retry_on_disconnect
 def complete_company_research_run(
     run_id: int,
     *,
     stages: dict[str, Any],
     records: list[dict],
     summary: str,
+    partial: bool = False,
 ) -> None:
-    """Store the per-stage results + captured records and mark the run done."""
+    """Store the per-stage results + captured records and mark the run done.
+
+    `partial=True` records `completed_partial` — some stages ran, at least one
+    failed. A partial run must not read as a clean one: the summary names the
+    failed stages, and the status says so.
+    """
     c = require_client()
     c.table(_TABLE).update({
-        "status": "completed",
+        "status": "completed_partial" if partial else "completed",
         "stages": stages or {},
         "records": records or [],
         "summary": summary or "",
@@ -83,8 +129,14 @@ def complete_company_research_run(
     }).eq("id", run_id).execute()
 
 
+@retry_on_disconnect
 def fail_company_research_run(run_id: int, error: str) -> None:
-    """Mark the run `failed` (best-effort — the worker never crashes here)."""
+    """Mark the run `failed`.
+
+    Retried on a transient disconnect: this is the ONLY thing that moves a row
+    out of `running`, and a stranded `running` row blocks every future run for
+    that company until the orphan sweep ages it out.
+    """
     c = require_client()
     c.table(_TABLE).update({
         "status": "failed",
@@ -109,32 +161,51 @@ def latest_company_research_run(company_id: str) -> dict | None:
     return resp.data[0] if resp.data else None
 
 
+def _live_run_id(company_id: str) -> int | None:
+    """The id of this company's live (`running`, younger than the orphan cutoff)
+    run, or None. Raises on a read error — callers decide how to degrade."""
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(minutes=ORPHAN_RUN_AFTER_MINUTES)
+    ).isoformat()
+    rows = (
+        require_client().table(_TABLE).select("id")
+        .eq("company_id", company_id)
+        .eq("status", "running")
+        .gt("created_at", cutoff)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0]["id"] if rows else None
+
+
+def _fail_stale_running_rows(company_id: str) -> int:
+    """Fail THIS company's `running` rows older than the orphan cutoff.
+
+    The one-live-run unique index carries no age condition, so an orphan row
+    (server restarted mid-run) would otherwise block every future run for this
+    company until the periodic sweep caught it — turning a transient restart into
+    "this company can never be researched again for 30 minutes". Called on the
+    insert-conflict path, so the heal is paid for only when it is needed.
+    """
+    return fail_orphan_company_research_runs(company_id=company_id)
+
+
 def company_research_run_in_flight(company_id: str) -> bool:
     """Is a research run live for this company right now?
 
+    Advisory pre-check: it exists to give the chat a good message ("already
+    researching…") without an insert attempt. The real guard is the partial
+    unique index — see start_company_research_run — so this failing open is safe.
+
     True only for a `running` row YOUNGER than the orphan cutoff: an older one
-    belongs to a process that died, and must not block a retry forever. Fails
-    OPEN (False) on any read error — the guard is a cost optimization, and its
-    failure mode should be "run it" rather than "silently never research this
-    company again".
+    belongs to a process that died and must not block a retry forever. Fails
+    OPEN (False) on any read error: the DB still refuses a genuine double.
     """
     try:
-        c = require_client()
-        cutoff = (
-            datetime.now(timezone.utc)
-            - timedelta(minutes=ORPHAN_RUN_AFTER_MINUTES)
-        ).isoformat()
-        rows = (
-            c.table(_TABLE).select("id")
-            .eq("company_id", company_id)
-            .eq("status", "running")
-            .gt("created_at", cutoff)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        return bool(rows)
+        return _live_run_id(company_id) is not None
     except Exception:  # noqa: BLE001 — advisory guard, fail open
         logger.exception(
             "company_research in-flight check failed for %s (allowing run)",
@@ -145,6 +216,8 @@ def company_research_run_in_flight(company_id: str) -> bool:
 
 def fail_orphan_company_research_runs(
     older_than_minutes: int = ORPHAN_RUN_AFTER_MINUTES,
+    *,
+    company_id: str | None = None,
 ) -> int:
     """Fail rows abandoned in `running` by a dead process. Returns the count.
 
@@ -155,19 +228,18 @@ def fail_orphan_company_research_runs(
     db/pipeline_runs.fail_orphan_running_runs and
     db/asks.fail_orphan_generating_ask_jobs. Runs at startup and on the
     scheduler's 5-minute heal job.
+
+    `company_id` narrows the sweep to one tenant — used by the insert-conflict
+    heal so a new trigger doesn't have to wait for the periodic sweep.
     """
     cutoff = (
         datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
     ).isoformat()
     c = require_client()
-    rows = (
-        c.table(_TABLE).select("id")
-        .eq("status", "running")
-        .lt("created_at", cutoff)
-        .execute()
-        .data
-        or []
-    )
+    q = c.table(_TABLE).select("id").eq("status", "running")
+    if company_id is not None:
+        q = q.eq("company_id", company_id)
+    rows = q.lt("created_at", cutoff).execute().data or []
     for r in rows:
         fail_company_research_run(r["id"], INTERRUPTED_RUN_ERROR)
     return len(rows)

@@ -617,7 +617,10 @@ def answer(
         from app import company_research
 
         cr = company_research.answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id, question=question, history=history,
+            # A sweep is several minutes of paid web search; each stage boundary
+            # is a cancellation checkpoint, so a Stop actually stops it.
+            is_cancelled=is_cancelled,
         )
         if cr is not None:
             return _maybe_verify(cr, enterprise_id)
