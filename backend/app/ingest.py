@@ -193,6 +193,25 @@ def _looks_textual(data: bytes) -> bool:
         return False
 
 
+# Sentinel inside the binary placeholder `fallback_to_md` emits. Callers that
+# must distinguish "we extracted nothing usable" from real content check for it
+# via `is_unparsed_stub` rather than string-matching themselves, so the stub text
+# and its detector can never drift apart.
+_UNPARSED_STUB_MARKER = "_Stored as a source but not yet parsed (type "
+
+
+def is_unparsed_stub(text: str) -> bool:
+    """True when `text` is the placeholder `fallback_to_md` produces for content
+    it could not parse (legacy binary .doc/.ppt/.xls, images, audio…).
+
+    The stub is deliberately NON-EMPTY so the file still registers as a source,
+    which means an `if not text` check does NOT catch it. Anything that treats
+    "no usable text" as a decision point (e.g. roadmap→KG ingest, which must not
+    let an unparseable re-upload retire the previous roadmap's signals) has to
+    ask this instead."""
+    return _UNPARSED_STUB_MARKER in (text or "")
+
+
 def fallback_to_md(filename: str, data: bytes) -> str:
     """Best-effort conversion for types without a dedicated converter.
 
@@ -206,7 +225,7 @@ def fallback_to_md(filename: str, data: bytes) -> str:
     kb = max(1, round(len(data) / 1024))
     return (
         f"# {Path(filename).name}\n\n"
-        f"_Stored as a source but not yet parsed (type {suffix}, {kb} KB). "
+        f"{_UNPARSED_STUB_MARKER}{suffix}, {kb} KB). "
         "Binary or unrecognized format — its content is not included in "
         "analysis yet._\n"
     )

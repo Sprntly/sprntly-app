@@ -15735,6 +15735,48 @@
     height: 16px;
   }
 
+  /* SlackSyncChannelsPicker — the multi-select pull-channel checklist.
+     Same card look as the radios, in a scrollable column so a big
+     workspace doesn't blow the drawer out. */
+  .conn-slack-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .conn-slack-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 9px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .conn-slack-check:hover {
+    border-color: var(--ink-3);
+    background: var(--surface-2);
+  }
+
+  .conn-slack-check:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .conn-slack-check input {
+    accent-color: var(--accent);
+    margin: 0;
+    width: 16px;
+    height: 16px;
+  }
+
   .conn-slack-label {
     display: block;
     font-size: 11px;
@@ -21570,7 +21612,14 @@
    as a distinct bordered card rather than inline chat text so it reads as an
    action to take, not as more of the agent's prose — the one place in the chat
    where a click leaves the product and changes a system a whole team watches. */
-.jira-confirm {
+/* Confirm cards for a change the agent PROPOSED in chat. Two of them share this
+   chrome — the Jira field/status/comment card (JiraChangeConfirm) and the
+   PRD-grounded ticket rewrite (TicketChangeConfirm) — because they are the same
+   promise to the reader: here is exactly what will happen, and nothing happens
+   until you say so. The `.jira-confirm*` names came first and stay as-is so the
+   existing card and its tests are untouched. */
+.jira-confirm,
+.ticket-confirm {
   margin-top: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -21578,7 +21627,8 @@
   padding: 12px 14px;
 }
 
-.jira-confirm-head {
+.jira-confirm-head,
+.ticket-confirm-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -21586,7 +21636,8 @@
   margin-bottom: 8px;
 }
 
-.jira-confirm-kind {
+.jira-confirm-kind,
+.ticket-confirm-kind {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -21596,35 +21647,73 @@
   padding: 2px 6px;
 }
 
-.jira-confirm-key { font-weight: 600; font-size: 13px; }
-.jira-confirm-summary { color: var(--ink-3); font-size: 13px; }
+.jira-confirm-key,
+.ticket-confirm-key { font-weight: 600; font-size: 13px; }
+.jira-confirm-summary,
+.ticket-confirm-summary { color: var(--ink-3); font-size: 13px; }
 
-.jira-confirm-lines {
+.jira-confirm-lines,
+.ticket-confirm-lines {
   margin: 0 0 10px;
   padding-left: 18px;
   font-size: 13px;
   color: var(--ink-2);
 }
 
-.jira-confirm-lines li { margin: 2px 0; }
+.jira-confirm-lines li,
+.ticket-confirm-lines li { margin: 2px 0; }
 
-.jira-confirm-actions { display: flex; gap: 8px; }
+.jira-confirm-actions,
+.ticket-confirm-actions { display: flex; gap: 8px; }
+
+/* The proposed description in full. A rewrite REPLACES what is there, so the
+   card shows the replacement text itself rather than only describing it —
+   capped and scrollable so a long one can't push the Confirm button off the
+   thread. */
+.ticket-confirm-body {
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+.ticket-confirm-criteria {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.ticket-confirm-criteria-head {
+  font-weight: 600;
+  font-size: 12px;
+  margin-top: 10px;
+}
 
 /* Deliberately stated under the buttons, not above them: the reassurance is
    most useful at the moment of hesitation, right where the cursor is. */
-.jira-confirm-note {
+.jira-confirm-note,
+.ticket-confirm-note {
   margin-top: 8px;
   font-size: 11px;
   color: var(--ink-4);
 }
 
 .jira-confirm-result,
-.jira-confirm--done {
+.jira-confirm--done,
+.ticket-confirm-result,
+.ticket-confirm--done {
   font-size: 12px;
   color: var(--ink-3);
 }
 
-.jira-confirm-error {
+.jira-confirm-error,
+.ticket-confirm-error {
   font-size: 12px;
   color: var(--danger, #b23c3c);
   margin-bottom: 8px;

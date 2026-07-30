@@ -30,8 +30,10 @@ from typing import Callable, Optional
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
+from app.prompt_history import clamp_turn_text
 from app.prompts import (
     ASK_SYSTEM,
+    ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_PRD_ADDENDUM,
     OUT_OF_SCOPE_MESSAGE,
@@ -39,9 +41,11 @@ from app.prompts import (
 from app.skill_router import (
     detect_intent,
     is_call_digest,
+    is_connector_lookup,
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_ticket_update,
     is_voc_report_request,
 )
 from app.skills.catalog import NON_ROUTABLE, routable_manifest
@@ -164,11 +168,21 @@ def _router_menu() -> str:
 
 
 def _render_history(history: Optional[list[dict]]) -> str:
-    """Render the last few turns as plain text for prompt context."""
+    """Render the last few turns as plain text for prompt context.
+
+    Each turn is clamped (`app.prompt_history`) before it is folded in: an HTML
+    report answer — VoC, public-feedback, DS analysis — is persisted verbatim as
+    a conversation turn, and one carrying base64 charts is megabytes of `data:`
+    URI. Replaying that into the router and answer calls would 400 every later
+    ask in the thread, non-retryably. The turn count cap alone doesn't bound
+    bytes, so the per-turn clamp is what makes this safe."""
     if not history:
         return ""
     recent = history[-_HISTORY_TURNS:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [
+        f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}"
+        for t in recent
+    ]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 
@@ -176,12 +190,14 @@ def _routable(skill_id: str, enterprise_id: Optional[str] = None) -> bool:
     """Can this id be invoked? Built-ins: vendored and not NON_ROUTABLE.
     With an enterprise_id, the company's CUSTOM skills (PRD 1854) also count —
     a fresh DB check, so a just-uploaded skill works and a just-deleted one
-    stops immediately. Custom skills reach here only via the slash fast-path
-    and pinned_skill; the regex rules and the LLM router menu stay built-in
-    only (the memoized menu is process-global — per-company entries there
-    would leak names across tenants)."""
-    if skill_id in set(list_skills()):
-        return skill_id not in NON_ROUTABLE
+    stops immediately. A custom skill may share a vendored id (the override
+    rule: custom wins), so a NON_ROUTABLE built-in id still routes when the
+    company has an upload under it. Custom skills reach here only via the
+    slash fast-path and pinned_skill; the regex rules and the LLM router menu
+    stay built-in only (the memoized menu is process-global — per-company
+    entries there would leak names across tenants)."""
+    if skill_id in set(list_skills()) and skill_id not in NON_ROUTABLE:
+        return True
     if enterprise_id:
         from app.skills.resolver import has_custom_skill
 
@@ -291,18 +307,20 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
 
 def _answer_single_shot(
     decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
-    on_delta=None,
+    on_delta=None, skill_spec=None,
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
     grounded on the KG when the tenant's graph has relevant signal — or, for a
     PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
     prefix and the KG retrieval is skipped)."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
-    # Custom skill (PRD 1854): not a vendored dir, so the gateway can't load it
-    # by id — resolve the DB-backed spec here and hand it over. Built-ins pass
-    # spec=None and the gateway loads from disk exactly as before.
-    skill_spec = None
-    if decision.skill_id and decision.skill_id not in set(list_skills()):
+    # Custom skill (PRD 1854): resolve the DB-backed spec and hand it over —
+    # CUSTOM FIRST even when the id names a vendored dir, because a company
+    # upload sharing a built-in id replaces it (the override rule). Only when
+    # the company has no upload under this id does spec=None send the gateway
+    # to disk, exactly as before. The dispatch may pass the spec in to save
+    # the repeat lookup.
+    if skill_spec is None and decision.skill_id and enterprise_id:
         from app.skills.resolver import custom_skill_spec
 
         skill_spec = custom_skill_spec(enterprise_id, decision.skill_id)
@@ -322,6 +340,9 @@ def _answer_single_shot(
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
+        # skill_spec is not None ⇔ the method text is a company upload, not a
+        # vendored skill — tell the model it's user content, never authority.
+        + (ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM if skill_spec is not None else "")
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
     )
@@ -449,6 +470,25 @@ def _maybe_verify(payload: dict, enterprise_id: str) -> dict:
     return payload
 
 
+def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
+    """Is the Claude data-analysis engine enabled for this company?
+
+    `ds_claude_analysis` in companies.feature_flags, DEFAULT OFF — the opposite
+    of the module entitlements, which grandfather absent flags ON. A read failure
+    also resolves OFF, so the deterministic engine is what an unreachable/legacy
+    flags column gets.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.entitlements import feature_flags_for_company
+
+        return bool(feature_flags_for_company(enterprise_id).get("ds_claude_analysis"))
+    except Exception:  # noqa: BLE001 — flag read must never break the ask
+        logger.exception("ds_claude_analysis flag read failed for %s", enterprise_id)
+        return False
+
+
 def _log_qa(enterprise_id: str, skill_id: str, purpose: str, meta: dict) -> None:
     """Best-effort decision-log row for the tool-loop path (the single-shot path
     is logged by the gateway itself)."""
@@ -527,31 +567,97 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )
 
-    # "Analyze my data" is a COMMAND to run the deterministic DS engine over the
-    # company's uploaded CSV/Excel exports — not a question for the corpus/KG.
+    # "Analyze my data" is a COMMAND to run a DS engine over the company's
+    # uploaded CSV/Excel exports — not a question for the corpus/KG.
     # Intercept before generic routing for the same reason as the call digest:
     # the keyword rules would send it to a synthesis skill, which answers from
     # the KG instead of computing over the actual data.
     if not pinned_skill and is_data_analysis_request(question):
+        # Opt-in per company: the Claude code-execution engine actually reads the
+        # question (the v5.8 battery never does) but sends the raw CSVs to the
+        # Files API, so it stays behind a flag until that's signed off. Any
+        # failure falls through to the deterministic engine — the permanent
+        # fail-open floor — so this can never 500 the chat.
+        if _ds_claude_enabled(enterprise_id):
+            try:
+                from app.ds import claude_analysis
+
+                return claude_analysis.answer(
+                    enterprise_id=enterprise_id,
+                    question=question,
+                    history=history,
+                    is_cancelled=is_cancelled,
+                )
+            except AskCancelled:
+                raise  # a user Stop must not spend a second (legacy) run
+            except Exception:  # noqa: BLE001 — fall back, never fail
+                logger.exception(
+                    "DS Claude analysis failed for %s; falling back to the "
+                    "deterministic engine", enterprise_id,
+                )
         from app.ds import chat_analysis
 
         return chat_analysis.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
 
-    # Live Jira read: a question referencing a Jira issue/epic wants the CURRENT
+    # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
+    # Checked BEFORE the tracker lookup below, which would otherwise claim it —
+    # a write verb on a PM noun is exactly its trigger — and hand it to a skill
+    # whose tools are tracker-only and which cannot read a PRD at all. That
+    # mismatch is the reported failure this path exists to fix. It serves BOTH
+    # kinds of ticket (Sprntly and Jira), so unlike the lookup it must not be
+    # gated on a tracker connection.
+    if (
+        not pinned_skill
+        and not question.lstrip().startswith("/")
+        and is_ticket_update(question, history)
+    ):
+        from app import ticket_update
+
+        return ticket_update.answer(
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            prd_id=prd_id,
+        )
+
+    # Live TRACKER read: a question referencing a ticket/epic wants the CURRENT
     # state — status, comments, epic children — not the periodic, comment-less
     # KG snapshot the generic router would answer from. Intercept before routing
-    # and let the model fetch the real issues live (read-only tool loop). When
-    # Jira isn't connected, jira_lookup returns a helpful connect message rather
-    # than falling through. A slash command (handled by route()) is exempt so an
-    # explicit skill invocation that merely names Jira isn't hijacked.
+    # and let the model fetch the real issues live (read-only tool loop, plus
+    # Jira's propose→confirm card). The tracker picker resolves WHICH tracker the
+    # company has connected (Jira, else ClickUp) — routing here has always been
+    # tracker-agnostic while execution was Jira-only, which is why a ClickUp-only
+    # company used to be told to connect Jira. When no tracker is connected it
+    # returns a connect message rather than falling through. A slash command
+    # (handled by route()) is exempt so an explicit skill invocation that merely
+    # names Jira isn't hijacked.
     if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(question, history):
-        from app import jira_lookup
+        from app.connector_lookup import tracker
 
-        return jira_lookup.answer(
+        return tracker.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
+
+    # Live read of any OTHER connected tool the question names — "check slack for
+    # what was said about the pricing change", "what changed in the repo this
+    # week", "which deals in hubspot mention onboarding". Same reason as the
+    # tracker path: the answer lives in the tool, not in the KG snapshot. Placed
+    # LAST of the interceptions on purpose — call-digest, VoC and DS own their
+    # phrasings, and the tracker owns tickets; this one only fires when the
+    # question NAMES a source none of them claimed. A source we cannot read live
+    # is answered honestly here too (registry.not_supported_message), which is
+    # better than the generic path guessing from the KG.
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        connector_hints = is_connector_lookup(question, history)
+        if connector_hints:
+            from app.connector_lookup import registry
+
+            return registry.answer_for_hints(
+                enterprise_id=enterprise_id, question=question,
+                history=history, hints=connector_hints,
+            )
 
     if pinned_skill and _routable(pinned_skill, enterprise_id):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
@@ -592,6 +698,22 @@ def answer(
             on_delta=on_delta,
         )
 
+    # Custom-skill override (PRD 1854): a company upload that shares a
+    # vendored id WINS, so it must run as itself through the generic
+    # single-shot path — never through the built-in's special-cased pipeline
+    # below (public-feedback web search, VoC call digest, script tools). One
+    # fresh DB read; the resolved spec is handed to the single-shot call so
+    # it isn't looked up twice.
+    from app.skills.resolver import custom_skill_spec
+
+    custom_spec = custom_skill_spec(enterprise_id, decision.skill_id)
+    if custom_spec is not None:
+        payload = _answer_single_shot(
+            decision, enterprise_id, question, history, prd_context=prd_context,
+            on_delta=on_delta, skill_spec=custom_spec,
+        )
+        return _maybe_verify(payload, enterprise_id)
+
     # Public-feedback routed: the report needs the public WEB (app stores,
     # Reddit, review sites), which the generic skill answer can't reach — it
     # would answer from the KG's first-party signal. Run the dedicated
@@ -605,6 +727,25 @@ def answer(
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
+
+    # Company-research routed: "do some deep research on our company/pricing"
+    # needs the public WEB, which the generic skill answer can't reach — it
+    # would answer from whatever the KG already holds, which for a fresh
+    # company is nothing. Run the dedicated staged sweep instead; it also seeds
+    # the KG (origin="web_research", never "upload"/"connector"). Returns None
+    # when the feature flag is off or the company profile can't be read, falling
+    # through to the generic answer.
+    if decision.skill_id == "company-research":
+        from app import company_research
+
+        cr = company_research.answer(
+            enterprise_id=enterprise_id, question=question, history=history,
+            # A sweep is several minutes of paid web search; each stage boundary
+            # is a cancellation checkpoint, so a Stop actually stops it.
+            is_cancelled=is_cancelled,
+        )
+        if cr is not None:
+            return _maybe_verify(cr, enterprise_id)
 
     # Competitive-intelligence routed: the review needs the public WEB (what a
     # rival shipped, their pricing page, their app-store rating), which the

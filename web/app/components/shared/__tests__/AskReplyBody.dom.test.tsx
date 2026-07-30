@@ -43,6 +43,21 @@ describe("AskReplyBody answer chrome", () => {
     expect(container.textContent).not.toContain("23% of new users abandon")
   })
 
+  // An answer that IS a self-contained HTML document renders in the sandboxed
+  // iframe; its title comes from the skill that produced it. Before the map the
+  // DS analysis report was labelled "Voice of Customer report".
+  const HTML_REPLY = { ...REPLY, answer: '<!doctype html><html><body><div>report</div></body></html>' }
+
+  it.each([
+    ["ds-agent", "Data analysis report"],
+    ["public-feedback-report", "Public Feedback report"],
+    ["voice-of-customer-report", "Voice of Customer report"],
+    [undefined, "Voice of Customer report"],
+  ])("titles the HTML report iframe for _skill=%s", (skill, title) => {
+    const { container } = render(<AskReplyBody reply={{ ...HTML_REPLY, _skill: skill }} />)
+    expect(container.querySelector("iframe")?.getAttribute("title")).toBe(title)
+  })
+
   it("still renders citation cards unless omitCitations", () => {
     const { container } = render(<AskReplyBody reply={REPLY} />)
     expect(container.querySelector(".ai-bar-reply-cite")).not.toBeNull()

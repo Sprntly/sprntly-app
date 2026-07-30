@@ -2,13 +2,16 @@
 provider IS, surfaced on the connectors API and consumed by type-driven
 features (the ticket sync's eligible-provider set).
 
-Cardinality is a product decision: exactly ONE type per connector for now,
-kept list-shaped so multi-type support later is a data change only.
+Cardinality is a product decision (2026-07-30): connectors may carry multiple
+types when the tool genuinely is more than one thing — Slack is the first
+(communication + customer-voice). Every provider carries at least one type.
 """
 from __future__ import annotations
 
 from app.connectors.catalog import (
+    COMMUNICATION,
     CONNECTOR_TYPES,
+    CUSTOMER_VOICE,
     TASK_MANAGEMENT,
     has_type,
     providers_with_type,
@@ -27,17 +30,26 @@ def test_every_connectable_provider_is_classified():
         assert types_for(provider), f"{provider} has no types"
 
 
-def test_exactly_one_type_per_connector_for_now():
-    """Product decision (2026-07): one type per connector. The list shape is
-    future-proofing, not an invitation — this test is the guardrail."""
+def test_every_provider_has_at_least_one_type():
+    """Multi-type is allowed (product decision 2026-07-30), untyped is not —
+    every catalog entry must say what the tool IS."""
     for provider, types in CONNECTOR_TYPES.items():
-        assert len(types) == 1, f"{provider} has {len(types)} types: {types}"
+        assert len(types) >= 1, f"{provider} has no types"
+
+
+def test_slack_is_dual_typed():
+    """Slack is the first multi-type connector: a communication tool (brief
+    delivery) AND a customer-voice source (user-selected channels are synced
+    into the corpus). Order is meaningful-ish (primary first) — pin it."""
+    assert types_for("slack") == [COMMUNICATION, CUSTOMER_VOICE]
+    assert has_type("slack", COMMUNICATION)
+    assert has_type("slack", CUSTOMER_VOICE)
+    assert "slack" in providers_with_type(CUSTOMER_VOICE)
 
 
 def test_types_are_provider_specific():
     assert types_for("clickup") == [TASK_MANAGEMENT]
     assert types_for("jira") == [TASK_MANAGEMENT]
-    assert types_for("slack") == ["communication"]
     assert types_for("hubspot") == ["crm"]
     assert types_for("fireflies") == ["meetings"]
     # Unknown providers are just untyped — never an error.
@@ -80,4 +92,6 @@ def test_public_connection_carries_types():
         "config_json": None,
     }
     assert _public_connection(row)["types"] == [TASK_MANAGEMENT]
-    assert _public_connection({**row, "provider": "slack"})["types"] == ["communication"]
+    assert _public_connection({**row, "provider": "slack"})["types"] == [
+        COMMUNICATION, CUSTOMER_VOICE,
+    ]

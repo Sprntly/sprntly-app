@@ -96,6 +96,7 @@ from app.connectors.tokens import (
     encrypt_token_json,
 )
 from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
+from app.prompt_history import clamp_turn_text
 from app.skill_router import is_competitive_report_request
 
 logger = logging.getLogger(__name__)
@@ -215,17 +216,57 @@ def _require_admin_for_org_connector(
 
 def _visible_connection_rows(company: CompanyContext) -> list[dict]:
     """Connection rows the CURRENT user may see: every company-scoped
-    provider (shared) plus only THIS user's own Slack row. Other members'
-    per-user Slack rows (and legacy NULL-user Slack rows) are filtered out
-    so one member never sees another's personal Slack."""
+    provider (shared) plus exactly ONE Slack row.
+
+    Slack's two roles have two scopes. Delivery config is per-user, so a
+    member sees their OWN Slack row untouched. But the voice-of-customer
+    side is company-level: a member who never installed the bot still sees
+    the COMPANY's sync connection (see slack_company.py) so the Voice shelf
+    reads Connected and the shared pull selection is visible — SANITIZED,
+    with the owner's personal delivery target stripped, so one member never
+    reads another's delivery config. Legacy NULL-user Slack rows stay
+    hidden."""
     rows = db.list_connections(company.company_id)
     out: list[dict] = []
+    own_slack = False
     for r in rows:
         if r.get("provider") == slack_oauth.SLACK_PROVIDER:
             if r.get("user_id") != company.user_id:
                 continue
+            own_slack = True
         out.append(r)
+    if not own_slack:
+        shared = _company_slack_row_sanitized(company.company_id)
+        if shared:
+            out.append(shared)
     return out
+
+
+def _company_slack_row_sanitized(company_id: str) -> dict | None:
+    """The company's Slack sync row, safe to show to a member who doesn't
+    own it: personal delivery config removed, company-level pull config
+    kept, and flagged `company_connection` so the web knows this is the
+    shared workspace connection rather than the member's own install."""
+    from app.connectors.slack_company import (
+        resolve_company_slack_row,
+        row_config,
+    )
+    from app.connectors.slack_sync import (
+        CONFIG_SYNC_CHANNEL_IDS,
+        CONFIG_SYNC_CHANNEL_NAMES,
+    )
+
+    row = resolve_company_slack_row(company_id)
+    if not row:
+        return None
+    cfg = row_config(row)
+    sanitized = {
+        k: v
+        for k, v in cfg.items()
+        if k in (CONFIG_SYNC_CHANNEL_IDS, CONFIG_SYNC_CHANNEL_NAMES, "team")
+    }
+    sanitized["company_connection"] = True
+    return {**row, "config_json": json.dumps(sanitized)}
 
 
 @router.get("")
@@ -477,10 +518,16 @@ def test_connection(
 
     from app.connector_probe import ProbeError, probe_connection
 
-    # Slack is per-user: validate THIS user's own connection, never a
-    # company-shared one. Every other provider stays company-scoped.
+    # Slack: validate THIS user's own connection when they have one; a
+    # member without their own install probes the COMPANY sync connection
+    # instead (read-only health check — the drawer's status pill must read
+    # Connected for the shared voice-of-customer connection they can see).
     if provider == slack_oauth.SLACK_PROVIDER:
         row = db.get_slack_connection(company.company_id, company.user_id)
+        if not row:
+            from app.connectors.slack_company import resolve_company_slack_row
+
+            row = resolve_company_slack_row(company.company_id)
     else:
         row = db.get_connection(company.company_id, provider)
     if not row:
@@ -2192,7 +2239,15 @@ def _slack_conversation_history(
         history.append(
             {
                 "role": "assistant" if is_bot else "user",
-                "content": content if is_bot else _strip_leading_mention(content),
+                # Clamped at construction (#949's per-turn clamp). The consuming
+                # fold in qa_agent clamps too, but this path is the one that now
+                # carries REPORT answers: a Slack DM thread can hold the bot's
+                # own report summary, and before file delivery it could hold a
+                # whole HTML document. Bounding it here means every downstream
+                # fold — qa_agent's and every divert's — sees a sane turn.
+                "content": clamp_turn_text(
+                    content if is_bot else _strip_leading_mention(content)
+                ),
             }
         )
     return history[-12:]
@@ -2567,9 +2622,26 @@ def _slack_user_token(company_id: str, user_id: str) -> tuple[str, dict]:
 def slack_list_channels(
     company: CompanyContext = Depends(require_company),
 ):
-    """List channels the bot can post into. Backs the channel-picker
-    in the Configure drawer. Resolves THIS user's own Slack."""
-    token, _row = _slack_bot_token(company.company_id, company.user_id)
+    """List channels the bot can post into. Backs both channel pickers
+    (delivery target + pull channels). Resolves THIS user's own Slack,
+    falling back to the COMPANY's sync connection so members who never
+    installed their own bot can still see the shared pull selection —
+    channel names only, never another member's delivery config."""
+    from app.connectors.slack_company import (
+        CompanySlackError,
+        company_slack_token,
+    )
+
+    if db.get_slack_connection(company.company_id, company.user_id):
+        token, _row = _slack_bot_token(company.company_id, company.user_id)
+        return {"channels": slack_oauth.list_channels(token)}
+    try:
+        resolved = company_slack_token(company.company_id)
+    except CompanySlackError as e:
+        raise HTTPException(500, str(e)) from e
+    if not resolved:
+        raise HTTPException(404, "Slack is not connected")
+    token, _row = resolved
     return {"channels": slack_oauth.list_channels(token)}
 
 
@@ -2703,6 +2775,97 @@ def slack_save_config(
     return {"ok": True, "config": config, "joined": joined}
 
 
+class SlackSyncChannelIn(BaseModel):
+    id: str
+    # Display name, stored alongside the id so an unjoined channel can be
+    # reported by name at sync time.
+    name: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("channel id cannot be empty")
+
+
+class SlackSyncChannelsIn(BaseModel):
+    channels: list[SlackSyncChannelIn]
+
+    def model_post_init(self, _context) -> None:
+        # The sync caps at 50 channels (slack_sync.MAX_CHANNELS) — refuse a
+        # selection it could never honor.
+        if len(self.channels) > 50:
+            raise ValueError("select at most 50 channels")
+
+
+@router.post("/slack/sync-channels")
+def slack_save_sync_channels(
+    body: SlackSyncChannelsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which channels the Slack corpus sync pulls from — COMPANY-WIDE.
+
+    Voice-of-customer pulling is company-level (one selection, one scheduled
+    sync per company — see slack_company.py), so the selection is stored on
+    the company's Slack sync connection, whichever member installed it, and
+    only admins may change it. An empty list clears the selection (back to
+    every channel the bot is a member of). Selected public channels are
+    best-effort self-joined right away (idempotent, `channels:join`) so the
+    first sync doesn't skip them as not_in_channel; private channels can't
+    be self-joined and need a manual /invite."""
+    from app.connectors.slack_company import (
+        CompanySlackError,
+        company_slack_token,
+        resolve_company_slack_row,
+        row_config,
+    )
+    from app.connectors.slack_sync import (
+        CONFIG_SYNC_CHANNEL_IDS,
+        CONFIG_SYNC_CHANNEL_NAMES,
+    )
+
+    # Company-wide config → org-connector RBAC, even though the underlying
+    # connection row is a member's install.
+    if company.role not in ("owner", "admin"):
+        raise HTTPException(
+            403,
+            "Only admins can choose the channels Sprntly pulls from. "
+            "Ask your workspace admin to update the selection.",
+        )
+    row = resolve_company_slack_row(company.company_id)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    # Dedupe preserving order — the sync pulls in selection order.
+    ids = list(dict.fromkeys(c.id for c in body.channels))
+    names = {
+        c.id: c.name.strip()
+        for c in body.channels
+        if c.name and c.name.strip()
+    }
+    updated = db.patch_slack_connection_config(
+        company.company_id,
+        row.get("user_id") or "",
+        {CONFIG_SYNC_CHANNEL_IDS: ids, CONFIG_SYNC_CHANNEL_NAMES: names},
+    )
+    config = row_config(updated) if updated else {}
+    joined: list[str] = []
+    if ids:
+        try:
+            resolved = company_slack_token(company.company_id)
+            if resolved:
+                bot_token, _row = resolved
+                for cid in ids:
+                    try:
+                        if slack_oauth.join_channel(bot_token, cid):
+                            joined.append(cid)
+                    except Exception:  # noqa: BLE001 — join is best-effort per channel
+                        logger.exception("slack auto-join failed for %s", cid)
+        except CompanySlackError:
+            logger.exception("slack auto-join on sync-channels save failed")
+        except Exception:  # noqa: BLE001 — join must never block the save
+            logger.exception("slack auto-join on sync-channels save failed")
+    return {"ok": True, "config": config, "joined": joined}
+
+
 class SlackSyncCorpusIn(BaseModel):
     dataset: str
     history_days: int = 90
@@ -2716,9 +2879,10 @@ def slack_sync_to_corpus(
     """Sync Slack channels, messages, and threads into the corpus.
 
     Fetches data from the Slack API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base. Uses THIS
-    user's own Slack bot token (per-user scope; also fixes the prior
-    company-less token lookup).
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. COMPANY-LEVEL:
+    whoever clicks Sync, the sync uses the company's Slack connection and
+    its shared pull-channel selection (see slack_company.py) — the same
+    corpus every member reads. Also runs on the scheduled connector refresh.
     """
     from app.connectors.slack_sync import SlackSyncError, sync_slack
 
@@ -2726,7 +2890,6 @@ def slack_sync_to_corpus(
         result = sync_slack(
             body.dataset,
             company_id=company.company_id,
-            user_id=company.user_id,
             history_days=body.history_days,
         )
     except SlackSyncError as e:

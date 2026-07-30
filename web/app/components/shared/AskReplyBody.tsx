@@ -8,6 +8,7 @@ import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
 import { HtmlReportView } from "./HtmlReportView"
 import { JiraChangeConfirm } from "./JiraChangeConfirm"
+import { TicketChangeConfirm } from "./TicketChangeConfirm"
 import { InlineChart, parseChartBody } from "./InlineChart"
 
 /** Pull a plain-text body out of react-markdown's `code` children prop. */
@@ -30,6 +31,7 @@ function flattenText(node: ReactNode): string {
  */
 const REPORT_TITLES: Record<string, string> = {
   "public-feedback-report": "Public Feedback report",
+  "ds-agent": "Data analysis report",
   "competitive-intelligence-review": "Competitive Intelligence report",
   "voice-of-customer-report": "Voice of Customer report",
 }
@@ -81,7 +83,8 @@ export function AskReplyBody({
   // escape the tags. The report is self-contained, so we skip the simulated-typing
   // stream and the citations chrome below it.
   if (looksLikeHtmlBrief(reply.answer)) {
-    const reportTitle = REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
+    const reportTitle =
+      REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
     const report = <HtmlReportView html={reply.answer} title={reportTitle} />
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>
@@ -104,6 +107,10 @@ export function AskReplyBody({
           sentence explaining what it does is still being typed out. */}
       {done && reply._pending_jira_change ? (
         <JiraChangeConfirm change={reply._pending_jira_change} />
+      ) : null}
+      {/* A PRD-grounded ticket rewrite, held back for the same reason. */}
+      {done && reply._pending_ticket_change ? (
+        <TicketChangeConfirm change={reply._pending_ticket_change} />
       ) : null}
       {done && !omitCitations && reply.citations?.length ? (
         <div className="ai-bar-reply-cites ai-bar-reply-cites--stream-reveal">
