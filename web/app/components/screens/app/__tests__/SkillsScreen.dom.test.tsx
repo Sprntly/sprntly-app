@@ -306,10 +306,14 @@ describe("SkillsScreen", () => {
       fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
     })
 
-    expect(customUploadMock).toHaveBeenCalledWith(
-      expect.any(File),
-      "Estimation helper",
-      "Scores features by reach × confidence.",
+    // waitFor: the modal's .md content pre-check reads the file (FileReader)
+    // before calling upload, so the call lands a tick after the click.
+    await waitFor(() =>
+      expect(customUploadMock).toHaveBeenCalledWith(
+        expect.any(File),
+        "Estimation helper",
+        "Scores features by reach × confidence.",
+      ),
     )
     // Modal closes, toast fires, and the new skill is in the library.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
