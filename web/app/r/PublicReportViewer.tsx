@@ -80,7 +80,7 @@ export function PublicReportView({
           {downloading ? "Preparing…" : "Download PDF"}
         </button>
       </header>
-      <HtmlReportView html={report.html} title={report.title} />
+      <HtmlReportView html={report.html} title={report.title} watermark />
     </div>
   )
 }

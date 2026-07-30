@@ -32,11 +32,17 @@ WITHOUT allow-scripts):
     Fonts hosts the report skills actually use are allowed; every other request is
     aborted. Fonts matter enough to allow because these are typographic documents
     and a fallback font visibly changes them.
+
+Every rendered PDF carries the Sprntly wordmark (app/watermark.py), stamped in
+this module so both the authed download and the public shared-link download are
+marked by construction rather than by each route remembering to.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+
+from app.watermark import PDF_HEADER_TEMPLATE, pdf_footer_template, watermark_html
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +133,12 @@ async def render_report_pdf(html: str) -> bytes | None:
                         await route.abort()
 
                 await page.route("**/*", _gate)
-                await page.set_content(html, timeout=_CONTENT_TIMEOUT_MS)
+                # Stamped here rather than at the two routes so both the authed
+                # download and the public /r/<token> one are marked by
+                # construction — there is no way to reach page.pdf() unmarked.
+                await page.set_content(
+                    watermark_html(html), timeout=_CONTENT_TIMEOUT_MS
+                )
                 # Bounded settle so webfonts land before layout is measured; a
                 # slow/blocked font falls through to system fonts rather than
                 # stalling the download.
@@ -145,6 +156,13 @@ async def render_report_pdf(html: str) -> bytes | None:
                         # media.
                         print_background=True,
                         margin=dict(_PDF_MARGIN),
+                        # The sprntly.ai footer, painted into the bottom margin
+                        # band on every page — see app/watermark.py for why the
+                        # footer cannot ride in the document body like the
+                        # wordmark does.
+                        display_header_footer=True,
+                        header_template=PDF_HEADER_TEMPLATE,
+                        footer_template=pdf_footer_template(),
                     ),
                     timeout=_PDF_TIMEOUT_S,
                 )

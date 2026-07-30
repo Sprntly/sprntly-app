@@ -3994,6 +3994,44 @@ function filenameFromDisposition(headers: Headers): string {
   return match?.[1] || "report.pdf"
 }
 
+export const documentsApi = {
+  /**
+   * Render an assembled HTML document (PRD, Evidence, or the two combined) to
+   * PDF server-side and get the file back.
+   *
+   * Same renderer as `reportsApi.downloadPdf` — headless Chromium over the
+   * document's own `@media print` rules — so a PRD download is byte-identical
+   * across browsers and carries the same watermark and sprntly.ai footer as a
+   * report. This replaced a `window.print()` dialog, which produced a different
+   * file per browser and could not be marked.
+   *
+   * The HTML is sent rather than read server-side by id because these panels are
+   * editable: see backend/app/routes/documents.py.
+   *
+   * 503 means the renderer was unavailable; the caller should say so rather than
+   * saving a broken file.
+   */
+  downloadPdf: async (
+    html: string,
+    filename: string,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const token = accessTokenProvider ? await accessTokenProvider() : null
+    const headers: Record<string, string> = {
+      Accept: "application/pdf",
+      "Content-Type": "application/json",
+    }
+    if (token) headers["Authorization"] = `Bearer ${token}`
+    const res = await fetch(`${API_URL}/v1/documents/pdf`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify({ html, filename }),
+    })
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers) }
+  },
+}
+
 /** What an anonymous visitor on `/r/<token>` can see — four fields, enforced
  *  server-side by a response_model (routes/reports_public.py). */
 export type PublicReport = {

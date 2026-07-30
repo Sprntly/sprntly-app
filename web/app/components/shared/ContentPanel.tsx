@@ -31,8 +31,10 @@ import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
   IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar,
 } from "@tabler/icons-react"
-import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
-import { printCombined } from "../../lib/combinedExport"
+import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
+import { buildCombinedHtml } from "../../lib/combinedExport"
+import { documentsApi } from "../../lib/api"
+import { saveBlob } from "../../lib/saveBlob"
 import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
 
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
@@ -108,12 +110,22 @@ function ShareMenu({
     setOpen(false)
     try {
       // Combined Evidence + PRD when both are HTML briefs (evidence fetched on
-      // demand); otherwise the v3 HTML PRD prints itself (its print stylesheet
-      // strips the editing chrome), and a markdown PRD uses the section builder.
+      // demand), else the PRD brief alone. Rendered SERVER-side, the same way a
+      // report downloads: one identical file per browser, carrying the Sprntly
+      // watermark and footer. (This used to open the browser's print dialog,
+      // which produced a different file per browser and could not be marked.)
       const ev = prd.html ? await resolveEvidence() : null
-      if (ev?.html && prd.html) printCombined(ev, prd)
-      else if (prd.html) printPrdHtml(prd)
-      else await downloadPrdPdf(prd)
+      const html = ev?.html && prd.html ? buildCombinedHtml(ev, prd) : prd.html
+      if (html) {
+        const slug = slugifyTitle(prd.title)
+        const name = ev?.html && prd.html ? `${slug}-evidence-prd` : slug
+        const res = await documentsApi.downloadPdf(html, name)
+        saveBlob(res.blob, res.filename || `${name}.pdf`)
+      } else {
+        // A markdown-only PRD has no HTML brief to render; the section builder
+        // draws one client-side (already watermarked and footered).
+        await downloadPrdPdf(prd)
+      }
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     }

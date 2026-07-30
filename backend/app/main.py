@@ -57,6 +57,7 @@ from app.routes import (
     design_agent,
     design_agent_bundle,
     design_agent_comments,
+    documents,
     feedback,
     ideation,
     ingest,
@@ -337,6 +338,10 @@ app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
 app.include_router(reports.router)
+# Renders a client-assembled document (PRD, Evidence, or the two combined) to PDF
+# through the same Chromium renderer the report download uses — see
+# routes/documents.py for why the HTML comes from the client.
+app.include_router(documents.router)
 # No-auth share viewer for reports (`/r/<token>`). Registered separately from
 # reports.router so the unauthenticated surface stays visible in this list.
 app.include_router(reports_public.router)
