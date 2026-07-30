@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app import competitive_intel_report
@@ -594,19 +595,47 @@ def _capture_pass(*, system_focus: str, user: str, max_searches: int,
     return parse_records(raw), meta.get("stop_reason") == "max_tokens"
 
 
+@dataclass
+class CaptureResult:
+    """What one capture run actually managed to observe.
+
+    The three "no records" lists are deliberately SEPARATE, because they mean
+    completely different things to a reader and only ONE of them is a finding:
+
+      * `unobserved` — we searched and found nothing. Silence from a fast-moving
+        rival IS a finding, and the report says so with the window checked.
+      * `capped` — we DID find records and then dropped them when the run's
+        record budget filled up. Reporting that as "shipped nothing" would be a
+        false finding about a competitor we have evidence for.
+      * `skipped` — we never looked, because the web-search budget ran out
+        first. "Not checked" and "checked, nothing found" are different claims
+        and a VP-shareable report must not blur them.
+
+    Folding all three into one list is what produced the bug this shape exists
+    to prevent: a late competitor whose records were all dropped over the cap
+    landed in `unobserved` and ANALYSE was instructed to render it as having
+    shipped nothing.
+    """
+
+    records: list[dict]
+    unobserved: list[str]
+    capped: list[str]
+    skipped: list[str]
+    truncated: bool
+
+
 def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
-             prior_state: dict) -> tuple[list[dict], list[str], bool]:
+             prior_state: dict) -> CaptureResult:
     """Run the staged capture over the competitor set plus one "us" pass.
 
-    Returns (records, unobserved, truncated):
-      * `unobserved` names the companies whose pass failed or returned nothing —
-        the analysis stage reports that silence rather than filling the row.
-      * `truncated` is True when any pass hit its output budget, so an empty
-        record set means "the capture overflowed", never "nothing was found".
+    Returns a `CaptureResult`; see that class for how the three zero-record
+    outcomes differ and why they must not be merged. `truncated` is True when
+    any pass hit its output budget, so an empty record set means "the capture
+    overflowed", never "nothing was found".
 
-    Raises RuntimeError only when EVERY pass failed — that is web search being
-    unavailable, and the caller says so plainly instead of reporting from
-    memory.
+    Raises RuntimeError only when EVERY pass failed AND nothing was captured —
+    that is web search being unavailable, and the caller says so plainly instead
+    of reporting from memory.
     """
     from app.graph.config_layers import resolve_config
     from app.research.competitor import (
@@ -628,11 +657,14 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
 
     records: list[dict] = []
     unobserved: list[str] = []
+    capped: list[str] = []
+    skipped: list[str] = []
     truncated = False
     calls = 0
     failures = 0
     attempts = 0
     dropped = 0
+    dropped_by_name: dict[str, int] = {}
 
     def _run(name: str, focus: str, user: str, module: str | None) -> list[dict]:
         nonlocal truncated, calls, dropped
@@ -650,15 +682,31 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
             # hundred — all of which are fed to ONE 16k-output ANALYSE call.
             # Cap the total and SAY what was dropped rather than silently
             # blowing up the context (and the bill).
+            #
+            # Counted PER COMPETITOR, because "we found nothing" and "we found
+            # things and then ran out of room" must not become the same claim.
             if len(records) >= _TOTAL_RECORD_CAP:
                 dropped += 1
+                dropped_by_name[name] = dropped_by_name.get(name, 0) + 1
                 continue
             r.setdefault("competitor", name)
             records.append(r)
         return got
 
+    def _classify(name: str, before: int) -> None:
+        """Record the coverage outcome for a company that produced no usable
+        records. Cap-affected companies are NOT silence — we have evidence for
+        them, we just had nowhere to put it."""
+        if len(records) > before:
+            return
+        if dropped_by_name.get(name):
+            capped.append(name)
+        else:
+            unobserved.append(name)
+
     # One pass for us first — every later finding is judged "so what for us".
     attempts += 1
+    _us_before = len(records)
     try:
         _run("us", _US_FOCUS,
              f"{scope}. Today is {today}. Establish our own position now."
@@ -666,12 +714,14 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     except Exception:  # noqa: BLE001 — isolate; the competitors still matter
         logger.exception("competitive-intel: 'us' capture pass failed")
         failures += 1
-        unobserved.append("us")
+    _classify("us", _us_before)
 
     for name in names[:_MAX_COMPETITORS]:
         needed = max(1, len(stages))
         if calls + needed > search_budget:
-            unobserved.append(name)
+            # NEVER CHECKED — a different claim from "checked, nothing found",
+            # and the report must not blur them.
+            skipped.append(name)
             logger.info("competitive-intel: web-search budget reached before %s", name)
             continue
         attempts += 1
@@ -698,9 +748,8 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         except Exception:  # noqa: BLE001 — isolate per competitor
             logger.exception("competitive-intel: capture failed for %s", name)
             failures += 1
-        # "Unobserved" means ZERO records for this competitor — checked either
-        # way, nothing found. It is deliberately decided AFTER the try, on the
-        # record count alone, rather than inside the except branch:
+        # Coverage outcome, decided AFTER the try on the record count alone
+        # rather than inside the except branch:
         #
         # in Review mode a competitor runs SEVERAL staged calls, so one module
         # raising mid-sequence used to mark the whole competitor unobserved even
@@ -709,9 +758,9 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         # competitor whose records were sitting in the same prompt — a
         # contradiction that either loses real findings or invites the model to
         # resolve it however it likes. A partial Review is partial data, not
-        # silence.
-        if len(records) == before:
-            unobserved.append(name)
+        # silence. `_classify` also separates cap-affected companies, which have
+        # evidence we simply had no room for.
+        _classify(name, before)
 
     # Every attempt raised AND nothing was captured → web search is unavailable,
     # and the caller says so plainly instead of reporting from memory. The
@@ -723,24 +772,30 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     if dropped:
         logger.warning(
             "competitive-intel: dropped %d record(s) over the %d-record run cap "
-            "(mode=%s, competitors=%s) — the report is built from the first %d",
-            dropped, _TOTAL_RECORD_CAP, mode, names, _TOTAL_RECORD_CAP,
+            "(mode=%s, competitors=%s, fully-dropped=%s) — the report is built "
+            "from the first %d",
+            dropped, _TOTAL_RECORD_CAP, mode, names, capped, _TOTAL_RECORD_CAP,
         )
-    _log_capture(enterprise_id, records, calls, unobserved, mode, dropped)
-    return records, unobserved, truncated
+    result = CaptureResult(
+        records=records, unobserved=unobserved, capped=capped,
+        skipped=skipped, truncated=truncated,
+    )
+    _log_capture(enterprise_id, result, calls, mode, dropped)
+    return result
 
 
-def _log_capture(enterprise_id: str, records: list[dict], calls: int,
-                 unobserved: list[str], mode: str, dropped: int = 0) -> None:
+def _log_capture(enterprise_id: str, result: CaptureResult, calls: int,
+                 mode: str, dropped: int = 0) -> None:
     try:
         from app.graph.decision_log import log_agent_decision
 
         log_agent_decision(
             enterprise_id=enterprise_id, agent="qa",
             decision_type="competitive_intel_capture",
-            factors={"records": len(records), "web_search_calls": calls,
-                     "unobserved": unobserved, "mode": mode,
-                     "dropped_over_cap": dropped},
+            factors={"records": len(result.records), "web_search_calls": calls,
+                     "unobserved": result.unobserved,
+                     "capped": result.capped, "skipped": result.skipped,
+                     "mode": mode, "dropped_over_cap": dropped},
             prompt_version="qa-competitive-intel-capture-v1",
         )
     except Exception:  # noqa: BLE001 — audit is best-effort
@@ -806,10 +861,11 @@ def answer(*, enterprise_id: str, question: str,
     scope = _scope_block(profile, question)
 
     try:
-        records, unobserved, truncated = _capture(
+        capture = _capture(
             enterprise_id, scope=scope, names=names, mode=mode,
             prior_state=prior_state if isinstance(prior_state, dict) else {},
         )
+        records = capture.records
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
         logger.exception("competitive-intel: capture failed for %s", enterprise_id)
         return _plain_payload(
@@ -818,7 +874,7 @@ def answer(*, enterprise_id: str, question: str,
             "be untraceable. Please retry in a moment."
         )
     if not records:
-        if truncated:
+        if capture.truncated:
             return _plain_payload(
                 "I found competitor activity but hit an internal limit "
                 "capturing it. Please retry — this usually succeeds on a "
@@ -836,7 +892,7 @@ def answer(*, enterprise_id: str, question: str,
         data = _analyse(
             enterprise_id, question=question, history=history, mode=mode,
             names=names, set_source=set_source, records=records,
-            unobserved=unobserved, prior_state=prior_state,
+            coverage=capture, prior_state=prior_state,
             prior_decisions=prior_decisions,
         )
         html = competitive_intel_report.render_html(data)
@@ -871,7 +927,7 @@ def answer(*, enterprise_id: str, question: str,
 
 def _analyse(enterprise_id: str, *, question: str, history: list[dict] | None,
              mode: str, names: list[str], set_source: str,
-             records: list[dict], unobserved: list[str], prior_state: dict,
+             records: list[dict], coverage: CaptureResult, prior_state: dict,
              prior_decisions: list) -> dict:
     """One gateway call: records + prior state → the report's structured data."""
     if not prior_state:
@@ -885,13 +941,36 @@ def _analyse(enterprise_id: str, *, question: str, history: list[dict] | None,
         "roster": "This is the company's configured competitor set.",
         "discovery": "This set was derived from the company's position.",
     }.get(set_source, "")
+    # Three DIFFERENT coverage claims, worded differently on purpose. Only the
+    # first is a finding; the other two are limits on this run, and reporting
+    # either of them as "shipped nothing" would be a false finding about a
+    # competitor we either have evidence for or never looked at.
     silence = (
         "\nCHECKED BUT NOT OBSERVED: "
-        + ", ".join(unobserved)
+        + ", ".join(coverage.unobserved)
         + ". Report each of these as checked-with-nothing-found (set "
         "`nothing_shipped` and state the window) — never fill their rows from "
         "general knowledge.\n"
-    ) if unobserved else ""
+    ) if coverage.unobserved else ""
+    capped_note = (
+        "\nNOT CAPTURED — RECORD BUDGET REACHED: "
+        + ", ".join(coverage.capped)
+        + ". Observations WERE found for these and then dropped when this run's "
+        "record budget filled up, so they are missing from the records below. "
+        "Do NOT set `nothing_shipped` for them and do NOT say they shipped "
+        "nothing — that would be false. Say in one line that coverage for them "
+        "was truncated in this run and a rerun would pick them up, and never "
+        "fill their rows from general knowledge.\n"
+    ) if coverage.capped else ""
+    skipped_note = (
+        "\nNOT CHECKED: "
+        + ", ".join(coverage.skipped)
+        + ". These were NOT researched at all — the research budget ran out "
+        "before reaching them. State plainly that they were not checked in this "
+        "run. Do NOT set `nothing_shipped` for them: \"not checked\" and "
+        "\"checked, nothing found\" are different claims and must not be "
+        "blurred. Never fill their rows from general knowledge.\n"
+    ) if coverage.skipped else ""
 
     header = (
         f"Competitor set: {', '.join(names)}. {set_note}\n"
@@ -900,7 +979,7 @@ def _analyse(enterprise_id: str, *, question: str, history: list[dict] | None,
         "set contains at least one ENTRANT — a company that is not a "
         "competitor yet but will be inside twelve months. If none of the names "
         "above is an entrant, say so once and add one.\n"
-        f"{silence}\n{mode_instruction}\n\n"
+        f"{silence}{capped_note}{skipped_note}\n{mode_instruction}\n\n"
         "=== PRIOR STATE (ci-state.json from the last run; {} when baseline) ===\n"
         + json.dumps(prior_state or {}, ensure_ascii=False)
         + "\n\n=== PRIOR DECISIONS (carry every one forward with status) ===\n"

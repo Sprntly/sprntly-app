@@ -113,10 +113,14 @@ def _patch_analyse(monkeypatch, calls=None, data=None, error=False):
     monkeypatch.setattr(ci, "llm_call", _fake)
 
 
-def _patch_capture(monkeypatch, records=RECORDS, unobserved=(), truncated=False):
+def _patch_capture(monkeypatch, records=RECORDS, unobserved=(), capped=(),
+                   skipped=(), truncated=False):
     monkeypatch.setattr(
         ci, "_capture",
-        lambda *a, **k: (list(records), list(unobserved), truncated),
+        lambda *a, **k: ci.CaptureResult(
+            records=list(records), unobserved=list(unobserved),
+            capped=list(capped), skipped=list(skipped), truncated=truncated,
+        ),
     )
 
 
@@ -130,6 +134,8 @@ def _full(monkeypatch, **kw):
                   save_error=kw.pop("save_error", False))
     _patch_capture(monkeypatch, records=kw.pop("records", RECORDS),
                    unobserved=kw.pop("unobserved", ()),
+                   capped=kw.pop("capped", ()),
+                   skipped=kw.pop("skipped", ()),
                    truncated=kw.pop("truncated", False))
     _patch_analyse(monkeypatch, calls=kw.pop("calls", None),
                    data=kw.pop("data", None), error=kw.pop("analyse_error", False))
@@ -410,15 +416,15 @@ def test_scan_capture_runs_one_pass_per_competitor_plus_us(monkeypatch):
         return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, truncated = ci._capture(
+    cap = ci._capture(
         "e1", scope="Our company: Acme", names=["Globex", "Initech"],
         mode=ci.MODE_SCAN, prior_state={},
     )
     assert len(seen) == 3                     # us + two competitors
     assert all(s["module"] is None for s in seen)   # no staged modules in a Scan
-    assert unobserved == [] and truncated is False
+    assert cap.unobserved == [] and cap.truncated is False
     # every record is stamped with the company the pass was about
-    assert {r["competitor"] for r in records} == {"us", "Globex", "Initech"}
+    assert {r["competitor"] for r in cap.records} == {"us", "Globex", "Initech"}
     assert kw_skill_bound(seen)
 
 
@@ -442,15 +448,15 @@ def test_review_capture_runs_the_v2_module_sequence_capped_by_config(monkeypatch
                             "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="Our company: Acme", names=["Globex"],
         mode=ci.MODE_REVIEW, prior_state=PRIOR_STATE,
     )
     from app.research.competitor import CIR_DIAGNOSTIC_MODULES
 
     assert seen == [None, *CIR_DIAGNOSTIC_MODULES[:2]]
-    assert len(records) == 3
-    assert unobserved == []
+    assert len(cap.records) == 3
+    assert cap.unobserved == []
 
 
 def test_review_capture_carries_prior_observations_forward(monkeypatch):
@@ -478,12 +484,12 @@ def test_partial_capture_failure_isolates_and_marks_the_competitor_unobserved(mo
         return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
         prior_state={},
     )
-    assert unobserved == ["Initech"]
-    assert records and all(r["competitor"] != "Initech" for r in records)
+    assert cap.unobserved == ["Initech"]
+    assert cap.records and all(r["competitor"] != "Initech" for r in cap.records)
 
 
 def test_competitor_with_nothing_found_is_marked_unobserved(monkeypatch):
@@ -492,11 +498,11 @@ def test_competitor_with_nothing_found_is_marked_unobserved(monkeypatch):
             [{"what": "observed", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    _, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
         prior_state={},
     )
-    assert unobserved == ["Initech"]
+    assert cap.unobserved == ["Initech"]
 
 
 def test_review_partial_module_failure_keeps_the_records_and_not_unobserved(monkeypatch):
@@ -517,13 +523,13 @@ def test_review_partial_module_failure_keeps_the_records_and_not_unobserved(monk
                             "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
         prior_state=PRIOR_STATE,
     )
-    globex = [r for r in records if r.get("competitor") == "Globex"]
+    globex = [r for r in cap.records if r.get("competitor") == "Globex"]
     assert globex, "stage-1 records were discarded"
-    assert "Globex" not in unobserved, (
+    assert "Globex" not in cap.unobserved, (
         "a competitor with sourced records must never be reported as unobserved"
     )
 
@@ -537,12 +543,12 @@ def test_review_competitor_whose_every_stage_fails_is_unobserved(monkeypatch):
         return json.dumps([{"what": "ours", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
         prior_state=PRIOR_STATE,
     )
-    assert unobserved == ["Globex"]
-    assert all(r.get("competitor") != "Globex" for r in records)
+    assert cap.unobserved == ["Globex"]
+    assert all(r.get("competitor") != "Globex" for r in cap.records)
 
 
 def test_every_pass_failing_raises_so_the_caller_says_so_plainly(monkeypatch):
@@ -567,12 +573,12 @@ def test_records_survive_even_when_every_attempt_recorded_a_failure(monkeypatch)
         return json.dumps([{"what": "real finding", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    records, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
         prior_state=PRIOR_STATE,
     )
-    assert any(r["what"] == "real finding" for r in records)
-    assert unobserved == ["us"]
+    assert any(r["what"] == "real finding" for r in cap.records)
+    assert cap.unobserved == ["us"]
 
 
 def test_total_record_cap_bounds_the_run_and_counts_the_drops(monkeypatch):
@@ -598,12 +604,98 @@ def test_total_record_cap_bounds_the_run_and_counts_the_drops(monkeypatch):
             [{"what": f"rec {i}", "source": "s", "tier": "h"} for i in range(4)]
         ),
     )
-    records, _, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
         prior_state={},
     )
-    assert len(records) == 5                     # capped, not 12
+    assert len(cap.records) == 5                 # capped, not 12
     assert logged["args"][-1] > 0                # dropped count reported
+
+
+def test_competitor_whose_records_were_all_dropped_is_capped_not_unobserved(monkeypatch):
+    """The cap must not manufacture silence.
+
+    A later competitor's pass DID find records; they were dropped because the
+    run's record budget was already full. That leaves zero records for them, so
+    the naive check (`len(records) == before`) put them in `unobserved` and
+    ANALYSE was instructed to render them as having SHIPPED NOTHING — a false
+    finding about a competitor we have evidence for.
+    """
+    monkeypatch.setattr(ci, "_TOTAL_RECORD_CAP", 2)
+    monkeypatch.setattr(ci, "_log_capture", lambda *a, **k: None)
+    import app.graph.config_layers as layers
+
+    monkeypatch.setattr(
+        layers, "resolve_config",
+        lambda _eid: {"research": {"max_searches": 4, "cir_modules_max": 2,
+                                   "deep_dive_max_web_searches": 40}},
+    )
+    # Every pass finds two records; the cap (2) is filled by the "us" pass, so
+    # BOTH competitors find things and have all of them dropped.
+    monkeypatch.setattr(
+        ci, "call_with_web_search",
+        lambda **kw: json.dumps(
+            [{"what": "found something", "source": "s", "tier": "h"},
+             {"what": "found another", "source": "s", "tier": "h"}]
+        ),
+    )
+    cap = ci._capture(
+        "e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
+        prior_state={},
+    )
+    assert cap.capped == ["Globex", "Initech"]
+    assert cap.unobserved == [], (
+        "a competitor whose records were dropped over the cap is NOT silence"
+    )
+    assert cap.skipped == []
+
+
+def test_capped_competitor_is_never_described_as_having_shipped_nothing(monkeypatch):
+    """The prompt half of the same bug: the capped competitor must get the
+    record-budget wording, and must NOT get the nothing_shipped instruction."""
+    calls = []
+    _full(monkeypatch, capped=("Initech",), calls=calls)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    prompt = calls[0]["input"]
+    assert "NOT CAPTURED — RECORD BUDGET REACHED: Initech" in prompt
+    assert "Do NOT set `nothing_shipped` for them" in prompt
+    assert "coverage for them" in prompt
+    # ...and the silence instruction is absent entirely (nothing was unobserved).
+    assert "CHECKED BUT NOT OBSERVED" not in prompt
+    assert "never fill their rows from general knowledge" in prompt
+
+
+def test_budget_skipped_competitor_is_reported_as_not_checked(monkeypatch):
+    """"Not checked" and "checked, nothing found" are different claims. A
+    competitor the web-search budget never reached must not be reported as
+    having shipped nothing."""
+    calls = []
+    _full(monkeypatch, skipped=("Umbrella",), calls=calls)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    prompt = calls[0]["input"]
+    assert "NOT CHECKED: Umbrella" in prompt
+    assert "not checked in this run" in prompt
+    assert "different claims and must not be" in prompt
+    assert "CHECKED BUT NOT OBSERVED" not in prompt
+
+
+def test_the_three_coverage_states_are_worded_separately(monkeypatch):
+    """All three at once: each company appears under its own heading, and only
+    the genuinely-silent one gets the nothing_shipped instruction."""
+    calls = []
+    _full(monkeypatch, unobserved=("Quiet Co",), capped=("Capped Co",),
+          skipped=("Skipped Co",), calls=calls)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    prompt = calls[0]["input"]
+    assert "CHECKED BUT NOT OBSERVED: Quiet Co" in prompt
+    assert "NOT CAPTURED — RECORD BUDGET REACHED: Capped Co" in prompt
+    assert "NOT CHECKED: Skipped Co" in prompt
+    # The nothing_shipped instruction attaches to the silent one only; the other
+    # two blocks explicitly forbid it.
+    silence_at = prompt.index("CHECKED BUT NOT OBSERVED")
+    capped_at = prompt.index("NOT CAPTURED — RECORD BUDGET REACHED")
+    assert "`nothing_shipped` and state the window" in prompt[silence_at:capped_at]
+    assert prompt.count("Do NOT set `nothing_shipped`") == 2
 
 
 def test_capture_salvages_a_truncated_record_array(monkeypatch):
@@ -615,9 +707,9 @@ def test_capture_salvages_a_truncated_record_array(monkeypatch):
     def _web(**kw): return cut
 
     _patch_web(monkeypatch, _web)
-    records, _, _ = ci._capture("e1", scope="s", names=["Globex"],
+    cap = ci._capture("e1", scope="s", names=["Globex"],
                                 mode=ci.MODE_SCAN, prior_state={})
-    assert any(r["what"] == "Asset Studio rebuilt" for r in records)
+    assert any(r["what"] == "Asset Studio rebuilt" for r in cap.records)
 
 
 def test_web_budget_stops_before_overspending(monkeypatch):
@@ -636,12 +728,14 @@ def test_web_budget_stops_before_overspending(monkeypatch):
         return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
 
     monkeypatch.setattr(ci, "call_with_web_search", _web)
-    _, unobserved, _ = ci._capture(
+    cap = ci._capture(
         "e1", scope="s", names=["Globex", "Initech", "Umbrella"],
         mode=ci.MODE_SCAN, prior_state={},
     )
     assert len(calls) <= 2
-    assert "Umbrella" in unobserved
+    # Never CHECKED is not "checked, nothing found".
+    assert "Umbrella" in cap.skipped
+    assert "Umbrella" not in cap.unobserved
 
 
 # ── 5. Fabrication guardrails in the prompts ─────────────────────────────────
