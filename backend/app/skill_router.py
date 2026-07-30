@@ -35,6 +35,13 @@ class SkillMatch:
 #     benchmark, intelligence, "where do we stand", "how do we compare",
 #     "what are they shipping").
 _CIR_SUBJECT = r"(?:competitors?|competition|competitive|rivals?|market)"
+# "market" is the loose one: it names our category as often as our rivals, so it
+# is admitted only where the surrounding shape is unambiguous ("market
+# landscape", "benchmark us against the market", "how do we compare to the
+# market"). Shapes where a bare "the market" reads as a general question —
+# "what is the market doing today?", "run a study on the market" — use the
+# STRICT subject instead and defer to the haiku router.
+_CIR_SUBJECT_STRICT = r"(?:competitors?|competition|competitive|rivals?)"
 _CIR_REPORT_NOUN = (
     r"(?:report|analys[ie]s|review|scan|landscape|benchmark(?:ing|s)?|"
     r"intelligence|study|teardown|round-?up|deep[\s-]?dive|pulse|briefing)"
@@ -58,29 +65,44 @@ _CIR_REPORT_RULE_SRC = (
     # "market landscape", "monthly competitor scan", "quarterly competitive
     # review", "competitor deep dive". Up to two filler words between the two.
     rf"\b{_CIR_SUBJECT}\s+(?:\w+\s+){{0,2}}{_CIR_REPORT_NOUN}\b"
-    # "review of the competition", "benchmark against the market"
+    # "review of the competition", "teardown of our rivals". STRICT subject:
+    # "run a study on the market" is a general research ask, not a report ask.
     rf"|\b{_CIR_REPORT_NOUN}\s+(?:of|on|for|across|against|vs\.?|versus)\s+"
-    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_CIR_SUBJECT}\b"
+    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_CIR_SUBJECT_STRICT}\b"
     # "where do we stand vs competitors" / "vs the competition, where do we stand"
     rf"|{_near(_CIR_STANDING, _CIR_SUBJECT_B)}"
     # "how do we compare to the market" / "how do we stack up against rivals"
     rf"|{_near(_CIR_COMPARE, _CIR_SUBJECT_B)}"
-    # "what are our competitors shipping/launching/doing/been up to"
-    rf"|\bwhat\s+(?:are|is|has|have)\b.{{0,30}}\b{_CIR_SUBJECT}\b.{{0,30}}"
+    # "what are our competitors shipping/launching/doing/been up to". STRICT
+    # subject: "what is the market doing today?" is a general question.
+    rf"|\bwhat\s+(?:are|is|has|have)\b.{{0,30}}\b{_CIR_SUBJECT_STRICT}\b.{{0,30}}"
     r"\b(?:ship(?:ping|ped)?|launch(?:ing|ed)?|releas\w+|doing|building|"
     r"been\s+up\s+to|up\s+to)\b"
     # "benchmark us against the market"
     rf"|{_near(_CIR_BENCHMARK, _CIR_SUBJECT_B)}"
 )
 
-# Sibling strategy skills whose asks read competitor-ish but belong elsewhere.
-# Vetoing them keeps the fast-path honest instead of widening the regex further
-# and then apologising for it.
+# Sibling strategy skills whose asks read competitor-ish but belong elsewhere,
+# plus asks about the user's OWN uploaded data. Vetoing them keeps the fast-path
+# honest instead of widening the regex further and then apologising for it.
+#
+# The uploaded-data veto exists because the DS engine's own trigger
+# (`is_data_analysis_request`) requires an analyze-VERB, and "deep dive" is not
+# one — so "do a deep dive on the market data I uploaded" fell past DS and was
+# claimed by CIR's `market … deep dive` shape, buying a web sweep for a question
+# about a spreadsheet. Anything naming the user's own data defers.
+#
+# TAM/SAM/SOM is matched CASE-SENSITIVELY via `(?-i:…)`: under re.I the `sam`
+# alternative also matched the NAME Sam, so "competitive analysis of Sam's Club
+# vs Costco" lost its fast path to a market-sizing veto.
 _CIR_VETO = re.compile(
     r"\bmarket\s+structure\b|\bfive\s+forces\b|\bporter'?s\b"
-    r"|\bmarket\s+siz\w+\b|\b(?:tam|sam|som)\b"
+    r"|\bmarket\s+siz\w+\b|(?-i:\b(?:TAM|SAM|SOM)\b)"
     r"|\bpositioning\s+statement\b|\bbattle\s?cards?\b"
-    r"|\btraffic\s+lights?\b|\bbeachhead\b",
+    r"|\btraffic\s+lights?\b|\bbeachhead\b"
+    # …the user's own data, not the public web.
+    r"|\buploaded?\b|\b(?:my|our)\s+data\b|\bthe\s+data\b"
+    r"|\b(?:csvs?|spreadsheets?|excel|xlsx?)\b",
     re.I,
 )
 

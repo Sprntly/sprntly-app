@@ -62,6 +62,11 @@ ANSWER_MODEL = "claude-sonnet-4-6"
 # a truncated array used to read as "nothing found").
 _CAPTURE_MAX_TOKENS = 8000
 _CAPTURE_RECORD_CAP = 30
+# ...and a ceiling across ALL passes in one run. A Review is
+# competitors x stages passes, so the per-pass cap alone permits several
+# hundred records into a single 16k-output ANALYSE call. Overflow is dropped
+# and counted, never silently absorbed.
+_TOTAL_RECORD_CAP = 240
 # Per-stage running-summary cap (chars) carried into the next stage, mirroring
 # research/competitor.py's deep-dive.
 _SUMMARY_CAP = 1600
@@ -340,7 +345,7 @@ _VS_TAIL = re.compile(
     r"compare\s+(?:us\s+|ourselves\s+)?(?:to|with|against)|relative\s+to)\s+(.+)$",
     re.I | re.S,
 )
-# Generic collective nouns that are NOT a named competitor — "vs the market",
+# Generic collectives that are NOT a named competitor — "vs the market",
 # "against our competitors" must fall through to the roster, not become a name.
 _GENERIC_SET_WORDS = frozenset({
     "competitor", "competitors", "competition", "the competition", "rival",
@@ -349,6 +354,26 @@ _GENERIC_SET_WORDS = frozenset({
     "peers", "our peers", "alternatives", "incumbents", "the incumbents",
     "last quarter", "last month", "last year", "the landscape", "landscape",
     "everyone else", "the usual suspects", "anyone", "each other",
+})
+# ...and the same job for QUALIFIED collectives, which the exact-match set above
+# cannot catch: "versus the European market", "how do we compare to the
+# enterprise market", "vs the market leaders", "against the SMB segment". Those
+# extracted cleanly as "European market" / "market leaders", and because a
+# user-named set WINS over the roster, the pipeline then web-researched a company
+# called "European market" and never looked at the real competitors.
+#
+# English puts the head noun last, so the test is the final word: a name whose
+# head noun is a collective describes a GROUP, not a company, and belongs to the
+# roster/derivation path. False negatives are safe (we fall back to the roster);
+# a false positive spends minutes researching a phrase.
+_GENERIC_HEAD_NOUNS = frozenset({
+    "market", "markets", "marketplace", "industry", "industries", "landscape",
+    "space", "spaces", "segment", "segments", "sector", "sectors", "category",
+    "categories", "ecosystem", "field", "arena", "competition", "competitor",
+    "competitors", "rival", "rivals", "leader", "leaders", "leadership",
+    "player", "players", "vendor", "vendors", "incumbent", "incumbents",
+    "challengers", "challenger", "peers", "alternatives", "others", "rest",
+    "everyone", "anyone", "them", "world", "region", "regions", "geography",
 })
 _TAIL_STOP = re.compile(
     r"[?!;]|\bfor\s+the\b|\bin\s+the\b|\bover\s+the\b|\bthis\s+(?:quarter|month|year)\b"
@@ -363,8 +388,10 @@ def named_competitors(question: str) -> list[str]:
 
     These WIN over the stored roster and are treated as data — never written to
     `companies.competitors[]`, matching POST /v1/research/competitors/run's
-    ad-hoc override semantics. Returns [] when the question names none or names
-    only a collective ("vs the market").
+    ad-hoc override semantics. Returns [] when the question names none, or names
+    only a collective — bare ("vs the market") or qualified ("versus the
+    European market", "vs the market leaders"), which is a group to compare
+    against rather than a company to research.
     """
     m = _VS_TAIL.search(question or "")
     if not m:
@@ -382,9 +409,14 @@ def named_competitors(question: str) -> list[str]:
             continue
         if name.lower() in _GENERIC_SET_WORDS:
             continue
+        words = name.split()
         # A real company name is short. Four words is generous ("Amazon Web
         # Services Marketplace") and keeps prose fragments out.
-        if len(name.split()) > 4:
+        if len(words) > 4:
+            continue
+        # Head-noun test: "European market" / "market leaders" / "SMB segment"
+        # are groups, not companies.
+        if words[-1].strip(".,'\"").lower() in _GENERIC_HEAD_NOUNS:
             continue
         if name not in out:
             out.append(name)
@@ -600,9 +632,10 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     calls = 0
     failures = 0
     attempts = 0
+    dropped = 0
 
     def _run(name: str, focus: str, user: str, module: str | None) -> list[dict]:
-        nonlocal truncated, calls
+        nonlocal truncated, calls, dropped
         got, cut = _capture_pass(
             system_focus=focus, user=user,
             max_searches=per_pass_searches, skill_module=module,
@@ -610,9 +643,18 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         calls += 1
         truncated = truncated or cut
         for r in got:
-            if isinstance(r, dict):
-                r.setdefault("competitor", name)
-                records.append(r)
+            if not isinstance(r, dict):
+                continue
+            # Per-pass caps alone don't bound the run: a Review is
+            # competitors x stages passes, so 30 records each can reach several
+            # hundred — all of which are fed to ONE 16k-output ANALYSE call.
+            # Cap the total and SAY what was dropped rather than silently
+            # blowing up the context (and the bill).
+            if len(records) >= _TOTAL_RECORD_CAP:
+                dropped += 1
+                continue
+            r.setdefault("competitor", name)
+            records.append(r)
         return got
 
     # One pass for us first — every later finding is judged "so what for us".
@@ -653,23 +695,43 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
                      f"{scope}\n\nCompetitor under review: {name}. Today is "
                      f"{today}. Report what changed in roughly the last 90 days."
                      + prior_note, None)
-            if len(records) == before:
-                # The pass succeeded and found nothing. That is a finding, but
-                # the ANALYSE stage needs to know the row was actually checked.
-                unobserved.append(name)
         except Exception:  # noqa: BLE001 — isolate per competitor
             logger.exception("competitive-intel: capture failed for %s", name)
             failures += 1
+        # "Unobserved" means ZERO records for this competitor — checked either
+        # way, nothing found. It is deliberately decided AFTER the try, on the
+        # record count alone, rather than inside the except branch:
+        #
+        # in Review mode a competitor runs SEVERAL staged calls, so one module
+        # raising mid-sequence used to mark the whole competitor unobserved even
+        # though earlier stages had already produced sourced records. ANALYSE was
+        # then told "never fill their rows from general knowledge" about a
+        # competitor whose records were sitting in the same prompt — a
+        # contradiction that either loses real findings or invites the model to
+        # resolve it however it likes. A partial Review is partial data, not
+        # silence.
+        if len(records) == before:
             unobserved.append(name)
 
-    if attempts and failures == attempts:
+    # Every attempt raised AND nothing was captured → web search is unavailable,
+    # and the caller says so plainly instead of reporting from memory. The
+    # record check matters: a partial Review can leave failures == attempts (the
+    # "us" pass died, then one late module died) while real records exist, and
+    # those must never be thrown away.
+    if attempts and failures == attempts and not records:
         raise RuntimeError("every competitive-intelligence capture pass failed")
-    _log_capture(enterprise_id, records, calls, unobserved, mode)
+    if dropped:
+        logger.warning(
+            "competitive-intel: dropped %d record(s) over the %d-record run cap "
+            "(mode=%s, competitors=%s) — the report is built from the first %d",
+            dropped, _TOTAL_RECORD_CAP, mode, names, _TOTAL_RECORD_CAP,
+        )
+    _log_capture(enterprise_id, records, calls, unobserved, mode, dropped)
     return records, unobserved, truncated
 
 
 def _log_capture(enterprise_id: str, records: list[dict], calls: int,
-                 unobserved: list[str], mode: str) -> None:
+                 unobserved: list[str], mode: str, dropped: int = 0) -> None:
     try:
         from app.graph.decision_log import log_agent_decision
 
@@ -677,7 +739,8 @@ def _log_capture(enterprise_id: str, records: list[dict], calls: int,
             enterprise_id=enterprise_id, agent="qa",
             decision_type="competitive_intel_capture",
             factors={"records": len(records), "web_search_calls": calls,
-                     "unobserved": unobserved, "mode": mode},
+                     "unobserved": unobserved, "mode": mode,
+                     "dropped_over_cap": dropped},
             prompt_version="qa-competitive-intel-capture-v1",
         )
     except Exception:  # noqa: BLE001 — audit is best-effort

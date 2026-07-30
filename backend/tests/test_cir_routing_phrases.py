@@ -103,6 +103,17 @@ NEGATIVES = [
     # Other surfaces.
     "turn this feedback into tickets",
     "prioritize these features with RICE",
+    # The user's OWN uploaded data is the DS engine's job, not a web sweep. DS's
+    # own trigger needs an analyze-VERB and "deep dive" is not one, so without a
+    # veto here this bought a multi-minute web sweep for a spreadsheet question.
+    "do a deep dive on the market data I uploaded",
+    "run an analysis on my data",
+    "deep dive on the CSVs I shared",
+    "what does the data say about our market",
+    # Bare "the market" without competitor context is a general question.
+    "what is the market doing today?",
+    "run a study on the market",
+    "how big is the market right now",
 ]
 
 
@@ -190,6 +201,47 @@ def test_sibling_strategy_asks_are_vetoed_out_of_cir(q):
     positioning, rather than CIR claiming them on a shared noun."""
     d = detect_intent(q)
     assert not (d and d.skill_id == CIR), f"{q!r} was claimed by CIR"
+
+
+@pytest.mark.parametrize("q", [
+    "competitive analysis of Sam's Club vs Costco",
+    "competitor report on Sam Altman's new venture",
+    "competitive review vs Samsung",
+])
+def test_market_sizing_veto_does_not_swallow_names_containing_sam(q):
+    """The TAM/SAM/SOM veto is CASE-SENSITIVE. Under re.I the `sam` alternative
+    also matched the NAME Sam, so a real competitive ask lost its fast path to a
+    market-sizing veto it had nothing to do with."""
+    assert is_competitive_report_request(q), f"fast-path lost: {q!r}"
+    d = detect_intent(q)
+    assert d and d.skill_id == CIR
+
+
+@pytest.mark.parametrize("q", [
+    "what's the TAM for this market?",
+    "estimate the SAM and SOM for enterprise",
+])
+def test_uppercase_market_sizing_still_vetoes(q):
+    assert not is_competitive_report_request(q), f"veto lost: {q!r}"
+
+
+def test_public_sentiment_about_one_competitor_belongs_to_the_intent_stage():
+    """"What are people saying about competitor X online?" is claimed by NEITHER
+    fast path, on purpose.
+
+    public-feedback-report is about what people say about US; CIR's Stage C
+    covers per-competitor sentiment but only as part of a full landscape review;
+    and a single-rival read could equally be sales-battlecard. That ambiguity is
+    exactly what the haiku router is for — pinning it to a regex here would be
+    guessing. What must hold deterministically is that neither fast path grabs
+    it, so the router actually gets to decide."""
+    q = "what are people saying about competitor X online?"
+    assert not is_competitive_report_request(q)
+    d = detect_intent(q)
+    assert not (d and d.skill_id == CIR), f"CIR claimed {q!r}"
+    assert not (d and d.skill_id == "public-feedback-report"), (
+        f"public-feedback claimed {q!r} — it reports on US, not a rival"
+    )
 
 
 # ── Live intent-router eval (real haiku call) ────────────────────────────────
