@@ -142,6 +142,9 @@ def sync_provider(
                     {"channel": "upload"} if provider == "uploads" else None
                 ),
                 skill_id=PROVIDER_SKILLS.get(provider),
+                # Haiku relevance + category triage ahead of every batch
+                # — the core connector-sync ingestion path.
+                triage=True,
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):
