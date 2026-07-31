@@ -66,6 +66,19 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
       { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
+      // Research repository. Reads run over Marvin's MCP server (they publish
+      // no REST API), and their US and EU installs are separate deployments
+      // with separate authorization servers — hence `regions`, which makes
+      // Connect ask before redirecting. No bundled SVG mark yet, so it keeps
+      // the brand-color letter glyph.
+      {
+        id: "marvin", name: "Marvin", logo: "M", logoText: "M",
+        logoColor: "#5B4BE1", oauth: true, types: ["customer-voice"],
+        regions: [
+          { value: "us", label: "US / Global" },
+          { value: "eu", label: "EU" },
+        ],
+      },
       { id: "app_store",  name: "App Store",  logo: "A", logoText: "A", logoColor: "#0D96F6", oauth: false, types: ["customer-voice"] },
       { id: "play_store", name: "Play Store", logo: "P", logoText: "P", logoColor: "#01875F", oauth: false, types: ["customer-voice"] },
       // No bundled SVG mark yet — brand-color letter glyph like Fireflies.

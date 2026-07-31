@@ -82,6 +82,7 @@ import {
   CredentialsPromptModal,
   type CredentialsValues,
 } from "../../../connectors/CredentialsPromptModal"
+import { RegionPromptModal } from "../../../connectors/RegionPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 // This project ships @tabler/icons-react (SVG components) but NOT the `ti`
@@ -796,6 +797,9 @@ export function ConnectorsSettings() {
     useState<ConnectorItemRow | null>(null)
   const [credentialsConnectingItem, setCredentialsConnectingItem] =
     useState<ConnectorItemRow | null>(null)
+  // Multi-deployment providers (Marvin) pick a region before the redirect.
+  const [regionConnectingItem, setRegionConnectingItem] =
+    useState<ConnectorItemRow | null>(null)
   // Set when we send the user to a provider's OAuth page in a sibling tab —
   // tells the visibility listener to refresh connections when they switch back.
   const oauthInFlight = useRef(false)
@@ -906,12 +910,50 @@ export function ConnectorsSettings() {
     new Set(connectionByProvider.keys()),
   )
 
+  /**
+   * The OAuth leg: fetch the authorize URL with our Bearer header, then hand
+   * the browser over. Split out of onConnect so the region picker can reuse it
+   * once the user has chosen a deployment. Must still be entered from a click
+   * gesture — openOauthTab pre-opens the tab so the popup blocker sees one.
+   */
+  const startOauthFlow = useCallback(
+    async (providerId: string, region?: string) => {
+      const oauthTab = openOauthTab()
+      oauthInFlight.current = true
+      try {
+        const dataset =
+          providerId === "google_drive" ? activeCompany : undefined
+        const r = await connectorsApi.startOauth(
+          providerId, dataset, undefined, region,
+        )
+        if (r.authorize_url) {
+          oauthTab.finish(r.authorize_url)
+        } else {
+          oauthTab.abort()
+          oauthInFlight.current = false
+        }
+      } catch (e) {
+        oauthTab.abort()
+        oauthInFlight.current = false
+        throw e
+      }
+    },
+    [activeCompany],
+  )
+
   const onConnect = useCallback(
     async (providerId: string) => {
       // Find the catalog row so we know which auth flow to take.
       const item = CONNECTOR_CATALOG
         .flatMap((c) => c.items)
         .find((i) => i.id === providerId)
+
+      if (item?.regions?.length) {
+        // Multi-deployment vendor (Marvin): which install holds their data
+        // decides which authorization server we redirect to, so ask first.
+        setRegionConnectingItem(item)
+        return
+      }
 
       if (item?.authType === "apikey") {
         // Open the API-key paste modal instead of an OAuth redirect.
@@ -935,34 +977,18 @@ export function ConnectorsSettings() {
 
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
       // Open the provider in a new tab so the user keeps their place in
-      // Settings. Pre-open synchronously (before the startOauth await) so the
-      // popup blocker treats it as part of the click gesture; mark the connect
-      // in flight so we reload connections when the user switches back.
-      const oauthTab = openOauthTab()
-      oauthInFlight.current = true
-      // Go through the fetch-then-navigate path so the auth check runs
-      // with the Supabase Bearer header before we hand control to the
-      // browser's URL bar.
+      // Settings, and mark the connect in flight so we reload connections when
+      // the user switches back.
       try {
-        const dataset =
-          providerId === "google_drive" ? activeCompany : undefined
-        const r = await connectorsApi.startOauth(providerId, dataset)
-        if (r.authorize_url) {
-          oauthTab.finish(r.authorize_url)
-        } else {
-          oauthTab.abort()
-          oauthInFlight.current = false
-        }
+        await startOauthFlow(providerId)
       } catch (e) {
-        oauthTab.abort()
-        oauthInFlight.current = false
         // Non-admins hit a 403 admin gate for org-wide connectors (e.g.
         // Google Drive). Surface a clear, friendly explanation instead of
         // the raw "Could not start … connect" diagnostic.
         setLoadError(connectStartErrorMessage(providerId, e))
       }
     },
-    [activeCompany],
+    [startOauthFlow],
   )
 
   const handleApiKeyConnect = useCallback(
@@ -1233,6 +1259,21 @@ export function ConnectorsSettings() {
         }
         onConnect={handleCredentialsConnect}
         onClose={() => setCredentialsConnectingItem(null)}
+      />
+      <RegionPromptModal
+        open={regionConnectingItem != null}
+        connectorName={regionConnectingItem?.name ?? ""}
+        regions={regionConnectingItem?.regions ?? []}
+        helpText={
+          regionConnectingItem?.id === "marvin"
+            ? "Marvin runs separate US and EU workspaces. Pick the one your team uses — you'll authorize on that deployment. Reading research also requires a Marvin admin to have enabled Settings → Developer → Enable MCP."
+            : null
+        }
+        onConnect={async (region) => {
+          if (!regionConnectingItem) return
+          await startOauthFlow(regionConnectingItem.id, region)
+        }}
+        onClose={() => setRegionConnectingItem(null)}
       />
     </>
   )

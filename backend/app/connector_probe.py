@@ -33,6 +33,7 @@ from app.connectors import (
     google_oauth,
     hubspot_oauth,
     jira_oauth,
+    marvin_oauth,
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
@@ -247,6 +248,47 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
                     if x
                 ),
             }
+    elif provider == marvin_oauth.MARVIN_PROVIDER:
+        # Marvin has no "who am I" endpoint — MCP exposes no identity call — so
+        # the probe IS the MCP handshake: it succeeds only with a token the
+        # resource server still accepts. Refresh (and persist) an expiring
+        # token first so a connection stays healthy past the access token's
+        # lifetime; persisting matters in case Marvin rotates refresh tokens.
+        import time
+
+        from app import db
+
+        region = token_json.get("region")
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = marvin_oauth.refresh_access_token(
+                    refresh_token, region=region
+                )
+                token_json = json.loads(
+                    marvin_oauth.token_payload_to_store(
+                        new_json, region=region, keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    marvin_oauth.MARVIN_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except marvin_oauth.MarvinAuthExpiredError as e:
+                raise ProbeError(
+                    f"Marvin token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → soft; the handshake below decides
+                logger.warning("Marvin probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        mcp_url = token_json.get("mcp_url") or marvin_oauth.region_config(region)["mcp_url"]
+        server_info = marvin_oauth.fetch_server_identity(access_token, mcp_url)
+        if server_info:
+            # No email/login to resolve — label with the deployment instead.
+            user_obj = {"name": marvin_oauth.account_label(server_info, region)}
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}

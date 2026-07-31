@@ -63,6 +63,10 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "fireflies": [MEETINGS],
     "gong": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
+    # Research repository (heymarvin.com) — interview/survey studies and the
+    # team's synthesized insight reports. Evidence about what customers said,
+    # so it sits in the Voice of Customer shelf alongside Dovetail.
+    "marvin": [CUSTOMER_VOICE],
     "salesforce": [CRM],
     # Analytics
     "mixpanel": [ANALYTICS],

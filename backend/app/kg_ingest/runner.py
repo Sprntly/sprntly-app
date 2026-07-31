@@ -29,6 +29,7 @@ from app.kg_ingest.pullers import (
     github,
     hubspot,
     jira,
+    marvin,
     sprinklr,
     superset,
     uploads,
@@ -48,6 +49,10 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
     "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),
+    # Marvin's credential packs the access token AND the region's MCP endpoint
+    # into one string (like Superset's): the puller speaks MCP rather than REST
+    # and has to know WHICH deployment (US/EU) it is talking to.
+    "marvin":    (marvin.pull,    "marvin_credential",   "customer_voice (UX research repository: interview/survey studies and the research team's synthesized insight reports — already-analyzed findings about what customers said, not raw transcripts)"),
     # No third party behind this one: the "credential" is the owning company id
     # and the puller reads the documents the user uploaded themselves. Each
     # record carries the user's own source name + description (see the puller).

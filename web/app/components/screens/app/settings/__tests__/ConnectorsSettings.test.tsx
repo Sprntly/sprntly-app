@@ -298,9 +298,9 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders only the OPEN category's rows, not all 42 catalog rows", () => {
+  it("renders only the OPEN category's rows, not all 43 catalog rows", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(42) // v6 catalog + Uploaded documents + Slack's second (voice) placement
+    expect(total).toBe(43) // v6 catalog + Uploaded documents + Slack's second (voice) placement
     for (const cat of CONNECTOR_CATALOG) {
       // The `uploads` provider is never rendered as a connector row — it's
       // surfaced as the document-source list instead.
@@ -553,7 +553,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(12)
+    expect(rowsAcrossPanels).toBe(13)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(

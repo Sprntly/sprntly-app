@@ -60,8 +60,13 @@ def _maybe_refresh_token(
 
     Jira (Atlassian) is handled alongside github: its access tokens expire ~1h
     and its refresh tokens ROTATE, so — like github — we persist the whole new
-    payload on every refresh."""
-    if provider not in ("github", "jira"):
+    payload on every refresh.
+
+    Marvin is the third: its OAuth 2.1 access tokens are short-lived, and its
+    stored payload has to be rebuilt (not just merged) on refresh because the
+    puller's packed `marvin_credential` embeds the access token — see
+    marvin_oauth.token_payload_to_store."""
+    if provider not in ("github", "jira", "marvin"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -76,6 +81,15 @@ def _maybe_refresh_token(
 
             new_json_str = jira_oauth.token_payload_to_store(
                 jira_oauth.refresh_access_token(refresh_token)
+            )
+        elif provider == "marvin":
+            from app.connectors import marvin_oauth
+
+            region = token_json.get("region")
+            new_json_str = marvin_oauth.token_payload_to_store(
+                marvin_oauth.refresh_access_token(refresh_token, region=region),
+                region=region,
+                keep_refresh_token=refresh_token,
             )
         else:
             from app.connectors import github_app

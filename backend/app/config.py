@@ -229,6 +229,17 @@ class Settings(BaseSettings):
     sprinklr_oauth_redirect_url: str = ""
     sprinklr_environment: str = ""
 
+    # Marvin connector (heymarvin.com — OAuth 2.1 + PKCE against their MCP
+    # server's authorization server). Unlike every other connector there is NO
+    # developer portal: Marvin supports RFC 7591 dynamic client registration,
+    # so Sprntly registers itself on first use and persists the result in
+    # `oauth_dynamic_clients`. The id/secret below are an override for the day
+    # Marvin issues a static partner client — leave them empty otherwise.
+    # Only the redirect URI is genuinely required.
+    marvin_oauth_redirect_uri: str = ""
+    marvin_client_id: str = ""
+    marvin_client_secret: str = ""
+
     # Slack connector (OAuth 2.0 — bot token for message delivery + sync)
     slack_client_id: str = ""
     slack_client_secret: str = ""

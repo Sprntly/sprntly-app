@@ -28,6 +28,9 @@
   GET    /v1/connectors/github/installations    -> list installs we know about
   GET    /v1/connectors/github/pull-requests    -> list tracked open PRs
   GET    /v1/connectors/github/repos            -> user's accessible repos (Engineer Agent input)
+
+  GET    /v1/connectors/marvin/callback          -> OAuth callback (MCP, region-scoped)
+  DELETE /v1/connectors/marvin                   -> disconnect
 """
 from __future__ import annotations
 
@@ -75,6 +78,7 @@ from app.connectors import (
     google_oauth,
     hubspot_oauth,
     jira_oauth,
+    marvin_oauth,
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
@@ -367,6 +371,11 @@ class StartOauthIn(BaseModel):
     # default /settings?section=connectors. Validated as a safe path
     # before being signed into state (open-redirect guard).
     return_to: str | None = None
+    # Provider deployment to authorize against, for vendors that run more than
+    # one (Marvin: "us" / "eu" — different authorization servers AND different
+    # MCP endpoints, so the choice must be made before the redirect and signed
+    # into state). Ignored by single-deployment providers.
+    region: str | None = None
 
 
 @router.post("/{provider}/start-oauth")
@@ -452,6 +461,21 @@ def start_oauth(
         url = sprinklr_oauth.authorize_url(
             state=sprinklr_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == marvin_oauth.MARVIN_PROVIDER:
+        if not marvin_oauth.marvin_configured():
+            raise HTTPException(500, "Marvin OAuth is not configured on the server")
+        # Region and the PKCE-seeding nonce both live inside the state, and
+        # authorize_url reads them back out — so the URL can't disagree with
+        # the state the callback will verify.
+        url = marvin_oauth.authorize_url(
+            marvin_oauth.sign_oauth_state(
+                company_id=company.company_id,
+                region=payload.region,
+                return_to=return_to,
             )
         )
         return {"authorize_url": url}
@@ -1799,6 +1823,85 @@ def sprinklr_disconnect(
         raise HTTPException(404, "Sprinklr is not connected")
     db.delete_connection(company.company_id, sprinklr_oauth.SPRINKLR_PROVIDER)
     return {"deleted": True, "provider": sprinklr_oauth.SPRINKLR_PROVIDER}
+
+
+# ─────────────────────── Marvin ───────────────────────
+#
+# Voice-of-customer research repository (heymarvin.com). Two things make this
+# connector unlike the others:
+#
+#   1. It has no REST API. All reads go through Marvin's MCP server, so the
+#      stored credential packs the access token together with the region's MCP
+#      endpoint (see marvin_oauth.token_payload_to_store).
+#   2. Its client credential is SELF-REGISTERED at connect time (RFC 7591)
+#      rather than pasted from a developer portal, because Marvin has no
+#      portal. That happens inside marvin_oauth.ensure_client.
+
+
+@router.get("/marvin/callback")
+def marvin_callback(code: str, state: str):
+    payload = marvin_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    region = payload.get("region")
+    token_json = marvin_oauth.exchange_code_for_token(
+        code, region=region, nonce=payload["nonce"],
+    )
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Marvin did not return an access_token")
+
+    # Unlike every other connector this identity call is NOT best-effort. MCP
+    # has no identity endpoint, so the handshake is simultaneously the only
+    # proof the token can read anything — and the common failure here is a real
+    # one users must act on: a workspace whose admin hasn't enabled
+    # Settings → Developer → Enable MCP consents fine and then exposes nothing.
+    # Storing that as a healthy connection would strand the user on a connector
+    # that silently syncs zero records.
+    mcp_url = marvin_oauth.region_config(region)["mcp_url"]
+    server_info = marvin_oauth.fetch_server_identity(access_token, mcp_url)
+    if not server_info:
+        raise HTTPException(
+            400,
+            "Marvin authorized the connection but exposed no research data. "
+            "Ask a Marvin admin to turn on Settings → Developer → Enable MCP, "
+            "then reconnect.",
+        )
+
+    try:
+        token_encrypted = encrypt_token_json(
+            marvin_oauth.token_payload_to_store(token_json, region=region)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=marvin_oauth.MARVIN_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=marvin_oauth.MARVIN_SCOPES,
+        account_label=marvin_oauth.account_label(server_info, region),
+        config_json=json.dumps({
+            "region": marvin_oauth.normalize_region(region),
+            "mcp_url": mcp_url,
+            "server": server_info,
+        }),
+    )
+
+    kickoff_sync(company_id, marvin_oauth.MARVIN_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, marvin_oauth.MARVIN_PROVIDER)
+
+
+@router.delete("/marvin")
+def marvin_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, marvin_oauth.MARVIN_PROVIDER)
+    row = db.get_connection(company.company_id, marvin_oauth.MARVIN_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Marvin is not connected")
+    db.delete_connection(company.company_id, marvin_oauth.MARVIN_PROVIDER)
+    return {"deleted": True, "provider": marvin_oauth.MARVIN_PROVIDER}
 
 
 # ─────────────────────── Asana ───────────────────────

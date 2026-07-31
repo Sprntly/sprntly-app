@@ -31,15 +31,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 42 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(42)
-    // 41 distinct connectors — the extra row is dual-typed Slack's second
+    expect(total).toBe(43)
+    // 42 distinct connectors — the extra row is dual-typed Slack's second
     // placement, not a second connector.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(41)
+    expect(distinct.size).toBe(42)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -118,12 +118,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, Marvin, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
     // Slack is dual-typed (communication + customer-voice) so its card sits
     // on this shelf too — same item, same connection as in Communications.
     expect(items("Voice of Customer & Support")).toEqual([
-      "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Slack",
+      "Zendesk", "Intercom", "Dovetail", "Marvin", "App Store", "Play Store",
+      "Sprinklr", "Fireflies", "Gong", "Slack",
     ])
   })
 
@@ -175,7 +175,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr",
+        "hubspot", "jira", "marvin", "slack", "sprinklr",
       ].sort(),
     )
   })
@@ -208,6 +208,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "google_drive",
         "hubspot",
         "jira",
+        "marvin",
         "slack",
         "sprinklr",
         "superset",
@@ -256,7 +257,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 12 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
+  it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
     // Set-dedup: Slack's card renders on two shelves but is one connector.
     const ids = [...new Set(
       connectableCatalog()
@@ -273,6 +274,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "google_drive",
         "hubspot",
         "jira",
+        "marvin",
         "slack",
         "sprinklr",
         "superset",
@@ -290,7 +292,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Analytics")).toEqual(["superset"])
     // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "slack",
+      "marvin", "sprinklr", "fireflies", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])

@@ -70,6 +70,11 @@ export type ConnectorConnectModalViewProps = {
   credentialsError?: string | null
   isSubmittingCredentials?: boolean
 
+  /** Selected deployment for multi-region providers (Marvin). Ignored — and
+   *  the picker hidden — when the catalog row declares no `regions`. */
+  region?: string
+  onRegionChange?: (next: string) => void
+
   /** True while the OAuth startOauth request is in flight (between
    *  click + browser navigation). */
   isConnecting: boolean
@@ -106,6 +111,8 @@ export function ConnectorConnectModalView({
   credentials = { baseUrl: "", username: "", password: "" },
   credentialsError = null,
   isSubmittingCredentials = false,
+  region = "",
+  onRegionChange = () => {},
   isConnecting,
   oauthError,
   showCompleteOrRestart,
@@ -301,6 +308,28 @@ export function ConnectorConnectModalView({
                 connection. Finish there, then come back to this tab — your
                 onboarding stays right where it is.
               </p>
+              {item.regions?.length ? (
+                /* Multi-deployment vendor: the region decides WHICH
+                   authorization server we send them to, so it has to be
+                   settled before the redirect. */
+                <>
+                  <label className="field-label" htmlFor="conn-modal-region">
+                    {item.name} region
+                  </label>
+                  <select
+                    id="conn-modal-region"
+                    className="input"
+                    value={region || item.regions[0].value}
+                    onChange={(e) => onRegionChange(e.target.value)}
+                  >
+                    {item.regions.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : null}
               {oauthError ? (
                 <p className="conn-modal-error" role="alert">
                   {oauthError}
@@ -477,6 +506,7 @@ export function ConnectorConnectModal({
   )
   const [credentialsError, setCredentialsError] = useState<string | null>(null)
   const [isSubmittingCredentials, setIsSubmittingCredentials] = useState(false)
+  const [region, setRegion] = useState("")
   const [isConnecting, setIsConnecting] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
   const [showCompleteOrRestart, setShowCompleteOrRestart] = useState(false)
@@ -492,6 +522,7 @@ export function ConnectorConnectModal({
     setCredentials({ baseUrl: "", username: "", password: "" })
     setCredentialsError(null)
     setIsSubmittingCredentials(false)
+    setRegion("")
     setIsConnecting(false)
     setOauthError(null)
     // Detect in-flight: a Connect was started for this provider that
@@ -522,7 +553,14 @@ export function ConnectorConnectModal({
     try {
       // Drive uses dataset to scope folder choice; others ignore it.
       const dataset = providerId === "google_drive" ? activeCompany : undefined
-      const r = await connectorsApi.startOauth(providerId, dataset, returnTo)
+      // Region only matters for multi-deployment providers; fall back to the
+      // catalog's first entry when the user never touched the picker.
+      const chosenRegion = item?.regions?.length
+        ? region || item.regions[0].value
+        : undefined
+      const r = await connectorsApi.startOauth(
+        providerId, dataset, returnTo, chosenRegion,
+      )
       if (r.authorize_url) {
         oauthTab.finish(r.authorize_url)
       } else {
@@ -541,7 +579,7 @@ export function ConnectorConnectModal({
     } finally {
       setIsConnecting(false)
     }
-  }, [providerId, activeCompany, returnTo])
+  }, [providerId, activeCompany, returnTo, item, region])
 
   const handleSubmitApiKey = useCallback(async () => {
     if (!providerId || !apiKey.trim()) return
@@ -657,6 +695,8 @@ export function ConnectorConnectModal({
       credentials={credentials}
       credentialsError={credentialsError}
       isSubmittingCredentials={isSubmittingCredentials}
+      region={region}
+      onRegionChange={setRegion}
       isConnecting={isConnecting}
       oauthError={oauthError}
       showCompleteOrRestart={showCompleteOrRestart}

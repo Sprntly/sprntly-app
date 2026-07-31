@@ -1780,6 +1780,10 @@ export const connectorsApi = {
   disconnectAsana: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/asana`),
 
+  // ---- Marvin (OAuth over their MCP server; region chosen at connect) ------
+  disconnectMarvin: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/marvin`),
+
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
@@ -1869,10 +1873,15 @@ export const connectorsApi = {
    * the default `/settings?section=connectors`. Backend validates it as
    * a safe relative path (open-redirect guard).
    */
-  startOauth: (provider: string, dataset?: string, returnTo?: string) => {
+  /** `region` is only meaningful for multi-deployment providers (Marvin);
+   *  single-deployment providers ignore it server-side. */
+  startOauth: (
+    provider: string, dataset?: string, returnTo?: string, region?: string,
+  ) => {
     const body: Record<string, string> = {}
     if (dataset) body.dataset = dataset
     if (returnTo) body.return_to = returnTo
+    if (region) body.region = region
     return api.post<{ authorize_url: string }>(
       `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
       body,
