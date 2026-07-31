@@ -242,21 +242,22 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     expect(narrowed[0].textContent).toContain("/my-estimator")
   })
 
-  // Override (PRD 1854): a custom skill sharing a built-in's trigger REPLACES
-  // it — the palette lists the trigger once, as the custom skill.
-  it("dedupes the slash palette when a custom skill shadows a built-in trigger", async () => {
+  // No-override (PRD 1854 revision): a custom skill named after a built-in
+  // replaces nothing — both are listed, each with its own trigger and its own
+  // description, because the description is what tells them apart.
+  it("lists BOTH skills when a custom skill shares a built-in's name", async () => {
     vi.mocked(skillsApi.list).mockResolvedValueOnce({
       skills: [
         {
           id: "c2",
-          slug: "prioritize",
-          trigger: "/prioritize",
-          name: "Our Prioritize",
+          slug: "prioritize-2", // the built-in kept /prioritize
+          trigger: "/prioritize-2",
+          name: "Prioritize",
           description: "House ranking rules",
           uploader_name: "Fortune",
           created_at: null,
           has_file: true,
-          overrides_builtin: true,
+          name_conflict: true,
         },
       ],
     })
@@ -269,9 +270,14 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     })
     const palette = await screen.findByRole("listbox", { name: "Skills" })
     const rows = within(palette).getAllByRole("option")
-    expect(rows).toHaveLength(1)
-    expect(rows[0].textContent).toContain("Our Prioritize")
-    expect(rows[0].textContent).toContain("/prioritize")
+    expect(rows).toHaveLength(2)
+    // The custom one leads, and each row carries the trigger that invokes IT.
+    expect(rows[0].textContent).toContain("/prioritize-2")
+    expect(rows[0].textContent).toContain("House ranking rules")
+    expect(rows[1].textContent).toContain("/prioritize")
+    expect(rows[1].textContent).toContain("Rank ideas")
+    // Same name on both rows — the descriptions are the distinguisher.
+    expect(rows.every((r) => r.textContent?.includes("Prioritize"))).toBe(true)
   })
 
   // A1: firing a change on the landing file input adds the attachment, and the

@@ -625,9 +625,11 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
-  /** The slug shadows a built-in Sprntly skill id — this skill REPLACES the
-   *  built-in for the company at invocation time (PRD 1854 override). */
-  overrides_builtin: boolean
+  /** The name was already taken when this skill was uploaded, so its trigger
+   *  was disambiguated away from the name's plain slug (`/prd-author-2` for a
+   *  skill named "PRD Author"). Nothing was replaced — the skill that owned
+   *  the name keeps its own trigger and both are invocable. */
+  name_conflict: boolean
 }
 
 export const skillsApi = {
@@ -635,7 +637,10 @@ export const skillsApi = {
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
    *  Server is the authoritative validator (422/400/413/409 with readable
-   *  `detail`); the modal mirrors the cheap checks client-side. */
+   *  `detail`); the modal mirrors the cheap checks client-side. A name shared
+   *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
+   *  report the disambiguated trigger); a name already used by one of the
+   *  company's OWN custom skills is the 409. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)

@@ -9,10 +9,12 @@ two apart. Deliberately NO cache on the DB path: a read per invocation is one
 PostgREST select, it keeps every replica consistent, and a deleted skill
 disappears immediately (the invocation-error ticket relies on that).
 
-Lookup order is CUSTOM FIRST: a company upload that shares a vendored id
-REPLACES the built-in for that company (PRD 1854 override — the uploader is
-warned at upload time via the 201's overrides_builtin flag). Deleting the
-custom skill restores the built-in on the next invocation.
+Lookup order is BUILT-IN FIRST: a custom skill NEVER overrides a vendored one.
+The upload route hands a name-colliding upload its own trigger instead
+(custom.available_slug), so the two ids don't overlap in the first place and
+both skills stay invocable — this order is what guarantees it even for a row
+that predates that rule. Custom skills resolve on the fallback leg, where the
+id names no vendored dir.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from typing import Optional
 
 from app.db.custom_skills import get_custom_skill
 from app.skills.custom import build_spec
-from app.skills.loader import SkillSpec, get_skill, list_skills
+from app.skills.loader import SkillSpec, UnknownSkillError, get_skill, list_skills
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +31,9 @@ logger = logging.getLogger(__name__)
 def custom_skill_spec(company_id: str, slug: str) -> Optional[SkillSpec]:
     """The company's uploaded skill as a gateway-ready SkillSpec, or None.
 
-    Fails OPEN to None on a DB error: the override lookup now rides EVERY
-    skill invocation (custom-first), so a PostgREST hiccup must degrade to
-    the vendored library — losing the override for one request — rather than
-    take built-in skill answers down with it."""
+    Fails OPEN to None on a DB error: this lookup rides every invocation of a
+    non-vendored id, so a PostgREST hiccup must degrade to "no such custom
+    skill" rather than take skill answers down with it."""
     if not company_id or not slug:
         return None
     try:
@@ -52,15 +53,22 @@ def has_custom_skill(company_id: str, slug: str) -> bool:
 
 
 def resolve_skill(skill_id: str, company_id: Optional[str] = None) -> SkillSpec:
-    """A SkillSpec from either library — the company's CUSTOM skill first, so
-    an upload sharing a vendored id replaces the built-in for that company;
-    vendored disk skills are the fallback. Raises UnknownSkillError when
-    neither has it."""
+    """A SkillSpec from either library — the VENDORED skill first, so a custom
+    upload can never take over a built-in's trigger; the company's uploads
+    answer for every id no built-in claims. Raises UnknownSkillError when
+    neither library has it.
+
+    Built-in-first also skips the DB read entirely for vendored ids (the common
+    case), and get_skill is lru_cached."""
+    try:
+        return get_skill(skill_id)
+    except UnknownSkillError:
+        pass
     if company_id:
         spec = custom_skill_spec(company_id, skill_id)
         if spec is not None:
             return spec
-    return get_skill(skill_id)
+    raise UnknownSkillError(f"unknown skill {skill_id!r} in either library")
 
 
 def is_builtin(skill_id: str) -> bool:

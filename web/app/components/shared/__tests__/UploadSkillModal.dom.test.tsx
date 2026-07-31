@@ -60,7 +60,7 @@ describe("slugifyName", () => {
 })
 
 describe("UploadSkillModal", () => {
-  it("warns — without blocking — when the name matches a built-in skill", async () => {
+  it("previews the trigger — without blocking — when a built-in has the name", async () => {
     const onUpload = vi.fn().mockResolvedValue(undefined)
     const { container } = render(
       React.createElement(UploadSkillModal, {
@@ -75,10 +75,11 @@ describe("UploadSkillModal", () => {
         target: { value: "PRD Author" },
       })
     })
-    // Informational status, not an alert — the upload is allowed to proceed.
-    expect(screen.getByRole("status").textContent).toMatch(
-      /replace it with your skill/,
-    )
+    // Informational status, not an alert: nothing is replaced — the upload
+    // proceeds and just gets its own trigger, which the notice names.
+    const notice = screen.getByRole("status").textContent ?? ""
+    expect(notice).toMatch(/both stay in your library/i)
+    expect(notice).toContain("/prd-author-2")
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
@@ -92,13 +93,50 @@ describe("UploadSkillModal", () => {
     await waitFor(() => expect(onUpload).toHaveBeenCalled())
   })
 
-  it("shows no override warning for a non-colliding name", async () => {
+  it("previewed trigger skips a slug the company already handed out", async () => {
     render(
       React.createElement(UploadSkillModal, {
         open: true,
         onUpload: vi.fn(),
         onClose: vi.fn(),
         builtinSlugs: ["prd-author"],
+        customSkills: [{ slug: "prd-author-2", name: "PRD Author 2" }],
+      }),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "PRD Author" },
+      })
+    })
+    expect(screen.getByRole("status").textContent).toContain("/prd-author-3")
+  })
+
+  it("alerts when the company's OWN library already has the name (the 409)", async () => {
+    render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload: vi.fn(),
+        onClose: vi.fn(),
+        customSkills: [{ slug: "estimation-helper", name: "Estimation Helper" }],
+      }),
+    )
+    await act(async () => {
+      // Same name once slugified — the equivalence the server rejects on.
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "estimation  helper!" },
+      })
+    })
+    expect(screen.getByRole("alert").textContent).toMatch(/rename this one/i)
+  })
+
+  it("shows no name notice for a free name", async () => {
+    render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload: vi.fn(),
+        onClose: vi.fn(),
+        builtinSlugs: ["prd-author"],
+        customSkills: [{ slug: "estimation-helper", name: "Estimation Helper" }],
       }),
     )
     await act(async () => {
@@ -107,6 +145,7 @@ describe("UploadSkillModal", () => {
       })
     })
     expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.queryByRole("alert")).toBeNull()
   })
 
   it("gates submit until file, name, and description are all present", async () => {

@@ -16,6 +16,7 @@ import pytest
 from app.skills.custom import (
     ParsedSkill,
     SkillParseError,
+    available_slug,
     build_spec,
     content_hash_for,
     parse_upload,
@@ -43,6 +44,25 @@ def test_slugify_kebab_cases_display_names():
 
 def test_slugify_empty_when_no_alphanumerics():
     assert slugify("!!! ???") == ""
+
+
+# ─── available_slug ──────────────────────────────────────────────────────────
+
+
+def test_available_slug_keeps_the_base_when_free():
+    assert available_slug("my-estimator", ["prd-author", "roadmap"]) == "my-estimator"
+    assert available_slug("my-estimator", []) == "my-estimator"
+
+
+def test_available_slug_numbers_past_every_taken_id():
+    # The suffix series starts at -2 and skips whatever is already spoken for,
+    # so a colliding upload never lands on a trigger someone else answers.
+    assert available_slug("prd-author", ["prd-author"]) == "prd-author-2"
+    assert available_slug("prd-author", ["prd-author", "prd-author-2"]) == "prd-author-3"
+    assert (
+        available_slug("prd-author", ["prd-author", "prd-author-2", "prd-author-4"])
+        == "prd-author-3"
+    )
 
 
 # ─── .md uploads ─────────────────────────────────────────────────────────────
