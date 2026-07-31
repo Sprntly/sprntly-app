@@ -1357,8 +1357,14 @@
      strip's own colour. The far stop is bare `transparent` — gradients
      interpolate premultiplied, so it fades to nothing rather than through a
      white (or black) haze the way an explicit rgba(…, 0) would risk. */
+  /* Offset past the PINNED Top Insights tab (--tab-pin-w, measured by
+     ChatScreen's syncTabOverflow), which sticks to the strip's left edge while
+     the chat tabs scroll under it. Anchored at 0 the fade would either wash over
+     the pin or hide behind it; starting at the pin's right edge is what makes it
+     read as "tabs have scrolled away under here". Falls back to 0 before the
+     first measure, which is the pre-pin behaviour. */
   .chat-tab-scroller::before {
-    left: 0;
+    left: var(--tab-pin-w, 0px);
     background: linear-gradient(90deg, var(--surface-2, #f7f5f0) 15%, transparent 100%);
   }
 
@@ -1376,9 +1382,11 @@
     /* Bar hidden in every engine; the fades above carry the affordance. */
     scrollbar-width: none;
     -ms-overflow-style: none;
-    /* Clicking a tab that's partly out of view (or opening a new one) glides
-       it in rather than jumping. */
-    scroll-behavior: smooth;
+    /* NO `scroll-behavior: smooth` here. The scrollLeft setter obeys it, so it
+       animated the wheel and drag gestures too — every tick queued its own
+       animation and the strip lagged behind the pointer. The one scroll that
+       SHOULD glide (bringing a selected tab into view) asks for it explicitly,
+       via scrollTo({behavior:"smooth"}) in ChatScreen. */
     overscroll-behavior-x: contain;
   }
 
@@ -1388,10 +1396,118 @@
     display: none;
   }
 
+  /* Drag-to-pan (ChatScreen adds .is-panning for the duration of the gesture).
+     The grab cursor has to beat the tabs' own `cursor: pointer`, hence the
+     descendant selector; text selection would otherwise sweep across the labels
+     as the pointer moves. */
+  .chat-tab-list.is-panning,
+  .chat-tab-list.is-panning * {
+    cursor: grabbing;
+    user-select: none;
+  }
+
+  /* Tab separators, Chrome's rule: a hairline between adjacent tabs, so a strip
+     of narrow tabs reads as distinct cards instead of one run-on row. It is
+     drawn on a tab's LEFT edge and suppressed wherever a real edge already
+     divides them — either side of the active tab (which is a bordered card) and
+     either side of a hovered tab (which gets its own tinted background). The
+     first tab has no separator: `+ .chat-tab` never matches it.
+
+     Every rule here is scoped to :not([data-tab-active]) because the ACTIVE
+     tab's ::before is something else entirely — its left shoulder (below). The
+     two must never match the same element. */
+  .chat-tab-list .chat-tab + .chat-tab:not([data-tab-active])::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 18px;
+    background: var(--line, #E8E6E0);
+    transition: opacity 0.12s var(--ease, ease);
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active] + .chat-tab:not([data-tab-active])::before,
+  .chat-tab-list .chat-tab:not([data-tab-active]):hover::before,
+  .chat-tab-list .chat-tab:hover + .chat-tab:not([data-tab-active])::before {
+    opacity: 0;
+  }
+
+  /* ── The active tab's shoulders ────────────────────────────────────────────
+     Chrome's tab isn't a plain rounded rectangle: at the bottom its sides flare
+     OUTWARD on a concave curve that lands on the toolbar line, so the tab reads
+     as a physical tab merging into the page rather than a card sitting on top
+     of it. That flare is what these two pseudo-elements draw — ::before the left
+     shoulder, ::after the right.
+
+     Each is an 8px box parked just outside the tab's bottom corner, painted by a
+     radial-gradient centred on the corner NEAREST the strip: inside the radius
+     it's transparent (the strip shows through, carving the concave curve), a
+     1px ring of --line continues the tab's own border around that curve, and
+     everything beyond is the tab's fill flowing down into the content area.
+     The gradient is tangent to the tab's vertical edge where they meet, which is
+     what keeps the join invisible.
+
+     The 9px width is 8px of shoulder + 1px lapping back OVER the tab's own
+     side border, so that border stops at the curve instead of continuing as a
+     stub down the inside of it. */
+  .chat-tab-list .chat-tab[data-tab-active]::before,
+  .chat-tab-list .chat-tab[data-tab-active]::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    width: 9px;
+    height: 8px;
+    pointer-events: none;
+    /* Neutralises the separator rule's centring transform, in case a future
+       edit lets both match. */
+    top: auto;
+    transform: none;
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active]::before {
+    left: -8px;
+    background: radial-gradient(
+      circle at top left,
+      transparent 6.9px,
+      var(--line, #E8E6E0) 7.1px,
+      var(--line, #E8E6E0) 7.9px,
+      var(--surface, #fff) 8.1px
+    );
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active]::after {
+    right: -8px;
+    background: radial-gradient(
+      circle at top right,
+      transparent 6.9px,
+      var(--line, #E8E6E0) 7.1px,
+      var(--line, #E8E6E0) 7.9px,
+      var(--surface, #fff) 8.1px
+    );
+  }
+
+  /* Hover on an inactive tab — the other half of telling narrow tabs apart:
+     the one under the pointer lifts out of the strip before you click it.
+     Inline styles set the background, so this needs the extra specificity. */
+  .chat-tab-list .chat-tab:not([data-tab-active]):hover {
+    background: var(--surface-3, rgba(0, 0, 0, 0.04)) !important;
+  }
+
+  /* The pinned tab keeps the scrolling tabs off itself with a real border
+     rather than a separator: the separator belongs to the tab on its right,
+     which slides away under the pin. Only when inactive — active, its own card
+     border already does the job. The 1px is already reserved (the inline style
+     paints it transparent), so nothing shifts. */
+  .chat-tab-list .chat-tab--pinned:not([data-tab-active]) {
+    border-right-color: var(--line, #E8E6E0) !important;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .chat-tab-list { scroll-behavior: auto; }
     .chat-tab-scroller::before,
     .chat-tab-scroller::after { transition: none; }
+    .chat-tab-list .chat-tab::before { transition: none; }
   }
 
   /* The way back to a closed artifact panel. An accent disc, because it's the
