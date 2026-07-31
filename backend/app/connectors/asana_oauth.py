@@ -43,6 +43,7 @@ import requests
 from fastapi import HTTPException
 
 from app.config import settings
+from app.connectors.tracker_errors import TrackerDeleteForbiddenError
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +464,64 @@ def create_subtask(access_token: str, parent_gid: str, *, name: str) -> dict[str
     _raise_for(r, "create_subtask")
     data = (r.json() or {}).get("data") or {}
     return {"gid": data.get("gid"), "url": data.get("permalink_url")}
+
+
+def _delete(access_token: str, path: str, what: str) -> bool:
+    """Shared DELETE against the Asana API, with the status contract the other
+    trackers' deletes use:
+
+      200/204  gone                 -> True
+      404/410  ALREADY gone         -> True (absence is what the caller wanted)
+      403      refused on perms     -> TrackerDeleteForbiddenError (close instead)
+      401      bad token            -> AsanaAuthExpiredError (reconnect)
+      other                         -> HTTPException(502)
+
+    Deliberately does NOT go through `_raise_for`, which maps 401 and 403 alike
+    to a reconnect prompt. Asana returns 403 for "you may not delete this
+    object" — most often a story someone else authored, or a task in a project
+    the account only comments on — and none of that is fixed by reconnecting.
+    """
+    r = requests.delete(f"{ASANA_API}{path}", headers=_headers(access_token),
+                        timeout=_WRITE_TIMEOUT)
+    if r.status_code in (404, 410):
+        logger.info("Asana %s: already gone (%s)", what, r.status_code)
+        return True
+    if r.status_code == 403:
+        logger.info("Asana %s refused on permissions", what)
+        raise TrackerDeleteForbiddenError(
+            "Asana refused the delete — the connected account lacks permission "
+            "on this object"
+        )
+    if r.status_code == 401:
+        logger.warning("Asana %s auth rejected: 401", what)
+        raise AsanaAuthExpiredError(
+            "Asana rejected the stored token — reconnect Asana to continue"
+        )
+    if not r.ok:
+        logger.warning("Asana %s failed: %s %s", what, r.status_code, r.text[:300])
+        raise HTTPException(502, f"Asana {what} failed")
+    return True
+
+
+def delete_task(access_token: str, task_gid: str) -> bool:
+    """Delete one task (`DELETE /tasks/{gid}`). Returns True when it is gone,
+    including when it already was. Deleting a parent takes its subtasks with
+    it. Asana moves deleted tasks to the author's trash for 30 days, so this is
+    recoverable by the customer — unlike the Jira equivalent."""
+    return _delete(access_token, f"/tasks/{task_gid}", "delete_task")
+
+
+def delete_task_comment(access_token: str, story_gid: str) -> bool:
+    """Delete one comment (`DELETE /stories/{gid}`). Returns True when it is
+    gone, including when it already was.
+
+    Asana models a comment as a STORY on the task, and only comment stories are
+    deletable — the system stories it generates for status/field changes are
+    not, and answer 403. That is correct behavior here: Sprntly only ever
+    deletes a story gid that add_task_comment returned and
+    `ticket_comments.tracker_comment_id` stored, which is always a real comment.
+    """
+    return _delete(access_token, f"/stories/{story_gid}", "delete_task_comment")
 
 
 def add_task_to_section(access_token: str, section_gid: str, task_gid: str) -> None:

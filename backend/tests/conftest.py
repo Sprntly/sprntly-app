@@ -878,6 +878,10 @@ CREATE TABLE ticket_edits (
     custom_fields       TEXT,
     -- Mirrors supabase/migrations/20260712170000_ticket_edits_issue_type.sql
     issue_type          TEXT,
+    -- Mirrors 20260731120000_ticket_edits_lifecycle.sql: 'active' | 'excluded'
+    -- | 'deleted'. Non-active tickets are never pushed and are removed from
+    -- the tracker if they were.
+    lifecycle           TEXT NOT NULL DEFAULT 'active',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );

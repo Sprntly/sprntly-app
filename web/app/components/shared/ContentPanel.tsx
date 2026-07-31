@@ -17,8 +17,8 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketStub, type TicketSyncState, type TrackerMeta,
-  type TrackerProvider,
+  type JiraProject, type TicketLifecycle, type TicketStub,
+  type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { ReportsTab } from "./ReportsTab"
@@ -761,11 +761,17 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
   story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
   const preview = story.user_story || story.body
+  const excluded = story.lifecycle === "excluded"
   return (
-    <button type="button" className="tkv2-card" onClick={onOpen}>
+    <button type="button" className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`} onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
       <div className="tkv2-card-main">
-        <div className="tkv2-card-title">{story.title}</div>
+        <div className="tkv2-card-title tkv2-rtitle">
+          {story.title}
+          {/* Says WHY the row has no tracker chip — without it an excluded
+              ticket looks identical to one that simply failed to sync. */}
+          {excluded ? <span className="tkv2-exbadge" title={`Not sent to ${tool || "the PM tool"}`}>Excluded</span> : null}
+        </div>
         {preview ? (
           <div className="tkv2-story">
             {preview}
@@ -1369,6 +1375,20 @@ export function TicketsTab() {
     }
   })()
 
+  // A ticket's lifecycle changed in the detail: mirror it in this list's own
+  // copy so the change shows without a refetch. A deleted ticket LEAVES the
+  // array (the server drops it from every later read), which is also why the
+  // detail closes itself on delete — the index it was rendering is gone.
+  const applyLifecycle = (index: number, lifecycle: TicketLifecycle) => {
+    if (genState.kind !== "ready") return
+    const next =
+      lifecycle === "deleted"
+        ? genState.stories.filter((_, i) => i !== index)
+        : genState.stories.map((s, i) => (i === index ? { ...s, lifecycle } : s))
+    setGenState({ ...genState, stories: next })
+    if (lifecycle === "deleted") setSelectedIndex(null)
+  }
+
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
   if (selectedStory && prdId != null) {
@@ -1396,6 +1416,7 @@ export function TicketsTab() {
             meta: trackerMeta.meta,
             synced: selectedStory.id ? syncState?.statuses?.[selectedStory.id] : undefined,
           } : undefined}
+          onLifecycleChange={(lifecycle) => applyLifecycle(selectedIndex as number, lifecycle)}
         />
       </div>
     )

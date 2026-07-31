@@ -479,7 +479,7 @@ def list_tickets(
     # so the list reflects edited status/priority/title without N round-trips.
     edits = (
         c.table("ticket_edits")
-        .select("ticket_key, status, priority, title, assignee")
+        .select("ticket_key, status, priority, title, assignee, lifecycle")
         .eq("company_id", company_id)
         .execute()
         .data
@@ -506,6 +506,11 @@ def list_tickets(
                 continue
             key = _ticket_key_for(row.get("prd_id"), story)
             e = edit_by_key.get(key, {})
+            # A deleted ticket is not work anyone should be handed — it is gone
+            # from Sprntly and from the tracker. Excluded ones are still real
+            # work, just not synced, so they stay listed with the flag.
+            if e.get("lifecycle") == "deleted":
+                continue
             # Unedited status defaults to "Backlog" (as in get_ticket / the web
             # UI) so the recommended `status=Backlog` filter actually finds the
             # generated-but-unedited backlog. title/priority use is-not-None
@@ -540,6 +545,11 @@ def list_tickets(
                     "tracker_provider": sync_cfg.get("provider"),
                     "tracker_status": tracker_state.get("status"),
                     "tracker_url": tracker_state.get("url"),
+                    # "excluded" = deliberately held back from the tracker, so
+                    # a client doesn't read the missing tracker_url as a bug.
+                    # Absent for the ordinary case.
+                    **({"lifecycle": e["lifecycle"]}
+                       if e.get("lifecycle") and e["lifecycle"] != "active" else {}),
                 }
             )
     return {"tickets": tickets, "count": len(tickets)}
