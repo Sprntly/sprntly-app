@@ -111,3 +111,51 @@ def test_sweep_is_idempotent(isolated_settings):
 
     assert fail_orphan_generating_ask_jobs() == 1
     assert fail_orphan_generating_ask_jobs() == 0
+
+
+# ── Heartbeat: age must mean "abandoned", not "slow" ────────────────────────
+#
+# The staging blocker this exists for: the competitive-intelligence review runs
+# ~20 minutes. Its row sat in `generating` with `updated_at` frozen at creation
+# (the report paths publish no deltas), so at 15 minutes this sweep failed the
+# row while the worker was still running — and because complete_ask_job is
+# guarded on `status == 'generating'`, the answer it eventually produced was
+# then silently discarded. 4/4 attempts lost, each already paid for.
+
+def test_heartbeat_keeps_a_long_running_job_out_of_the_sweep(isolated_settings):
+    from app.db.asks import touch_ask_job
+
+    ask_id = _insert("generating", minutes_ago=60)
+    # A live worker beats before the sweep runs.
+    assert touch_ask_job(ask_id) is True
+
+    assert fail_orphan_generating_ask_jobs() == 0
+    status, _ = _status(ask_id)
+    assert status == "generating", "a beating worker's job was reaped"
+
+
+def test_heartbeat_reports_when_the_job_has_left_generating(isolated_settings):
+    """The beat is guarded on `generating`, so a finished/cancelled job stops
+    being touched — and the loop learns to stop from the return value."""
+    from app.db.asks import touch_ask_job
+
+    for terminal in ("ready", "cancelled", "error"):
+        ask_id = _insert(terminal, minutes_ago=1)
+        assert touch_ask_job(ask_id) is False, terminal
+
+
+def test_heartbeat_never_resurrects_a_cancelled_job(isolated_settings):
+    from app.db.asks import touch_ask_job
+
+    ask_id = _insert("cancelled", minutes_ago=1)
+    touch_ask_job(ask_id)
+    status, _ = _status(ask_id)
+    assert status == "cancelled"
+
+
+def test_an_unbeaten_job_is_still_reaped(isolated_settings):
+    """The sweep must keep working for genuinely dead workers — the heartbeat
+    narrows what "abandoned" means, it does not disable the sweep."""
+    ask_id = _insert("generating", minutes_ago=60)
+    assert fail_orphan_generating_ask_jobs() == 1
+    assert _status(ask_id)[0] == "error"

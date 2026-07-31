@@ -81,6 +81,8 @@ from app.db.asks import (
 
 # Competitive-intelligence runs (state + captured records + rendered reports)
 from app.db.competitive_intel_runs import (
+    claim_competitive_intel_run,
+    complete_competitive_intel_run,
     latest_competitive_intel_run,
     save_competitive_intel_run,
 )

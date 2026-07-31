@@ -772,7 +772,11 @@ def answer(
         from app import competitive_intel
 
         cir = competitive_intel.answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id, question=question, history=history,
+            # A staged sweep is minutes of paid web search; each competitor and
+            # each module boundary is a cancellation checkpoint, so a Stop
+            # actually stops the spending (company_research parity).
+            is_cancelled=is_cancelled,
         )
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)

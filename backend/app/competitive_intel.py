@@ -47,12 +47,18 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 
 from app import competitive_intel_report
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
 from app.prompt_history import clamp_turn_text
+# qa_agent imports THIS module lazily (inside answer()), so a module-level
+# import back is safe and keeps the cancellation type identical to the one
+# the ask worker catches.
+from app.qa_agent import AskCancelled
 from app.report_records import parse_records
+from app.usage_context import Feature, usage_scope
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +82,33 @@ _SUMMARY_CAP = 1600
 # shallow (SKILL.md Stage 0), and each name costs web-search calls.
 _MAX_COMPETITORS = 5
 
+def _check_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    """Abort the pipeline if the user stopped the ask. Raises qa_agent's
+    AskCancelled so the ask worker treats it as a stop, not a failure."""
+    if is_cancelled is not None and is_cancelled():
+        raise AskCancelled()
+
+
 MODE_SCAN = "scan"
 MODE_REVIEW = "review"
+
+# Capture DEPTH is separate from report MODE.
+#
+# A Review's report structure (the strategic layer, all three benchmarks, both
+# radars) is cheap — it is one synthesis call. What is expensive is the staged
+# capture: one web-search call PER MODULE per competitor, so a 3-competitor
+# baseline ran 19 multi-search calls and took ~20 minutes on staging. That
+# outlived the chat's patience, the ask-job liveness window, and the user's.
+#
+# So a BASELINE Review (the first report a company ever asks for, which is the
+# one they judge us on) now captures at SCAN depth — one pass per competitor —
+# and still renders the full Review structure. A subsequent Review, asked for
+# deliberately once state exists, keeps the staged depth.
+DEPTH_SCAN = "scan"
+DEPTH_STAGED = "staged"
+# Baselines also cover fewer competitors, for the same reason: three deep beats
+# five shallow, and the first run has to land.
+_MAX_COMPETITORS_BASELINE = 3
 
 
 # ── CAPTURE prompts ──────────────────────────────────────────────────────────
@@ -563,18 +594,19 @@ def _answer_from_run(*, enterprise_id: str, question: str, run: dict,
         + "\n\n=== CAPTURED RECORDS ===\n"
         + json.dumps(run.get("records") or [], ensure_ascii=False)
     )
-    result = llm_call(
-        enterprise_id=enterprise_id,
-        agent="qa",
-        purpose="competitive_intel_query",
-        model=ANSWER_MODEL,
-        system=_QUERY_SYSTEM,
-        input=_render_history(history) + f"Question: {question}\n\n{context}",
-        prompt_version="qa-competitive-intel-query-v1",
-        json_schema=_ASK_RESPONSE_SCHEMA,
-        skill=CIR_SKILL,
-        max_tokens=4000,
-    )
+    with usage_scope(feature=Feature.ASK, operation="competitive_intel_query"):
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="competitive_intel_query",
+            model=ANSWER_MODEL,
+            system=_QUERY_SYSTEM,
+            input=_render_history(history) + f"Question: {question}\n\n{context}",
+            prompt_version="qa-competitive-intel-query-v1",
+            json_schema=_ASK_RESPONSE_SCHEMA,
+            skill=CIR_SKILL,
+            max_tokens=4000,
+        )
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.5, "unanswered": "",
@@ -590,21 +622,35 @@ def _answer_from_run(*, enterprise_id: str, question: str, run: dict,
 
 # ── CAPTURE ──────────────────────────────────────────────────────────────────
 
-def _capture_pass(*, system_focus: str, user: str, max_searches: int,
+def _capture_pass(*, enterprise_id: str, system_focus: str, user: str,
+                  max_searches: int,
                   skill_module: str | None = None) -> tuple[list[dict], bool]:
     """One web-search capture pass → (records, truncated). Raises on API
-    failure; callers isolate per competitor."""
+    failure; callers isolate per competitor.
+
+    `call_with_web_search` talks to app.llm DIRECTLY rather than through the
+    gateway, so neither the company key binding nor the usage label is applied
+    for us — both have to be stated here (the ds_claude_analysis pattern).
+    Without this every capture call in the run — which is nearly all of the
+    cost — landed on the dashboard as feature='unattributed', operation=None,
+    and on the default key rather than the company's.
+    """
+    from app.llm_keys import company_llm_key
+
     meta: dict = {}
-    raw = call_with_web_search(
-        system=f"{_CAPTURE_SYSTEM}\n\n### THIS PASS\n{system_focus}",
-        user=user,
-        model=ANSWER_MODEL,
-        max_tokens=_CAPTURE_MAX_TOKENS,
-        max_searches=max_searches,
-        meta_out=meta,
-        skill=CIR_SKILL,
-        skill_module=skill_module,
-    )
+    with company_llm_key(enterprise_id), usage_scope(
+        feature=Feature.ASK, operation="competitive_intel_capture"
+    ):
+        raw = call_with_web_search(
+            system=f"{_CAPTURE_SYSTEM}\n\n### THIS PASS\n{system_focus}",
+            user=user,
+            model=ANSWER_MODEL,
+            max_tokens=_CAPTURE_MAX_TOKENS,
+            max_searches=max_searches,
+            meta_out=meta,
+            skill=CIR_SKILL,
+            skill_module=skill_module,
+        )
     return parse_records(raw), meta.get("stop_reason") == "max_tokens"
 
 
@@ -638,7 +684,8 @@ class CaptureResult:
 
 
 def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
-             prior_state: dict) -> CaptureResult:
+             prior_state: dict, depth: str | None = None,
+             is_cancelled: Callable[[], bool] | None = None) -> CaptureResult:
     """Run the staged capture over the competitor set plus one "us" pass.
 
     Returns a `CaptureResult`; see that class for how the three zero-record
@@ -660,7 +707,12 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     per_pass_searches = int(cfg.get("max_searches", 12))
     search_budget = int(cfg.get("deep_dive_max_web_searches", 40))
     modules_max = int(cfg.get("cir_modules_max", len(CIR_DIAGNOSTIC_MODULES)))
-    stages = CIR_DIAGNOSTIC_MODULES[:max(1, modules_max)] if mode == MODE_REVIEW else []
+    # Depth defaults to whatever the mode implies; `answer` overrides it for a
+    # baseline, which wants Review STRUCTURE at Scan COST.
+    if depth is None:
+        depth = DEPTH_STAGED if mode == MODE_REVIEW else DEPTH_SCAN
+    stages = (CIR_DIAGNOSTIC_MODULES[:max(1, modules_max)]
+              if depth == DEPTH_STAGED else [])
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prior_note = (
         "\n\nPRIOR STATE (what we already hold on this company — look for what "
@@ -682,7 +734,7 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     def _run(name: str, focus: str, user: str, module: str | None) -> list[dict]:
         nonlocal truncated, calls, dropped
         got, cut = _capture_pass(
-            system_focus=focus, user=user,
+            enterprise_id=enterprise_id, system_focus=focus, user=user,
             max_searches=per_pass_searches, skill_module=module,
         )
         calls += 1
@@ -724,12 +776,19 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         _run("us", _US_FOCUS,
              f"{scope}. Today is {today}. Establish our own position now."
              + prior_note, None)
+    except AskCancelled:
+        raise                       # a Stop is not a pass failure
     except Exception:  # noqa: BLE001 — isolate; the competitors still matter
         logger.exception("competitive-intel: 'us' capture pass failed")
         failures += 1
     _classify("us", _us_before)
 
     for name in names[:_MAX_COMPETITORS]:
+        # Cooperative cancellation at the one boundary that matters: each
+        # competitor is minutes of paid web search, so a Stop that lands here
+        # saves everything after it. Raising (rather than returning) lets the
+        # caller distinguish "user abandoned it" from "we found nothing".
+        _check_cancelled(is_cancelled)
         needed = max(1, len(stages))
         if calls + needed > search_budget:
             # NEVER CHECKED — a different claim from "checked, nothing found",
@@ -745,6 +804,7 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
                 # runs it — one call per module, capped running digest carried
                 # forward so stages don't re-log the same observation.
                 for module in stages:
+                    _check_cancelled(is_cancelled)
                     carried = _observed_digest(records[before:])
                     prior = (f"\n\n--- already observed for {name} "
                              f"(do not repeat) ---\n{carried}") if carried else ""
@@ -758,6 +818,13 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
                      f"{scope}\n\nCompetitor under review: {name}. Today is "
                      f"{today}. Report what changed in roughly the last 90 days."
                      + prior_note, None)
+        except AskCancelled:
+            # Per-competitor isolation must NOT swallow a Stop: AskCancelled is
+            # an Exception, so without this the cancellation was caught here,
+            # logged as "capture failed for <competitor>", and the sweep carried
+            # on to the next one — still spending, which is the whole thing
+            # cancellation exists to prevent.
+            raise
         except Exception:  # noqa: BLE001 — isolate per competitor
             logger.exception("competitive-intel: capture failed for %s", name)
             failures += 1
@@ -818,7 +885,8 @@ def _log_capture(enterprise_id: str, result: CaptureResult, calls: int,
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def answer(*, enterprise_id: str, question: str,
-           history: list[dict] | None = None) -> dict | None:
+           history: list[dict] | None = None,
+           is_cancelled: Callable[[], bool] | None = None) -> dict | None:
     """Run the competitive-intelligence pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -871,14 +939,38 @@ def answer(*, enterprise_id: str, question: str,
     mode, mode_reason = choose_mode(question, prior_run, names)
     prior_state = (prior_run or {}).get("state") or {}
     prior_decisions = prior_state.get("decisions") or []
+
+    # A BASELINE (no prior state) renders the full Review structure but captures
+    # at SCAN depth, and over fewer competitors. The staged sweep is what made
+    # the first-ever report take ~20 minutes on staging — longer than the chat
+    # polls, longer than the ask-job liveness window, and long enough that every
+    # attempt was paid for and thrown away. A deliberate Review, asked for once
+    # state exists, keeps the staged depth.
+    baseline = not prior_state
+    depth = DEPTH_SCAN if baseline else (
+        DEPTH_STAGED if mode == MODE_REVIEW else DEPTH_SCAN
+    )
+    if baseline:
+        names = names[:_MAX_COMPETITORS_BASELINE]
     scope = _scope_block(profile, question)
 
+    # Claim the run BEFORE spending anything, so an abandoned sweep leaves a
+    # trace instead of costing money invisibly.
+    run_id = _claim_run(enterprise_id, question=question, mode=mode,
+                        competitor_set=names)
+
     try:
+        _check_cancelled(is_cancelled)
         capture = _capture(
             enterprise_id, scope=scope, names=names, mode=mode,
             prior_state=prior_state if isinstance(prior_state, dict) else {},
+            depth=depth, is_cancelled=is_cancelled,
         )
         records = capture.records
+    except AskCancelled:
+        # The user stopped it. Not a failure — re-raise so the ask worker leaves
+        # the job `cancelled` and no error bubble is shown.
+        raise
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
         logger.exception("competitive-intel: capture failed for %s", enterprise_id)
         return _plain_payload(
@@ -902,6 +994,8 @@ def answer(*, enterprise_id: str, question: str,
         )
 
     try:
+        # Last checkpoint before the document-scale synthesis call.
+        _check_cancelled(is_cancelled)
         data = _analyse(
             enterprise_id, question=question, history=history, mode=mode,
             names=names, set_source=set_source, records=records,
@@ -909,6 +1003,8 @@ def answer(*, enterprise_id: str, question: str,
             prior_decisions=prior_decisions,
         )
         html = competitive_intel_report.render_html(data)
+    except AskCancelled:
+        raise
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("competitive-intel: synthesis failed for %s", enterprise_id)
         return _plain_payload(
@@ -919,9 +1015,9 @@ def answer(*, enterprise_id: str, question: str,
 
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     window_label = str(metadata.get("window") or "")[:200]
-    _save_run(
-        enterprise_id, question=question, mode=mode, window_label=window_label,
-        competitor_set=names, records=records,
+    _finish_run(
+        enterprise_id, run_id, question=question, mode=mode,
+        window_label=window_label, competitor_set=names, records=records,
         state=data.get("next_state") if isinstance(data.get("next_state"), dict) else {},
         metadata=metadata, html=html,
     )
@@ -1001,7 +1097,19 @@ def _analyse(enterprise_id: str, *, question: str, history: list[dict] | None,
         "object per dated, sourced observation) ===\n"
         + json.dumps(records, ensure_ascii=False)
     )
-    result = llm_call(
+    with usage_scope(feature=Feature.ASK, operation="competitive_intel_report"):
+        result = _analyse_call(
+            enterprise_id=enterprise_id, history=history, question=question,
+            header=header,
+        )
+    data = result.output
+    if not isinstance(data, dict):
+        raise ValueError(f"expected dict output, got {type(data).__name__}")
+    return data
+
+
+def _analyse_call(*, enterprise_id: str, history, question: str, header: str):
+    return llm_call(
         enterprise_id=enterprise_id,
         agent="qa",
         purpose="competitive_intel_report",
@@ -1016,10 +1124,6 @@ def _analyse(enterprise_id: str, *, question: str, history: list[dict] | None,
         # timeout — stream on the long read timeout, like public_feedback.
         long_output=True,
     )
-    data = result.output
-    if not isinstance(data, dict):
-        raise ValueError(f"expected dict output, got {type(data).__name__}")
-    return data
 
 
 # ── Best-effort persistence (works with the table absent) ────────────────────
@@ -1039,12 +1143,39 @@ def _latest_run(enterprise_id: str) -> dict | None:
     return run if isinstance(run, dict) else None
 
 
-def _save_run(enterprise_id: str, **kw) -> None:
-    """Persist the completed run. A failure degrades the NEXT run (it will be a
-    Review) and follow-up querying; the answer already rendered."""
+def _claim_run(enterprise_id: str, *, question: str, mode: str,
+               competitor_set: list[str]) -> int | None:
+    """Reserve the run row BEFORE the sweep spends anything.
+
+    Returns the row id, or None when the table is absent or the write fails —
+    in which case completion falls back to a plain insert, exactly as before.
+    Claiming is what makes an abandoned run visible: staging attempts that timed
+    out left no row at all, so a twenty-minute paid sweep was indistinguishable
+    from a request that never happened."""
     try:
         from app import db
 
-        db.save_competitive_intel_run(enterprise_id, **kw)
+        return db.claim_competitive_intel_run(
+            enterprise_id, question=question, mode=mode,
+            competitor_set=competitor_set,
+        )
+    except Exception:  # noqa: BLE001 — best-effort; the run still proceeds
+        logger.exception("competitive-intel: run claim failed for %s", enterprise_id)
+        return None
+
+
+def _finish_run(enterprise_id: str, run_id: int | None, *, question: str,
+                **kw) -> None:
+    """Fill in the claimed run and mark it complete. Falls back to a fresh
+    insert when the claim didn't land, so persistence never depends on it. A
+    failure degrades the NEXT run (it will be a Review) and follow-up querying;
+    the answer already rendered."""
+    try:
+        from app import db
+
+        if run_id is not None:
+            db.complete_competitive_intel_run(run_id, **kw)
+        else:
+            db.save_competitive_intel_run(enterprise_id, question=question, **kw)
     except Exception:  # noqa: BLE001 — follow-ups degrade; the answer stands
         logger.exception("competitive-intel: run save failed for %s", enterprise_id)
