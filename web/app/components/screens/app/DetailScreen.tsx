@@ -11,6 +11,9 @@ import { EmptyPane } from "../../shared/EmptyPane"
 import { EvidenceSections } from "../../shared/EvidenceSections"
 import { EvidenceHtmlBrief } from "../../shared/EvidenceHtmlBrief"
 import { StreamingHtmlPreview, stripLeadingFence } from "../../shared/StreamingHtmlPreview"
+import { GeneratingBanner, GeneratingPane } from "../../shared/GenerationState"
+import { EVIDENCE_GEN } from "../../shared/generationPhases"
+import { IconMicroscope } from "@tabler/icons-react"
 import { stripHtmlCodeFence } from "../../../lib/htmlBrief"
 
 export function DetailScreen() {
@@ -173,9 +176,11 @@ export function DetailScreen() {
         // render it as it grows with a slim indicator instead of the skeleton.
         <div className="prd-frame">
           <div className="prd-body">
-            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="evidence-streaming"
+              title="Writing the evidence brief…"
+              sub="Rendering it below as it's written — the finished brief replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
               title="Evidence brief (generating)"
@@ -184,11 +189,16 @@ export function DetailScreen() {
           </div>
         </div>
       ) : evidenceState.kind === "loading" ? (
-        <EmptyPane
-          title="Generating evidence…"
-          hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
-          placeholders={4}
-        />
+        <div className="prd-frame">
+          <div className="prd-body">
+            <GeneratingPane
+              {...EVIDENCE_GEN}
+              testId="evidence-generating"
+              icon={<IconMicroscope size={19} />}
+              title="Generating evidence…"
+            />
+          </div>
+        </div>
       ) : evidenceState.kind === "error" ? (
         <EmptyPane
           title="Couldn't load full evidence"
