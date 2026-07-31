@@ -71,18 +71,41 @@ CONFLUENCE_ACCESSIBLE_RESOURCES_URL = (
 # + /{cloud_id}/wiki/api/v2/... (v2) or /{cloud_id}/wiki/rest/api/... (v1)
 CONFLUENCE_API_BASE = "https://api.atlassian.com/ex/confluence"
 
-# Fixed scope set for the Sprntly Confluence connector. Classic scopes, which
-# Atlassian recommends over the granular ones where they exist.
-#   read:confluence-space.summary    — list spaces (the space picker)
-#   read:confluence-content.summary  — content metadata without expansions
-#   read:confluence-content.all      — page/blogpost BODIES (the KG ingest)
-#   search:confluence                — CQL search (content discovery)
-#   read:confluence-user             — resolve the authorizing user for the label
-#   offline_access                   — REQUIRED for a refresh_token (~1h tokens)
+# Fixed scope set for the Sprntly Confluence connector.
+#
+# THE V1/V2 SCOPE SPLIT — the thing that will bite anyone editing this list.
+# Atlassian has two scope families and they are NOT interchangeable:
+#   * CLASSIC  (read:confluence-content.all, read:confluence-space.summary…)
+#     serve the v1 API under /wiki/rest/api/...
+#   * GRANULAR (read:space:confluence, read:page:confluence…) serve the v2 API
+#     under /wiki/api/v2/...
+# Calling a v2 endpoint with classic scopes returns
+# `401 {"code":401,"message":"Unauthorized; scope does not match"}` — an
+# authentication-shaped error for what is really an authorization mismatch,
+# which makes it easy to misread as a bad token. We read v2 for everything
+# except the current-user lookup, hence granular + one classic scope.
+#
+#   read:space:confluence     — GET /wiki/api/v2/spaces (the space picker)
+#   read:page:confluence      — GET /wiki/api/v2/pages (and, per Atlassian's
+#                               endpoint docs, /blogposts too)
+#   read:blogpost:confluence  — declared anyway: the scopes reference lists it
+#                               as "View blogposts" while the blogposts
+#                               endpoint doc claims read:page covers it. A
+#                               redundant scope is harmless; a missing one is
+#                               a 401 mid-sync.
+#   read:confluence-user      — CLASSIC, for GET /wiki/rest/api/user/current.
+#                               v2 has no current-user route, and mixing the
+#                               families in one app is permitted (the console
+#                               exposes Classic and Granular as separate tabs
+#                               on the same app).
+#   offline_access            — REQUIRED for a refresh_token (~1h tokens)
+#
+# Every scope here must ALSO be granted on the app in the developer console,
+# or the consent screen 400s. And scopes are baked into the token at consent:
+# changing this list means every existing connection must RECONNECT.
 CONFLUENCE_SCOPES = (
-    "read:confluence-space.summary read:confluence-content.summary "
-    "read:confluence-content.all search:confluence read:confluence-user "
-    "offline_access"
+    "read:space:confluence read:page:confluence read:blogpost:confluence "
+    "read:confluence-user offline_access"
 )
 
 #: `connections.config` key holding the resolved site id, cached at connect so
@@ -341,6 +364,16 @@ def site_url_for_cloud(access_token: str, cloud_id: str) -> str | None:
     for site in get_accessible_resources(access_token):
         if site.get("id") == cloud_id:
             return site.get("url")
+    return None
+
+
+def site_name_for_cloud(access_token: str, cloud_id: str) -> str | None:
+    """The site's display name, used as a fallback connection label when the
+    identity lookup is refused (an org can hide user details while content
+    reads work fine). Returns None if unavailable."""
+    for site in get_accessible_resources(access_token):
+        if site.get("id") == cloud_id:
+            return site.get("name")
     return None
 
 

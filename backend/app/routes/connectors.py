@@ -1792,9 +1792,17 @@ def confluence_list_spaces(
     here, and there is no scope that would widen it."""
     try:
         ctx = confluence_oauth.sync_context(company.company_id)
+        spaces = confluence_oauth.list_spaces(ctx.access_token, ctx.cloud_id)
     except confluence_oauth.ConfluenceNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
-    spaces = confluence_oauth.list_spaces(ctx.access_token, ctx.cloud_id)
+    except confluence_oauth.ConfluenceAuthExpiredError as e:
+        # Must be caught: an escaping exception becomes an unhandled 500 with
+        # no CORS headers, which the browser reports as a bare "Failed to
+        # fetch" — the picker then shows a network error for what is really a
+        # reconnect prompt. The commonest cause is a token minted before the
+        # granular v2 scopes were added, which fails with
+        # "Unauthorized; scope does not match".
+        raise HTTPException(400, str(e)) from e
     return {"spaces": spaces, "selected_ids": ctx.space_ids}
 
 

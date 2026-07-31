@@ -411,24 +411,51 @@ the consent screen 400s on undeclared scopes with no clue why.
   plus one localhost URL for dev, e.g.
   `http://localhost:8000/v1/connectors/confluence/callback`.
 
-### Permissions (scopes)
+### Permissions (scopes) — read the v1/v2 trap first
 
-Add the **Confluence API** under *Permissions*, then grant these classic
-scopes (Atlassian recommends classic over granular where both exist).
-Declared in `app/connectors/confluence_oauth.py::CONFLUENCE_SCOPES`; the
-app's declared scopes must be a superset or the consent screen 400s.
+**Atlassian has two scope families and they are not interchangeable.**
 
-| Scope | Why |
-|---|---|
-| `read:confluence-space.summary` | List spaces (the space picker) |
-| `read:confluence-content.summary` | Content metadata without expansions |
-| `read:confluence-content.all` | Page/blog-post **bodies** (the KG ingest) |
-| `search:confluence` | CQL content search |
-| `read:confluence-user` | Resolve the authorizing user (`/user/current`) for the label |
-| `offline_access` | Get a **refresh token** — access tokens last ~1 h |
+- **Classic** (`read:confluence-content.all`, `read:confluence-space.summary`, …)
+  serve the **v1** API under `/wiki/rest/api/...`
+- **Granular** (`read:space:confluence`, `read:page:confluence`, …) serve the
+  **v2** API under `/wiki/api/v2/...`
+
+Sprntly reads v2 for everything except the current-user lookup (v2 has no
+such route), so it needs **granular** scopes plus one classic one. Calling a
+v2 endpoint with classic scopes returns:
+
+```
+401 {"code":401,"message":"Unauthorized; scope does not match"}
+```
+
+which looks like a bad token but is really an authorization mismatch. If you
+see that, the scopes are wrong — not the credential.
+
+Add the **Confluence API** under *Permissions*. The console shows **Classic**
+and **Granular** as separate tabs on the same app; you need entries from
+both. Declared in `app/connectors/confluence_oauth.py::CONFLUENCE_SCOPES`;
+the app's declared scopes must be a superset or the consent screen 400s.
+
+| Scope | Tab | Why |
+|---|---|---|
+| `read:space:confluence` | Granular | `GET /wiki/api/v2/spaces` — the space picker |
+| `read:page:confluence` | Granular | `GET /wiki/api/v2/pages` (and blog posts) |
+| `read:blogpost:confluence` | Granular | Declared for safety — the scopes reference lists it while the endpoint doc claims `read:page` covers it |
+| `read:confluence-user` | Classic | `GET /wiki/rest/api/user/current` for the account label |
+| `offline_access` | — | Get a **refresh token**; access tokens last ~1 h |
 
 As with Jira, `offline_access` plus `prompt=consent` on the authorize URL
 are what make Atlassian return a refresh token.
+
+**Scopes are baked into the token at consent.** Changing this list means
+every existing connection must **reconnect** — refreshing carries the old
+scope set forward, so a stale connection keeps 401ing until the user
+re-authorizes.
+
+The health probe calls `list_spaces(limit=1)` rather than the identity
+endpoint precisely because of this split: an identity-only probe answers on
+the classic scope and would report a connection healthy while every sync
+401s.
 
 ### Env vars
 

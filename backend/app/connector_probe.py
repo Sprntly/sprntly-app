@@ -219,6 +219,23 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
         cloud_id = (json.loads(row.get("config_json") or "{}")).get(
             confluence_oauth.CONFIG_CLOUD_ID
         ) or confluence_oauth.first_cloud_id(access_token)
+        # Probe with the call the CONNECTOR actually depends on, not a cheap
+        # identity endpoint. Confluence has two scope families: the v1
+        # current-user route answers on a CLASSIC scope, while everything this
+        # connector reads is v2 and needs GRANULAR ones. An identity-only probe
+        # therefore reports a healthy connection whose every sync 401s with
+        # "scope does not match" — which is exactly the state a token minted
+        # before the granular scopes were added is in. Listing one space costs
+        # the same round trip and proves the thing that matters.
+        if cloud_id:
+            try:
+                confluence_oauth.list_spaces(
+                    access_token, cloud_id, limit=1, max_pages=1
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence rejected the token: {e}", reason="rejected"
+                ) from e
         raw_user = (
             confluence_oauth.fetch_current_user(access_token, cloud_id)
             if cloud_id else {}
@@ -229,6 +246,14 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
             user_obj = {
                 "email": raw_user.get("email"),
                 "name": raw_user.get("displayName") or raw_user.get("publicName"),
+            }
+        elif cloud_id:
+            # The scope check above passed, so the connection IS healthy even
+            # though the identity lookup came back empty (an org can refuse
+            # read:confluence-user while content reads work). Fall back to the
+            # site name so this doesn't read as a rejected credential.
+            user_obj = {
+                "name": confluence_oauth.site_name_for_cloud(access_token, cloud_id)
             }
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""

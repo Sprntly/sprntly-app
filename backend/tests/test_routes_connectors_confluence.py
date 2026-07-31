@@ -122,15 +122,24 @@ def test_authorize_url_has_required_params(confluence_env):
     assert "jira" not in url
 
 
-def test_authorize_url_requests_content_and_space_scopes(confluence_env):
-    """The space picker needs space.summary; the KG ingest needs content.all
-    (bodies). Losing either silently degrades a whole feature."""
+def test_authorize_url_requests_granular_v2_scopes(confluence_env):
+    """Everything this connector reads is the v2 API, which answers ONLY to
+    granular scopes. Requesting the classic equivalents instead yields
+    `401 Unauthorized; scope does not match` on every call — an
+    authentication-shaped error for an authorization mismatch, easy to
+    misread as a bad token. This pins the family."""
     from app.connectors import confluence_oauth
     scopes = confluence_oauth.CONFLUENCE_SCOPES.split()
-    assert "read:confluence-space.summary" in scopes
-    assert "read:confluence-content.all" in scopes
+    assert "read:space:confluence" in scopes      # GET /api/v2/spaces
+    assert "read:page:confluence" in scopes       # GET /api/v2/pages
+    assert "read:blogpost:confluence" in scopes
+    assert "offline_access" in scopes             # refresh token
+    # The one classic scope, for the v1 current-user route (v2 has none).
     assert "read:confluence-user" in scopes
-    assert "offline_access" in scopes
+    # The classic CONTENT scopes must not come back: they look right and are
+    # silently useless against v2.
+    assert not [s for s in scopes if s.startswith("read:confluence-content")]
+    assert "read:confluence-space.summary" not in scopes
 
 
 def test_exchange_code_for_token_posts_correctly(confluence_env):
@@ -749,6 +758,33 @@ def test_list_spaces_404_when_not_connected(confluence_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.get("/v1/connectors/confluence/spaces")
     assert r.status_code == 404
+
+
+def test_list_spaces_returns_400_not_500_on_a_rejected_token(
+    confluence_env, monkeypatch
+):
+    """An escaping exception becomes an unhandled 500 with no CORS headers,
+    which the browser reports as a bare "Failed to fetch" — the picker then
+    shows a network error for what is really a reconnect prompt. The
+    commonest trigger is a token minted before the granular v2 scopes were
+    added ("Unauthorized; scope does not match")."""
+    import time
+
+    ctx = company_client(monkeypatch)
+    _seed_confluence_row(
+        ctx.company_id,
+        {"access_token": "stale-scopes", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {"cloud_id": "cloud-9",
+         "sites": [{"id": "cloud-9", "url": "https://acme.atlassian.net"}]},
+    )
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(ok=False, status=401,
+                                  text='{"code":401,"message":"Unauthorized; '
+                                       'scope does not match"}')):
+        r = ctx.client.get("/v1/connectors/confluence/spaces")
+    assert r.status_code == 400, r.text
+    assert "reconnect" in r.text.lower()
 
 
 def test_save_spaces_persists_ids_and_keys(confluence_env, monkeypatch):

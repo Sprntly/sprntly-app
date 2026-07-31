@@ -130,7 +130,18 @@ def _confluence_row(token: dict, *, cloud_id: str | None = "cloud-1") -> dict:
     return row
 
 
-def test_confluence_healthy_resolves_label(monkeypatch):
+@pytest.fixture
+def _confluence_scopes_ok(monkeypatch):
+    """Default the scope check to passing. The probe's real assertion is
+    list_spaces (see test_confluence_unhealthy_when_v2_scopes_are_missing);
+    tests about labelling stub it out so they isolate the label logic."""
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "list_spaces",
+        lambda tok, cloud, **kw: [{"id": "s1", "key": "ENG"}],
+    )
+
+
+def test_confluence_healthy_resolves_label(monkeypatch, _confluence_scopes_ok):
     import time
 
     monkeypatch.setattr(
@@ -148,7 +159,7 @@ def test_confluence_healthy_resolves_label(monkeypatch):
     assert detail == "alice@acme.test"
 
 
-def test_confluence_falls_back_to_public_name(monkeypatch):
+def test_confluence_falls_back_to_public_name(monkeypatch, _confluence_scopes_ok):
     """An org privacy setting can hide emails while content reads still work."""
     import time
 
@@ -167,12 +178,22 @@ def test_confluence_falls_back_to_public_name(monkeypatch):
     assert detail == "alice"
 
 
-def test_confluence_unhealthy_on_empty_identity(monkeypatch):
+def test_confluence_healthy_with_site_name_when_identity_is_refused(
+    monkeypatch, _confluence_scopes_ok
+):
+    """Unlike the other providers, an empty identity payload here is NOT a
+    rejected credential: an org can refuse read:confluence-user while content
+    reads work perfectly. The scope check is what decides health, so this
+    falls back to the site name rather than reporting a dead connection."""
     import time
 
     monkeypatch.setattr(
         connector_probe.confluence_oauth, "fetch_current_user",
         lambda tok, cloud: {},
+    )
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "site_name_for_cloud",
+        lambda tok, cloud: "Acme Wiki",
     )
     healthy, detail = probe_connection(
         "confluence",
@@ -181,11 +202,42 @@ def test_confluence_unhealthy_on_empty_identity(monkeypatch):
             "obtained_at": int(time.time()), "expires_in": 3600,
         }),
     )
-    assert healthy is False
-    assert "rejected" in detail
+    assert healthy is True
+    assert detail == "Acme Wiki"
 
 
-def test_confluence_uses_cached_cloud_id_without_resolving(monkeypatch):
+def test_confluence_unhealthy_when_v2_scopes_are_missing(monkeypatch):
+    """The defect this probe exists to catch. Confluence has two scope
+    families: the v1 current-user route answers on a CLASSIC scope, while
+    every read this connector performs is v2 and needs GRANULAR ones. An
+    identity-only probe reports GREEN on a token whose every sync 401s with
+    "scope does not match" — precisely the state of a connection made before
+    the granular scopes were requested."""
+    import time
+
+    def _rejected(tok, cloud, **kw):
+        raise connector_probe.confluence_oauth.ConfluenceAuthExpiredError(
+            "Unauthorized; scope does not match"
+        )
+
+    monkeypatch.setattr(connector_probe.confluence_oauth, "list_spaces", _rejected)
+    # Identity would succeed — that is exactly why it must not be the probe.
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "fetch_current_user",
+        lambda tok, cloud: {"email": "alice@acme.test"},
+    )
+    with pytest.raises(ProbeError) as ei:
+        probe_connection(
+            "confluence",
+            _confluence_row({
+                "access_token": "t", "refresh_token": "r",
+                "obtained_at": int(time.time()), "expires_in": 3600,
+            }),
+        )
+    assert ei.value.reason == "rejected"
+
+
+def test_confluence_uses_cached_cloud_id_without_resolving(monkeypatch, _confluence_scopes_ok):
     """accessible-resources is an extra round trip per probe; the cached
     config_json.cloud_id exists to avoid it."""
     import time
@@ -215,7 +267,7 @@ def test_confluence_uses_cached_cloud_id_without_resolving(monkeypatch):
     assert called["resolved"] is False
 
 
-def test_confluence_refresh_persists_and_keeps_company_id(monkeypatch):
+def test_confluence_refresh_persists_and_keeps_company_id(monkeypatch, _confluence_scopes_ok):
     """The highest-risk regression in the connector: lose company_id on a
     refresh and `runner.token_for` raises on the NEXT sync, far from the
     change that caused it."""
