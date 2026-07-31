@@ -3297,8 +3297,32 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => {
-          // Resolved at send time — tabsRef, not the closure — so a
+        ask: async () => {
+          // The conversation id this ask belongs to. On a FOLLOW-UP the tab
+          // already carries it and this resolves without a round trip; on the
+          // tab's FIRST message the row is still being created —
+          // pushPendingConversation fires the create and deliberately does not
+          // await it — so reading `dbConvId` synchronously here would yield
+          // null. That is how a first-message HTML report got captured with
+          // conversation_id NULL and the Reports panel then said "No reports in
+          // this chat" (staging P1, 2026-07-30): the id is fixed at REQUEST
+          // time and nothing backfills it afterwards.
+          //
+          // `ensureConversation` shares the very same in-flight create the turn
+          // persistence uses (create-once per tab), so awaiting it costs at most
+          // the remainder of one already-issued request and never mints a second
+          // conversation. It resolves null on failure, so a create that fails
+          // still lets the ask through — exactly the previous behaviour.
+          const convId =
+            tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
+            (await persistence.ensureConversation(targetTabId, {
+              turnId: id,
+              title: displayQuery.length > 52
+                ? `${displayQuery.slice(0, 49)}…`
+                : displayQuery,
+              query: displayQuery,
+            }))
+          // Resolved AFTER the await — tabsRef, not the closure — so a
           // conversation created (or a PRD that finished generating) AFTER the
           // tab opened is still picked up. `sendQuery` carries any attached-
           // document content; `isStopped` lets the user stop the ask.
@@ -3321,8 +3345,9 @@ export function ChatScreen() {
             // (history) on EVERY follow-up, not just PRD-tab chats — the backend
             // loads history by conversation_id, so without this each ask is
             // context-free and a follow-up like "get all in to-do status" loses
-            // the thread it was answering.
-            ...(targetTab?.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+            // the thread it was answering. It is ALSO what attaches a captured
+            // HTML report to this chat room (app/report_capture.py).
+            ...(convId != null ? { conversation_id: convId } : {}),
             // PRD-tab chat: also send the PRD id so the answer is grounded on the
             // open PRD + its insight/evidence/tickets/prototype.
             ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
