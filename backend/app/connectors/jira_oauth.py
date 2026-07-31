@@ -36,6 +36,7 @@ import requests
 from fastapi import HTTPException
 
 from app.config import settings
+from app.connectors.tracker_errors import TrackerDeleteForbiddenError
 
 logger = logging.getLogger(__name__)
 
@@ -635,6 +636,97 @@ def update_issue(
     site_url = _site_url_for_cloud(access_token, cloud_id)
     url = f"{site_url}/browse/{issue_key}" if site_url else None
     return {"key": issue_key, "url": url}
+
+
+def _delete(
+    access_token: str, cloud_id: str, path: str, what: str,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    """Shared DELETE against a Jira cloud site, with the status contract every
+    removal in Sprntly relies on:
+
+      204/200  the object is gone      -> True
+      404/410  it was ALREADY gone     -> True (the caller wanted absence, and
+               absence is what holds — reporting failure would make the sync
+               retry a delete forever against an object that no longer exists)
+      403      refused on permissions  -> TrackerDeleteForbiddenError, so the
+               caller can close the item instead of destroying it
+      401      the token is bad        -> JiraAuthExpiredError (reconnect)
+      other                            -> HTTPException(502)
+
+    The 401/403 SPLIT is the reason this doesn't reuse the update/create error
+    handling, which collapses both into JiraAuthExpiredError. That collapse is
+    right for a write (either way the user must act on the connection) and
+    wrong for a delete: a 403 here is a project-permission fact about the
+    Atlassian account, not a token problem, and a reconnect prompt would send
+    the user somewhere that cannot fix it.
+    """
+    resp = requests.delete(
+        f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/{path}",
+        params=params or {},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+        timeout=_TIMEOUT,
+    )
+    if resp.status_code in (404, 410):
+        logger.info("Jira %s: already gone (%s)", what, resp.status_code)
+        return True
+    if resp.status_code == 403:
+        logger.info("Jira %s refused on permissions", what)
+        raise TrackerDeleteForbiddenError(
+            "Jira refused the delete — the connected account needs the "
+            "'Delete Issues' project permission"
+        )
+    if resp.status_code == 401:
+        logger.warning("Jira %s auth rejected: 401", what)
+        raise JiraAuthExpiredError(
+            "Jira rejected the stored token — reconnect Jira to continue"
+        )
+    if not resp.ok:
+        logger.warning("Jira %s failed: %s %s", what, resp.status_code, resp.text[:300])
+        raise HTTPException(502, f"Jira {what} failed")
+    return True
+
+
+def delete_issue(
+    access_token: str, cloud_id: str, issue_key: str, *, delete_subtasks: bool = True
+) -> bool:
+    """Delete one issue (`DELETE /issue/{key}`). Returns True when the issue is
+    gone — including when it already was.
+
+    `delete_subtasks` maps to Jira's own `deleteSubtasks` query parameter.
+    Jira REFUSES to delete a parent that still has children unless it is set,
+    so the default is True: a Sprntly ticket owns the sub-tasks Sprntly created
+    under it, and leaving them orphaned under a deleted parent is exactly the
+    broken state this exists to prevent.
+
+    Raises TrackerDeleteForbiddenError when the account may not delete issues
+    (the common case on a default Jira permission scheme) — callers close the
+    issue instead. THIS IS PERMANENT: Jira has no undo and no trash for issue
+    deletes, so only call it for an object Sprntly itself created.
+    """
+    return _delete(
+        access_token, cloud_id, f"issue/{issue_key}", "delete_issue",
+        params={"deleteSubtasks": "true" if delete_subtasks else "false"},
+    )
+
+
+def delete_issue_comment(
+    access_token: str, cloud_id: str, issue_key: str, comment_id: str
+) -> bool:
+    """Delete one comment (`DELETE /issue/{key}/comment/{id}`). Returns True
+    when the comment is gone, including when it already was.
+
+    Raises TrackerDeleteForbiddenError on a 403 — Jira gates comment deletion
+    on "Delete All Comments" (or "Delete Own Comments" for the author), so an
+    app-posted comment is refusable independently of issue-delete rights.
+    """
+    return _delete(
+        access_token, cloud_id, f"issue/{issue_key}/comment/{comment_id}",
+        "delete_issue_comment",
+    )
 
 
 def _text_from_adf(doc: Any) -> str:
