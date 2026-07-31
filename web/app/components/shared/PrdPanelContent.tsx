@@ -17,6 +17,7 @@ import { markdownToPrdState } from "../../lib/prd-adapter"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
+import { OriginQuestionBanner } from "./OriginQuestionBanner"
 import { IconTicket } from "@tabler/icons-react"
 import {
   IconGrid,
@@ -257,6 +258,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       {/* Scrolling document area — the footer action bar below stays PINNED
           to the panel's bottom edge (mirrors how the header holds the tabs). */}
       <div className="prd-scroll">
+      {prd && <OriginQuestionBanner question={prd.question} />}
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">

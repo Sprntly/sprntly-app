@@ -733,6 +733,15 @@ export type PrdRecord = {
    *  `(brief_id, insight_index)`); `'ideation'` and `'upload'` PRDs have none.
    *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
   source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
+  /** The originating chat question, when this PRD was generated via the
+   *  "generate a PRD for X" chat command (routes/prd.py's generate-from-task).
+   *  Null/absent for every other generation path (brief insight, ideation,
+   *  import) and for rows generated before this column existed. */
+  question?: string | null
+  /** The originating ask_jobs row, when one exists. Currently always null in
+   *  practice — the chat-task PRD command runs outside the ask pipeline — kept
+   *  for shape parity with db/reports.py's identical column. */
+  ask_id?: number | null
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -766,6 +775,11 @@ export type EvidenceRecord = {
   status: "generating" | "ready" | "failed"
   error?: string | null
   variant?: string
+  /** The originating chat question — same shape/contract as PrdRecord.question
+   *  (see there). Set only on the chat-task Evidence path. */
+  question?: string | null
+  /** Kept for shape parity with PrdRecord.ask_id — currently always null. */
+  ask_id?: number | null
 }
 
 export const evidenceApi = {
@@ -3672,6 +3686,12 @@ export const conversationsApi = {
    *  tab can rehydrate the earlier chat. `conversation` is null when none exists. */
   byPrd: (prdId: number) =>
     api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-prd/${prdId}`),
+  /** Evidence mirror of byPrd — most recent conversation (with turns) bound to
+   *  an Evidence doc via `conversations.evidence_id`. `conversation` is null
+   *  when the caller has none (never generated it, or it predates this
+   *  linkage) — never 404. */
+  byEvidence: (evidenceId: number) =>
+    api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-evidence/${evidenceId}`),
   update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean; prd_id?: number }) =>
     api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
   remove: (id: number) =>

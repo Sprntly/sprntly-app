@@ -381,6 +381,10 @@ async def generate_task_evidence(
     *,
     template_version: int | None = None,
     variant: str = "v1",
+    question: str | None = None,
+    conversation_id: int | None = None,
+    company_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Generate the Evidence artifact for a chat-task PRD, IF the KG backs it.
 
@@ -390,7 +394,17 @@ async def generate_task_evidence(
     (brief_id, theme_id) — re-issuing the same task reuses the existing doc —
     then render the doc from the retrieved trail. Best-effort throughout; a
     failure marks the row failed and never disturbs the PRD generation running
-    in parallel."""
+    in parallel.
+
+    `question`/`conversation_id` carry the originating chat-task linkage
+    (mirrors the sibling PRD's `start_prd(question=...)` +
+    `bind_conversation_to_prd`) — `question` is stamped on the new row,
+    `conversation_id` (+ `company_id`/`user_id`, needed to scope the bind)
+    links the commanding chat via `conversations.evidence_id`. All optional:
+    callers with no chat context (none currently — this path is chat-task-only)
+    simply leave the doc's linkage NULL.
+    """
+    from app.db.conversations import bind_conversation_to_evidence
     from app.db.evidences import find_existing_evidence_for_theme, start_evidence
     from app.graph.retrieval import task_evidence_trail
 
@@ -426,7 +440,15 @@ async def generate_task_evidence(
             template_version=template_version,
             variant=variant,
             theme_id=theme_id,
+            question=question,
         )
+        # Link the commanding chat to this Evidence doc NOW (mirrors the PRD's
+        # bind_conversation_to_prd, called right after start_prd in routes/prd.py) —
+        # best-effort, never blocks/fails the generation below.
+        if conversation_id is not None and company_id:
+            bind_conversation_to_evidence(
+                conversation_id, evidence_id, company_id, user_id
+            )
         await asyncio.to_thread(
             _run_sync_task, evidence_id, insight, trail["signals"],
             enterprise_id, trail.get("kg_refs") or [],

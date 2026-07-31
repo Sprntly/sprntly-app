@@ -96,3 +96,74 @@ def get_conversation_prd_id(
             exc_info=True,
         )
         return None
+
+
+# ── Evidence half of the binding (mirrors the PRD pair above exactly) ───────
+#
+# Extends the SAME mechanism to Evidence rather than inventing a parallel one
+# (conversations.evidence_id, added alongside conversations.prd_id's existing
+# column — see the 20260731 migration): the chat-task command's Evidence
+# artifact (generate_task_evidence) gets the identical "bind the commanding
+# chat to the artifact server-side, before the caller could navigate away"
+# treatment PRDs already had.
+
+
+def bind_conversation_to_evidence(
+    conversation_id: int,
+    evidence_id: int,
+    company_id: str,
+    user_id: str | None,
+) -> bool:
+    """Point `conversation_id` at `evidence_id`. True if a row was updated.
+
+    Same ownership scoping and "only fills a NULL" semantics as
+    bind_conversation_to_prd — see its docstring."""
+    try:
+        c = require_client()
+        q = (
+            c.table("conversations")
+            .update({"evidence_id": evidence_id})
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .is_("evidence_id", "null")
+        )
+        if user_id:
+            q = q.eq("user_id", user_id)
+        resp: Any = q.execute()
+        return bool(resp.data)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to bind conversation %s to evidence %s", conversation_id, evidence_id,
+            exc_info=True,
+        )
+        return False
+
+
+def get_conversation_evidence_id(
+    conversation_id: int,
+    company_id: str,
+    user_id: str | None,
+) -> int | None:
+    """The Evidence doc this conversation is bound to, or None. Read half of
+    bind_conversation_to_evidence — see get_conversation_prd_id."""
+    try:
+        c = require_client()
+        q = (
+            c.table("conversations")
+            .select("evidence_id")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+        )
+        if user_id:
+            q = q.eq("user_id", user_id)
+        rows: Any = q.execute()
+        if rows.data:
+            return rows.data[0].get("evidence_id")
+        return None
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to read evidence binding for conversation %s", conversation_id,
+            exc_info=True,
+        )
+        return None

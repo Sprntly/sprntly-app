@@ -21,6 +21,7 @@ import {
   type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { OriginQuestionBanner } from "./OriginQuestionBanner"
 import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
@@ -691,6 +692,7 @@ function EvidenceTab() {
           </div>
         )}
 
+        {evidence && <OriginQuestionBanner question={evidence.question} />}
         {evidence ? (
           evidence.html ? (
             // v3 evidence — the self-contained HTML visual brief. It carries its

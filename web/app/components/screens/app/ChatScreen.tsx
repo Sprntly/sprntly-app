@@ -3968,25 +3968,12 @@ export function ChatScreen() {
     router.replace("/")
   }, [searchParams, startNewThread, router])
 
-  // ── PRD deep-link (`/brief?prd=<id>`) ─────────────────────────────────────
-  // The Slack "your PRD is ready" ping links here carrying the prd id. Open that
-  // PRD as a chat tab + panel via the SAME load flow the command palette / brief
-  // "View PRD" use (openPrdTab → kind:"load"). openPrdTab routes to `/`, which
-  // strips the `?prd=` param, so no separate replace is needed. Latched like the
-  // new-chat handler so it fires once per arrival and re-arms when absent.
-  const consumedPrdRef = useRef(false)
-  useEffect(() => {
-    const raw = searchParams.get("prd")
-    if (raw == null) {
-      consumedPrdRef.current = false
-      return
-    }
-    if (consumedPrdRef.current) return
-    const prdId = Number(raw)
-    if (!Number.isInteger(prdId) || prdId <= 0) return
-    consumedPrdRef.current = true
-    openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
-  }, [searchParams, openPrdTab])
+  // NOTE: the `/brief?prd=<id>` deep-link (Slack "your PRD is ready" ping) used
+  // to be consumed HERE. It's now handled shell-level by
+  // `(app)/hooks/useArtifactUrlSync.ts` (mounted once in AppShell), alongside
+  // its `?evidence=`/`?ticket=` siblings, so the same param works from any
+  // `(app)` page rather than only when ChatScreen happens to be mounted. See
+  // that hook for the current implementation + tests.
 
   const hasThread = thread.length > 0
   // A tab bound to a PRD or brief insight opens with the insight itself as the
