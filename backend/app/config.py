@@ -192,6 +192,16 @@ class Settings(BaseSettings):
     jira_client_secret: str = ""
     jira_oauth_redirect_uri: str = ""
 
+    # Confluence connector (Atlassian OAuth 2.0 3LO with ROTATING refresh
+    # tokens). A SEPARATE console app from Jira, not a shared one: an
+    # Atlassian 3LO integration carries exactly one callback URL, and one app
+    # declaring both products' scopes would ask a Jira-only customer to grant
+    # Confluence reads. Deliberately no fallback to the jira_* values — a
+    # silent misconfiguration there 400s on the consent screen with no clue why.
+    confluence_client_id: str = ""
+    confluence_client_secret: str = ""
+    confluence_oauth_redirect_uri: str = ""
+
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
     hubspot_client_secret: str = ""

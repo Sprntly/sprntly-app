@@ -298,9 +298,9 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders only the OPEN category's rows, not all 42 catalog rows", () => {
+  it("renders only the OPEN category's rows, not all 43 catalog rows", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(42) // v6 catalog + Uploaded documents + Slack's second (voice) placement
+    expect(total).toBe(43) // v6 catalog + Uploaded documents + Slack's second (voice) placement
     for (const cat of CONNECTOR_CATALOG) {
       // The `uploads` provider is never rendered as a connector row — it's
       // surfaced as the document-source list instead.
@@ -539,10 +539,10 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // One rail tab per surviving category. 12 connectors are wired, but the
+    // One rail tab per surviving category. 13 connectors are wired, but the
     // `uploads` provider is never shown as a row (it's the document-source
     // list) while dual-typed Slack renders a row on BOTH its shelves (voice
-    // + comms), so 12 connector rows render across the panels.
+    // + comms), so 13 connector rows render across the panels.
     const one = render({ categories: keptCategories })
     expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
@@ -553,7 +553,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(12)
+    expect(rowsAcrossPanels).toBe(13)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(
@@ -569,10 +569,10 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = renderAllPanels()
-    // 8 of the 10 wired connectors have an official bundled SVG mark
+    // 9 of the 11 wired connectors have an official bundled SVG mark
     // (Fireflies and Sprinklr keep their letter glyphs). Slack's mark
     // renders twice — its card sits on both the voice and comms shelves —
-    // so 9 <img> tags total.
+    // so 10 <img> tags total.
     for (const id of [
       "slack",
       "github",
@@ -582,10 +582,11 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
       "jira",
       "google_drive",
       "asana",
+      "confluence",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(9)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(10)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).

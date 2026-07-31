@@ -54,6 +54,11 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     # Documentation
     "google_drive": [DOCUMENTS],
     "notion": [DOCUMENTS],
+    # A team wiki: specs, decision records, runbooks, handbooks. Typed
+    # `documents` like Notion/Drive and NOT an evidence exception — a page
+    # asserting a customer problem is the author's claim about it, not
+    # measured proof, so Confluence alone must not open the brief gate.
+    "confluence": [DOCUMENTS],
     # The user's OWN documents, uploaded into a named source. A documentation
     # tool by type, but an evidence source by intent — see the exceptions below.
     "uploads": [DOCUMENTS],

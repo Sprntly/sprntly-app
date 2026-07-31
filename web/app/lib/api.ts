@@ -1717,6 +1717,10 @@ export const connectorsApi = {
   disconnectJira: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/jira`),
 
+  // ---- Confluence ----------------------------------------------------------
+  disconnectConfluence: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/confluence`),
+
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),

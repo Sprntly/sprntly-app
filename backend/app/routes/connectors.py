@@ -73,6 +73,7 @@ from app.config import settings
 from app.connectors import (
     asana_oauth,
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     fireflies_apikey,
     github_app,
@@ -447,6 +448,16 @@ def start_oauth(
             raise HTTPException(500, "Jira OAuth is not configured on the server")
         url = jira_oauth.authorize_url(
             state=jira_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == confluence_oauth.CONFLUENCE_PROVIDER:
+        if not confluence_oauth.confluence_configured():
+            raise HTTPException(500, "Confluence OAuth is not configured on the server")
+        url = confluence_oauth.authorize_url(
+            state=confluence_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -1694,6 +1705,76 @@ def jira_disconnect(
         raise HTTPException(404, "Jira is not connected")
     db.delete_connection(company.company_id, jira_oauth.JIRA_PROVIDER)
     return {"deleted": True, "provider": jira_oauth.JIRA_PROVIDER}
+
+
+# ─────────────────────── Confluence ───────────────────────
+
+
+@router.get("/confluence/callback")
+def confluence_callback(code: str, state: str):
+    payload = confluence_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = confluence_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Confluence did not return an access_token")
+
+    # Same cloud_id quirk as Jira: it is required for every subsequent REST
+    # call and is NOT in the token response, so cache it (and the site list)
+    # on the connection.
+    sites = confluence_oauth.get_accessible_resources(access_token)
+    cloud_id = sites[0].get("id") if sites else None
+    user = (
+        confluence_oauth.fetch_current_user(access_token, cloud_id)
+        if cloud_id else {}
+    )
+    label = confluence_oauth.account_label_from(user, sites)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides inside the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed (PULLERS key
+            # "company_id") — the puller needs the connection's config, which
+            # a lone access token can't reach. See token_payload_to_store.
+            confluence_oauth.token_payload_to_store(
+                token_json, company_id=company_id
+            )
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=confluence_oauth.CONFLUENCE_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=confluence_oauth.CONFLUENCE_SCOPES,
+        account_label=label,
+        config_json=json.dumps(
+            {
+                confluence_oauth.CONFIG_CLOUD_ID: cloud_id,
+                "sites": sites,
+                "user": user,
+            }
+        ),
+    )
+
+    # No-op today (confluence has no entry in kg_ingest PULLERS yet) but wired
+    # now so the puller PR is a one-line registration rather than a route edit.
+    kickoff_sync(company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, confluence_oauth.CONFLUENCE_PROVIDER)
+
+
+@router.delete("/confluence")
+def confluence_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, confluence_oauth.CONFLUENCE_PROVIDER)
+    row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Confluence is not connected")
+    db.delete_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    return {"deleted": True, "provider": confluence_oauth.CONFLUENCE_PROVIDER}
 
 
 # ─────────────────────── HubSpot ───────────────────────

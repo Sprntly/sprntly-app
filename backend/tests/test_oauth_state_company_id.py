@@ -17,10 +17,12 @@ from fastapi import HTTPException
 
 from app.connectors import (
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     github_app,
     google_oauth,
     hubspot_oauth,
+    jira_oauth,
 )
 
 
@@ -30,6 +32,11 @@ PROVIDERS = [
     ("clickup", clickup_oauth, clickup_oauth.CLICKUP_PROVIDER),
     ("hubspot", hubspot_oauth, hubspot_oauth.HUBSPOT_PROVIDER),
     ("google", google_oauth, google_oauth.GOOGLE_DRIVE_PROVIDER),
+    # The two Atlassian 3LO connectors. They share an identity provider AND
+    # the JWT secret, so the provider claim these tests pin is the only thing
+    # keeping either callback from accepting the other's state.
+    ("jira", jira_oauth, jira_oauth.JIRA_PROVIDER),
+    ("confluence", confluence_oauth, confluence_oauth.CONFLUENCE_PROVIDER),
 ]
 
 

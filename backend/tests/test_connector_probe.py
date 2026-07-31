@@ -112,3 +112,166 @@ def test_unsupported_provider_raises_probe_error():
     with pytest.raises(ProbeError) as ei:
         probe_connection("totally_made_up", _row("totally_made_up", {"access_token": "t"}))
     assert ei.value.reason == "unsupported"
+
+
+# ─────────────────────────── Confluence ───────────────────────────
+#
+# Atlassian 3LO: ~1h access tokens with ROTATING refresh tokens, so the probe
+# must refresh AND persist near expiry (a throwaway refresh strands the stored
+# one). It carries one obligation Jira's branch doesn't: company_id must
+# survive the rewrite, because that is the credential the kg_ingest puller is
+# handed.
+
+
+def _confluence_row(token: dict, *, cloud_id: str | None = "cloud-1") -> dict:
+    row = _row("confluence", token)
+    row["company_id"] = "co-42"
+    row["config_json"] = json.dumps({"cloud_id": cloud_id}) if cloud_id else "{}"
+    return row
+
+
+def test_confluence_healthy_resolves_label(monkeypatch):
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "fetch_current_user",
+        lambda tok, cloud: {"email": "alice@acme.test", "displayName": "Alice"},
+    )
+    healthy, detail = probe_connection(
+        "confluence",
+        _confluence_row({
+            "access_token": "t", "refresh_token": "r",
+            "obtained_at": int(time.time()), "expires_in": 3600,
+        }),
+    )
+    assert healthy is True
+    assert detail == "alice@acme.test"
+
+
+def test_confluence_falls_back_to_public_name(monkeypatch):
+    """An org privacy setting can hide emails while content reads still work."""
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "fetch_current_user",
+        lambda tok, cloud: {"publicName": "alice"},
+    )
+    healthy, detail = probe_connection(
+        "confluence",
+        _confluence_row({
+            "access_token": "t", "refresh_token": "r",
+            "obtained_at": int(time.time()), "expires_in": 3600,
+        }),
+    )
+    assert healthy is True
+    assert detail == "alice"
+
+
+def test_confluence_unhealthy_on_empty_identity(monkeypatch):
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "fetch_current_user",
+        lambda tok, cloud: {},
+    )
+    healthy, detail = probe_connection(
+        "confluence",
+        _confluence_row({
+            "access_token": "t", "refresh_token": "r",
+            "obtained_at": int(time.time()), "expires_in": 3600,
+        }),
+    )
+    assert healthy is False
+    assert "rejected" in detail
+
+
+def test_confluence_uses_cached_cloud_id_without_resolving(monkeypatch):
+    """accessible-resources is an extra round trip per probe; the cached
+    config_json.cloud_id exists to avoid it."""
+    import time
+
+    called = {"resolved": False}
+
+    def _boom(_tok):
+        called["resolved"] = True
+        return "should-not-be-used"
+
+    monkeypatch.setattr(connector_probe.confluence_oauth, "first_cloud_id", _boom)
+    seen: dict = {}
+
+    def _user(tok, cloud):
+        seen["cloud_id"] = cloud
+        return {"email": "a@b.test"}
+
+    monkeypatch.setattr(connector_probe.confluence_oauth, "fetch_current_user", _user)
+    probe_connection(
+        "confluence",
+        _confluence_row({
+            "access_token": "t", "refresh_token": "r",
+            "obtained_at": int(time.time()), "expires_in": 3600,
+        }, cloud_id="cloud-cached"),
+    )
+    assert seen["cloud_id"] == "cloud-cached"
+    assert called["resolved"] is False
+
+
+def test_confluence_refresh_persists_and_keeps_company_id(monkeypatch):
+    """The highest-risk regression in the connector: lose company_id on a
+    refresh and `runner.token_for` raises on the NEXT sync, far from the
+    change that caused it."""
+    persisted: dict = {}
+
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "refresh_access_token",
+        lambda rt: {"access_token": "fresh", "refresh_token": "rotated",
+                    "expires_in": 3600},
+    )
+    monkeypatch.setattr(connector_probe, "encrypt_token_json", lambda blob: blob)
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "fetch_current_user",
+        lambda tok, cloud: {"email": "alice@acme.test"},
+    )
+
+    from app import db
+
+    monkeypatch.setattr(
+        db, "update_connection_tokens",
+        lambda cid, provider, blob: persisted.update(
+            {"company_id": cid, "provider": provider, "blob": blob}
+        ),
+    )
+
+    healthy, detail = probe_connection(
+        "confluence",
+        # obtained_at 0 → provably expired → the refresh path runs.
+        _confluence_row({
+            "access_token": "stale", "refresh_token": "old-refresh",
+            "obtained_at": 0, "expires_in": 3600, "company_id": "co-42",
+        }),
+    )
+    assert healthy is True
+    assert detail == "alice@acme.test"
+
+    assert persisted["provider"] == "confluence"
+    stored = json.loads(persisted["blob"])
+    assert stored["access_token"] == "fresh"
+    assert stored["refresh_token"] == "rotated"   # rotation persisted
+    assert stored["company_id"] == "co-42"        # the puller's credential
+
+
+def test_confluence_refresh_rejection_raises_probe_error(monkeypatch):
+    def _dead(_rt):
+        raise connector_probe.confluence_oauth.ConfluenceAuthExpiredError("revoked")
+
+    monkeypatch.setattr(
+        connector_probe.confluence_oauth, "refresh_access_token", _dead
+    )
+    with pytest.raises(ProbeError) as ei:
+        probe_connection(
+            "confluence",
+            _confluence_row({
+                "access_token": "stale", "refresh_token": "dead",
+                "obtained_at": 0, "expires_in": 3600,
+            }),
+        )
+    assert ei.value.reason == "rejected"

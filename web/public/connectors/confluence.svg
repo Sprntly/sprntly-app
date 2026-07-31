@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" preserveAspectRatio="xMidYMid">
+    <title>Confluence</title>
+    <defs>
+        <linearGradient id="confluence-lower" x1="100%" y1="100%" x2="20%" y2="10%">
+            <stop offset="18%" stop-color="#0052CC"/>
+            <stop offset="100%" stop-color="#2684FF"/>
+        </linearGradient>
+        <linearGradient id="confluence-upper" x1="0%" y1="0%" x2="80%" y2="90%">
+            <stop offset="18%" stop-color="#0052CC"/>
+            <stop offset="100%" stop-color="#2684FF"/>
+        </linearGradient>
+    </defs>
+    <g fill="none" stroke-width="44" stroke-linecap="round">
+        <path stroke="url(#confluence-lower)" d="M24 214C70 150 150 168 232 206"/>
+        <path stroke="url(#confluence-upper)" d="M232 42C186 106 106 88 24 50"/>
+    </g>
+</svg>

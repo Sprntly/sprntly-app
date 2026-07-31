@@ -373,6 +373,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectGithub()
   } else if (providerId === "jira") {
     await connectorsApi.disconnectJira()
+  } else if (providerId === "confluence") {
+    await connectorsApi.disconnectConfluence()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {

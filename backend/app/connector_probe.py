@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from app.connectors import (
     asana_oauth,
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     fireflies_apikey,
     github_app,
@@ -175,6 +176,59 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
             user_obj = {
                 "email": raw_user.get("emailAddress"),
                 "name": raw_user.get("displayName"),
+            }
+    elif provider == confluence_oauth.CONFLUENCE_PROVIDER:
+        # Same shape as the Jira branch above — Atlassian 3LO, ~1h access
+        # tokens, ROTATING refresh tokens, so a refresh must be persisted or
+        # the stored one is stranded. One extra obligation Jira doesn't have:
+        # company_id must survive the refresh, because it is the credential
+        # the kg_ingest puller receives (see token_payload_to_store).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = confluence_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    confluence_oauth.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    confluence_oauth.CONFLUENCE_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Confluence probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        cloud_id = (json.loads(row.get("config_json") or "{}")).get(
+            confluence_oauth.CONFIG_CLOUD_ID
+        ) or confluence_oauth.first_cloud_id(access_token)
+        raw_user = (
+            confluence_oauth.fetch_current_user(access_token, cloud_id)
+            if cloud_id else {}
+        )
+        # Normalize Confluence's field names onto the keys _label_from_user
+        # expects (it answers with publicName when the org hides emails).
+        if raw_user:
+            user_obj = {
+                "email": raw_user.get("email"),
+                "name": raw_user.get("displayName") or raw_user.get("publicName"),
             }
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""

@@ -1,8 +1,8 @@
 # Third-party connectors
 
-How Sprntly registers and authenticates with Google Drive, Figma, and
-GitHub. This is the operator guide — read it before clicking through any
-provider's developer-settings UI.
+How Sprntly registers and authenticates with Google Drive, Figma, GitHub,
+Jira, and Confluence. This is the operator guide — read it before clicking
+through any provider's developer-settings UI.
 
 All connector tokens are stored Fernet-encrypted in the `connections`
 table (one row per provider) keyed by the env var `TOKEN_ENCRYPTION_KEY`.
@@ -375,3 +375,118 @@ calls then go to
   paragraphs on create/update.
 - `priority` is omitted when unmapped: not every project defines a
   priority field, and Jira 400s on unknown fields.
+
+---
+
+## Confluence
+
+Sprntly connects to Confluence Cloud via an **Atlassian OAuth 2.0 (3LO)**
+app — a **second, separate** integration from the Jira one. Register at
+<https://developer.atlassian.com/console/myapps/> → **Create** →
+**OAuth 2.0 integration**, named e.g. `Sprntly (Confluence)`.
+
+### Why a separate app (vs adding Confluence scopes to the Jira app)?
+
+- **One app, one callback URL.** An Atlassian 3LO integration carries
+  exactly one Callback URL. Sharing would force both connectors through a
+  single `/atlassian/callback` that disambiguates on the state JWT's
+  `provider` claim — and `jira_oauth.verify_oauth_state` deliberately
+  hard-rejects a state whose provider isn't `jira`. That is a refactor of
+  a shipped connector to enable a new one.
+- **Consent blast radius.** One app declaring both products' scopes means
+  a customer connecting only Jira is asked to grant
+  `read:confluence-content.all`. Over-broad, for zero benefit.
+- **Independent kill switch.** `confluence_configured()` returning False
+  disables Confluence without touching Jira.
+
+There is deliberately **no** `CONFLUENCE_CLIENT_ID or JIRA_CLIENT_ID`
+fallback in `config.py`: it would produce a silent misconfiguration where
+the consent screen 400s on undeclared scopes with no clue why.
+
+### App settings
+
+- **Name**: `Sprntly (Confluence)`
+- **Callback URL** (Authorization → OAuth 2.0 (3LO)):
+  `https://api.sprntly.ai/v1/connectors/confluence/callback` (production)
+  plus one localhost URL for dev, e.g.
+  `http://localhost:8000/v1/connectors/confluence/callback`.
+
+### Permissions (scopes)
+
+Add the **Confluence API** under *Permissions*, then grant these classic
+scopes (Atlassian recommends classic over granular where both exist).
+Declared in `app/connectors/confluence_oauth.py::CONFLUENCE_SCOPES`; the
+app's declared scopes must be a superset or the consent screen 400s.
+
+| Scope | Why |
+|---|---|
+| `read:confluence-space.summary` | List spaces (the space picker) |
+| `read:confluence-content.summary` | Content metadata without expansions |
+| `read:confluence-content.all` | Page/blog-post **bodies** (the KG ingest) |
+| `search:confluence` | CQL content search |
+| `read:confluence-user` | Resolve the authorizing user (`/user/current`) for the label |
+| `offline_access` | Get a **refresh token** — access tokens last ~1 h |
+
+As with Jira, `offline_access` plus `prompt=consent` on the authorize URL
+are what make Atlassian return a refresh token.
+
+### Env vars
+
+| Var | Source |
+|---|---|
+| `CONFLUENCE_CLIENT_ID` | App → Settings → *Client ID* |
+| `CONFLUENCE_CLIENT_SECRET` | App → Settings → *Secret* |
+| `CONFLUENCE_OAUTH_REDIRECT_URI` | matches the app's Callback URL exactly |
+
+### The cloud_id quirk
+
+Identical to Jira's (see above) with a different path suffix. REST calls go
+to `https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/api/v2/...`
+(v2) or `.../wiki/rest/api/...` (v1). We resolve `cloud_id` via
+`GET /oauth/token/accessible-resources` at connect time and cache it in
+`connections.config_json.cloud_id`.
+
+Note the current-user call uses the **v1** endpoint
+(`/wiki/rest/api/user/current`) on purpose: the v2 API has no current-user
+route.
+
+### Token lifecycle
+
+Same as Jira: ~1 h access tokens, **rotating** refresh tokens, so the whole
+payload is persisted on every refresh. Refresh happens in the health probe
+(`connector_probe.py`) and — once the ingest puller lands — before a KG
+sync. A rejected refresh raises `ConfluenceAuthExpiredError` → the UI
+prompts a reconnect.
+
+One Confluence-specific obligation: the encrypted token payload also
+carries **`company_id`**, because that is the credential the KG puller will
+be handed (it needs the connection's config, which a lone access token
+can't reach). Any code path that rewrites the token payload must preserve
+it — see `confluence_oauth.token_payload_to_store`.
+
+### Caveats
+
+- **We see exactly what the connecting user sees.** 3LO acts as that
+  person: space permissions and per-page restrictions are enforced by
+  Atlassian. There is no scope that widens this, and none that narrows it
+  to particular spaces. So coverage depends on *who clicked Connect*, and
+  it changes silently if their permissions change. This is the first thing
+  to check when a customer says "Sprntly is missing our X docs."
+- **No webhooks.** Confluence webhooks are a Connect/Forge descriptor
+  feature; a plain 3LO app cannot subscribe. Sync is poll-only, via the
+  scheduler's `refresh_connectors` job.
+- **Page bodies are never plain text** — `storage` (XHTML plus
+  `<ac:*>`/`<ri:*>` macro tags), `atlas_doc_format` (ADF, arriving as a
+  JSON *string*), or `view` (rendered HTML).
+- Typed `documents` in `connectors/catalog.py`, which makes it
+  **non-evidence**: like Notion and Google Docs, Confluence alone cannot
+  satisfy the Top Insights brief data-source gate. That is deliberate — a
+  page asserting a customer problem is the author's claim about it, not
+  measured proof.
+
+### Current scope
+
+OAuth connect + disconnect + health probe only. There is no `PULLERS`
+entry yet, so a connected Confluence shows healthy in Settings →
+Connectors and ingests nothing. The KG puller and the space picker are
+separate, later changes.
