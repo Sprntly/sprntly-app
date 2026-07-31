@@ -802,6 +802,10 @@ def is_ticket_update(question: str, history: list[dict] | None = None) -> bool:
 _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
     "slack": re.compile(r"\bslack\b", re.I),
     "jira": re.compile(r"\b(jira|atlassian)\b", re.I),
+    # Unambiguous product name, so a bare mention is enough. Naming it
+    # alongside "atlassian" simply puts BOTH providers in the returned set —
+    # this function answers with a set, not a first match.
+    "confluence": re.compile(r"\bconfluence\b", re.I),
     "clickup": re.compile(r"\bclick\s?up\b", re.I),
     "github": re.compile(r"\bgit\s?hub\b", re.I),
     "hubspot": re.compile(r"\bhub\s?spot\b", re.I),
