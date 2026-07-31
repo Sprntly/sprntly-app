@@ -118,7 +118,47 @@ def test_pull_is_distilled_only_and_window_scoped():
         records = list(fireflies.pull("key", since=since, limit=10))
     body = post.call_args.kwargs["json"]
     assert "sentences" not in body["query"]
-    assert body["variables"] == {"limit": 10, "fromDate": "2026-06-01T00:00:00+00:00", "toDate": None}
+    assert body["variables"] == {
+        "limit": 10, "skip": 0,
+        "fromDate": "2026-06-01T00:00:00+00:00", "toDate": None,
+    }
     assert records[0].provider == "fireflies" and records[0].kind == "meeting"
     # No verbatim quotes leak into the persisted record.
     assert "SAML SSO" not in records[0].text
+
+
+def test_pull_paginates_past_the_api_page_cap():
+    """Fireflies caps one `transcripts` query at 50. Before this, pull() issued
+    a SINGLE query, so the KG sync saw at most one page no matter the limit —
+    a workspace with 485 calls had ~460 permanently invisible to the KG."""
+    page1 = [dict(_T, id=f"ff-{i}") for i in range(50)]
+    page2 = [dict(_T, id=f"ff-{50 + i}") for i in range(12)]
+    with patch("app.kg_ingest.pullers.fireflies.requests.post",
+               side_effect=[_resp(page1), _resp(page2)]) as post:
+        records = list(fireflies.pull("key", limit=200))
+
+    assert len(records) == 62, "both pages must reach the caller"
+    assert [c.kwargs["json"]["variables"]["skip"] for c in post.call_args_list] == [0, 50]
+    # A short page ends the walk — no wasted third request.
+    assert post.call_count == 2
+
+
+def test_pull_stops_at_the_limit():
+    """`limit` is a ceiling across ALL pages, not a page size."""
+    full = [dict(_T, id=f"ff-{i}") for i in range(50)]
+    with patch("app.kg_ingest.pullers.fireflies.requests.post",
+               side_effect=[_resp(full), _resp(full[:10])]) as post:
+        records = list(fireflies.pull("key", limit=60))
+
+    assert len(records) == 60
+    assert post.call_args_list[-1].kwargs["json"]["variables"]["limit"] == 10, \
+        "the final page must request only the remaining headroom"
+
+
+def test_pull_terminates_on_an_empty_page():
+    """Defensive: a provider that ignores `skip` would otherwise loop forever."""
+    with patch("app.kg_ingest.pullers.fireflies.requests.post",
+               side_effect=[_resp([dict(_T, id=f"ff-{i}") for i in range(50)]),
+                            _resp([])]) as post:
+        records = list(fireflies.pull("key", limit=500))
+    assert len(records) == 50 and post.call_count == 2
