@@ -51,6 +51,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import jwt
@@ -87,10 +88,26 @@ CONFLUENCE_SCOPES = (
 #: `connections.config` key holding the resolved site id, cached at connect so
 #: readers don't re-hit accessible-resources on every call.
 CONFIG_CLOUD_ID = "cloud_id"
+#: The accessible-resources payload, also cached at connect — carries each
+#: site's browse URL, which page permalinks are built from.
+CONFIG_SITES = "sites"
+#: The spaces the workspace chose to sync. EMPTY MEANS EVERY readable space —
+#: the same backwards-compatible default as slack_sync's channel selection, so
+#: a connection made before the picker existed keeps working unchanged.
+CONFIG_SYNC_SPACE_IDS = "sync_space_ids"
+#: {space_id: key} for the ids above, kept alongside so a space that has become
+#: unreadable can be reported BY NAME rather than as an opaque id.
+CONFIG_SYNC_SPACE_KEYS = "sync_space_keys"
 
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 _TIMEOUT = 20
+
+#: 429 backoff. Atlassian's quota is a points-based cost budget, so a burst of
+#: body-bearing page reads is the thing most likely to trip it. Shape mirrors
+#: kg_ingest.transcription's retry — bounded attempts, honour Retry-After.
+_MAX_ATTEMPTS = 3
+_MAX_BACKOFF_S = 30
 
 
 def confluence_configured() -> bool:
@@ -348,4 +365,254 @@ def account_label_from(user: dict[str, Any], sites: list[dict[str, Any]]) -> str
         or user.get("publicName")
         or (sites[0].get("name") if sites else None)
         or None
+    )
+
+
+# ── Read API: shared HTTP policy ─────────────────────────────────────────────
+#
+# There is no shared connector HTTP client in this codebase (every connector
+# does bare `requests` with a module-local timeout), so rate-limit and auth
+# policy is hand-rolled — but hand-rolled ONCE, here, because both the space
+# picker route and the KG puller need identical behaviour.
+
+
+def api_get(
+    access_token: str,
+    url: str,
+    params: dict[str, Any] | None = None,
+    *,
+    what: str = "read",
+) -> dict[str, Any]:
+    """One authenticated GET against a Confluence REST URL, with the error
+    contract the callers depend on:
+
+      429   honour Retry-After and retry, up to _MAX_ATTEMPTS
+      401   ConfluenceAuthExpiredError — carries status_code=401 so
+            kg_ingest.auto_sync stamps "reconnect required" rather than
+            logging an ERROR traceback
+      403   ConfluenceAuthExpiredError too. Unlike a tracker DELETE (where a
+            403 is a per-object permission fact worth distinguishing), a 403
+            on a plain read here means the grant no longer covers what we ask
+            for — reconnecting IS the remedy.
+      404   returned as {} rather than raised: a space can be deleted or
+            restricted mid-sync, and one missing container must not read as a
+            broken credential.
+    """
+    last_status = None
+    for attempt in range(_MAX_ATTEMPTS):
+        resp = requests.get(
+            url,
+            params=params or {},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+            timeout=_TIMEOUT,
+        )
+        last_status = resp.status_code
+        if resp.status_code == 429:
+            if attempt == _MAX_ATTEMPTS - 1:
+                break
+            try:
+                wait = int(resp.headers.get("Retry-After") or 2)
+            except (TypeError, ValueError):
+                wait = 2
+            logger.info(
+                "Confluence %s rate-limited; retrying in %ss", what,
+                min(wait, _MAX_BACKOFF_S),
+            )
+            time.sleep(min(max(wait, 0), _MAX_BACKOFF_S))
+            continue
+        if resp.status_code in (401, 403):
+            logger.warning("Confluence %s auth rejected: %s", what, resp.status_code)
+            raise ConfluenceAuthExpiredError(
+                "Confluence rejected the stored token — reconnect Confluence to continue"
+            )
+        if resp.status_code == 404:
+            logger.info("Confluence %s: not found (404)", what)
+            return {}
+        if not resp.ok:
+            logger.warning(
+                "Confluence %s failed: %s %s", what, resp.status_code, resp.text[:200]
+            )
+            raise HTTPException(502, f"Confluence {what} failed")
+        return resp.json() or {}
+    raise HTTPException(502, f"Confluence {what} rate-limited ({last_status})")
+
+
+def next_cursor(body: dict[str, Any]) -> str | None:
+    """The `cursor` query param out of a v2 response's `_links.next`.
+
+    v2 paginates by opaque cursor and advertises the next page as a RELATIVE
+    url ("/wiki/api/v2/spaces?cursor=…&limit=100"). Parsing the param out
+    beats concatenating that path onto our base: the base already carries
+    /wiki, so naive concatenation double-prefixes it."""
+    nxt = ((body.get("_links") or {}).get("next")) or ""
+    if not nxt:
+        return None
+    from urllib.parse import parse_qs, urlparse
+
+    values = parse_qs(urlparse(nxt).query).get("cursor") or []
+    return values[0] if values else None
+
+
+def list_spaces(
+    access_token: str,
+    cloud_id: str,
+    *,
+    limit: int = 100,
+    max_pages: int = 3,
+    include_personal: bool = False,
+) -> list[dict[str, Any]]:
+    """Every space this token can read, as `[{id, key, name, type}]`.
+
+    Personal spaces (`~accountid`) are excluded by default: they are people's
+    private scratch areas, and sweeping them into a company knowledge graph is
+    the kind of surprise a connector should not spring. `max_pages` bounds this
+    at pilot scale the way every other connector bounds its listing."""
+    out: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        body = api_get(
+            access_token,
+            f"{CONFLUENCE_API_BASE}/{cloud_id}/wiki/api/v2/spaces",
+            params,
+            what="list_spaces",
+        )
+        results = body.get("results") or []
+        for s in results:
+            if not s.get("id"):
+                continue
+            if not include_personal and s.get("type") == "personal":
+                continue
+            out.append({
+                "id": str(s.get("id")),
+                "key": s.get("key"),
+                "name": s.get("name"),
+                "type": s.get("type"),
+            })
+        cursor = next_cursor(body)
+        if not cursor or not results:
+            break
+    return out
+
+
+# ── Sync context ─────────────────────────────────────────────────────────────
+
+
+class ConfluenceNotConnectedError(RuntimeError):
+    """No usable Confluence connection for this company."""
+
+
+@dataclass(frozen=True)
+class ConfluenceContext:
+    """Everything one Confluence read pass needs, resolved from the stored
+    connection in a single place.
+
+    This exists because of a shape mismatch: `kg_ingest.runner.token_for`
+    hands a puller exactly ONE field out of the decrypted token payload, but a
+    Confluence pull needs the access token AND the site id AND the picked
+    spaces — the last two living in `connections.config`, which a lone token
+    can't reach. So the puller's credential is the company id (the `uploads`
+    puller's trick) and this resolves the rest."""
+
+    company_id: str
+    access_token: str
+    cloud_id: str
+    #: https://api.atlassian.com/ex/confluence/{cloud_id}/wiki — append
+    #: /api/v2/... or /rest/api/...
+    base: str
+    #: https://acme.atlassian.net/wiki — for human-facing page permalinks.
+    site_url: str | None
+    #: EMPTY means every readable space (see CONFIG_SYNC_SPACE_IDS).
+    space_ids: list[str]
+    space_keys: dict[str, str]
+
+
+def sync_context(company_id: str) -> ConfluenceContext:
+    """Resolve a live read context for `company_id`.
+
+    Refreshes AND PERSISTS an expiring access token first. Persisting is not
+    optional: Atlassian rotates refresh tokens, so a throwaway refresh strands
+    the stored one and the connection dies at the next cycle. Because this
+    re-reads the row every pass it also picks up a token another path (the
+    probe, auto_sync's pre-sync refresh) just wrote — the refresh here is a
+    backstop, not a duplicate.
+
+    Raises ConfluenceNotConnectedError when there is no row, no readable token,
+    or no site the token can see."""
+    from app import db
+    from app.connectors.tokens import decrypt_token_json, encrypt_token_json
+
+    row = db.get_connection(company_id, CONFLUENCE_PROVIDER)
+    if not row:
+        raise ConfluenceNotConnectedError(
+            f"Confluence is not connected for company {company_id}"
+        )
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except Exception as e:  # noqa: BLE001 — unreadable token is a dead connection
+        raise ConfluenceNotConnectedError(
+            "the stored Confluence token could not be read"
+        ) from e
+
+    refresh_token = token_json.get("refresh_token")
+    obtained_at = token_json.get("obtained_at") or 0
+    expires_in = token_json.get("expires_in") or 3600
+    if refresh_token and time.time() > obtained_at + expires_in - 120:
+        new_payload = token_payload_to_store(
+            refresh_access_token(refresh_token),
+            company_id=company_id,
+            keep_refresh_token=refresh_token,
+        )
+        db.update_connection_tokens(
+            company_id, CONFLUENCE_PROVIDER, encrypt_token_json(new_payload)
+        )
+        token_json = json.loads(new_payload)
+
+    access_token = token_json.get("access_token") or ""
+    if not access_token:
+        raise ConfluenceNotConnectedError("the Confluence connection has no access token")
+
+    try:
+        config = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+
+    cloud_id = config.get(CONFIG_CLOUD_ID) or first_cloud_id(access_token)
+    if not cloud_id:
+        raise ConfluenceNotConnectedError(
+            "the Confluence token can no longer see any site"
+        )
+
+    # Prefer the site list cached at connect over a fresh accessible-resources
+    # round trip — this runs on every sync pass.
+    site_url = next(
+        (
+            s.get("url")
+            for s in (config.get(CONFIG_SITES) or [])
+            if isinstance(s, dict) and s.get("id") == cloud_id
+        ),
+        None,
+    ) or site_url_for_cloud(access_token, cloud_id)
+
+    raw_ids = config.get(CONFIG_SYNC_SPACE_IDS) or []
+    space_ids = [str(i) for i in raw_ids if i]
+    raw_keys = config.get(CONFIG_SYNC_SPACE_KEYS) or {}
+    space_keys = (
+        {str(k): str(v) for k, v in raw_keys.items()}
+        if isinstance(raw_keys, dict) else {}
+    )
+
+    return ConfluenceContext(
+        company_id=company_id,
+        access_token=access_token,
+        cloud_id=cloud_id,
+        base=f"{CONFLUENCE_API_BASE}/{cloud_id}/wiki",
+        site_url=site_url,
+        space_ids=space_ids,
+        space_keys=space_keys,
     )

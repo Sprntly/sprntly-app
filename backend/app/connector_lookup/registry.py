@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 #: User-facing names (mirrors web/app/lib/connectorsCatalog.ts labels).
 DISPLAY_NAMES: dict[str, str] = {
     "jira": "Jira",
+    "confluence": "Confluence",
     "clickup": "ClickUp",
     "asana": "Asana",
     "linear": "Linear",
@@ -103,6 +104,7 @@ DEFERRED: dict[str, str] = {
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
+    "confluence": "Confluence",
 }
 
 #: No Sprntly connector at all — catalog entries only (connectors/catalog.py).

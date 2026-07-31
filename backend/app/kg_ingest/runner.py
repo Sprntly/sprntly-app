@@ -25,6 +25,7 @@ from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
     clickup,
+    confluence,
     fireflies,
     github,
     hubspot,
@@ -52,7 +53,26 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     # and the puller reads the documents the user uploaded themselves. Each
     # record carries the user's own source name + description (see the puller).
     "uploads":   (uploads.pull,  "company_id",          "user-uploaded business documents (research, strategy, support exports, decks, spreadsheets — the user named and described this corpus; treat the source_name/source_description properties as authoritative context for what the text is)"),
+    # Like uploads, the "credential" is the company id — a Confluence pull
+    # needs the site id and the selected spaces off the connection row, and
+    # token_for can only hand a puller one field.
+    "confluence": (confluence.pull, "company_id",       "internal_documentation (Confluence wiki pages + blog posts from the spaces this workspace selected: product specs, PRDs, architecture and decision records, runbooks, meeting and retro notes, team handbooks — the company's WRITTEN CONTEXT. Treat these as statements of intent, plans and internal process, NOT as customer evidence: a page asserting a problem is its author's claim about it, not measured proof. The space_key and title properties carry which team/area owns the page)"),
 }
+
+#: Providers whose records are DOCUMENTS rather than connector telemetry.
+#:
+#: Their signals still carry origin="connector" (they did arrive over a
+#: connector) but also channel="upload", which is what the brief's evidence
+#: gate reads to keep an upload-only tenant on the relaxed single-source path
+#: (synthesis.convergence: `origin == "connector" and channel == "upload"`
+#: counts as upload evidence). Google Drive reaches the same conclusion by a
+#: different route — kg_ingest.drive_extract stamps origin="upload" outright,
+#: for the reason spelled out in its module docstring.
+#:
+#: Getting this wrong is a SILENT regression in the wrong direction: a plain
+#: connector origin would make briefs STRICTER for a tenant the moment they
+#: connect their wiki.
+_DOCUMENT_PROVIDERS: frozenset[str] = frozenset({"uploads", "confluence"})
 
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
@@ -116,13 +136,14 @@ def sync_provider(
                 agent=f"ingest:{provider}",
                 source_hint=hint,
                 origin="connector",
-                # The uploads "connector" is the user's own documents — the
-                # same evidentiary class as manual uploads, so it keeps the
-                # brief gate's upload-only relaxation (convergence counts
-                # channel="upload" as upload evidence, mirroring #868's Drive
-                # rationale).
+                # Document-class providers (the user's own uploads, and the
+                # company wiki) are the same evidentiary class as manual
+                # uploads, so they keep the brief gate's upload-only
+                # relaxation — convergence counts channel="upload" as upload
+                # evidence, mirroring #868's Drive rationale. See
+                # _DOCUMENT_PROVIDERS.
                 provenance_extra=(
-                    {"channel": "upload"} if provider == "uploads" else None
+                    {"channel": "upload"} if provider in _DOCUMENT_PROVIDERS else None
                 ),
             )
             totals["batches"] += 1

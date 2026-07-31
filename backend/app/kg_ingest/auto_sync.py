@@ -58,10 +58,12 @@ def _maybe_refresh_token(
     not configured) logs a WARNING and returns the input unchanged, so the
     caller's sync surfaces the usual 401 → "reconnect required".
 
-    Jira (Atlassian) is handled alongside github: its access tokens expire ~1h
-    and its refresh tokens ROTATE, so — like github — we persist the whole new
-    payload on every refresh."""
-    if provider not in ("github", "jira"):
+    Jira and Confluence (Atlassian) are handled alongside github: their access
+    tokens expire ~1h and their refresh tokens ROTATE, so — like github — we
+    persist the whole new payload on every refresh. Confluence additionally
+    requires company_id to survive the rewrite, because that is the credential
+    its puller is handed (see confluence_oauth.token_payload_to_store)."""
+    if provider not in ("github", "jira", "confluence"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -71,7 +73,17 @@ def _maybe_refresh_token(
     try:
         from app.connectors.tokens import encrypt_token_json
 
-        if provider == "jira":
+        if provider == "confluence":
+            from app.connectors import confluence_oauth
+
+            new_json_str = confluence_oauth.token_payload_to_store(
+                confluence_oauth.refresh_access_token(refresh_token),
+                # Dropping this here breaks the NEXT sync, not this refresh:
+                # token_for("confluence", ...) reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "jira":
             from app.connectors import jira_oauth
 
             new_json_str = jira_oauth.token_payload_to_store(

@@ -306,6 +306,234 @@ def test_account_label_falls_back_through_identity_then_site(confluence_env):
     assert confluence_oauth.account_label_from({}, []) is None
 
 
+# ── Read API: rate limits, auth, pagination ──────────────────────────────────
+
+
+def test_api_get_retries_on_429_and_honours_retry_after(confluence_env, monkeypatch):
+    from app.connectors import confluence_oauth
+
+    limited = _resp(ok=False, status=429)
+    limited.headers = {"Retry-After": "0"}
+    ok = _resp(json_body={"results": [{"id": "1"}]})
+
+    slept: list[float] = []
+    monkeypatch.setattr(confluence_oauth.time, "sleep", lambda s: slept.append(s))
+    with patch("app.connectors.confluence_oauth.requests.get",
+               side_effect=[limited, ok]) as mock_get:
+        body = confluence_oauth.api_get("tok", "https://x.test/y")
+    assert body["results"] == [{"id": "1"}]
+    assert mock_get.call_count == 2
+    assert slept == [0]
+
+
+def test_api_get_gives_up_after_max_attempts(confluence_env, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.connectors import confluence_oauth
+
+    limited = _resp(ok=False, status=429)
+    limited.headers = {"Retry-After": "0"}
+    monkeypatch.setattr(confluence_oauth.time, "sleep", lambda s: None)
+    with patch("app.connectors.confluence_oauth.requests.get", return_value=limited):
+        with pytest.raises(HTTPException):
+            confluence_oauth.api_get("tok", "https://x.test/y")
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_api_get_maps_auth_failures_to_reconnect(confluence_env, status):
+    """Both statuses mean the grant no longer covers this read, and
+    reconnecting IS the remedy — unlike a tracker DELETE, where 403 is a
+    per-object permission fact worth distinguishing."""
+    from app.connectors import confluence_oauth
+
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(ok=False, status=status, text="nope")):
+        with pytest.raises(confluence_oauth.ConfluenceAuthExpiredError):
+            confluence_oauth.api_get("tok", "https://x.test/y")
+
+
+def test_api_get_treats_404_as_empty(confluence_env):
+    """A space can be deleted or restricted mid-sync; one missing container
+    must not read as a broken credential."""
+    from app.connectors import confluence_oauth
+
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(ok=False, status=404)):
+        assert confluence_oauth.api_get("tok", "https://x.test/y") == {}
+
+
+def test_next_cursor_parses_the_param_not_the_path(confluence_env):
+    """v2 advertises the next page as a RELATIVE url that already carries
+    /wiki — concatenating it onto our base would double-prefix."""
+    from app.connectors import confluence_oauth
+
+    body = {"_links": {"next": "/wiki/api/v2/spaces?cursor=abc123&limit=100"}}
+    assert confluence_oauth.next_cursor(body) == "abc123"
+    assert confluence_oauth.next_cursor({"_links": {}}) is None
+    assert confluence_oauth.next_cursor({}) is None
+
+
+def test_list_spaces_paginates_and_drops_personal_spaces(confluence_env):
+    """Personal spaces are people's private scratch areas — sweeping them into
+    a company knowledge graph is not a surprise a connector should spring."""
+    from app.connectors import confluence_oauth
+
+    page1 = _resp(json_body={
+        "results": [
+            {"id": 1, "key": "ENG", "name": "Engineering", "type": "global"},
+            {"id": 2, "key": "~alice", "name": "Alice", "type": "personal"},
+        ],
+        "_links": {"next": "/wiki/api/v2/spaces?cursor=CUR2&limit=100"},
+    })
+    page2 = _resp(json_body={
+        "results": [{"id": 3, "key": "PROD", "name": "Product", "type": "global"}],
+    })
+    with patch("app.connectors.confluence_oauth.requests.get",
+               side_effect=[page1, page2]) as mock_get:
+        spaces = confluence_oauth.list_spaces("tok", "cloud-1")
+    assert [s["key"] for s in spaces] == ["ENG", "PROD"]
+    # ids are stringified so they compare against the stored selection.
+    assert [s["id"] for s in spaces] == ["1", "3"]
+    assert mock_get.call_args_list[1].kwargs["params"]["cursor"] == "CUR2"
+
+
+def test_list_spaces_can_include_personal(confluence_env):
+    from app.connectors import confluence_oauth
+
+    body = _resp(json_body={"results": [
+        {"id": 2, "key": "~alice", "name": "Alice", "type": "personal"},
+    ]})
+    with patch("app.connectors.confluence_oauth.requests.get", return_value=body):
+        spaces = confluence_oauth.list_spaces("tok", "c1", include_personal=True)
+    assert [s["key"] for s in spaces] == ["~alice"]
+
+
+# ── sync_context ─────────────────────────────────────────────────────────────
+
+
+def _seed_confluence_row(company_id: str, token: dict, config: dict) -> None:
+    from app import db
+    from app.connectors.tokens import encrypt_token_json
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider="confluence",
+        token_encrypted=encrypt_token_json(json.dumps(token)),
+        scopes="",
+        account_label="sam@acme.co",
+        config_json=json.dumps(config),
+    )
+
+
+def test_sync_context_resolves_from_the_connection_row(confluence_env, monkeypatch):
+    import time
+
+    from app.connectors import confluence_oauth
+
+    ctx_company = company_client(monkeypatch).company_id
+    _seed_confluence_row(
+        ctx_company,
+        {"access_token": "live", "refresh_token": "r",
+         "obtained_at": int(time.time()), "expires_in": 3600,
+         "company_id": ctx_company},
+        {"cloud_id": "cloud-9",
+         "sites": [{"id": "cloud-9", "url": "https://acme.atlassian.net"}],
+         "sync_space_ids": ["s1", "s2"],
+         "sync_space_keys": {"s1": "ENG", "s2": "PROD"}},
+    )
+    ctx = confluence_oauth.sync_context(ctx_company)
+    assert ctx.access_token == "live"
+    assert ctx.cloud_id == "cloud-9"
+    assert ctx.base == "https://api.atlassian.com/ex/confluence/cloud-9/wiki"
+    assert ctx.space_ids == ["s1", "s2"]
+    assert ctx.space_keys == {"s1": "ENG", "s2": "PROD"}
+
+
+def test_sync_context_uses_the_cached_site_list_for_permalinks(
+    confluence_env, monkeypatch
+):
+    """accessible-resources on every sync pass is a round trip we already paid
+    for at connect."""
+    import time
+
+    from app.connectors import confluence_oauth
+
+    ctx_company = company_client(monkeypatch).company_id
+    _seed_confluence_row(
+        ctx_company,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {"cloud_id": "cloud-9",
+         "sites": [{"id": "cloud-9", "url": "https://acme.atlassian.net"}]},
+    )
+    with patch("app.connectors.confluence_oauth.requests.get") as mock_get:
+        ctx = confluence_oauth.sync_context(ctx_company)
+    assert ctx.site_url == "https://acme.atlassian.net"
+    assert mock_get.call_count == 0
+
+
+def test_sync_context_refreshes_and_persists_keeping_company_id(
+    confluence_env, monkeypatch
+):
+    """Atlassian rotates refresh tokens, so a throwaway refresh strands the
+    stored one. And company_id must survive, or the NEXT sync loses its
+    credential."""
+    from app.connectors import confluence_oauth
+    from app.connectors.tokens import decrypt_token_json
+
+    ctx_company = company_client(monkeypatch).company_id
+    _seed_confluence_row(
+        ctx_company,
+        # obtained_at 0 → provably expired.
+        {"access_token": "stale", "refresh_token": "old",
+         "obtained_at": 0, "expires_in": 3600, "company_id": ctx_company},
+        {"cloud_id": "cloud-9", "sites": []},
+    )
+    with patch("app.connectors.confluence_oauth.requests.post",
+               return_value=_resp(json_body={
+                   "access_token": "fresh", "refresh_token": "rotated",
+                   "expires_in": 3600,
+               })):
+        with patch("app.connectors.confluence_oauth.requests.get",
+                   return_value=_resp(json_body=[])):
+            ctx = confluence_oauth.sync_context(ctx_company)
+
+    assert ctx.access_token == "fresh"
+
+    from app import db
+    row = db.get_connection(ctx_company, "confluence")
+    stored = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    assert stored["access_token"] == "fresh"
+    assert stored["refresh_token"] == "rotated"
+    assert stored["company_id"] == ctx_company
+
+
+def test_sync_context_raises_when_not_connected(confluence_env, monkeypatch):
+    from app.connectors import confluence_oauth
+
+    ctx_company = company_client(monkeypatch).company_id
+    with pytest.raises(confluence_oauth.ConfluenceNotConnectedError):
+        confluence_oauth.sync_context(ctx_company)
+
+
+def test_sync_context_raises_when_no_site_is_visible(confluence_env, monkeypatch):
+    import time
+
+    from app.connectors import confluence_oauth
+
+    ctx_company = company_client(monkeypatch).company_id
+    _seed_confluence_row(
+        ctx_company,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {},  # no cached cloud_id
+    )
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(json_body=[])):
+        with pytest.raises(confluence_oauth.ConfluenceNotConnectedError):
+            confluence_oauth.sync_context(ctx_company)
+
+
 # ─────────────────────────── Route tests ───────────────────────────
 
 
