@@ -823,6 +823,116 @@ function StubRow({ stub, index }: { stub: TicketStub; index: number }) {
   )
 }
 
+// ── "Still generating" surfaces ──────────────────────────────────────────────
+// A ticket run is a 40-90s LLM job (read → plan → fan-out → write), and the tab
+// used to announce that with a 20px spinner and one muted 13px line — which
+// reads as a stalled panel, not as work in progress. Two surfaces carry it now:
+//
+//   • TicketsGenerating    — the FIRST generation, nothing to show yet: a full
+//     working state (pulsing header, rotating phase line, indeterminate bar,
+//     ticket-shaped shimmer rows) so the wait looks like a list being filled.
+//   • TicketsWorkingBanner — tickets ARE on screen and more are coming: either
+//     streaming (partial set landing batch by batch) or regenerating (an edited
+//     PRD is replacing the set). Loud enough to read at a glance.
+
+/** Indicative legs of a ticket run, rotated on a slow timer. They mirror the
+ *  skill's real order; nothing reports WHICH leg is live, so this is honest
+ *  pacing (the work described is really happening, in this order) rather than
+ *  a measured progress claim — the batch counter below is the measured one. */
+const GEN_PHASES = [
+  "Reading the PRD end to end…",
+  "Mapping requirements onto work items…",
+  "Planning the ticket breakdown…",
+  "Writing each ticket — story, criteria, priority…",
+  "Checking how the tickets depend on each other…",
+]
+const GEN_PHASE_MS = 7000
+
+function TicketsGenerating({ prdTitle }: { prdTitle: string }) {
+  // One tick per phase. It also drives the "still working" note, so a long run
+  // keeps changing on screen even before the first batch exists to report.
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), GEN_PHASE_MS)
+    return () => clearInterval(t)
+  }, [])
+  const phase = GEN_PHASES[Math.min(tick, GEN_PHASES.length - 1)]
+  const slow = tick >= GEN_PHASES.length - 1
+
+  return (
+    <div className="tkv2 tkt-list-wrap" data-testid="tickets-generating" aria-busy="true">
+      <div className="tkv2-topbar tkgen-topbar">
+        <div className="tkgen-head">
+          <span className="tkgen-orb" aria-hidden><IconTicket size={19} /></span>
+          <div className="tkgen-headtext">
+            <h2>Breaking <em>{prdTitle}</em> into tickets…</h2>
+            <div className="tkgen-phase" role="status" aria-live="polite">
+              {phase}
+              <span className="tkgen-dot" aria-hidden />
+            </div>
+          </div>
+        </div>
+        <div className="tkgen-bar" aria-hidden><span className="tkgen-bar-pill" /></div>
+        <div className="tkgen-note">
+          {slow
+            ? "Still working — a long PRD takes longer to break down. Each ticket appears here the moment it's written."
+            : "This usually takes under a minute. Tickets appear here as they're written — you can keep working in the chat meanwhile."}
+        </div>
+      </div>
+
+      {/* Ticket-SHAPED skeletons, not a generic block: the panel shows what is
+          being built, so the wait reads as a list filling in. */}
+      <div className="tkgen-skels" aria-hidden>
+        {[0, 1, 2].map((i) => (
+          <div className="tkgen-skel" key={i}>
+            <span className="tkgen-skel-key" />
+            <div className="tkgen-skel-lines">
+              <span className="tkgen-skel-line" />
+              <span className="tkgen-skel-line" />
+              <span className="tkgen-skel-line" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** The banner shown ABOVE a list that is still being built or replaced. */
+function TicketsWorkingBanner({ tone, title, sub, progress, testId }: {
+  tone: "stream" | "refresh"
+  title: string
+  sub: string
+  /** Fan-out batch progress, when the job reports it. */
+  progress?: { done: number; total: number } | null
+  testId?: string
+}) {
+  const prog = progress && progress.total > 0 ? progress : null
+  const pct = prog ? Math.round((Math.min(prog.done, prog.total) / prog.total) * 100) : null
+  return (
+    <div
+      className={`tkgen-banner${tone === "refresh" ? " tkgen-banner--refresh" : ""}`}
+      data-testid={testId}
+      role="status"
+      aria-live="polite"
+    >
+      <span className="tkgen-banner-spin" aria-hidden />
+      <div className="tkgen-banner-main">
+        <div className="tkgen-banner-title">{title}</div>
+        <div className="tkgen-banner-sub">{sub}</div>
+        {/* Determinate only once batches are reported — before that an
+            indeterminate sweep, so the bar never parks at a fake 0%. */}
+        <div className="tkgen-bar tkgen-bar--slim" aria-hidden>
+          {pct == null
+            ? <span className="tkgen-bar-pill" />
+            : <span className="tkgen-bar-fill" style={{ width: `${Math.max(6, pct)}%` }} />}
+        </div>
+      </div>
+      {prog ? <span className="tkgen-banner-count">{prog.done}/{prog.total}</span> : null}
+    </div>
+  )
+}
+
 // ── Ticket trackers ──────────────────────────────────────────────────────────
 // The task-management tools tickets can sync with — derived from the
 // connector catalog's TYPES (connectors typed "task-management" that the
@@ -1293,12 +1403,7 @@ export function TicketsTab() {
   }
 
   if (genState.kind === "generating") {
-    return (
-      <div className="cpanel-empty" data-testid="tickets-generating">
-        <span className="prd-loader" aria-hidden />
-        <p>Breaking <em>{prdTitle}</em> into tickets…</p>
-      </div>
-    )
+    return <TicketsGenerating prdTitle={prdTitle} />
   }
 
   if (genState.kind === "error") {
@@ -1431,8 +1536,14 @@ export function TicketsTab() {
           PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
         <h2>Tickets from <em>{prdTitle}</em></h2>
+        {/* The subline must never read as a finished count while a run is in
+            flight — that's the whole reason the old treatment went unnoticed. */}
         <div className="tkv2-sub">
-          {stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD
+          {refreshing
+            ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
+            : streaming
+              ? `Writing tickets · ${stories.length} ready so far`
+              : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
         {stories.length > 0 && (
           <div className="tkv2-hactions">
@@ -1497,20 +1608,29 @@ export function TicketsTab() {
         )}
       </div>
 
-      {/* Regeneration + sync status lines (under the header). */}
+      {/* Regeneration + sync status lines (under the header). The two
+          "still working" ones are full banners rather than 12px notes — a run
+          in flight has to be readable at a glance from the top of the panel. */}
       {streaming && (
-        <div className="tkt-push-status" data-testid="tickets-streaming">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          {stories.length === 0 && skeletonStubs.length > 0
-            ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
-            : `Generating tickets${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…`}
-        </div>
+        <TicketsWorkingBanner
+          tone="stream"
+          testId="tickets-streaming"
+          title="Generating tickets…"
+          sub={
+            stories.length === 0 && skeletonStubs.length > 0
+              ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
+              : `Showing them as they land${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}.`
+          }
+          progress={streamProgress}
+        />
       )}
       {refreshing && (
-        <div className="tkt-push-status">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          The PRD changed — updating these tickets. Showing the previous set until the new one is ready.
-        </div>
+        <TicketsWorkingBanner
+          tone="refresh"
+          testId="tickets-refreshing"
+          title="Regenerating — the PRD changed"
+          sub="Updating these tickets from the edited PRD. The previous set stays below until the new one is ready."
+        />
       )}
       {!refreshing && refreshError && (
         <div className="tkt-push-status tkt-push-status--err">
@@ -1540,15 +1660,27 @@ export function TicketsTab() {
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
         <div>
-          I&apos;ve broken <em>{prdTitle}</em> into{" "}
+          {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
           {/* While streaming, count the whole planned set (landed + skeletons)
               so the number doesn't creep up batch by batch. */}
           <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD. Review, then push to your tracker.
+          prioritized from the PRD.{" "}
+          {streaming
+            ? "The rest are landing now."
+            : "Review, then push to your tracker."}
         </div>
       </div>
 
-      <div className="tkt-list">
+      {/* The stale set is still useful (and still clickable), but it must not
+          look current while its replacement is being written — label it and
+          hold it back visually. */}
+      {refreshing && (
+        <div className="tkgen-stale-lbl">
+          <span className="tkgen-stale-dot" aria-hidden /> Previous tickets — being replaced
+        </div>
+      )}
+
+      <div className={`tkt-list${refreshing ? " tkt-list--stale" : ""}`}>
         {stories.map((s, i) => (
           <StoryRow
             key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)}
