@@ -317,9 +317,42 @@ def tickets_for_prd(
     return {
         "status": row.get("status") or "ready",
         "fresh": fresh,
-        "stories": row.get("stories") or [],
+        "stories": _apply_lifecycle(company.company_id, prd_id,
+                                    row.get("stories") or []),
         "generated_at": row.get("generated_at"),
     }
+
+
+def _apply_lifecycle(
+    company_id: str, prd_id: int, stories: list[dict]
+) -> list[dict]:
+    """Drop DELETED tickets from a rendered set and tag EXCLUDED ones.
+
+    Deleted tickets stay in `prd_tickets.stories` — that array is regenerated
+    wholesale from the PRD, so the deletion is recorded on ticket_edits and
+    applied on the way out instead. Excluded ones are still shown (the user
+    chose to keep them in Sprntly), carrying `lifecycle` so the UI can mark
+    them as not going to the tracker.
+    """
+    from app.db.ticket_lifecycle import DELETED, lifecycle_by_key
+    from app.stories.sync import ticket_key_for
+
+    try:
+        states = lifecycle_by_key(company_id, prd_id)
+    except Exception:  # noqa: BLE001 — a lookup failure must not blank the tab
+        logger.warning("lifecycle lookup failed for prd %s", prd_id)
+        return stories
+    if not states:
+        return stories
+    out: list[dict] = []
+    for s in stories:
+        if not isinstance(s, dict):
+            continue
+        state = states.get(ticket_key_for(prd_id, s))
+        if state == DELETED:
+            continue
+        out.append({**s, "lifecycle": state} if state else s)
+    return out
 
 
 @router.post("/lists")

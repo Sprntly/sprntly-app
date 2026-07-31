@@ -325,6 +325,26 @@
     border-color: var(--accent-hover);
   }
 
+  /* Destructive confirm (delete a ticket, and any future irreversible action).
+     Red is reserved for actions that DESTROY something — never for a plain
+     "are you sure", or it stops carrying any weight. */
+  .btn-danger {
+    background: #DC2626;
+    color: #fff;
+    border-color: #DC2626;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: #B91C1C;
+    border-color: #B91C1C;
+  }
+
+  .btn-danger:disabled {
+    background: #DC2626;
+    color: #fff;
+    border-color: #DC2626;
+  }
+
   .btn-ghost {
     background: transparent;
     border-color: transparent;
@@ -4644,6 +4664,20 @@
     padding: 12px 24px 18px;
     display: flex;
     justify-content: flex-end;
+  }
+
+  /* ConfirmDialog — a question, not a workspace: narrower than the 560px
+     option-picker modals so the sentence stays one comfortable measure. */
+  .modal.cfm {
+    max-width: 420px;
+  }
+
+  .modal.cfm .modal-title {
+    font-size: 19px;
+  }
+
+  .modal.cfm .modal-foot {
+    padding: 18px 24px 20px;
   }
 
   /* ---------- Right-side drawers ---------- */
@@ -20471,6 +20505,35 @@
   border-bottom: 1px solid var(--line);
 }
 .tkv2-descwide { padding: 22px 26px 6px; border-bottom: 1px solid var(--line); }
+
+/* ── detail: lifecycle (exclude from the tracker / delete) ── */
+.tkv2-lcactions { margin-left: auto; display: inline-flex; gap: 6px; }
+.tkv2-lcbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11.5px; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--line); background: #fff; color: var(--soft);
+  cursor: pointer;
+}
+.tkv2-lcbtn:hover:not(:disabled) { background: #f6f6f5; color: var(--ink); }
+.tkv2-lcbtn:disabled { opacity: .5; cursor: default; }
+.tkv2-lcbtn--danger { border-color: #FCA5A5; background: #FEF2F2; color: #DC2626; }
+.tkv2-lcbtn--danger:hover:not(:disabled) { background: #FEE2E2; color: #B91C1C; }
+/* Banner on an excluded ticket — it is still fully editable, so this states
+   the one thing that differs rather than dimming the whole panel. */
+.tkv2-lcbanner {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; padding: 8px 26px;
+  background: #FFFBEB; color: #92400E;
+  border-bottom: 1px solid #FDE68A;
+}
+/* Excluded row in the ticket list. */
+.tkv2-row--excluded .tkv2-rtitle { color: var(--soft); }
+.tkv2-exbadge {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; padding: 1px 6px; border-radius: 4px;
+  background: #FEF3C7; color: #92400E; vertical-align: middle;
+}
 
 /* ── detail: sections + description ── */
 .tkv2-sec { margin-bottom: 24px; }

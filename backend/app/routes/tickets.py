@@ -3,6 +3,8 @@
   GET    /v1/tickets/{key}/data           -> all overrides for a ticket
   PUT    /v1/tickets/{key}/description    -> save description + acceptance criteria
   PUT    /v1/tickets/{key}/fields         -> save title/priority/status/sprint/assignee
+  PUT    /v1/tickets/{key}/lifecycle      -> exclude / delete / restore a ticket
+  DELETE /v1/tickets/{key}                -> delete a ticket (+ its tracker issue)
   POST   /v1/tickets/{key}/attachments    -> add an attachment
   DELETE /v1/tickets/{key}/attachments/{id} -> remove an attachment
   POST   /v1/tickets/{key}/comments       -> add a comment
@@ -187,8 +189,13 @@ def save_fields(
     fields = validate_fields_against_meta(company.company_id, ticket_key, fields)
     c = require_client()
     # custom_fields MERGES over the stored map (one jsonb column holds many
-    # fields — a single-field save must not clobber siblings; null clears
-    # that one field's override).
+    # fields — a single-field save must not clobber siblings).
+    #
+    # A cleared field is stored as an explicit null, NOT removed from the map.
+    # Dropping the key made "the user cleared this" indistinguishable from
+    # "the user never touched this", and the sync engine reads exactly that
+    # difference to decide what to write — so a clear silently did nothing and
+    # the old value stayed on the tracker task forever.
     if fields.get("custom_fields") is not None:
         existing = (
             c.table("ticket_edits").select("custom_fields")
@@ -197,11 +204,7 @@ def save_fields(
             or []
         )
         merged = dict((existing[0].get("custom_fields") if existing else None) or {})
-        for fid, value in fields["custom_fields"].items():
-            if value is None:
-                merged.pop(fid, None)
-            else:
-                merged[fid] = value
+        merged.update(fields["custom_fields"])
         fields["custom_fields"] = merged
     payload = {
         "company_id": company.company_id,
@@ -218,6 +221,65 @@ def save_fields(
 
     kick_prd_sync_from_key(company.company_id, ticket_key)
     return {"ok": True}
+
+
+class LifecycleIn(BaseModel):
+    """`active` restores a ticket, `excluded` holds it back from the tracker,
+    `deleted` removes it from Sprntly. Both non-active states also remove the
+    tracker copy — see app.db.ticket_lifecycle."""
+    lifecycle: str = Field(..., pattern="^(active|excluded|deleted)$")
+
+
+def _apply_lifecycle(company_id: str, ticket_key: str, lifecycle: str) -> dict:
+    """Move a ticket's lifecycle and push the consequence to the tracker now.
+
+    The tracker side is NOT done inline: it is left to the sync pass, kicked
+    here so it happens immediately. That is deliberate — the pass already
+    knows how to delete-or-close, drop the mapping, and RETRY a removal that
+    failed, so doing it inline would mean a second, weaker implementation of
+    the same thing that gives up after one attempt.
+    """
+    from app.db.ticket_lifecycle import set_lifecycle
+    from app.stories.sync import kick_prd_sync_from_key
+
+    set_lifecycle(company_id, ticket_key, lifecycle)
+    # set_lifecycle bumps updated_at, so the pass reads this as a fresh local
+    # change. No-op for an unbound PRD (nothing to remove it from).
+    syncing = kick_prd_sync_from_key(company_id, ticket_key)
+    return {"ok": True, "lifecycle": lifecycle, "tracker_sync_started": syncing}
+
+
+@router.put("/{ticket_key}/lifecycle")
+def set_ticket_lifecycle(
+    ticket_key: str,
+    body: LifecycleIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Set one ticket's lifecycle — exclude it from the tracker, delete it, or
+    restore it.
+
+    Excluding and deleting both REMOVE the ticket from the bound tracker if it
+    was pushed there; they differ only in whether Sprntly still shows it.
+    Restoring to `active` lets the next sync re-create it.
+    """
+    return _apply_lifecycle(company.company_id, ticket_key, body.lifecycle)
+
+
+@router.delete("/{ticket_key}")
+def delete_ticket(
+    ticket_key: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Delete a ticket: gone from Sprntly, and its Jira/ClickUp/Asana issue
+    deleted too (closed instead where the tracker refuses on permissions).
+
+    A SOFT delete — the ticket_edits row is marked rather than dropped. The
+    generated story lives in `prd_tickets.stories`, which is regenerated
+    wholesale from the PRD, so a hard delete there would be undone by the next
+    regeneration and silently re-push the ticket. Marking also keeps the
+    restore path (PUT lifecycle `active`) honest.
+    """
+    return _apply_lifecycle(company.company_id, ticket_key, "deleted")
 
 
 @router.post("/{ticket_key}/attachments")
@@ -294,11 +356,28 @@ def remove_comment(
     comment_id: int,
     company: WorkspaceContext = Depends(require_workspace),
 ):
-    """Remove a comment."""
+    """Remove a comment — from the tracker too, when it was pushed there.
+
+    The tracker id is read BEFORE the row is deleted, because the row is the
+    only record that the comment was ever pushed: delete first and the id is
+    gone, and with it any way to clean up the copy sitting on the customer's
+    Jira issue. That copy used to be left behind on every comment deletion.
+    """
+    from app.stories.sync import kick_comment_delete
+
     c = require_client()
+    rows = (
+        c.table("ticket_comments").select("tracker_comment_id")
+        .eq("id", comment_id).eq("company_id", company.company_id)
+        .limit(1).execute().data
+        or []
+    )
+    tracker_comment_id = rows[0].get("tracker_comment_id") if rows else None
     c.table("ticket_comments").delete().eq(
         "id", comment_id
     ).eq("company_id", company.company_id).execute()
+    if tracker_comment_id:
+        kick_comment_delete(company.company_id, ticket_key, str(tracker_comment_id))
     return {"ok": True}
 
 
@@ -542,6 +621,35 @@ class PushJiraIn(BaseModel):
     issue_type: str = Field(default="Task", min_length=1)
 
 
+def _pushable(cid: str, tasks: list[TaskIn]) -> tuple[list[TaskIn], list[dict[str, Any]]]:
+    """Split a requested push into tasks that may go out and ones that may not.
+
+    A deleted or excluded ticket must never reach the tracker, and the client
+    is not the place to enforce that: these routes take an explicit task list,
+    so a stale tab (or any other caller) could ask to push a ticket the user
+    removed a moment ago. Skipped tasks come back in `errors` so the UI can say
+    what did not go, rather than reporting a silent partial push.
+    """
+    from app.db.ticket_lifecycle import lifecycle_by_key
+
+    try:
+        states = lifecycle_by_key(cid)
+    except Exception:  # noqa: BLE001 — a lookup failure must not block a push
+        logger.warning("lifecycle lookup failed on push; pushing everything")
+        return list(tasks), []
+    allowed, skipped = [], []
+    for t in tasks:
+        state = states.get(t.task_id)
+        if state:
+            skipped.append({
+                "task_id": t.task_id, "title": t.title,
+                "error": f"Ticket is {state} — not pushed",
+            })
+        else:
+            allowed.append(t)
+    return allowed, skipped
+
+
 def _load_overrides(c: Any, cid: str, ticket_key: str) -> dict[str, Any]:
     """Fetch a ticket's saved edits + comments (the user-reviewed source of
     truth) so the pushed task reflects what the user last saved, not just the
@@ -633,9 +741,9 @@ def push_clickup(
     cid = company.company_id
 
     created: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
+    tasks, errors = _pushable(cid, body.tasks)
 
-    for task in body.tasks:
+    for task in tasks:
         try:
             overrides = _load_overrides(c, cid, task.task_id)
             # User-reviewed overrides win over the generator's base values.
@@ -745,9 +853,9 @@ def push_jira(
     cid = company.company_id
 
     created: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
+    tasks, errors = _pushable(cid, body.tasks)
 
-    for task in body.tasks:
+    for task in tasks:
         try:
             overrides = _load_overrides(c, cid, task.task_id)
             description = (
