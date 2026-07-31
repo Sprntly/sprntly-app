@@ -702,6 +702,171 @@ def test_patch_ideation_tenant_isolation(isolated_settings, _override_company):
     assert row["status"] == "proposed"
 
 
+# ────────── decision chain: Artifact -REALIZES-> Outcome -VALIDATES-> Hypothesis ──────────
+# Trigger: an idea moving to status='done' (PATCH /v1/ideation/{id}).
+
+
+def _seed_hypothesis_decision_artifact(facade, cid, *, theme_label, insight_title):
+    """Seed theme + hypothesis (ADDRESSES edge) + decision (PROMOTED_TO) +
+    artifact (RESULTED_IN) — the state Generate PRD (triggers 1+2) would have
+    already produced by the time an idea reaches status='done'."""
+    from app.graph.decision_chain import (
+        create_artifact_from_decision,
+        promote_hypothesis_to_decision,
+    )
+    from app.graph.types import Entity, Relationship
+
+    theme = Entity(enterprise_id=cid, type="theme", canonical_label=theme_label)
+    facade.create_entity(cid, theme)
+    hyp = Entity(
+        enterprise_id=cid, type="hypothesis", canonical_label=insight_title[:200],
+        properties={"claim": "ship it", "tag": "something_new", "theme_id": theme.id},
+    )
+    facade.create_entity(cid, hyp)
+    facade.write_relationship(cid, Relationship(
+        enterprise_id=cid, type="ADDRESSES", source_kind="entity",
+        source_id=hyp.id, target_kind="entity", target_id=theme.id))
+    decision = promote_hypothesis_to_decision(facade, cid, hyp.id, label=insight_title)
+    artifact = create_artifact_from_decision(facade, cid, decision.id, label=insight_title)
+    return theme, hyp, decision, artifact
+
+
+def test_patch_ideation_done_writes_artifact_to_outcome_chain(
+    isolated_settings, _override_company, facade,
+):
+    """Marking an idea 'done' whose theme resolves to a hypothesis that
+    already has a decision/artifact (i.e. its PRD was generated) creates an
+    `outcome` Entity + REALIZES edge from the artifact, and a VALIDATES edge
+    back to the originating hypothesis with `actual_impact=None` (no live
+    analytics connector — the ticket's manual/PM-annotatable path)."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Checkout broken", insight_title="Fix checkout")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "Fix checkout"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    realized = facade.edges_from(cid, artifact.id, type="REALIZES")
+    assert len(realized) == 1
+    assert realized[0].source_kind == "entity" and realized[0].source_id == artifact.id
+    outcome = facade.get_entity(cid, realized[0].target_id)
+    assert outcome is not None
+    assert outcome.type == "outcome"
+    assert outcome.properties["artifact_id"] == artifact.id
+    assert outcome.properties.get("actual_impact") is None
+
+    validates = facade.edges_from(cid, outcome.id, type="VALIDATES")
+    assert len(validates) == 1
+    assert validates[0].source_id == outcome.id
+    assert validates[0].target_id == hyp.id
+
+
+def test_patch_ideation_done_without_prd_writes_no_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """An idea marked 'done' whose hypothesis never had a PRD generated (no
+    decision/artifact in the chain) has nothing to link an outcome to — the
+    write is skipped, not an error, and the status update still succeeds."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.graph.types import Entity, Relationship
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme = Entity(enterprise_id=cid, type="theme", canonical_label="No PRD yet")
+    facade.create_entity(cid, theme)
+    hyp = Entity(
+        enterprise_id=cid, type="hypothesis", canonical_label="No PRD yet",
+        properties={"theme_id": theme.id},
+    )
+    facade.create_entity(cid, hyp)
+    facade.write_relationship(cid, Relationship(
+        enterprise_id=cid, type="ADDRESSES", source_kind="entity",
+        source_id=hyp.id, target_kind="entity", target_id=theme.id))
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "No PRD yet"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    assert db.table("kg_entity").select("id").eq("enterprise_id", cid) \
+        .eq("type", "outcome").execute().data == []
+
+
+def test_patch_ideation_done_twice_does_not_duplicate_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """The trigger only fires on the ACTUAL transition into 'done' — a
+    re-PATCH of an already-'done' item must not write a duplicate
+    outcome/edge pair."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Onboarding slow", insight_title="Fix onboarding")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "Fix onboarding"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    assert client.patch(f"/v1/ideation/{iid}", json={"status": "done"}).status_code == 200
+    assert client.patch(f"/v1/ideation/{iid}", json={"status": "done"}).status_code == 200
+
+    assert len(facade.edges_from(cid, artifact.id, type="REALIZES")) == 1
+
+
+def test_patch_ideation_in_progress_does_not_trigger_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """Only a transition INTO 'done' fires the chain — 'in_progress' must not."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Search slow", insight_title="Fix search")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="proposed")
+    db.table("ideation_items").update({"title": "Fix search"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "in_progress"})
+    assert r.status_code == 200, r.text
+
+    assert facade.edges_from(cid, artifact.id, type="REALIZES") == []
+
+
+def test_patch_ideation_done_manual_item_skips_chain(
+    isolated_settings, _override_company, facade,
+):
+    """A manual "+ Add idea" item has no KG theme behind it (synthetic
+    ``manual:`` theme_id) — marking it done must not attempt (and fail) a KG
+    walk; it's skipped like the detail-popup's evidence trail is."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.db.ideation import create_manual_ideation_item
+
+    cid = _override_company
+    client = TestClient(main_mod.app)
+    created = create_manual_ideation_item(cid, title="Manual idea")
+
+    r = client.patch(f"/v1/ideation/{created['id']}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    db = isolated_settings["supabase"]
+    assert db.table("kg_entity").select("id").eq("enterprise_id", cid) \
+        .eq("type", "outcome").execute().data == []
+
+
 # ─────────────────── replace-not-append (prune stale) ───────────────────
 
 def test_prune_stale_ideation_removes_only_stale_proposed_status(isolated_settings):
