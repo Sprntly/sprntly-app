@@ -4969,14 +4969,16 @@
   /* -------- Content Panel (Evidence / PRD / Tickets) -------- */
   /* Width driven by --cpanel-width on <html> (set by the resize handle).
      Both the panel and padding-right read the same var so they stay in sync.
-     Hard-capped at 60vw — panel never takes more than 60% of the screen. */
+     Unresized, the panel opens at 35% and leaves the thread 65%. The clamp
+     bounds mirror clampCpanelWidth() in ContentPanel, so the first drag picks
+     up exactly where the default sat instead of jumping to another floor. */
   /* Entry timing only. A transition applies with the value the element is
      transitioning TO, so adding this class uses the duration below (matching
      .cpanel--in) and removing it falls back to the base .main-column rule's
      shorter one (matching .cpanel--out) — the column and the panel's edge
      travel together in both directions. */
   .app--cpanel-open .main-column {
-    padding-right: min(var(--cpanel-width, 60vw), 60vw);
+    padding-right: clamp(420px, var(--cpanel-width, 35vw), 60vw);
     box-sizing: border-box;
     transition: padding-left 0.2s ease,
       padding-right var(--cpanel-in-ms, 260ms) var(--ease);
@@ -4992,7 +4994,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(var(--cpanel-width, 60vw), 60vw);
+    width: clamp(420px, var(--cpanel-width, 35vw), 60vw);
     max-width: 60vw;
     z-index: 50;
     background: #fff;
@@ -5095,6 +5097,22 @@
   html.cpanel-resizing {
     cursor: ew-resize;
     user-select: none;
+  }
+
+  /* Everything the cursor crosses mid-drag keeps the resize cursor — otherwise
+     it flickers to a pointer/text caret over each button and paragraph the
+     panel edge sweeps past, which reads as the drag having let go. */
+  html.cpanel-resizing * {
+    cursor: ew-resize !important;
+  }
+
+  /* The panel body hosts iframes (PRD and report frames). An iframe consumes
+     the pointer stream in its own document, so a drag whose edge crossed one
+     used to freeze and then keep running past the release. Pointer capture is
+     the real fix (see ContentPanel); this makes the frames inert for the
+     duration so nothing inside them can react to a gesture that isn't theirs. */
+  html.cpanel-resizing iframe {
+    pointer-events: none;
   }
 
   html.cpanel-resizing .cpanel,
