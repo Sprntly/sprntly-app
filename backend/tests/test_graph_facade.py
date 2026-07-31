@@ -444,3 +444,44 @@ def test_create_source_is_idempotent_on_duplicate_id(facade):
     assert len(rows) == 1                      # one row, not two
     assert rows[0].id == "fixed-source-id"
     assert rows[0].label == "doc-1-relabeled"  # upsert applied the new values
+
+
+# ---------- ensure_company_entity (tenant root anchor) ----------
+
+def test_ensure_company_entity_creates_once(facade):
+    from app.graph.types import COMPANY_ENTITY_TYPE
+
+    company_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent is not None
+    assert ent.type == COMPANY_ENTITY_TYPE
+    assert ent.canonical_label == "Acme Inc"
+
+    all_company = facade.query_entities("ent-A", type=COMPANY_ENTITY_TYPE)
+    assert len(all_company) == 1
+
+
+def test_ensure_company_entity_is_idempotent_and_does_not_rename(facade):
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    # A second call (e.g. a different label the second time) finds the
+    # existing node rather than creating a duplicate or renaming it.
+    second_id = facade.ensure_company_entity("ent-A", label="A Different Name")
+    assert second_id == first_id
+
+    ent = facade.get_entity("ent-A", first_id)
+    assert ent.canonical_label == "Acme Inc"  # unchanged
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+
+
+def test_ensure_company_entity_falls_back_to_enterprise_id_label(facade):
+    company_id = facade.ensure_company_entity("ent-A")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent.canonical_label == "ent-A"
+
+
+def test_ensure_company_entity_is_tenant_scoped(facade):
+    a_id = facade.ensure_company_entity("ent-A", label="Acme")
+    b_id = facade.ensure_company_entity("ent-B", label="Beta")
+    assert a_id != b_id
+    assert facade.get_entity("ent-B", a_id) is None
+    assert facade.get_entity("ent-A", b_id) is None

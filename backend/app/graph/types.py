@@ -57,6 +57,17 @@ RESERVED_ENTITY_TYPES: frozenset[str] = frozenset({
     "hypothesis", "decision", "outcome", "artifact",
 })
 
+# The tenant-scoped root anchor entity type — every enterprise gets exactly
+# one `company` entity, and every segment/competitor/constraint (and, longer
+# term, other tenant-scoped node) wires to it via SCOPED_TO/INFORMS rather
+# than floating disconnected from the tenant it belongs to. Not one of the
+# RESERVED_ENTITY_TYPES above — those carry the §2 ledger's extra required
+# properties; a company node carries none, it is just an emergent-style type
+# (like "segment"/"competitor"/"theme") that happens to be a singleton per
+# tenant. `GraphFacade.ensure_company_entity` is the one place that creates
+# it, so callers never construct this type by hand.
+COMPANY_ENTITY_TYPE = "company"
+
 # Signal source_type enum (must match the DB CHECK constraint in the migration).
 SIGNAL_SOURCE_TYPES: frozenset[str] = frozenset({
     "analytics", "project_mgmt", "communication", "customer_voice", "revenue",

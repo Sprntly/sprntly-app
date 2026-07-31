@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from app.db.client import require_client
 from app.graph.types import (
+    COMPANY_ENTITY_TYPE,
     Entity,
     Relationship,
     Signal,
@@ -97,6 +98,37 @@ class GraphFacade:
         }
         self._tbl("kg_entity").insert(row).execute()
         return entity
+
+    def ensure_company_entity(
+        self, enterprise_id: str, label: Optional[str] = None
+    ) -> str:
+        """Find-or-create the tenant's single root `company` entity — the KG's
+        tenant-scoped anchor node. Every enterprise gets exactly one; other
+        entities/signals that belong to this tenant wire to it (SCOPED_TO /
+        INFORMS) instead of floating disconnected.
+
+        Unlike theme/segment/competitor entities, there's no embedding
+        dedupe concern here — a plain existence check by type is enough
+        since there is only ever one per tenant. `label` is only used the
+        first time (entity creation); a later call with a different label
+        does NOT rename an already-existing company entity. Falls back to
+        `enterprise_id` as the label if none is supplied, so this is always
+        safe to call with just an enterprise_id.
+
+        A shared primitive rather than a private helper on one caller,
+        because more than one write path needs "find or create this
+        tenant's company root" — today `business_context_projection`, and
+        any later reconciliation pass over existing tenants needs the exact
+        same find-or-create semantics."""
+        existing = self.query_entities(enterprise_id, type=COMPANY_ENTITY_TYPE)
+        if existing:
+            return existing[0].id
+        ent = Entity(
+            enterprise_id=enterprise_id, type=COMPANY_ENTITY_TYPE,
+            canonical_label=label or enterprise_id,
+        )
+        self.create_entity(enterprise_id, ent)
+        return ent.id
 
     def write_signal(self, enterprise_id: str, signal: Signal) -> Signal:
         self._assert_tenant(enterprise_id, signal.enterprise_id)
