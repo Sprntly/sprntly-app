@@ -483,7 +483,11 @@ export function ArtifactsScreen() {
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
         // renders the loaded doc without re-generating.
-        setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
+        setContent({
+          evidence: { ...markdownToEvidenceState(rec.payload_md), question: rec.question },
+          evidenceId: rec.id,
+          evidenceGenerating: false,
+        })
         return
       }
       if (a.type === "report") {

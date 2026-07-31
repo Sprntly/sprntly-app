@@ -52,6 +52,7 @@ const EMPTY: AppContentState = {
   prdGenerating: false,
   prdPartialHtml: null,
   evidence: null,
+  evidenceId: null,
   evidenceGenerating: false,
   evidencePartialHtml: null,
   conversationId: null,

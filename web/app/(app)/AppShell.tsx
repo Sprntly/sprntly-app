@@ -33,9 +33,13 @@ import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useThreadReportsSync } from "../components/shared/useThreadReports"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
+import { useArtifactUrlSync } from "./hooks/useArtifactUrlSync"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useGenerationNotify()
+  // Shell-level, page-agnostic `?prd=`/`?evidence=`/`?ticket=` deep-link sync
+  // (both directions) — see the hook's doc comment for the full design.
+  useArtifactUrlSync()
   // Single owner of the active thread's reports (mirrored into ContentContext),
   // same shape as useBriefHydration below: the panel and ChatScreen both read
   // that list, and neither should fetch it.

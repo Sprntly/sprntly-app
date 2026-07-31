@@ -21,6 +21,7 @@ import {
   type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { OriginQuestionBanner } from "./OriginQuestionBanner"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
@@ -763,6 +764,7 @@ function EvidenceTab() {
           </div>
         )}
 
+        {evidence && <OriginQuestionBanner question={evidence.question} />}
         {evidence ? (
           evidence.html ? (
             // v3 evidence — the self-contained HTML visual brief. It carries its

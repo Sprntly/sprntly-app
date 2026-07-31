@@ -171,7 +171,11 @@ CREATE TABLE prds (
     -- PRD generated from an ideation item; source='brief' + theme_id NULL for a
     -- brief-insight PRD.
     source           TEXT NOT NULL DEFAULT 'brief',
-    theme_id         TEXT
+    theme_id         TEXT,
+    -- 20260731090000: originating-chat-question linkage (mirrors reports'
+    -- question/ask_id) — NULL on every path except the chat-task command.
+    question         TEXT,
+    ask_id           INTEGER
 );
 
 CREATE TABLE evidences (
@@ -187,7 +191,10 @@ CREATE TABLE evidences (
     variant          TEXT NOT NULL DEFAULT 'v1',
     -- 20260719120000: chat-task evidence keys by (brief_id, theme_id)
     -- ('chat:<hash>'); brief-insight docs keep NULL.
-    theme_id         TEXT
+    theme_id         TEXT,
+    -- 20260731090000: originating-chat-question linkage (mirrors prds above).
+    question         TEXT,
+    ask_id           INTEGER
 );
 
 -- Test-harness only (NOT a migration): the real prd_patches migration ships
@@ -1213,11 +1220,15 @@ CREATE TABLE conversations (
     reply       TEXT NOT NULL DEFAULT '',
     pinned      INTEGER NOT NULL DEFAULT 0,
     prd_id      INTEGER,
+    -- 20260731090000: Evidence half of the conversation<->artifact binding
+    -- (mirrors prd_id above).
+    evidence_id INTEGER,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
 CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
+CREATE INDEX conversations_evidence_idx ON conversations (evidence_id);
 
 CREATE TABLE conversation_turns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -49,6 +49,8 @@ def start_prd(
     run_id: str | None = None,
     source: str = "brief",
     theme_id: str | None = None,
+    question: str | None = None,
+    ask_id: int | None = None,
 ) -> int:
     """Insert an empty PRD row in 'generating' state. Returns the new id.
 
@@ -56,6 +58,14 @@ def start_prd(
     `source`/`theme_id` mark an ideation-sourced PRD (source='ideation', theme_id
     set) vs a brief PRD (source='brief', theme_id NULL — its theme resolves from
     brief.insights[insight_index]). See the 20260702 migration.
+
+    `question`/`ask_id` are the originating-chat-question linkage (mirrors
+    db/reports.py's `question`/`ask_id`) — set only on paths that actually have
+    a typed question behind them (the chat-task PRD command); every other path
+    (brief insight click, ideation, import) leaves both NULL, which the reader
+    treats as "no originating question" rather than an error. The originating
+    CONVERSATION is tracked separately via `conversations.prd_id` (see
+    db/conversations.bind_conversation_to_prd) — not duplicated here.
     """
     c = require_client()
     resp = c.table("prds").insert({
@@ -69,6 +79,8 @@ def start_prd(
         "run_id": run_id,
         "source": source,
         "theme_id": theme_id,
+        "question": question,
+        "ask_id": ask_id,
     }).execute()
     return resp.data[0]["id"]
 
