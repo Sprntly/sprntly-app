@@ -484,9 +484,49 @@ it — see `confluence_oauth.token_payload_to_store`.
   page asserting a customer problem is the author's claim about it, not
   measured proof.
 
+### Ingestion
+
+`app/kg_ingest/pullers/confluence.py`, registered in `runner.PULLERS`.
+Pages and blog posts, bodies included, from the selected spaces.
+
+The credential the puller is handed is the **company id**, not a token —
+`runner.token_for` passes exactly one field of the encrypted payload, and
+a Confluence pull also needs the site id and the space selection off
+`connections.config`. `confluence_oauth.sync_context()` resolves all of
+it (refreshing and persisting an expiring token on the way). The
+`uploads` puller uses the same trick.
+
+Caps, all in the puller module: 25 spaces, 250 pages per space per kind
+(5 pages of 50), 4 000 chars per record, and a global 500-record valve.
+The valve matters because the content-hash ledger makes *re-*syncs free
+but the **first** sync pays the LLM for everything.
+
+Signals carry `origin="connector"` **plus `channel="upload"`** (see
+`runner._DOCUMENT_PROVIDERS`). A wiki is the same evidentiary class as a
+manual upload, and without the channel stamp connecting Confluence would
+silently revoke the brief gate's upload-only relaxation — briefs would get
+*stricter* the moment a tenant added their wiki.
+
+No per-space watermark, deliberately: the ledger already makes an
+unchanged page cost zero LLM, `sort=-modified-date` keeps a truncated
+space fresh, and a watermark would blind us to pages *moved* into a space
+(old modified-date, never seen again).
+
+### Space selection
+
+`GET /v1/connectors/confluence/spaces` lists what the connected account
+can read (readable by any member); `POST` the same path saves the
+selection (admin-only). Stored on the connection config as
+`sync_space_ids` + `sync_space_keys` — keys kept so a space that later
+becomes unreadable is reported by name.
+
+**An empty selection means every readable space.** That is the
+backwards-compatible default, and it is what a connection made before the
+picker existed has. Personal spaces (`~accountid`) are always excluded.
+
 ### Current scope
 
-OAuth connect + disconnect + health probe only. There is no `PULLERS`
-entry yet, so a connected Confluence shows healthy in Settings →
-Connectors and ingests nothing. The KG puller and the space picker are
-separate, later changes.
+Connect, disconnect, health probe, KG ingest, space picker. No live chat
+read adapter yet — Confluence sits in `connector_lookup.DEFERRED`, so a
+question naming it gets the honest "syncs into your knowledge graph, but I
+can't query it live" answer rather than a guess.

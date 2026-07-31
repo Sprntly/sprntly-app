@@ -29,6 +29,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
@@ -527,6 +528,13 @@ export function ConfigureConnectorDrawer({
           onSynced={onDisconnected /* reuse the reload callback */}
         />
       </>
+    )
+  } else if (providerId === "confluence") {
+    slot = (
+      <ConfluenceSpacesPicker
+        savedSpaceIds={connection?.config?.sync_space_ids}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
     )
   } else if (providerId === "github") {
     slot = <GithubInstallsSlot onChanged={onDisconnected} />

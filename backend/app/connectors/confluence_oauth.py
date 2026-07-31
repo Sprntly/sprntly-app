@@ -299,7 +299,12 @@ def token_payload_to_store(
 def get_accessible_resources(access_token: str) -> list[dict[str, Any]]:
     """Return the Atlassian sites this token can act on, each as Atlassian's
     native {id (cloud_id), name, url, scopes, avatarUrl}. Returns [] on any
-    non-2xx so callers degrade rather than fail the connect."""
+    non-2xx so callers degrade rather than fail the connect.
+
+    The shape is validated rather than trusted: this feeds cloud_id
+    resolution, which every later REST call depends on, and an unexpected
+    payload (an error envelope, a gateway's HTML) would otherwise surface as
+    an AttributeError deep inside a sync rather than as "no site visible"."""
     resp = requests.get(
         CONFLUENCE_ACCESSIBLE_RESOURCES_URL,
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
@@ -311,7 +316,14 @@ def get_accessible_resources(access_token: str) -> list[dict[str, Any]]:
             resp.status_code, resp.text[:200],
         )
         return []
-    return resp.json() or []
+    body = resp.json()
+    if not isinstance(body, list):
+        logger.warning(
+            "Confluence accessible-resources returned %s, expected a list",
+            type(body).__name__,
+        )
+        return []
+    return [s for s in body if isinstance(s, dict)]
 
 
 def first_cloud_id(access_token: str) -> str | None:

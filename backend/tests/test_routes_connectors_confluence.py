@@ -270,6 +270,29 @@ def test_first_cloud_id_none_when_no_sites(confluence_env):
         assert confluence_oauth.first_cloud_id("tok") is None
 
 
+def test_accessible_resources_rejects_a_non_list_payload(confluence_env):
+    """cloud_id resolution feeds every later REST call. An error envelope or a
+    gateway's HTML must degrade to "no site visible", not blow up deep inside
+    a sync with an AttributeError."""
+    from app.connectors import confluence_oauth
+
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(json_body={"error": "nope"})):
+        assert confluence_oauth.get_accessible_resources("tok") == []
+        assert confluence_oauth.first_cloud_id("tok") is None
+        assert confluence_oauth.site_url_for_cloud("tok", "c1") is None
+
+
+def test_accessible_resources_drops_non_dict_entries(confluence_env):
+    from app.connectors import confluence_oauth
+
+    with patch("app.connectors.confluence_oauth.requests.get",
+               return_value=_resp(json_body=["junk", {"id": "c1", "url": "u"}])):
+        assert confluence_oauth.get_accessible_resources("tok") == [
+            {"id": "c1", "url": "u"}
+        ]
+
+
 def test_fetch_current_user_hits_the_v1_endpoint(confluence_env):
     """v2 has no current-user route — the v1 one is correct here and is what
     read:confluence-user covers."""
@@ -689,3 +712,125 @@ def test_disconnect_404_when_not_connected(confluence_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.delete("/v1/connectors/confluence")
     assert r.status_code == 404
+
+
+# ─────────────────────────── Space picker routes ───────────────────────────
+
+
+def test_list_spaces_returns_spaces_and_the_current_selection(
+    confluence_env, monkeypatch
+):
+    import time
+
+    ctx = company_client(monkeypatch)
+    _seed_confluence_row(
+        ctx.company_id,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        # `sites` cached at connect, so resolving the context costs no HTTP —
+        # the single mocked GET below is the spaces listing itself.
+        {"cloud_id": "cloud-9",
+         "sites": [{"id": "cloud-9", "url": "https://acme.atlassian.net"}],
+         "sync_space_ids": ["1"]},
+    )
+    body = _resp(json_body={"results": [
+        {"id": 1, "key": "ENG", "name": "Engineering", "type": "global"},
+        {"id": 2, "key": "PROD", "name": "Product", "type": "global"},
+    ]})
+    with patch("app.connectors.confluence_oauth.requests.get", return_value=body):
+        r = ctx.client.get("/v1/connectors/confluence/spaces")
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert [s["key"] for s in payload["spaces"]] == ["ENG", "PROD"]
+    assert payload["selected_ids"] == ["1"]
+
+
+def test_list_spaces_404_when_not_connected(confluence_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors/confluence/spaces")
+    assert r.status_code == 404
+
+
+def test_save_spaces_persists_ids_and_keys(confluence_env, monkeypatch):
+    import json as _json
+    import time
+
+    ctx = company_client(monkeypatch)
+    _seed_confluence_row(
+        ctx.company_id,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {"cloud_id": "cloud-9"},
+    )
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces",
+        json={"spaces": [
+            {"id": "1", "key": "ENG"},
+            {"id": "2", "key": "PROD"},
+            {"id": "1", "key": "ENG"},   # duplicate — deduped, order kept
+        ]},
+    )
+    assert r.status_code == 200, r.text
+
+    from app import db
+    row = db.get_connection(ctx.company_id, "confluence")
+    config = _json.loads(row.get("config_json") or "{}")
+    assert config["sync_space_ids"] == ["1", "2"]
+    assert config["sync_space_keys"] == {"1": "ENG", "2": "PROD"}
+    # The cloud_id written at connect must survive a config PATCH.
+    assert config["cloud_id"] == "cloud-9"
+
+
+def test_save_spaces_empty_list_clears_back_to_everything(
+    confluence_env, monkeypatch
+):
+    """Empty selection is the backwards-compatible default, not a no-op: a
+    connection made before this picker existed has no stored selection and
+    must keep syncing every readable space."""
+    import json as _json
+    import time
+
+    ctx = company_client(monkeypatch)
+    _seed_confluence_row(
+        ctx.company_id,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {"cloud_id": "c", "sync_space_ids": ["1"], "sync_space_keys": {"1": "ENG"}},
+    )
+    r = ctx.client.post("/v1/connectors/confluence/spaces", json={"spaces": []})
+    assert r.status_code == 200, r.text
+
+    from app import db
+    config = _json.loads(
+        db.get_connection(ctx.company_id, "confluence").get("config_json") or "{}"
+    )
+    assert config["sync_space_ids"] == []
+
+
+def test_save_spaces_404_when_not_connected(confluence_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "1"}]}
+    )
+    assert r.status_code == 404
+
+
+def test_save_spaces_rejects_a_selection_past_the_puller_cap(
+    confluence_env, monkeypatch
+):
+    """Refuse a selection the puller could never honor rather than silently
+    truncating one."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces",
+        json={"spaces": [{"id": str(i)} for i in range(26)]},
+    )
+    assert r.status_code == 422
+
+
+def test_save_spaces_rejects_a_blank_id(confluence_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "  "}]}
+    )
+    assert r.status_code == 422

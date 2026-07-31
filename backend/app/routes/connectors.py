@@ -1777,6 +1777,91 @@ def confluence_disconnect(
     return {"deleted": True, "provider": confluence_oauth.CONFLUENCE_PROVIDER}
 
 
+@router.get("/confluence/spaces")
+def confluence_list_spaces(
+    company: CompanyContext = Depends(require_company),
+):
+    """The spaces the connected account can read, for the picker.
+
+    Readable by any member (mirrors slack_list_channels, which is not
+    admin-gated) — seeing what COULD be synced is not a privileged action;
+    changing the selection is.
+
+    Personal spaces are excluded. Note this list is bounded by the connecting
+    user's own Confluence permissions: a space they cannot read simply is not
+    here, and there is no scope that would widen it."""
+    try:
+        ctx = confluence_oauth.sync_context(company.company_id)
+    except confluence_oauth.ConfluenceNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    spaces = confluence_oauth.list_spaces(ctx.access_token, ctx.cloud_id)
+    return {"spaces": spaces, "selected_ids": ctx.space_ids}
+
+
+class ConfluenceSpaceIn(BaseModel):
+    id: str
+    key: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("space id cannot be empty")
+
+
+class ConfluenceSyncSpacesIn(BaseModel):
+    spaces: list[ConfluenceSpaceIn]
+
+    def model_post_init(self, _context) -> None:
+        # The puller caps at _MAX_SPACES — refuse a selection it could never
+        # honor rather than silently truncating one.
+        if len(self.spaces) > 25:
+            raise ValueError("select at most 25 spaces")
+
+
+@router.post("/confluence/spaces")
+def confluence_save_sync_spaces(
+    body: ConfluenceSyncSpacesIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which spaces the KG ingest pulls from — COMPANY-WIDE.
+
+    An EMPTY list clears the selection, which means every readable space
+    again. That is the backwards-compatible default (same rule as Slack's
+    channel selection): a connection made before this picker existed has no
+    stored selection and must keep working.
+
+    Keys are stored alongside the ids so a space that later becomes
+    unreadable can be reported BY NAME in the sync log rather than as an
+    opaque id."""
+    _require_admin_for_org_connector(company, confluence_oauth.CONFLUENCE_PROVIDER)
+    row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Confluence is not connected")
+    # Dedupe preserving order — the puller walks the selection in order.
+    ids = list(dict.fromkeys(s.id for s in body.spaces))
+    keys = {
+        s.id: s.key.strip()
+        for s in body.spaces
+        if s.key and s.key.strip()
+    }
+    updated = db.patch_connection_config(
+        company.company_id,
+        confluence_oauth.CONFLUENCE_PROVIDER,
+        {
+            confluence_oauth.CONFIG_SYNC_SPACE_IDS: ids,
+            confluence_oauth.CONFIG_SYNC_SPACE_KEYS: keys,
+        },
+    )
+    try:
+        config = json.loads((updated or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    # Pull the new selection now rather than waiting for the 6-hourly sweep —
+    # the user just told us what they want ingested.
+    kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    return {"ok": True, "config": config}
+
+
 # ─────────────────────── HubSpot ───────────────────────
 #
 # Commit I. OAuth-only — no corpus sync yet.

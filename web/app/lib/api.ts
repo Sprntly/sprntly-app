@@ -1518,6 +1518,12 @@ export type ConnectionSummary = {
     // sanitized server-side). Delivery UIs must ignore such rows — the
     // member has no personal delivery target until they connect their own.
     company_connection?: boolean
+    // Confluence — the Atlassian site id, cached at connect, plus the
+    // space selection the KG ingest pulls from. Empty/absent = every space
+    // the connected account can read. COMPANY-wide, admin-only to change.
+    cloud_id?: string
+    sync_space_ids?: string[]
+    sync_space_keys?: Record<string, string>
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1623,6 +1629,14 @@ export type SlackChannel = {
   is_archived: boolean
 }
 
+export type ConfluenceSpace = {
+  id: string
+  key: string | null
+  name: string | null
+  /** "global" | "personal" — personal spaces are filtered out server-side. */
+  type: string | null
+}
+
 // Multitenant: connector routes resolve the active company entirely
 // from the JWT (`Depends(require_company)`) — no client-side workspace
 // or company id is sent. Methods below therefore take only the inputs
@@ -1720,6 +1734,23 @@ export const connectorsApi = {
   // ---- Confluence ----------------------------------------------------------
   disconnectConfluence: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/confluence`),
+
+  /** Spaces the connected Confluence account can read (personal ones
+   *  excluded server-side), plus the currently persisted selection. */
+  listConfluenceSpaces: () =>
+    api.get<{ spaces: ConfluenceSpace[]; selected_ids: string[] }>(
+      `/v1/connectors/confluence/spaces`,
+    ),
+
+  /** Choose which spaces the KG ingest pulls from (stored on the company's
+   *  Confluence connection config as sync_space_ids / sync_space_keys). An
+   *  empty list clears the selection back to every readable space.
+   *  Admin-only — a member gets 403 with the admin-gate message. */
+  setConfluenceSyncSpaces: (spaces: { id: string; key?: string | null }[]) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/confluence/spaces`,
+      { spaces },
+    ),
 
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
