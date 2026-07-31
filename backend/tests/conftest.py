@@ -728,6 +728,10 @@ CREATE TABLE kg_signal (
     confidence     REAL NOT NULL DEFAULT 1.0,
     weight         REAL NOT NULL DEFAULT 1.0,
     provenance     TEXT NOT NULL DEFAULT '{}',
+    skill_id       TEXT,
+    origin         TEXT,
+    channel        TEXT,
+    evidence_eligible INTEGER,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

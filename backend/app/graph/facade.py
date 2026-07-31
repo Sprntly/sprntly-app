@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.db.client import require_client
-from app.graph.types import Entity, Relationship, Signal, Source
+from app.graph.types import (
+    Entity,
+    Relationship,
+    Signal,
+    Source,
+    compute_evidence_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,10 @@ class GraphFacade:
             "confidence": signal.confidence,
             "weight": signal.weight,
             "provenance": signal.provenance,
+            "skill_id": signal.skill_id,
+            "origin": signal.origin,
+            "channel": signal.channel,
+            "evidence_eligible": signal.evidence_eligible,
         }
         self._tbl("kg_signal").insert(row).execute()
         return signal
@@ -528,6 +538,19 @@ class GraphFacade:
         sig.confidence = float(r.get("confidence") or 1.0)
         sig.weight = float(r.get("weight") or 1.0)
         sig.provenance = r.get("provenance") or {}
+        # Typed-field promotion: the DB column wins when present;
+        # a pre-migration row (column null) falls back to the informal
+        # provenance dict key, mirroring Signal.__post_init__ — this
+        # reconstruction path bypasses __init__/__post_init__ entirely
+        # (Signal.__new__), so the same fallback has to be repeated here.
+        sig.skill_id = r.get("skill_id") if r.get("skill_id") is not None else sig.provenance.get("skill_id")
+        sig.origin = r.get("origin") if r.get("origin") is not None else sig.provenance.get("origin")
+        sig.channel = r.get("channel") if r.get("channel") is not None else sig.provenance.get("channel")
+        raw_eligible = r.get("evidence_eligible")
+        sig.evidence_eligible = (
+            bool(raw_eligible) if raw_eligible is not None
+            else compute_evidence_eligible(sig.source_type, sig.origin)
+        )
         return sig
 
     def _row_to_relationship(self, r: dict) -> Relationship:

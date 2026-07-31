@@ -121,6 +121,7 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "workspaces":           {"is_default"},
     "products":             {"is_primary"},
     "ideation_items":       {"shortlisted"},
+    "kg_signal":            {"evidence_eligible"},
 }
 
 

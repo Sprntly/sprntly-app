@@ -15,9 +15,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app.graph.facade import GraphFacade
-from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
+from app.graph.types import (
+    CONNECTED_SOURCE_TYPES,
+    NON_EVIDENCE_ORIGINS,
+    SOURCE_STALE_WINDOW_DAYS,
+    Signal,
+    signal_is_retired,
+)
 from app.synthesis.scoring import voc_score
 
+# CONNECTED_SOURCE_TYPES / NON_EVIDENCE_ORIGINS moved to `app.graph.types`
+# — that's also where `Signal.evidence_eligible` is computed from
+# them, so the extractor and this gate can't drift apart. Re-imported above
+# rather than redefined so every existing `convergence.CONNECTED_SOURCE_TYPES`
+# / `convergence.NON_EVIDENCE_ORIGINS` reference (this module's own use below,
+# plus company_research.py's docstrings and test imports) keeps resolving
+# unchanged.
+#
 # Source types that represent REAL connected-source evidence (a connector sync
 # or a corpus document run through the extractor), as opposed to onboarding /
 # business-context / agent-inference SEEDED metadata. The seeded source types
@@ -26,11 +40,7 @@ from app.synthesis.scoring import voc_score
 # represent a connected data source. Used by has_sufficient_evidence() to gate
 # brief generation so a brand-new, source-less company gets an EMPTY brief
 # instead of fabricated findings derived from onboarding metadata.
-CONNECTED_SOURCE_TYPES: frozenset[str] = frozenset({
-    "analytics", "project_mgmt", "communication", "customer_voice", "revenue",
-    "outcome_measured",
-})
-
+#
 # Provenance origins whose signals are NEVER evidence, whatever source_type they
 # carry. Today: `web_research` — facts scraped off the public web about the
 # company's own footprint (app/company_research.py).
@@ -54,7 +64,6 @@ CONNECTED_SOURCE_TYPES: frozenset[str] = frozenset({
 # evidence list: once a tenant has REAL evidence and a brief is warranted, the
 # research context is useful. They just cannot be what makes a brief happen,
 # and they never inflate a "N sources converging" claim.
-NON_EVIDENCE_ORIGINS: frozenset[str] = frozenset({"web_research"})
 
 
 @dataclass
