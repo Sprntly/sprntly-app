@@ -445,6 +445,24 @@ class GraphFacade:
             kept.append(self._row_to_signal(r))
         return kept
 
+    def recent_signals_by_skill(
+        self, enterprise_id: str, skill_id: str, limit: int = 25
+    ) -> list[Signal]:
+        """The most recent signals a given vendored extraction skill
+        produced for this enterprise, newest-transaction-first — the
+        sampling primitive for `app.graph.evals`'s structural eval harness.
+        Read-only and bounded by `limit`; never used on a live
+        request/ingestion path. Tenant-scoped like every other facade read."""
+        rows = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("skill_id", skill_id)
+            .order("transaction_at", desc=True)
+            .limit(limit)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
     def has_signals_since(self, enterprise_id: str, iso_ts: str) -> bool:
         """True if any `kg_signal` for this enterprise has `created_at > iso_ts`.
 
