@@ -219,6 +219,16 @@ export function useArtifactUrlSync() {
       && Object.entries(had).every(([k, v]) => k === want.key || v == null)
     if (alreadyCorrect) return
 
+    // Mark this value as already-consumed BEFORE writing it, so the
+    // URL→drawer effects above don't mistake our own reflected write for a
+    // fresh inbound deep link and re-invoke openPrdTab — that re-invocation
+    // routes to "/" unconditionally (NavigationContext.openPrdTab) and strips
+    // the param right back off a moment later. Confirmed live: without this,
+    // every click-driven open showed a GET / → GET /?prd=<id> → GET /
+    // triplet within ~1s in frontend.log.
+    if (want.key === PRD_PARAM) consumedRef.current.prd = want.value
+    if (want.key === EVIDENCE_PARAM) consumedRef.current.evidence = want.value
+
     params.delete(PRD_PARAM)
     params.delete(EVIDENCE_PARAM)
     params.delete(TICKET_PARAM)
