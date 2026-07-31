@@ -32,6 +32,11 @@ _LOCATE_MAX_TOKENS = 1024
 # Clamp free-text rationale fields after parsing.
 _MAX_RATIONALE_CHARS = 300
 
+# Clamp the external-entry-point surface_description after parsing — a
+# one-line description, not a paragraph. Reused verbatim in the recovery UI
+# copy and in the generation-prompt directive, so it stays short.
+_MAX_EXTERNAL_SURFACE_DESCRIPTION_CHARS = 200
+
 # Cap a user-supplied steer ("search again" direction) before it enters the
 # prompt. Defensive only — the route layer trims/caps first; this is the floor.
 _MAX_HINT_CHARS = 300
@@ -131,6 +136,31 @@ class LocateCandidate(BaseModel):
     classification_confidence: int = 0
 
 
+class ExternalEntryPointSignal(BaseModel):
+    """Whether the PRD's own description implies its entry point originates
+    OUTSIDE the connected codebase entirely — carried on `LocateResult` from
+    the SAME locate LLM call (no second round-trip).
+
+    Generalized by construction: `surface_description` is free text the model
+    writes describing WHAT KIND of external surface it read (an email, an SMS,
+    a third-party partner UI, anything) — never a closed enum of known
+    channels, so this signal never special-cases any one channel (email
+    included). Downstream (`decide_gate`) only acts on this when the ordinary
+    codebase-match path would otherwise decline/ranked_confirm; a real in-app
+    match always wins over this heuristic, so an ordinary flow is unaffected.
+    """
+
+    detected: bool = False
+    # One-line, plain-language description of the external surface, e.g. "a
+    # confirmation email sent to the customer" or "the partner's booking
+    # portal". "" whenever detected is False (enforced on parse).
+    surface_description: str = ""
+    # 0-100, clamped on parse. Certainty that the entry point is genuinely
+    # external — a SEPARATE signal from any candidate's which-surface
+    # confidence. 0 whenever detected is False (enforced on parse).
+    confidence: int = 0
+
+
 class LocateResult(BaseModel):
     candidates: list[LocateCandidate] = Field(default_factory=list)  # ranked, ≤3
     is_multi_node: bool = False  # True when the PRD legitimately spans a screen set
@@ -143,6 +173,12 @@ class LocateResult(BaseModel):
     # (rode the call), "ignored_oversize" / "ignored_decode" (fell open to
     # text-only). Surfaced so the route + UI can avoid an image-steer claim.
     image_status: str = "absent"
+    # The SAME call's read on whether the PRD's entry point lives outside this
+    # codebase entirely. Honest default: not detected. See
+    # `ExternalEntryPointSignal` for the generalization contract.
+    external_entry_point: ExternalEntryPointSignal = Field(
+        default_factory=ExternalEntryPointSignal
+    )
 
 
 def compact_map(m: "MapResult") -> str:
@@ -392,6 +428,40 @@ def locate_screen(
                                 coerced_cues.append(cleaned)
                 parsed["read_cues"] = coerced_cues
 
+            # Defensively coerce the optional top-level `external_entry_point`
+            # BEFORE validation — same rationale as read_cues above: a raw bad
+            # shape (non-dict, non-bool detected, non-numeric confidence) would
+            # otherwise fail the whole model_validate and drop every candidate.
+            if "external_entry_point" in parsed:
+                raw_ext = parsed.get("external_entry_point")
+                if isinstance(raw_ext, dict):
+                    if "detected" in raw_ext and not isinstance(
+                        raw_ext["detected"], bool
+                    ):
+                        raw_detected = raw_ext["detected"]
+                        if isinstance(raw_detected, str):
+                            raw_ext["detected"] = raw_detected.strip().lower() in (
+                                "true",
+                                "1",
+                                "yes",
+                                "on",
+                            )
+                        else:
+                            raw_ext["detected"] = bool(raw_detected)
+                    if "confidence" in raw_ext:
+                        try:
+                            raw_ext["confidence"] = int(float(raw_ext["confidence"]))
+                        except (ValueError, TypeError):
+                            raw_ext["confidence"] = 0
+                    if "surface_description" in raw_ext and not isinstance(
+                        raw_ext["surface_description"], str
+                    ):
+                        raw_ext["surface_description"] = ""
+                else:
+                    # Non-dict shape (string, list, number, None-not-omitted) —
+                    # drop it entirely so the model default (not detected) wins.
+                    parsed["external_entry_point"] = {}
+
         raw_result = LocateResult.model_validate(parsed)
 
         # Post-parse normalization.
@@ -431,12 +501,31 @@ def locate_screen(
         # list empty so the UI never claims an image steer that did not happen.
         read_cues = list(raw_result.read_cues) if image_status == "applied" else []
 
+        # external_entry_point is only a meaningful claim when detected=True AND
+        # it carries a non-empty description — a "detected" flag with nothing to
+        # say is not an actionable signal. Any other combination normalizes back
+        # to the honest "not detected" default so downstream (decide_gate) never
+        # has to re-validate the contract.
+        ext_raw = raw_result.external_entry_point
+        ext_description = ext_raw.surface_description.strip()[
+            :_MAX_EXTERNAL_SURFACE_DESCRIPTION_CHARS
+        ]
+        ext_detected = bool(ext_raw.detected and ext_description)
+        external_entry_point = ExternalEntryPointSignal(
+            detected=ext_detected,
+            surface_description=ext_description if ext_detected else "",
+            confidence=(
+                max(0, min(100, int(ext_raw.confidence))) if ext_detected else 0
+            ),
+        )
+
         # Enforce the ≤3 cap even when the model returns more.
         result = LocateResult(
             candidates=candidates[:3],
             is_multi_node=raw_result.is_multi_node,
             read_cues=read_cues,
             image_status=image_status,
+            external_entry_point=external_entry_point,
         )
         _status = "complete" if result.candidates else "empty"
         return result

@@ -11,7 +11,11 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app.design_agent.codebase_map.locate import LocateCandidate, LocateResult
+from app.design_agent.codebase_map.locate import (
+    ExternalEntryPointSignal,
+    LocateCandidate,
+    LocateResult,
+)
 from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID
 
 GateDecision = Literal["auto_proceed", "proceed_with_note", "ranked_confirm"]
@@ -36,6 +40,17 @@ _SPANS_ROUTING_CLASSIFICATION_THRESHOLD = 85
 # Per-repo overrides. Empty in the initial release — the calibration report
 # feeds future entries. No DB; this is an in-code starting value.
 _PER_REPO_THRESHOLD: dict[str, int] = {}
+
+# Trust floor for surfacing the external-entry-point signal on an outcome that
+# would otherwise be a plain ranked_confirm (no strong in-app match — see
+# `_external_surface` below). A SEPARATE signal from both the auto-proceed
+# threshold (which-surface confidence) and the spans-routing classification
+# threshold (kind-of-placement confidence): this one gates the model's
+# certainty that the PRD's entry point lives OUTSIDE the connected codebase
+# entirely. Calibrated below auto-proceed (a heuristic escape hatch does not
+# need auto-proceed's bar) but high enough that an ordinary weak/ambiguous
+# in-app flow is not mistaken for an external one.
+_EXTERNAL_SURFACE_CONFIDENCE_THRESHOLD = 70
 
 
 def threshold_for_repo(repo: str) -> int:
@@ -64,6 +79,16 @@ class GateResult(BaseModel):
     # "attach-to-primary-domain" when anchored to the top-ranked involved domain
     # surface. None for every other decision. Additive + default-safe, so existing
     # call-sites and response serializers are unaffected.
+    external_surface: Optional[ExternalEntryPointSignal] = None
+    # Populated ONLY on a ranked_confirm outcome that would otherwise decline —
+    # the no-candidates, ambiguous-leading, and genuine-no-host-decline
+    # branches — AND only when the SAME locate call's own read of the PRD
+    # flagged the entry point as genuinely external at/above
+    # _EXTERNAL_SURFACE_CONFIDENCE_THRESHOLD. NEVER populated on auto_proceed /
+    # proceed_with_note / the spans-routing rescue: a real in-app match always
+    # wins over this heuristic, so an ordinary flow is byte-for-byte
+    # unaffected. None on every other path. Additive + default-safe, mirroring
+    # the `routing` field's shape.
 
 
 def _route_spanning_decline(
@@ -153,6 +178,22 @@ def _route_spanning_decline(
     return None
 
 
+def _external_surface(result: LocateResult) -> Optional[ExternalEntryPointSignal]:
+    """The external-entry-point signal to attach to a ranked_confirm outcome.
+
+    Trusts the SAME locate call's own `external_entry_point` read (no second
+    LLM round-trip) when it is both detected and at/above the trust floor;
+    else None. Called ONLY from the three ranked_confirm return sites in
+    decide_gate below — the auto_proceed / proceed_with_note / spans-routing
+    branches never call this, which is what keeps the signal from ever firing
+    on an ordinary flow that already found a real in-app match.
+    """
+    sig = result.external_entry_point
+    if sig.detected and sig.confidence >= _EXTERNAL_SURFACE_CONFIDENCE_THRESHOLD:
+        return sig
+    return None
+
+
 def decide_gate(
     result: LocateResult,
     *,
@@ -170,6 +211,14 @@ def decide_gate(
     5. Spanning would-be-decline with a trustworthy host → proceed_with_note
        (routing="attach-to-shell" | "attach-to-primary-domain")
     6. confidence < t / genuine no-host decline → ranked_confirm
+
+    Every ranked_confirm outcome (1, 2, 6) additionally carries
+    `external_surface` when the SAME locate call's own read of the PRD flagged
+    the entry point as genuinely external — see `_external_surface`. This is
+    layered ON TOP of the precedence above, never a 7th branch: it only ever
+    enriches an outcome that was already going to be ranked_confirm, so a real
+    in-app match (auto_proceed / proceed_with_note, including the spans-routing
+    rescue) is never affected.
 
     locate.py guarantees candidates are ordered descending by confidence; this
     function does NOT re-sort them — the invariant is asserted below.
@@ -193,6 +242,7 @@ def decide_gate(
             ranked=[],
             threshold=t,
             top_confidence=0,
+            external_surface=_external_surface(result),
         )
 
     # The locate service guarantees descending-by-confidence order; the gate
@@ -210,6 +260,7 @@ def decide_gate(
             ranked=list(result.candidates),
             threshold=t,
             top_confidence=top_confidence,
+            external_surface=_external_surface(result),
         )
 
     if result.is_multi_node and leading.confidence >= t:
@@ -257,4 +308,5 @@ def decide_gate(
         ranked=list(result.candidates),
         threshold=t,
         top_confidence=top_confidence,
+        external_surface=_external_surface(result),
     )
