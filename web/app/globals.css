@@ -21905,154 +21905,208 @@
 }
 
 /* ============================================================================
-   Tickets — "still generating" visibility (`tkgen-*`)
-   A ticket run is a 40-90s LLM job. The tab used to announce that with a 20px
-   spinner plus one muted 13px line, which read as a stalled panel — so these
-   rules give the run real weight: a full working state for the FIRST
-   generation (nothing to show yet) and a banner for the two cases where
-   tickets are already on screen (streaming a partial set / regenerating over
-   an edited PRD).
-   Everything is scoped under `.tkv2`, so it inherits the ticket palette
-   defined there rather than the app-wide one.
+   Generation work-in-progress (`gwip-*`) — the shared "this artifact is being
+   built" treatment for Evidence, PRD and Tickets (GenerationState.tsx).
+
+   Every pipeline artifact is a 30-90s LLM job, and each one used to announce
+   that with a ~20px spinner plus one muted 12-13px line — at that weight a run
+   in flight reads as a stalled panel. Two surfaces replace those:
+     • .gwip        — nothing to show yet: a full working state.
+     • .gwip-banner — content is already on screen and more is coming.
+
+   PALETTE: the rules below consume `--gw-*` only. The defaults map to the app
+   palette; inside `.tkv2` they remap to the ticket palette, so the same
+   treatment reads as native in both places. Add a surface by remapping the
+   tokens — never by forking the rules.
    ========================================================================== */
-.tkv2 .tkgen-topbar {
-  background: linear-gradient(180deg, var(--green-s), var(--panel));
-  border: 1px solid var(--green-b);
+.gwip,
+.gwip-banner {
+  --gw-ink: var(--ink);
+  --gw-ink2: var(--ink-2);
+  --gw-soft: var(--ink-3);
+  --gw-line: var(--line);
+  --gw-paper: var(--surface-2);
+  --gw-panel: var(--surface);
+  --gw-chip: var(--surface-3);
+  --gw-accent: var(--accent);
+  --gw-accent-d: var(--accent-ink);
+  --gw-accent-s: var(--accent-muted);
+  --gw-accent-b: var(--accent-soft);
+  --gw-warn: var(--warn);
+  --gw-warn-b: var(--warn-soft);
+  --gw-warn-br: var(--warn-border);
+}
+/* `--ink`, `--line`, `--paper` are already redefined by `.tkv2` itself and
+   inherit; only the names that differ need remapping here. */
+.tkv2 .gwip,
+.tkv2 .gwip-banner {
+  --gw-ink2: var(--ink2);
+  --gw-soft: var(--soft);
+  --gw-panel: var(--panel);
+  --gw-chip: var(--chip);
+  --gw-accent: var(--green);
+  --gw-accent-d: var(--green-d);
+  --gw-accent-s: var(--green-s);
+  --gw-accent-b: var(--green-b);
+  --gw-warn: var(--high);
+  --gw-warn-b: var(--high-b);
+  --gw-warn-br: var(--high-br);
 }
 
-.tkgen-head { display: flex; gap: 16px; align-items: flex-start; }
+.gwip { display: flex; flex-direction: column; color: var(--gw-ink); }
 
-/* The pulse ring is the panel's loudest "this is alive" signal — it keeps
-   moving even when the phase copy hasn't changed for seconds. */
-.tkgen-orb {
+.gwip-head {
+  background: linear-gradient(180deg, var(--gw-accent-s), var(--gw-panel));
+  border: 1px solid var(--gw-accent-b);
+  border-radius: 12px; padding: 22px 26px;
+}
+.gwip-headrow { display: flex; gap: 16px; align-items: flex-start; }
+
+/* The pulse ring is the loudest "this is alive" signal on the surface — it
+   keeps moving even when the phase copy hasn't changed for seconds. */
+.gwip-orb {
   position: relative; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
   width: 42px; height: 42px; border-radius: 50%;
-  background: var(--paper); color: var(--green-d);
-  border: 1px solid var(--green-b);
+  background: var(--gw-paper); color: var(--gw-accent-d);
+  border: 1px solid var(--gw-accent-b);
 }
-.tkgen-orb::after {
+.gwip-orb::after {
   content: ""; position: absolute; inset: -5px; border-radius: 50%;
-  border: 2px solid var(--green);
-  animation: tkgen-pulse 1.9s ease-out infinite;
+  border: 2px solid var(--gw-accent);
+  animation: gwip-pulse 1.9s ease-out infinite;
 }
-@keyframes tkgen-pulse {
+@keyframes gwip-pulse {
   0%   { transform: scale(.85); opacity: .55; }
   70%  { transform: scale(1.2); opacity: 0; }
   100% { transform: scale(1.2); opacity: 0; }
 }
 
-.tkgen-headtext { min-width: 0; }
-.tkgen-phase {
+.gwip-headtext { min-width: 0; }
+.gwip-title {
+  font-family: var(--font-serif); font-weight: 500; font-size: 24px;
+  color: var(--gw-ink); line-height: 1.3;
+}
+.gwip-title em { font-style: italic; font-weight: 600; color: var(--gw-accent-d); }
+.gwip-phase {
   display: flex; align-items: center; min-height: 1.5em;
-  margin-top: 7px; font-size: 14.5px; font-weight: 500; color: var(--ink2);
+  margin-top: 7px; font-size: 14.5px; font-weight: 500; color: var(--gw-ink2);
 }
-.tkgen-dot {
+.gwip-dot {
   width: 7px; height: 7px; margin-left: 8px; border-radius: 50%;
-  background: var(--green); animation: tkgen-blink 1.1s ease-in-out infinite;
+  background: var(--gw-accent); animation: gwip-blink 1.1s ease-in-out infinite;
 }
-@keyframes tkgen-blink { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+@keyframes gwip-blink { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
 
-.tkgen-bar {
+.gwip-bar {
   position: relative; height: 5px; margin-top: 18px;
-  border-radius: 999px; background: var(--green-b); overflow: hidden;
+  border-radius: 999px; background: var(--gw-accent-b); overflow: hidden;
 }
-.tkgen-bar--slim { height: 4px; margin-top: 10px; }
-.tkgen-bar-pill {
+.gwip-bar--slim { height: 4px; margin-top: 10px; }
+.gwip-bar-pill {
   position: absolute; top: 0; left: 0; height: 100%; width: 38%;
-  border-radius: 999px; background: linear-gradient(90deg, var(--green), var(--green-d));
-  animation: tkgen-sweep 1.5s ease-in-out infinite;
+  border-radius: 999px; background: linear-gradient(90deg, var(--gw-accent), var(--gw-accent-d));
+  animation: gwip-sweep 1.5s ease-in-out infinite;
 }
-@keyframes tkgen-sweep { 0% { left: -38%; } 100% { left: 100%; } }
-.tkgen-bar-fill {
+@keyframes gwip-sweep { 0% { left: -38%; } 100% { left: 100%; } }
+.gwip-bar-fill {
   position: absolute; top: 0; left: 0; height: 100%;
-  border-radius: 999px; background: linear-gradient(90deg, var(--green), var(--green-d));
+  border-radius: 999px; background: linear-gradient(90deg, var(--gw-accent), var(--gw-accent-d));
   transition: width .45s ease;
 }
 
-.tkgen-note { margin-top: 13px; font-size: 13.5px; color: var(--soft); line-height: 1.55; }
+.gwip-note { margin-top: 13px; font-size: 13.5px; color: var(--gw-soft); line-height: 1.55; }
 
-/* Ticket-SHAPED placeholders: the wait reads as a list being filled in. */
-.tkgen-skels { display: flex; flex-direction: column; }
-.tkgen-skel {
+/* Placeholders shaped like the artifact — a ticket list fills in as rows, a
+   PRD or evidence brief as prose blocks. */
+.gwip-skels { display: flex; flex-direction: column; }
+.gwip-skel {
   display: flex; gap: 22px; margin-top: 14px; padding: 20px 22px;
-  background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  background: var(--gw-paper); border: 1px solid var(--gw-line); border-radius: 12px;
 }
-.tkgen-skel:nth-child(2) { opacity: .78; }
-.tkgen-skel:nth-child(3) { opacity: .54; }
-.tkgen-skel-key {
+.gwip-skel:nth-child(2) { opacity: .74; }
+.gwip-skel:nth-child(3) { opacity: .5; }
+.gwip-skel-key {
   flex: none; width: 46px; height: 28px; border-radius: 8px;
-  background: var(--panel); border: 1px solid var(--line);
+  background: var(--gw-panel); border: 1px solid var(--gw-line);
 }
-.tkgen-skel-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
-.tkgen-skel-line {
+.gwip-skel-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.gwip-skel--doc .gwip-skel-lines { gap: 12px; }
+.gwip-skel-line {
   position: relative; overflow: hidden;
-  height: 12px; border-radius: 6px; background: var(--chip);
+  height: 12px; border-radius: 6px; background: var(--gw-chip);
 }
-.tkgen-skel-line:nth-child(1) { width: 58%; height: 15px; }
-.tkgen-skel-line:nth-child(2) { width: 100%; }
-.tkgen-skel-line:nth-child(3) { width: 76%; }
-.tkgen-skel-line::after {
+.gwip-skel--row .gwip-skel-line:nth-child(1) { width: 58%; height: 15px; }
+.gwip-skel--row .gwip-skel-line:nth-child(2) { width: 100%; }
+.gwip-skel--row .gwip-skel-line:nth-child(3) { width: 76%; }
+/* A prose block: one heading rule, then body copy of ragged width. */
+.gwip-skel-line--head { width: 42%; height: 17px; margin-bottom: 4px; }
+.gwip-skel--doc .gwip-skel-line:nth-child(2) { width: 100%; }
+.gwip-skel--doc .gwip-skel-line:nth-child(3) { width: 94%; }
+.gwip-skel--doc .gwip-skel-line:nth-child(4) { width: 68%; }
+.gwip-skel-line::after {
   content: ""; position: absolute; inset: 0 -40%;
   background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, .9) 45%, transparent 88%);
   transform: translateX(-55%);
-  animation: tkgen-glide 1.25s ease-in-out infinite;
+  animation: gwip-glide 1.25s ease-in-out infinite;
 }
-.tkgen-skel:nth-child(2) .tkgen-skel-line::after { animation-delay: .16s; }
-.tkgen-skel:nth-child(3) .tkgen-skel-line::after { animation-delay: .32s; }
-@keyframes tkgen-glide {
+.gwip-skel:nth-child(2) .gwip-skel-line::after { animation-delay: .16s; }
+.gwip-skel:nth-child(3) .gwip-skel-line::after { animation-delay: .32s; }
+@keyframes gwip-glide {
   0%   { transform: translateX(-55%); }
   100% { transform: translateX(55%); }
 }
 
-/* ── Banner: a run in flight over tickets that are already on screen ────────
-   Green = adding to the set (streaming). Amber = replacing it (the PRD was
-   edited), which is the state a user most needs to notice before pushing. */
-.tkgen-banner {
+/* ── Banner: a run in flight over content that is already on screen ─────────
+   Accent = adding to it (streaming). Warn = REPLACING it, which is the state a
+   user most needs to notice before acting on what's currently shown. */
+.gwip-banner {
   display: flex; gap: 13px; align-items: flex-start;
-  margin-top: 14px; padding: 13px 16px;
-  border: 1px solid var(--green-b); border-left: 3px solid var(--green);
-  border-radius: 10px; background: var(--green-s);
+  margin: 14px 0; padding: 13px 16px;
+  border: 1px solid var(--gw-accent-b); border-left: 3px solid var(--gw-accent);
+  border-radius: 10px; background: var(--gw-accent-s);
 }
-.tkgen-banner--refresh {
-  border-color: var(--high-br); border-left-color: var(--high); background: var(--high-b);
+.gwip-banner--warn {
+  border-color: var(--gw-warn-br); border-left-color: var(--gw-warn); background: var(--gw-warn-b);
 }
-.tkgen-banner-spin {
+.gwip-banner-spin {
   flex: none; width: 17px; height: 17px; margin-top: 2px;
-  border-radius: 50%; border: 2px solid var(--green-b); border-top-color: var(--green-d);
-  animation: tkgen-spin .85s linear infinite;
+  border-radius: 50%; border: 2px solid var(--gw-accent-b); border-top-color: var(--gw-accent-d);
+  animation: gwip-spin .85s linear infinite;
 }
-.tkgen-banner--refresh .tkgen-banner-spin { border-color: var(--high-br); border-top-color: var(--high); }
-@keyframes tkgen-spin { to { transform: rotate(360deg); } }
-.tkgen-banner-main { flex: 1; min-width: 0; }
-.tkgen-banner-title { font-size: 14.5px; font-weight: 700; color: var(--ink); }
-.tkgen-banner-sub { margin-top: 2px; font-size: 13.5px; color: var(--ink2); line-height: 1.5; }
-.tkgen-banner-count {
+.gwip-banner--warn .gwip-banner-spin { border-color: var(--gw-warn-br); border-top-color: var(--gw-warn); }
+@keyframes gwip-spin { to { transform: rotate(360deg); } }
+.gwip-banner-main { flex: 1; min-width: 0; }
+.gwip-banner-title { font-size: 14.5px; font-weight: 700; color: var(--gw-ink); }
+.gwip-banner-sub { margin-top: 2px; font-size: 13.5px; color: var(--gw-ink2); line-height: 1.5; }
+.gwip-banner-count {
   flex: none; font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
-  color: var(--green-d); background: var(--paper);
-  border: 1px solid var(--green-b); border-radius: 999px; padding: 3px 10px;
+  color: var(--gw-accent-d); background: var(--gw-paper);
+  border: 1px solid var(--gw-accent-b); border-radius: 999px; padding: 3px 10px;
 }
-.tkgen-banner--refresh .tkgen-bar { background: var(--high-br); }
-.tkgen-banner--refresh .tkgen-bar-pill,
-.tkgen-banner--refresh .tkgen-bar-fill { background: linear-gradient(90deg, var(--high), #8f5f16); }
+.gwip-banner--warn .gwip-bar { background: var(--gw-warn-br); }
+.gwip-banner--warn .gwip-bar-pill,
+.gwip-banner--warn .gwip-bar-fill {
+  background: linear-gradient(90deg, var(--gw-warn), var(--gw-warn));
+}
 
-/* The outgoing set: readable and still clickable, but visibly not current. */
-.tkgen-stale-lbl {
+/* The outgoing content: readable and still clickable, but visibly not current. */
+.gwip-stale-lbl {
   display: flex; align-items: center; gap: 8px; margin: 24px 0 -4px;
   font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--high);
+  color: var(--high, var(--warn));
 }
-.tkgen-stale-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--high);
-  animation: tkgen-blink 1.4s ease-in-out infinite;
+.gwip-stale-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+  animation: gwip-blink 1.4s ease-in-out infinite;
 }
 .tkt-list--stale { opacity: .5; filter: saturate(.75); transition: opacity .25s ease; }
 
 @media (prefers-reduced-motion: reduce) {
-  .tkgen-orb::after { animation: none; opacity: .3; }
-  .tkgen-dot,
-  .tkgen-stale-dot { animation: none; opacity: 1; }
-  .tkgen-banner-spin { animation: none; }
-  .tkgen-skel-line::after { animation: none; }
-  .tkgen-bar-pill { animation: none; left: 0; width: 100%; opacity: .55; }
+  .gwip-orb::after { animation: none; opacity: .3; }
+  .gwip-dot,
+  .gwip-stale-dot { animation: none; opacity: 1; }
+  .gwip-banner-spin { animation: none; }
+  .gwip-skel-line::after { animation: none; }
+  .gwip-bar-pill { animation: none; left: 0; width: 100%; opacity: .55; }
 }

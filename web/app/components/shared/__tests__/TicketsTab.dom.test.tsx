@@ -136,8 +136,8 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     const wip = screen.getByTestId("tickets-generating")
     expect(screen.getByText(/Breaking/)).toBeTruthy()
     expect(screen.getByText(/Reading the PRD end to end/i)).toBeTruthy()
-    expect(wip.querySelectorAll(".tkgen-skel")).toHaveLength(3)
-    expect(wip.querySelector(".tkgen-bar-pill")).toBeTruthy()
+    expect(wip.querySelectorAll(".gwip-skel")).toHaveLength(3)
+    expect(wip.querySelector(".gwip-bar-pill")).toBeTruthy()
   })
 
   it("streams partial ticket batches (with progress) while still generating", async () => {

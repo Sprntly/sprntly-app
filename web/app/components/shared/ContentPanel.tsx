@@ -21,6 +21,8 @@ import {
   type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
@@ -711,9 +713,11 @@ function EvidenceTab() {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane skeleton. The finished doc (poll result) replaces this.
           <div style={{ minHeight: 280 }}>
-            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="evidence-streaming"
+              title="Writing the evidence brief…"
+              sub="Rendering it below as it's written — the finished brief replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
               title="Evidence brief (generating)"
@@ -721,10 +725,11 @@ function EvidenceTab() {
             />
           </div>
         ) : isLoading ? (
-          <EmptyPane
+          <GeneratingPane
+            {...EVIDENCE_GEN}
+            testId="evidence-generating"
+            icon={<IconMicroscope size={19} />}
             title="Generating evidence…"
-            hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
-            placeholders={4}
           />
         ) : localState.kind === "error" ? (
           <>
@@ -819,116 +824,6 @@ function StubRow({ stub, index }: { stub: TicketStub; index: number }) {
           {stub.prd_section ? <span className="ctx"> Context: {stub.prd_section}</span> : null}
         </div>
       </div>
-    </div>
-  )
-}
-
-// ── "Still generating" surfaces ──────────────────────────────────────────────
-// A ticket run is a 40-90s LLM job (read → plan → fan-out → write), and the tab
-// used to announce that with a 20px spinner and one muted 13px line — which
-// reads as a stalled panel, not as work in progress. Two surfaces carry it now:
-//
-//   • TicketsGenerating    — the FIRST generation, nothing to show yet: a full
-//     working state (pulsing header, rotating phase line, indeterminate bar,
-//     ticket-shaped shimmer rows) so the wait looks like a list being filled.
-//   • TicketsWorkingBanner — tickets ARE on screen and more are coming: either
-//     streaming (partial set landing batch by batch) or regenerating (an edited
-//     PRD is replacing the set). Loud enough to read at a glance.
-
-/** Indicative legs of a ticket run, rotated on a slow timer. They mirror the
- *  skill's real order; nothing reports WHICH leg is live, so this is honest
- *  pacing (the work described is really happening, in this order) rather than
- *  a measured progress claim — the batch counter below is the measured one. */
-const GEN_PHASES = [
-  "Reading the PRD end to end…",
-  "Mapping requirements onto work items…",
-  "Planning the ticket breakdown…",
-  "Writing each ticket — story, criteria, priority…",
-  "Checking how the tickets depend on each other…",
-]
-const GEN_PHASE_MS = 7000
-
-function TicketsGenerating({ prdTitle }: { prdTitle: string }) {
-  // One tick per phase. It also drives the "still working" note, so a long run
-  // keeps changing on screen even before the first batch exists to report.
-  const [tick, setTick] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), GEN_PHASE_MS)
-    return () => clearInterval(t)
-  }, [])
-  const phase = GEN_PHASES[Math.min(tick, GEN_PHASES.length - 1)]
-  const slow = tick >= GEN_PHASES.length - 1
-
-  return (
-    <div className="tkv2 tkt-list-wrap" data-testid="tickets-generating" aria-busy="true">
-      <div className="tkv2-topbar tkgen-topbar">
-        <div className="tkgen-head">
-          <span className="tkgen-orb" aria-hidden><IconTicket size={19} /></span>
-          <div className="tkgen-headtext">
-            <h2>Breaking <em>{prdTitle}</em> into tickets…</h2>
-            <div className="tkgen-phase" role="status" aria-live="polite">
-              {phase}
-              <span className="tkgen-dot" aria-hidden />
-            </div>
-          </div>
-        </div>
-        <div className="tkgen-bar" aria-hidden><span className="tkgen-bar-pill" /></div>
-        <div className="tkgen-note">
-          {slow
-            ? "Still working — a long PRD takes longer to break down. Each ticket appears here the moment it's written."
-            : "This usually takes under a minute. Tickets appear here as they're written — you can keep working in the chat meanwhile."}
-        </div>
-      </div>
-
-      {/* Ticket-SHAPED skeletons, not a generic block: the panel shows what is
-          being built, so the wait reads as a list filling in. */}
-      <div className="tkgen-skels" aria-hidden>
-        {[0, 1, 2].map((i) => (
-          <div className="tkgen-skel" key={i}>
-            <span className="tkgen-skel-key" />
-            <div className="tkgen-skel-lines">
-              <span className="tkgen-skel-line" />
-              <span className="tkgen-skel-line" />
-              <span className="tkgen-skel-line" />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-/** The banner shown ABOVE a list that is still being built or replaced. */
-function TicketsWorkingBanner({ tone, title, sub, progress, testId }: {
-  tone: "stream" | "refresh"
-  title: string
-  sub: string
-  /** Fan-out batch progress, when the job reports it. */
-  progress?: { done: number; total: number } | null
-  testId?: string
-}) {
-  const prog = progress && progress.total > 0 ? progress : null
-  const pct = prog ? Math.round((Math.min(prog.done, prog.total) / prog.total) * 100) : null
-  return (
-    <div
-      className={`tkgen-banner${tone === "refresh" ? " tkgen-banner--refresh" : ""}`}
-      data-testid={testId}
-      role="status"
-      aria-live="polite"
-    >
-      <span className="tkgen-banner-spin" aria-hidden />
-      <div className="tkgen-banner-main">
-        <div className="tkgen-banner-title">{title}</div>
-        <div className="tkgen-banner-sub">{sub}</div>
-        {/* Determinate only once batches are reported — before that an
-            indeterminate sweep, so the bar never parks at a fake 0%. */}
-        <div className="tkgen-bar tkgen-bar--slim" aria-hidden>
-          {pct == null
-            ? <span className="tkgen-bar-pill" />
-            : <span className="tkgen-bar-fill" style={{ width: `${Math.max(6, pct)}%` }} />}
-        </div>
-      </div>
-      {prog ? <span className="tkgen-banner-count">{prog.done}/{prog.total}</span> : null}
     </div>
   )
 }
@@ -1403,7 +1298,17 @@ export function TicketsTab() {
   }
 
   if (genState.kind === "generating") {
-    return <TicketsGenerating prdTitle={prdTitle} />
+    return (
+      <div className="tkv2 tkt-list-wrap">
+        <GeneratingPane
+          {...TICKET_GEN}
+          testId="tickets-generating"
+          icon={<IconTicket size={19} />}
+          title={<>Breaking <em>{prdTitle}</em> into tickets…</>}
+          skeleton="rows"
+        />
+      </div>
+    )
   }
 
   if (genState.kind === "error") {
@@ -1612,8 +1517,7 @@ export function TicketsTab() {
           "still working" ones are full banners rather than 12px notes — a run
           in flight has to be readable at a glance from the top of the panel. */}
       {streaming && (
-        <TicketsWorkingBanner
-          tone="stream"
+        <GeneratingBanner
           testId="tickets-streaming"
           title="Generating tickets…"
           sub={
@@ -1625,8 +1529,8 @@ export function TicketsTab() {
         />
       )}
       {refreshing && (
-        <TicketsWorkingBanner
-          tone="refresh"
+        <GeneratingBanner
+          tone="warn"
           testId="tickets-refreshing"
           title="Regenerating — the PRD changed"
           sub="Updating these tickets from the edited PRD. The previous set stays below until the new one is ready."
@@ -1675,8 +1579,8 @@ export function TicketsTab() {
           look current while its replacement is being written — label it and
           hold it back visually. */}
       {refreshing && (
-        <div className="tkgen-stale-lbl">
-          <span className="tkgen-stale-dot" aria-hidden /> Previous tickets — being replaced
+        <div className="gwip-stale-lbl">
+          <span className="gwip-stale-dot" aria-hidden /> Previous tickets — being replaced
         </div>
       )}
 
