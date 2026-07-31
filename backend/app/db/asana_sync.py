@@ -47,6 +47,28 @@ def save_asana_task_gid(
 
 
 @retry_on_disconnect
+def list_asana_subtask_gids(
+    company_id: str, project_gid: str, ticket_id: str
+) -> dict[str, str]:
+    """Every subtask Sprntly created under this ticket, as
+    `{sub_id: asana_task_gid}` (sub_id being the `{ticket_id}#sub#{hash}` form
+    sync_asana_subtasks writes). The record that makes child-issue REMOVAL
+    detectable — see app.db.jira_sync.list_jira_subtask_keys."""
+    resp = (
+        require_client().table("asana_task_map")
+        .select("ticket_id, asana_task_gid")
+        .eq("company_id", company_id).eq("project_gid", project_gid)
+        .like("ticket_id", f"{ticket_id}#sub#%")
+        .execute()
+    )
+    return {
+        r["ticket_id"]: r["asana_task_gid"]
+        for r in (resp.data or [])
+        if r.get("ticket_id") and r.get("asana_task_gid")
+    }
+
+
+@retry_on_disconnect
 def delete_asana_task_gid(company_id: str, project_gid: str, ticket_id: str) -> None:
     """Drop the ticket's mapping AND its child-issue subtask rows
     (`{ticket_id}#sub#…`). Called when the Asana task was DELETED in the

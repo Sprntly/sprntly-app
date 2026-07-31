@@ -17,11 +17,13 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketStub, type TicketSyncState, type TrackerMeta,
-  type TrackerProvider,
+  type JiraProject, type TicketLifecycle, type TicketStub,
+  type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { OriginQuestionBanner } from "./OriginQuestionBanner"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
@@ -713,9 +715,11 @@ function EvidenceTab() {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane skeleton. The finished doc (poll result) replaces this.
           <div style={{ minHeight: 280 }}>
-            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="evidence-streaming"
+              title="Writing the evidence brief…"
+              sub="Rendering it below as it's written — the finished brief replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
               title="Evidence brief (generating)"
@@ -723,10 +727,11 @@ function EvidenceTab() {
             />
           </div>
         ) : isLoading ? (
-          <EmptyPane
+          <GeneratingPane
+            {...EVIDENCE_GEN}
+            testId="evidence-generating"
+            icon={<IconMicroscope size={19} />}
             title="Generating evidence…"
-            hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
-            placeholders={4}
           />
         ) : localState.kind === "error" ? (
           <>
@@ -763,11 +768,17 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
   story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
   const preview = story.user_story || story.body
+  const excluded = story.lifecycle === "excluded"
   return (
-    <button type="button" className="tkv2-card" onClick={onOpen}>
+    <button type="button" className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`} onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
       <div className="tkv2-card-main">
-        <div className="tkv2-card-title">{story.title}</div>
+        <div className="tkv2-card-title tkv2-rtitle">
+          {story.title}
+          {/* Says WHY the row has no tracker chip — without it an excluded
+              ticket looks identical to one that simply failed to sync. */}
+          {excluded ? <span className="tkv2-exbadge" title={`Not sent to ${tool || "the PM tool"}`}>Excluded</span> : null}
+        </div>
         {preview ? (
           <div className="tkv2-story">
             {preview}
@@ -1290,9 +1301,14 @@ export function TicketsTab() {
 
   if (genState.kind === "generating") {
     return (
-      <div className="cpanel-empty" data-testid="tickets-generating">
-        <span className="prd-loader" aria-hidden />
-        <p>Breaking <em>{prdTitle}</em> into tickets…</p>
+      <div className="tkv2 tkt-list-wrap">
+        <GeneratingPane
+          {...TICKET_GEN}
+          testId="tickets-generating"
+          icon={<IconTicket size={19} />}
+          title={<>Breaking <em>{prdTitle}</em> into tickets…</>}
+          skeleton="rows"
+        />
       </div>
     )
   }
@@ -1371,6 +1387,20 @@ export function TicketsTab() {
     }
   })()
 
+  // A ticket's lifecycle changed in the detail: mirror it in this list's own
+  // copy so the change shows without a refetch. A deleted ticket LEAVES the
+  // array (the server drops it from every later read), which is also why the
+  // detail closes itself on delete — the index it was rendering is gone.
+  const applyLifecycle = (index: number, lifecycle: TicketLifecycle) => {
+    if (genState.kind !== "ready") return
+    const next =
+      lifecycle === "deleted"
+        ? genState.stories.filter((_, i) => i !== index)
+        : genState.stories.map((s, i) => (i === index ? { ...s, lifecycle } : s))
+    setGenState({ ...genState, stories: next })
+    if (lifecycle === "deleted") setSelectedIndex(null)
+  }
+
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
   if (selectedStory && prdId != null) {
@@ -1398,6 +1428,7 @@ export function TicketsTab() {
             meta: trackerMeta.meta,
             synced: selectedStory.id ? syncState?.statuses?.[selectedStory.id] : undefined,
           } : undefined}
+          onLifecycleChange={(lifecycle) => applyLifecycle(selectedIndex as number, lifecycle)}
         />
       </div>
     )
@@ -1412,8 +1443,14 @@ export function TicketsTab() {
           PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
         <h2>Tickets from <em>{prdTitle}</em></h2>
+        {/* The subline must never read as a finished count while a run is in
+            flight — that's the whole reason the old treatment went unnoticed. */}
         <div className="tkv2-sub">
-          {stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD
+          {refreshing
+            ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
+            : streaming
+              ? `Writing tickets · ${stories.length} ready so far`
+              : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
         {stories.length > 0 && (
           <div className="tkv2-hactions">
@@ -1478,20 +1515,28 @@ export function TicketsTab() {
         )}
       </div>
 
-      {/* Regeneration + sync status lines (under the header). */}
+      {/* Regeneration + sync status lines (under the header). The two
+          "still working" ones are full banners rather than 12px notes — a run
+          in flight has to be readable at a glance from the top of the panel. */}
       {streaming && (
-        <div className="tkt-push-status" data-testid="tickets-streaming">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          {stories.length === 0 && skeletonStubs.length > 0
-            ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
-            : `Generating tickets${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…`}
-        </div>
+        <GeneratingBanner
+          testId="tickets-streaming"
+          title="Generating tickets…"
+          sub={
+            stories.length === 0 && skeletonStubs.length > 0
+              ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
+              : `Showing them as they land${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}.`
+          }
+          progress={streamProgress}
+        />
       )}
       {refreshing && (
-        <div className="tkt-push-status">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          The PRD changed — updating these tickets. Showing the previous set until the new one is ready.
-        </div>
+        <GeneratingBanner
+          tone="warn"
+          testId="tickets-refreshing"
+          title="Regenerating — the PRD changed"
+          sub="Updating these tickets from the edited PRD. The previous set stays below until the new one is ready."
+        />
       )}
       {!refreshing && refreshError && (
         <div className="tkt-push-status tkt-push-status--err">
@@ -1521,15 +1566,27 @@ export function TicketsTab() {
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
         <div>
-          I&apos;ve broken <em>{prdTitle}</em> into{" "}
+          {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
           {/* While streaming, count the whole planned set (landed + skeletons)
               so the number doesn't creep up batch by batch. */}
           <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD. Review, then push to your tracker.
+          prioritized from the PRD.{" "}
+          {streaming
+            ? "The rest are landing now."
+            : "Review, then push to your tracker."}
         </div>
       </div>
 
-      <div className="tkt-list">
+      {/* The stale set is still useful (and still clickable), but it must not
+          look current while its replacement is being written — label it and
+          hold it back visually. */}
+      {refreshing && (
+        <div className="gwip-stale-lbl">
+          <span className="gwip-stale-dot" aria-hidden /> Previous tickets — being replaced
+        </div>
+      )}
+
+      <div className={`tkt-list${refreshing ? " tkt-list--stale" : ""}`}>
         {stories.map((s, i) => (
           <StoryRow
             key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)}

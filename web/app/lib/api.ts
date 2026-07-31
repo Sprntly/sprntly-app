@@ -2865,6 +2865,12 @@ export type TicketFields = {
   issue_type?: string | null
 }
 
+/** Whether a ticket is live, held back from the PM tool, or deleted.
+ *  Non-active tickets do not exist in the tracker — that is the whole point of
+ *  both non-active states; they differ only in whether Sprntly still shows the
+ *  ticket. */
+export type TicketLifecycle = "active" | "excluded" | "deleted"
+
 export type TicketDataResponse = {
   description: string | null
   acceptance_criteria: string[] | null
@@ -2908,9 +2914,27 @@ export const ticketDataApi = {
     api.post<{ id: number; author: string; body: string; time: string }>(
       `/v1/tickets/${encodeURIComponent(ticketKey)}/comments`, { author, body },
     ),
-  /** Remove a comment. */
+  /** Remove a comment. When the comment had been pushed to the bound tracker,
+   *  the tracker's copy is deleted too. */
   removeComment: (ticketKey: string, commentId: number) =>
     api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/${commentId}`),
+  /** Exclude / delete / restore a ticket.
+   *
+   *  `excluded` keeps it in Sprntly but holds it back from the PM tool;
+   *  `deleted` removes it from Sprntly. BOTH also delete the Jira/ClickUp/
+   *  Asana issue if the ticket had been pushed (closed instead where the
+   *  tracker refuses on permissions). `active` restores it, and the next sync
+   *  re-creates it in the tracker. */
+  setLifecycle: (ticketKey: string, lifecycle: TicketLifecycle) =>
+    api.put<{ ok: boolean; lifecycle: TicketLifecycle; tracker_sync_started: boolean }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/lifecycle`, { lifecycle },
+    ),
+  /** Delete a ticket — from Sprntly and from the bound PM tool. Shorthand for
+   *  setLifecycle(key, "deleted"). */
+  remove: (ticketKey: string) =>
+    api.delete<{ ok: boolean; lifecycle: TicketLifecycle; tracker_sync_started: boolean }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}`,
+    ),
   /** AI summary of the comment thread. `summary` is null when there's too little
    *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
   summarizeComments: (ticketKey: string) =>
@@ -3020,6 +3044,10 @@ export type GeneratedStory = {
   // Set by the per-ticket assignee picker just before a Jira push; not a
   // generated property (backend omits it from the cache). null = unassigned. ──
   assignee_account_id?: string | null
+  // ── Lifecycle. Absent for the ordinary "active" case; "excluded" means the
+  // user is holding this ticket back from the PM tool. Deleted tickets are
+  // filtered out server-side, so this never arrives as "deleted". ──
+  lifecycle?: TicketLifecycle
 }
 
 export type StoryPushResult = {

@@ -18,11 +18,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const goTo = vi.fn()
 const goToNewChat = vi.fn()
+const goToWorkbench = vi.fn()
+const openPalette = vi.fn()
 const toggleSidebar = vi.fn()
 let sidebarCollapsed = true
 
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ currentScreen: "brief", goTo, goToNewChat, sidebarCollapsed, toggleSidebar }),
+  useNavigation: () => ({
+    currentScreen: "brief",
+    goTo,
+    goToNewChat,
+    goToWorkbench,
+    openPalette,
+    sidebarCollapsed,
+    toggleSidebar,
+  }),
 }))
 
 vi.mock("../../../context/ContentContext", () => ({
@@ -66,6 +76,8 @@ import { Sidebar } from "../Sidebar"
 beforeEach(() => {
   goTo.mockClear()
   goToNewChat.mockClear()
+  goToWorkbench.mockClear()
+  openPalette.mockClear()
   toggleSidebar.mockClear()
   setActiveWorkspace.mockClear()
   sidebarCollapsed = true
@@ -94,16 +106,57 @@ describe("Sidebar — New chat wiring", () => {
   })
 })
 
+// ── Workbench (2026-07-31) ───────────────────────────────────────────────────
+// The rail has two doors into the same tabbed home surface, and they must not
+// collapse into one: "Workbench" restores the last CHAT tab (goToWorkbench →
+// `/?tab=last`), "Top Insights" activates the pinned brief tab (goTo("brief")).
+describe("Sidebar — Workbench", () => {
+  it("renders Workbench directly above Top Insights", () => {
+    const { container } = render(React.createElement(Sidebar))
+    const labels = Array.from(container.querySelectorAll(".sb-rail-nav .sb-rail-label")).map(
+      (el) => el.textContent,
+    )
+    expect(labels[0]).toBe("Workbench")
+    expect(labels[1]).toBe("Top Insights")
+  })
+
+  it("Workbench uses goToWorkbench — never the plain screen nav or new-chat", () => {
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByLabelText("Workbench"))
+    expect(goToWorkbench).toHaveBeenCalledTimes(1)
+    expect(goTo).not.toHaveBeenCalled()
+    expect(goToNewChat).not.toHaveBeenCalled()
+  })
+
+  it("Top Insights still routes to the pinned brief tab, not the workbench", () => {
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByLabelText("Top Insights"))
+    expect(goTo).toHaveBeenCalledWith("brief")
+    expect(goToWorkbench).not.toHaveBeenCalled()
+  })
+})
+
 // ── Shell restyle: every nav affordance is preserved ──────────────────────────
 // The visual restyle of the rail must NOT drop any nav entry. This guards the
 // full set so a future CSS/markup change can't silently remove one. Sign out
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Top Insights, All chats, Guide, Settings + Feedback", () => {
+  // The rail's Search trigger is hidden for now (product call, 2026-07-31). The
+  // palette is NOT removed: AppShell still renders it and owns ⌘K, so this only
+  // asserts the button is absent — never that search stopped working.
+  it("no longer renders the Search trigger (palette + ⌘K are untouched)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByTestId("palette-trigger")).toBeNull()
+    expect(screen.queryByLabelText("Search (Ctrl+K)")).toBeNull()
+    expect(openPalette).not.toHaveBeenCalled()
+  })
+
+  it("renders New chat, Workbench, Top Insights, All chats, Guide, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
+      "Workbench",
       "Top Insights",
       "Chat history",
       "Ideation",

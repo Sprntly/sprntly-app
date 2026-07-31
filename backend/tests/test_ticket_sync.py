@@ -172,8 +172,10 @@ class FakeTracker:
         self.pushed: list[tuple[str, str]] = []       # (ref, title)
         self.created: list[str] = []                   # titles
         self.cleared: list[str] = []                   # tids clear_ref'd
+        self.removed: list[str] = []                   # refs remove_task'd
         self.status_sets: list[tuple[str, str]] = []   # (ref, status)
         self.field_pushes: list[tuple[str, dict]] = [] # (ref, {fid: value})
+        self.field_push_current: list[dict] = []       # remote values at push time
         self.type_sets: list[tuple[str, str]] = []     # (ref, issue_type)
         self.comments: list[tuple[str, str]] = []      # (ref, text)
         self.assignee_sets: list[tuple[str, str]] = [] # (ref, account_id)
@@ -184,6 +186,7 @@ class FakeTracker:
     gone_seed: set = set()
     meta_seed: dict | None = None
     assignee_seed: dict = {}  # lower-cased email → accountId (assignable users)
+    removal_fails: bool = False  # tracker refuses remove_task (delete + close)
 
     def assignee_ref(self, assignee):
         # Mirrors the real _Tracker: resolve the Sprntly assignee's email to a
@@ -238,8 +241,12 @@ class FakeTracker:
             for f in self.editable_fields()
         }
 
-    def push_custom_fields(self, ref, values):
+    def push_custom_fields(self, ref, values, current=None):
+        # `current` = the tracker's values right now; the real ClickUp branch
+        # needs it to know which tags to REMOVE (its tag API has no whole-list
+        # write). Recorded so tests can assert it was threaded through.
         self.field_pushes.append((ref, dict(values)))
+        self.field_push_current.append(dict(current or {}))
         tid = ref.removeprefix("ref-")
         cf = dict((self.remotes.get(tid) or {}).get("custom_fields") or {})
         cf.update(values)
@@ -251,7 +258,21 @@ class FakeTracker:
     def clear_ref(self, tid):
         self.cleared.append(tid)
         self.remotes.pop(tid, None)
+        # Also drop it from the SEED, which is what a later pass's tracker is
+        # built from. The real clear_ref deletes a mapping ROW, so the next
+        # pass genuinely sees the ticket as never-pushed; without this the fake
+        # would resurrect it and hide restore/re-create bugs.
+        FakeTracker.seed.pop(tid, None)
         self.gone.discard(tid)
+
+    def remove_task(self, ref):
+        # Whole-ticket removal (deleted / excluded). `removal_fails` makes the
+        # tracker refuse, so a test can check the mapping is KEPT for a retry.
+        self.removed.append(ref)
+        if FakeTracker.removal_fails:
+            return False
+        self.remotes.pop(ref.removeprefix("ref-"), None)
+        return True
 
     def remote(self, ref):
         tid = ref.removeprefix("ref-")
@@ -259,7 +280,9 @@ class FakeTracker:
             return {"__gone__": True}
         return self.remotes.get(tid)
 
-    def push(self, ref, story):
+    def push(self, ref, story, remote=None):
+        # `remote` = the state the pass already read; the real ClickUp branch
+        # reuses its checklists for the child-issue reconcile.
         tid = ref.removeprefix("ref-")
         self.pushed.append((ref, story.title))
         self.remotes[tid] = {
@@ -290,6 +313,7 @@ def fake_tracker(monkeypatch):
     FakeTracker.gone_seed = set()
     FakeTracker.meta_seed = None
     FakeTracker.assignee_seed = {}
+    FakeTracker.removal_fails = False
     from app.stories import sync as sync_mod
 
     monkeypatch.setattr(sync_mod, "_Tracker", FakeTracker)
@@ -504,7 +528,7 @@ def test_no_changes_means_no_writes(isolated_settings, fake_tracker):
     tracker = fake_tracker.instances[0]
     assert tracker.pushed == [] and tracker.created == [] and tracker.status_sets == []
     assert result == {"pushed": 0, "imported": 0, "push_errors": 0,
-                      "statuses": result["statuses"]}
+                      "removed": 0, "statuses": result["statuses"]}
 
 
 def test_tracker_status_change_imports_into_internal_status(isolated_settings, fake_tracker):
