@@ -794,6 +794,11 @@ export function ChatScreen() {
   const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
   const tabsKey = `sprntly_chat_tabs_${authUserId}_${activeCompany}`
   const activeTabKey = `sprntly_chat_active_tab_${authUserId}_${activeCompany}`
+  // The last CHAT tab the user was on — the pinned brief tab is never written
+  // here. This is what the sidebar's "Workbench" nav (`/?tab=last`) restores, so
+  // it always lands on real work rather than the brief. Session-scoped and
+  // user+company-scoped for the same reasons as the tabs themselves.
+  const lastTabKey = `sprntly_chat_last_tab_${authUserId}_${activeCompany}`
 
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
@@ -934,6 +939,14 @@ export function ChatScreen() {
   useEffect(() => {
     try { sessionStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
+
+  // Remember the last CHAT tab (never the pinned brief tab, never the tab-less
+  // landing) so "Workbench" can return the user to their open work. Written on
+  // every switch; read only by the `?tab=last` handler below.
+  useEffect(() => {
+    if (!activeTabId || activeTabId === BRIEF_TAB_ID) return
+    try { sessionStorage.setItem(lastTabKey, activeTabId) } catch { /* ignore */ }
+  }, [activeTabId, lastTabKey])
 
   // The pinned brief tab is synthesized (not in `tabs`), so when it's active
   // `activeTab` is null. `isBriefTab` lets the render swap in <BriefChat/> for
@@ -3968,6 +3981,41 @@ export function ChatScreen() {
     router.replace("/")
   }, [searchParams, startNewThread, router])
 
+  // ── "Workbench" hand-off (`/?tab=last`) ───────────────────────────────────
+  // The sidebar's two doors into this surface are deliberately split: "Top
+  // Insights" (→ /brief) always activates the pinned brief tab, and "Workbench"
+  // (→ /?tab=last, goToWorkbench) always activates the user's last CHAT tab, so
+  // neither nav can strand you on the other's surface. Resolution order:
+  //   1. the remembered tab, if it's still open (it may have been closed since),
+  //   2. otherwise the last tab in the strip — the user has open work either way,
+  //   3. otherwise a fresh chat tab, so the nav is never a no-op.
+  // Latched + param-stripped exactly like the new-chat handler above.
+  const consumedLastTabRef = useRef(false)
+  useEffect(() => {
+    if (searchParams.get("tab") !== "last") {
+      consumedLastTabRef.current = false
+      return
+    }
+    if (consumedLastTabRef.current) return
+    consumedLastTabRef.current = true
+    let remembered: string | null = null
+    try { remembered = sessionStorage.getItem(lastTabKey) } catch { /* ignore */ }
+    const open = tabsRef.current
+    const target =
+      remembered && open.some((t) => t.id === remembered)
+        ? remembered
+        : open.length > 0
+          ? open[open.length - 1].id
+          : null
+    if (target) {
+      setActiveTabId(target)
+      setDraft("")
+    } else {
+      startNewThread()
+    }
+    router.replace("/")
+  }, [searchParams, lastTabKey, startNewThread, router])
+
   // ── PRD deep-link (`/brief?prd=<id>`) ─────────────────────────────────────
   // The Slack "your PRD is ready" ping links here carrying the prd id. Open that
   // PRD as a chat tab + panel via the SAME load flow the command palette / brief
@@ -4239,6 +4287,57 @@ export function ChatScreen() {
     const atEnd = list.scrollLeft + list.clientWidth >= list.scrollWidth - 1
     const edges = [atStart ? null : "start", atEnd ? null : "end"].filter(Boolean).join(" ")
     scroller.setAttribute("data-ov", edges)
+    // The left fade must start where the PINNED tab ends, not at the strip's
+    // edge — otherwise it paints over the pin (or hides behind it) instead of
+    // marking the scrolled-away tabs sliding under it. Measured rather than
+    // hard-coded because the pin's width is its label's, which is font-dependent.
+    // Measured off bounding rects, not offsetLeft: engines disagree on whether
+    // offsetLeft reflects a sticky element's shifted position, and the fade must
+    // sit at the pin's VISUAL right edge in both states (at rest and while stuck).
+    const pin = list.querySelector<HTMLElement>("[data-tab-pinned='true']")
+    const pinW = pin
+      ? Math.max(0, pin.getBoundingClientRect().right - scroller.getBoundingClientRect().left)
+      : 0
+    scroller.style.setProperty("--tab-pin-w", `${pinW}px`)
+  }, [])
+
+  // Keep the ACTIVE tab inside the strip's visible corridor — which is narrower
+  // than the strip itself at both ends: the sticky Top Insights pin covers the
+  // left, and on the right the artifact panel takes up to 60vw off `.main-column`
+  // (padding-right), shrinking the strip under whatever is currently scrolled
+  // there. So opening the panel on a tab that sat near the right edge left that
+  // tab clipped behind the panel with nothing to bring it back. This slides the
+  // tabs to its left out of the way until it's fully in the corridor again, and
+  // the reverse when the panel closes and the corridor grows back.
+  //
+  // Minimum movement, not centring: an already-visible tab must not jump.
+  const keepActiveTabVisible = useCallback((smooth: boolean) => {
+    const list = tabListRef.current
+    if (!list) return
+    const active = list.querySelector<HTMLElement>("[data-tab-active='true']")
+    // The pin is always visible by definition — nothing to scroll to.
+    if (!active || active.dataset.tabPinned === "true") return
+    const pin = list.querySelector<HTMLElement>("[data-tab-pinned='true']")
+    const view = list.getBoundingClientRect()
+    const rect = active.getBoundingClientRect()
+    const leftBound = pin ? pin.getBoundingClientRect().right : view.left
+    // A little air so the tab doesn't sit flush against the panel's edge.
+    const rightBound = view.right - 12
+    let delta = 0
+    if (rect.right > rightBound) delta = rect.right - rightBound
+    else if (rect.left < leftBound) delta = rect.left - leftBound
+    // A tab wider than the corridor can't satisfy both bounds — prefer its LEFT
+    // edge, so the title reads from the start rather than the middle.
+    delta = Math.min(delta, rect.left - leftBound)
+    if (delta === 0) return
+    const left = list.scrollLeft + delta
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+    // scrollTo is absent in jsdom, hence the guard.
+    if (smooth && !reduced && typeof list.scrollTo === "function") {
+      list.scrollTo({ left, behavior: "smooth" })
+    } else {
+      list.scrollLeft = left
+    }
   }, [])
 
   useEffect(() => {
@@ -4260,45 +4359,145 @@ export function ChatScreen() {
       // works natively — only redirect the vertical-dominant ones.
       if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
       e.preventDefault()
-      // Direct assignment, not scrollBy: `scroll-behavior: smooth` would queue
-      // an animation per wheel tick and the strip would lag the gesture.
-      list.scrollLeft += e.deltaY
+      // deltaY is only in PIXELS for trackpads and Chromium mice. A real wheel
+      // in Firefox reports LINES (deltaMode 1, deltaY ±3) and some report PAGES
+      // (2) — taken raw, a wheel notch there moved the strip 3px and read as
+      // "scrolling doesn't work". Convert to pixels before applying.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? list.clientWidth : 1
+      // Instant, not animated — the strip must track the gesture 1:1. That's why
+      // `scroll-behavior: smooth` is off on .chat-tab-list (the scrollLeft setter
+      // would otherwise obey it and queue an animation per wheel tick).
+      list.scrollLeft += e.deltaY * unit
+    }
+
+    // ── Drag-to-pan ──────────────────────────────────────────────────────────
+    // Press anywhere on the strip and drag sideways to pull the tabs along, the
+    // way you'd shove a row of paper tabs. The strip has no scrollbar to grab and
+    // a plain mouse has no horizontal wheel, so without this the ONLY way to
+    // reach an overflowed tab is a wheel gesture that happens to be over the
+    // strip — which is what "I can't scroll it with the mouse" was.
+    //
+    // Mouse only: touch and pen already pan natively (and hijacking those
+    // pointers would fight the browser's own inertia).
+    let panning = false
+    let panStartX = 0
+    let panStartScroll = 0
+    let panMoved = false
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.button !== 0) return
+      if (list.scrollWidth <= list.clientWidth) return
+      // Never start a pan on a control — the × close and the "+" new-tab button
+      // must stay ordinary clicks.
+      if ((e.target as HTMLElement | null)?.closest("button")) return
+      panning = true
+      panMoved = false
+      panStartX = e.clientX
+      panStartScroll = list.scrollLeft
+    }
+
+    // A few px of slack before it counts as a drag, so a slightly shaky click on
+    // a tab still selects it instead of nudging the strip.
+    const PAN_THRESHOLD = 5
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panning) return
+      const dx = e.clientX - panStartX
+      if (!panMoved) {
+        if (Math.abs(dx) < PAN_THRESHOLD) return
+        panMoved = true
+        // Marks the drag for CSS (grabbing cursor, no text selection).
+        list.classList.add("is-panning")
+      }
+      // Drag direction is the CONTENT's: pull right → tabs move right → the
+      // viewport moves left. Absolute (from the press position), not
+      // incremental, so the tabs stay glued to the pointer even if a move event
+      // is dropped.
+      list.scrollLeft = panStartScroll - dx
+      e.preventDefault()
+    }
+
+    const endPan = () => {
+      if (!panning) return
+      panning = false
+      list.classList.remove("is-panning")
+      // `panMoved` stays set until the click handler below consumes it: the
+      // click fires AFTER pointerup, and releasing on top of a tab must not
+      // also switch to that tab.
+    }
+
+    const onClickCapture = (e: MouseEvent) => {
+      if (!panMoved) return
+      panMoved = false
+      e.preventDefault()
+      e.stopPropagation()
     }
 
     list.addEventListener("scroll", syncTabOverflow, { passive: true })
     list.addEventListener("wheel", onWheel, { passive: false })
-    window.addEventListener("resize", syncTabOverflow)
+    list.addEventListener("pointerdown", onPointerDown)
+    // Move/up on the WINDOW so a drag that leaves the 44px strip (easy — it's
+    // short) keeps panning, and a release anywhere still ends it.
+    window.addEventListener("pointermove", onPointerMove, { passive: false })
+    window.addEventListener("pointerup", endPan)
+    window.addEventListener("pointercancel", endPan)
+    list.addEventListener("click", onClickCapture, true)
+    const onResize = () => {
+      syncTabOverflow()
+      // Instant, not a glide: while the panel animates open (or the user drags
+      // its resize handle) this fires continuously, and a queued smooth scroll
+      // per frame would stutter. Instant tracking reads as the tabs sliding
+      // aside to make room, which is the intent.
+      keepActiveTabVisible(false)
+    }
+    window.addEventListener("resize", onResize)
     // The strip also resizes without a window resize — the artifact panel
     // opening/closing re-lays the column out underneath it.
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncTabOverflow) : null
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(onResize) : null
     ro?.observe(list)
     return () => {
       list.removeEventListener("scroll", syncTabOverflow)
       list.removeEventListener("wheel", onWheel)
-      window.removeEventListener("resize", syncTabOverflow)
+      list.removeEventListener("pointerdown", onPointerDown)
+      window.removeEventListener("pointermove", onPointerMove)
+      window.removeEventListener("pointerup", endPan)
+      window.removeEventListener("pointercancel", endPan)
+      list.removeEventListener("click", onClickCapture, true)
+      window.removeEventListener("resize", onResize)
       ro?.disconnect()
     }
-  }, [syncTabOverflow])
+  }, [syncTabOverflow, keepActiveTabVisible])
 
   // Tab opened/closed/renamed → the overflow edges moved.
   useEffect(() => { syncTabOverflow() }, [tabs, syncTabOverflow])
 
   // Selecting a tab that's scrolled out of view (a command opening a new one,
   // or the palette jumping to an old one) should bring it back, not leave the
-  // user hunting for a highlight they can't see. `scroll-behavior: smooth` on
-  // the list makes this a glide; `nearest` keeps an already-visible tab still.
+  // user hunting for a highlight they can't see. A glide, not a jump — the user
+  // didn't drive this scroll directly, so an instant snap reads as the strip
+  // flinching.
   useEffect(() => {
     const list = tabListRef.current
     if (!list) return
     // rAF: on a just-opened tab the node lands in the same commit, so measuring
     // before paint would scroll to a stale position.
     const raf = requestAnimationFrame(() => {
-      const active = list.querySelector<HTMLElement>("[data-tab-active='true']")
-      active?.scrollIntoView({ block: "nearest", inline: "nearest" })
+      keepActiveTabVisible(true)
       syncTabOverflow()
     })
     return () => cancelAnimationFrame(raf)
-  }, [activeTabId, syncTabOverflow])
+  }, [activeTabId, syncTabOverflow, keepActiveTabVisible])
+
+  // The artifact panel opening/closing is the other thing that moves the strip's
+  // right edge. The ResizeObserver above tracks the column's padding animating,
+  // but only fires while the box actually changes — this is the settle, so the
+  // active tab ends up fully clear of the panel (and, on close, so the strip
+  // relaxes back now that the corridor is wide again). The delay clears the
+  // panel's own 260ms transition; a glide because the strip has stopped moving
+  // by then.
+  useEffect(() => {
+    const t = setTimeout(() => keepActiveTabVisible(true), 300)
+    return () => clearTimeout(t)
+  }, [contentPanelTab, keepActiveTabVisible])
 
   return (
     <AppLayout
@@ -4336,21 +4535,43 @@ export function ChatScreen() {
               style={{
                 display: "flex", alignItems: "stretch", gap: 0,
                 flex: "1 1 auto", minWidth: 0,
-                paddingLeft: 8, overflowX: "auto", overflowY: "visible",
+                // NO padding-left. The strip's 8px lead-in lives inside the
+                // pinned tab's own left padding instead — as list padding it was
+                // an 8px gap the pin couldn't cover, and scrolling tabs showed
+                // through it to the left of the pin.
+                overflowX: "auto", overflowY: "visible",
               }}
             >
               {/* Pinned brief tab — always first, never closable (synthesized, not
-                  in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
+                  in `tabs`/localStorage). Selecting it renders <BriefChat/> below.
+                  PINNED IN THE LITERAL SENSE: `position: sticky` holds it at the
+                  strip's left edge while the chat tabs scroll horizontally UNDER
+                  it, so the way back to Top Insights is never itself scrolled out
+                  of reach. It outranks the scroller's left overflow fade (z-index
+                  2), which is offset past it via --tab-pin-w so the fade still
+                  reads as "more tabs that way" instead of washing over the pin.
+                  `left: 0` — FLUSH, deliberately. Stuck at any inset, the gap
+                  between the strip's edge and the pin is a window the scrolling
+                  tabs show through; the strip's 8px lead-in is therefore carried
+                  as this tab's own extra left padding (22 = 14 + 8), which puts
+                  the label in exactly the same place but backs it with the pin's
+                  opaque fill all the way to the edge. */}
               <div
                 key={BRIEF_TAB_ID}
+                className="chat-tab chat-tab--pinned"
                 data-tab-active={isBriefTab ? "true" : undefined}
+                data-tab-pinned="true"
                 onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
                 style={{
+                  position: "sticky", left: 0, zIndex: 3,
                   display: "flex", alignItems: "center", gap: 6,
-                  padding: "0 14px", fontSize: 13, cursor: "pointer",
+                  padding: "0 14px 0 22px", fontSize: 13, cursor: "pointer",
                   color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
                   fontWeight: isBriefTab ? 500 : 400,
-                  background: isBriefTab ? "var(--surface, #fff)" : "transparent",
+                  // OPAQUE even when inactive (the strip's own colour, so it looks
+                  // unchanged at rest) — a transparent pin would let the scrolling
+                  // tabs show straight through it.
+                  background: isBriefTab ? "var(--surface, #fff)" : "var(--surface-2, #f7f5f0)",
                   borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
                   borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
                   borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
@@ -4367,9 +4588,16 @@ export function ChatScreen() {
                 return (
                   <div
                     key={tab.id}
+                    className="chat-tab"
                     data-tab-active={isActive ? "true" : undefined}
                     onClick={() => { setActiveTabId(tab.id); setDraft("") }}
                     style={{
+                      // Positioned so the separator / shoulder pseudo-elements
+                      // anchor to it; raised when active so its shoulders, which
+                      // reach 8px into both neighbours, paint OVER them (a later
+                      // sibling would otherwise cover the right one).
+                      position: "relative",
+                      zIndex: isActive ? 1 : undefined,
                       display: "flex", alignItems: "center", gap: 6,
                       padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
                       color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",

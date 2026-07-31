@@ -117,6 +117,15 @@ interface NavigationContextType {
    *  doesn't re-trigger. Works whether the surface is freshly mounted or already
    *  on screen (the search-param change re-runs the consume effect). */
   goToNewChat: () => void
+  /** Open the WORKBENCH: the home surface restored to the tab the user was last
+   *  on, EXCLUDING the pinned Top Insights tab. The sidebar has two doors into
+   *  the same tabbed surface — "Top Insights" always lands on the pinned first
+   *  tab, "Workbench" always lands on your open work. Pushes `/?tab=last`;
+   *  ChatScreen consumes the one-shot param (then strips it), activating the
+   *  remembered chat tab, or falling back to a fresh chat when none is open.
+   *  Same one-shot-param shape as `goToNewChat` so it works whether the surface
+   *  is freshly mounted or already on screen. */
+  goToWorkbench: () => void
 
   // Drawer state
   activeDrawer: "claude" | "ticket" | "design-agent" | null
@@ -402,6 +411,19 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const goToWorkbench = useCallback(() => {
+    setActiveDrawer(null)
+    setActiveModal(null)
+    setShareMenuOpen(false)
+    setReviewPastOpen(false)
+    setPendingOndemandDraft(null)
+    // `/?tab=last` — the one-shot "restore my last non-brief tab" signal
+    // ChatScreen consumes (then strips). Without the param, `/` defaults to the
+    // pinned brief tab, which is precisely the tab this nav must NOT land on.
+    router.push("/?tab=last")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openPrdTab = useCallback((request: PrdTabRequest) => {
     setPendingPrdTab(request)
     // This navigation to `/` is *for* opening the PRD panel — tell the
@@ -470,6 +492,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         currentScreen,
         goTo,
         goToNewChat,
+        goToWorkbench,
         activeDrawer,
         openDrawer,
         closeDrawers,
