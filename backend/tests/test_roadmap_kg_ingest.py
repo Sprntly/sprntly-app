@@ -1285,3 +1285,32 @@ def test_roadmap_ingest_still_does_not_trigger_triage(isolated_settings):
     assert calls, "extract_document was not called"
     for kwargs in calls:
         assert kwargs.get("triage", False) is False
+
+
+def test_roadmap_ingest_routes_through_the_roadmap_extraction_skill(
+        isolated_settings):
+    """The dedicated method (one signal per initiative, normalized
+    initiative_status/target_period, kind never deal_blocker) only applies
+    if the call site actually passes it — regression guard for the wiring."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-skill")
+    _store_roadmap("co-skill", _roadmap_text("A"), workspace_id="ws-1")
+    facade = GraphFacade()
+
+    real_extract_document = rm.extract_document
+    calls: list[dict] = []
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real_extract_document(*args, **kwargs)
+
+    with _Extraction():
+        with patch.object(rm, "extract_document", side_effect=spy):
+            rm.ingest_roadmap("co-skill", "ws-1", facade=facade)
+
+    assert calls, "extract_document was not called"
+    for kwargs in calls:
+        assert kwargs.get("skill_id") == "roadmap-extraction"
+
+    [signal] = _roadmap_signals(facade, "co-skill").values()
+    assert signal.skill_id == "roadmap-extraction"

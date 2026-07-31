@@ -339,6 +339,10 @@ def _ingest_roadmap_locked(
             # count as connected evidence in the brief gate. See _FORCE_SOURCE_TYPE.
             force_source_type=_FORCE_SOURCE_TYPE,
             provenance_extra=provenance_extra,
+            # Dedicated method: one signal per initiative (not per sentence),
+            # a normalized initiative_status/target_period, and a resolved
+            # kind-collapse decision — see backend/skills/roadmap-extraction.
+            skill_id="roadmap-extraction",
         )
         totals["signals"] += r["signals"]
         totals["themes"] += r["themes"]
