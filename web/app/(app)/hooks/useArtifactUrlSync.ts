@@ -74,6 +74,18 @@ export function useArtifactUrlSync() {
   const { openPrdTab, contentPanelTab } = useNavigation()
   const { content, setContent } = useContent()
 
+  // `/prototype` pre-dates this hook and owns `?prd=` for an unrelated
+  // purpose (which prototype's canvas to show — read directly via
+  // PrototypeRoute.tsx's own useSearchParams(), independent of the drawer
+  // system entirely). Since this hook is mounted globally in AppShell, its
+  // drawer→URL effect would otherwise see `contentPanelTab == null` on that
+  // page (no drawer is ever open there) and strip `?prd=` right back off —
+  // confirmed live: a real "GET /prototype?prd=<id>" landed on bare
+  // "GET /prototype" ("No PRD selected") within the same session. This param
+  // name collision is specific to `/prototype`; every other `(app)` page is
+  // fair game for the drawer params.
+  const ownsPrdParamElsewhere = pathname === "/prototype"
+
   // ── URL → drawer (one-shot per distinct param value; re-arms when the
   // param is removed — mirrors the existing `?new=1` / legacy `?prd=`
   // consumption latch in ChatScreen) ──────────────────────────────────────
@@ -93,6 +105,7 @@ export function useArtifactUrlSync() {
   const urlEvidenceMetaRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (ownsPrdParamElsewhere) return
     const raw = searchParams.get(PRD_PARAM)
     if (!raw) {
       consumedRef.current.prd = null
@@ -104,9 +117,10 @@ export function useArtifactUrlSync() {
     if (prdId == null) return
     pendingUrlOpenRef.current = true
     openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
-  }, [searchParams, openPrdTab])
+  }, [searchParams, openPrdTab, ownsPrdParamElsewhere])
 
   useEffect(() => {
+    if (ownsPrdParamElsewhere) return
     const raw = searchParams.get(EVIDENCE_PARAM)
     if (!raw) {
       consumedRef.current.evidence = null
@@ -143,6 +157,7 @@ export function useArtifactUrlSync() {
   const pendingTicketPrdRef = useRef<number | null>(null)
 
   useEffect(() => {
+    if (ownsPrdParamElsewhere) return
     const raw = searchParams.get(TICKET_PARAM)
     if (!raw) {
       consumedRef.current.ticket = null
@@ -156,7 +171,7 @@ export function useArtifactUrlSync() {
     pendingUrlOpenRef.current = true
     pendingTicketPrdRef.current = prdId
     openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
-  }, [searchParams, openPrdTab])
+  }, [searchParams, openPrdTab, ownsPrdParamElsewhere])
 
   useEffect(() => {
     if (pendingTicketPrdRef.current == null) return
@@ -178,6 +193,7 @@ export function useArtifactUrlSync() {
 
   // ── drawer → URL ─────────────────────────────────────────────────────────
   useEffect(() => {
+    if (ownsPrdParamElsewhere) return
     if (contentPanelTab != null) pendingUrlOpenRef.current = false
     if (pendingUrlOpenRef.current) return // mid-open from a URL param — don't fight it
 
@@ -235,5 +251,5 @@ export function useArtifactUrlSync() {
     params.set(want.key, want.value)
     router.replace(`${pathname}?${params}`, { scroll: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, pathname, router])
+  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, pathname, router, ownsPrdParamElsewhere])
 }
