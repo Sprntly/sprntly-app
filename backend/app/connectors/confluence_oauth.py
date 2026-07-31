@@ -98,14 +98,22 @@ CONFLUENCE_API_BASE = "https://api.atlassian.com/ex/confluence"
 #                               families in one app is permitted (the console
 #                               exposes Classic and Granular as separate tabs
 #                               on the same app).
+#   search:confluence         — CLASSIC, for CQL search (GET
+#                               /wiki/rest/api/search), which chat's live
+#                               lookup uses. v2 has no search endpoint either.
+#                               A connection authorized before this scope was
+#                               added keeps working: confluence_fetch reports
+#                               search as unavailable and the adapter falls
+#                               back to listing.
 #   offline_access            — REQUIRED for a refresh_token (~1h tokens)
 #
 # Every scope here must ALSO be granted on the app in the developer console,
 # or the consent screen 400s. And scopes are baked into the token at consent:
-# changing this list means every existing connection must RECONNECT.
+# changing this list means every existing connection must RECONNECT to gain
+# the new capability.
 CONFLUENCE_SCOPES = (
     "read:space:confluence read:page:confluence read:blogpost:confluence "
-    "read:confluence-user offline_access"
+    "read:confluence-user search:confluence offline_access"
 )
 
 #: `connections.config` key holding the resolved site id, cached at connect so

@@ -442,6 +442,7 @@ the app's declared scopes must be a superset or the consent screen 400s.
 | `read:page:confluence` | Granular | `GET /wiki/api/v2/pages` (and blog posts) |
 | `read:blogpost:confluence` | Granular | Declared for safety — the scopes reference lists it while the endpoint doc claims `read:page` covers it |
 | `read:confluence-user` | Classic | `GET /wiki/rest/api/user/current` for the account label |
+| `search:confluence` | Classic | CQL search (`GET /wiki/rest/api/search`) — powers chat's live wiki search. v2 has no search endpoint |
 | `offline_access` | — | Get a **refresh token**; access tokens last ~1 h |
 
 As with Jira, `offline_access` plus `prompt=consent` on the authorize URL
@@ -551,9 +552,31 @@ becomes unreadable is reported by name.
 backwards-compatible default, and it is what a connection made before the
 picker existed has. Personal spaces (`~accountid`) are always excluded.
 
+### Live chat reads
+
+`app/connector_lookup/confluence.py` over `app/connectors/confluence_fetch.py`.
+Four read-only tools: `confluence_search` (CQL), `confluence_list_pages`,
+`confluence_list_spaces`, `confluence_get_page`.
+
+**Two readers, on purpose.** The KG holds *extracted signals* — atomic facts
+the extractor pulled out of pages — not the pages. "What does our onboarding
+spec actually say" is a question about the document, and only a live read
+answers it. The sync answers "what does the company believe, across every
+source".
+
+Reads are bounded by the space selection *and* by the connecting user's own
+Confluence permissions. The adapter's system block tells the model to say so
+rather than conclude the wiki is silent on a topic.
+
+**Search degrades honestly.** CQL search needs the classic `search:confluence`
+scope, added after the first connections were made. A token without it makes
+`search_pages` return `available=False`, and the adapter tells the model
+search could not run and to fall back to listing. Reporting that 401 as an
+empty result set would have chat confidently state a wiki says nothing about
+something it documents thoroughly — "we found nothing" and "we could not
+look" are different answers.
+
 ### Current scope
 
-Connect, disconnect, health probe, KG ingest, space picker. No live chat
-read adapter yet — Confluence sits in `connector_lookup.DEFERRED`, so a
-question naming it gets the honest "syncs into your knowledge graph, but I
-can't query it live" answer rather than a guess.
+Connect, disconnect, health probe, KG ingest, space picker, live chat reads.
+No write path — Sprntly requests no Confluence write scope at all.
