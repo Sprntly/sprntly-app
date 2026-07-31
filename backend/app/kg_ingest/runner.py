@@ -1,9 +1,14 @@
 """Ingestion runner — RawRecords → extraction batches → KG (§1b pipeline).
 
 Generic across providers: a puller yields RawRecords; the runner batches them
-(by char budget) and routes each batch through the generic extractor. Signal
-idempotency is content-keyed (uuid5), so re-syncs and shifting batches can't
-duplicate. Error-isolated per batch — one bad batch never kills the sync.
+(by char budget) and routes each batch through the extractor. A provider with
+a dedicated method in ``PROVIDER_SKILLS`` (currently HubSpot, Jira, ClickUp —
+the connectors whose record shapes carry classification signal the generic
+prompt can't see, e.g. Jira's native issue type) is routed to its skill;
+every other provider falls back to the fully generic extraction path
+unchanged. Signal idempotency is content-keyed (uuid5), so re-syncs and
+shifting batches can't duplicate. Error-isolated per batch — one bad batch
+never kills the sync.
 
 COST GATE: pullers re-fetch everything on every sync, and the uuid5 dedup
 only fires at the signal WRITE — after the LLM call was paid for. The runner
@@ -52,6 +57,18 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     # and the puller reads the documents the user uploaded themselves. Each
     # record carries the user's own source name + description (see the puller).
     "uploads":   (uploads.pull,  "company_id",          "user-uploaded business documents (research, strategy, support exports, decks, spreadsheets — the user named and described this corpus; treat the source_name/source_description properties as authoritative context for what the text is)"),
+}
+
+# provider → vendored extraction skill id (backend/skills/<id>/), for the
+# highest-value connectors that have a purpose-built extraction method beyond
+# the generic prompt above. A provider with no entry here (fireflies, github,
+# sprinklr, superset, uploads, and every non-PULLERS connector) falls back to
+# the fully generic extractor unchanged — see extract_document's skill_id
+# docstring. Extend this mapping as more connectors get a dedicated skill.
+PROVIDER_SKILLS: dict[str, str] = {
+    "hubspot": "hubspot-extraction",
+    "jira": "jira-extraction",
+    "clickup": "clickup-extraction",
 }
 
 
@@ -124,6 +141,7 @@ def sync_provider(
                 provenance_extra=(
                     {"channel": "upload"} if provider == "uploads" else None
                 ),
+                skill_id=PROVIDER_SKILLS.get(provider),
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):

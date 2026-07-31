@@ -106,3 +106,57 @@ def test_provenance_extra_merged_with_origin(facade):
     assert sig.provenance["origin"] == "connector"
     assert sig.provenance["channel"] == "upload"
     assert sig.provenance["category"] == "voice"
+
+
+# ── skill_id routing (connector extraction skills) ──────────────────────────
+
+
+def test_skill_id_none_by_default_leaves_llm_call_unchanged(facade):
+    """Every pre-existing caller passes no skill_id — llm_call must receive
+    skill=None, and no skill_id key lands in provenance."""
+    with patch.object(ex, "llm_call", return_value=_llm_result(
+            [_item("seeded fact", "pm_manual")])) as mock_call, \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        ex.extract_document(facade, "ent-x", doc_name="calls.md", text="doc body")
+    assert mock_call.call_args.kwargs["skill"] is None
+    sig = next(iter(_signals(facade).values()))
+    assert "skill_id" not in sig.provenance
+
+
+def test_skill_id_passed_through_to_llm_call(facade):
+    """A connector-bound skill_id rides straight into gateway.llm_call(skill=...),
+    which is what folds the skill's SKILL.md into the cacheable prompt prefix
+    and suffixes prompt_version with +<id>@<hash> (see gateway._build_method_prefix)."""
+    with patch.object(ex, "llm_call", return_value=_llm_result(
+            [_item("seeded fact", "pm_manual")])) as mock_call, \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        ex.extract_document(facade, "ent-x", doc_name="calls.md", text="doc body",
+                            skill_id="hubspot-extraction")
+    assert mock_call.call_args.kwargs["skill"] == "hubspot-extraction"
+
+
+def test_skill_id_stamped_on_every_written_signal(facade):
+    """Every Signal a skill-routed batch produces can point back to the exact
+    skill that produced it — the field a later formal skill_id column reads
+    from."""
+    _extract(facade, [
+        _item("seeded fact", "pm_manual"),
+        _item("revenue fact", "revenue"),
+    ], skill_id="jira-extraction")
+    by_content = {s.content: s for s in _signals(facade).values()}
+    assert by_content["seeded fact"].provenance["skill_id"] == "jira-extraction"
+    assert by_content["revenue fact"].provenance["skill_id"] == "jira-extraction"
+
+
+def test_skill_id_coexists_with_origin_and_provenance_extra(facade):
+    """skill_id, origin, and provenance_extra all land in the same dict without
+    clobbering each other — the shape a real connector call site uses."""
+    _extract(facade, [_item("seeded fact", "pm_manual")],
+             origin="connector", skill_id="clickup-extraction",
+             provenance_extra={"channel": "upload"})
+    sig = next(iter(_signals(facade).values()))
+    assert sig.provenance["origin"] == "connector"
+    assert sig.provenance["skill_id"] == "clickup-extraction"
+    assert sig.provenance["channel"] == "upload"

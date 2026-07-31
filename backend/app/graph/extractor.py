@@ -84,6 +84,7 @@ def extract_document(
     # jsonb-shaped: str values in the connector paths, plus ints/None from the
     # roadmap path (roadmap_version, workspace_id).
     provenance_extra: dict[str, object] | None = None,
+    skill_id: str | None = None,
 ) -> dict:
     """Extract one document into the KG.
 
@@ -132,7 +133,21 @@ def extract_document(
     a prompt can be talked out of it.
 
     ``provenance_extra`` is merged into each signal's provenance verbatim
-    (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
+    (e.g. {"channel": "upload", "category": "voice"} for category uploads).
+
+    ``skill_id`` binds a vendored extraction skill (``backend/skills/<id>/``,
+    loaded via ``app.skills.loader``) for connectors that have one — passed
+    straight through to ``gateway.llm_call(skill=...)``, which prepends the
+    skill's SKILL.md (+ references) to the cacheable prompt prefix ahead of
+    this module's generic ``_SYSTEM`` layer, and suffixes ``prompt_version``
+    with ``+<skill_id>@<content_hash>`` for the decision-log audit trail. Every
+    signal this produces also gets ``provenance["skill_id"]`` stamped directly
+    (not just buried in the prompt_version string) so a Signal can be traced
+    back to the exact skill that produced it without parsing telemetry — the
+    field a later formal ``skill_id`` column has something real to read from.
+    ``None`` (the default, every pre-existing caller) keeps the fully generic
+    path: no method block, plain ``prompt_version``, no ``skill_id`` in
+    provenance — unchanged behavior."""
     if force_source_type and force_source_type not in SIGNAL_SOURCE_TYPES:
         raise ValueError(
             f"force_source_type={force_source_type!r} is not a valid "
@@ -147,6 +162,7 @@ def extract_document(
         input=(f"source system: {source_hint}\n" if source_hint else "")
               + f"<document name={doc_name!r}>\n{text}\n</document>",
         json_schema=_EXTRACT_SCHEMA,
+        skill=skill_id,
     )
     items = result.output.get("signals", [])
     if not items:
@@ -212,6 +228,7 @@ def extract_document(
             provenance={"source": "extractor", "doc": doc_name,
                         "prompt_version": PROMPT_VERSION,
                         **({"origin": origin} if origin else {}),
+                        **({"skill_id": skill_id} if skill_id else {}),
                         **(provenance_extra or {})},
         )
         try:
