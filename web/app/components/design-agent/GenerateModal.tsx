@@ -933,6 +933,12 @@ export function GenerateModal({
     // path omits it and falls back to the settled repoSel — identical behaviour.
     repoOverride?: string,
     forCodebase?: boolean,
+    // The PM-confirmed external-entry-point description (from
+    // locateResult.external_surface), sent ONLY by the recovery panel's
+    // "generate placeholder" action. Only ever meaningful alongside
+    // chosenRoute/chosenId both null — a chosen screen means a real in-app
+    // match won, so this is dropped in that branch below regardless.
+    externalSurfaceHint?: string | null,
   ) {
     if (prdId == null) return
     const codebaseGenerate = forCodebase || (designSource === "github" && githubActive)
@@ -982,6 +988,10 @@ export function GenerateModal({
     // so id is the only signal present for it. chosen_screen_route still travels
     // for back-compat + as the human label / cache pin; chosen_screen_id is the
     // resolution key the backend prefers.
+    // The external-surface hint only ever rides a no-chosen-screen run — a
+    // chosen screen means a real in-app match won, so it is dropped in that
+    // branch below regardless of what the caller passed (belt-and-suspenders,
+    // mirroring the same guard on the backend's _run_generation_bg).
     const params =
       codebaseGenerate && (chosenRoute || chosenId)
         ? {
@@ -1001,7 +1011,12 @@ export function GenerateModal({
             // -only (Tier-3), since there is no shell to ground on anyway.
             ...baseParams,
             map_commit_sha: retainedSha,
+            ...(externalSurfaceHint
+              ? { external_surface_hint: externalSurfaceHint }
+              : {}),
           }
+        : codebaseGenerate && externalSurfaceHint
+        ? { ...baseParams, external_surface_hint: externalSurfaceHint }
         : baseParams
     void runGenerateFlow({
       params,
@@ -1430,6 +1445,15 @@ export function GenerateModal({
   const realRanked = locateResult
     ? locateResult.ranked.filter(isRealCandidate)
     : []
+  // External-entry-point signal (from the SAME locate call — see
+  // GateResult.external_surface / ExternalEntryPointSignal). Only ever
+  // meaningful alongside realRanked.length === 0 — the backend only attaches
+  // this signal on a ranked_confirm outcome with no strong in-app match, and
+  // an ordinary weak/ambiguous match never carries it (an internal-only flow
+  // is unaffected). Generalized: surface_description is whatever free text
+  // locate produced, not a fixed category (email included).
+  const externalSurface = locateResult?.external_surface ?? null
+  const externalDetected = Boolean(externalSurface?.detected)
   const recoveryPanel = locateResult ? (
     <div data-testid="unmapped-resolve">
       <p className="locate-hint" data-testid="locate-unmapped">
@@ -1446,6 +1470,56 @@ export function GenerateModal({
           </>
         )}
       </p>
+      {/* External-entry-point recovery: the flow's entry point genuinely lives
+          outside this codebase (an email, an SMS, a third-party partner UI,
+          anything the locate call's own read of the PRD implies — see
+          isRealCandidate's sibling signal above). Only ever renders on the
+          no-real-candidate variant. A user-attached screenshot always WINS —
+          when one is present, this shows a note instead of the placeholder
+          CTA, and "Search again" (below) is what actually uses it. */}
+      {realRanked.length === 0 && externalDetected && externalSurface && (
+        <div
+          className="locate-external-surface"
+          data-testid="locate-external-surface"
+        >
+          <p
+            className="locate-hint"
+            data-testid="locate-external-surface-hint"
+          >
+            This looks like it starts outside your app —{" "}
+            {externalSurface.surface_description}. Attach a real screenshot of
+            it below, or we can generate a generic placeholder to keep the
+            flow moving.
+          </p>
+          {steerImage ? (
+            <p
+              className="locate-hint"
+              data-testid="locate-external-surface-screenshot-note"
+            >
+              Using your attached screenshot instead of a generated
+              placeholder.
+            </p>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-accent"
+              data-testid="generate-external-placeholder"
+              onClick={() =>
+                runGenerateForRoute(
+                  null,
+                  locateResult.commit_sha || null,
+                  null,
+                  repoSel,
+                  true,
+                  externalSurface.surface_description,
+                )
+              }
+            >
+              Generate a placeholder for it
+            </button>
+          )}
+        </div>
+      )}
       {/* Candidates lead on the PICKER variant. The pickable confirm view
           (Suggested + Other options) renders ABOVE the steer whenever a real
           candidate survives the isRealCandidate filter — "the picker and the
@@ -1475,17 +1549,20 @@ export function GenerateModal({
           steer is demoted below it and "Search again" is plain/secondary — it
           must not compete with the accent "Use this screen" cards. Blank input
           disables the button. */}
-      {/* Image-as-steer. The screenshot affordance lives ONLY on the
-          MAPPED variant (realRanked > 0): there ARE candidates to re-rank, so a
-          screenshot can help. On the UNMAPPED variant there is no map to re-rank,
-          so NONE of this renders — that path keeps the text steer
-          + PRD-anyway floor only. The chip + image feedback sit above the steer
-          row (mockup intent); the attach button sits inside the row. */}
-      {/* Framing heading for the mapped steer grouping — names both ways to
-          redirect the anchor (type a direction, or show a screenshot). MAPPED
-          variant only, matching the image-control gating; the unmapped variant
-          keeps its own steer copy. */}
-      {realRanked.length > 0 && (
+      {/* Image-as-steer. The screenshot affordance lives on the MAPPED variant
+          (realRanked > 0, where there ARE candidates to re-rank) AND on the
+          external-detected variant (no candidates, but a real screenshot of
+          the external surface is exactly the manual-upload path AC3 asks to
+          preserve — the user can attach it here and "Search again" re-runs
+          locate with it attached). On any OTHER unmapped variant none of this
+          renders — that path keeps the text steer + PRD-anyway floor only.
+          The chip + image feedback sit above the steer row (mockup intent);
+          the attach button sits inside the row. */}
+      {/* Framing heading for the steer grouping — names both ways to redirect
+          the anchor (type a direction, or show a screenshot). Matches the
+          image-control gating below; the plain unmapped variant keeps its own
+          steer copy with no heading. */}
+      {(realRanked.length > 0 || externalDetected) && (
         <p
           className="locate-steer-heading"
           data-testid="locate-steer-heading"
@@ -1493,7 +1570,7 @@ export function GenerateModal({
           Not the right screen? Tell us where to anchor — or show us.
         </p>
       )}
-      {realRanked.length > 0 && steerImage && (
+      {(realRanked.length > 0 || externalDetected) && steerImage && (
         <div className="locate-image-chip" data-testid="locate-image-chip">
           <IconImage size={16} className="locate-image-chip-icon" />
           <div className="locate-image-chip-meta">
@@ -1530,9 +1607,10 @@ export function GenerateModal({
       {/* No silent image drop. A fall-open (oversize / undecodable on the
           server) must NEVER claim the image was used: show an inline notice that
           we searched on text instead, and render NO cues / no "re-ranked toward
-          the screenshot" copy. Gated on the mapped variant + a non-applied,
-          non-absent status returned by the last search. */}
-      {realRanked.length > 0 &&
+          the screenshot" copy. Gated to the same variants the attach control
+          renders on, + a non-applied, non-absent status returned by the last
+          search. */}
+      {(realRanked.length > 0 || externalDetected) &&
         (imageStatus === "ignored_oversize" ||
           imageStatus === "ignored_decode") && (
           <p className="locate-image-notice" data-testid="locate-image-notice">
@@ -1567,10 +1645,12 @@ export function GenerateModal({
             }
           }}
         />
-        {/* Attach / replace screenshot — MAPPED variant only. Hidden file input
-            driven by a visible button so the control matches the steer row's
-            vocabulary. */}
-        {realRanked.length > 0 && (
+        {/* Attach / replace screenshot — MAPPED variant, or the external-
+            detected variant (a real screenshot of the external surface takes
+            precedence over the generated placeholder — see
+            locate-external-surface above). Hidden file input driven by a
+            visible button so the control matches the steer row's vocabulary. */}
+        {(realRanked.length > 0 || externalDetected) && (
           <>
             <input
               ref={steerImageInputRef}
@@ -1598,7 +1678,13 @@ export function GenerateModal({
         )}
         <button
           type="button"
-          className={realRanked.length === 0 ? "btn btn-accent" : "btn"}
+          // "Search again" is the sole accent action on the plain unmapped
+          // variant. When the external-placeholder CTA is ALSO offered, this
+          // is demoted to plain so the two don't compete for primary
+          // attention — the placeholder CTA leads instead.
+          className={
+            realRanked.length === 0 && !externalDetected ? "btn btn-accent" : "btn"
+          }
           data-testid="locate-search-again"
           disabled={!(searchHint.trim() || steerImage)}
           onClick={() =>
@@ -1613,8 +1699,9 @@ export function GenerateModal({
         </button>
       </div>
       {/* Client-side reject: a non-image MIME / >5 MB / unreadable file is
-          refused BEFORE any upload, with an inline message. Mapped variant only. */}
-      {realRanked.length > 0 && steerImageError && (
+          refused BEFORE any upload, with an inline message. Same variants as
+          the attach control. */}
+      {(realRanked.length > 0 || externalDetected) && steerImageError && (
         <p className="locate-image-error" data-testid="locate-image-error">
           {steerImageError}
         </p>

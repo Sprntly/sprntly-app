@@ -1517,6 +1517,25 @@
   color: var(--danger);
 }
 
+/* External-entry-point recovery — the flow's entry point genuinely lives
+ * outside this codebase (see GateResult.external_surface). Accent-tinted card,
+ * echoing the attached-screenshot chip's treatment, so it reads as its own
+ * recovery option rather than plain body text. Sits above the picker /
+ * steer row on the no-real-candidate variant. */
+.design-agent-surface.modal .locate-external-surface {
+  margin: 4px 0 0;
+  padding: 12px 13px;
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+  border-radius: var(--radius);
+}
+.design-agent-surface.modal .locate-external-surface .locate-hint {
+  margin: 0 0 10px;
+}
+.design-agent-surface.modal .locate-external-surface .locate-hint:last-child {
+  margin-bottom: 0;
+}
+
 /* "Generate from the PRD anyway" — de-emphasized fallback rendered as a text
  * link, not a button (the recovery ladder leads with the accent "Search again").
  * Kept as a <button> element for the action semantics; styled flat. */

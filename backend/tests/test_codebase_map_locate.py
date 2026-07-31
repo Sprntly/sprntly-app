@@ -1246,6 +1246,183 @@ def test_route_match_rescues_candidate_with_unknown_id():
 
 
 # ---------------------------------------------------------------------------
+# External-entry-point signal — generalized (no single-channel special-casing)
+# ---------------------------------------------------------------------------
+
+
+def _decline_only_payload(*, external_entry_point: dict | None = None) -> dict:
+    """A no-host-decline candidate (no in-app match) with an optional
+    external_entry_point block — the shape a genuinely external PRD produces."""
+    payload = {
+        "candidates": [
+            {
+                "route": "",
+                "id": "",
+                "entry_component": "",
+                "confidence": 0,
+                "rationale": "No surface in this app can host the described trigger.",
+                "ambiguous": False,
+                "classification": "no-host-decline",
+                "spans_multi_surface": False,
+                "classification_confidence": 90,
+            }
+        ],
+        "is_multi_node": False,
+    }
+    if external_entry_point is not None:
+        payload["external_entry_point"] = external_entry_point
+    return payload
+
+
+def test_external_entry_point_sms_detected():
+    """An SMS-triggered PRD: detected=True with an SMS-flavored description —
+    proves the signal is NOT email-specific."""
+    m = _map_with_nodes("/team")
+    payload = _decline_only_payload(
+        external_entry_point={
+            "detected": True,
+            "surface_description": "an SMS text the user receives on their phone",
+            "confidence": 88,
+        }
+    )
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("the flow starts when the user gets a text message", m, client=fake)
+
+    assert result.external_entry_point.detected is True
+    assert "SMS" in result.external_entry_point.surface_description or "text" in result.external_entry_point.surface_description
+    assert result.external_entry_point.confidence == 88
+
+
+def test_external_entry_point_partner_portal_detected():
+    """A third-party-partner-portal PRD: a DIFFERENT surface type than SMS or
+    email — proves the signal generalizes across arbitrary external surfaces."""
+    m = _map_with_nodes("/team")
+    payload = _decline_only_payload(
+        external_entry_point={
+            "detected": True,
+            "surface_description": "the partner's external booking website",
+            "confidence": 82,
+        }
+    )
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen(
+        "the flow starts when the customer books on the partner's site", m, client=fake
+    )
+
+    assert result.external_entry_point.detected is True
+    assert result.external_entry_point.surface_description == "the partner's external booking website"
+    assert result.external_entry_point.confidence == 82
+
+
+def test_external_entry_point_not_detected_on_internal_flow():
+    """An ordinary in-app PRD with a real candidate never sets detected=True —
+    the field defaults to the honest "not detected" contract."""
+    m = _map_with_nodes("/team")
+    payload = _happy_payload()  # no external_entry_point key at all
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("team management PRD", m, client=fake)
+
+    assert result.external_entry_point.detected is False
+    assert result.external_entry_point.surface_description == ""
+    assert result.external_entry_point.confidence == 0
+
+
+def test_external_entry_point_detected_true_but_empty_description_normalizes_false():
+    """detected=True with no description is not an actionable signal — coerced
+    back to the honest 'not detected' default rather than trusted verbatim."""
+    m = _map_with_nodes("/team")
+    payload = _decline_only_payload(
+        external_entry_point={"detected": True, "surface_description": "", "confidence": 90}
+    )
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake)
+
+    assert result.external_entry_point.detected is False
+    assert result.external_entry_point.confidence == 0
+
+
+def test_external_entry_point_confidence_clamped_and_description_capped():
+    """confidence clamps to [0,100]; surface_description caps at the char limit."""
+    m = _map_with_nodes("/team")
+    long_desc = "x" * (locate_mod._MAX_EXTERNAL_SURFACE_DESCRIPTION_CHARS + 100)
+    payload = _decline_only_payload(
+        external_entry_point={
+            "detected": True,
+            "surface_description": long_desc,
+            "confidence": 150,
+        }
+    )
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake)
+
+    assert result.external_entry_point.confidence == 100
+    assert len(result.external_entry_point.surface_description) == locate_mod._MAX_EXTERNAL_SURFACE_DESCRIPTION_CHARS
+
+
+def test_external_entry_point_malformed_shape_never_raises():
+    """A non-dict / string-typed detected / non-numeric confidence never raises
+    and never breaks the rest of the parse (candidates still survive)."""
+    m = _map_with_nodes("/team")
+
+    # external_entry_point as a bare string (not a dict at all).
+    payload_str = dict(_happy_payload(), external_entry_point="not a dict")
+    fake1 = FakeClient([_make_response(payload_str)])
+    r1 = locate_screen("prd", m, client=fake1)
+    assert r1.candidates[0].route == "/team"
+    assert r1.external_entry_point.detected is False
+
+    # detected as a string, confidence as a non-numeric string.
+    payload_bad = dict(
+        _happy_payload(),
+        external_entry_point={
+            "detected": "true",
+            "surface_description": "an email notification",
+            "confidence": "not-a-number",
+        },
+    )
+    fake2 = FakeClient([_make_response(payload_bad)])
+    r2 = locate_screen("prd", m, client=fake2)
+    assert r2.external_entry_point.detected is True
+    assert r2.external_entry_point.confidence == 0  # non-numeric coerces to 0
+
+
+def test_external_entry_point_never_prevents_real_candidates():
+    """The signal is independent of candidate ranking: a real in-app candidate
+    still comes through even when external_entry_point is also present."""
+    m = _map_with_nodes("/team")
+    payload = dict(
+        _happy_payload(),
+        external_entry_point={
+            "detected": True,
+            "surface_description": "a push notification the user taps",
+            "confidence": 60,
+        },
+    )
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake)
+
+    assert result.candidates[0].route == "/team"
+    assert result.external_entry_point.detected is True
+
+
+def test_locate_system_generalizes_external_entry_point():
+    """LOCATE_SYSTEM's external-entry-point rule names multiple surface TYPES
+    (not just email) and explicitly instructs against special-casing one."""
+    lower = LOCATE_SYSTEM.lower()
+    assert "external_entry_point" in LOCATE_SYSTEM
+    assert "email" in lower
+    assert "sms" in lower or "text message" in lower
+    assert "partner" in lower
+    assert "do not treat" in lower or "not a special case" in lower or "generalize" in lower
+
+
+# ---------------------------------------------------------------------------
 # Plain-English / integrity
 # ---------------------------------------------------------------------------
 
@@ -1287,5 +1464,5 @@ def test_no_prohibited_tokens_in_source():
 
 
 def test_template_version_at_current():
-    """DESIGN_AGENT_TEMPLATE_VERSION is 9 after the mobile-capability directive bump."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 9
+    """DESIGN_AGENT_TEMPLATE_VERSION is 10 after the external-entry-point placeholder bump."""
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 10

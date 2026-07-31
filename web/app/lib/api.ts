@@ -2342,6 +2342,11 @@ export const designAgentApi = {
      *  build_map at read time so the recreate reads the same bytes the PM
      *  confirmed against (and lands a cache hit). */
     map_commit_sha?: string | null
+    /** The PM-confirmed external-entry-point description from the locate
+     *  gate's `external_surface` signal (codebase generation only, no chosen
+     *  screen). Free text, e.g. "a confirmation email sent to the customer" —
+     *  never a closed enum. Absent/null = no signal / old client. */
+    external_surface_hint?: string | null
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
@@ -2732,6 +2737,19 @@ export type LocateResponse = {
    *  "ignored_oversize" / "ignored_decode" (fell open to text-only — the UI must
    *  NOT claim the image was used). Optional/additive; defaults to "absent". */
   image_status?: "absent" | "applied" | "ignored_oversize" | "ignored_decode"
+  /** Whether the SAME locate call's own read of the PRD flagged the entry
+   *  point as genuinely external (an email, an SMS, a third-party partner UI,
+   *  anything — never a closed set of channels). Present ONLY on a
+   *  ranked_confirm outcome where no strong in-app match was found; undefined
+   *  / null on every other decision (a real in-app match always wins) and on
+   *  the unmapped fail-open path (no locate call ran). Optional/additive. */
+  external_surface?: {
+    detected: boolean
+    /** Free text describing WHAT the external surface is, e.g. "a
+     *  confirmation email sent to the customer" — never a fixed category. */
+    surface_description: string
+    confidence: number
+  } | null
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate. */
