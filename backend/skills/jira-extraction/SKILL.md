@@ -53,6 +53,25 @@ unnecessary and error-prone here):
 6. **`labels`** are a strong theme hint when present — prefer a label that
    already names the feature area over inventing a new theme label from the
    summary.
+7. **`kind` is ALWAYS one of `bug` / `feature_request` / `finding` — never
+   borrow another connector's vocabulary.** Some Jira issues read like a
+   sales or revenue story ("enterprise customer won't renew until this
+   ships", "sales flagged this as a deal blocker") because the reporter
+   copied in customer/CSM/sales context. That is still just a Bug, Story,
+   Task, or Epic by Jira's own `type` field — classify it with rules 1-4
+   exactly as you would any other issue of that type, and do NOT emit a
+   second, separately-framed signal in HubSpot's revenue vocabulary
+   (`deal_blocker`, or any other CRM-shaped `kind`) for the same issue.
+   Every Jira issue produces AT MOST ONE signal from this skill. Capture the
+   revenue/customer stakes as evidence, not as a different classification:
+   fold the account name, ARR figure, and "blocks renewal" framing into
+   `properties` (e.g. `{"customer": "Acme Corp", "revenue_at_risk_usd":
+   180000, "blocks_renewal": true}`) on the single `bug` / `feature_request`
+   / `finding` signal the issue's `type` dictates. The dedicated
+   `hubspot-extraction` skill is what reads a HubSpot deal's own `stage` and
+   emits `deal_blocker` from first-party CRM data — trust Jira's native
+   `type` field here instead of re-guessing a CRM category from prose the
+   same way that skill would.
 
 ## What NOT to extract
 - An issue whose summary + description together carry no concrete claim (a

@@ -57,6 +57,37 @@ Output:
 }
 ```
 
+## Worked example — Bug with sales/revenue framing in the description
+
+The description quotes sales/CSM language ("won't renew", "deal-critical
+blocker"), but `type` is still `Bug` — `kind` stays `"bug"`, never
+`"deal_blocker"` (that value belongs to `hubspot-extraction`'s vocabulary,
+not this skill's). The revenue stakes ride into `properties` on the SAME
+signal instead of producing a second, separately-framed one.
+
+Input:
+```
+[jira/issue id=ENT-4821 at=2026-07-20]
+title: Enterprise customer can't renew until SSO group sync ships
+data: status=In Progress, priority=Highest, type=Bug, project=Platform, labels=[sso, enterprise]
+Acme Corp (our largest enterprise account, $180k ARR) has told their CSM they
+will not renew their contract next month unless SSO group sync is delivered.
+Their security team blocked the renewal pending this. Sales has flagged this
+as a deal-critical blocker for the quarter.
+```
+Output — ONE signal, `kind` still within `{bug, feature_request, finding}`:
+```json
+{
+  "kind": "bug",
+  "content": "Acme Corp ($180k ARR) will not renew their contract next month unless SSO group sync is delivered; their security team has blocked the renewal pending this",
+  "source_type": "project_mgmt",
+  "theme": "SSO group sync",
+  "relationship": "AFFECTS",
+  "properties": {"status": "In Progress", "priority": "Highest", "issue_type": "Bug", "customer": "Acme Corp", "revenue_at_risk_usd": 180000, "blocks_renewal": true},
+  "confidence": 0.9
+}
+```
+
 ## Worked example — Epic
 
 Input:
