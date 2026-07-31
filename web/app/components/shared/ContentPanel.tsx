@@ -54,13 +54,21 @@ const TABS = [
   { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
 ] as const
 
-const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
-const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
+// The key is versioned because the bounds below moved: widths stored under the
+// old key were dragged against a 60vw default and a 650px floor, so replaying
+// one now would mean a panel that never opens at its intended 35%.
+const CPANEL_WIDTH_KEY = "sprntly-cpanel-width-v2"
+const CPANEL_DEFAULT_VW = 0.35 // first open: 35% panel / 65% thread
 const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
+// Floor, not a comfortable width — it's what 35% comes to on a ~1200px window,
+// so the default never starts below the point the first drag would clamp to.
+const CPANEL_WIDTH_MIN = 420
 
 function clampCpanelWidth(px: number): number {
   const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
-  return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
+  // On a window narrow enough that the floor exceeds the cap, the cap wins.
+  const min = Math.min(CPANEL_WIDTH_MIN, max)
+  return Math.min(max, Math.max(min, Math.round(px)))
 }
 
 // Header Share dropdown — Download PDF of the combined Evidence + PRD (falls
@@ -334,14 +342,17 @@ export function ContentPanel() {
     }
   }, [evidenceHidden, contentPanelTab, activeTab, openContentPanel])
 
-  // Tracks the live pixel width; null = use the CSS default (60vw).
+  // Tracks the live pixel width; null = use the CSS default (35vw).
   const widthRef = useRef<number | null>(null)
+  // Teardown for the drag session in flight, or null when none is. Doubles as
+  // the "already ended" guard — several events can terminate one gesture.
+  const endDragRef = useRef<(() => void) | null>(null)
 
   // On open: restore saved width, apply it, and keep it clamped on window resize.
   // On close: remove the CSS var so it resets to default.
   //
   // Keyed on `mounted`, not on the tab: clearing --cpanel-width the moment the
-  // tab went null would snap a user-widened panel back to the 60vw default in
+  // tab went null would snap a user-widened panel back to the 35vw default in
   // the first frame of the exit slide. Now the var lives exactly as long as the
   // panel element does. (It also stops the effect re-running on every tab
   // switch, which pointlessly removed and re-applied the same width.)
@@ -371,31 +382,90 @@ export function ContentPanel() {
   }, [mounted])
 
   // Pointer-down on the left-edge handle starts a drag session.
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    if (window.innerWidth <= 768) return
+  //
+  // Pointer events with capture, not mouse events. The panel body hosts iframes
+  // (the PRD and report frames), and an iframe's document swallows the parent's
+  // mouse events: the moment the widening panel's edge slid under the cursor,
+  // mousemove stopped arriving and the panel froze mid-drag — and because the
+  // mouseup was swallowed too, the session never ended, so the panel started
+  // tracking the cursor again after the button had already been released.
+  // Capturing the pointer pins every event of the gesture to the handle no
+  // matter what it travels over, and guarantees exactly one terminating event.
+  //
+  // Writes are coalesced onto a single animation frame. One width change
+  // re-lays out the panel AND the thread column's padding — the expensive half
+  // — while a pointermove burst can fire several times per frame, so doing that
+  // work per-event rather than per-frame is what made the drag feel heavy.
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || window.innerWidth <= 768) return
     e.preventDefault()
+    const handle = e.currentTarget
     const root = document.documentElement
     const startX = e.clientX
-    const startW = widthRef.current ?? Math.round(window.innerWidth * CPANEL_MAX_VW)
-    root.classList.add("cpanel-resizing")
+    const { pointerId } = e
+    // Seed from what's actually on screen rather than from an assumed default,
+    // so the first drag off a never-resized panel doesn't jump.
+    const startW = widthRef.current ?? Math.round(
+      handle.parentElement?.getBoundingClientRect().width
+        || window.innerWidth * CPANEL_DEFAULT_VW,
+    )
 
-    const onMove = (ev: MouseEvent) => {
+    let latestX = startX
+    let frame = 0
+    const flush = () => {
+      frame = 0
       // Dragging LEFT widens the panel (panel anchored to right edge).
-      const next = clampCpanelWidth(startW + (startX - ev.clientX))
+      const next = clampCpanelWidth(startW + (startX - latestX))
       widthRef.current = next
       root.style.setProperty("--cpanel-width", `${next}px`)
     }
-    const onUp = () => {
+
+    root.classList.add("cpanel-resizing")
+    // Not supported everywhere (and a no-op in jsdom) — the window listeners
+    // below still see captured events, since capture retargets but still
+    // bubbles, so the drag degrades to the old behaviour rather than breaking.
+    try { handle.setPointerCapture(pointerId) } catch { /* fall through */ }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      latestX = ev.clientX
+      if (!frame) frame = window.requestAnimationFrame(flush)
+    }
+    const end = () => {
+      if (endDragRef.current !== end) return
+      endDragRef.current = null
+      // Land the last move rather than dropping it a frame short of the cursor.
+      if (frame) { window.cancelAnimationFrame(frame); flush() }
       if (widthRef.current != null) {
         window.localStorage.setItem(CPANEL_WIDTH_KEY, String(widthRef.current))
       }
       root.classList.remove("cpanel-resizing")
-      window.removeEventListener("mousemove", onMove)
-      window.removeEventListener("mouseup", onUp)
+      try { handle.releasePointerCapture(pointerId) } catch { /* already gone */ }
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      // A cancelled pointer (OS gesture, alt-tab) or capture lost to a
+      // disappearing handle both end the gesture with no pointerup at all.
+      window.removeEventListener("pointercancel", onUp)
+      handle.removeEventListener("lostpointercapture", end)
     }
-    window.addEventListener("mousemove", onMove)
-    window.addEventListener("mouseup", onUp)
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      end()
+    }
+
+    endDragRef.current = end
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+    handle.addEventListener("lostpointercapture", end)
   }, [])
+
+  // A gesture can outlive the panel — close it, or navigate away, mid-drag and
+  // the window listeners would stay attached with the session still live, which
+  // is the same "resizes with no button held" failure by another route. Real
+  // browsers fire lostpointercapture when the handle leaves the DOM; this is
+  // what makes it true without depending on that.
+  useEffect(() => () => endDragRef.current?.(), [])
 
   if (!mounted) return null
 
@@ -414,7 +484,7 @@ export function ContentPanel() {
         {/* Draggable left edge — grab to resize */}
         <div
           className="cpanel-resize-handle"
-          onMouseDown={handleResizeStart}
+          onPointerDown={handleResizeStart}
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize panel"
