@@ -110,6 +110,17 @@ describe("VegaChart", () => {
     warn.mockRestore()
   })
 
+  it("degrades instead of embedding an envelope with no rows", async () => {
+    // vega would embed this cleanly, resolve, and paint an empty box with
+    // nothing to explain it. Degrade at the one point the blankness is
+    // actually detectable.
+    const { container } = render(<VegaChart spec={{ spec: { mark: "bar" }, data: [] }} />)
+    await waitFor(() =>
+      expect(container.querySelector('[data-testid="vega-chart-empty"]')).toBeTruthy(),
+    )
+    expect(embed).not.toHaveBeenCalled()
+  })
+
   it("refuses a spec that reaches outward, and shows the table", async () => {
     const remote = { mark: "bar", data: { url: "https://example.test/rows.json" } }
     const { container } = render(
@@ -292,10 +303,35 @@ describe("resolveChartSpec — the Phase 0 envelope", () => {
     expect(out.title).toBe("Envelope title")
   })
 
-  it("does not clobber data an inner spec already carries", () => {
+  it("injects UNCONDITIONALLY, overwriting data a non-conforming inner spec carries", () => {
+    // Deliberate. `render.py` assigns unconditionally; if the client were
+    // conditional, a non-conforming spec would draw the ENVELOPE's rows on the
+    // server and the INNER rows in the browser — the same stored PRD showing
+    // two different charts depending on which renderer drew it. Rejecting such
+    // specs is the backend validator's job; if one slips through, both
+    // renderers must be wrong the same way.
     const inner = { mark: "bar", data: { values: [{ z: 9 }] } }
     const out = resolveChartSpec({ spec: inner, data: ROWS })
-    expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual([{ z: 9 }])
+    expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual(ROWS)
+    // The caller's spec object is not mutated.
+    expect(inner.data.values).toEqual([{ z: 9 }])
+  })
+
+  it("marks an envelope with no rows as undrawable", () => {
+    const out = resolveChartSpec({ spec: { mark: "bar" }, data: [] })
+    expect(out.drawable).toBe(false)
+    // The table still reaches for the inner spec's own rows, so a reader gets
+    // the numbers even where we refuse to draw.
+    const withInner = resolveChartSpec({ spec: { mark: "bar", data: { values: ROWS } } , data: [] })
+    expect(withInner.drawable).toBe(false)
+    expect(withInner.rows).toEqual(ROWS)
+  })
+
+  it("never declares a bare spec undrawable — its rows may come from a generator", () => {
+    expect(resolveChartSpec({ mark: "bar", data: { sequence: { start: 0, stop: 10 } } }).drawable).toBe(
+      true,
+    )
+    expect(resolveChartSpec(SPEC).drawable).toBe(true)
   })
 
   it("treats a facet/repeat spec as a real spec, not an envelope", () => {

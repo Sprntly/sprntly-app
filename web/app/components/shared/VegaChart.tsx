@@ -107,12 +107,20 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * never feeds the Vega path.
  * ------------------------------------------------------------------ */
 
-/** A spec object that is really an envelope wrapping the actual spec. */
+/**
+ * A spec object that is really an envelope wrapping the actual spec.
+ *
+ * `facet` and `repeat` specs ALSO have a `spec` key — they are operators with a
+ * single-view child — so their presence is taken as proof this is a real
+ * Vega-Lite spec rather than an envelope.
+ *
+ * THAT DISCRIMINATION DEPENDS ON A GUARANTEE FROM THE EMITTING END: Phase 0's
+ * envelope must never carry `facet` or `repeat` at top level. It is pinned on
+ * the backend side as well, so the ambiguity cannot arise from either
+ * direction. If that ever changes, this function is where it breaks.
+ */
 function isChartSpecEnvelope(v: VegaLiteSpec): boolean {
   if (!isPlainObject(v.spec)) return false
-  // `facet` and `repeat` specs ALSO have a `spec` key — they are operators with
-  // a single-view child. The envelope never carries one, so their presence
-  // means this is a real Vega-Lite spec, not an envelope.
   if ("facet" in v || "repeat" in v) return false
   return true
 }
@@ -129,26 +137,46 @@ function rowsOf(v: unknown): ChartTableRow[] {
 export function resolveChartSpec(input: VegaLiteSpec): {
   vlSpec: VegaLiteSpec
   rows: ChartTableRow[]
+  /** False when we can PROVE the spec has nothing to draw — embed would
+   *  succeed and paint an empty box. Only decidable on the envelope path. */
+  drawable: boolean
   title?: string
   subtitle?: string
   caption?: string
 } {
-  if (!isPlainObject(input)) return { vlSpec: input, rows: [] }
+  if (!isPlainObject(input)) return { vlSpec: input, rows: [], drawable: true }
   if (!isChartSpecEnvelope(input)) {
-    return { vlSpec: input, rows: specDataRows(input) }
+    // A bare spec's rows can come from places this can't see — a `sequence`
+    // generator, a `datasets` reference — so never declare it undrawable.
+    return { vlSpec: input, rows: specDataRows(input), drawable: true }
   }
-  const inner = { ...(input.spec as Record<string, unknown>) } as VegaLiteSpec
+
+  const original = input.spec as VegaLiteSpec
+  const inner = { ...(original as Record<string, unknown>) } as VegaLiteSpec
   const rows = rowsOf(input.data)
-  // Inject only when the inner spec has none of its own. Phase 0's renderer
-  // assigns unconditionally, but the envelope contract says the spec is
-  // data-free, so an inner spec that DOES carry data is non-conforming and
-  // clobbering it would silently discard the rows an author put there.
-  if (!("data" in inner) && rows.length > 0) {
-    inner.data = { values: rows }
-  }
+
+  // UNCONDITIONAL, mirroring `render.py` exactly.
+  //
+  // It is tempting to inject only when the inner spec has no data of its own,
+  // on the grounds that clobbering discards rows an author put there. That
+  // optimises the wrong invariant. The point of one spec contract with two
+  // renderers is that identical input draws an identical chart; if the server
+  // assigns unconditionally and the client does not, a non-conforming spec
+  // renders the ENVELOPE's rows server-side and the INNER rows in the browser —
+  // the same stored PRD showing two different charts depending on which path
+  // drew it, which is close to undiagnosable from a bug report.
+  //
+  // Rejecting non-conforming specs is Phase 0's validator's job. If one slips
+  // past into a stored document, both renderers must at least be wrong the
+  // same way.
+  inner.data = { values: rows }
+
   return {
     vlSpec: inner,
-    rows: rows.length > 0 ? rows : specDataRows(inner),
+    // The table still reaches for the inner spec's rows when the envelope has
+    // none, so a reader gets the numbers even where we refuse to draw.
+    rows: rows.length > 0 ? rows : specDataRows(original),
+    drawable: rows.length > 0,
     title: typeof input.title === "string" ? input.title : undefined,
     subtitle: typeof input.subtitle === "string" ? input.subtitle : undefined,
     caption: typeof input.caption === "string" ? input.caption : undefined,
@@ -323,6 +351,8 @@ export function VegaChart({
   // `specKey` unchanged doesn't need to re-run it just to see the same value.
   const specRef = useRef(resolved.vlSpec)
   specRef.current = resolved.vlSpec
+  const drawableRef = useRef(resolved.drawable)
+  drawableRef.current = resolved.drawable
 
   useEffect(() => {
     let cancelled = false
@@ -336,6 +366,13 @@ export function VegaChart({
       return
     }
     if (specReachesOutward(vlSpec)) {
+      setPhase("failed")
+      return
+    }
+    if (!drawableRef.current) {
+      // Envelope with no rows: vega would embed cleanly, resolve, and paint an
+      // empty box with nothing to explain it. Degrade at the one point where
+      // the blankness is actually detectable.
       setPhase("failed")
       return
     }
@@ -424,11 +461,19 @@ export function VegaChart({
         ) : null}
         {phase !== "ready" && !pending ? (
           phase === "failed" ? (
-            <ChartDataTable
-              rows={rows}
-              variant="static"
-              note="This chart couldn’t be drawn — here is the data behind it."
-            />
+            rows.length > 0 ? (
+              <ChartDataTable
+                rows={rows}
+                variant="static"
+                note="This chart couldn’t be drawn — here is the data behind it."
+              />
+            ) : (
+              // Nothing to draw AND nothing to tabulate. Say so rather than
+              // leaving an unexplained empty box on the page.
+              <div className="chart-data-fallback-note" data-testid="vega-chart-empty">
+                This chart couldn’t be drawn — no data was attached to it.
+              </div>
+            )
           ) : (
             <div className="vega-chart-loading" data-testid="vega-chart-loading" aria-live="polite">
               Loading chart…
