@@ -379,14 +379,12 @@ function SkillsScreenContent() {
   // should surface stakeholder-map even though its blurb doesn't say it.
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
-    // A custom skill that shares a built-in's id REPLACES it (PRD 1854
-    // override) — drop the built-in card so the catalog can't advertise a
-    // skill that no longer runs; the Custom section carries the replacement.
-    const customSlugs = new Set(customSkills.map((s) => s.slug))
-    const catalog = skills.filter((s) => !customSlugs.has(s.id))
+    // Every built-in card stays, including one whose name a custom skill
+    // shares: an upload no longer replaces a built-in, so both still run —
+    // under different triggers, which is what the two cards show.
     const visible = !q
-      ? catalog
-      : catalog.filter(
+      ? skills
+      : skills.filter(
           (s) =>
             s.label.toLowerCase().includes(q) ||
             s.trigger.toLowerCase().includes(q) ||
@@ -394,7 +392,7 @@ function SkillsScreenContent() {
             s.category.toLowerCase().includes(q),
         )
     return groupSkills(visible)
-  }, [skills, customSkills, query])
+  }, [skills, query])
 
   // Custom skills join the same search — name, trigger, or description.
   const visibleCustom = useMemo(() => {
@@ -448,8 +446,8 @@ function SkillsScreenContent() {
     setCustomSkills((prev) => [created, ...prev])
     showToast(
       "Skill uploaded",
-      created.overrides_builtin
-        ? `${created.name} replaces the built-in Sprntly skill ${created.trigger} for your whole company.`
+      created.name_conflict
+        ? `That name was already taken, so ${created.name} is invoked with ${created.trigger} in chat — the skill that had the name still works too.`
         : `${created.name} is in your library — invoke it with ${created.trigger} in chat.`,
     )
   }
@@ -478,6 +476,7 @@ function SkillsScreenContent() {
         onUpload={onUpload}
         onClose={() => setUploadOpen(false)}
         builtinSlugs={skills.map((s) => s.id)}
+        customSkills={customSkills}
       />
     </AppLayout>
   )

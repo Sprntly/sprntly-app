@@ -12,8 +12,10 @@ from app.connectors.catalog import (
     COMMUNICATION,
     CONNECTOR_TYPES,
     CUSTOMER_VOICE,
+    DOCUMENTS,
     TASK_MANAGEMENT,
     has_type,
+    is_evidence_provider,
     providers_with_type,
     types_for,
 )
@@ -24,7 +26,7 @@ def test_every_connectable_provider_is_classified():
     connector must be classified before it ships."""
     connectable = [
         "jira", "clickup", "google_drive", "hubspot",
-        "github", "figma", "slack", "fireflies",
+        "github", "figma", "slack", "fireflies", "confluence",
     ]
     for provider in connectable:
         assert types_for(provider), f"{provider} has no types"
@@ -52,9 +54,22 @@ def test_types_are_provider_specific():
     assert types_for("jira") == [TASK_MANAGEMENT]
     assert types_for("hubspot") == ["crm"]
     assert types_for("fireflies") == ["meetings"]
+    assert types_for("confluence") == [DOCUMENTS]
     # Unknown providers are just untyped — never an error.
     assert types_for("not-a-provider") == []
     assert types_for(None) == []
+
+
+def test_confluence_is_not_evidence():
+    """A wiki is internal documentation: a page asserting a customer problem
+    is the author's CLAIM about it, not measured proof. So Confluence sits
+    with Notion/Google Docs as `documents` and — unlike `uploads` — is
+    deliberately NOT an evidence exception, meaning it cannot open the brief's
+    data-source gate on its own."""
+    assert is_evidence_provider("confluence") is False
+    assert is_evidence_provider("google_drive") is False
+    # The contrast that makes the rule legible: uploads IS an exception.
+    assert is_evidence_provider("uploads") is True
 
 
 def test_providers_with_type_and_has_type():

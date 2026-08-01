@@ -389,6 +389,12 @@ async def generate_from_task(
         variant=PRD_VARIANT,
         source="chat",
         theme_id=theme_id,
+        # The originating-question linkage (mirrors db/reports.py's `question`):
+        # this is the ONE PRD-generation path with a genuine user-typed question
+        # behind it — brief/ideation/import PRDs have no chat question, so they
+        # leave this NULL. No ask_id: this command runs outside the ask_jobs
+        # pipeline (no ask row exists to reference).
+        question=task_text,
     )
     # No _record_prd_action: there is no real theme to advance in the lifecycle.
 
@@ -418,10 +424,15 @@ async def generate_from_task(
 
     # In parallel: the Evidence artifact, generated from semantic KG retrieval
     # over the task — skipped inside (no row) when the KG has no backing signals.
+    # Same originating question/conversation linkage as the PRD above.
     ev_task = asyncio.create_task(
         generate_task_evidence(
             brief_id, insight, theme_id,
             template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+            question=task_text,
+            conversation_id=body.conversation_id,
+            company_id=company.company_id,
+            user_id=company.user_id,
         )
     )
     _inflight_tasks.add(ev_task)

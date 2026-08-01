@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 #: User-facing names (mirrors web/app/lib/connectorsCatalog.ts labels).
 DISPLAY_NAMES: dict[str, str] = {
     "jira": "Jira",
+    "confluence": "Confluence",
     "clickup": "ClickUp",
     "asana": "Asana",
     "linear": "Linear",
@@ -88,6 +89,10 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.gdrive import PROVIDER
 
         return PROVIDER
+    if name == "confluence":
+        from app.connector_lookup.confluence import PROVIDER
+
+        return PROVIDER
     return None
 
 
@@ -95,6 +100,7 @@ def provider_for(name: str) -> LookupProvider | None:
 #: not-supported copy agree with what actually exists.
 LOOKUP_PROVIDERS: tuple[str, ...] = (
     "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
+    "confluence",
 )
 
 #: Connected (they sync into the KG) but no live-read adapter yet.

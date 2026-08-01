@@ -208,7 +208,7 @@ export function describeSignInError(error: unknown): {
     return {
       kind: "unconfirmed",
       message:
-        "Please confirm your email first — check your inbox for the verification link.",
+        "Please confirm your email first — check your inbox for the verification code.",
       countsAsFailedAttempt: false,
     }
   }

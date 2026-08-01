@@ -2,10 +2,13 @@
 // and handlers in. Lets the structure be asserted via renderToStaticMarkup.
 import Link from "next/link"
 import { AuthShell } from "./AuthShell"
+import { OtpInput } from "./OtpInput"
 import { PasswordStrengthBar } from "./PasswordStrengthBar"
-import { Eye, EyeOff } from "./icons"
+import { Eye, EyeOff, InfoCircle, Refresh } from "./icons"
 
-export type ResetPasswordMode = "form" | "done" | "no-session"
+/** "code" gates the form: the recovery email carries a 6-digit code, and
+ *  redeeming it is what mints the session updateUser needs. */
+export type ResetPasswordMode = "code" | "form" | "done" | "no-session"
 
 export type ResetPasswordViewProps = {
   mode: ResetPasswordMode
@@ -18,6 +21,15 @@ export type ResetPasswordViewProps = {
   onConfirmPasswordChange: (v: string) => void
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
+  /* --- code mode --- */
+  email?: string
+  code?: string
+  message?: string | null
+  resendCooldown?: number
+  canResend?: boolean
+  onCodeChange?: (v: string) => void
+  onCodeSubmit?: (e: React.FormEvent) => void
+  onResend?: () => void
 }
 
 export function ResetPasswordView(props: ResetPasswordViewProps) {
@@ -48,12 +60,77 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
     )
   }
 
+  if (mode === "code") {
+    const code = props.code ?? ""
+    return (
+      <AuthShell tag="Password reset" cardClassName="auth-card-center">
+        <div className="auth-h">Check your <em>email.</em></div>
+        <div className="auth-sub">
+          If an account exists, we sent a 6-digit reset code. Enter it below to
+          choose a new password.
+        </div>
+        {props.email && <div className="verify-email">{props.email}</div>}
+
+        <form onSubmit={props.onCodeSubmit}>
+          <OtpInput
+            value={code}
+            onChange={props.onCodeChange ?? (() => {})}
+            disabled={submitting}
+            autoFocus
+            invalid={!!error}
+            ariaLabel="Password reset code"
+            idPrefix="reset-code"
+          />
+
+          {error && (
+            <p className="auth-error" role="alert">
+              {error}
+            </p>
+          )}
+          {props.message && <div className="auth-msg">{props.message}</div>}
+
+          <button
+            type="submit"
+            className="btn btn-brand btn-block"
+            disabled={submitting || code.length < 6}
+          >
+            {submitting ? "Verifying…" : "Verify code"}
+          </button>
+        </form>
+
+        <button
+          type="button"
+          className="btn btn-ghost btn-block"
+          style={{ marginTop: 8, fontSize: 12, padding: 9 }}
+          onClick={props.onResend}
+          disabled={!props.canResend}
+        >
+          <Refresh width={13} height={13} />
+          {(props.resendCooldown ?? 0) > 0 ? (
+            <>
+              Resend code <span className="muted">({props.resendCooldown}s)</span>
+            </>
+          ) : (
+            "Resend code"
+          )}
+        </button>
+        <div className="spam-note">
+          <InfoCircle width={14} height={14} />
+          <div>Check your spam folder if it doesn&apos;t arrive. Code expires in 1 hour.</div>
+        </div>
+        <div className="auth-foot">
+          <Link href="/sign-in" className="auth-link">Back to sign in</Link>
+        </div>
+      </AuthShell>
+    )
+  }
+
   if (mode === "no-session") {
     return (
       <AuthShell tag="Password reset">
-        <div className="auth-h">Link <em>expired.</em></div>
+        <div className="auth-h">Reset <em>expired.</em></div>
         <div className="auth-sub">
-          This reset link is invalid or has expired. Request a new one and sign in again.
+          This reset request is invalid or has expired. Request a new one and sign in again.
         </div>
         <div style={{ marginTop: 16 }}>
           <Link href="/sign-in" className="btn btn-brand btn-block">

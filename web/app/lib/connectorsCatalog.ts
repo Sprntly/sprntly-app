@@ -192,6 +192,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
       { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
+      { id: "confluence",   name: "Confluence", logo: "C", logoText: "C", logoColor: "#172B4D", logoSvg: "/connectors/confluence.svg", oauth: true, types: ["documents"] },
     ],
   },
   {

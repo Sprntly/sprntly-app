@@ -31,15 +31,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 42 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(42)
-    // 41 distinct connectors — the extra row is dual-typed Slack's second
+    expect(total).toBe(43)
+    // 42 distinct connectors — the extra row is dual-typed Slack's second
     // placement, not a second connector.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(41)
+    expect(distinct.size).toBe(42)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -112,9 +112,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Company documentation: Uploaded documents, Notion, Google Docs", () => {
+  it("Company documentation: Uploaded documents, Notion, Google Docs, Confluence", () => {
     expect(items("Company documentation")).toEqual([
-      "Uploaded documents", "Notion", "Google Docs",
+      "Uploaded documents", "Notion", "Google Docs", "Confluence",
     ])
   })
 
@@ -174,7 +174,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
-        "asana", "clickup", "figma", "github", "google_drive",
+        "asana", "clickup", "confluence", "figma", "github", "google_drive",
         "hubspot", "jira", "slack", "sprinklr",
       ].sort(),
     )
@@ -202,6 +202,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -229,7 +230,7 @@ describe("Google Docs uses the existing google_drive OAuth backend", () => {
 describe("Company documentation category", () => {
   it("merges Uploaded documents with Notion + Google Docs; docs tools stay out of Project Management", () => {
     const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
-    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive"])
+    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive", "confluence"])
     const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
     const pmIds = pm.items.map((i) => i.id)
     expect(pmIds).not.toContain("notion")
@@ -256,7 +257,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 12 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
+  it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
     // Set-dedup: Slack's card renders on two shelves but is one connector.
     const ids = [...new Set(
       connectableCatalog()
@@ -267,6 +268,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -298,7 +300,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Communications")).toEqual(["slack"])
     // Merged category keeps only its WIRED rows (Notion isn't wired yet):
     // Uploaded documents (upload) + Google Docs (google_drive OAuth).
-    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive"])
+    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

@@ -12,12 +12,15 @@ import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { PRD_GEN } from "./generationPhases"
 import { multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
-import { IconTicket } from "@tabler/icons-react"
+import { OriginQuestionBanner } from "./OriginQuestionBanner"
+import { IconFileText, IconTicket } from "@tabler/icons-react"
 import {
   IconGrid,
   IconLinkInsert,
@@ -257,6 +260,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       {/* Scrolling document area — the footer action bar below stays PINNED
           to the panel's bottom edge (mirrors how the header holds the tabs). */}
       <div className="prd-scroll">
+      {prd && <OriginQuestionBanner question={prd.question} />}
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">
@@ -312,9 +316,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane spinner. The finished PRD (poll result) replaces this.
           <div className="prd-body" style={{ minHeight: 280 }}>
-            <div data-testid="prd-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="prd-streaming"
+              title="Writing the PRD…"
+              sub="Rendering it below as it's written — the finished draft replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.prdPartialHtml))}
               title="PRD draft (generating)"
@@ -324,9 +330,12 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
             {content.prdGenerating ? (
-              <div data-testid="prd-generating" style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
-                <span className="prd-loader" aria-hidden /> Generating PRD…
-              </div>
+              <GeneratingPane
+                {...PRD_GEN}
+                testId="prd-generating"
+                icon={<IconFileText size={19} />}
+                title="Generating PRD…"
+              />
             ) : (
               <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Top Insights by selecting an insight and clicking Generate PRD." placeholders={0} />
             )}

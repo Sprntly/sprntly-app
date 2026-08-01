@@ -625,9 +625,11 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
-  /** The slug shadows a built-in Sprntly skill id — this skill REPLACES the
-   *  built-in for the company at invocation time (PRD 1854 override). */
-  overrides_builtin: boolean
+  /** The name was already taken when this skill was uploaded, so its trigger
+   *  was disambiguated away from the name's plain slug (`/prd-author-2` for a
+   *  skill named "PRD Author"). Nothing was replaced — the skill that owned
+   *  the name keeps its own trigger and both are invocable. */
+  name_conflict: boolean
 }
 
 export const skillsApi = {
@@ -635,7 +637,10 @@ export const skillsApi = {
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
    *  Server is the authoritative validator (422/400/413/409 with readable
-   *  `detail`); the modal mirrors the cheap checks client-side. */
+   *  `detail`); the modal mirrors the cheap checks client-side. A name shared
+   *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
+   *  report the disambiguated trigger); a name already used by one of the
+   *  company's OWN custom skills is the 409. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)
@@ -728,6 +733,15 @@ export type PrdRecord = {
    *  `(brief_id, insight_index)`); `'ideation'` and `'upload'` PRDs have none.
    *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
   source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
+  /** The originating chat question, when this PRD was generated via the
+   *  "generate a PRD for X" chat command (routes/prd.py's generate-from-task).
+   *  Null/absent for every other generation path (brief insight, ideation,
+   *  import) and for rows generated before this column existed. */
+  question?: string | null
+  /** The originating ask_jobs row, when one exists. Currently always null in
+   *  practice — the chat-task PRD command runs outside the ask pipeline — kept
+   *  for shape parity with db/reports.py's identical column. */
+  ask_id?: number | null
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -761,6 +775,11 @@ export type EvidenceRecord = {
   status: "generating" | "ready" | "failed"
   error?: string | null
   variant?: string
+  /** The originating chat question — same shape/contract as PrdRecord.question
+   *  (see there). Set only on the chat-task Evidence path. */
+  question?: string | null
+  /** Kept for shape parity with PrdRecord.ask_id — currently always null. */
+  ask_id?: number | null
 }
 
 export const evidenceApi = {
@@ -1513,6 +1532,12 @@ export type ConnectionSummary = {
     // sanitized server-side). Delivery UIs must ignore such rows — the
     // member has no personal delivery target until they connect their own.
     company_connection?: boolean
+    // Confluence — the Atlassian site id, cached at connect, plus the
+    // space selection the KG ingest pulls from. Empty/absent = every space
+    // the connected account can read. COMPANY-wide, admin-only to change.
+    cloud_id?: string
+    sync_space_ids?: string[]
+    sync_space_keys?: Record<string, string>
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1618,6 +1643,14 @@ export type SlackChannel = {
   is_archived: boolean
 }
 
+export type ConfluenceSpace = {
+  id: string
+  key: string | null
+  name: string | null
+  /** "global" | "personal" — personal spaces are filtered out server-side. */
+  type: string | null
+}
+
 // Multitenant: connector routes resolve the active company entirely
 // from the JWT (`Depends(require_company)`) — no client-side workspace
 // or company id is sent. Methods below therefore take only the inputs
@@ -1711,6 +1744,27 @@ export const connectorsApi = {
   // ---- Jira ----------------------------------------------------------------
   disconnectJira: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/jira`),
+
+  // ---- Confluence ----------------------------------------------------------
+  disconnectConfluence: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/confluence`),
+
+  /** Spaces the connected Confluence account can read (personal ones
+   *  excluded server-side), plus the currently persisted selection. */
+  listConfluenceSpaces: () =>
+    api.get<{ spaces: ConfluenceSpace[]; selected_ids: string[] }>(
+      `/v1/connectors/confluence/spaces`,
+    ),
+
+  /** Choose which spaces the KG ingest pulls from (stored on the company's
+   *  Confluence connection config as sync_space_ids / sync_space_keys). An
+   *  empty list clears the selection back to every readable space.
+   *  Admin-only — a member gets 403 with the admin-gate message. */
+  setConfluenceSyncSpaces: (spaces: { id: string; key?: string | null }[]) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/confluence/spaces`,
+      { spaces },
+    ),
 
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
@@ -2323,6 +2377,11 @@ export const designAgentApi = {
      *  build_map at read time so the recreate reads the same bytes the PM
      *  confirmed against (and lands a cache hit). */
     map_commit_sha?: string | null
+    /** The PM-confirmed external-entry-point description from the locate
+     *  gate's `external_surface` signal (codebase generation only, no chosen
+     *  screen). Free text, e.g. "a confirmation email sent to the customer" —
+     *  never a closed enum. Absent/null = no signal / old client. */
+    external_surface_hint?: string | null
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
@@ -2713,6 +2772,19 @@ export type LocateResponse = {
    *  "ignored_oversize" / "ignored_decode" (fell open to text-only — the UI must
    *  NOT claim the image was used). Optional/additive; defaults to "absent". */
   image_status?: "absent" | "applied" | "ignored_oversize" | "ignored_decode"
+  /** Whether the SAME locate call's own read of the PRD flagged the entry
+   *  point as genuinely external (an email, an SMS, a third-party partner UI,
+   *  anything — never a closed set of channels). Present ONLY on a
+   *  ranked_confirm outcome where no strong in-app match was found; undefined
+   *  / null on every other decision (a real in-app match always wins) and on
+   *  the unmapped fail-open path (no locate call ran). Optional/additive. */
+  external_surface?: {
+    detected: boolean
+    /** Free text describing WHAT the external surface is, e.g. "a
+     *  confirmation email sent to the customer" — never a fixed category. */
+    surface_description: string
+    confidence: number
+  } | null
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate. */
@@ -2846,6 +2918,12 @@ export type TicketFields = {
   issue_type?: string | null
 }
 
+/** Whether a ticket is live, held back from the PM tool, or deleted.
+ *  Non-active tickets do not exist in the tracker — that is the whole point of
+ *  both non-active states; they differ only in whether Sprntly still shows the
+ *  ticket. */
+export type TicketLifecycle = "active" | "excluded" | "deleted"
+
 export type TicketDataResponse = {
   description: string | null
   acceptance_criteria: string[] | null
@@ -2889,9 +2967,27 @@ export const ticketDataApi = {
     api.post<{ id: number; author: string; body: string; time: string }>(
       `/v1/tickets/${encodeURIComponent(ticketKey)}/comments`, { author, body },
     ),
-  /** Remove a comment. */
+  /** Remove a comment. When the comment had been pushed to the bound tracker,
+   *  the tracker's copy is deleted too. */
   removeComment: (ticketKey: string, commentId: number) =>
     api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/${commentId}`),
+  /** Exclude / delete / restore a ticket.
+   *
+   *  `excluded` keeps it in Sprntly but holds it back from the PM tool;
+   *  `deleted` removes it from Sprntly. BOTH also delete the Jira/ClickUp/
+   *  Asana issue if the ticket had been pushed (closed instead where the
+   *  tracker refuses on permissions). `active` restores it, and the next sync
+   *  re-creates it in the tracker. */
+  setLifecycle: (ticketKey: string, lifecycle: TicketLifecycle) =>
+    api.put<{ ok: boolean; lifecycle: TicketLifecycle; tracker_sync_started: boolean }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/lifecycle`, { lifecycle },
+    ),
+  /** Delete a ticket — from Sprntly and from the bound PM tool. Shorthand for
+   *  setLifecycle(key, "deleted"). */
+  remove: (ticketKey: string) =>
+    api.delete<{ ok: boolean; lifecycle: TicketLifecycle; tracker_sync_started: boolean }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}`,
+    ),
   /** AI summary of the comment thread. `summary` is null when there's too little
    *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
   summarizeComments: (ticketKey: string) =>
@@ -3001,6 +3097,10 @@ export type GeneratedStory = {
   // Set by the per-ticket assignee picker just before a Jira push; not a
   // generated property (backend omits it from the cache). null = unassigned. ──
   assignee_account_id?: string | null
+  // ── Lifecycle. Absent for the ordinary "active" case; "excluded" means the
+  // user is holding this ticket back from the PM tool. Deleted tickets are
+  // filtered out server-side, so this never arrives as "deleted". ──
+  lifecycle?: TicketLifecycle
 }
 
 export type StoryPushResult = {
@@ -3667,6 +3767,12 @@ export const conversationsApi = {
    *  tab can rehydrate the earlier chat. `conversation` is null when none exists. */
   byPrd: (prdId: number) =>
     api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-prd/${prdId}`),
+  /** Evidence mirror of byPrd — most recent conversation (with turns) bound to
+   *  an Evidence doc via `conversations.evidence_id`. `conversation` is null
+   *  when the caller has none (never generated it, or it predates this
+   *  linkage) — never 404. */
+  byEvidence: (evidenceId: number) =>
+    api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-evidence/${evidenceId}`),
   update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean; prd_id?: number }) =>
     api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
   remove: (id: number) =>

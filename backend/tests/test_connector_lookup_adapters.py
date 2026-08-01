@@ -651,7 +651,8 @@ def _connected(monkeypatch):
 
 def test_every_shipped_adapter_resolves():
     assert set(registry.LOOKUP_PROVIDERS) == {
-        "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
+        "jira", "clickup", "slack", "fireflies", "github", "hubspot",
+        "google_drive", "confluence",
     }
     for name in registry.LOOKUP_PROVIDERS:
         provider = registry.provider_for(name)

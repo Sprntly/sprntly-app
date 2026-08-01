@@ -219,6 +219,39 @@ def get_conversation_by_prd(
     return {"conversation": conversation, "turns": turns.data or []}
 
 
+@router.get("/by-evidence/{evidence_id}")
+def get_conversation_by_evidence(
+    evidence_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the CALLER'S most recent conversation for an Evidence doc (plus
+    its turns) — the Evidence mirror of GET /by-prd/{prd_id}. Same per-user
+    scoping and same "empty (not 404) when the caller has no saved conversation
+    for it yet" contract; see get_conversation_by_prd for the full rationale."""
+    c = require_client()
+    conv = (
+        c.table("conversations")
+        .select("*")
+        .eq("company_id", company.company_id)
+        .eq("evidence_id", evidence_id)
+        .eq("user_id", company.user_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    conversation = conv.data[0] if conv.data else None
+    if conversation is None:
+        return {"conversation": None, "turns": []}
+    turns = (
+        c.table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", conversation["id"])
+        .order("created_at")
+        .execute()
+    )
+    return {"conversation": conversation, "turns": turns.data or []}
+
+
 @router.patch("/{conversation_id}")
 def update_conversation(
     conversation_id: int,

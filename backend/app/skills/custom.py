@@ -25,6 +25,7 @@ import hashlib
 import io
 import re
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -66,6 +67,23 @@ def slugify(name: str) -> str:
     Skills spec (lowercase alphanumerics + single hyphens, no edge hyphens)."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     return re.sub(r"-{2,}", "-", slug)
+
+
+def available_slug(base: str, taken: Iterable[str]) -> str:
+    """First free id in the series `base`, `base-2`, `base-3`, … .
+
+    A custom skill NEVER overrides a same-named built-in — both stay invocable,
+    so their triggers have to differ. `taken` is every id already spoken for:
+    the vendored built-ins plus the company's own custom slugs (a name like
+    "PRD Author 2" can itself occupy `prd-author-2`). The display name the user
+    typed is untouched — only the trigger is disambiguated."""
+    used = set(taken)
+    if base not in used:
+        return base
+    n = 2
+    while f"{base}-{n}" in used:
+        n += 1
+    return f"{base}-{n}"
 
 
 def parse_upload(filename: str, data: bytes) -> ParsedSkill:

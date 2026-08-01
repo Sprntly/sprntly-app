@@ -7,6 +7,8 @@ may ever raise into the ask worker.
 """
 from __future__ import annotations
 
+import pytest
+
 from app import report_capture as rc
 
 VOC_HTML = (
@@ -309,3 +311,92 @@ def test_get_report_is_scoped_to_its_company(isolated_settings):
     )
     assert db.get_report(rid, "c1")["title"] == "VoC"
     assert db.get_report(rid, "c2") is None
+
+
+# ─── every report skill attaches identically (2026-07-30 staging P1) ─────────
+# A DS report opened the Reports panel to "No reports in this chat": its row had
+# conversation_id NULL while VoC rows from the same day carried it. These pin the
+# BACKEND half of that question — `capture_report` has exactly one caller
+# (ask_job_runner) and `conversation_id` is a passthrough parameter, so every
+# report skill is attached by the same code with no per-skill branch. The real
+# fault was at the request boundary (see the frontend test); these exist so a
+# future per-skill special case can't reintroduce an asymmetry here.
+
+DS_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>What your data shows</title>"
+    "</head><body><div class=\"page\"><h1>What your data shows</h1>"
+    "<h2>Export users retain 2.3x longer</h2></div></body></html>"
+)
+
+
+@pytest.mark.parametrize(
+    ("skill", "html"),
+    [
+        ("ds-agent", DS_HTML),
+        ("voice-of-customer-report", VOC_HTML),
+        ("competitive-intelligence-review", VOC_HTML),
+        ("company-research", VOC_HTML),
+        ("public-feedback-report", VOC_HTML),
+    ],
+)
+async def test_every_report_skill_carries_the_conversation_id(
+    isolated_settings, monkeypatch, skill, html
+):
+    """Whatever conversation the ask ran in, the captured row carries it —
+    identically for every report-producing skill."""
+    from app import ask_job_runner as ajr
+    from app import db
+    from app.db.client import require_client
+
+    monkeypatch.setattr(ajr.qa_agent, "answer", lambda **kw: _payload(html, skill))
+    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
+    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    monkeypatch.setattr(ajr, "fail_ask_job", lambda i, m: None)
+
+    await ajr.run_ask_job(
+        ask_id=7,
+        enterprise_id="conv-co",
+        question="analyze my data",
+        dataset="d",
+        conversation_id=99,
+        workspace_id="w1",
+    )
+
+    rows = (
+        require_client().table("reports").select("id")
+        .eq("company_id", "conv-co").execute().data
+    )
+    assert len(rows) == 1, f"{skill} should capture exactly one report"
+    row = db.get_report(rows[0]["id"], "conv-co")
+    assert row["skill"] == skill
+    assert row["conversation_id"] == 99, (
+        f"{skill} report must attach to the chat room it ran in — a NULL here is "
+        "what makes the Reports panel say 'No reports in this chat'"
+    )
+
+
+async def test_report_has_no_conversation_when_the_ask_carried_none(
+    isolated_settings, monkeypatch
+):
+    """The legitimate unattached case: a report generated from the Artifacts
+    panel has no chat to belong to, and ArtifactsScreen deliberately sends no
+    conversation_id. NULL there is correct, not the bug."""
+    from app import ask_job_runner as ajr
+    from app import db
+    from app.db.client import require_client
+
+    monkeypatch.setattr(ajr.qa_agent, "answer", lambda **kw: _payload(DS_HTML, "ds-agent"))
+    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
+    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    monkeypatch.setattr(ajr, "fail_ask_job", lambda i, m: None)
+
+    await ajr.run_ask_job(
+        ask_id=8, enterprise_id="noconv-co", question="q", dataset="d",
+    )
+
+    rows = (
+        require_client().table("reports").select("id")
+        .eq("company_id", "noconv-co").execute().data
+    )
+    row = db.get_report(rows[0]["id"], "noconv-co")
+    assert row["conversation_id"] is None

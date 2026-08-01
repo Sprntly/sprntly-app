@@ -569,6 +569,12 @@ export interface PrdContent {
    * for `:::block` PRDs/evidence.
    */
   html?: string
+  /** The originating chat question (`EvidenceRecord.question`) — set only for
+   *  a chat-task Evidence doc; null/undefined otherwise (brief-insight docs,
+   *  and any doc generated before this column existed). Mirrors
+   *  `PrdState.question`; lives here (not on `PrdState`) so Evidence — which
+   *  has no `PrdState` of its own — carries it too. */
+  question?: string | null
 }
 
 /**
@@ -658,6 +664,15 @@ export interface AppContentState {
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a
    *  `prd_id`, so it is typed `PrdContent`, not `PrdState`. */
   evidence: PrdContent | null
+  /** The `evidences` row id behind `content.evidence`, when the setter knows
+   *  it (the Artifacts library's explicit open-by-id, and the `?evidence=`
+   *  URL deep link). Used ONLY to reflect the artifact-link URL param back
+   *  onto the address bar while the Evidence tab is showing this doc — NOT
+   *  populated by every path that sets `evidence` (the brief/insight
+   *  generate-or-resolve flows in ChatScreen/ContentPanel do not thread an id
+   *  through), so a null here while `evidence` is set just means the URL
+   *  won't carry `?evidence=` for that particular open — never an error. */
+  evidenceId: number | null
   /** True while evidence is being generated from the chat flow (ChatScreen),
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */

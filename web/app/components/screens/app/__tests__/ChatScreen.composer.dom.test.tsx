@@ -242,21 +242,22 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     expect(narrowed[0].textContent).toContain("/my-estimator")
   })
 
-  // Override (PRD 1854): a custom skill sharing a built-in's trigger REPLACES
-  // it — the palette lists the trigger once, as the custom skill.
-  it("dedupes the slash palette when a custom skill shadows a built-in trigger", async () => {
+  // No-override (PRD 1854 revision): a custom skill named after a built-in
+  // replaces nothing — both are listed, each with its own trigger and its own
+  // description, because the description is what tells them apart.
+  it("lists BOTH skills when a custom skill shares a built-in's name", async () => {
     vi.mocked(skillsApi.list).mockResolvedValueOnce({
       skills: [
         {
           id: "c2",
-          slug: "prioritize",
-          trigger: "/prioritize",
-          name: "Our Prioritize",
+          slug: "prioritize-2", // the built-in kept /prioritize
+          trigger: "/prioritize-2",
+          name: "Prioritize",
           description: "House ranking rules",
           uploader_name: "Fortune",
           created_at: null,
           has_file: true,
-          overrides_builtin: true,
+          name_conflict: true,
         },
       ],
     })
@@ -269,9 +270,14 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     })
     const palette = await screen.findByRole("listbox", { name: "Skills" })
     const rows = within(palette).getAllByRole("option")
-    expect(rows).toHaveLength(1)
-    expect(rows[0].textContent).toContain("Our Prioritize")
-    expect(rows[0].textContent).toContain("/prioritize")
+    expect(rows).toHaveLength(2)
+    // The custom one leads, and each row carries the trigger that invokes IT.
+    expect(rows[0].textContent).toContain("/prioritize-2")
+    expect(rows[0].textContent).toContain("House ranking rules")
+    expect(rows[1].textContent).toContain("/prioritize")
+    expect(rows[1].textContent).toContain("Rank ideas")
+    // Same name on both rows — the descriptions are the distinguisher.
+    expect(rows.every((r) => r.textContent?.includes("Prioritize"))).toBe(true)
   })
 
   // A1: firing a change on the landing file input adds the attachment, and the
@@ -488,6 +494,67 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     expect(opts?.conversation_id).toBe(100)
     // A plain chat tab carries no PRD id.
     expect(opts).not.toHaveProperty("prd_id")
+  })
+
+  // Regression (staging P1, 2026-07-30): the FIRST message of a tab must carry
+  // a conversation_id too. The conversation row is created fire-and-forget by
+  // pushPendingConversation, so the old code — which read `dbConvId` off the tab
+  // synchronously — always sent the first ask with no conversation_id. Harmless
+  // for history (there is none yet), but the id is what ATTACHES a captured HTML
+  // report to the thread, and it is fixed at request time with nothing to
+  // backfill it. A DS report generated as an opening message therefore landed
+  // with conversation_id NULL and its "View report" opened an empty panel.
+  // Every report skill was equally affected; VoC only looked healthy because
+  // those runs happened to be follow-ups (see the test above, which pre-seeds
+  // dbConvId and so never exercised this).
+  it("forwards conversation_id on the FIRST message, awaiting the pending create", async () => {
+    const { conversationsApi } = await import("../../../../lib/api")
+    vi.mocked(conversationsApi.create).mockResolvedValueOnce({ id: 777 } as never)
+
+    // The real first-message flow: a fresh chat, nothing persisted yet.
+    searchString = "new=1"
+    renderScreen()
+
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "analyze my data" } })
+    })
+    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => {
+      fireEvent.click(sendBtn)
+    })
+
+    await waitFor(() => {
+      expect(askedOpts.length).toBeGreaterThan(0)
+    })
+    expect(askedOpts[askedOpts.length - 1]?.conversation_id).toBe(777)
+    // NB: awaiting shares the in-flight create rather than starting one — the
+    // number of create calls in this harness is identical with and without the
+    // await (measured), so the fix adds no conversation churn.
+  })
+
+  it("still sends the first ask when the conversation create fails", async () => {
+    const { conversationsApi } = await import("../../../../lib/api")
+    vi.mocked(conversationsApi.create).mockRejectedValueOnce(new Error("supabase down"))
+
+    searchString = "new=1"
+    renderScreen()
+
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "analyze my data" } })
+    })
+    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => {
+      fireEvent.click(sendBtn)
+    })
+
+    await waitFor(() => {
+      expect(askedOpts.length).toBeGreaterThan(0)
+    })
+    // The answer still happens — attachment is best-effort, never a gate on it.
+    expect(askedOpts[askedOpts.length - 1]).not.toHaveProperty("conversation_id")
   })
 
   // A4: an attached file's content is appended to the outgoing query on send.

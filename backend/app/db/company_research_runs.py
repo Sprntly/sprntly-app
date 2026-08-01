@@ -31,11 +31,36 @@ logger = logging.getLogger(__name__)
 
 _TABLE = "company_research_runs"
 
-# A full sweep is ~4 staged web-search passes plus extraction: 5-10 minutes in
-# practice. Anything still 'running' past this has lost its owner (the process
-# died mid-run). Tighter than pipeline_runs' 60 minutes because a research run
-# is bounded work with no fan-out, and a stuck row blocks the in-flight guard.
-ORPHAN_RUN_AFTER_MINUTES = 30
+# A full sweep is ~4 staged web-search passes plus extraction. Observed p50 on
+# staging is ~5 minutes (a real run measured 4m53s), so 15 gives 3x headroom
+# over the longest plausible run while bounding how long an orphan can sit.
+#
+# Why it matters that this is not generous: while a 'running' row is younger
+# than this window it is INDISTINGUISHABLE from a live run, so the in-flight
+# guard reports "already researching" and that company cannot start a new sweep.
+# A deploy that restarts the service mid-run therefore locks the company out for
+# the whole window. 30 minutes (the original value) made a routine deploy look
+# like a stuck feature — observed on staging 2026-07-30, run id 3.
+#
+# Under-shooting is cheap by construction: if this fires while a run really is
+# alive, the live run still completes and writes its signals, and the racing
+# trigger is caught by the partial unique index rather than double-spending a
+# sweep. Over-shooting is what actually costs the user.
+#
+# NOTE — the sweep cadence differs per environment, so this window is the real
+# bound on staging:
+#   * prod has SCHEDULER_ENABLED=true, so scheduler.py's 5-minute heal job runs
+#     and an orphan is cleared within ~this window + 5 minutes;
+#   * STAGING has SCHEDULER_ENABLED=false — start_scheduler() never runs, so
+#     the ONLY sweeps there are the one in main.py's startup lifespan and the
+#     on-demand heal on the insert-conflict path
+#     (start_company_research_run → _fail_stale_running_rows). Which means on
+#     staging nothing clears an orphan until either a restart or the next
+#     trigger arrives past this window — so keeping the window short IS the fix
+#     for the stuck-row experience there.
+# Keep in sync with the "~15 minutes" the chat copy promises
+# (company_research._plain_payload for the already_running branch).
+ORPHAN_RUN_AFTER_MINUTES = 15
 
 #: error recorded on runs whose owning process died (server restart mid-run).
 INTERRUPTED_RUN_ERROR = (

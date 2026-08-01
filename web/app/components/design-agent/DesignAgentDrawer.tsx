@@ -134,6 +134,11 @@ type GenerateFlowDeps = {
     /** The snapshot SHA the route was confirmed against. Pins the backend's
      *  build_map at read time so the recreate reads the same bytes. */
     map_commit_sha?: string | null
+    /** The PM-confirmed external-entry-point description from the locate
+     *  gate's `external_surface` signal — sent ONLY by the recovery panel's
+     *  "generate placeholder" action (codebase mode, no chosen screen). Free
+     *  text, never a closed enum. Absent/null = no signal / old client. */
+    external_surface_hint?: string | null
   }
   generate: typeof designAgentApi.generate
   runGeneration: typeof runDesignAgentGeneration

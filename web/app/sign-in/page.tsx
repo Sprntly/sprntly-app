@@ -23,7 +23,6 @@ export default function SignInPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forgotMode, setForgotMode] = useState(false)
-  const [forgotSent, setForgotSent] = useState(false)
   const [lockoutMs, setLockoutMs] = useState(0)
 
   useEffect(() => {
@@ -76,12 +75,11 @@ export default function SignInPage() {
     setSubmitting(true)
     try {
       await auth.resetPassword(email)
-      setForgotSent(true)
     } catch {
-      setForgotSent(true)
-    } finally {
-      setSubmitting(false)
+      // Swallow either way — never reveal whether the address is registered.
     }
+    // The recovery email carries a 6-digit code; /reset-password collects it.
+    router.push(`/reset-password?email=${encodeURIComponent(email)}`)
   }
 
   async function onGoogle() {
@@ -109,28 +107,6 @@ export default function SignInPage() {
       <AuthShell tag="Sign in">
         <div className="auth-h">Sign-in <em>not configured.</em></div>
         <div className="auth-sub">Set Supabase env vars in web/.env.local</div>
-      </AuthShell>
-    )
-  }
-
-  if (forgotSent) {
-    return (
-      <AuthShell tag="Reset password">
-        <div className="auth-h">Check your <em>email.</em></div>
-        <div className="auth-sub">
-          If an account exists for <strong>{email}</strong>, you&apos;ll receive a reset link
-          shortly.
-        </div>
-        <button
-          type="button"
-          className="btn btn-brand btn-block"
-          onClick={() => {
-            setForgotMode(false)
-            setForgotSent(false)
-          }}
-        >
-          Back to sign in
-        </button>
       </AuthShell>
     )
   }

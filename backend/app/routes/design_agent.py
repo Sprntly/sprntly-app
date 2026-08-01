@@ -447,6 +447,16 @@ class GenerateRequest(BaseModel):
     #   The map snapshot the route was confirmed against. Pins build_map at
     #   read time so the recreate reads the same bytes the PM confirmed
     #   against, and lands a cache hit on the (installation_id, repo, sha) key.
+    external_surface_hint: str | None = Field(default=None, max_length=300)
+    #   The PM-confirmed external-entry-point description from the locate gate
+    #   (codebase generation only, no chosen screen — see
+    #   GateResult.external_surface). Free text describing the external
+    #   surface, e.g. "a confirmation email sent to the customer" — never a
+    #   closed enum. When present, `_run_generation_bg` appends a generic
+    #   placeholder-screen directive to the scaffold prompt UNLESS a reference
+    #   screenshot also rode this run — a real screenshot always wins. None =
+    #   no signal / old client; the blank-canvas or shell-grounded path runs
+    #   exactly as before.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -702,6 +712,7 @@ async def generate(
         chosen_screen_route=body.chosen_screen_route,
         chosen_screen_id=body.chosen_screen_id,
         map_commit_sha=body.map_commit_sha,
+        external_surface_hint=body.external_surface_hint,
         # Usage-ledger row id, threaded so the bg-runner can finalize the SAME
         # row at the terminal. A plain int → round-trips losslessly through the
         # Tier-2 job payload (serialize/deserialize copy scalars verbatim).
@@ -1225,6 +1236,16 @@ class LocateCandidateOut(BaseModel):
     component_count: int = 0  # composed_components length from the matching ScreenNode
 
 
+class ExternalSurfaceOut(BaseModel):
+    """Wire shape of GateResult.external_surface. Mirrors ExternalEntryPointSignal —
+    a plain serializer, not a re-derivation. Present only when detected (see
+    the None default on LocateResponse.external_surface below)."""
+
+    detected: bool = False
+    surface_description: str = ""
+    confidence: int = 0
+
+
 class LocateResponse(BaseModel):
     decision: Literal["auto_proceed", "proceed_with_note", "ranked_confirm"]
     chosen: list[LocateCandidateOut]   # screen(s) generation would run on
@@ -1245,6 +1266,12 @@ class LocateResponse(BaseModel):
     # not happen ("absent" | "applied" | "ignored_oversize" | "ignored_decode").
     read_cues: list[str] = Field(default_factory=list)
     image_status: str = "absent"
+    # External-entry-point signal (GateResult.external_surface). None on every
+    # path except a ranked_confirm outcome where the locate call's own read of
+    # the PRD flagged the entry point as genuinely external — see
+    # ExternalEntryPointSignal / decide_gate._external_surface. None on the
+    # unmapped fail-open path too (no locate call ran). Additive + default-safe.
+    external_surface: ExternalSurfaceOut | None = None
 
 
 def _unmapped_locate_response(repo: str) -> LocateResponse:
@@ -1437,6 +1464,15 @@ async def _run_locate_bg(
             commit_sha=map_result.commit_sha,
             read_cues=locate_result.read_cues,
             image_status=locate_result.image_status,
+            external_surface=(
+                ExternalSurfaceOut(
+                    detected=gate.external_surface.detected,
+                    surface_description=gate.external_surface.surface_description,
+                    confidence=gate.external_surface.confidence,
+                )
+                if gate.external_surface is not None
+                else None
+            ),
         ))
     except Exception as exc:  # noqa: BLE001 — terminal record, never let the task die unhandled
         from app.design_agent.provider_errors import (
@@ -1780,6 +1816,7 @@ async def _run_generation_bg(
     chosen_screen_route: str | None = None,
     chosen_screen_id: str | None = None,
     map_commit_sha: str | None = None,
+    external_surface_hint: str | None = None,
     event_id: int | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
@@ -1843,6 +1880,18 @@ async def _run_generation_bg(
         screenshot_blocks = await _screenshot_reference_blocks(
             screenshot_keys, prototype_id=prototype_id, workspace_id=workspace_id
         )
+        # The placeholder directive is only meaningful on the no-chosen-screen
+        # path (the "generate anyway" / shell-grounded run the recovery panel's
+        # external-surface CTA fires) — defensive belt-and-suspenders alongside
+        # render_scaffold_user's own has_screenshot precedence: a chosen screen
+        # means a real in-app match WAS found (or the PM picked one manually),
+        # so the hint is dropped rather than layering a spurious extra screen
+        # onto an already-grounded recreate run.
+        effective_external_hint = (
+            external_surface_hint
+            if not (chosen_screen_route or chosen_screen_id)
+            else None
+        )
         user_text = render_scaffold_user(
             prd_md=prd_md,
             target_platform=target_platform,
@@ -1850,6 +1899,7 @@ async def _run_generation_bg(
             figma_frames=source_block,
             codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
             has_screenshot=bool(screenshot_blocks),
+            external_surface_hint=effective_external_hint,
         )
         user_content: list[dict] = [{"type": "text", "text": user_text}]
         user_content[0:0] = screenshot_blocks  # insert ALL of them before the text, preserving order

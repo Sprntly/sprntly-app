@@ -23,9 +23,20 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
-from app.db.asana_sync import get_asana_task_gid, save_asana_task_gid
+from app.connectors.tracker_errors import TrackerDeleteForbiddenError
+from app.db.asana_sync import (
+    delete_asana_task_gid,
+    get_asana_task_gid,
+    list_asana_subtask_gids,
+    save_asana_task_gid,
+)
 from app.db.clickup_sync import get_clickup_task_id, save_clickup_task_id
-from app.db.jira_sync import get_jira_issue_key, save_jira_issue_key
+from app.db.jira_sync import (
+    delete_jira_issue_key,
+    get_jira_issue_key,
+    list_jira_subtask_keys,
+    save_jira_issue_key,
+)
 from app.stories.generate import Story
 
 logger = logging.getLogger(__name__)
@@ -45,6 +56,67 @@ class JiraNotConnectedError(LookupError):
 
 class AsanaNotConnectedError(LookupError):
     """Raised when the company has no active Asana connection."""
+
+
+# ── Child issues, shared across the three trackers ──────────────────────────
+#
+# A ticket's child issues are a plain list of labels in Sprntly. Each tracker
+# stores them differently (Jira sub-tasks, Asana subtasks, a ClickUp
+# checklist), but the identity rule is the same everywhere: THE LABEL IS THE
+# CHILD ISSUE. Sprntly has no per-child id to carry, so a child is addressed by
+# a hash of its text, and a rename reads as one removed + one added — which is
+# the honest outcome, because that is exactly what the user did in Sprntly.
+
+#: The ClickUp checklist a ticket's child issues live on.
+_CHILD_CHECKLIST = "Child issues"
+
+
+def _child_labels(subtasks: Iterable[str] | None) -> list[str]:
+    """A ticket's child issues as clean labels: the '[P]' parallel marker
+    stripped, blanks dropped, order preserved. The single definition of what
+    counts as a child issue, so the three trackers can never disagree about
+    whether one is present."""
+    import re as _re
+
+    out: list[str] = []
+    for raw in subtasks or []:
+        label = _re.sub(r"^\s*\[P\]\s*", "", str(raw)).strip()
+        if label:
+            out.append(label)
+    return out
+
+
+def _sub_id(ticket_id: str, label: str) -> str:
+    """The mapping key for one child issue: `{ticket_id}#sub#{hash(label)}`.
+    Content-derived because Sprntly has no stable child id to key off."""
+    import hashlib
+
+    return (
+        f"{ticket_id}#sub#"
+        f"{hashlib.sha256(label.encode('utf-8')).hexdigest()[:12]}"
+    )
+
+
+def _done_status_name(company_id: str, provider: str, destination: str) -> str | None:
+    """The destination's own name for a completed status (first with a `done`
+    category in cached tracker metadata), or None when unknown.
+
+    The close fallback's vocabulary: when a tracker REFUSES to delete something
+    (Jira's "Delete Issues" permission is the usual reason), the removal still
+    has to land somehow, and closing the item is the honest approximation.
+    Reads the customer's real status names — "Complete", "Shipped", whatever
+    their workflow calls it — never a hardcoded "Done".
+    """
+    try:
+        from app.db.tracker_meta import get_cached_meta
+
+        meta = get_cached_meta(company_id, provider, destination)
+    except Exception:  # noqa: BLE001 — meta is an enhancement, never a gate
+        return None
+    for s in (meta or {}).get("statuses") or []:
+        if s.get("category") == "done" and s.get("name"):
+            return s["name"]
+    return None
 
 
 def _clickup_fields(story: Story) -> dict[str, Any]:
@@ -101,7 +173,7 @@ def push_stories_to_clickup(
     title_to_task: dict[str, str] = {}
     stories = list(stories)
 
-    # ── Pass 1: create/update each task (+ child-issue checklist on new tasks) ──
+    # ── Pass 1: create/update each task + reconcile its child-issue checklist ──
     for story in stories:
         try:
             ticket_id = story.stable_id()
@@ -124,11 +196,11 @@ def push_stories_to_clickup(
                 task_id = task.get("id")
                 if task_id:
                     save_clickup_task_id(company_id, list_id, ticket_id, task_id)
-                    # Child issues → a ClickUp checklist. Only on CREATE — a
-                    # re-push would otherwise stack duplicate checklists (ClickUp
-                    # has no upsert here); a full checklist reconcile is future work.
-                    _sync_subtasks_checklist(access_token, task_id, story)
             if task_id:
+                # Child issues → a ClickUp checklist, reconciled on EVERY push,
+                # not just the first. Create-only was why a child issue removed
+                # (or added, or renamed) in Sprntly never reached ClickUp.
+                _reconcile_subtasks_checklist(access_token, task_id, story)
                 title_to_task[story.title] = task_id
             created.append({
                 "story": story.title,
@@ -158,20 +230,65 @@ def push_stories_to_clickup(
     return {"created": created, "errors": errors}
 
 
-def _sync_subtasks_checklist(access_token: str, task_id: str, story: Story) -> None:
-    """Create a 'Child issues' checklist on a freshly-created task, one item per
-    subtask (the '[P]' parallel marker stripped). Best-effort — never fails the
-    push."""
-    if not story.subtasks:
-        return
+def _reconcile_subtasks_checklist(
+    access_token: str, task_id: str, story: Story,
+    *, checklists: list[dict[str, Any]] | None = None,
+) -> None:
+    """Make the task's 'Child issues' checklist match the ticket's child issues
+    exactly — items added, and items the user REMOVED in Sprntly deleted.
+
+    This used to run on create only, which meant a child issue deleted in
+    Sprntly stayed on the customer's ClickUp checklist forever (and an edited
+    list never reached ClickUp at all). Reconciling by NAME is right here
+    because a ClickUp checklist item has no stable identity of its own — the
+    label IS the child issue, so a renamed item reads as one removed and one
+    added, which is exactly what should happen in ClickUp.
+
+    `checklists` lets the sync pass hand over the ones its own task read
+    already returned; omit it and they're fetched. Best-effort throughout —
+    never fails the push.
+    """
+    labels = _child_labels(story.subtasks)
     try:
-        checklist_id = clickup_oauth.create_checklist(access_token, task_id, "Child issues")
-        if not checklist_id:
+        if checklists is None:
+            checklists = clickup_oauth.get_task_checklists(access_token, task_id)
+        existing = next(
+            (c for c in checklists if (c.get("name") or "") == _CHILD_CHECKLIST), None
+        )
+        if not labels:
+            # The last child issue was removed. ClickUp leaves an empty
+            # checklist behind, so drop the whole thing rather than a bare
+            # "Child issues" heading the ticket no longer has.
+            if existing:
+                clickup_oauth.delete_checklist(access_token, existing["id"])
             return
-        for sub in story.subtasks:
-            label = sub.replace("[P]", "").strip()
-            if label:
+        if existing is None:
+            checklist_id = clickup_oauth.create_checklist(
+                access_token, task_id, _CHILD_CHECKLIST
+            )
+            if not checklist_id:
+                return
+            for label in labels:
                 clickup_oauth.create_checklist_item(access_token, checklist_id, label)
+            return
+
+        wanted = set(labels)
+        kept: set[str] = set()
+        for item in existing.get("items") or []:
+            name = item.get("name") or ""
+            # `name in kept` prunes a DUPLICATE of a wanted label too — one
+            # child issue must not show as two rows after a re-push.
+            if name in wanted and name not in kept:
+                kept.add(name)
+                continue
+            clickup_oauth.delete_checklist_item(
+                access_token, existing["id"], item["id"]
+            )
+        for label in labels:
+            if label not in kept:
+                clickup_oauth.create_checklist_item(
+                    access_token, existing["id"], label
+                )
     except Exception as e:  # noqa: BLE001
         logger.warning("ClickUp checklist sync failed for %r: %s", story.title, e)
 
@@ -274,7 +391,7 @@ def jira_subtask_type(company_id: str, project_key: str) -> str | None:
     return None
 
 
-def push_jira_subtasks(
+def sync_jira_subtasks(
     company_id: str,
     project_key: str,
     parent_key: str,
@@ -285,22 +402,30 @@ def push_jira_subtasks(
     cloud_id: str,
     subtask_type: str,
 ) -> None:
-    """Create the MISSING child issues as real Jira sub-tasks under
-    `parent_key`. Idempotent by content: each subtask maps to a
-    `{ticket_id}#sub#{hash}` row in jira_issue_map, so a re-push/sync skips
-    ones that exist; a renamed item creates a new sub-task (the old one stays
-    — add-only, like tags). Per-item failures are isolated + logged."""
-    import hashlib
-    import re as _re
+    """Make the real Jira sub-tasks under `parent_key` match the ticket's child
+    issues: missing ones created, ones REMOVED in Sprntly deleted.
 
-    for raw in subtasks or []:
-        label = _re.sub(r"^\s*\[P\]\s*", "", str(raw)).strip()
-        if not label:
-            continue
-        sub_id = (
-            f"{ticket_id}#sub#"
-            f"{hashlib.sha256(label.encode('utf-8')).hexdigest()[:12]}"
-        )
+    The removal half is what makes this a sync rather than a one-way seed. It
+    used to be add-only, so deleting a child issue in Sprntly (or renaming
+    one — a rename is a remove plus an add, since the label is the identity)
+    left a live sub-task on the customer's board that nothing would ever clean
+    up.
+
+    What SHOULD exist comes from `subtasks`; what DOES exist comes from
+    jira_issue_map's `{ticket_id}#sub#…` rows, so only sub-tasks Sprntly itself
+    created are ever touched — a sub-task a developer added in Jira by hand has
+    no mapping row and is left completely alone.
+
+    Deletes take their children with them (`deleteSubtasks`) and fall back to
+    CLOSING the issue when Jira refuses on permissions, which is the common
+    case: "Delete Issues" is not in a default permission scheme. Per-item
+    failures are isolated and logged; a child that could be neither deleted nor
+    closed keeps its mapping row so the next pass retries it.
+    """
+    labels = _child_labels(subtasks)
+    wanted = {_sub_id(ticket_id, label): label for label in labels}
+
+    for sub_id, label in wanted.items():
         try:
             if get_jira_issue_key(company_id, project_key, sub_id):
                 continue
@@ -317,6 +442,51 @@ def push_jira_subtasks(
             logger.warning(
                 "Jira sub-task push failed under %s (%r): %s", parent_key, label, e
             )
+
+    try:
+        mapped = list_jira_subtask_keys(company_id, project_key, ticket_id)
+    except Exception:  # noqa: BLE001 — no map read, no prune; adds still landed
+        logger.warning("Jira sub-task prune skipped under %s (map read failed)", parent_key)
+        return
+    for sub_id, issue_key in mapped.items():
+        if sub_id in wanted:
+            continue
+        if not _remove_jira_subtask(
+            company_id, project_key, issue_key,
+            access_token=access_token, cloud_id=cloud_id,
+        ):
+            continue  # keep the mapping so the next pass retries
+        delete_jira_issue_key(company_id, project_key, sub_id)
+
+
+def _remove_jira_subtask(
+    company_id: str, project_key: str, issue_key: str,
+    *, access_token: str, cloud_id: str,
+) -> bool:
+    """Delete one Jira sub-task, closing it instead when Jira refuses. True
+    when the removal landed either way (so the caller can drop the mapping),
+    False when neither worked and it should be retried next pass."""
+    try:
+        return jira_oauth.delete_issue(access_token, cloud_id, issue_key)
+    except TrackerDeleteForbiddenError:
+        done = _done_status_name(company_id, "jira", project_key)
+        if done and jira_oauth.transition_issue(
+            access_token, cloud_id, issue_key, done
+        ):
+            logger.info(
+                "Jira sub-task %s could not be deleted (no Delete Issues "
+                "permission) — closed as %r instead", issue_key, done,
+            )
+            return True
+        logger.warning(
+            "Jira sub-task %s could not be deleted or closed — it stays on the "
+            "board; grant the connected account 'Delete Issues' on %s",
+            issue_key, project_key,
+        )
+        return False
+    except Exception as e:  # noqa: BLE001 — one child failing is isolated
+        logger.warning("Jira sub-task delete failed for %s: %s", issue_key, e)
+        return False
 
 
 def push_stories_to_jira(
@@ -374,8 +544,11 @@ def push_stories_to_jira(
                 issue_key = issue.get("key")
                 if issue_key:
                     save_jira_issue_key(company_id, project_key, ticket_id, issue_key)
-            if issue_key and subtask_type and story.subtasks:
-                push_jira_subtasks(
+            # No `and story.subtasks` guard: the reconcile has to run on an
+            # EMPTY list too, or removing a ticket's last child issue is the
+            # one removal that can never reach Jira.
+            if issue_key and subtask_type:
+                sync_jira_subtasks(
                     company_id, project_key, issue_key, ticket_id,
                     story.subtasks,
                     access_token=access_token, cloud_id=cloud_id,
@@ -467,7 +640,7 @@ def _asana_creds(company_id: str) -> str:
     return access_token
 
 
-def push_asana_subtasks(
+def sync_asana_subtasks(
     company_id: str,
     project_gid: str,
     parent_gid: str,
@@ -476,26 +649,21 @@ def push_asana_subtasks(
     *,
     access_token: str,
 ) -> None:
-    """Create the MISSING child issues as real NATIVE Asana subtasks under
-    `parent_gid`. Idempotent by content: each subtask maps to a
-    `{ticket_id}#sub#{hash}` row in asana_task_map (reusing the same table as
-    the parent), so a re-push/sync skips ones that exist; a renamed item
-    creates a new subtask (the old one stays — add-only, mirroring the Jira
-    sub-task push). Per-item failures are isolated + logged.
+    """Make the native Asana subtasks under `parent_gid` match the ticket's
+    child issues: missing ones created, ones REMOVED in Sprntly deleted.
+    Mirrors sync_jira_subtasks — see it for why removal matters and why only
+    Sprntly-created subtasks (the `{ticket_id}#sub#…` rows in asana_task_map)
+    are ever touched.
 
     Asana subtasks need no special type (unlike Jira), so this always runs when
-    a story has child issues — they never live only as description text."""
-    import hashlib
-    import re as _re
+    a story has child issues — they never live only as description text. A
+    refused delete falls back to marking the subtask COMPLETE, Asana's
+    equivalent of closing it.
+    """
+    labels = _child_labels(subtasks)
+    wanted = {_sub_id(ticket_id, label): label for label in labels}
 
-    for raw in subtasks or []:
-        label = _re.sub(r"^\s*\[P\]\s*", "", str(raw)).strip()
-        if not label:
-            continue
-        sub_id = (
-            f"{ticket_id}#sub#"
-            f"{hashlib.sha256(label.encode('utf-8')).hexdigest()[:12]}"
-        )
+    for sub_id, label in wanted.items():
         try:
             if get_asana_task_gid(company_id, project_gid, sub_id):
                 continue
@@ -506,6 +674,41 @@ def push_asana_subtasks(
             logger.warning(
                 "Asana sub-task push failed under %s (%r): %s", parent_gid, label, e
             )
+
+    try:
+        mapped = list_asana_subtask_gids(company_id, project_gid, ticket_id)
+    except Exception:  # noqa: BLE001 — no map read, no prune; adds still landed
+        logger.warning("Asana sub-task prune skipped under %s (map read failed)", parent_gid)
+        return
+    for sub_id, gid in mapped.items():
+        if sub_id in wanted:
+            continue
+        if not _remove_asana_subtask(gid, access_token=access_token):
+            continue  # keep the mapping so the next pass retries
+        delete_asana_task_gid(company_id, project_gid, sub_id)
+
+
+def _remove_asana_subtask(gid: str, *, access_token: str) -> bool:
+    """Delete one Asana subtask, completing it instead when Asana refuses.
+    True when the removal landed either way. Asana keeps deleted tasks in the
+    author's trash for 30 days, so this is recoverable by the customer."""
+    try:
+        return asana_oauth.delete_task(access_token, gid)
+    except TrackerDeleteForbiddenError:
+        try:
+            asana_oauth.update_task(access_token, gid, completed=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Asana subtask %s could not be deleted or completed: %s", gid, e
+            )
+            return False
+        logger.info(
+            "Asana subtask %s could not be deleted — marked complete instead", gid
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — one child failing is isolated
+        logger.warning("Asana subtask delete failed for %s: %s", gid, e)
+        return False
 
 
 def push_stories_to_asana(
@@ -548,8 +751,9 @@ def push_stories_to_asana(
                 task_gid = task.get("gid")
                 if task_gid:
                     save_asana_task_gid(company_id, project_gid, ticket_id, task_gid)
-            if task_gid and story.subtasks:
-                push_asana_subtasks(
+            # Runs on an empty list too — see the Jira push for why.
+            if task_gid:
+                sync_asana_subtasks(
                     company_id, project_gid, task_gid, ticket_id, story.subtasks,
                     access_token=access_token,
                 )

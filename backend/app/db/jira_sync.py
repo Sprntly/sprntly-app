@@ -46,6 +46,33 @@ def save_jira_issue_key(
 
 
 @retry_on_disconnect
+def list_jira_subtask_keys(
+    company_id: str, project_key: str, ticket_id: str
+) -> dict[str, str]:
+    """Every sub-task Sprntly created under this ticket, as
+    `{sub_id: jira_issue_key}` where sub_id is the `{ticket_id}#sub#{hash}`
+    form sync_jira_subtasks writes.
+
+    This is the record that makes REMOVAL detectable: the ticket's current
+    child-issue list says what should exist, and this says what Sprntly
+    actually created — anything here and not there is a child the user deleted,
+    whose Jira sub-task is still sitting in their board.
+    """
+    resp = (
+        require_client().table("jira_issue_map")
+        .select("ticket_id, jira_issue_key")
+        .eq("company_id", company_id).eq("project_key", project_key)
+        .like("ticket_id", f"{ticket_id}#sub#%")
+        .execute()
+    )
+    return {
+        r["ticket_id"]: r["jira_issue_key"]
+        for r in (resp.data or [])
+        if r.get("ticket_id") and r.get("jira_issue_key")
+    }
+
+
+@retry_on_disconnect
 def delete_jira_issue_key(company_id: str, project_key: str, ticket_id: str) -> None:
     """Drop the ticket's mapping AND its sub-task rows (`{ticket_id}#sub#…`).
     Called when the Jira issue was DELETED in the tracker so a re-sync treats

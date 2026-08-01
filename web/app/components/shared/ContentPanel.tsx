@@ -17,10 +17,13 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketStub, type TicketSyncState, type TrackerMeta,
-  type TrackerProvider,
+  type JiraProject, type TicketLifecycle, type TicketStub,
+  type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { OriginQuestionBanner } from "./OriginQuestionBanner"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
@@ -52,13 +55,21 @@ const TABS = [
   { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
 ] as const
 
-const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
-const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
+// The key is versioned because the bounds below moved: widths stored under the
+// old key were dragged against a 60vw default and a 650px floor, so replaying
+// one now would mean a panel that never opens at its intended 35%.
+const CPANEL_WIDTH_KEY = "sprntly-cpanel-width-v2"
+const CPANEL_DEFAULT_VW = 0.35 // first open: 35% panel / 65% thread
 const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
+// Floor, not a comfortable width — it's what 35% comes to on a ~1200px window,
+// so the default never starts below the point the first drag would clamp to.
+const CPANEL_WIDTH_MIN = 420
 
 function clampCpanelWidth(px: number): number {
   const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
-  return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
+  // On a window narrow enough that the floor exceeds the cap, the cap wins.
+  const min = Math.min(CPANEL_WIDTH_MIN, max)
+  return Math.min(max, Math.max(min, Math.round(px)))
 }
 
 // Header Share dropdown — Download PDF of the combined Evidence + PRD (falls
@@ -332,14 +343,17 @@ export function ContentPanel() {
     }
   }, [evidenceHidden, contentPanelTab, activeTab, openContentPanel])
 
-  // Tracks the live pixel width; null = use the CSS default (60vw).
+  // Tracks the live pixel width; null = use the CSS default (35vw).
   const widthRef = useRef<number | null>(null)
+  // Teardown for the drag session in flight, or null when none is. Doubles as
+  // the "already ended" guard — several events can terminate one gesture.
+  const endDragRef = useRef<(() => void) | null>(null)
 
   // On open: restore saved width, apply it, and keep it clamped on window resize.
   // On close: remove the CSS var so it resets to default.
   //
   // Keyed on `mounted`, not on the tab: clearing --cpanel-width the moment the
-  // tab went null would snap a user-widened panel back to the 60vw default in
+  // tab went null would snap a user-widened panel back to the 35vw default in
   // the first frame of the exit slide. Now the var lives exactly as long as the
   // panel element does. (It also stops the effect re-running on every tab
   // switch, which pointlessly removed and re-applied the same width.)
@@ -369,31 +383,90 @@ export function ContentPanel() {
   }, [mounted])
 
   // Pointer-down on the left-edge handle starts a drag session.
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    if (window.innerWidth <= 768) return
+  //
+  // Pointer events with capture, not mouse events. The panel body hosts iframes
+  // (the PRD and report frames), and an iframe's document swallows the parent's
+  // mouse events: the moment the widening panel's edge slid under the cursor,
+  // mousemove stopped arriving and the panel froze mid-drag — and because the
+  // mouseup was swallowed too, the session never ended, so the panel started
+  // tracking the cursor again after the button had already been released.
+  // Capturing the pointer pins every event of the gesture to the handle no
+  // matter what it travels over, and guarantees exactly one terminating event.
+  //
+  // Writes are coalesced onto a single animation frame. One width change
+  // re-lays out the panel AND the thread column's padding — the expensive half
+  // — while a pointermove burst can fire several times per frame, so doing that
+  // work per-event rather than per-frame is what made the drag feel heavy.
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || window.innerWidth <= 768) return
     e.preventDefault()
+    const handle = e.currentTarget
     const root = document.documentElement
     const startX = e.clientX
-    const startW = widthRef.current ?? Math.round(window.innerWidth * CPANEL_MAX_VW)
-    root.classList.add("cpanel-resizing")
+    const { pointerId } = e
+    // Seed from what's actually on screen rather than from an assumed default,
+    // so the first drag off a never-resized panel doesn't jump.
+    const startW = widthRef.current ?? Math.round(
+      handle.parentElement?.getBoundingClientRect().width
+        || window.innerWidth * CPANEL_DEFAULT_VW,
+    )
 
-    const onMove = (ev: MouseEvent) => {
+    let latestX = startX
+    let frame = 0
+    const flush = () => {
+      frame = 0
       // Dragging LEFT widens the panel (panel anchored to right edge).
-      const next = clampCpanelWidth(startW + (startX - ev.clientX))
+      const next = clampCpanelWidth(startW + (startX - latestX))
       widthRef.current = next
       root.style.setProperty("--cpanel-width", `${next}px`)
     }
-    const onUp = () => {
+
+    root.classList.add("cpanel-resizing")
+    // Not supported everywhere (and a no-op in jsdom) — the window listeners
+    // below still see captured events, since capture retargets but still
+    // bubbles, so the drag degrades to the old behaviour rather than breaking.
+    try { handle.setPointerCapture(pointerId) } catch { /* fall through */ }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      latestX = ev.clientX
+      if (!frame) frame = window.requestAnimationFrame(flush)
+    }
+    const end = () => {
+      if (endDragRef.current !== end) return
+      endDragRef.current = null
+      // Land the last move rather than dropping it a frame short of the cursor.
+      if (frame) { window.cancelAnimationFrame(frame); flush() }
       if (widthRef.current != null) {
         window.localStorage.setItem(CPANEL_WIDTH_KEY, String(widthRef.current))
       }
       root.classList.remove("cpanel-resizing")
-      window.removeEventListener("mousemove", onMove)
-      window.removeEventListener("mouseup", onUp)
+      try { handle.releasePointerCapture(pointerId) } catch { /* already gone */ }
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      // A cancelled pointer (OS gesture, alt-tab) or capture lost to a
+      // disappearing handle both end the gesture with no pointerup at all.
+      window.removeEventListener("pointercancel", onUp)
+      handle.removeEventListener("lostpointercapture", end)
     }
-    window.addEventListener("mousemove", onMove)
-    window.addEventListener("mouseup", onUp)
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      end()
+    }
+
+    endDragRef.current = end
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+    handle.addEventListener("lostpointercapture", end)
   }, [])
+
+  // A gesture can outlive the panel — close it, or navigate away, mid-drag and
+  // the window listeners would stay attached with the session still live, which
+  // is the same "resizes with no button held" failure by another route. Real
+  // browsers fire lostpointercapture when the handle leaves the DOM; this is
+  // what makes it true without depending on that.
+  useEffect(() => () => endDragRef.current?.(), [])
 
   if (!mounted) return null
 
@@ -412,7 +485,7 @@ export function ContentPanel() {
         {/* Draggable left edge — grab to resize */}
         <div
           className="cpanel-resize-handle"
-          onMouseDown={handleResizeStart}
+          onPointerDown={handleResizeStart}
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize panel"
@@ -691,6 +764,7 @@ function EvidenceTab() {
           </div>
         )}
 
+        {evidence && <OriginQuestionBanner question={evidence.question} />}
         {evidence ? (
           evidence.html ? (
             // v3 evidence — the self-contained HTML visual brief. It carries its
@@ -711,9 +785,11 @@ function EvidenceTab() {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane skeleton. The finished doc (poll result) replaces this.
           <div style={{ minHeight: 280 }}>
-            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="evidence-streaming"
+              title="Writing the evidence brief…"
+              sub="Rendering it below as it's written — the finished brief replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
               title="Evidence brief (generating)"
@@ -721,10 +797,11 @@ function EvidenceTab() {
             />
           </div>
         ) : isLoading ? (
-          <EmptyPane
+          <GeneratingPane
+            {...EVIDENCE_GEN}
+            testId="evidence-generating"
+            icon={<IconMicroscope size={19} />}
             title="Generating evidence…"
-            hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
-            placeholders={4}
           />
         ) : localState.kind === "error" ? (
           <>
@@ -761,11 +838,17 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
   story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
   const preview = story.user_story || story.body
+  const excluded = story.lifecycle === "excluded"
   return (
-    <button type="button" className="tkv2-card" onClick={onOpen}>
+    <button type="button" className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`} onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
       <div className="tkv2-card-main">
-        <div className="tkv2-card-title">{story.title}</div>
+        <div className="tkv2-card-title tkv2-rtitle">
+          {story.title}
+          {/* Says WHY the row has no tracker chip — without it an excluded
+              ticket looks identical to one that simply failed to sync. */}
+          {excluded ? <span className="tkv2-exbadge" title={`Not sent to ${tool || "the PM tool"}`}>Excluded</span> : null}
+        </div>
         {preview ? (
           <div className="tkv2-story">
             {preview}
@@ -1288,9 +1371,14 @@ export function TicketsTab() {
 
   if (genState.kind === "generating") {
     return (
-      <div className="cpanel-empty" data-testid="tickets-generating">
-        <span className="prd-loader" aria-hidden />
-        <p>Breaking <em>{prdTitle}</em> into tickets…</p>
+      <div className="tkv2 tkt-list-wrap">
+        <GeneratingPane
+          {...TICKET_GEN}
+          testId="tickets-generating"
+          icon={<IconTicket size={19} />}
+          title={<>Breaking <em>{prdTitle}</em> into tickets…</>}
+          skeleton="rows"
+        />
       </div>
     )
   }
@@ -1369,6 +1457,20 @@ export function TicketsTab() {
     }
   })()
 
+  // A ticket's lifecycle changed in the detail: mirror it in this list's own
+  // copy so the change shows without a refetch. A deleted ticket LEAVES the
+  // array (the server drops it from every later read), which is also why the
+  // detail closes itself on delete — the index it was rendering is gone.
+  const applyLifecycle = (index: number, lifecycle: TicketLifecycle) => {
+    if (genState.kind !== "ready") return
+    const next =
+      lifecycle === "deleted"
+        ? genState.stories.filter((_, i) => i !== index)
+        : genState.stories.map((s, i) => (i === index ? { ...s, lifecycle } : s))
+    setGenState({ ...genState, stories: next })
+    if (lifecycle === "deleted") setSelectedIndex(null)
+  }
+
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
   if (selectedStory && prdId != null) {
@@ -1396,6 +1498,7 @@ export function TicketsTab() {
             meta: trackerMeta.meta,
             synced: selectedStory.id ? syncState?.statuses?.[selectedStory.id] : undefined,
           } : undefined}
+          onLifecycleChange={(lifecycle) => applyLifecycle(selectedIndex as number, lifecycle)}
         />
       </div>
     )
@@ -1410,8 +1513,14 @@ export function TicketsTab() {
           PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
         <h2>Tickets from <em>{prdTitle}</em></h2>
+        {/* The subline must never read as a finished count while a run is in
+            flight — that's the whole reason the old treatment went unnoticed. */}
         <div className="tkv2-sub">
-          {stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD
+          {refreshing
+            ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
+            : streaming
+              ? `Writing tickets · ${stories.length} ready so far`
+              : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
         {stories.length > 0 && (
           <div className="tkv2-hactions">
@@ -1476,20 +1585,28 @@ export function TicketsTab() {
         )}
       </div>
 
-      {/* Regeneration + sync status lines (under the header). */}
+      {/* Regeneration + sync status lines (under the header). The two
+          "still working" ones are full banners rather than 12px notes — a run
+          in flight has to be readable at a glance from the top of the panel. */}
       {streaming && (
-        <div className="tkt-push-status" data-testid="tickets-streaming">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          {stories.length === 0 && skeletonStubs.length > 0
-            ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
-            : `Generating tickets${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…`}
-        </div>
+        <GeneratingBanner
+          testId="tickets-streaming"
+          title="Generating tickets…"
+          sub={
+            stories.length === 0 && skeletonStubs.length > 0
+              ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
+              : `Showing them as they land${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}.`
+          }
+          progress={streamProgress}
+        />
       )}
       {refreshing && (
-        <div className="tkt-push-status">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          The PRD changed — updating these tickets. Showing the previous set until the new one is ready.
-        </div>
+        <GeneratingBanner
+          tone="warn"
+          testId="tickets-refreshing"
+          title="Regenerating — the PRD changed"
+          sub="Updating these tickets from the edited PRD. The previous set stays below until the new one is ready."
+        />
       )}
       {!refreshing && refreshError && (
         <div className="tkt-push-status tkt-push-status--err">
@@ -1519,15 +1636,27 @@ export function TicketsTab() {
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
         <div>
-          I&apos;ve broken <em>{prdTitle}</em> into{" "}
+          {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
           {/* While streaming, count the whole planned set (landed + skeletons)
               so the number doesn't creep up batch by batch. */}
           <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD. Review, then push to your tracker.
+          prioritized from the PRD.{" "}
+          {streaming
+            ? "The rest are landing now."
+            : "Review, then push to your tracker."}
         </div>
       </div>
 
-      <div className="tkt-list">
+      {/* The stale set is still useful (and still clickable), but it must not
+          look current while its replacement is being written — label it and
+          hold it back visually. */}
+      {refreshing && (
+        <div className="gwip-stale-lbl">
+          <span className="gwip-stale-dot" aria-hidden /> Previous tickets — being replaced
+        </div>
+      )}
+
+      <div className={`tkt-list${refreshing ? " tkt-list--stale" : ""}`}>
         {stories.map((s, i) => (
           <StoryRow
             key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)}
