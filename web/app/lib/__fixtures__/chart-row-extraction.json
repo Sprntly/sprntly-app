@@ -1,6 +1,13 @@
 {
-  "$comment": "CROSS-LANGUAGE CONTRACT FIXTURE — one shared definition of where a Vega-Lite spec's rows live. Consumed by web/app/components/shared/__tests__/VegaChart.dom.test.tsx (specDataRows) and, once PR #986 lands, by the pytest for ChartSpec.row_count(). Both implementations must return the same rowCount for every case here. This file exists because the two sides drifted: the client walked containers while the server read the root only, and NEITHER resolved altair's default named-dataset shape — so one spec produced three different answers (client-envelope: empty, client-bare: drawn, server: 'No data.'). Add a case here BEFORE fixing a row-extraction bug on either side, so the fix lands on both.",
-  "$definition": "Rows live at: (1) the root's `data`, (2) any nested container's `data` — layer / concat / hconcat / vconcat / spec, (3) a named reference `data: {name}` resolved against the ROOT `datasets` map. Inline `values` wins over a named reference on the same node. The first container that yields rows wins; containers are searched in the order listed above. A row is a JSON object; non-object array elements are not rows.",
+  "$comment": "CROSS-LANGUAGE CONTRACT FIXTURE — one shared definition of where a Vega-Lite spec's rows live, and which specs are in contract at all. Consumed by web/app/lib/__tests__/chart-row-extraction.contract.test.ts (specDataRows / specViolatesContract / MAX_SPEC_DEPTH) and by the pytest for ChartSpec on the backend. Both implementations must agree on every case here. This file exists because the two sides drifted: the client walked nested containers while the server read the root only, and NEITHER resolved altair's default named-dataset shape — so one spec produced three different answers (client-envelope: empty, client-bare: drawn, server: 'No data.'). Add a case here BEFORE fixing a row-extraction or validation bug on either side, so the fix has to land on both.",
+
+  "$definition": "ROWS: (1) the root's `data`, (2) any nested container's `data` — layer / concat / hconcat / vconcat / spec, (3) a named reference `data: {name}` resolved against the ROOT `datasets` map. Inline `values` wins over a named reference on the same node ONLY WHEN NON-EMPTY: vega-lite@6.4.3 resolves `{name: 'd', values: []}` to the named dataset, verified by compiling it. The first container that yields rows wins; containers are searched in the order listed. A row is a JSON object; non-object array elements (numbers, strings) are legal payload but are not rows and do not count. WALK DEPTH: both implementations cap at `limits.maxDepth`, counting every JSON level; a spec deeper than the cap is refused rather than silently half-read. IN CONTRACT: an inline payload under `values` or `datasets` must be an ARRAY — nothing more. Vega-Lite's InlineDataset legitimately admits string[] / number[] / boolean[] (a sort order, a tick set), and refusing those rejected specs vl_convert renders fine. The array test is the whole safety argument: the walk deliberately skips the CONTENTS of `values`/`datasets` so a data column named `url` is not a false positive, and what that skip must not let through is a DICT — spec structure smuggled past the walk. `[1,2,3]` contains no dict and smuggles nothing. A CSV/TSV STRING under `values` is OUT of contract and rejected by both sides even though vega parses it: the design promises the data ships alongside every chart so a reader can expand it to a table, and a CSV string neither side parses cannot be tabulated — accepting it would render a picture whose numbers are unreadable, silently breaking the provenance promise that is the whole trust story.",
+
+  "limits": {
+    "maxDepth": 64,
+    "$note": "Ruled 64 on both sides. Previously unpinned drift: the client capped at 64 and the server at 16, agreeing up to 16 and diverging from 17. Written here so it is a contract value, not two constants that happen to match."
+  },
+
   "cases": [
     {
       "name": "root inline values",
@@ -92,14 +99,37 @@
       "rowCount": 2
     },
     {
+      "name": "EMPTY inline values do NOT win over a named reference on the same node",
+      "$note": "vega-lite@6.4.3 resolves this to the named dataset — verified by compiling it. A reader that treats a present-but-empty `values` as the decision reports 0 for a chart that draws 2 points.",
+      "spec": {
+        "mark": "line",
+        "data": { "name": "d", "values": [] },
+        "datasets": { "d": [{ "t": 1, "y": 5 }, { "t": 2, "y": 7 }] }
+      },
+      "rowCount": 2
+    },
+    {
       "name": "generator — rows not visible from here",
       "spec": { "mark": "bar", "data": { "sequence": { "start": 0, "stop": 10 } } },
       "rowCount": 0
     },
     {
-      "name": "non-object array elements are not rows",
+      "name": "non-object array elements are legal payload but are not rows",
       "spec": { "mark": "bar", "data": { "values": [1, 2, 3] } },
       "rowCount": 0
+    },
+    {
+      "name": "legal non-object `datasets` entry alongside the real rows",
+      "$note": "A sort order / tick set carried next to the data. Renders a real SVG server-side; must not be refused or miscounted.",
+      "spec": {
+        "mark": "line",
+        "data": { "name": "d" },
+        "datasets": {
+          "d": [{ "t": 1, "y": 5 }, { "t": 2, "y": 7 }],
+          "legend_ticks": [1, 2, 3]
+        }
+      },
+      "rowCount": 2
     },
     {
       "name": "first container that yields rows wins",
@@ -110,6 +140,85 @@
         ]
       },
       "rowCount": 1
+    }
+  ],
+
+  "contractCases": [
+    {
+      "name": "plain data-closed spec is in contract",
+      "spec": { "mark": "bar", "data": { "values": [{ "a": 1 }] } },
+      "rejected": false
+    },
+    {
+      "name": "number[] inline payload is a legal InlineDataset",
+      "spec": { "mark": "bar", "data": { "values": [1, 2, 3] } },
+      "rejected": false
+    },
+    {
+      "name": "string[] `datasets` entry is a legal InlineDataset",
+      "spec": {
+        "mark": "line",
+        "data": { "name": "d" },
+        "datasets": { "d": [{ "a": 1 }], "sort_order": ["low", "mid", "high"] }
+      },
+      "rejected": false
+    },
+    {
+      "name": "a data COLUMN named url/href is not an outbound reference",
+      "spec": { "mark": "bar", "data": { "values": [{ "url": "https://a.test", "hits": 4 }] } },
+      "rejected": false
+    },
+    {
+      "name": "CSV string under `values` is OUT of contract",
+      "$note": "vega parses it and draws the chart, but neither implementation parses it, so its rows cannot be tabulated. Accepting it renders a picture whose numbers are unreadable — the provenance promise, silently broken.",
+      "spec": { "mark": "bar", "data": { "values": "t,y\n1,5\n2,7" } },
+      "rejected": true
+    },
+    {
+      "name": "dict under `values` — spec structure smuggled past the skipped key",
+      "spec": { "mark": "bar", "data": { "values": { "url": "https://attacker.example/x.json" } } },
+      "rejected": true
+    },
+    {
+      "name": "dict under a `datasets` entry",
+      "spec": { "datasets": { "a": { "url": "https://attacker.example/x.json" } } },
+      "rejected": true
+    },
+    {
+      "name": "remote data reference",
+      "spec": { "mark": "bar", "data": { "url": "https://attacker.example/rows.json" } },
+      "rejected": true
+    },
+    {
+      "name": "image mark — a third-party fetch from our own origin",
+      "spec": {
+        "mark": { "type": "image" },
+        "encoding": { "url": { "value": "https://attacker.example/px.gif" } }
+      },
+      "rejected": true
+    },
+    {
+      "name": "href encoding — a real <a> in trusted DOM",
+      "spec": { "mark": "bar", "encoding": { "href": { "value": "https://attacker.example" } } },
+      "rejected": true
+    },
+    {
+      "name": "params with an input binding — a slider in a PRD panel",
+      "spec": {
+        "mark": "bar",
+        "params": [{ "name": "s", "value": 5, "bind": { "input": "range", "min": 0, "max": 10 } }]
+      },
+      "rejected": true
+    },
+    {
+      "name": "params with an interval selection — live brush",
+      "spec": { "mark": "point", "params": [{ "name": "p", "select": "interval" }] },
+      "rejected": true
+    },
+    {
+      "name": "expr value ref — sandboxed here, refused for parity with the server",
+      "spec": { "mark": { "type": "bar", "width": { "expr": "width/3" } } },
+      "rejected": true
     }
   ]
 }

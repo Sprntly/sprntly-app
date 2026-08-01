@@ -81,7 +81,9 @@ export function __vegaRuntimeLoadCount() {
  * thrown out of React's render phase, which takes down the whole page rather
  * than degrading one chart.
  *
- * 64 to agree with Phase 0's `_MAX_DEPTH`; both count every JSON level. It has
+ * 64 on both sides, pinned by `limits.maxDepth` in the shared row-extraction
+ * fixture rather than left as two constants that happen to match today. Both
+ * count every JSON level. It has
  * to be generous: `facet -> spec -> vconcat -> layer -> encoding -> color ->
  * condition -> scale -> domain` is already ~12 levels before any transform
  * detail, and each nesting step costs two here (object, then array element). A
@@ -89,7 +91,7 @@ export function __vegaRuntimeLoadCount() {
  * the server renders fine — the exact client/server divergence this contract
  * exists to prevent.
  */
-const MAX_SPEC_DEPTH = 64
+export const MAX_SPEC_DEPTH = 64
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v)
@@ -188,6 +190,10 @@ function datasetsOf(root: VegaLiteSpec): Record<string, unknown> {
 
 /**
  * The rows one node's `data` points at — inline, or through a named reference.
+ *
+ * Inline `values` wins over a named reference on the same node ONLY when it is
+ * non-empty: `vega-lite@6.4.3` resolves `{"name": "d", "values": []}` to the
+ * named dataset, verified by compiling it.
  *
  * `data: {"name": "data-<hash>"}` + a top-level `datasets` map is what
  * `altair.to_dict()` emits by DEFAULT (its default data transformer names and
@@ -396,9 +402,22 @@ export function resolveChartSpec(input: VegaLiteSpec): {
  * VALUE where no key check could see it anyway.
  * ------------------------------------------------------------------ */
 
-/** Inline row payloads must be arrays of row objects. Empty is fine. */
-function isRowArray(v: unknown): boolean {
-  return Array.isArray(v) && v.every((r) => isPlainObject(r))
+/**
+ * Inline data payloads must be ARRAYS. Nothing more.
+ *
+ * Not "arrays of objects": Vega-Lite's `InlineDataset` legitimately admits
+ * `string[]` / `number[]` / `boolean[]`, which is the ordinary way to carry a
+ * sort order or a tick set alongside the real rows — and the server accepts
+ * them (`isinstance(rows, list)`). Demanding row objects refused specs that
+ * `vl_convert` renders perfectly well.
+ *
+ * The array test is all the safety argument needs. The reason to shape-check at
+ * all is that a DICT sitting under `values`/`datasets` is spec structure
+ * smuggled past a walk that deliberately skips those keys; `[1, 2, 3]` contains
+ * no dict and smuggles nothing.
+ */
+function isInlineDataArray(v: unknown): boolean {
+  return Array.isArray(v)
 }
 
 const REJECTED_KEYS = new Set(["url", "href", "params", "expr"])
@@ -414,11 +433,11 @@ export function specViolatesContract(spec: VegaLiteSpec): boolean {
 
     // Shape checks BEFORE the skip below, because the skip depends on them.
     const data = node.data
-    if (isPlainObject(data) && "values" in data && !isRowArray(data.values)) return true
+    if (isPlainObject(data) && "values" in data && !isInlineDataArray(data.values)) return true
     const datasets = node.datasets
     if (isPlainObject(datasets)) {
       for (const payload of Object.values(datasets)) {
-        if (!isRowArray(payload)) return true
+        if (!isInlineDataArray(payload)) return true
       }
     }
 
