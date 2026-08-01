@@ -173,13 +173,24 @@ def _top_level_keys() -> frozenset[str]:
 _MAX_DEPTH = 64
 
 
+# Row payloads, not spec structure. The structural rules below (`url`, `href`,
+# `expr`, `image`) are about what the SPEC instructs the renderer to do; a data
+# row that happens to have a column called `url` is a value, not an instruction.
+# Descending into rows would reject a perfectly good "top referrer URLs" chart —
+# and a rule that fires on the data is a rule people learn to route around.
+_DATA_KEYS = frozenset({"values", "datasets"})
+
+
 def _walk(node: Any, path: str = "$", depth: int = 0) -> Iterator[tuple[str, Any]]:
-    """Yield `(json_path, node)` for every dict/list node in the tree.
+    """Yield `(json_path, node)` for every structural dict/list node in the tree.
 
     A full recursive walk is what makes the nested cases (`layer[]`, `hconcat[]`,
     `vconcat[]`, `concat[]`, `facet`+`spec`, `repeat`+`spec`) fall out for free
     instead of needing a hand-maintained list of container keys — the container
     list is exactly what a future Vega-Lite version would silently extend.
+
+    Inline row payloads (`data.values`, `datasets.*`) are NOT descended into —
+    see `_DATA_KEYS`. Their *shape* is still checked, just not their contents.
     """
     if depth > _MAX_DEPTH:
         raise ChartSpecError(
@@ -189,6 +200,8 @@ def _walk(node: Any, path: str = "$", depth: int = 0) -> Iterator[tuple[str, Any
     yield path, node
     if isinstance(node, dict):
         for key, value in node.items():
+            if key in _DATA_KEYS:
+                continue
             yield from _walk(value, f"{path}.{key}", depth + 1)
     elif isinstance(node, list):
         for i, value in enumerate(node):
@@ -242,12 +255,29 @@ def validate_vega_lite_spec(spec: Any) -> None:
                 path=f"{path}.mark",
             )
 
-        encoding = node.get("encoding")
-        if isinstance(encoding, dict) and "href" in encoding:
+        # Blanket, not an enumeration of channels. Enumerating is how the gap
+        # appears: `href` is an encoding channel today, and the next version of
+        # Vega-Lite is free to accept it somewhere else.
+        if "href" in node:
             raise ChartSpecError(
-                "'href' encodings are not allowed: they put a spec-chosen link "
-                "into a chart the user is invited to click",
-                path=f"{path}.encoding.href",
+                "'href' is not allowed anywhere in a chart spec: it puts a "
+                "spec-chosen outbound link into a chart the user is invited to "
+                "click, out of a sandboxed report",
+                path=f"{path}.href",
+            )
+
+    # Row payloads are not walked, so their SHAPE is checked here instead: an
+    # inline row set must be a list of rows, which is what makes "not descended
+    # into" safe — a dict hiding under `values` would be spec structure smuggled
+    # past the rules above.
+    for path, node in _walk(spec):
+        if not isinstance(node, dict):
+            continue
+        values = node.get("values")
+        if values is not None and not isinstance(values, (list, str)):
+            raise ChartSpecError(
+                "inline 'values' must be an array of rows",
+                path=f"{path}.values",
             )
 
     datasets = spec.get("datasets")
@@ -273,7 +303,22 @@ def validate_vega_lite_spec(spec: Any) -> None:
             path="$.config",
         )
 
-    # 5. no unknown top-level keys.
+    # 5. no faceting at the top level — a cross-phase structural pin, not taste.
+    #    Vega-Lite's `{facet, spec}` and `{repeat, spec}` forms carry a `spec`
+    #    key, which is ambiguous with the `ChartSpec` ENVELOPE's own `spec` key.
+    #    The client discriminates the two by treating `facet`/`repeat` as proof
+    #    that it is looking at a raw Vega-Lite spec rather than an envelope, and
+    #    that only holds while nothing we emit is faceted at this level. Faceting
+    #    belongs one level down, inside a layer/concat child.
+    if "facet" in spec or "repeat" in spec:
+        raise ChartSpecError(
+            "top-level 'facet'/'repeat' is not allowed: the {facet, spec} form is "
+            "structurally ambiguous with the ChartSpec envelope. Facet inside a "
+            "child spec instead",
+            path="$.facet" if "facet" in spec else "$.repeat",
+        )
+
+    # 6. no unknown top-level keys.
     unknown = sorted(set(spec) - _top_level_keys())
     if unknown:
         raise ChartSpecError(
@@ -281,7 +326,7 @@ def validate_vega_lite_spec(spec: Any) -> None:
             + ", ".join(unknown)
         )
 
-    # 5. the schema itself (last: by far the most expensive check).
+    # 7. the schema itself (last: by far the most expensive check).
     errors = sorted(_validator().iter_errors(spec), key=lambda e: list(e.absolute_path))
     if errors:
         first = errors[0]
@@ -345,13 +390,38 @@ class ChartSpec(BaseModel):
 
     @model_validator(mode="after")
     def _close_and_validate(self) -> "ChartSpec":
+        """Close the spec over the envelope's rows, then validate it.
+
+        Injection is **unconditional**: when `data` is non-empty it becomes the
+        spec's top-level data, overwriting anything already there. That is a
+        cross-renderer invariant, not a preference — the client injects the same
+        way, and a *conditional* injection on either side means the same stored
+        chart renders from the spec's rows on one and the envelope's rows on the
+        other. One chart, two pictures, no error anywhere. So: the envelope's
+        `data` is the row carrier, always, on both sides.
+
+        An empty `data` leaves the spec alone, which is what lets a model-authored
+        spec that already carries its own `values` through unharmed.
+        """
         spec = dict(self.spec)
-        if "data" not in spec and self.data:
+        if self.data:
             spec["data"] = {"values": [dict(row) for row in self.data]}
         spec.setdefault("$schema", VEGA_LITE_SCHEMA_URL)
         validate_vega_lite_spec(spec)
         object.__setattr__(self, "spec", spec)
         return self
+
+    def row_count(self) -> int:
+        """Rows this chart would actually draw, from wherever they live.
+
+        The envelope's rows if it has any, else the spec's own inline `values`.
+        Zero means there is nothing to draw — see `render.render_svg`, which
+        degrades to the table rather than emitting an empty plot frame.
+        """
+        if self.data:
+            return len(self.data)
+        values = (self.spec.get("data") or {}).get("values")
+        return len(values) if isinstance(values, list) else 0
 
     @classmethod
     def build(cls, **kwargs: Any) -> "ChartSpec":

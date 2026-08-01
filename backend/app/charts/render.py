@@ -210,6 +210,12 @@ def _render(
 ) -> Any:
     import vl_convert as vlc  # local import: 33 MB of Rust, off the startup path
 
+    if chart.row_count() == 0:
+        # A chart with no rows renders as an empty plot frame: axes, a title, and
+        # nothing in it. That reads as a broken chart rather than as "no data",
+        # and it is indistinguishable from a render that silently lost its rows.
+        # The table says the true thing in one line.
+        raise ValueError("chart carries no rows")
     if len(chart.data) > MAX_ROWS:
         raise ValueError(
             f"chart carries {len(chart.data)} rows, over the {MAX_ROWS} cap"

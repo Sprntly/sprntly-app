@@ -86,9 +86,23 @@ def test_chart_spec_inlines_its_rows_and_stamps_the_schema():
     assert "data" not in BASE
 
 
-def test_chart_spec_keeps_an_explicit_data_block():
-    chart = ChartSpec(spec=_with_data(BASE), data=[{"a": "Z", "b": 9}])
+def test_envelope_rows_win_over_a_data_block_already_in_the_spec():
+    """Injection is unconditional, on this side and on the client's.
+
+    A *conditional* injection on either side means the same stored chart renders
+    from the spec's rows on the server and the envelope's rows in the browser —
+    one chart, two pictures, and no error anywhere to notice it by.
+    """
+    envelope_rows = [{"a": "Z", "b": 9}]
+    chart = ChartSpec(spec=_with_data(BASE), data=envelope_rows)
+    assert chart.spec["data"] == {"values": envelope_rows}
+
+
+def test_an_empty_envelope_leaves_a_self_contained_spec_alone():
+    """The model-authored path: a spec that already carries its own rows."""
+    chart = ChartSpec(spec=_with_data(BASE))
     assert chart.spec["data"] == {"values": ROWS}
+    assert chart.row_count() == len(ROWS)
 
 
 def test_the_serialised_spec_carries_its_rows_so_a_client_cannot_render_blank():
@@ -143,6 +157,38 @@ def test_url_is_rejected_at_every_nesting_depth(where):
         validate_vega_lite_spec(NESTED_URL_CASES[where])
     assert "data-closed" in str(excinfo.value)
     assert excinfo.value.path and excinfo.value.path.endswith(".url")
+
+
+def test_a_url_column_in_the_rows_is_data_not_an_instruction():
+    """The rules are about what the SPEC instructs, not what the rows contain.
+
+    A "top referrer URLs" chart is a legitimate chart. Rejecting it would be a
+    rule people learn to route around rather than a boundary.
+    """
+    validate_vega_lite_spec(
+        {
+            "data": {"values": [{"url": "https://example.com/a", "hits": 3}]},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "url", "type": "nominal"},
+                "y": {"field": "hits", "type": "quantitative"},
+            },
+        }
+    )
+
+
+def test_a_dict_hiding_under_values_is_still_rejected():
+    """Not descending into rows is only safe while rows are actually rows."""
+    with pytest.raises(ChartSpecError, match="array of rows"):
+        validate_vega_lite_spec({**BASE, "data": {"values": {"url": "https://x"}}})
+
+
+def test_href_is_rejected_outside_an_encoding_block_too():
+    """Blanket, not a channel enumeration — enumerating is how the gap appears."""
+    with pytest.raises(ChartSpecError, match="href"):
+        validate_vega_lite_spec(
+            {"data": {"values": ROWS}, "layer": [{**BASE, "href": "https://example.com"}]}
+        )
 
 
 def test_datasets_pointing_at_a_url_is_rejected():
@@ -234,6 +280,38 @@ def test_expr_as_a_value_ref_is_rejected():
 
 
 # ── rule 4: the theme is ours ────────────────────────────────────────────────
+
+def test_top_level_facet_is_rejected():
+    """`{facet, spec}` is structurally ambiguous with the ChartSpec envelope."""
+    with pytest.raises(ChartSpecError, match="ambiguous"):
+        validate_vega_lite_spec(
+            {
+                "data": {"values": ROWS},
+                "facet": {"field": "a", "type": "nominal"},
+                "spec": BASE,
+            }
+        )
+
+
+def test_top_level_repeat_is_rejected():
+    with pytest.raises(ChartSpecError, match="ambiguous"):
+        validate_vega_lite_spec(
+            {
+                "data": {"values": ROWS},
+                "repeat": ["b"],
+                "spec": {
+                    "mark": "bar",
+                    "encoding": {"x": {"field": {"repeat": "repeat"}, "type": "nominal"}},
+                },
+            }
+        )
+
+
+def test_the_envelope_itself_cannot_carry_facet_or_repeat():
+    """Belt and braces on the same pin: the model forbids extra fields."""
+    with pytest.raises(ValidationError):
+        ChartSpec(spec=dict(BASE), data=ROWS, facet={"field": "a"})
+
 
 def test_top_level_config_is_rejected():
     with pytest.raises(ChartSpecError, match="config"):

@@ -241,6 +241,32 @@ def test_table_fallback_handles_an_empty_row_set():
     assert "<table>" not in out
 
 
+def test_a_chart_with_no_rows_degrades_to_the_table_rather_than_an_empty_frame(
+    monkeypatch,
+):
+    """An empty plot frame — axes, a title, nothing in it — reads as a broken
+    chart, and is indistinguishable from a render that lost its rows."""
+    chart = ChartSpec(
+        spec={
+            "data": {"values": []},
+            "mark": "bar",
+            "encoding": {"x": {"field": "a", "type": "nominal"}},
+        },
+        data=[],
+        title="Nothing to draw",
+    )
+
+    def must_not_be_called(payload, **kwargs):  # pragma: no cover - the assertion
+        raise AssertionError("renderer was called for a chart with no rows")
+
+    monkeypatch.setattr(vl_convert, "vegalite_to_svg", must_not_be_called)
+    stats: dict[str, int] = {}
+    out = render_svg(chart, stats=stats)
+    assert out.startswith("<figure")
+    assert "No data." in out
+    assert stats == {"charts_dropped": 1}
+
+
 def test_a_chart_with_no_data_at_all_is_rejected_at_construction():
     from pydantic import ValidationError
 
