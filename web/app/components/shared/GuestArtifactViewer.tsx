@@ -12,7 +12,7 @@
 // exactly once via artifactShareApi.content(token) and populates its own
 // ContentContext directly — it never calls prdApi.get, loadPrdById,
 // evidenceApi.get, loadEvidenceByInsight, or storiesApi.getJob.
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { NavigationProvider, useNavigation } from "../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../context/ContentContext"
 import { GuestSessionProvider, type GuestSession } from "../../context/GuestSessionContext"
@@ -23,6 +23,8 @@ import { GuestRail } from "./GuestRail"
 import { EmptyPane } from "./EmptyPane"
 import { ContentPanel } from "./ContentPanel"
 import { Toast } from "./Toast"
+import { JoinWorkspaceBanner } from "./JoinWorkspaceBanner"
+import { JoinConfirmModal } from "./JoinConfirmModal"
 
 export type GuestArtifactViewerProps = {
   token: string
@@ -31,13 +33,14 @@ export type GuestArtifactViewerProps = {
   owningCompanyName: string
 }
 
-function GuestArtifactViewerInner({ token, sharerName, owningCompanyName }: GuestArtifactViewerProps) {
+function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompanyName }: GuestArtifactViewerProps) {
   const { setContent } = useContent()
   const { openContentPanel } = useNavigation()
   // Ref (not state) so React 18 dev double-invoke of effects still fetches
   // exactly once per real mount (AC10) — a state-driven guard would still let
   // both invocations start the request before either commits its flip.
   const fetchedRef = useRef(false)
+  const [joinModalOpen, setJoinModalOpen] = useState(false)
 
   useEffect(() => {
     if (fetchedRef.current) return
@@ -88,6 +91,10 @@ function GuestArtifactViewerInner({ token, sharerName, owningCompanyName }: Gues
     <div className="app">
       <GuestRail />
       <div className="main-column">
+        <JoinWorkspaceBanner
+          owningCompanyName={owningCompanyName}
+          onJoin={() => setJoinModalOpen(true)}
+        />
         <main className="main" data-testid="guest-viewer-main">
           <EmptyPane
             title="Shared with you"
@@ -97,6 +104,13 @@ function GuestArtifactViewerInner({ token, sharerName, owningCompanyName }: Gues
       </div>
       <ContentPanel />
       <Toast />
+      <JoinConfirmModal
+        open={joinModalOpen}
+        token={token}
+        artifactId={artifactId}
+        sharerName={sharerName}
+        onClose={() => setJoinModalOpen(false)}
+      />
     </div>
   )
 }

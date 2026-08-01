@@ -37,6 +37,11 @@ vi.mock("../ContentPanel", async () => {
 })
 vi.mock("../GuestRail", () => ({ GuestRail: () => <div data-testid="guest-rail" /> }))
 vi.mock("../Toast", () => ({ Toast: () => null }))
+// Group B's join banner/modal have their own dedicated test files (and their
+// own auth-context needs) — mocked here so this file stays focused on Group
+// A's standalone-mount/fetch-once concerns.
+vi.mock("../JoinWorkspaceBanner", () => ({ JoinWorkspaceBanner: () => null }))
+vi.mock("../JoinConfirmModal", () => ({ JoinConfirmModal: () => null }))
 
 const apiCallsMock = vi.hoisted(() => ({
   prdGet: vi.fn(),
