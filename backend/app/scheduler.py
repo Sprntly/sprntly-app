@@ -614,6 +614,31 @@ def _run_jira_personal_data_report() -> None:
         logger.exception("jira personal-data report cycle failed")
 
 
+def _run_extraction_eval_cycle() -> None:
+    """Extraction evals (app/graph/evals.py): sample recent extraction
+    output per skill_id, across every company, and check it against the
+    expected shape its producing skill declares. Read-only, sampled, and
+    off the request/ingestion path by construction — this job is the only
+    caller of `run_scheduled_eval_cycle` in this codebase. Fully isolated —
+    a failure here never affects other jobs; per-(company, skill) failures
+    are already isolated inside `run_scheduled_eval_cycle` itself."""
+    try:
+        from app.config import settings
+        from app.graph.evals import run_scheduled_eval_cycle
+
+        totals = run_scheduled_eval_cycle(
+            sample_size=settings.extraction_eval_sample_size
+        )
+        logger.info(
+            "extraction-eval cycle done: companies=%s skills=%s sampled=%s "
+            "findings=%s",
+            totals.get("companies"), totals.get("skills"),
+            totals.get("sampled"), totals.get("findings"),
+        )
+    except Exception:  # noqa: BLE001 — eval job must never crash the scheduler
+        logger.exception("extraction-eval cycle failed")
+
+
 def start_scheduler() -> None:
     """Initialize and start the APScheduler. Call from FastAPI lifespan."""
     global _scheduler
@@ -743,6 +768,20 @@ def start_scheduler() -> None:
             trigger=IntervalTrigger(minutes=ts_mins),
             id="ticket_sync",
             name=f"Ticket tracker two-way sync (every {ts_mins}m)",
+            replace_existing=True,
+        )
+
+    # Extraction evals: sampled structural check of recent extraction output
+    # against each vendored connector-extraction skill's declared shape
+    # contract. Opt-in via EXTRACTION_EVAL_ENABLED; read-only + sampled, own
+    # cadence decoupled from the connector refresh interval above.
+    if settings.extraction_eval_enabled:
+        eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+        _scheduler.add_job(
+            _run_extraction_eval_cycle,
+            trigger=IntervalTrigger(hours=eval_hours),
+            id="extraction_eval",
+            name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
             replace_existing=True,
         )
 

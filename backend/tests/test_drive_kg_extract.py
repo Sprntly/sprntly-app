@@ -63,7 +63,7 @@ def test_extract_writes_upload_origin_and_source_row(monkeypatch):
     seen = []
 
     def fake_extract(facade, company_id, *, doc_name, text, agent=None,
-                     source_hint=None, origin=None):
+                     source_hint=None, origin=None, **kw):
         seen.append({"doc_name": doc_name, "text": text, "agent": agent,
                      "source_hint": source_hint, "origin": origin})
         return {"signals": 2, "themes": 1, "skipped": 0}

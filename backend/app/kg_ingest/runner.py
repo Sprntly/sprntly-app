@@ -1,9 +1,14 @@
 """Ingestion runner — RawRecords → extraction batches → KG (§1b pipeline).
 
 Generic across providers: a puller yields RawRecords; the runner batches them
-(by char budget) and routes each batch through the generic extractor. Signal
-idempotency is content-keyed (uuid5), so re-syncs and shifting batches can't
-duplicate. Error-isolated per batch — one bad batch never kills the sync.
+(by char budget) and routes each batch through the extractor. A provider with
+a dedicated method in ``PROVIDER_SKILLS`` (currently HubSpot, Jira, ClickUp —
+the connectors whose record shapes carry classification signal the generic
+prompt can't see, e.g. Jira's native issue type) is routed to its skill;
+every other provider falls back to the fully generic extraction path
+unchanged. Signal idempotency is content-keyed (uuid5), so re-syncs and
+shifting batches can't duplicate. Error-isolated per batch — one bad batch
+never kills the sync.
 
 COST GATE: pullers re-fetch everything on every sync, and the uuid5 dedup
 only fires at the signal WRITE — after the LLM call was paid for. The runner
@@ -57,6 +62,18 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     # needs the site id and the selected spaces off the connection row, and
     # token_for can only hand a puller one field.
     "confluence": (confluence.pull, "company_id",       "internal_documentation (Confluence wiki pages + blog posts from the spaces this workspace selected: product specs, PRDs, architecture and decision records, runbooks, meeting and retro notes, team handbooks — the company's WRITTEN CONTEXT. Treat these as statements of intent, plans and internal process, NOT as customer evidence: a page asserting a problem is its author's claim about it, not measured proof. The space_key and title properties carry which team/area owns the page)"),
+}
+
+# provider → vendored extraction skill id (backend/skills/<id>/), for the
+# highest-value connectors that have a purpose-built extraction method beyond
+# the generic prompt above. A provider with no entry here (fireflies, github,
+# sprinklr, superset, uploads, and every non-PULLERS connector) falls back to
+# the fully generic extractor unchanged — see extract_document's skill_id
+# docstring. Extend this mapping as more connectors get a dedicated skill.
+PROVIDER_SKILLS: dict[str, str] = {
+    "hubspot": "hubspot-extraction",
+    "jira": "jira-extraction",
+    "clickup": "clickup-extraction",
 }
 
 #: Providers whose records are DOCUMENTS rather than connector telemetry.
@@ -145,6 +162,10 @@ def sync_provider(
                 provenance_extra=(
                     {"channel": "upload"} if provider in _DOCUMENT_PROVIDERS else None
                 ),
+                skill_id=PROVIDER_SKILLS.get(provider),
+                # Haiku relevance + category triage ahead of every batch
+                # — the core connector-sync ingestion path.
+                triage=True,
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):

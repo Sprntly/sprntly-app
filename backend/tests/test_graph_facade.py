@@ -61,6 +61,99 @@ def test_relationship_validates_node_kinds(isolated_settings):
                      source_id="a", target_kind="entity", target_id="b")
 
 
+# ---------- typed field promotion (skill_id/origin/channel/evidence_eligible) ----------
+
+def test_signal_typed_fields_default_none_and_evidence_eligible_computed(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c")
+    assert s.skill_id is None
+    assert s.origin is None
+    assert s.channel is None
+    # revenue is a CONNECTED_SOURCE_TYPES member and origin is None (not a
+    # NON_EVIDENCE_ORIGIN) → eligible by default.
+    assert s.evidence_eligible is True
+
+
+def test_signal_typed_fields_fall_back_to_provenance_dict(isolated_settings):
+    """A caller that only sets the informal provenance dict (every
+    pre-existing construction site) still gets the typed fields populated —
+    the transition-safety fallback in __post_init__."""
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              provenance={"skill_id": "jira-extraction", "origin": "connector",
+                          "channel": "upload"})
+    assert s.skill_id == "jira-extraction"
+    assert s.origin == "connector"
+    assert s.channel == "upload"
+
+
+def test_signal_typed_kwarg_wins_over_provenance_dict(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              provenance={"origin": "connector"}, origin="upload")
+    assert s.origin == "upload"
+
+
+def test_signal_evidence_eligible_explicit_kwarg_wins(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              evidence_eligible=False)
+    assert s.evidence_eligible is False
+
+
+def test_row_to_signal_falls_back_to_provenance_dict_for_pre_migration_rows(isolated_settings):
+    """A pre-migration row (typed columns null in the DB, values only in the
+    provenance dict) reconstructs with the typed fields populated from the
+    dict — GraphFacade._row_to_signal's read-side fallback."""
+    import uuid
+    from app.graph import GraphFacade
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    sig_id = str(uuid.uuid4())
+    isolated_settings["supabase"].table("kg_signal").insert({
+        "id": sig_id, "enterprise_id": "ent-A", "source_type": "revenue",
+        "kind": "finding", "content": "pre-migration row", "properties": {},
+        "valid_at": now, "transaction_at": now, "provenance": {
+            "skill_id": "hubspot-extraction", "origin": "connector",
+            "channel": "upload",
+        },
+        # typed columns left unset → null, exactly like a real pre-migration row
+    }).execute()
+
+    facade = GraphFacade()
+    sig = facade.get_signal("ent-A", sig_id)
+    assert sig is not None
+    assert sig.skill_id == "hubspot-extraction"
+    assert sig.origin == "connector"
+    assert sig.channel == "upload"
+    # evidence_eligible column also null → computed on the fly from
+    # source_type + origin (same policy as a fresh Signal would apply).
+    assert sig.evidence_eligible is True
+
+
+def test_row_to_signal_prefers_typed_column_over_provenance_dict(isolated_settings):
+    """When both are present (post-migration row), the typed DB column wins —
+    it's the more authoritative source once it exists."""
+    import uuid
+    from app.graph import GraphFacade
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    sig_id = str(uuid.uuid4())
+    isolated_settings["supabase"].table("kg_signal").insert({
+        "id": sig_id, "enterprise_id": "ent-A", "source_type": "revenue",
+        "kind": "finding", "content": "post-migration row", "properties": {},
+        "valid_at": now, "transaction_at": now,
+        "provenance": {"origin": "upload"},  # stale/mismatched dict value
+        "origin": "connector",               # the typed column is authoritative
+    }).execute()
+
+    facade = GraphFacade()
+    sig = facade.get_signal("ent-A", sig_id)
+    assert sig.origin == "connector"
+
+
 # ---------- facade ----------
 
 @pytest.fixture
@@ -351,3 +444,44 @@ def test_create_source_is_idempotent_on_duplicate_id(facade):
     assert len(rows) == 1                      # one row, not two
     assert rows[0].id == "fixed-source-id"
     assert rows[0].label == "doc-1-relabeled"  # upsert applied the new values
+
+
+# ---------- ensure_company_entity (tenant root anchor) ----------
+
+def test_ensure_company_entity_creates_once(facade):
+    from app.graph.types import COMPANY_ENTITY_TYPE
+
+    company_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent is not None
+    assert ent.type == COMPANY_ENTITY_TYPE
+    assert ent.canonical_label == "Acme Inc"
+
+    all_company = facade.query_entities("ent-A", type=COMPANY_ENTITY_TYPE)
+    assert len(all_company) == 1
+
+
+def test_ensure_company_entity_is_idempotent_and_does_not_rename(facade):
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    # A second call (e.g. a different label the second time) finds the
+    # existing node rather than creating a duplicate or renaming it.
+    second_id = facade.ensure_company_entity("ent-A", label="A Different Name")
+    assert second_id == first_id
+
+    ent = facade.get_entity("ent-A", first_id)
+    assert ent.canonical_label == "Acme Inc"  # unchanged
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+
+
+def test_ensure_company_entity_falls_back_to_enterprise_id_label(facade):
+    company_id = facade.ensure_company_entity("ent-A")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent.canonical_label == "ent-A"
+
+
+def test_ensure_company_entity_is_tenant_scoped(facade):
+    a_id = facade.ensure_company_entity("ent-A", label="Acme")
+    b_id = facade.ensure_company_entity("ent-B", label="Beta")
+    assert a_id != b_id
+    assert facade.get_entity("ent-B", a_id) is None
+    assert facade.get_entity("ent-A", b_id) is None

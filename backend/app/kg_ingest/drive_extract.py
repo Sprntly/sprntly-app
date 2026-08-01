@@ -118,6 +118,10 @@ def extract_drive_docs(
                     # a documents source, and a connector origin would disable
                     # the brief gate's upload-only relaxation for this tenant.
                     origin="upload",
+                    # Haiku relevance + category triage ahead of every chunk
+                    # — Drive syncs arbitrary user files, so
+                    # relevance-filtering has real value here.
+                    triage=True,
                 )
                 for k in ("signals", "themes", "skipped"):
                     totals[k] += r[k]

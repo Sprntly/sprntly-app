@@ -100,6 +100,10 @@ SKILL_CATEGORY: dict[str, str] = {
     "stakeholder-update": "Stakeholder & Communication",
     "fact-check": "Verification",
     "top-insights": "Stakeholder & Communication",
+    "hubspot-extraction": "Data Extraction",
+    "jira-extraction": "Data Extraction",
+    "clickup-extraction": "Data Extraction",
+    "roadmap-extraction": "Data Extraction",
 }
 
 # Skills the Q&A router must never select (still installed + callable by name).
@@ -111,8 +115,17 @@ SKILL_CATEGORY: dict[str, str] = {
 #   - evidence-brief is the Evidence Page method, bound by name from
 #     app/evidence_kg.py; it synthesizes a single brief insight's KG signal
 #     trail into the provenance doc, not a chat answer.
+#   - {hubspot,jira,clickup}-extraction are ingestion-time methods, bound by
+#     provider name from app.kg_ingest.runner.PROVIDER_SKILLS; they classify
+#     a connector sync batch into Signals, not something a chat turn invokes.
+#   - roadmap-extraction is the same kind of ingestion-time method, bound by
+#     name from app.kg_ingest.roadmap (not PROVIDER_SKILLS — a roadmap isn't
+#     a connector sync); it classifies an uploaded roadmap into Signals, not
+#     something a chat turn invokes.
 NON_ROUTABLE: frozenset[str] = frozenset(
-    {"business-context", "fact-check", "top-insights", "evidence-brief"}
+    {"business-context", "fact-check", "top-insights", "evidence-brief",
+     "hubspot-extraction", "jira-extraction", "clickup-extraction",
+     "roadmap-extraction"}
 )
 
 # Acronyms to upper-case when humanising an id into a display label.

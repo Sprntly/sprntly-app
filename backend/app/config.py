@@ -415,6 +415,20 @@ class Settings(BaseSettings):
     # From: header for invite reminder emails. Empty → brief_email_from (the
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
+
+    # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
+    # check of recent extraction output per skill_id against the expected
+    # shape each vendored connector-extraction skill declares in its own
+    # references/expected-signal-shape.md. Read-only + sampled by design —
+    # never runs on a live ingestion or request path. OFF by default like the
+    # other opt-in scheduler jobs; flip on once there's enough real
+    # hubspot/jira/clickup extraction volume for a sample to be meaningful.
+    extraction_eval_enabled: bool = False
+    extraction_eval_interval_hours: int = 24
+    # How many of an enterprise+skill's most recent signals one eval pass
+    # samples.
+    extraction_eval_sample_size: int = 25
+
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)

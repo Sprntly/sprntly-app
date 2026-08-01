@@ -187,11 +187,18 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
                     origin="connector", source_hint=hint,
                     source_type_default=source_type,
                     provenance_extra={"channel": "upload", "category": category},
+                    # Haiku relevance + category triage ahead of every corpus
+                    # doc. This is separate from `category` above
+                    # (the user-picked upload category / evidence bucket) —
+                    # triage's own classification lands as
+                    # provenance["triage_category"].
+                    triage=True,
                 )
             else:
                 r = extract_document(
                     facade, company_id, doc_name=doc.name, text=doc.text,
                     origin="upload",
+                    triage=True,
                 )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]

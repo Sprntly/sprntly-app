@@ -8,7 +8,7 @@ the company had actually committed to shipping. This module closes that gap: one
 extraction pass per roadmap VERSION, into the same KG every other source writes
 to.
 
-Three properties worth stating explicitly, because they're what makes a roadmap
+Four properties worth stating explicitly, because they're what makes a roadmap
 different from every other ingest source:
 
 1. NOT EVIDENCE — enforced on BOTH axes the brief sufficiency gate reads.
@@ -51,6 +51,22 @@ different from every other ingest source:
    The ledger row is written only AFTER a successful extraction, so a failed run
    (bad key, provider outage) simply retries on the next touch.
 
+4. Company-root wiring. Every signal a version asserts (freshly written, or
+   carried over unchanged from the previous version) gets an INFORMS edge to
+   the tenant's single ``company`` root entity (``GraphFacade.
+   ensure_company_entity`` — the same find-or-create primitive and edge
+   semantics ``research.business_context_projection`` uses), so roadmap
+   content doesn't float disconnected from its tenant. No separate edge-expiry
+   step is needed: an INFORMS edge from a signal ``expire_signals`` later
+   retires isn't deleted, but every reader that walks INFORMS/edges-from-a-
+   signal already resolves the source signal and calls ``signal_is_retired``
+   before trusting it (evidence_kg, retrieval, convergence) — the same pattern
+   every other signal-sourced edge in this KG already relies on, so retirement
+   is covered transitively, not by a new mechanism. Theme entities the shared
+   extractor creates as a side effect are NOT wired here — they are a
+   cross-source concept every ingestion path shares, not something owned by
+   roadmap ingestion.
+
 Called from two places, both fire-and-forget / error-isolated:
   * `kg_ingest.auto_sync.kickoff_roadmap_ingest` — right after POST
     /v1/company/roadmap-doc, so a fresh upload reaches the KG in seconds.
@@ -67,7 +83,7 @@ from typing import Optional
 
 from app.graph.extractor import _NS, extract_document
 from app.graph.facade import GraphFacade
-from app.graph.types import Source
+from app.graph.types import Relationship, Source
 from app.ingest import is_unparsed_stub
 from app.roadmap_doc import load_roadmap_doc
 
@@ -186,6 +202,21 @@ def _live_roadmap_signal_ids(
             continue
         out.append(sig.id)
     return out
+
+
+def _company_informed_signal_ids(
+    facade: GraphFacade, company_id: str, company_entity_id: str
+) -> set[str]:
+    """Ids of signals that already carry an INFORMS edge to the tenant's
+    `company` root. The per-ingest dedup check: a bet CARRIED OVER from the
+    previous roadmap version re-derives the same content-keyed signal id (see
+    module docstring (2)), so without this check re-extracting it every
+    version would pile up a duplicate edge to the root on every re-upload."""
+    return {
+        e.source_id
+        for e in facade.edges_to(company_id, company_entity_id, type="INFORMS")
+        if e.source_kind == "signal"
+    }
 
 
 def _roadmap_unchanged_since(
@@ -308,11 +339,44 @@ def _ingest_roadmap_locked(
             # count as connected evidence in the brief gate. See _FORCE_SOURCE_TYPE.
             force_source_type=_FORCE_SOURCE_TYPE,
             provenance_extra=provenance_extra,
+            # Dedicated method: one signal per initiative (not per sentence),
+            # a normalized initiative_status/target_period, and a resolved
+            # kind-collapse decision — see backend/skills/roadmap-extraction.
+            skill_id="roadmap-extraction",
         )
         totals["signals"] += r["signals"]
         totals["themes"] += r["themes"]
         totals["duplicates"] += r["skipped"]
         keep.update(r.get("signal_ids") or [])
+
+    # ── Company-root wiring ───────────────────────────────────────────────────
+    # Every signal this version asserts (freshly written, or carried over from
+    # the previous version and re-derived to the same content-keyed id) gets an
+    # INFORMS edge to the tenant's single `company` root — the same
+    # find-or-create primitive and edge semantics `business_context_projection`
+    # uses, so roadmap-derived content stops floating disconnected from its
+    # tenant. Only THEMES (created generically inside `extract_document`,
+    # shared by every extraction caller — connectors, uploads, roadmap alike)
+    # are left unwired here: they are not a roadmap-owned node, and wiring them
+    # would mean changing the shared extractor's behavior for every ingestion
+    # path, not just this one.
+    #
+    # Dedup via `_company_informed_signal_ids` (not a blind write) because
+    # `keep` includes ids `extract_document` reported as duplicate-skipped —
+    # bets carried over unchanged from a version that already wired them.
+    company_wired = 0
+    if keep:
+        company_entity_id = facade.ensure_company_entity(company_id)
+        already_wired = _company_informed_signal_ids(
+            facade, company_id, company_entity_id)
+        for sig_id in sorted(keep - already_wired):
+            facade.write_relationship(company_id, Relationship(
+                enterprise_id=company_id, type="INFORMS",
+                source_kind="signal", source_id=sig_id,
+                target_kind="entity", target_id=company_entity_id,
+                provenance={"agent": "ingest:roadmap"},
+            ))
+            company_wired += 1
 
     # ── Replace semantics, with two safety gates ─────────────────────────────
     # Retire whatever the old roadmap asserted and this one doesn't. Only reached
@@ -362,9 +426,9 @@ def _ingest_roadmap_locked(
     ))
     logger.info(
         "roadmap-ingest done: company=%s ws=%s v%s chunks=%s signals=%s "
-        "duplicates=%s expired=%s",
+        "duplicates=%s expired=%s company_wired=%s",
         company_id, workspace_id, doc.version, len(parts),
-        totals["signals"], totals["duplicates"], expired,
+        totals["signals"], totals["duplicates"], expired, company_wired,
     )
     return {
         "status": "ingested",
@@ -375,4 +439,5 @@ def _ingest_roadmap_locked(
         "expired": expired,
         "version": doc.version,
         "content_sha": sha,
+        "company_wired": company_wired,
     }
