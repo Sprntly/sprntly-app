@@ -43,6 +43,24 @@ import math
 logger = logging.getLogger(__name__)
 
 # ── Pinned design (examples/01-facebook-ads.html) ────────────────────────────
+#
+# `.page` is a sheet of paper on a desk: a white block with its own border and
+# drop shadow over a tinted `body`. That is the look at full width, and it is
+# WRONG in the two places the document is re-hosted, so both are overridden
+# rather than the design being changed:
+#
+#   * PDF (the @media print block at the foot of _STYLE) — render_report_pdf
+#     prints to A4 with print_background on, so the desk would paint on every
+#     page and the sheet's border would be drawn INSIDE the printer margins,
+#     where it slices across every page boundary. The margins
+#     (report_pdf.py:_PDF_MARGIN) are the whitespace, so the sheet drops its own
+#     padding — except at the top, which is where `.brandmark` is absolutely
+#     positioned and would otherwise land on the <h1>.
+#   * The in-app Reports panel — same problem, a second border inside the
+#     panel's own card. Overridden frontend-side, in HtmlReportView's
+#     PANEL_STYLE, because the panel is the only surface that knows its width.
+#
+# The standalone /r/<token> page is the one surface that gets the design as-is.
 
 _STYLE = """
 @import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -119,6 +137,10 @@ ul.tight li{margin-bottom:3px}
 .xax div{text-align:center;padding-top:5px}
 .y{color:var(--happy-t);font-weight:600}.n{color:#C4C0B2}.pt{color:var(--edge-t);font-weight:600}
 @media(max-width:820px){.pos,.xax{grid-template-columns:1fr}.pos .axl{justify-content:flex-start;text-align:left;padding:6px 0 0}}
+/* PDF: the printer margins ARE the whitespace, and the sheet is not drawn. */
+@media print{body{padding:0;background:#fff}
+.page{max-width:100%;padding:34px 0 0;border:0;border-radius:0;box-shadow:none}
+.rec,.rc,.callout,.srcbox,.radarwrap,.blank{break-inside:avoid}tr{break-inside:avoid}}
 """
 
 
