@@ -79,10 +79,17 @@ export function __vegaRuntimeLoadCount() {
  * Both walkers below recurse over attacker-influenced JSON and BOTH run during
  * render, outside any try/catch — an unbounded recursion there is a RangeError
  * thrown out of React's render phase, which takes down the whole page rather
- * than degrading one chart. A legitimate Vega-Lite spec nests a handful of
- * levels (layer inside concat inside facet); 24 is far past anything real.
+ * than degrading one chart.
+ *
+ * 64 to agree with Phase 0's `_MAX_DEPTH`; both count every JSON level. It has
+ * to be generous: `facet -> spec -> vconcat -> layer -> encoding -> color ->
+ * condition -> scale -> domain` is already ~12 levels before any transform
+ * detail, and each nesting step costs two here (object, then array element). A
+ * cap that trips on a deep-but-VALID spec would have the browser refuse a chart
+ * the server renders fine — the exact client/server divergence this contract
+ * exists to prevent.
  */
-const MAX_SPEC_DEPTH = 24
+const MAX_SPEC_DEPTH = 64
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v)
@@ -131,6 +138,65 @@ function rowsOf(v: unknown): ChartTableRow[] {
 }
 
 /**
+ * Strip `usermeta` off a spec before it goes anywhere near `embed()`.
+ *
+ * THIS IS A SECURITY BOUNDARY, not tidying. `vega-embed` treats
+ * `spec.usermeta.embedOptions` as CALLER OPTIONS and merges them over the
+ * options we pass, with the SPEC winning. A model-authored spec that sets
+ * `usermeta.embedOptions` can therefore:
+ *   - `actions: true` — restore the actions menu, including "Open in Vega Editor".
+ *   - `ast: false` — drop the interpreter and put expressions back through
+ *     `Function`-constructor codegen, voiding the whole CSP argument above.
+ *   - `patch: "https://…"` or `config: "https://…"` — a STRING is loaded via
+ *     `loader.load()`, i.e. an unconditional HTTP GET of an attacker-chosen
+ *     URL, whose JSON is then applied as a JSON-Patch to the compiled Vega
+ *     spec. That is arbitrary Vega control: further fetches, signals,
+ *     expressions.
+ *
+ * `specReachesOutward` cannot catch this. Its key-based rejection is the right
+ * shape for encodings and marks, but a JSON-Patch operation hides the URL in a
+ * VALUE — `{"op":"add","path":"/data/url","value":"https://…"}` — where no key
+ * check will ever see it.
+ *
+ * Stripped rather than rejected: altair writes a benign `usermeta`, so refusing
+ * on its presence would degrade legitimate charts. Nothing in our render path
+ * reads it, so dropping it costs nothing. Top level only — that is the one
+ * place `vega-embed` looks for caller options.
+ */
+function stripEmbedOptions(spec: VegaLiteSpec): VegaLiteSpec {
+  const copy = { ...(spec as Record<string, unknown>) } as VegaLiteSpec
+  delete (copy as Record<string, unknown>).usermeta
+  return copy
+}
+
+/**
+ * Does this spec state its rows INLINE anywhere — even as an empty list?
+ *
+ * The difference between "no rows" and "rows we cannot see from here" is the
+ * difference between a chart we know will be blank and one whose data arrives
+ * through a `sequence` generator or a named `datasets` reference. A `values`
+ * array that is present and empty is decidably rowless; the absence of any
+ * `values` at all is not decidable and must be given the benefit of the doubt.
+ */
+function specHasExplicitValues(spec: VegaLiteSpec): boolean {
+  const walk = (node: unknown, depth: number): boolean => {
+    if (depth > MAX_SPEC_DEPTH || !isPlainObject(node)) return false
+    const data = node.data
+    if (isPlainObject(data) && Array.isArray(data.values)) return true
+    for (const key of ["layer", "concat", "hconcat", "vconcat", "spec"]) {
+      const child = node[key]
+      if (Array.isArray(child)) {
+        if (child.some((c) => walk(c, depth + 1))) return true
+      } else if (child && walk(child, depth + 1)) {
+        return true
+      }
+    }
+    return false
+  }
+  return walk(spec, 0)
+}
+
+/**
  * Unwrap an envelope (if that is what we were handed) into the Vega-Lite spec
  * to embed plus the rows behind it. A bare Vega-Lite spec passes through.
  */
@@ -138,45 +204,52 @@ export function resolveChartSpec(input: VegaLiteSpec): {
   vlSpec: VegaLiteSpec
   rows: ChartTableRow[]
   /** False when we can PROVE the spec has nothing to draw — embed would
-   *  succeed and paint an empty box. Only decidable on the envelope path. */
+   *  succeed and paint an empty box. */
   drawable: boolean
   title?: string
   subtitle?: string
   caption?: string
 } {
   if (!isPlainObject(input)) return { vlSpec: input, rows: [], drawable: true }
+
   if (!isChartSpecEnvelope(input)) {
-    // A bare spec's rows can come from places this can't see — a `sequence`
-    // generator, a `datasets` reference — so never declare it undrawable.
-    return { vlSpec: input, rows: specDataRows(input), drawable: true }
+    const rows = specDataRows(input)
+    return {
+      vlSpec: stripEmbedOptions(input),
+      rows,
+      // Rows we found, or rows we cannot see from here (a `sequence`
+      // generator, a named `datasets` reference). Only a `values` array that
+      // is PRESENT and empty proves there is nothing to draw.
+      drawable: rows.length > 0 || !specHasExplicitValues(input),
+    }
   }
 
   const original = input.spec as VegaLiteSpec
-  const inner = { ...(original as Record<string, unknown>) } as VegaLiteSpec
+  const inner = stripEmbedOptions(original)
   const rows = rowsOf(input.data)
+  const innerRows = specDataRows(original)
 
-  // UNCONDITIONAL, mirroring `render.py` exactly.
+  // CONDITIONAL, mirroring `backend/app/charts/spec.py` exactly:
   //
-  // It is tempting to inject only when the inner spec has no data of its own,
-  // on the grounds that clobbering discards rows an author put there. That
-  // optimises the wrong invariant. The point of one spec contract with two
-  // renderers is that identical input draws an identical chart; if the server
-  // assigns unconditionally and the client does not, a non-conforming spec
-  // renders the ENVELOPE's rows server-side and the INNER rows in the browser —
-  // the same stored PRD showing two different charts depending on which path
-  // drew it, which is close to undiagnosable from a bug report.
+  //     if self.data:
+  //         spec["data"] = {"values": [dict(row) for row in self.data]}
   //
-  // Rejecting non-conforming specs is Phase 0's validator's job. If one slips
-  // past into a stored document, both renderers must at least be wrong the
-  // same way.
-  inner.data = { values: rows }
+  // The carve-out is load-bearing on both ends, not an oversight. `ChartSpec.data`
+  // defaults to `[]`, and Phase 1's DS sandbox writes altair `*.vl.json` files
+  // that ALWAYS inline their own `data.values` — so `{spec: <inlines rows>,
+  // data: []}` is a routine shape, not an exotic one. Assigning unconditionally
+  // would blank every one of those charts in the browser while the server drew
+  // them correctly.
+  if (rows.length > 0) {
+    inner.data = { values: rows }
+  }
 
   return {
     vlSpec: inner,
-    // The table still reaches for the inner spec's rows when the envelope has
-    // none, so a reader gets the numbers even where we refuse to draw.
-    rows: rows.length > 0 ? rows : specDataRows(original),
-    drawable: rows.length > 0,
+    // The table reaches for the inner spec's rows when the envelope has none,
+    // mirroring `ChartSpec.row_count()`'s fallback to `spec["data"]["values"]`.
+    rows: rows.length > 0 ? rows : innerRows,
+    drawable: rows.length > 0 || innerRows.length > 0,
     title: typeof input.title === "string" ? input.title : undefined,
     subtitle: typeof input.subtitle === "string" ? input.subtitle : undefined,
     caption: typeof input.caption === "string" ? input.caption : undefined,
@@ -256,8 +329,14 @@ export function specDataRows(spec: VegaLiteSpec | null | undefined): ChartTableR
  *
  * Implemented as a blanket rejection of the `url` and `href` KEYS anywhere in
  * the spec structure, which is broader than enumerating channels and cannot be
- * out-manoeuvred by a channel we forgot. Row data is skipped: a data COLUMN
- * legitimately named "url" is a string in a table, not a fetch.
+ * out-manoeuvred by a channel we forgot. Row payloads are skipped — `values`
+ * AND `datasets`, matching Phase 0's `_DATA_KEYS` — because a data COLUMN
+ * legitimately named "url" is a string in a table, not a fetch. (Vega-Lite
+ * compiles `datasets` entries to inline `values`; they never fetch.)
+ *
+ * It does NOT catch `usermeta.embedOptions`, which is not a channel and hides
+ * its URLs in JSON-Patch VALUES. That is handled by removing `usermeta`
+ * outright — see `stripEmbedOptions`.
  * ------------------------------------------------------------------ */
 export function specReachesOutward(spec: VegaLiteSpec): boolean {
   const isImageMark = (mark: unknown): boolean =>
@@ -271,8 +350,8 @@ export function specReachesOutward(spec: VegaLiteSpec): boolean {
     for (const [key, value] of Object.entries(node)) {
       if (key === "url" || key === "href") return true
       if (key === "mark" && isImageMark(value)) return true
-      // `values` is inline row data, and `datasets` values are too.
-      if (key === "values") continue
+      // Inline row payloads. Phase 0 skips the same two keys (`_DATA_KEYS`).
+      if (key === "values" || key === "datasets") continue
       if (walk(value, depth + 1)) return true
     }
     return false

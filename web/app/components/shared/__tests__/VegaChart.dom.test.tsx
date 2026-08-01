@@ -61,7 +61,9 @@ describe("VegaChart", () => {
     render(<VegaChart spec={SPEC} />)
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1))
     const [, spec, opts] = embed.mock.calls[0] as [HTMLElement, unknown, Record<string, unknown>]
-    expect(spec).toBe(SPEC)
+    // A stripped copy, not the caller's object — `usermeta` never reaches embed.
+    expect(spec).toEqual(SPEC)
+    expect(spec).not.toHaveProperty("usermeta")
     expect(opts.actions).toBe(false)
     expect(opts.renderer).toBe("svg")
     // `ast: true` = parse expressions to an AST instead of `Function`-constructor
@@ -228,9 +230,27 @@ describe("specReachesOutward", () => {
     expect(specReachesOutward({ datasets: { a: [{ v: 1 }] } })).toBe(false)
   })
 
-  it("rejects remote data in `data.url` and `datasets`", () => {
+  it("is not the gate for usermeta — that is stripped, not detected", () => {
+    // Documented so nobody later "fixes" the guard to cover usermeta and
+    // deletes the strip. A JSON-Patch hides its URL in a VALUE, so no
+    // key-based check can see it.
+    expect(
+      specReachesOutward({ mark: "bar", usermeta: { embedOptions: { ast: false } } }),
+    ).toBe(false)
+  })
+
+  it("rejects remote data in `data.url`", () => {
     expect(specReachesOutward({ data: { url: "http://x" } })).toBe(true)
-    expect(specReachesOutward({ datasets: { a: { url: "http://x" } } })).toBe(true)
+    expect(specReachesOutward({ layer: [{ data: { url: "http://x" } }] })).toBe(true)
+  })
+
+  it("does not walk `datasets` payloads — those are rows, not references", () => {
+    // Vega-Lite compiles `datasets` entries to inline `values`; they never
+    // fetch. A "top referrer URLs" chart legitimately has a `url` COLUMN.
+    expect(specReachesOutward({ datasets: { top: [{ url: "https://a.test", hits: 4 }] } })).toBe(
+      false,
+    )
+    expect(specReachesOutward({ datasets: { a: { url: "http://x" } } })).toBe(false)
   })
 
   it("rejects an image mark — a tracking pixel served from our own origin", () => {
@@ -276,17 +296,26 @@ describe("specReachesOutward", () => {
 
   it("refuses a spec too deep to vet rather than passing it through", () => {
     let deep: Record<string, unknown> = { mark: "bar" }
-    for (let i = 0; i < 100; i++) deep = { layer: [deep] }
+    for (let i = 0; i < 200; i++) deep = { layer: [deep] }
     expect(specReachesOutward(deep)).toBe(true)
+  })
+
+  it("does not refuse a deep-but-legitimate spec (cap agrees with Phase 0)", () => {
+    // `facet -> spec -> vconcat -> layer -> encoding -> color -> condition ->
+    // scale -> domain` is ~12 levels before any transform detail. A cap that
+    // trips here would have the browser degrade a chart the server renders.
+    let nested: Record<string, unknown> = { mark: "bar", data: { values: [{ a: 1 }] } }
+    for (let i = 0; i < 20; i++) nested = { layer: [nested] }
+    expect(specReachesOutward(nested)).toBe(false)
   })
 })
 
 describe("resolveChartSpec — the Phase 0 envelope", () => {
   const ROWS = [{ label: "a", value: 1 }, { label: "b", value: 2 }]
 
-  it("passes a bare Vega-Lite spec straight through", () => {
+  it("passes a bare Vega-Lite spec through unchanged (bar usermeta)", () => {
     const out = resolveChartSpec(SPEC)
-    expect(out.vlSpec).toBe(SPEC)
+    expect(out.vlSpec).toEqual(SPEC)
     expect(out.rows).toEqual(SPEC.data.values)
   })
 
@@ -303,43 +332,74 @@ describe("resolveChartSpec — the Phase 0 envelope", () => {
     expect(out.title).toBe("Envelope title")
   })
 
-  it("injects UNCONDITIONALLY, overwriting data a non-conforming inner spec carries", () => {
-    // Deliberate. `render.py` assigns unconditionally; if the client were
-    // conditional, a non-conforming spec would draw the ENVELOPE's rows on the
-    // server and the INNER rows in the browser — the same stored PRD showing
-    // two different charts depending on which renderer drew it. Rejecting such
-    // specs is the backend validator's job; if one slips through, both
-    // renderers must be wrong the same way.
+  it("leaves a spec that inlines its own rows alone when the envelope is empty", () => {
+    // Mirrors `spec.py`'s `if self.data:` carve-out. `ChartSpec.data` defaults
+    // to `[]` and Phase 1's DS sandbox writes altair `*.vl.json` that ALWAYS
+    // inlines `data.values`, so `{spec: <inlines rows>, data: []}` is routine.
+    // Injecting unconditionally would blank every one of those charts in the
+    // browser while the server drew them correctly.
     const inner = { mark: "bar", data: { values: [{ z: 9 }] } }
+    const out = resolveChartSpec({ spec: inner, data: [] })
+    expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual([{ z: 9 }])
+    expect(out.drawable).toBe(true)
+    expect(out.rows).toEqual([{ z: 9 }])
+  })
+
+  it("does not mutate the caller's inner spec when it does inject", () => {
+    const inner = { mark: "bar" }
     const out = resolveChartSpec({ spec: inner, data: ROWS })
     expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual(ROWS)
-    // The caller's spec object is not mutated.
-    expect(inner.data.values).toEqual([{ z: 9 }])
+    expect(inner).toEqual({ mark: "bar" })
   })
 
-  it("marks an envelope with no rows as undrawable", () => {
-    const out = resolveChartSpec({ spec: { mark: "bar" }, data: [] })
-    expect(out.drawable).toBe(false)
-    // The table still reaches for the inner spec's own rows, so a reader gets
-    // the numbers even where we refuse to draw.
-    const withInner = resolveChartSpec({ spec: { mark: "bar", data: { values: ROWS } } , data: [] })
-    expect(withInner.drawable).toBe(false)
-    expect(withInner.rows).toEqual(ROWS)
+  it("marks an envelope undrawable only when NEITHER side has rows", () => {
+    expect(resolveChartSpec({ spec: { mark: "bar" }, data: [] }).drawable).toBe(false)
   })
 
-  it("never declares a bare spec undrawable — its rows may come from a generator", () => {
-    expect(resolveChartSpec({ mark: "bar", data: { sequence: { start: 0, stop: 10 } } }).drawable).toBe(
-      true,
+  it("declares a bare spec undrawable when its `values` is present and empty", () => {
+    expect(resolveChartSpec({ mark: "bar", data: { values: [] } }).drawable).toBe(false)
+    expect(resolveChartSpec({ layer: [{ mark: "line", data: { values: [] } }] }).drawable).toBe(
+      false,
     )
+  })
+
+  it("gives the benefit of the doubt when rows are not visible from here", () => {
+    // A generator or a named `datasets` reference: we cannot see the rows, so
+    // we must not refuse to draw.
+    expect(
+      resolveChartSpec({ mark: "bar", data: { sequence: { start: 0, stop: 10 } } }).drawable,
+    ).toBe(true)
+    expect(
+      resolveChartSpec({ mark: "bar", data: { name: "a" }, datasets: { a: [{ v: 1 }] } }).drawable,
+    ).toBe(true)
     expect(resolveChartSpec(SPEC).drawable).toBe(true)
+  })
+
+  it("strips `usermeta` so a spec cannot hand itself embed options", () => {
+    const hostile = {
+      mark: "bar",
+      data: { values: [{ a: 1 }] },
+      usermeta: {
+        embedOptions: { actions: true, ast: false, patch: "https://evil.test/p.json" },
+      },
+    }
+    expect(resolveChartSpec(hostile).vlSpec).not.toHaveProperty("usermeta")
+    // Stripped, not rejected — altair writes a benign usermeta and the chart
+    // must still draw.
+    expect(resolveChartSpec(hostile).drawable).toBe(true)
+    // And on the envelope path too.
+    const env = resolveChartSpec({ spec: hostile, data: [{ a: 1 }] })
+    expect(env.vlSpec).not.toHaveProperty("usermeta")
   })
 
   it("treats a facet/repeat spec as a real spec, not an envelope", () => {
     const facet = { facet: { field: "g" }, spec: { mark: "bar", data: { values: ROWS } } }
+    // Not unwrapped: the returned spec is the facet spec itself (a stripped
+    // copy), not its `spec` child.
     const out = resolveChartSpec(facet)
-    expect(out.vlSpec).toBe(facet)
+    expect(out.vlSpec).toEqual(facet)
     const repeat = { repeat: ["a", "b"], spec: { mark: "bar" } }
-    expect(resolveChartSpec(repeat).vlSpec).toBe(repeat)
+    expect(resolveChartSpec(repeat).vlSpec).toEqual(repeat)
   })
 
   it("carries subtitle and caption off the envelope", () => {
