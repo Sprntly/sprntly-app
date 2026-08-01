@@ -76,7 +76,7 @@ describe("SignInView (v4)", () => {
     const html = render({ forgotMode: true })
     expect(html).not.toContain('id="password"')
     expect(html).not.toContain("or continue with")
-    expect(html).toContain("Send reset link")
+    expect(html).toContain("Send reset code")
   })
 
   it("surfaces the lockout banner", () => {

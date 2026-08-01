@@ -56,6 +56,50 @@ describe("ResetPasswordView", () => {
     expect(html).toMatch(/href="\/sign-in"/)
   })
 
+  describe("code mode", () => {
+    const codeProps: Partial<ResetPasswordViewProps> = {
+      mode: "code",
+      email: "sarah@meridian.health",
+      code: "",
+      resendCooldown: 0,
+      canResend: true,
+      onCodeChange: noop,
+      onCodeSubmit: noop,
+      onResend: noop,
+    }
+
+    it("renders six code boxes and the address the code went to", () => {
+      const html = render(codeProps)
+      expect((html.match(/class="otp-box"/g) ?? []).length).toBe(6)
+      expect(html).toContain("sarah@meridian.health")
+    })
+
+    it("asks for a code rather than a link", () => {
+      const html = render(codeProps)
+      expect(html).toMatch(/6-digit/i)
+      expect(html).not.toMatch(/reset link/i)
+    })
+
+    it("gates the verify submit until all six digits are entered", () => {
+      const disabledSubmit =
+        /<button[^>]*disabled[^>]*type="submit"|<button[^>]*type="submit"[^>]*disabled/
+      expect(render({ ...codeProps, code: "4839" })).toMatch(disabledSubmit)
+      expect(render({ ...codeProps, code: "483920" })).not.toMatch(disabledSubmit)
+    })
+
+    it("offers a resend with its cooldown", () => {
+      expect(render(codeProps)).toContain("Resend code")
+      const html = render({ ...codeProps, resendCooldown: 42, canResend: false })
+      expect(html).toContain("(42s)")
+    })
+
+    it("flags the boxes invalid when the code was rejected", () => {
+      const html = render({ ...codeProps, error: "That code isn't right." })
+      expect(html).toContain("otp-row-invalid")
+      expect(html).toContain('role="alert"')
+    })
+  })
+
   it("disables the submit button while submitting", () => {
     const html = render({ submitting: true })
     expect(html).toMatch(/<button[^>]*disabled[^>]*type="submit"|<button[^>]*type="submit"[^>]*disabled/)

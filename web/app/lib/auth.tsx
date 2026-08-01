@@ -78,6 +78,10 @@ type AuthCtx = AuthState & {
   signUpWithPassword: (input: SignUpInput) => Promise<SignUpResult>
   resetPassword: (email: string) => Promise<void>
   resendVerificationEmail: (email: string) => Promise<void>
+  /** Exchange the 6-digit signup code for a session. Throws on a bad/expired code. */
+  verifyEmailOtp: (email: string, token: string) => Promise<void>
+  /** Exchange the 6-digit recovery code for a session that can set a password. */
+  verifyPasswordResetOtp: (email: string, token: string) => Promise<void>
   signOut: () => Promise<void>
   refresh: () => Promise<void>
   postLoginPath: () => Promise<string>
@@ -228,7 +232,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email: normalizeEmail(input.email),
         password: input.password,
         options: {
-          emailRedirectTo: authCallbackUrl(),
+          // No emailRedirectTo: the confirmation email carries a 6-digit code,
+          // not a link, and is redeemed on /verify-email via verifyEmailOtp.
           data: {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
@@ -247,9 +252,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const resetPassword = useCallback(async (email: string) => {
     const supabase = getSupabase()
-    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email), {
-      redirectTo: authCallbackUrl(),
-    })
+    // No redirectTo — the recovery email carries a 6-digit code, redeemed on
+    // /reset-password via verifyPasswordResetOtp.
+    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email))
     if (error) throw error
   }, [])
 
@@ -258,7 +263,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { error } = await supabase.auth.resend({
       type: "signup",
       email: normalizeEmail(email),
-      options: { emailRedirectTo: authCallbackUrl() },
+    })
+    if (error) throw error
+  }, [])
+
+  const verifyEmailOtp = useCallback(async (email: string, token: string) => {
+    const supabase = getSupabase()
+    // "signup" is the token type GoTrue mints for the signup-confirmation
+    // email (and for auth.resend({type:"signup"})) — the same token the old
+    // emailed link carried as .TokenHash, just in its typeable 6-digit form.
+    const { error } = await supabase.auth.verifyOtp({
+      type: "signup",
+      email: normalizeEmail(email),
+      token: token.trim(),
+    })
+    if (error) throw error
+  }, [])
+
+  const verifyPasswordResetOtp = useCallback(async (email: string, token: string) => {
+    const supabase = getSupabase()
+    const { error } = await supabase.auth.verifyOtp({
+      type: "recovery",
+      email: normalizeEmail(email),
+      token: token.trim(),
     })
     if (error) throw error
   }, [])
@@ -295,6 +322,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
+      verifyEmailOtp,
+      verifyPasswordResetOtp,
       signOut,
       refresh,
       postLoginPath,
@@ -307,6 +336,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
+      verifyEmailOtp,
+      verifyPasswordResetOtp,
       signOut,
       refresh,
       isEmailVerified,
