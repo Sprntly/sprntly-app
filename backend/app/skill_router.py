@@ -15,6 +15,10 @@ import logging
 import re
 from dataclasses import dataclass
 
+# The same "this turn is a document, not prose" sniff the prompt-fold uses, so
+# thread detection and history clamping agree on what a report turn is.
+from app.prompt_history import looks_like_html
+
 logger = logging.getLogger(__name__)
 
 
@@ -589,12 +593,25 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
       ("get me ticket about cars"). This is what carries a thread whose answer
       happened to name no key ("no matching issues", a plain prose reply) into
       the next turn, and it's why the follow-up is read against every recent
-      question the user asked, not just the one they just sent."""
+      question the user asked, not just the one they just sent.
+
+    A generated REPORT turn is neither. It is a document the assistant produced,
+    persisted verbatim as its conversation turn, and it quotes whatever record
+    ids its sources use — a VoC report cites "TKT-48766" (Zendesk) and
+    "CALL-9875" (Talkdesk), both shaped exactly like a Jira key, and its Sources
+    line may name Jira as one connector among several. Reading that as tracker
+    evidence made every report thread a tracker thread, so the next follow-up
+    that happened to say "more" / "details" / "expand" was answered by the
+    tracker path with "no tracker is connected — connect Jira or ClickUp"
+    instead of by the report. Reported live against a Voice of Customer report.
+    A tracker thread is established by what was SAID, never by a document."""
     if not history:
         return False
     for turn in history[-_TRACKER_THREAD_WINDOW:]:
         content = turn.get("content") or ""
         if not content:
+            continue
+        if looks_like_html(content):
             continue
         if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
             return True
@@ -615,6 +632,28 @@ _TRACKER_AFFIRMATIVE = re.compile(
     r"that'?s?\s+right)\b[\s.!,]*$",
     re.I,
 )
+
+
+def _last_answer_was_report(history: list[dict] | None) -> bool:
+    """True when the most recent assistant turn is a generated REPORT document.
+
+    The sticky branches of the tracker and connector routers exist to carry an
+    anaphoric follow-up ("more detail on that one") back to the source the
+    thread was already reading. When the thing sitting directly above the
+    follow-up is a REPORT, that inference is wrong: "explain more on
+    recommendations point 1" is about the document, not a reason to re-read a
+    tracker or a connector. Those paths answer such a question with "no tracker
+    is connected" or "nothing found in Slack" — the reported bug — while the
+    normal answer path can read the report itself.
+
+    Only the LATEST answer counts. A report earlier in the thread must not stop
+    a later, genuine tracker/connector thread from going sticky.
+    """
+    for turn in reversed(history or []):
+        if (turn.get("role") or "user") != "assistant":
+            continue
+        return looks_like_html(turn.get("content") or "")
+    return False
 
 
 def _answers_tracker_question(question: str, history: list[dict] | None) -> bool:
@@ -685,6 +724,12 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     if _stateless_tracker_lookup(question):
         return True
     if _vetoed_as_creation(question):
+        return False
+    # The turn above this one is a report — the follow-up is about that
+    # document, not a reason to go looking in a tracker. Stateless matches are
+    # already through (a follow-up that really does name an issue key still
+    # routes here), so only the ambiguous, thread-carried ones stand down.
+    if _last_answer_was_report(history):
         return False
     if not _in_tracker_thread(history):
         return False
@@ -934,7 +979,15 @@ def is_connector_lookup(
     # Sticky thread: "who said that?" right after a Slack read names nothing at
     # all. Same two-signal shape as the tracker thread — the thread named a
     # source, and this message continues it rather than pivoting away.
-    if not history or _TRACKER_PIVOT.search(q):
+    #
+    # …unless the turn above is a REPORT, in which case the follow-up is about
+    # the document. That case reaches here loaded: the report ITSELF lists its
+    # sources ("Support tickets (Zendesk), Sales/CS field notes (Salesforce
+    # CRM)"), and the request that produced it usually named one too ("what are
+    # customers saying on slack?"). Every one of those looks like a source this
+    # thread was reading, so "explain more on recommendations point 1" would be
+    # answered by re-reading Slack instead of by the report it names.
+    if not history or _TRACKER_PIVOT.search(q) or _last_answer_was_report(history):
         return None
     if not (
         _TRACKER_ANAPHORA.search(q)
@@ -945,7 +998,10 @@ def is_connector_lookup(
     prior: set[str] = set()
     for turn in history[-_TRACKER_THREAD_WINDOW:]:
         content = turn.get("content") or ""
-        if content:
+        # A report DOCUMENT names its sources as provenance, not as a source
+        # this thread is reading live — see _in_tracker_thread for the same
+        # exclusion on the tracker side.
+        if content and not looks_like_html(content):
             prior |= _named_connector_providers(content)
     return prior or None
 
