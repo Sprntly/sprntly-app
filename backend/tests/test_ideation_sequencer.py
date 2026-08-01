@@ -156,6 +156,36 @@ def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
     assert rows[0]["score"] >= rows[1]["score"]
 
 
+def test_sequence_prioritize_call_is_registered_long_output(facade, isolated_settings):
+    """PRIORITIZE_POOL (60) themes can batch into a single large json_schema
+    call — on a first-run/high-volume tenant this tripped the gateway's
+    default 120s non-streamed httpx.ReadTimeout 3x live on staging in one
+    session (2026-08-01), same failure mode `_LONG_OUTPUT_SKILLS` exists to
+    prevent for prd-author/implementation-spec/evidence-brief. Pins both that
+    sequence_ideation's llm_call is bound to PRIORITIZE_SKILL and that the
+    skill is on the long-output allowlist, so a future edit dropping either
+    silently reintroduces the timeout instead of failing CI."""
+    from app.graph.gateway import _LONG_OUTPUT_SKILLS
+    from app.synthesis import ideation as bl
+
+    _seed_company(isolated_settings["supabase"], "ent-A")
+    theme = _seed_theme_with_signals(facade, "ent-A", "solo", [
+        ("revenue", "deal_blocker", {}, 0),
+    ])
+
+    captured: dict = {}
+
+    def fake_llm_call(**kw):
+        captured.update(kw)
+        return _llm_result(_triage_for(theme.id))
+
+    with patch.object(bl, "llm_call", fake_llm_call):
+        bl.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
+
+    assert captured.get("skill") == bl.PRIORITIZE_SKILL
+    assert bl.PRIORITIZE_SKILL in _LONG_OUTPUT_SKILLS  # → gateway streams it
+
+
 # ─────────────────────────── dedup (_drop_duplicates unit) ───────────────────────
 
 class _Cand:
