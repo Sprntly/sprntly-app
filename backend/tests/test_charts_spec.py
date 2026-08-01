@@ -217,6 +217,66 @@ def test_decision_non_object_array_elements_are_not_rows():
     assert count_rows({"mark": "bar", "data": {"values": [1, {"a": 1}, "x"]}}) == 1
 
 
+def test_decision_an_EMPTY_inline_values_falls_through_to_the_named_reference():
+    """Presence of `values` is not the test; having rows is.
+
+    Compiled against vega-lite 6.4.3, `{"name": "d", "values": []}` with a
+    populated `datasets.d` yields a vega `data[0]` of the NAMED dataset. Reading
+    the mere presence of `values` counted 0 rows and printed "No data." over a
+    chart `vl_convert` draws in 7,071 bytes and the client returns 2 rows for.
+    """
+    spec = {
+        "mark": "bar",
+        "data": {"name": "d", "values": []},
+        "datasets": {"d": [{"a": 1}, {"a": 2}]},
+    }
+    assert count_rows(spec) == 2
+
+
+def test_an_empty_inline_values_with_no_reference_is_still_empty():
+    """The fall-through must not invent rows where there are none."""
+    assert count_rows({"mark": "bar", "data": {"values": []}}) == 0
+    assert count_rows({"mark": "bar", "data": {"name": "d"}, "datasets": {"d": []}}) == 0
+
+
+def test_row_extraction_and_the_security_walk_share_one_depth_limit():
+    """64 on both sides, and the same number the client's walker uses.
+
+    An undocumented 16 here meant the two implementations agreed up to 16 and
+    diverged from 17: a 17-deep `vconcat` counted 0 rows and printed "No data."
+    while `vl_convert` rendered it in 13,310 bytes.
+    """
+    from app.charts.spec import _MAX_DEPTH
+
+    assert _MAX_DEPTH == 64
+
+    def nest(depth):
+        node = {"mark": "bar", "data": {"values": [{"a": 1}, {"a": 2}]}}
+        for _ in range(depth):
+            node = {"vconcat": [node]}
+        return node
+
+    assert count_rows(nest(16)) == 2
+    assert count_rows(nest(17)) == 2  # the case that used to disagree
+    assert count_rows(nest(_MAX_DEPTH)) == 2
+    assert count_rows(nest(_MAX_DEPTH + 1)) == 0  # past the agreed limit, both stop
+
+
+def test_a_csv_string_in_values_is_out_of_contract():
+    """Vega-Lite accepts it; we refuse it, on purpose.
+
+    Every chart promises the rows behind it can be shown as a table — that
+    provenance is the trust story the contract exists for. A CSV string we do
+    not parse cannot be tabulated, so accepting it would draw a chart whose data
+    we could not display, and break the promise silently rather than fail.
+    """
+    for payload in ("a,b\nA,1\nB,2", "a\tb\nA\t1"):
+        with pytest.raises(ChartSpecError, match="array of rows"):
+            validate_vega_lite_spec(
+                {**BASE, "data": {"values": payload, "format": {"type": "csv"}}}
+            )
+
+
 # ── the cap asks a DIFFERENT question, on purpose ────────────────────────────
 
 def test_total_row_payload_sums_what_the_renderer_is_handed():

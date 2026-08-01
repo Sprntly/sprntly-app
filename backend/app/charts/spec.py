@@ -266,14 +266,26 @@ def validate_vega_lite_spec(spec: Any) -> None:
             continue
 
         # Row payloads are not descended into (see `_DATA_KEYS`), so their SHAPE
-        # is checked here instead: an inline row set must be an array of rows (or
-        # a raw string, which is how Vega-Lite carries inline CSV/TSV). That is
-        # what makes "not descended into" safe — a dict hiding under `values`
-        # would be spec structure smuggled past the rules below.
+        # is checked here instead: an inline row set must be an ARRAY of rows.
+        # That is what makes "not descended into" safe — a dict hiding under
+        # `values` would be spec structure smuggled past the rules below.
+        #
+        # Vega-Lite also accepts `values` as a raw CSV/TSV STRING. That form is
+        # deliberately out of this contract, and it is refused rather than
+        # tolerated. The design promises that the rows ship alongside every chart
+        # so a reader can always expand to the table behind the picture — that
+        # provenance is the trust story the whole contract exists for. A CSV
+        # string we do not parse cannot be tabulated, so accepting it would
+        # render a chart whose data we could not show, and silently break the
+        # promise rather than fail. It also counted 0 rows and printed
+        # "No data." over a chart `vl_convert` renders happily. If a caller has
+        # CSV, parsing it into rows is one line at the call site.
         values = node.get("values")
-        if values is not None and not isinstance(values, (list, str)):
+        if values is not None and not isinstance(values, list):
             raise ChartSpecError(
-                "inline 'values' must be an array of rows",
+                "inline 'values' must be an array of rows — a CSV/TSV string is "
+                "out of contract, because rows we cannot tabulate break the "
+                "expand-to-table promise every chart makes",
                 path=f"{path}.values",
             )
 
@@ -419,12 +431,25 @@ def _rows_of(value: Any) -> list[dict[str, Any]]:
 
 
 def _rows_at(node: Any, datasets: dict[str, Any]) -> list[dict[str, Any]]:
-    """The rows on ONE node: inline `values`, else a `datasets` reference."""
+    """The rows on ONE node: inline `values`, else a `datasets` reference.
+
+    Inline `values` wins over a same-node `name` — but only when it actually has
+    rows. An EMPTY inline array falls through to the reference, because that is
+    what Vega-Lite itself does: compiled against vega-lite 6.4.3,
+    `{"data": {"name": "d", "values": []}, "datasets": {"d": [2 rows]}}` yields a
+    vega `data[0]` of the named dataset, not the empty array. Short-circuiting on
+    the mere PRESENCE of `values` made this chart count 0 rows and print
+    "No data." while `vl_convert` drew it in 7,071 bytes and the client returned
+    2 rows — one stored spec, two pictures, which is the whole failure class this
+    contract exists to close.
+    """
     block = node.get("data") if isinstance(node, dict) else None
     if not isinstance(block, dict):
         return []
-    if "values" in block:  # inline wins over a name on the same node
-        return _rows_of(block["values"])
+    if "values" in block:
+        rows = _rows_of(block["values"])
+        if rows:
+            return rows
     name = block.get("name")
     if isinstance(name, str):
         return _rows_of(datasets.get(name))
@@ -441,8 +466,18 @@ def extract_rows(
     Depth-first, root before containers, first non-empty wins. `datasets` is
     resolved against the ROOT map throughout, because that is where Vega-Lite
     keeps it however deep the reference is.
+
+    The depth limit is `_MAX_DEPTH` (64), the SAME number the client's walker and
+    the security walk use — pinned in the shared fixture's `$definition` rather
+    than left as an unwritten constant in two languages. It carried an
+    undocumented 16 before, so the two sides agreed up to 16 and diverged from
+    17: a 17-deep `vconcat` counted 0 rows here and printed "No data." while
+    `vl_convert` rendered it in 13,310 bytes. `_MAX_DEPTH`'s own comment argues
+    against exactly this — "a cap that trips on a deep-but-VALID spec would have
+    the browser refuse a chart the server renders fine" — which is what it was
+    doing, reversed.
     """
-    if not isinstance(spec, dict) or depth > 16:
+    if not isinstance(spec, dict) or depth > _MAX_DEPTH:
         return []
     if datasets is None:
         raw = spec.get("datasets")
