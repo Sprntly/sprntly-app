@@ -321,6 +321,10 @@ def _texts_under_tz(tz: str, chart_name: str) -> list[str]:
         capture_output=True,
         text=True,
         check=True,
+        # A child that wedges would otherwise hang the lane until the job limit,
+        # which reads as "CI is broken" rather than "this test failed". Generous
+        # (a cold render pays V8 startup) but finite.
+        timeout=120,
     )
     return json.loads(out.stdout)
 
