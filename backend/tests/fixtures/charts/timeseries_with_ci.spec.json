@@ -1,0 +1,101 @@
+{
+  "data": [
+    {
+      "hi": 0.46,
+      "lo": 0.38,
+      "t": "2026-01-01",
+      "y": 0.42
+    },
+    {
+      "hi": 0.52,
+      "lo": 0.42,
+      "t": "2026-01-08",
+      "y": 0.47
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.timeseries_with_ci",
+    "rows": 2
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "hi": 0.46,
+          "lo": 0.38,
+          "t": "2026-01-01",
+          "y": 0.42
+        },
+        {
+          "hi": 0.52,
+          "lo": 0.42,
+          "t": "2026-01-08",
+          "y": 0.47
+        }
+      ]
+    },
+    "height": 300,
+    "layer": [
+      {
+        "encoding": {
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "t",
+            "title": "Date",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "lo",
+            "title": "Rate",
+            "type": "quantitative"
+          },
+          "y2": {
+            "field": "hi"
+          }
+        },
+        "mark": {
+          "color": "#5B7FFF",
+          "opacity": 0.18,
+          "type": "area"
+        }
+      },
+      {
+        "encoding": {
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "t",
+            "title": "Date",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "y",
+            "title": "Rate",
+            "type": "quantitative"
+          }
+        },
+        "mark": {
+          "color": "#5B7FFF",
+          "point": {
+            "color": "#5B7FFF",
+            "filled": true
+          },
+          "tooltip": true,
+          "type": "line"
+        }
+      }
+    ],
+    "title": {
+      "text": "Activation rate"
+    },
+    "width": 560
+  },
+  "title": "Activation rate"
+}

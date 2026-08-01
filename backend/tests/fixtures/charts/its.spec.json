@@ -1,0 +1,175 @@
+{
+  "data": [
+    {
+      "period": "pre",
+      "t": "2026-01-01",
+      "y": 100.0
+    },
+    {
+      "period": "pre",
+      "t": "2026-01-08",
+      "y": 104.0
+    },
+    {
+      "period": "post",
+      "t": "2026-01-22",
+      "y": 131.0
+    },
+    {
+      "period": "post",
+      "t": "2026-01-29",
+      "y": 136.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.its",
+    "rows": 4
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "period": "pre",
+          "t": "2026-01-01",
+          "y": 100.0
+        },
+        {
+          "period": "pre",
+          "t": "2026-01-08",
+          "y": 104.0
+        },
+        {
+          "period": "post",
+          "t": "2026-01-22",
+          "y": 131.0
+        },
+        {
+          "period": "post",
+          "t": "2026-01-29",
+          "y": 136.0
+        }
+      ]
+    },
+    "height": 300,
+    "layer": [
+      {
+        "encoding": {
+          "color": {
+            "field": "period",
+            "sort": [
+              "pre",
+              "post"
+            ],
+            "title": "Period",
+            "type": "nominal"
+          },
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "t",
+            "title": "Date",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "y",
+            "title": "Value",
+            "type": "quantitative"
+          }
+        },
+        "mark": {
+          "strokeWidth": 2,
+          "type": "line"
+        }
+      },
+      {
+        "encoding": {
+          "color": {
+            "field": "period",
+            "sort": [
+              "pre",
+              "post"
+            ],
+            "title": "Period",
+            "type": "nominal"
+          },
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "t",
+            "title": "Date",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "y",
+            "title": "Value",
+            "type": "quantitative"
+          }
+        },
+        "mark": {
+          "filled": true,
+          "tooltip": true,
+          "type": "point"
+        }
+      },
+      {
+        "data": {
+          "values": [
+            {
+              "at": "2026-01-15"
+            }
+          ]
+        },
+        "encoding": {
+          "x": {
+            "field": "at",
+            "type": "temporal"
+          }
+        },
+        "mark": {
+          "color": "#4A554F",
+          "strokeDash": [
+            4,
+            3
+          ],
+          "strokeWidth": 1,
+          "type": "rule"
+        }
+      },
+      {
+        "data": {
+          "values": [
+            {
+              "at": "2026-01-15"
+            }
+          ]
+        },
+        "encoding": {
+          "x": {
+            "field": "at",
+            "type": "temporal"
+          }
+        },
+        "mark": {
+          "align": "left",
+          "baseline": "top",
+          "color": "#4A554F",
+          "dx": 4,
+          "dy": 2,
+          "text": "Intervention",
+          "type": "text"
+        }
+      }
+    ],
+    "title": {
+      "text": "Weekly signups around the change"
+    },
+    "width": 560
+  },
+  "title": "Weekly signups around the change"
+}

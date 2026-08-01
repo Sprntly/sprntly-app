@@ -1,0 +1,46 @@
+{
+  "colors": [
+    "#15201b",
+    "#5b7fff",
+    "#6fcf97",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "g": 54,
+    "line": 46,
+    "path": 32,
+    "svg": 1,
+    "text": 28
+  },
+  "texts": [
+    "0",
+    "100",
+    "120",
+    "140",
+    "20",
+    "40",
+    "60",
+    "80",
+    "Date",
+    "Enterprise",
+    "Jan 01",
+    "Jan 01",
+    "Jan 02",
+    "Jan 02",
+    "Jan 03",
+    "Jan 03",
+    "Jan 04",
+    "Jan 04",
+    "Jan 05",
+    "Jan 05",
+    "Jan 06",
+    "Jan 06",
+    "Jan 07",
+    "Jan 07",
+    "Self-serve",
+    "Series",
+    "Teams",
+    "Weekly active teams by plan"
+  ]
+}

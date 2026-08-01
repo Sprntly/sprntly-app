@@ -1,0 +1,42 @@
+{
+  "colors": [
+    "#15201b",
+    "#5b7fff",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "g": 32,
+    "line": 46,
+    "path": 16,
+    "svg": 1,
+    "text": 25
+  },
+  "texts": [
+    "0",
+    "100",
+    "120",
+    "140",
+    "20",
+    "40",
+    "60",
+    "80",
+    "Date",
+    "Jan 01",
+    "Jan 02",
+    "Jan 03",
+    "Jan 04",
+    "Jan 05",
+    "Jan 06",
+    "Jan 07",
+    "Jan 08",
+    "Jan 09",
+    "Jan 10",
+    "Jan 11",
+    "Jan 12",
+    "Jan 13",
+    "Jan 14",
+    "Teams",
+    "Weekly active teams"
+  ]
+}

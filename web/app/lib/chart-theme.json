@@ -1,0 +1,153 @@
+{
+  "$comment": "Sprntly chart theme \u2014 the WEB-SIDE MIRROR of backend/app/charts/theme.py. The backend module is the source of truth for the values; this file is the copy the client renderer (vega-embed) reads, so the server SVG renderer (vl-convert) and the client cannot drift. It lives under web/ ON PURPOSE: Phase 0 and Phase 2 are separate PRs, a backend-owned file imported from web/ would make the web build depend on Phase 0 landing first, and a client `import` of a path above the project root needs experimental.externalDir in next.config.ts (which also carries the Sentry wrapper and the static-export switch, and is not worth touching for this). Phase 0 adds a test that regenerates and diffs this file against theme.py. `categorical` is lifted VERBATIM from web/app/components/shared/InlineChart.tsx CHART_COLORS, in order, so nothing changes colour by accident; web/app/lib/__tests__/chart-theme.test.ts fails on drift between the two.",
+  "version": 1,
+  "vegaLiteSchema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "$commentFonts": "TWO font stacks on purpose. `font` is the SSR stack: vl-convert measures text server-side and emits real <text> elements, so the font it MEASURES with has to be the font that ends up DRAWN \u2014 Liberation Sans is metric-compatible with Arial/Helvetica and is present in the render container. `fontClient` is the browser stack, where the browser both measures and draws, so it can use the app's real UI font. The client renderer swaps fontClient in over font; see chart-theme.ts clientConfig().",
+  "font": "Liberation Sans, Arial, Helvetica, sans-serif",
+  "fontClient": "Geist, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+  "categorical": [
+    "#5B7FFF",
+    "#6FCF97",
+    "#F2994A",
+    "#BB6BD9",
+    "#56CCF2",
+    "#EB5757",
+    "#F2C94C",
+    "#27AE60"
+  ],
+  "$commentVega": "Full Vega-Lite `config` objects, passed straight through to the renderer. NO CSS custom properties anywhere \u2014 vl-convert has no DOM and cannot resolve var(--\u2026), so a theme value that works on the client and blanks on the server is exactly the drift this file exists to prevent. `dark` is emitted even though the app ships no dark mode yet, so the contract is fixed before a theme toggle lands rather than after.",
+  "vega": {
+    "light": {
+      "background": "transparent",
+      "font": "Liberation Sans, Arial, Helvetica, sans-serif",
+      "padding": 4,
+      "autosize": {
+        "type": "fit",
+        "contains": "padding"
+      },
+      "range": {
+        "category": [
+          "#5B7FFF",
+          "#6FCF97",
+          "#F2994A",
+          "#BB6BD9",
+          "#56CCF2",
+          "#EB5757",
+          "#F2C94C",
+          "#27AE60"
+        ]
+      },
+      "view": {
+        "stroke": null,
+        "continuousWidth": 420,
+        "continuousHeight": 200
+      },
+      "title": {
+        "fontSize": 13,
+        "fontWeight": 600,
+        "color": "#15201B",
+        "anchor": "start",
+        "offset": 8
+      },
+      "axis": {
+        "labelFontSize": 10,
+        "labelColor": "#828D87",
+        "titleFontSize": 11,
+        "titleColor": "#828D87",
+        "titleFontWeight": 500,
+        "domainColor": "#EEF0EE",
+        "tickColor": "#EEF0EE",
+        "gridColor": "#EEF0EE",
+        "gridWidth": 1,
+        "labelLimit": 140
+      },
+      "legend": {
+        "labelFontSize": 10,
+        "labelColor": "#15201B",
+        "titleFontSize": 10,
+        "titleColor": "#828D87",
+        "symbolType": "circle",
+        "symbolSize": 60
+      },
+      "line": {
+        "strokeWidth": 2.5
+      },
+      "bar": {
+        "cornerRadiusEnd": 3
+      },
+      "arc": {
+        "stroke": null
+      },
+      "point": {
+        "size": 40,
+        "filled": true
+      }
+    },
+    "dark": {
+      "background": "transparent",
+      "font": "Liberation Sans, Arial, Helvetica, sans-serif",
+      "padding": 4,
+      "autosize": {
+        "type": "fit",
+        "contains": "padding"
+      },
+      "range": {
+        "category": [
+          "#5B7FFF",
+          "#6FCF97",
+          "#F2994A",
+          "#BB6BD9",
+          "#56CCF2",
+          "#EB5757",
+          "#F2C94C",
+          "#27AE60"
+        ]
+      },
+      "view": {
+        "stroke": null,
+        "continuousWidth": 420,
+        "continuousHeight": 200
+      },
+      "title": {
+        "fontSize": 13,
+        "fontWeight": 600,
+        "color": "#F2F4F3",
+        "anchor": "start",
+        "offset": 8
+      },
+      "axis": {
+        "labelFontSize": 10,
+        "labelColor": "#9AA5A0",
+        "titleFontSize": 11,
+        "titleColor": "#9AA5A0",
+        "titleFontWeight": 500,
+        "domainColor": "#2C3733",
+        "tickColor": "#2C3733",
+        "gridColor": "#2C3733",
+        "gridWidth": 1,
+        "labelLimit": 140
+      },
+      "legend": {
+        "labelFontSize": 10,
+        "labelColor": "#F2F4F3",
+        "titleFontSize": 10,
+        "titleColor": "#9AA5A0",
+        "symbolType": "circle",
+        "symbolSize": 60
+      },
+      "line": {
+        "strokeWidth": 2.5
+      },
+      "bar": {
+        "cornerRadiusEnd": 3
+      },
+      "arc": {
+        "stroke": null
+      },
+      "point": {
+        "size": 40,
+        "filled": true
+      }
+    }
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "data": [
+    {
+      "series": "Enterprise",
+      "t": "2026-01-01",
+      "y": 120.0
+    },
+    {
+      "series": "Enterprise",
+      "t": "2026-01-08",
+      "y": 138.0
+    },
+    {
+      "series": "Self-serve",
+      "t": "2026-01-01",
+      "y": 64.0
+    },
+    {
+      "series": "Self-serve",
+      "t": "2026-01-08",
+      "y": 71.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.timeseries",
+    "rows": 4
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "series": "Enterprise",
+          "t": "2026-01-01",
+          "y": 120.0
+        },
+        {
+          "series": "Enterprise",
+          "t": "2026-01-08",
+          "y": 138.0
+        },
+        {
+          "series": "Self-serve",
+          "t": "2026-01-01",
+          "y": 64.0
+        },
+        {
+          "series": "Self-serve",
+          "t": "2026-01-08",
+          "y": 71.0
+        }
+      ]
+    },
+    "encoding": {
+      "color": {
+        "field": "series",
+        "sort": [
+          "Enterprise",
+          "Self-serve"
+        ],
+        "title": "Series",
+        "type": "nominal"
+      },
+      "x": {
+        "axis": {
+          "format": "%b %d",
+          "labelAngle": 0
+        },
+        "field": "t",
+        "title": "Date",
+        "type": "temporal"
+      },
+      "y": {
+        "field": "y",
+        "title": "Teams",
+        "type": "quantitative"
+      }
+    },
+    "height": 300,
+    "mark": {
+      "point": true,
+      "tooltip": true,
+      "type": "line"
+    },
+    "title": {
+      "text": "Weekly active teams by plan"
+    },
+    "width": 560
+  },
+  "title": "Weekly active teams by plan"
+}
