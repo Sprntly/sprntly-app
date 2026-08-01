@@ -58,6 +58,11 @@ export type SignUpInput = {
   /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
    *  auto-detect from the browser so the Top Insights brief fires Monday 06:00 local. */
   timezone?: string
+  /** An artifact-share token, when the sign-up originated from a valid
+   *  shared-artifact link. Persisted into user_metadata so postLoginPath()
+   *  can resolve it on ANY device/session, even if verification completes
+   *  somewhere other than where sign-up started. */
+  pendingShareToken?: string
 }
 
 /** Best-effort IANA timezone of the current browser (e.g. "America/New_York").
@@ -241,6 +246,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             ...(input.priorities?.trim() ? { priorities: input.priorities.trim() } : {}),
             ...(input.accountType ? { account_type: input.accountType } : {}),
             ...(timezone ? { timezone } : {}),
+            ...(input.pendingShareToken ? { pending_share_token: input.pendingShareToken } : {}),
           },
         },
       })

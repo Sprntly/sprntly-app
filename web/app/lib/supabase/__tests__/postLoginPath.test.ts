@@ -16,6 +16,7 @@ const getUserMock = vi.fn()
 const profileMaybeSingleMock = vi.fn()
 const fetchWorkspaceMock = vi.fn()
 const acceptInviteMock = vi.fn()
+const resolveArtifactShareMock = vi.fn()
 
 // postLoginPath calls the module-local getSupabase(), so we can't intercept it
 // by mocking the re-export. Instead satisfy getSupabasePublicConfig() with env
@@ -48,6 +49,12 @@ vi.mock("../../teamApi", () => ({
   teamApi: { acceptInvite: (...a: unknown[]) => acceptInviteMock(...a) },
 }))
 
+// postLoginPath lazily imports artifactShareApi's resolveArtifactShare, same
+// pattern as tryAcceptInvite's lazy teamApi import above.
+vi.mock("../../artifactShareApi", () => ({
+  resolveArtifactShare: (...a: unknown[]) => resolveArtifactShareMock(...a),
+}))
+
 import { postLoginPath } from "../client"
 import { ONBOARDING_STEP_SLUGS } from "../../onboarding/types"
 import { ApiError } from "../../api"
@@ -58,18 +65,33 @@ afterEach(() => {
   vi.resetAllMocks()
 })
 
-function newConfirmedUser() {
+function newConfirmedUser(userMetadata?: Record<string, unknown>) {
   getUserMock.mockResolvedValue({
-    data: { user: { id: "user-1", email_confirmed_at: "2026-01-01T00:00:00Z" } },
+    data: {
+      user: {
+        id: "user-1",
+        email_confirmed_at: "2026-01-01T00:00:00Z",
+        user_metadata: userMetadata,
+      },
+    },
   })
   fetchWorkspaceMock.mockResolvedValue(null) // no workspace
   acceptInviteMock.mockRejectedValue(new Error("no invite")) // no auto-accept
 }
 
 /** A signed-in user who already belongs to a company (workspace resolves). */
-function existingMemberUser(workspace: Record<string, unknown> = {}) {
+function existingMemberUser(
+  workspace: Record<string, unknown> = {},
+  userMetadata?: Record<string, unknown>,
+) {
   getUserMock.mockResolvedValue({
-    data: { user: { id: "user-1", email_confirmed_at: "2026-01-01T00:00:00Z" } },
+    data: {
+      user: {
+        id: "user-1",
+        email_confirmed_at: "2026-01-01T00:00:00Z",
+        user_metadata: userMetadata,
+      },
+    },
   })
   fetchWorkspaceMock.mockResolvedValue({
     id: "ws-1",
@@ -147,5 +169,89 @@ describe("postLoginPath — pending-invite resolution for existing members", () 
       new ApiError(409, { detail: "already in another company" }),
     )
     expect(await postLoginPath()).toBe("/invite-conflict")
+  })
+})
+
+describe("postLoginPath — guest account state (pending share token)", () => {
+  it("routes a new user with an EMPTY first_name to the your-name gate (unchanged when no pending_share_token)", async () => {
+    newConfirmedUser()
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "", account_type: "company" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe("/onboarding/your-name")
+    expect(resolveArtifactShareMock).not.toHaveBeenCalled()
+  })
+
+  it("routes to the artifact on a guest_view resolve outcome", async () => {
+    newConfirmedUser({ pending_share_token: "abc123" })
+    resolveArtifactShareMock.mockResolvedValue({
+      outcome: "guest_view",
+      artifact_type: "prd",
+      artifact_id: 42,
+      owning_company_name: "Acme",
+      sharer_name: "Ada",
+    })
+    expect(await postLoginPath()).toBe("/?prd=42&share=abc123")
+    expect(resolveArtifactShareMock).toHaveBeenCalledWith("abc123")
+  })
+
+  it("routes to /not-authorized on a blocked resolve outcome", async () => {
+    newConfirmedUser({ pending_share_token: "abc123" })
+    resolveArtifactShareMock.mockResolvedValue({
+      outcome: "blocked",
+      reason: "domain_mismatch",
+    })
+    expect(await postLoginPath()).toBe("/not-authorized?share=abc123")
+  })
+
+  it("falls open to onboarding when resolve fails (network/other error)", async () => {
+    newConfirmedUser({ pending_share_token: "abc123" })
+    resolveArtifactShareMock.mockResolvedValue(undefined)
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+  })
+
+  it("skips the share check entirely when the user already has a workspace", async () => {
+    existingMemberUser({}, { pending_share_token: "abc123" })
+    acceptInviteMock.mockRejectedValue(new ApiError(404, { detail: "no invite" }))
+    expect(await postLoginPath()).toBe("/")
+    expect(resolveArtifactShareMock).not.toHaveBeenCalled()
+  })
+
+  it("ignores a non-string pending_share_token, falling through to onboarding", async () => {
+    newConfirmedUser({ pending_share_token: 12345 })
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(resolveArtifactShareMock).not.toHaveBeenCalled()
+  })
+
+  it("ignores an empty-string pending_share_token, falling through to onboarding", async () => {
+    newConfirmedUser({ pending_share_token: "" })
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(resolveArtifactShareMock).not.toHaveBeenCalled()
+  })
+
+  it("still checks the pending share after tryAcceptInvite resolves to no-op", async () => {
+    newConfirmedUser({ pending_share_token: "abc123" })
+    acceptInviteMock.mockRejectedValue(new ApiError(404, { detail: "no invite" }))
+    resolveArtifactShareMock.mockResolvedValue({
+      outcome: "guest_view",
+      artifact_type: "prd",
+      artifact_id: 7,
+      owning_company_name: "Acme",
+      sharer_name: "Ada",
+    })
+    expect(await postLoginPath()).toBe("/?prd=7&share=abc123")
   })
 })

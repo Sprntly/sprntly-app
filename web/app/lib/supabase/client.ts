@@ -209,6 +209,28 @@ export async function postLoginPath(): Promise<string> {
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
+    // Guest account state: a user with zero company memberships who signed
+    // up via a shared-artifact link carries the token in user_metadata (set
+    // server-side at signUp() time — see lib/auth.tsx's SignUpInput — so it
+    // survives the verify-email hop even across devices). Resolve it before
+    // falling through to onboarding, which would otherwise create a brand
+    // new company for someone who only meant to view/join an existing one.
+    const pendingToken = user.user_metadata?.pending_share_token
+    if (typeof pendingToken === "string" && pendingToken) {
+      const { resolveArtifactShare } = await import("../artifactShareApi")
+      const outcome = await resolveArtifactShare(pendingToken)
+      if (outcome?.outcome === "guest_view") {
+        return `/?prd=${outcome.artifact_id}&share=${pendingToken}`
+      }
+      if (outcome?.outcome === "blocked") {
+        return `/not-authorized?share=${pendingToken}`
+      }
+      // outcome undefined (network/other error, or a stale/malformed token
+      // server-side has no row for) — fail OPEN to onboarding, never to a
+      // stuck screen. The real security gate (view/join) is enforced
+      // server-side by resolve/join regardless of how the user got here.
+    }
+
     // Pre-onboarding profile gate: a brand-new user whose profile is missing
     // a first name OR the company-vs-personal account type goes to the
     // unnumbered `your-name` gate first. Google sign-ups always miss the
