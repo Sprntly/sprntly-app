@@ -1,0 +1,115 @@
+{
+  "$comment": "CROSS-LANGUAGE CONTRACT FIXTURE — one shared definition of where a Vega-Lite spec's rows live. Consumed by web/app/components/shared/__tests__/VegaChart.dom.test.tsx (specDataRows) and, once PR #986 lands, by the pytest for ChartSpec.row_count(). Both implementations must return the same rowCount for every case here. This file exists because the two sides drifted: the client walked containers while the server read the root only, and NEITHER resolved altair's default named-dataset shape — so one spec produced three different answers (client-envelope: empty, client-bare: drawn, server: 'No data.'). Add a case here BEFORE fixing a row-extraction bug on either side, so the fix lands on both.",
+  "$definition": "Rows live at: (1) the root's `data`, (2) any nested container's `data` — layer / concat / hconcat / vconcat / spec, (3) a named reference `data: {name}` resolved against the ROOT `datasets` map. Inline `values` wins over a named reference on the same node. The first container that yields rows wins; containers are searched in the order listed above. A row is a JSON object; non-object array elements are not rows.",
+  "cases": [
+    {
+      "name": "root inline values",
+      "spec": {
+        "mark": "bar",
+        "data": { "values": [{ "a": 1 }, { "a": 2 }] }
+      },
+      "rowCount": 2
+    },
+    {
+      "name": "no data at all",
+      "spec": { "mark": "bar" },
+      "rowCount": 0
+    },
+    {
+      "name": "root values present but empty",
+      "spec": { "mark": "bar", "data": { "values": [] } },
+      "rowCount": 0
+    },
+    {
+      "name": "layered — data hangs off a layer, not the root (ITS / DiD / K-M shape)",
+      "spec": {
+        "layer": [
+          { "mark": "line", "data": { "values": [{ "t": 1, "y": 5 }, { "t": 2, "y": 7 }] } },
+          { "mark": "rule", "encoding": { "x": { "datum": 3 } } }
+        ]
+      },
+      "rowCount": 2
+    },
+    {
+      "name": "vconcat wrapping hconcat",
+      "spec": {
+        "vconcat": [{ "hconcat": [{ "mark": "bar", "data": { "values": [{ "a": 1 }] } }] }]
+      },
+      "rowCount": 1
+    },
+    {
+      "name": "concat",
+      "spec": { "concat": [{ "mark": "bar", "data": { "values": [{ "a": 1 }, { "a": 2 }] } }] },
+      "rowCount": 2
+    },
+    {
+      "name": "facet operator — child under `spec`",
+      "spec": {
+        "facet": { "field": "g" },
+        "spec": { "mark": "bar", "data": { "values": [{ "a": 1 }, { "a": 2 }, { "a": 3 }] } }
+      },
+      "rowCount": 3
+    },
+    {
+      "name": "altair default — named dataset reference, rows hoisted to `datasets`",
+      "$note": "What altair.to_dict() emits by DEFAULT: its data transformer names and hoists the rows rather than inlining them. Phase 1's DS sandbox writes altair specs, so this is the ordinary shape. A reader that only understands inline `values` reports these charts as having no data.",
+      "spec": {
+        "mark": "line",
+        "data": { "name": "data-9f2c" },
+        "datasets": { "data-9f2c": [{ "t": 1, "y": 5 }, { "t": 2, "y": 7 }, { "t": 3, "y": 6 }] }
+      },
+      "rowCount": 3
+    },
+    {
+      "name": "named dataset reference inside a layer",
+      "spec": {
+        "layer": [{ "mark": "line", "data": { "name": "d" } }],
+        "datasets": { "d": [{ "a": 1 }, { "a": 2 }] }
+      },
+      "rowCount": 2
+    },
+    {
+      "name": "named reference resolving to an empty dataset",
+      "spec": {
+        "mark": "bar",
+        "data": { "name": "d" },
+        "datasets": { "d": [] }
+      },
+      "rowCount": 0
+    },
+    {
+      "name": "named reference with no matching dataset",
+      "spec": { "mark": "bar", "data": { "name": "missing" }, "datasets": { "other": [{ "a": 1 }] } },
+      "rowCount": 0
+    },
+    {
+      "name": "inline values win over a named reference on the same node",
+      "spec": {
+        "mark": "bar",
+        "data": { "name": "d", "values": [{ "a": 1 }, { "a": 2 }] },
+        "datasets": { "d": [{ "b": 9 }] }
+      },
+      "rowCount": 2
+    },
+    {
+      "name": "generator — rows not visible from here",
+      "spec": { "mark": "bar", "data": { "sequence": { "start": 0, "stop": 10 } } },
+      "rowCount": 0
+    },
+    {
+      "name": "non-object array elements are not rows",
+      "spec": { "mark": "bar", "data": { "values": [1, 2, 3] } },
+      "rowCount": 0
+    },
+    {
+      "name": "first container that yields rows wins",
+      "spec": {
+        "layer": [
+          { "mark": "line", "data": { "values": [{ "a": 1 }] } },
+          { "mark": "point", "data": { "values": [{ "b": 1 }, { "b": 2 }] } }
+        ]
+      },
+      "rowCount": 1
+    }
+  ]
+}

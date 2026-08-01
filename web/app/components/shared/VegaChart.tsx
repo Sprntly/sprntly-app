@@ -137,53 +137,150 @@ function rowsOf(v: unknown): ChartTableRow[] {
   return v.filter((r): r is ChartTableRow => isPlainObject(r))
 }
 
+/** The container keys a Vega-Lite spec can nest child specs under. */
+const CONTAINER_KEYS = ["layer", "concat", "hconcat", "vconcat", "spec"] as const
+
 /**
- * Strip `usermeta` off a spec before it goes anywhere near `embed()`.
+ * Top-level keys removed from every spec before it reaches `embed()`.
  *
- * THIS IS A SECURITY BOUNDARY, not tidying. `vega-embed` treats
- * `spec.usermeta.embedOptions` as CALLER OPTIONS and merges them over the
- * options we pass, with the SPEC winning. A model-authored spec that sets
- * `usermeta.embedOptions` can therefore:
- *   - `actions: true` — restore the actions menu, including "Open in Vega Editor".
- *   - `ast: false` — drop the interpreter and put expressions back through
- *     `Function`-constructor codegen, voiding the whole CSP argument above.
- *   - `patch: "https://…"` or `config: "https://…"` — a STRING is loaded via
- *     `loader.load()`, i.e. an unconditional HTTP GET of an attacker-chosen
- *     URL, whose JSON is then applied as a JSON-Patch to the compiled Vega
- *     spec. That is arbitrary Vega control: further fetches, signals,
- *     expressions.
+ * THIS IS A SECURITY BOUNDARY, not tidying.
  *
- * `specReachesOutward` cannot catch this. Its key-based rejection is the right
- * shape for encodings and marks, but a JSON-Patch operation hides the URL in a
+ * `usermeta` — `vega-embed` treats `spec.usermeta.embedOptions` as CALLER
+ * OPTIONS and merges them over the options we pass, with the SPEC winning. A
+ * model-authored spec could set `actions: true` (restoring the actions menu,
+ * including "Open in Vega Editor"), `ast: false` (dropping the interpreter and
+ * putting expressions back through `Function`-constructor codegen, voiding the
+ * whole CSP argument above), or a STRING `patch`/`config`, which vega-embed
+ * loads via `loader.load()` — an unconditional HTTP GET of an attacker-chosen
+ * URL whose JSON is then applied as a JSON-Patch to the compiled Vega spec.
+ * That last one is arbitrary Vega control: further fetches, signals,
+ * expressions.
+ *
+ * `config` — a spec's own `config` wins over the `config` we pass, so
+ * `{"config": {"background": "#ff0000"}}` repaints a chart straight out of the
+ * Sprntly theme. The theme is the contract that keeps the server SVG renderer
+ * and this one looking like the same product; a spec does not get to opt out.
+ *
+ * `specViolatesContract` cannot catch either. Its key-based rejection is the
+ * right shape for encodings and marks, but a JSON-Patch hides its URL in a
  * VALUE — `{"op":"add","path":"/data/url","value":"https://…"}` — where no key
  * check will ever see it.
  *
- * Stripped rather than rejected: altair writes a benign `usermeta`, so refusing
- * on its presence would degrade legitimate charts. Nothing in our render path
- * reads it, so dropping it costs nothing. Top level only — that is the one
- * place `vega-embed` looks for caller options.
+ * STRIPPED rather than rejected, on purpose: altair writes a benign `usermeta`
+ * and a benign `config`, so refusing on their presence would degrade
+ * legitimate charts. Nothing in our render path reads either, so dropping them
+ * costs nothing and the chart still draws. Top level only — that is where
+ * `vega-embed` looks for caller options and where Vega-Lite reads `config`.
  */
-function stripEmbedOptions(spec: VegaLiteSpec): VegaLiteSpec {
-  const copy = { ...(spec as Record<string, unknown>) } as VegaLiteSpec
-  delete (copy as Record<string, unknown>).usermeta
-  return copy
+const STRIPPED_TOP_LEVEL_KEYS = ["usermeta", "config"] as const
+
+function sanitizeSpec(spec: VegaLiteSpec): VegaLiteSpec {
+  const copy = { ...(spec as Record<string, unknown>) }
+  for (const key of STRIPPED_TOP_LEVEL_KEYS) delete copy[key]
+  return copy as VegaLiteSpec
+}
+
+/** The root `datasets` map, which named `data: {name}` references resolve against. */
+function datasetsOf(root: VegaLiteSpec): Record<string, unknown> {
+  const ds = isPlainObject(root) ? root.datasets : undefined
+  return isPlainObject(ds) ? ds : {}
 }
 
 /**
- * Does this spec state its rows INLINE anywhere — even as an empty list?
+ * The rows one node's `data` points at — inline, or through a named reference.
+ *
+ * `data: {"name": "data-<hash>"}` + a top-level `datasets` map is what
+ * `altair.to_dict()` emits by DEFAULT (its default data transformer names and
+ * hoists the rows rather than inlining them). Phase 1's DS sandbox writes
+ * altair specs, so this is the ordinary shape, not an exotic one — and a
+ * reader that only understands inline `values` reports those charts as having
+ * no data at all.
+ */
+function resolveNodeRows(
+  data: unknown,
+  datasets: Record<string, unknown>,
+): ChartTableRow[] {
+  if (!isPlainObject(data)) return []
+  const inline = rowsOf(data.values)
+  if (inline.length > 0) return inline
+  if (typeof data.name === "string") return rowsOf(datasets[data.name])
+  return []
+}
+
+/**
+ * Rows for the table disclosure.
+ *
+ * Reads the ENVELOPE's `data` first — that is the row carrier in the Phase 0
+ * contract — and only then walks the spec.
+ *
+ * ONE SHARED DEFINITION OF WHERE ROWS LIVE, matching `ChartSpec.row_count()`
+ * on the backend: the root, any nested container (`layer`/`concat`/`hconcat`/
+ * `vconcat`/`spec`), AND named `datasets` references. Pinned across both
+ * implementations by the fixture at
+ * `app/lib/__fixtures__/chart-row-extraction.json`.
+ *
+ * The container walk matters because the interesting Phase 4 charts
+ * (interrupted time series, difference-in-differences, Kaplan-Meier) are ALL
+ * layered specs whose data hangs off a layer, not the root — a root-only read
+ * returns nothing for exactly the charts whose numbers a reader most wants to
+ * check.
+ */
+export function specDataRows(spec: VegaLiteSpec | null | undefined): ChartTableRow[] {
+  if (!isPlainObject(spec)) return []
+
+  if (isChartSpecEnvelope(spec)) {
+    const envelopeRows = rowsOf(spec.data)
+    if (envelopeRows.length > 0) return envelopeRows
+    return specDataRows(spec.spec as VegaLiteSpec)
+  }
+
+  const datasets = datasetsOf(spec)
+
+  const walk = (node: unknown, depth: number): ChartTableRow[] | null => {
+    if (depth > MAX_SPEC_DEPTH || !isPlainObject(node)) return null
+
+    const rows = resolveNodeRows(node.data, datasets)
+    if (rows.length > 0) return rows
+
+    for (const key of CONTAINER_KEYS) {
+      const child = node[key]
+      if (Array.isArray(child)) {
+        for (const c of child) {
+          const found = walk(c, depth + 1)
+          if (found) return found
+        }
+      } else if (child) {
+        const found = walk(child, depth + 1)
+        if (found) return found
+      }
+    }
+    return null
+  }
+
+  return walk(spec, 0) ?? []
+}
+
+/**
+ * Does this spec state where its rows are — even if the answer is "none"?
  *
  * The difference between "no rows" and "rows we cannot see from here" is the
- * difference between a chart we know will be blank and one whose data arrives
- * through a `sequence` generator or a named `datasets` reference. A `values`
- * array that is present and empty is decidably rowless; the absence of any
- * `values` at all is not decidable and must be given the benefit of the doubt.
+ * difference between a chart we KNOW will be blank and one whose data arrives
+ * through a `sequence` generator or some other path this reader does not model.
+ * A `values` array that is present and empty is decidably rowless, as is a
+ * named reference resolving to an empty dataset. The absence of any statement
+ * at all is not decidable and gets the benefit of the doubt.
  */
 function specHasExplicitValues(spec: VegaLiteSpec): boolean {
+  const datasets = datasetsOf(spec)
+
   const walk = (node: unknown, depth: number): boolean => {
     if (depth > MAX_SPEC_DEPTH || !isPlainObject(node)) return false
     const data = node.data
-    if (isPlainObject(data) && Array.isArray(data.values)) return true
-    for (const key of ["layer", "concat", "hconcat", "vconcat", "spec"]) {
+    if (isPlainObject(data)) {
+      if (Array.isArray(data.values)) return true
+      if (typeof data.name === "string" && Array.isArray(datasets[data.name])) return true
+    }
+    for (const key of CONTAINER_KEYS) {
       const child = node[key]
       if (Array.isArray(child)) {
         if (child.some((c) => walk(c, depth + 1))) return true
@@ -215,7 +312,7 @@ export function resolveChartSpec(input: VegaLiteSpec): {
   if (!isChartSpecEnvelope(input)) {
     const rows = specDataRows(input)
     return {
-      vlSpec: stripEmbedOptions(input),
+      vlSpec: sanitizeSpec(input),
       rows,
       // Rows we found, or rows we cannot see from here (a `sequence`
       // generator, a named `datasets` reference). Only a `values` array that
@@ -225,7 +322,7 @@ export function resolveChartSpec(input: VegaLiteSpec): {
   }
 
   const original = input.spec as VegaLiteSpec
-  const inner = stripEmbedOptions(original)
+  const inner = sanitizeSpec(original)
   const rows = rowsOf(input.data)
   const innerRows = specDataRows(original)
 
@@ -236,10 +333,11 @@ export function resolveChartSpec(input: VegaLiteSpec): {
   //
   // The carve-out is load-bearing on both ends, not an oversight. `ChartSpec.data`
   // defaults to `[]`, and Phase 1's DS sandbox writes altair `*.vl.json` files
-  // that ALWAYS inline their own `data.values` — so `{spec: <inlines rows>,
-  // data: []}` is a routine shape, not an exotic one. Assigning unconditionally
-  // would blank every one of those charts in the browser while the server drew
-  // them correctly.
+  // that carry their own rows — inline as `data.values`, or (altair's DEFAULT)
+  // as `data: {name}` plus a top-level `datasets` map. Either way
+  // `{spec: <carries its own rows>, data: []}` is a routine shape, not an
+  // exotic one, and assigning unconditionally would blank every one of those
+  // charts in the browser while the server drew them correctly.
   if (rows.length > 0) {
     inner.data = { values: rows }
   }
@@ -256,89 +354,56 @@ export function resolveChartSpec(input: VegaLiteSpec): {
   }
 }
 
-/**
- * Rows for the table disclosure.
- *
- * Reads the ENVELOPE's `data` first — that is the row carrier in the Phase 0
- * contract — and only then walks the spec, for a bare data-closed spec that
- * inlines its own values.
- *
- * The walk descends into `layer`/`concat`/`hconcat`/`vconcat`/`spec` rather
- * than reading only the top level. The interesting Phase 4 charts (interrupted
- * time series, difference-in-differences, Kaplan-Meier) are ALL layered specs
- * whose data hangs off a layer, not the root — a top-level-only read returns
- * nothing for exactly the charts whose numbers a reader most wants to check.
- */
-export function specDataRows(spec: VegaLiteSpec | null | undefined): ChartTableRow[] {
-  if (!isPlainObject(spec)) return []
-
-  if (isChartSpecEnvelope(spec)) {
-    const envelopeRows = rowsOf(spec.data)
-    if (envelopeRows.length > 0) return envelopeRows
-    return specDataRows(spec.spec as VegaLiteSpec)
-  }
-
-  const walk = (node: unknown, depth: number): ChartTableRow[] | null => {
-    if (depth > MAX_SPEC_DEPTH || !isPlainObject(node)) return null
-
-    const data = node.data
-    if (isPlainObject(data)) {
-      const rows = rowsOf(data.values)
-      if (rows.length > 0) return rows
-    }
-
-    for (const key of ["layer", "concat", "hconcat", "vconcat", "spec"]) {
-      const child = node[key]
-      if (Array.isArray(child)) {
-        for (const c of child) {
-          const rows = walk(c, depth + 1)
-          if (rows) return rows
-        }
-      } else if (child) {
-        const rows = walk(child, depth + 1)
-        if (rows) return rows
-      }
-    }
-    return null
-  }
-
-  return walk(spec, 0) ?? []
-}
-
 /* ------------------------------------------------------------------ *
- * Outbound-reference guard
+ * Contract validator
  *
- * A spec is DATA-CLOSED: it carries its rows and never reaches the network.
- * The backend validator enforces that too, but this component also renders
- * model-authored specs — a ```chart fence in a generated PRD, ultimately
- * steerable by whatever text the KG ingested from Jira/Slack/Drive — so refuse
- * here as well rather than trusting a single gate.
+ * A spec is DATA-CLOSED and INERT: it carries its rows, never reaches the
+ * network, and renders a picture rather than a user interface.
  *
- * Three ways a spec reaches outward, all rejected:
- *  - `data.url` / `datasets[*].url` — a fetch, the obvious one.
- *  - `mark: "image"` (or `{type: "image"}`) — Vega-Lite renders a real
- *    `<image>` element, so the reader's browser fetches a third-party URL from
- *    app.sprntly.ai, carrying their IP and Referer. A tracking pixel inside a
- *    document they trust.
+ * THIS IS THE ONLY GATE ON THE MODEL-AUTHORED CHANNEL. A spec arriving in a
+ * ```chart fence — ultimately steerable by whatever text the KG ingested from
+ * Jira/Slack/Drive/Confluence — reaches `embed()` having passed through no
+ * backend validation at all. Everything `backend/app/charts/spec.py` rejects
+ * for server-rendered specs has to be rejected here too, or the fence is
+ * simply the way around it.
+ *
+ * Rejected:
+ *  - `data.url` / any `url` key — a fetch.
+ *  - `mark: "image"` — Vega-Lite emits a real `<image>`, so the reader's
+ *    browser fetches a third-party URL FROM app.sprntly.ai, carrying their IP
+ *    and Referer. A tracking pixel inside a document they trust.
  *  - `href` — as an encoding channel or a mark property, Vega-Lite wraps the
  *    mark in a real `<a>` in OUR OWN DOM. A clickable outbound link the reader
  *    has every reason to believe we authored.
+ *  - `params` — inert on the server, NOT here. `vega-embed` renders
+ *    `{"bind": {"input": "range"}}` as a real `<input type="range">` in the PRD
+ *    panel, and `{"select": "interval"}` wires live brush/pan/zoom onto the
+ *    chart. A model-authored spec does not get to put controls nobody designed
+ *    into a document. This is the one the backend rejects specifically so this
+ *    renderer can collect on it.
+ *  - `expr` value refs — sandboxed by `ast: true` + the interpreter, so this is
+ *    a client/server DIVERGENCE rather than a hole: the server would refuse the
+ *    spec while the browser drew it. Same contract on both ends or neither.
+ *  - a malformed inline payload — `values` that is not an array of row objects,
+ *    or a `datasets` entry that is not. The walk SKIPS the contents of those
+ *    two keys (a "top referrer URLs" chart legitimately has a `url` column), so
+ *    the shape check is what earns the right to skip them. Without it,
+ *    `{"data": {"values": {"url": "…"}}}` walks straight past the guard.
  *
- * The last two are worse here than in the sandboxed-iframe case the plan
- * worried about, precisely because this path is trusted first-party DOM.
- *
- * Implemented as a blanket rejection of the `url` and `href` KEYS anywhere in
- * the spec structure, which is broader than enumerating channels and cannot be
- * out-manoeuvred by a channel we forgot. Row payloads are skipped — `values`
- * AND `datasets`, matching Phase 0's `_DATA_KEYS` — because a data COLUMN
- * legitimately named "url" is a string in a table, not a fetch. (Vega-Lite
- * compiles `datasets` entries to inline `values`; they never fetch.)
- *
- * It does NOT catch `usermeta.embedOptions`, which is not a channel and hides
- * its URLs in JSON-Patch VALUES. That is handled by removing `usermeta`
- * outright — see `stripEmbedOptions`.
+ * Not handled here: `usermeta` and top-level `config`, which are STRIPPED
+ * instead — see `STRIPPED_TOP_LEVEL_KEYS`. Stripping degrades a legitimate
+ * altair spec instead of refusing it, and a JSON-Patch hides its URL in a
+ * VALUE where no key check could see it anyway.
  * ------------------------------------------------------------------ */
-export function specReachesOutward(spec: VegaLiteSpec): boolean {
+
+/** Inline row payloads must be arrays of row objects. Empty is fine. */
+function isRowArray(v: unknown): boolean {
+  return Array.isArray(v) && v.every((r) => isPlainObject(r))
+}
+
+const REJECTED_KEYS = new Set(["url", "href", "params", "expr"])
+
+export function specViolatesContract(spec: VegaLiteSpec): boolean {
   const isImageMark = (mark: unknown): boolean =>
     mark === "image" || (isPlainObject(mark) && mark.type === "image")
 
@@ -347,10 +412,21 @@ export function specReachesOutward(spec: VegaLiteSpec): boolean {
     if (Array.isArray(node)) return node.some((c) => walk(c, depth + 1))
     if (!isPlainObject(node)) return false
 
+    // Shape checks BEFORE the skip below, because the skip depends on them.
+    const data = node.data
+    if (isPlainObject(data) && "values" in data && !isRowArray(data.values)) return true
+    const datasets = node.datasets
+    if (isPlainObject(datasets)) {
+      for (const payload of Object.values(datasets)) {
+        if (!isRowArray(payload)) return true
+      }
+    }
+
     for (const [key, value] of Object.entries(node)) {
-      if (key === "url" || key === "href") return true
+      if (REJECTED_KEYS.has(key)) return true
       if (key === "mark" && isImageMark(value)) return true
-      // Inline row payloads. Phase 0 skips the same two keys (`_DATA_KEYS`).
+      // Inline row payloads, now shape-checked above. Phase 0 skips the same
+      // two keys (`_DATA_KEYS`).
       if (key === "values" || key === "datasets") continue
       if (walk(value, depth + 1)) return true
     }
@@ -444,7 +520,7 @@ export function VegaChart({
       setPhase("failed")
       return
     }
-    if (specReachesOutward(vlSpec)) {
+    if (specViolatesContract(vlSpec)) {
       setPhase("failed")
       return
     }

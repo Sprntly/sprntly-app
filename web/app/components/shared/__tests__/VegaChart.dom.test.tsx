@@ -20,7 +20,7 @@ import {
   __vegaRuntimeLoadCount,
   resolveChartSpec,
   specDataRows,
-  specReachesOutward,
+  specViolatesContract,
 } from "../VegaChart"
 
 const embed = vi.fn()
@@ -224,40 +224,91 @@ describe("specDataRows", () => {
   })
 })
 
-describe("specReachesOutward", () => {
+describe("specViolatesContract", () => {
   it("allows a data-closed spec", () => {
-    expect(specReachesOutward(SPEC)).toBe(false)
-    expect(specReachesOutward({ datasets: { a: [{ v: 1 }] } })).toBe(false)
+    expect(specViolatesContract(SPEC)).toBe(false)
+    expect(specViolatesContract({ datasets: { a: [{ v: 1 }] } })).toBe(false)
   })
 
-  it("is not the gate for usermeta — that is stripped, not detected", () => {
-    // Documented so nobody later "fixes" the guard to cover usermeta and
-    // deletes the strip. A JSON-Patch hides its URL in a VALUE, so no
-    // key-based check can see it.
+  it("is not the gate for usermeta or config — those are STRIPPED, not detected", () => {
+    // Documented so nobody later "fixes" the guard to cover them and deletes
+    // the strip. A JSON-Patch hides its URL in a VALUE, so no key-based check
+    // can see it; and rejecting would kill legitimate altair specs.
     expect(
-      specReachesOutward({ mark: "bar", usermeta: { embedOptions: { ast: false } } }),
+      specViolatesContract({ mark: "bar", usermeta: { embedOptions: { ast: false } } }),
     ).toBe(false)
+    expect(specViolatesContract({ mark: "bar", config: { background: "#ff0000" } })).toBe(false)
   })
 
   it("rejects remote data in `data.url`", () => {
-    expect(specReachesOutward({ data: { url: "http://x" } })).toBe(true)
-    expect(specReachesOutward({ layer: [{ data: { url: "http://x" } }] })).toBe(true)
+    expect(specViolatesContract({ data: { url: "http://x" } })).toBe(true)
+    expect(specViolatesContract({ layer: [{ data: { url: "http://x" } }] })).toBe(true)
   })
 
   it("does not walk `datasets` payloads — those are rows, not references", () => {
     // Vega-Lite compiles `datasets` entries to inline `values`; they never
     // fetch. A "top referrer URLs" chart legitimately has a `url` COLUMN.
-    expect(specReachesOutward({ datasets: { top: [{ url: "https://a.test", hits: 4 }] } })).toBe(
+    expect(specViolatesContract({ datasets: { top: [{ url: "https://a.test", hits: 4 }] } })).toBe(
       false,
     )
-    expect(specReachesOutward({ datasets: { a: { url: "http://x" } } })).toBe(false)
+    expect(
+      specViolatesContract({ mark: "bar", data: { values: [{ url: "https://a.test" }] } }),
+    ).toBe(false)
+  })
+
+  it("rejects a malformed inline payload — the shape check earns the skip", () => {
+    // The walk skips the CONTENTS of `values`/`datasets` so a `url` column is
+    // not a false positive. That skip is only safe because the payload is
+    // known to be an array of rows. Without this check,
+    // `{"data":{"values":{"url":"…"}}}` walks straight past the guard.
+    expect(specViolatesContract({ data: { values: { url: "https://evil.test/x.json" } } })).toBe(
+      true,
+    )
+    expect(specViolatesContract({ data: { values: "not-an-array" } })).toBe(true)
+    expect(specViolatesContract({ datasets: { a: { url: "http://x" } } })).toBe(true)
+    expect(specViolatesContract({ datasets: { a: "nope" } })).toBe(true)
+    // Empty is a legitimate shape.
+    expect(specViolatesContract({ data: { values: [] } })).toBe(false)
+  })
+
+  it("rejects `params` — sliders and brushes nobody designed, in a PRD panel", () => {
+    // Inert on the server, NOT here: vega-embed renders a real
+    // <input type="range"> into the panel, and `select` wires live brush /
+    // pan / zoom onto the chart. The backend rejects this specifically so
+    // this renderer can collect on it.
+    expect(
+      specViolatesContract({
+        mark: "bar",
+        params: [{ name: "s", value: 5, bind: { input: "range", min: 0, max: 10 } }],
+      }),
+    ).toBe(true)
+    expect(specViolatesContract({ mark: "point", params: [{ name: "p", select: "interval" }] })).toBe(
+      true,
+    )
+    expect(
+      specViolatesContract({
+        layer: [{ mark: "point", params: [{ name: "g", select: "interval", bind: "scales" }] }],
+      }),
+    ).toBe(true)
+  })
+
+  it("rejects `expr` value refs — a client/server divergence, not a hole", () => {
+    // Sandboxed here by `ast: true` + the interpreter, so this is not a
+    // security gap. It is refused because the backend refuses it: the server
+    // would reject the spec while the browser drew it.
+    expect(
+      specViolatesContract({ mark: { type: "bar", width: { expr: "width/3" } } }),
+    ).toBe(true)
+    expect(
+      specViolatesContract({ mark: "bar", encoding: { y: { value: { expr: "height" } } } }),
+    ).toBe(true)
   })
 
   it("rejects an image mark — a tracking pixel served from our own origin", () => {
-    expect(specReachesOutward({ mark: "image" })).toBe(true)
-    expect(specReachesOutward({ mark: { type: "image" } })).toBe(true)
+    expect(specViolatesContract({ mark: "image" })).toBe(true)
+    expect(specViolatesContract({ mark: { type: "image" } })).toBe(true)
     expect(
-      specReachesOutward({
+      specViolatesContract({
         mark: { type: "image" },
         encoding: { url: { value: "https://evil.test/px.gif" } },
       }),
@@ -266,28 +317,28 @@ describe("specReachesOutward", () => {
 
   it("rejects an href encoding — a real <a> in our own trusted DOM", () => {
     expect(
-      specReachesOutward({ mark: "bar", encoding: { href: { value: "https://evil.test" } } }),
+      specViolatesContract({ mark: "bar", encoding: { href: { value: "https://evil.test" } } }),
     ).toBe(true)
-    expect(specReachesOutward({ mark: { type: "bar", href: "https://evil.test" } })).toBe(true)
+    expect(specViolatesContract({ mark: { type: "bar", href: "https://evil.test" } })).toBe(true)
   })
 
   it("rejects an href buried under layer / concat / facet `spec`", () => {
     expect(
-      specReachesOutward({
+      specViolatesContract({
         layer: [{ mark: "bar" }, { mark: "text", encoding: { href: { field: "u" } } }],
       }),
     ).toBe(true)
     expect(
-      specReachesOutward({ vconcat: [{ hconcat: [{ encoding: { href: { field: "u" } } }] }] }),
+      specViolatesContract({ vconcat: [{ hconcat: [{ encoding: { href: { field: "u" } } }] }] }),
     ).toBe(true)
     expect(
-      specReachesOutward({ facet: { field: "g" }, spec: { mark: "image" } }),
+      specViolatesContract({ facet: { field: "g" }, spec: { mark: "image" } }),
     ).toBe(true)
   })
 
   it("does not mistake a data COLUMN named url/href for an outbound reference", () => {
     expect(
-      specReachesOutward({
+      specViolatesContract({
         mark: "bar",
         data: { values: [{ url: "not-a-fetch", href: "also-not" }] },
       }),
@@ -297,7 +348,7 @@ describe("specReachesOutward", () => {
   it("refuses a spec too deep to vet rather than passing it through", () => {
     let deep: Record<string, unknown> = { mark: "bar" }
     for (let i = 0; i < 200; i++) deep = { layer: [deep] }
-    expect(specReachesOutward(deep)).toBe(true)
+    expect(specViolatesContract(deep)).toBe(true)
   })
 
   it("does not refuse a deep-but-legitimate spec (cap agrees with Phase 0)", () => {
@@ -306,7 +357,7 @@ describe("specReachesOutward", () => {
     // trips here would have the browser degrade a chart the server renders.
     let nested: Record<string, unknown> = { mark: "bar", data: { values: [{ a: 1 }] } }
     for (let i = 0; i < 20; i++) nested = { layer: [nested] }
-    expect(specReachesOutward(nested)).toBe(false)
+    expect(specViolatesContract(nested)).toBe(false)
   })
 })
 
@@ -334,8 +385,9 @@ describe("resolveChartSpec — the Phase 0 envelope", () => {
 
   it("leaves a spec that inlines its own rows alone when the envelope is empty", () => {
     // Mirrors `spec.py`'s `if self.data:` carve-out. `ChartSpec.data` defaults
-    // to `[]` and Phase 1's DS sandbox writes altair `*.vl.json` that ALWAYS
-    // inlines `data.values`, so `{spec: <inlines rows>, data: []}` is routine.
+    // to `[]` and Phase 1's DS sandbox writes altair `*.vl.json` that carries
+    // its own rows (inline, or via a named `datasets` reference — altair's
+    // default), so `{spec: <carries rows>, data: []}` is routine.
     // Injecting unconditionally would blank every one of those charts in the
     // browser while the server drew them correctly.
     const inner = { mark: "bar", data: { values: [{ z: 9 }] } }
@@ -369,10 +421,25 @@ describe("resolveChartSpec — the Phase 0 envelope", () => {
     expect(
       resolveChartSpec({ mark: "bar", data: { sequence: { start: 0, stop: 10 } } }).drawable,
     ).toBe(true)
-    expect(
-      resolveChartSpec({ mark: "bar", data: { name: "a" }, datasets: { a: [{ v: 1 }] } }).drawable,
-    ).toBe(true)
+    // A named reference now RESOLVES, so this is drawable because we can see
+    // the rows — not merely because we cannot.
+    const named = resolveChartSpec({
+      mark: "bar",
+      data: { name: "a" },
+      datasets: { a: [{ v: 1 }] },
+    })
+    expect(named.drawable).toBe(true)
+    expect(named.rows).toEqual([{ v: 1 }])
     expect(resolveChartSpec(SPEC).drawable).toBe(true)
+  })
+
+  it("strips top-level `config` so a spec cannot repaint itself out of the theme", () => {
+    // A spec's own `config` WINS over the config we pass, so this would
+    // repaint the chart red inside a Sprntly panel.
+    const loud = { mark: "bar", data: { values: [{ a: 1 }] }, config: { background: "#ff0000" } }
+    expect(resolveChartSpec(loud).vlSpec).not.toHaveProperty("config")
+    expect(resolveChartSpec(loud).drawable).toBe(true)
+    expect(resolveChartSpec({ spec: loud, data: [{ a: 1 }] }).vlSpec).not.toHaveProperty("config")
   })
 
   it("strips `usermeta` so a spec cannot hand itself embed options", () => {
