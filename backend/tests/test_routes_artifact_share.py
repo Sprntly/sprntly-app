@@ -276,3 +276,293 @@ def test_blocked_response_never_contains_artifact_title(isolated_settings, monke
     assert body["outcome"] == "blocked"
     assert "title" not in body
     assert "Secret PRD Title" not in str(body)
+
+
+# ── Join (AC9-13, AC17-adjacent attribution) ─────────────────────────────
+
+
+def test_join_denies_blocked_outcome_with_no_writes(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    other_company = seed_company(user_id="other-" + uuid.uuid4().hex[:8], slug="rival10")
+    from app.db.artifact_shares import mint_share
+    from app.db.client import require_client
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=other_company,
+        owner_workspace_id="ws-1", created_by_user_id="creator",
+    )
+
+    r = ctx.client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r.status_code == 403
+    assert require_client().table("artifact_share_joins").select("*").execute().data == []
+    other_members = (
+        require_client().table("company_members").select("user_id")
+        .eq("company_id", other_company).execute().data
+    )
+    assert ctx.user_id not in [m["user_id"] for m in other_members]
+    ws_members = require_client().table("workspace_members").select("user_id").execute().data
+    assert ctx.user_id not in [m["user_id"] for m in ws_members]
+
+
+def test_join_fresh_signup_creates_company_and_workspace_membership(isolated_settings, monkeypatch):
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme11")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme11.com"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme11.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r = client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["workspace_id"]
+
+    members = (
+        require_client().table("company_members").select("*")
+        .eq("company_id", company_id).eq("user_id", fresh_user).execute().data
+    )
+    assert len(members) == 1
+    assert members[0]["role"] == "member"
+
+    ws_members = (
+        require_client().table("workspace_members").select("*")
+        .eq("user_id", fresh_user).execute().data
+    )
+    assert len(ws_members) == 1
+    assert ws_members[0]["role"] == "member"
+    assert ws_members[0]["workspace_id"] == body["workspace_id"]
+
+    joins = (
+        require_client().table("artifact_share_joins").select("*")
+        .eq("joined_user_id", fresh_user).execute().data
+    )
+    assert len(joins) == 1
+
+
+def test_join_same_company_different_workspace_creates_workspace_membership_only(
+    isolated_settings, monkeypatch
+):
+    ctx = company_client(monkeypatch)
+    ws2 = ctx.client.post("/v1/workspaces", json={"name": "Notifications"}).json()
+    from app.db.artifact_shares import mint_share
+    from app.db.client import require_client
+
+    before_members = (
+        require_client().table("company_members").select("*")
+        .eq("company_id", ctx.company_id).execute().data
+    )
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=ctx.company_id,
+        owner_workspace_id=ws2["id"], created_by_user_id=ctx.user_id,
+    )
+
+    r = ctx.client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["workspace_id"] == ws2["id"]
+
+    after_members = (
+        require_client().table("company_members").select("*")
+        .eq("company_id", ctx.company_id).execute().data
+    )
+    assert len(after_members) == len(before_members)  # no NEW company_members row
+
+    ws_members = (
+        require_client().table("workspace_members").select("*")
+        .eq("workspace_id", ws2["id"]).eq("user_id", ctx.user_id).execute().data
+    )
+    assert len(ws_members) == 1
+    assert ws_members[0]["role"] == "member"
+
+
+def test_join_idempotent_on_repeat_call(isolated_settings, monkeypatch):
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme12")
+    from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme12.com"}
+    ).execute()
+    # A REAL workspace (not a fabricated id): the second /join call resolves
+    # this user as same-company (post-first-join) and re-grants into this
+    # exact workspace — must be a genuine row or the FK on workspace_members
+    # would reject it.
+    default_ws = ensure_default_workspace(company_id)
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme12.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r1 = client.post(f"/v1/artifact-share/{share['token']}/join")
+    r2 = client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    joins = (
+        require_client().table("artifact_share_joins").select("*")
+        .eq("joined_user_id", fresh_user).execute().data
+    )
+    assert len(joins) == 1
+
+
+def test_join_invalidates_membership_cache(isolated_settings, monkeypatch):
+    """AC13, mutation-proof: spies on the real `invalidate_user` (never a
+    stub) to prove /join actually calls it, AND directly asserts the cache
+    no longer returns the pre-join empty membership list — no sleep/TTL
+    wait."""
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme13")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme13.com"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme13.com"}
+    ).execute()
+
+    from app.db.companies import memberships_for_user
+
+    # Warm-probe pre-join (empty — never actually cached per authcache's own
+    # "never cache empty" invariant, but this mirrors the ticket's own
+    # described sequence).
+    assert memberships_for_user(fresh_user) == []
+
+    import app.db.authcache as authcache_mod
+
+    real_invalidate_user = authcache_mod.invalidate_user
+    calls: list[str] = []
+
+    def _spy(user_id: str) -> None:
+        calls.append(user_id)
+        real_invalidate_user(user_id)
+
+    monkeypatch.setattr(authcache_mod, "invalidate_user", _spy)
+
+    client = _bare_client(monkeypatch, fresh_user)
+    r = client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r.status_code == 200
+    assert fresh_user in calls  # invalidate_user was actually invoked, not merely coincidentally cold
+    assert memberships_for_user(fresh_user) != []  # resolves the NEW membership immediately
+
+
+def test_join_records_attribution_row(isolated_settings, monkeypatch):
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme14")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme14.com", "first_name": "Cre", "last_name": "Ator"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme14.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r = client.post(f"/v1/artifact-share/{share['token']}/join")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sharer_name"] == "Cre Ator"
+
+    joins = (
+        require_client().table("artifact_share_joins").select("*")
+        .eq("joined_user_id", fresh_user).execute().data
+    )
+    assert len(joins) == 1
+    joined_row = joins[0]
+    assert joined_row["share_id"] == share["id"]
+    assert joined_row["joined_user_id"] == fresh_user
+    assert joined_row["joined_company_id"] == company_id
+    assert joined_row["joined_workspace_id"] == body["workspace_id"]
+
+
+# ── Content (AC14, AC15) ──────────────────────────────────────────────────
+
+
+def test_content_endpoint_reads_across_workspace_boundary(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    prd_id = _seed_prd(db, "acme", title="Cross-workspace PRD")
+
+    ws2 = ctx.client.post("/v1/workspaces", json={"name": "Notifications"}).json()
+
+    # A PLAIN member whose only workspace_members row is on ws2 — NOT the
+    # default workspace the artifact actually lives in.
+    from app.db.client import require_client
+    from app.db.workspaces import upsert_workspace_member
+
+    member_id = "member-" + uuid.uuid4().hex[:8]
+    require_client().table("company_members").insert(
+        {"id": uuid.uuid4().hex, "company_id": ctx.company_id, "user_id": member_id, "role": "member"}
+    ).execute()
+    upsert_workspace_member(ws2["id"], member_id, "member")
+
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=prd_id, owner_company_id=ctx.company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=ctx.user_id,
+    )
+
+    r = ctx.client.get(
+        f"/v1/artifact-share/{share['token']}/content", headers=supabase_bearer(member_id)
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["prd"]["title"] == "Cross-workspace PRD"
+
+
+def test_content_endpoint_denies_blocked_caller(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    other_company = seed_company(user_id="other-" + uuid.uuid4().hex[:8], slug="rival15")
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=other_company,
+        owner_workspace_id="ws-1", created_by_user_id="creator",
+    )
+
+    r = ctx.client.get(f"/v1/artifact-share/{share['token']}/content")
+
+    assert r.status_code == 404

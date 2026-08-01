@@ -153,3 +153,51 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
         "owning_company_name": display_name_for_company_id(share["owner_company_id"]),
         "same_company": same_company,
     }
+
+
+@retry_on_disconnect
+def record_join(
+    *, share_id: int, joined_user_id: str, joined_company_id: str, joined_workspace_id: str
+) -> None:
+    """Attribution row for a completed /join. Idempotent: a repeat join for
+    an already-joined user is a no-op-success — the unique(share_id,
+    joined_user_id) constraint makes a double-click never error."""
+    client = require_client()
+    try:
+        client.table("artifact_share_joins").insert(
+            {
+                "share_id": share_id,
+                "joined_user_id": joined_user_id,
+                "joined_company_id": joined_company_id,
+                "joined_workspace_id": joined_workspace_id,
+            }
+        ).execute()
+    except Exception:  # noqa: BLE001 — unique-violation on a repeat join is success
+        pass
+
+
+def require_shared_prd(prd_id: int, owner_company_id: str) -> dict:
+    """Like `app.deps.ownership.require_owned_prd` but COMPANY-scoped only —
+    no workspace check. This is the deliberate guest-read exception this
+    ticket's share-grant exists to provide (a same-company-different-
+    workspace guest may read a PRD outside any workspace they are a formal
+    member of). Callers MUST have already proven the grant via
+    `resolve_share_access`'s `guest_view` outcome; this function performs NO
+    grant check itself — 404 (never 403) on a missing/foreign PRD, matching
+    require_owned_prd's non-disclosure convention."""
+    from fastapi import HTTPException
+
+    from app.db import get_brief_by_id
+    from app.db.prds import get_prd
+    from app.deps.ownership import company_id_for_dataset
+
+    prd = get_prd(prd_id)
+    if not prd:
+        raise HTTPException(status_code=404, detail="PRD not found")
+    brief = get_brief_by_id(prd["brief_id"])
+    if not brief:
+        raise HTTPException(status_code=404, detail="PRD not found")
+    owner = company_id_for_dataset(brief.get("dataset") or "")
+    if owner is None or owner != owner_company_id:
+        raise HTTPException(status_code=404, detail="PRD not found")
+    return prd

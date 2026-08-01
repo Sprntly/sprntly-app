@@ -254,3 +254,25 @@ def test_migration_is_idempotent_by_construction():
     assert creates, "migration defines no CREATE statements"
     for kind, guard in creates:
         assert guard, f"CREATE {kind} without IF NOT EXISTS in the new migration"
+
+
+# ── require_shared_prd (company-scoped, not workspace-scoped) ────────────
+
+
+def test_require_shared_prd_denies_different_company(isolated_settings):
+    from app.db import save_brief, start_prd
+    from app.db.artifact_shares import require_shared_prd
+
+    owner_company = _seed_company_row("acme10")
+    brief_id = save_brief("acme10", "W", {"insights": []}, schema_version=1)
+    prd_id = start_prd(
+        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v2"
+    )
+
+    # Owner resolves.
+    assert require_shared_prd(prd_id, owner_company)["id"] == prd_id
+
+    # Foreign company -> 404 (no workspace involved at all — company-scoped only).
+    with pytest.raises(Exception) as ei:
+        require_shared_prd(prd_id, "some-other-company")
+    assert getattr(ei.value, "status_code", None) == 404
