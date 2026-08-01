@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # accumulating the streamed text into the same return value. Behavior for all
 # other skills/callers is unchanged.
 _LONG_OUTPUT_SKILLS = frozenset(
-    {"prd-author", "implementation-spec", "evidence-brief"}
+    {"prd-author", "implementation-spec", "evidence-brief", "ideation-prioritize"}
 )
 
 
