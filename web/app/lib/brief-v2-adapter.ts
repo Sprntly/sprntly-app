@@ -18,9 +18,11 @@ import type {
   BriefTagType,
   PrdChartDatum,
   PrdChartKind,
+  VegaLiteSpec,
 } from "../types/content"
 import type { Brief, BriefSkillCta, BriefSkillType, ChartHint, Insight } from "./api"
 import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
+import { extractSpec } from "./chart-adapter"
 
 // ---- Types ----------------------------------------------------------------
 
@@ -37,6 +39,8 @@ export interface BriefV2InlineChart {
   title: string
   subtitle?: string
   data: PrdChartDatum[]
+  /** Optional Vega-Lite v6 spec; additive, takes precedence when present. */
+  spec?: VegaLiteSpec
 }
 
 export interface BriefV2Quote {
@@ -309,6 +313,9 @@ function statTilesFor(insight: Insight, accent: BriefActionAccent): BriefV2StatT
 
 function toInlineChart(h: ChartHint): BriefV2InlineChart {
   const kind = String(h.kind || "bar").toLowerCase() as PrdChartKind
+  // `spec` is additive — a hint that carries one renders through Vega, a hint
+  // that doesn't keeps the existing `kind`/`data` rendering unchanged.
+  const spec = extractSpec(h.spec)
   return {
     kind,
     title: h.title || "",
@@ -317,6 +324,7 @@ function toInlineChart(h: ChartHint): BriefV2InlineChart {
       label: d.label,
       value: typeof d.value === "number" ? d.value : Number(d.value) || 0,
     })),
+    ...(spec ? { spec } : {}),
   }
 }
 

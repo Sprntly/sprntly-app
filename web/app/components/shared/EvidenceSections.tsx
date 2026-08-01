@@ -76,6 +76,7 @@ function RenderBlock({ block }: { block: PrdSection }) {
           title={block.title}
           subtitle={block.subtitle}
           data={block.data}
+          spec={block.spec}
         />
       )
     case "v2-hero":

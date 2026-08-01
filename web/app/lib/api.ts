@@ -6,6 +6,7 @@
  * wrappers expose `company` to the rest of the app and translate at the
  * request/response boundary.
  */
+import type { VegaLiteSpec } from "../types/content"
 
 // Default to the deployed backend so `npm run dev` works out of the box
 // without a local FastAPI. To run against a local backend, set
@@ -150,6 +151,9 @@ export type ChartHint = {
   kind: "bar" | "line" | "stat"
   title: string
   data: { label: string; value: number }[]
+  /** Optional Vega-Lite v6 spec (additive — hints without one keep rendering
+   *  through the legacy `kind`/`data` path). */
+  spec?: VegaLiteSpec
 }
 /** The top-insights skill's closed type taxonomy (drives accent + the category
  *  pill). See backend/skills/top-insights/SKILL.md step 3. */

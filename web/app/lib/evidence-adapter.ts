@@ -22,6 +22,7 @@ import type {
   PrdSection,
   PrdContent,
 } from "../types/content"
+import { extractSpec } from "./chart-adapter"
 import { looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
 
 const HEADING_RULE = /^─+$/
@@ -77,11 +78,21 @@ function tryParseJson(body: string): unknown | null {
 
 /* ---------- chart parsing (shape-compatible with prd-adapter) ---------- */
 
+// NOTE (dedupe, deliberately NOT done here): this function is a near-copy of
+// the one in prd-adapter.ts. Both were already duplicated before this
+// change; unifying them is a worthwhile refactor but it would widen a `web/`
+// diff that Alex owns and has to rebase. Filed separately — change both, keep
+// them in step.
 function buildChartSection(value: unknown): PrdSection | null {
   if (!value || typeof value !== "object") return null
   const obj = value as Record<string, unknown>
+  // `spec` is ADDITIVE: a block may carry a Vega-Lite spec instead of, or
+  // alongside, the legacy `{kind, data}` pair. Old blocks (no spec) parse
+  // exactly as before — stored artifacts must keep rendering forever.
+  const spec = extractSpec(obj.spec)
   const kindRaw = String(obj.kind || "").toLowerCase()
-  if (!CHART_KINDS.includes(kindRaw as PrdChartKind)) return null
+  const kindKnown = CHART_KINDS.includes(kindRaw as PrdChartKind)
+  if (!kindKnown && !spec) return null
   const dataRaw = Array.isArray(obj.data) ? (obj.data as unknown[]) : []
   const data: PrdChartDatum[] = dataRaw
     .map((d) => {
@@ -95,13 +106,15 @@ function buildChartSection(value: unknown): PrdSection | null {
       return { label, value }
     })
     .filter((d: PrdChartDatum | null): d is PrdChartDatum => d !== null)
-  if (data.length === 0) return null
+  // A spec carries its own rows; a legacy block with none is nothing to draw.
+  if (data.length === 0 && !spec) return null
   return {
     type: "chart",
-    kind: kindRaw as PrdChartKind,
+    kind: kindKnown ? (kindRaw as PrdChartKind) : "bar",
     title: typeof obj.title === "string" ? obj.title : undefined,
     subtitle: typeof obj.subtitle === "string" ? obj.subtitle : undefined,
     data,
+    ...(spec ? { spec } : {}),
   }
 }
 

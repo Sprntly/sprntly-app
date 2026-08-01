@@ -363,6 +363,8 @@ export interface DetailEvidenceSection {
     title?: string
     subtitle?: string
     data: PrdChartDatum[]
+    /** Optional Vega-Lite spec; takes precedence over `kind`/`data`. */
+    spec?: VegaLiteSpec
   }>
 }
 
@@ -395,6 +397,22 @@ export interface DetailState {
 export type PrdChartKind = "bar" | "line" | "pie" | "donut" | "stat" | "gauge"
 
 export type PrdChartDatum = { label: string; value: number | string }
+
+/**
+ * A Vega-Lite v6 specification, as JSON.
+ *
+ * PURELY ADDITIVE. `kind` + `data` remain the contract; every stored PRD and
+ * evidence document on disk holds old-format chart blocks and re-renders them
+ * every time a user opens the artifact, so that path is supported forever.
+ * Precedence at render time is: `spec` present → Vega renderer; otherwise →
+ * the `kind`/`data` adapter. A block may legitimately carry both, in which
+ * case `data` still feeds the expand-to-table disclosure.
+ *
+ * Deliberately loose: specs are produced by typed backend emitters (or, for
+ * exploratory one-offs, by a model) and validated against the Vega-Lite schema
+ * server-side. The renderer's contract is "draw it, or fall back to the table".
+ */
+export type VegaLiteSpec = Record<string, unknown>
 
 /** Evidence semantic-block section variants. Naming kept as `v2-*` for
  *  historical reasons; these are the canonical evidence block types (no
@@ -510,6 +528,10 @@ export type PrdSection =
       title?: string
       subtitle?: string
       data: PrdChartDatum[]
+      /** Optional Vega-Lite spec; takes precedence over `kind`/`data`. See
+       *  the `VegaLiteSpec` doc comment — old-format blocks (no `spec`) are
+       *  supported forever. */
+      spec?: VegaLiteSpec
     }
   // ---- Evidence variants ----
   | { type: "v2-hero"; cards: EvidenceV2HeroCard[] }

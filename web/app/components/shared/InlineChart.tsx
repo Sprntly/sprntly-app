@@ -1,7 +1,21 @@
 "use client"
 
-import type { PrdChartDatum, PrdChartKind } from "../../types/content"
+import type { PrdChartDatum, PrdChartKind, VegaLiteSpec } from "../../types/content"
+import {
+  chartDatumRows,
+  COMPILE_LEGACY_KINDS,
+  extractSpec,
+  kindToVegaLite,
+} from "../../lib/chart-adapter"
+import { ChartDataTable } from "./ChartDataTable"
+import { VegaChart } from "./VegaChart"
 
+/**
+ * The categorical palette. `backend/app/charts/theme.py` lifts this list
+ * verbatim into `backend/app/charts/theme.json`, which the client renderer reads
+ * directly — `app/lib/__tests__/chart-theme.test.ts` fails on any drift.
+ * Keep the order: the index IS the series colour.
+ */
 export const CHART_COLORS = [
   "#5B7FFF",
   "#6FCF97",
@@ -24,31 +38,108 @@ export function fmtVal(v: number | string): string {
   return typeof v === "string" ? v : String(v)
 }
 
+/**
+ * The one chart entry point for native-React surfaces.
+ *
+ * It is an ADAPTER over two renderers, not a renderer itself:
+ *
+ *   `spec` present            → `VegaChart` (Vega-Lite, dynamically imported)
+ *   otherwise, `kind`+`data`  → the DOM/SVG implementations below
+ *
+ * The second path is not deprecated and is not going away. Stored PRDs and
+ * evidence documents hold old-format `{kind, data}` blocks and re-render them
+ * every time someone opens the artifact; that contract is supported forever.
+ * `spec` is purely additive.
+ *
+ * A block may carry both — the spec draws, and `data` still backs the
+ * expand-to-table disclosure underneath it.
+ *
+ * NOTE ON SANDBOXED SURFACES: this component needs JavaScript once it takes
+ * the Vega path. Every model-authored HTML surface (`HtmlReportView`,
+ * `EvidenceHtmlBrief`, `PrdHtmlView`, `StreamingHtmlPreview`) renders in an
+ * iframe with `sandbox="allow-same-origin"` and NO `allow-scripts`, and those
+ * take an HTML *string*, never React children — so `InlineChart` can never end
+ * up inside one. Charts for those surfaces are server-rendered to static SVG
+ * by `backend/app/charts/render.py`. The sandbox is not to be loosened.
+ */
 export function InlineChart({
   kind,
   title,
   subtitle,
   data,
+  spec,
 }: {
   kind: PrdChartKind
   title?: string
   subtitle?: string
   data: PrdChartDatum[]
+  /** Vega-Lite v6 spec. Additive — when present it takes precedence. */
+  spec?: VegaLiteSpec
 }) {
+  // Precedence 1: an explicit spec always wins.
+  // Precedence 2: a compiled legacy kind — OFF today (COMPILE_LEGACY_KINDS).
+  // Each of the six kinds is a bespoke design Vega-Lite does not reproduce
+  // faithfully, and a pixel-regressed chart in a stored PRD is worse than an
+  // un-migrated one. The per-kind rationale lives in chart-adapter.ts.
+  const effectiveSpec =
+    spec && typeof spec === "object"
+      ? spec
+      : COMPILE_LEGACY_KINDS
+        ? kindToVegaLite(kind, data, { title })
+        : null
+
+  const hasLegacyData = Array.isArray(data) && data.length > 0
+
+  if (effectiveSpec) {
+    return (
+      <VegaChart
+        spec={effectiveSpec}
+        title={title}
+        subtitle={subtitle}
+        tableRows={hasLegacyData ? chartDatumRows(data) : undefined}
+        className={`prd-chart-${kind}`}
+        // While the vega chunk loads, show the DOM chart rather than a spinner
+        // — for a block that carries BOTH a spec and legacy data (and for every
+        // block if COMPILE_LEGACY_KINDS is ever flipped on) that keeps first
+        // paint identical to today and survives the chunk failing to load.
+        // A spec-only block has no DOM equivalent, so it gets the loading line.
+        pending={hasLegacyData ? <ChartBody kind={kind} data={data} /> : undefined}
+      />
+    )
+  }
+
   return (
     <figure className={`prd-chart prd-chart-${kind}`}>
       {title ? <figcaption className="prd-chart-title">{title}</figcaption> : null}
       {subtitle ? <div className="prd-chart-sub">{subtitle}</div> : null}
       <div className="prd-chart-body">
-        {kind === "bar" ? <BarChart data={data} /> : null}
-        {kind === "line" ? <LineChart data={data} /> : null}
-        {kind === "pie" ? <PieChart data={data} /> : null}
-        {kind === "donut" ? <PieChart data={data} donut /> : null}
-        {kind === "stat" ? <StatChart data={data} /> : null}
-        {kind === "gauge" ? <GaugeChart data={data} /> : null}
+        <ChartBody kind={kind} data={data} />
       </div>
+      {/* Provenance: the numbers behind the picture, one click away. */}
+      <ChartDataTable rows={chartDatumRows(data)} />
     </figure>
   )
+}
+
+/** The hand-rolled DOM/SVG renderers, dispatched by kind. Extracted so the
+ *  same markup can serve as `VegaChart`'s pending state. */
+function ChartBody({ kind, data }: { kind: PrdChartKind; data: PrdChartDatum[] }) {
+  switch (kind) {
+    case "bar":
+      return <BarChart data={data} />
+    case "line":
+      return <LineChart data={data} />
+    case "pie":
+      return <PieChart data={data} />
+    case "donut":
+      return <PieChart data={data} donut />
+    case "stat":
+      return <StatChart data={data} />
+    case "gauge":
+      return <GaugeChart data={data} />
+    default:
+      return null
+  }
 }
 
 function BarChart({ data }: { data: PrdChartDatum[] }) {
@@ -389,12 +480,21 @@ function GaugeChart({ data }: { data: PrdChartDatum[] }) {
 
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
 
-/** Parse a `chart` fenced-block body into props for InlineChart, or null. */
+/** Parse a `chart` fenced-block body into props for InlineChart, or null.
+ *
+ *  Accepts BOTH shapes:
+ *   - legacy  `{kind, title?, subtitle?, data: [{label, value}]}`
+ *   - additive `{spec: <vega-lite v5>, title?, subtitle?, kind?, data?}`
+ *
+ *  A spec-only block is valid: `kind` defaults to `bar` (it is unused on the
+ *  Vega path but keeps the block type total) and `data` may be empty, in which
+ *  case the table disclosure reads the rows off `spec.data.values`. */
 export function parseChartBody(body: string): {
   kind: PrdChartKind
   title?: string
   subtitle?: string
   data: PrdChartDatum[]
+  spec?: VegaLiteSpec
 } | null {
   const tryParse = (s: string): unknown => {
     try {
@@ -412,8 +512,12 @@ export function parseChartBody(body: string): {
   }
   if (!parsed || typeof parsed !== "object") return null
   const obj = parsed as Record<string, unknown>
-  const kind = String(obj.kind || "").toLowerCase() as PrdChartKind
-  if (!CHART_KINDS.includes(kind)) return null
+  const spec = extractSpec(obj.spec)
+  const kindRaw = String(obj.kind || "").toLowerCase() as PrdChartKind
+  // With a spec the block no longer needs a legacy kind; without one the kind
+  // is what selects the renderer, so an unknown kind is still a rejection.
+  if (!spec && !CHART_KINDS.includes(kindRaw)) return null
+  const kind: PrdChartKind = CHART_KINDS.includes(kindRaw) ? kindRaw : "bar"
   const dataRaw = (obj.data as unknown[]) || []
   if (!Array.isArray(dataRaw)) return null
   const data: PrdChartDatum[] = dataRaw
@@ -428,11 +532,14 @@ export function parseChartBody(body: string): {
       return { label, value }
     })
     .filter((d: PrdChartDatum | null): d is PrdChartDatum => d !== null)
-  if (data.length === 0) return null
+  // A spec-only block carries its rows inside the spec, so empty `data` is
+  // fine there. A legacy block with no usable rows is still nothing to draw.
+  if (data.length === 0 && !spec) return null
   return {
     kind,
     title: typeof obj.title === "string" ? obj.title : undefined,
     subtitle: typeof obj.subtitle === "string" ? obj.subtitle : undefined,
     data,
+    ...(spec ? { spec } : {}),
   }
 }
