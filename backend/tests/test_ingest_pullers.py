@@ -486,7 +486,7 @@ def test_runner_batches_and_aggregates(isolated_settings):
     facade = GraphFacade()
     seen_docs = []
     def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None,
-                     origin=None, provenance_extra=None):
+                     origin=None, provenance_extra=None, valid_at=None):
         seen_docs.append((doc_name, len(text), source_hint, origin,
                           provenance_extra))
         return {"signals": 2, "themes": 1, "skipped": 0}

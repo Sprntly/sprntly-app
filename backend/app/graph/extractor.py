@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 
 from app.graph.config_layers import resolve_config
 from app.graph.embeddings import embed_texts
@@ -84,6 +85,7 @@ def extract_document(
     # jsonb-shaped: str values in the connector paths, plus ints/None from the
     # roadmap path (roadmap_version, workspace_id).
     provenance_extra: dict[str, object] | None = None,
+    valid_at: datetime | None = None,
 ) -> dict:
     """Extract one document into the KG.
 
@@ -132,7 +134,18 @@ def extract_document(
     a prompt can be talked out of it.
 
     ``provenance_extra`` is merged into each signal's provenance verbatim
-    (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
+    (e.g. {"channel": "upload", "category": "voice"} for category uploads).
+
+    ``valid_at`` is WHEN THE FACT WAS TRUE IN THE WORLD — the meeting date, the
+    ticket's update time — as distinct from ``transaction_at``, when we learned
+    it (always now). Left None it falls back to now for both, which is the right
+    default for a document with no intrinsic event time but WRONG for anything
+    replayed from history: a 6-month-old call ingested today would otherwise
+    look like today's evidence, and every recency/trend question over it would
+    silently answer about the sync date instead of the conversation. Note the
+    knock-on: ``Signal.stale_after`` is derived from ``valid_at``, so a genuinely
+    old signal is born already stale — which is the point, not a bug. It stays
+    queryable as history without pushing stale evidence into a current brief."""
     if force_source_type and force_source_type not in SIGNAL_SOURCE_TYPES:
         raise ValueError(
             f"force_source_type={force_source_type!r} is not a valid "
@@ -213,6 +226,10 @@ def extract_document(
                         "prompt_version": PROMPT_VERSION,
                         **({"origin": origin} if origin else {}),
                         **(provenance_extra or {})},
+            # Bitemporal: valid_at = when it was true, transaction_at = when we
+            # learned it. Only valid_at is overridden; transaction_at keeps its
+            # now() default so "what did we know, and when" stays answerable.
+            **({"valid_at": valid_at} if valid_at else {}),
         )
         try:
             facade.write_signal(enterprise_id, signal)

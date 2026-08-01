@@ -106,3 +106,38 @@ def test_provenance_extra_merged_with_origin(facade):
     assert sig.provenance["origin"] == "connector"
     assert sig.provenance["channel"] == "upload"
     assert sig.provenance["category"] == "voice"
+
+
+def test_valid_at_records_when_the_fact_was_true(facade):
+    """A signal extracted from a 6-month-old call must be dated by the CALL, not
+    by the sync. valid_at = when it was true; transaction_at = when we learned
+    it, which stays now — the two must not collapse into one."""
+    from datetime import datetime, timezone
+
+    meeting = datetime(2026, 2, 14, 16, 25, tzinfo=timezone.utc)
+    _extract(facade, [_item("seeded fact", "customer_voice")], valid_at=meeting)
+
+    sig = next(iter(_signals(facade).values()))
+    assert sig.valid_at == meeting
+    assert sig.transaction_at > meeting, "ingest time must stay ingest time"
+
+
+def test_valid_at_defaults_to_now_when_absent(facade):
+    """Documents with no intrinsic event time are unchanged by the new param."""
+    from datetime import datetime, timedelta, timezone
+
+    _extract(facade, [_item("seeded fact", "customer_voice")])
+    sig = next(iter(_signals(facade).values()))
+    assert datetime.now(timezone.utc) - sig.valid_at < timedelta(minutes=5)
+
+
+def test_old_valid_at_makes_the_signal_born_stale(facade):
+    """stale_after derives from valid_at, so backfilled history does NOT get
+    presented as current evidence — it stays queryable without leaking into a
+    brief that asks for fresh signals."""
+    from datetime import datetime, timezone
+
+    _extract(facade, [_item("seeded fact", "customer_voice")],
+             valid_at=datetime(2026, 1, 5, tzinfo=timezone.utc))
+    sig = next(iter(_signals(facade).values()))
+    assert sig.stale_after < datetime.now(timezone.utc)

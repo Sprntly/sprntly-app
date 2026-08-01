@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 URL = "https://api.fireflies.ai/graphql"
 _TIMEOUT = 30
-_LIMIT = 25            # KG-ingest cap — most recent meetings, pilot-scale
+# KG-ingest ceiling per sync, across all pages. Was 25 ("pilot-scale"), which
+# silently became a permanent horizon rather than a page size — see pull().
+# The real cost guard is the ledger (unchanged records never reach the model),
+# so this only bounds ONE sync's fetch; a workspace's full history is reached
+# by the sync's `since` cursor over successive runs, not by one huge pull.
+_LIMIT = 500
 _PAGE_SIZE = 50        # Fireflies API max per transcripts query — paginate past it
 # On-demand digest cap — the safety ceiling across ALL pages, not a page size.
 # A busy quarter is ~150 calls; 300 leaves headroom while bounding a runaway
@@ -48,9 +53,11 @@ _DIGEST_LIMIT = 300
 _QUOTES_PER_CALL = 60
 
 # Distilled-only query (KG-ingest path) — no `sentences`, per §6.
+# `skip` is required for the same reason as the digest query: the KG sync is no
+# longer capped at one page.
 _QUERY = """
-query Transcripts($limit: Int, $fromDate: DateTime, $toDate: DateTime) {
-  transcripts(limit: $limit, fromDate: $fromDate, toDate: $toDate) {
+query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
+  transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
     id
     title
     date
@@ -157,6 +164,34 @@ def _post(api_key: str, query: str, variables: dict) -> list[dict]:
     return (body.get("data") or {}).get("transcripts", []) or []
 
 
+def _paginate(
+    api_key: str,
+    query: str,
+    *,
+    since: Optional[datetime],
+    until: Optional[datetime],
+    limit: int,
+) -> Iterator[dict]:
+    """Walk `transcripts` pages until the window is exhausted or `limit` is hit.
+
+    Mirrors fetch_calls' loop. A short page means the window is done; a page
+    that comes back empty also terminates, so a provider that ignores `skip`
+    can't spin this forever."""
+    fetched = 0
+    while fetched < limit:
+        page_size = min(_PAGE_SIZE, limit - fetched)
+        page = _post(api_key, query, {
+            "limit": page_size, "skip": fetched,
+            "fromDate": _iso(since), "toDate": _iso(until),
+        })
+        if not page:
+            return
+        yield from page
+        fetched += len(page)
+        if len(page) < page_size:
+            return
+
+
 def pull(
     api_key: str,
     *,
@@ -166,11 +201,14 @@ def pull(
 ) -> Iterator[RawRecord]:
     """KG-ingest pull: distilled summaries → RawRecords (no raw sentences, §6).
 
-    `since`/`until` scope the window (omit for "most recent `limit`"); the
-    weekly sync passes none and gets the historical default behaviour."""
-    for t in _post(api_key, _QUERY, {
-        "limit": limit, "fromDate": _iso(since), "toDate": _iso(until),
-    }):
+    `since`/`until` scope the window; `limit` is the ceiling across ALL pages,
+    not a page size — Fireflies caps a single `transcripts` query at 50, so a
+    limit above that MUST paginate with `skip` or it silently returns one page
+    and the caller believes it saw everything. That was the old bug: the sync
+    asked for the 25 most recent meetings and got exactly that, forever, so a
+    workspace with 485 calls had ~460 of them permanently invisible to the KG
+    no matter how often the sync ran."""
+    for t in _paginate(api_key, _QUERY, since=since, until=until, limit=limit):
         s = t.get("summary") or {}
         text_parts = []
         if s.get("overview"):
