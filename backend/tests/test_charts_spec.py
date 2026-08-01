@@ -17,7 +17,8 @@ from pydantic import ValidationError
 from app.charts.spec import (
     ALTAIR_SCHEMA_VERSION,
     count_rows,
-    primary_rows,
+    extract_rows,
+    total_row_payload,
     VEGA_LITE_SCHEMA_URL,
     VL_VERSION,
     ChartProvenance,
@@ -131,60 +132,130 @@ def test_to_payload_round_trips_through_json():
     assert ChartSpec.model_validate(payload).spec == chart.spec
 
 
-# ── where the rows live (the cross-implementation contract) ──────────────────
+# ── where the rows live (the cross-language contract) ────────────────────────
 
-ROW_COUNT_CONTRACT = json.loads(
-    (Path(__file__).parent / "fixtures" / "charts" / "row-count-contract.json").read_text(
-        encoding="utf-8"
-    )
+SHARED_ROW_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "web"
+    / "app"
+    / "lib"
+    / "__fixtures__"
+    / "chart-row-extraction.json"
 )
+"""The SAME file #985's `specDataRows` tests read.
+
+One fixture, two implementations, one definition — read at test time with
+`open()`, the mirror of `web/app/lib/__tests__/pipeline-contract.test.ts`
+reading `backend/data/`. No bundler is involved in either direction.
+
+It lives under `web/` only because #985 could not touch `backend/`; it is not
+web-owned. Relocating it to a neutral home is a follow-up for whoever can touch
+both trees in one PR.
+"""
 
 
-@pytest.mark.parametrize(
-    "case", ROW_COUNT_CONTRACT["cases"], ids=lambda c: c["name"]
-)
-def test_row_count_contract(case):
-    """The SAME cases the client renderer answers, from the SAME file.
+def _shared_cases():
+    if not SHARED_ROW_FIXTURE.exists():
+        return []
+    return json.loads(SHARED_ROW_FIXTURE.read_text(encoding="utf-8"))["cases"]
 
-    Both sides use this number for decisions the user sees — the server to
-    decide "empty, degrade to a table" and "over MAX_ROWS, refuse", the client
-    to decide whether to inject rows and offer expand-to-table. Two answers to
-    one question is a chart that reads "No data." in a report and draws fine in
-    the browser, from one stored object, with no error on either side.
+
+@pytest.mark.parametrize("case", _shared_cases(), ids=lambda c: c["name"])
+def test_row_extraction_contract(case):
+    """Every case in the shared fixture, answered by the backend implementation.
+
+    Both sides use this number for decisions a user sees — the server to decide
+    "empty, degrade to a table", the client to decide whether to inject rows and
+    offer expand-to-table. Two answers to one question is a chart that reads
+    "No data." in a report and draws fine in the browser, from one stored object,
+    with no error on either side. That is exactly what happened before this
+    fixture existed, in three different directions at once.
     """
-    assert count_rows(case["spec"]) == case["expected_rows"], case["why"]
+    assert count_rows(case["spec"]) == case["rowCount"]
 
 
-def test_the_contract_covers_the_shapes_that_actually_broke():
-    """Guard against the fixture being trimmed back to the easy cases."""
-    names = {case["name"] for case in ROW_COUNT_CONTRACT["cases"]}
-    assert {
-        "altair_named_dataset",
-        "layered_rows_per_layer",
-        "layered_root_named_dataset",
-        "named_dataset_referenced_twice",
-    } <= names
+def test_the_shared_fixture_is_actually_present():
+    """A silently-empty parametrize would make the contract vacuous.
+
+    Skips rather than fails only if the fixture is relocated out from under us —
+    in which case this repoints, it does not get deleted.
+    """
+    if not SHARED_ROW_FIXTURE.exists():  # pragma: no cover - relocation guard
+        pytest.skip(f"shared row fixture not at {SHARED_ROW_FIXTURE}")
+    cases = _shared_cases()
+    assert len(cases) >= 15
+    names = " ".join(case["name"] for case in cases)
+    assert "altair" in names and "layer" in names
 
 
-def test_primary_rows_picks_the_series_not_the_annotation():
-    """A layered chart has several row sets; the table wants the biggest."""
+# The three cases in that fixture that encode DECISIONS rather than examples.
+# Asserted separately so that if the fixture is ever trimmed, the decisions do
+# not silently stop being tested.
+
+def test_decision_inline_values_beat_a_named_reference_on_the_same_node():
     spec = {
-        "data": {"values": [{"a": 1}, {"a": 2}, {"a": 3}]},
+        "mark": "bar",
+        "data": {"name": "d", "values": [{"a": 1}, {"a": 2}]},
+        "datasets": {"d": [{"b": 9}]},
+    }
+    assert extract_rows(spec) == [{"a": 1}, {"a": 2}]
+
+
+def test_decision_first_container_that_yields_rows_wins():
+    """Not the largest, not the sum — the first. Document order decides."""
+    spec = {
         "layer": [
-            {"mark": "line"},
-            {"data": {"values": [{"at": "2026-01-15"}]}, "mark": "rule"},
+            {"mark": "line", "data": {"values": [{"a": 1}]}},
+            {"mark": "point", "data": {"values": [{"b": 1}, {"b": 2}]}},
+        ]
+    }
+    assert count_rows(spec) == 1
+
+
+def test_decision_non_object_array_elements_are_not_rows():
+    assert count_rows({"mark": "bar", "data": {"values": [1, 2, 3]}}) == 0
+    assert count_rows({"mark": "bar", "data": {"values": [1, {"a": 1}, "x"]}}) == 1
+
+
+# ── the cap asks a DIFFERENT question, on purpose ────────────────────────────
+
+def test_total_row_payload_sums_what_the_renderer_is_handed():
+    """The contract stops at the first container; the cap cannot afford to.
+
+    A two-layer spec of 100k rows each counts 100k under the shared definition
+    and hands the renderer 200k. `MAX_ROWS` is the only real defence (the
+    timeout bounds the wait, not the work), so it measures the payload.
+    """
+    spec = {
+        "layer": [
+            {"mark": "line", "data": {"values": [{"a": 1}]}},
+            {"mark": "point", "data": {"values": [{"b": 1}, {"b": 2}]}},
+        ]
+    }
+    assert count_rows(spec) == 1        # the contract
+    assert total_row_payload(spec) == 3  # what actually gets rendered
+
+
+def test_total_row_payload_counts_a_named_dataset_once():
+    spec = {
+        "datasets": {"d": [{"a": 1}, {"a": 2}, {"a": 3}]},
+        "layer": [
+            {"data": {"name": "d"}, "mark": "line"},
+            {"data": {"name": "d"}, "mark": "point"},
         ],
     }
-    assert primary_rows(spec) == [{"a": 1}, {"a": 2}, {"a": 3}]
+    assert total_row_payload(spec) == 3
 
 
-def test_primary_rows_resolves_a_named_dataset():
+def test_total_row_payload_counts_an_unreferenced_dataset():
+    """The renderer is handed it either way, so the cap must see it."""
     spec = {
-        "data": {"name": "d"},
-        "datasets": {"d": [{"a": 1}, {"a": 2}]},
         "mark": "bar",
+        "data": {"values": [{"a": 1}]},
+        "datasets": {"orphan": [{"b": 1}, {"b": 2}]},
     }
-    assert primary_rows(spec) == [{"a": 1}, {"a": 2}]
+    assert count_rows(spec) == 1
+    assert total_row_payload(spec) == 3
 
 
 # ── rule 1: data-closed ──────────────────────────────────────────────────────
@@ -255,6 +326,27 @@ def test_datasets_pointing_at_a_url_is_rejected():
         validate_vega_lite_spec(
             {**BASE, "datasets": {"d": {"url": "https://example.com/r.json"}}}
         )
+
+
+def test_datasets_are_rejected_on_SHAPE_not_on_the_url_key():
+    """Agreed with #985, which rejects the same shape.
+
+    The shape rule is the stronger one and it is what earns the right to skip
+    descending into row payloads during the security walk: if a `datasets` entry
+    must be an array of rows, then nothing that is not rows can hide there. The
+    `url`-key check would have caught only the case someone thought of.
+
+    A divergence here would be the bad kind — a spec that stores fine on one
+    side and refuses to render on the other.
+    """
+    for bad in (
+        {"url": "https://example.com/rows.json"},  # the fetch shape
+        "https://example.com/rows.json",           # a bare string
+        {"foo": 1},                                # an object that is not rows
+        42,                                        # not even close
+    ):
+        with pytest.raises(ChartSpecError, match="inline row arrays"):
+            validate_vega_lite_spec({**_with_data(BASE), "datasets": {"d": bad}})
 
 
 def test_datasets_must_be_inline_row_arrays():

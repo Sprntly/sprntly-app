@@ -59,7 +59,7 @@ import queue
 import threading
 from typing import Any, Callable, Sequence, TypeVar
 
-from app.charts.spec import VL_VERSION, ChartSpec, primary_rows
+from app.charts.spec import VL_VERSION, ChartSpec, extract_rows, total_row_payload
 from app.charts.theme import Mode, theme_config
 
 logger = logging.getLogger(__name__)
@@ -157,9 +157,9 @@ def _cell(value: Any) -> str:
 def _fallback_rows(chart: ChartSpec) -> list[dict[str, Any]]:
     """The rows to tabulate, from wherever they actually live.
 
-    The envelope's `data` when it has any, else `spec.primary_rows` — the SAME
-    resolution `row_count()` uses, so the gate and the fallback can never
-    disagree about whether a chart has rows.
+    The envelope's `data` when it has any, else `spec.extract_rows` — the SAME
+    resolution `row_count()` and the client's table view use, so the gate, the
+    fallback and the browser can never disagree about whether a chart has rows.
 
     Reading only `chart.data` printed "No data." over a chart that had plenty.
     Reading only the ROOT `data.values` did the same thing to the two shapes
@@ -168,7 +168,7 @@ def _fallback_rows(chart: ChartSpec) -> list[dict[str, Any]]:
     false claim about the analysis, and they break this module's promise that if
     the presentation fails the rows are still true.
     """
-    return chart.data if chart.data else primary_rows(chart.spec)
+    return chart.data if chart.data else extract_rows(chart.spec)
 
 
 def render_table_html(chart: ChartSpec) -> str:
@@ -234,16 +234,22 @@ def _render(
         # and it is indistinguishable from a render that silently lost its rows.
         # The table says the true thing in one line.
         raise ValueError("chart carries no rows")
-    rows = chart.row_count()
-    if rows > MAX_ROWS:
-        # `row_count()`, not `len(chart.data)`: an envelope with empty `data` and
-        # rows inlined in `spec["data"]["values"]` is a shape the contract
-        # explicitly blesses — and the one Phase 1's altair sandbox always
-        # produces. Measuring the envelope there measures 0, and the cap that is
-        # supposed to be the real defence (the timeout is not, see above) never
-        # fires: 200k rows went through at 7.4 s and 48.9 MB of SVG, dropped by
-        # MAX_SVG_BYTES only after all the work was done, with the GIL held.
-        raise ValueError(f"chart carries {rows} rows, over the {MAX_ROWS} cap")
+    payload = total_row_payload(chart.spec)
+    if payload > MAX_ROWS:
+        # `total_row_payload`, not `len(chart.data)` and not `row_count()`.
+        #
+        # `len(chart.data)` measured 0 on every spec-carried chart — including
+        # every altair one, which is the shape Phase 1 always produces — so the
+        # cap that is supposed to be the real defence (the timeout is not, see
+        # above) never fired: 200k rows went through at 7.4 s and 48.9 MB of SVG,
+        # dropped by MAX_SVG_BYTES only after all the work was done, GIL held.
+        #
+        # `row_count()` is the shared contract number, which answers "which rows
+        # represent this chart" and stops at the first container that yields any.
+        # That is the right answer for the empty gate and for the client's table,
+        # and the wrong one here: a two-layer spec of 100k rows each would count
+        # 100k and sail through while handing the renderer 200k.
+        raise ValueError(f"chart carries {payload} rows, over the {MAX_ROWS} cap")
 
     payload = json.dumps(chart.spec)
     config = theme_config(mode)
