@@ -12,8 +12,8 @@ import { VegaChart } from "./VegaChart"
 
 /**
  * The categorical palette. `backend/app/charts/theme.py` lifts this list
- * verbatim into `backend/app/charts/theme.json`, which the client renderer reads
- * directly — `app/lib/__tests__/chart-theme.test.ts` fails on any drift.
+ * verbatim, and `app/lib/chart-theme.json` mirrors it for the client renderer —
+ * `app/lib/__tests__/chart-theme.test.ts` fails on any drift between the two.
  * Keep the order: the index IS the series colour.
  */
 export const CHART_COLORS = [

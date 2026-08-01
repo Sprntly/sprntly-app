@@ -1,16 +1,19 @@
 /**
  * Theme drift guard.
  *
- * `backend/app/charts/theme.json` is the SINGLE theme file — Phase 0 owns and
- * regenerates it, and `app/lib/chart-theme.ts` imports it directly rather than
- * keeping a copy under `web/`. That leaves exactly one place the palette can
- * drift: `InlineChart.tsx`'s `CHART_COLORS`, which the DOM renderers still use
- * and which the theme was lifted from. Drift there is silent — a chart just
- * quietly comes out the wrong colour in a stored PRD. This test binds them.
+ * `app/lib/chart-theme.json` is the WEB-SIDE MIRROR of the backend chart theme
+ * (`backend/app/charts/theme.py`), and `app/lib/chart-theme.ts` imports THAT —
+ * not the backend file. See the comment in `chart-theme.ts` for why the mirror
+ * lives under `web/`; Phase 0 adds the test that regenerates and diffs it.
+ *
+ * So the palette lives in two places this test can see: the mirror, and
+ * `InlineChart.tsx`'s `CHART_COLORS`, which the DOM renderers still use and
+ * which the theme was lifted from. Drift is silent — a chart just quietly comes
+ * out the wrong colour in a stored PRD. This test binds them.
  *
  * If this fails, do NOT "fix" it by editing one side. Decide which palette is
- * correct, change both (theme.json and InlineChart.tsx), and say so in the PR —
- * it is a visual change to every existing artifact.
+ * correct, change all three (theme.py, chart-theme.json, InlineChart.tsx), and
+ * say so in the PR — it is a visual change to every existing artifact.
  */
 import { describe, expect, it } from "vitest"
 import { CHART_COLORS } from "../../components/shared/InlineChart"

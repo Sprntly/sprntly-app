@@ -17,8 +17,10 @@ vi.hoisted(() => {
 import {
   VegaChart,
   __resetVegaRuntimeForTests,
+  __vegaRuntimeLoadCount,
+  resolveChartSpec,
   specDataRows,
-  specFetchesRemoteData,
+  specReachesOutward,
 } from "../VegaChart"
 
 const embed = vi.fn()
@@ -108,7 +110,7 @@ describe("VegaChart", () => {
     warn.mockRestore()
   })
 
-  it("refuses a spec that would fetch remote data, and shows the table", async () => {
+  it("refuses a spec that reaches outward, and shows the table", async () => {
     const remote = { mark: "bar", data: { url: "https://example.test/rows.json" } }
     const { container } = render(
       <VegaChart spec={remote} tableRows={[{ label: "a", value: 1 }]} />,
@@ -119,20 +121,41 @@ describe("VegaChart", () => {
     expect(embed).not.toHaveBeenCalled()
   })
 
-  it("loads the vega runtime once for many charts on a page", async () => {
-    const importSpy = vi.fn()
+  it("fetches the vega runtime ONCE for many charts on a page", async () => {
+    expect(__vegaRuntimeLoadCount()).toBe(0)
     render(
       <>
         <VegaChart spec={SPEC} />
-        <VegaChart spec={{ ...SPEC }} />
-        <VegaChart spec={{ ...SPEC }} />
+        <VegaChart spec={{ ...SPEC, mark: "line" }} />
+        <VegaChart spec={{ ...SPEC, mark: "point" }} />
       </>,
     )
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(3))
-    // One cached module promise; three embeds against it. (The import itself
-    // is module-scoped, so the assertion that matters is that nothing threw
-    // and all three mounted.)
-    expect(importSpy).not.toHaveBeenCalled()
+    // Three charts, three embeds, ONE runtime fetch. The counter increments
+    // inside loadVegaRuntime's cache-miss branch, so this pins OUR module-scope
+    // cache rather than vitest's module registry.
+    expect(__vegaRuntimeLoadCount()).toBe(1)
+  })
+
+  it("does not re-embed when a caller rebuilds an identical spec object", async () => {
+    // AskReplyBody re-parses the ```chart fence on every simulated-stream tick,
+    // handing us a fresh object with identical contents ~30 times per answer.
+    const { rerender } = render(<VegaChart spec={{ ...SPEC }} />)
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1))
+    rerender(<VegaChart spec={{ ...SPEC }} />)
+    rerender(<VegaChart spec={{ ...SPEC }} />)
+    rerender(<VegaChart spec={{ ...SPEC }} />)
+    await Promise.resolve()
+    expect(embed).toHaveBeenCalledTimes(1)
+    expect(finalize).not.toHaveBeenCalled()
+  })
+
+  it("does re-embed when the spec actually changes", async () => {
+    const { rerender } = render(<VegaChart spec={{ ...SPEC }} />)
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1))
+    rerender(<VegaChart spec={{ ...SPEC, mark: "line" }} />)
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2))
+    expect(finalize).toHaveBeenCalled()
   })
 
   it("finalizes the view on unmount so nothing leaks", async () => {
@@ -150,7 +173,7 @@ describe("VegaChart", () => {
   })
 })
 
-describe("spec helpers", () => {
+describe("specDataRows", () => {
   it("pulls table rows off an inline data-closed spec", () => {
     expect(specDataRows(SPEC)).toEqual(SPEC.data.values)
     expect(specDataRows(null)).toEqual([])
@@ -158,10 +181,139 @@ describe("spec helpers", () => {
     expect(specDataRows({ data: { url: "x" } })).toEqual([])
   })
 
-  it("detects remote data in both `data.url` and `datasets`", () => {
-    expect(specFetchesRemoteData(SPEC)).toBe(false)
-    expect(specFetchesRemoteData({ data: { url: "http://x" } })).toBe(true)
-    expect(specFetchesRemoteData({ datasets: { a: { url: "http://x" } } })).toBe(true)
-    expect(specFetchesRemoteData({ datasets: { a: [{ v: 1 }] } })).toBe(false)
+  it("descends into a LAYERED spec whose data hangs off a layer", () => {
+    // The shape every Phase 4 statistical chart takes (ITS, DiD, K-M): the
+    // root carries no data at all.
+    const layered = {
+      layer: [
+        { mark: "line", data: { values: [{ t: 1, y: 5 }] } },
+        { mark: "rule", encoding: { x: { datum: 3 } } },
+      ],
+    }
+    expect(specDataRows(layered)).toEqual([{ t: 1, y: 5 }])
+  })
+
+  it("descends into concat / hconcat / vconcat / facet-style `spec`", () => {
+    const rows = [{ a: 1 }]
+    expect(specDataRows({ vconcat: [{ hconcat: [{ data: { values: rows } }] }] })).toEqual(rows)
+    expect(specDataRows({ concat: [{ data: { values: rows } }] })).toEqual(rows)
+    expect(specDataRows({ facet: { field: "g" }, spec: { data: { values: rows } } })).toEqual(rows)
+  })
+
+  it("survives a pathologically nested spec instead of blowing the stack", () => {
+    // specDataRows runs during RENDER, outside any try/catch — an unbounded
+    // recursion here is a RangeError thrown out of React's render phase, which
+    // takes the page down rather than degrading one chart.
+    let deep: Record<string, unknown> = { data: { values: [{ a: 1 }] } }
+    for (let i = 0; i < 50_000; i++) deep = { layer: [deep] }
+    expect(() => specDataRows(deep)).not.toThrow()
+    expect(specDataRows(deep)).toEqual([])
+  })
+})
+
+describe("specReachesOutward", () => {
+  it("allows a data-closed spec", () => {
+    expect(specReachesOutward(SPEC)).toBe(false)
+    expect(specReachesOutward({ datasets: { a: [{ v: 1 }] } })).toBe(false)
+  })
+
+  it("rejects remote data in `data.url` and `datasets`", () => {
+    expect(specReachesOutward({ data: { url: "http://x" } })).toBe(true)
+    expect(specReachesOutward({ datasets: { a: { url: "http://x" } } })).toBe(true)
+  })
+
+  it("rejects an image mark — a tracking pixel served from our own origin", () => {
+    expect(specReachesOutward({ mark: "image" })).toBe(true)
+    expect(specReachesOutward({ mark: { type: "image" } })).toBe(true)
+    expect(
+      specReachesOutward({
+        mark: { type: "image" },
+        encoding: { url: { value: "https://evil.test/px.gif" } },
+      }),
+    ).toBe(true)
+  })
+
+  it("rejects an href encoding — a real <a> in our own trusted DOM", () => {
+    expect(
+      specReachesOutward({ mark: "bar", encoding: { href: { value: "https://evil.test" } } }),
+    ).toBe(true)
+    expect(specReachesOutward({ mark: { type: "bar", href: "https://evil.test" } })).toBe(true)
+  })
+
+  it("rejects an href buried under layer / concat / facet `spec`", () => {
+    expect(
+      specReachesOutward({
+        layer: [{ mark: "bar" }, { mark: "text", encoding: { href: { field: "u" } } }],
+      }),
+    ).toBe(true)
+    expect(
+      specReachesOutward({ vconcat: [{ hconcat: [{ encoding: { href: { field: "u" } } }] }] }),
+    ).toBe(true)
+    expect(
+      specReachesOutward({ facet: { field: "g" }, spec: { mark: "image" } }),
+    ).toBe(true)
+  })
+
+  it("does not mistake a data COLUMN named url/href for an outbound reference", () => {
+    expect(
+      specReachesOutward({
+        mark: "bar",
+        data: { values: [{ url: "not-a-fetch", href: "also-not" }] },
+      }),
+    ).toBe(false)
+  })
+
+  it("refuses a spec too deep to vet rather than passing it through", () => {
+    let deep: Record<string, unknown> = { mark: "bar" }
+    for (let i = 0; i < 100; i++) deep = { layer: [deep] }
+    expect(specReachesOutward(deep)).toBe(true)
+  })
+})
+
+describe("resolveChartSpec — the Phase 0 envelope", () => {
+  const ROWS = [{ label: "a", value: 1 }, { label: "b", value: 2 }]
+
+  it("passes a bare Vega-Lite spec straight through", () => {
+    const out = resolveChartSpec(SPEC)
+    expect(out.vlSpec).toBe(SPEC)
+    expect(out.rows).toEqual(SPEC.data.values)
+  })
+
+  it("injects the envelope's rows into a data-free spec", () => {
+    // Without this the chart embeds cleanly, reaches `ready`, throws nothing —
+    // and draws a blank box with no table under it.
+    const out = resolveChartSpec({
+      spec: { mark: "bar", encoding: { x: { field: "label" } } },
+      data: ROWS,
+      title: "Envelope title",
+    })
+    expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual(ROWS)
+    expect(out.rows).toEqual(ROWS)
+    expect(out.title).toBe("Envelope title")
+  })
+
+  it("does not clobber data an inner spec already carries", () => {
+    const inner = { mark: "bar", data: { values: [{ z: 9 }] } }
+    const out = resolveChartSpec({ spec: inner, data: ROWS })
+    expect((out.vlSpec as { data: { values: unknown } }).data.values).toEqual([{ z: 9 }])
+  })
+
+  it("treats a facet/repeat spec as a real spec, not an envelope", () => {
+    const facet = { facet: { field: "g" }, spec: { mark: "bar", data: { values: ROWS } } }
+    const out = resolveChartSpec(facet)
+    expect(out.vlSpec).toBe(facet)
+    const repeat = { repeat: ["a", "b"], spec: { mark: "bar" } }
+    expect(resolveChartSpec(repeat).vlSpec).toBe(repeat)
+  })
+
+  it("carries subtitle and caption off the envelope", () => {
+    const out = resolveChartSpec({
+      spec: { mark: "bar" },
+      data: ROWS,
+      subtitle: "sub",
+      caption: "cap",
+    })
+    expect(out.subtitle).toBe("sub")
+    expect(out.caption).toBe("cap")
   })
 })

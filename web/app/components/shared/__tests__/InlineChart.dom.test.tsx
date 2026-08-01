@@ -8,7 +8,7 @@
  * and evidence documents hold exactly these blocks and re-render them on every
  * open; if this file goes red, artifacts customers already have break.
  */
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 // Classic JSX runtime (tsconfig `jsx: "preserve"`) needs a global React before
 // the component modules evaluate.
@@ -130,6 +130,33 @@ describe("InlineChart — additive spec path", () => {
     const { container } = render(<InlineChart kind="bar" data={DATA} spec={spec} />)
     const table = container.querySelector('[data-testid="chart-data-table"]')
     expect(table!.textContent).toContain("Checkout")
+  })
+})
+
+describe("InlineChart — Phase 0 envelope end to end", () => {
+  it("injects the envelope's rows so the chart is not blank", async () => {
+    // The backend contract is `{spec, data, ...}` with a data-FREE spec; the
+    // server renderer injects the rows before rendering and this client has to
+    // do the same. Without the injection vega embeds happily, reaches `ready`,
+    // throws nothing — and draws an empty box.
+    const envelope = {
+      spec: {
+        $schema: "https://vega.github.io/schema/vega-lite/v6.json",
+        mark: "bar",
+        encoding: { x: { field: "label" }, y: { field: "value" } },
+      },
+      data: [{ label: "Checkout", value: 42 }],
+      title: "From the envelope",
+    }
+    const { container } = render(<InlineChart kind="bar" data={[]} spec={envelope} />)
+    await waitFor(() => expect(embedSpy).toHaveBeenCalled())
+    const embedded = embedSpy.mock.calls[0][1] as { data?: { values?: unknown } }
+    expect(embedded.data?.values).toEqual([{ label: "Checkout", value: 42 }])
+    // Envelope title is shown, and the envelope rows back the table.
+    expect(container.textContent).toContain("From the envelope")
+    expect(container.querySelector('[data-testid="chart-data-table"]')?.textContent).toContain(
+      "Checkout",
+    )
   })
 })
 
