@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse, ReportSummary } from "../lib/api"
+import type { AskResponse, GeneratedStory, ReportSummary } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -721,6 +721,11 @@ export interface AppContentState {
   sidebarConvCount: number | null
   /** Override default AI chips per screen id; empty array = no chips */
   aiScreenChips: Partial<Record<string, string[]>>
+  /** A guest session's pre-fetched ticket set (GuestArtifactViewer populates
+   *  this directly from the artifact-share content endpoint) — the Tickets
+   *  tab renders these instead of calling storiesApi when useGuestSession()
+   *  is non-null. `null`/absent for every non-guest render. */
+  guestTickets?: GeneratedStory[] | null
 }
 
 export function isBriefEmpty(b: BriefState): boolean {

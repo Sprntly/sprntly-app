@@ -7,6 +7,7 @@ import { useAuth } from "../lib/auth"
 import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
 import { signupApi } from "../lib/api"
 import { publicPath } from "../lib/public-path"
+import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
 
@@ -29,6 +30,37 @@ function SignUpForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const prefillEmail = searchParams.get("email") ?? ""
+  const shareToken = searchParams.get("share")
+  const [shareMeta, setShareMeta] = useState<ArtifactShareMetadata | null>(null)
+
+  // Fetch once on mount — the entry gate already resolved this same token, but
+  // a direct /sign-up?share= visit (no EntryGateScreen hop) needs its own read.
+  // Best-effort: an invalid/expired token here just means no strip renders —
+  // sign-up itself is never blocked by it (ArtifactShareGate/postLoginPath own
+  // the actual deny after account creation).
+  useEffect(() => {
+    if (!shareToken) return
+    let cancelled = false
+    artifactShareApi
+      .getMetadata(shareToken)
+      .then((meta) => {
+        if (!cancelled) setShareMeta(meta)
+      })
+      .catch(() => {
+        /* no strip — not a sign-up blocker */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [shareToken])
+
+  const shareContext = shareMeta
+    ? {
+        title: shareMeta.title || "a document",
+        sharerName: shareMeta.sharer_name,
+        requiredDomain: shareMeta.required_email_domain,
+      }
+    : undefined
 
   // Two-step sign-up matching v4 pages 02 (credentials) + 03 (about you).
   // Everything is collected in React state across both steps; the single
@@ -118,6 +150,9 @@ function SignUpForm() {
         role,
         // The company/personal split is retired (v6) — every signup is company.
         accountType: "company",
+        // Persisted into user_metadata so postLoginPath() can resolve this
+        // share on ANY device/session, even one that never saw this tab.
+        ...(shareToken ? { pendingShareToken: shareToken } : {}),
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
@@ -125,7 +160,9 @@ function SignUpForm() {
         return
       }
       if (result === "confirm_email") {
-        router.replace(`/verify-email?email=${encodeURIComponent(email)}`)
+        const verifyParams = new URLSearchParams({ email })
+        if (shareToken) verifyParams.set("share", shareToken)
+        router.replace(`/verify-email?${verifyParams.toString()}`)
       } else {
         router.replace(await auth.postLoginPath())
       }
@@ -185,6 +222,7 @@ function SignUpForm() {
       onToggleShowPassword={() => setShowPassword((v) => !v)}
       onSubmit={(e) => void onStep1(e)}
       onGoogle={onGoogle}
+      shareContext={shareContext}
     />
   )
 }

@@ -92,6 +92,21 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).toContain("Email")
     expect(html).not.toContain("Work email")
   })
+
+  it("test_sign_up_step1_view_mounts_share_context_strip_when_present", () => {
+    const html = renderStep1({
+      shareContext: { title: "Q3 Retention PRD", sharerName: "Priya Shah", requiredDomain: "acme.com" },
+    })
+    expect(html).toContain("share-context-strip")
+    expect(html).toContain("Priya Shah")
+    expect(html).toContain("acme.com")
+  })
+
+  it("test_sign_up_step1_view_unchanged_without_share_context", () => {
+    const html = renderStep1()
+    expect(html).not.toContain("share-context-strip")
+    expect(html).not.toContain("sign-up-domain-hint")
+  })
 })
 
 describe("SignUpStep2View (v4 page 03 — about you)", () => {

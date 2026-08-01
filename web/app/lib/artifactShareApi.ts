@@ -1,7 +1,7 @@
 // Thin client for the artifact-share primitive's pre-auth/guest routes
 // (/v1/artifact-share/*), extracted to its own module rather than appended to
 // the already-large api.ts (kept file-scoped for this workstream's review).
-import { api } from "./api"
+import { api, type EvidenceRecord, type GeneratedStory, type PrdRecord } from "./api"
 
 export type ArtifactShareMetadata = {
   artifact_type: string
@@ -27,6 +27,18 @@ export type ArtifactShareJoinResult = {
   workspace_id: string
 }
 
+/** GET .../content's shape: the raw rendered PRD row, its evidence doc (when
+ *  one exists for this PRD's theme — null otherwise), and the persisted
+ *  ticket set (null when tickets were never generated). Mirrors the shapes
+ *  `prdApi.get`/`evidenceApi.get`/`storiesApi.getForPrd` already return —
+ *  GuestArtifactViewer maps this with the SAME adapters those callers use
+ *  (markdownToPrdState / markdownToEvidenceState), never a parallel parser. */
+export type ArtifactShareContentResponse = {
+  prd: PrdRecord
+  evidence: EvidenceRecord | null
+  tickets: { stories: GeneratedStory[] } | null
+}
+
 export const artifactShareApi = {
   getMetadata: (token: string) =>
     api.get<ArtifactShareMetadata>(`/v1/artifact-share/${encodeURIComponent(token)}`),
@@ -38,6 +50,10 @@ export const artifactShareApi = {
     api.post<ArtifactShareJoinResult>(
       `/v1/artifact-share/${encodeURIComponent(token)}/join`,
       {},
+    ),
+  content: (token: string) =>
+    api.get<ArtifactShareContentResponse>(
+      `/v1/artifact-share/${encodeURIComponent(token)}/content`,
     ),
 }
 

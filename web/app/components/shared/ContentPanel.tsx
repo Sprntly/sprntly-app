@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useGuestSession } from "../../context/GuestSessionContext"
+import { ShareContextStrip } from "./ShareContextStrip"
 import { EvidenceSections } from "./EvidenceSections"
 import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
@@ -79,14 +81,18 @@ function ShareMenu({
   prd,
   evidence,
   onToast,
+  disabledReason,
 }: {
   prd: PrdState | null
   evidence: PrdContent | null
   onToast: (title: string, sub: string) => void
+  /** Set (e.g. by a guest session) to force-disable the menu regardless of
+   *  `prd`, with a reason surfaced via title/aria-label. */
+  disabledReason?: string
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const enabled = !!prd
+  const enabled = !!prd && !disabledReason
   // An HTML PRD generated from a brief insight almost always has an Evidence
   // brief, so we offer the combined Evidence + PRD download. The evidence may
   // not be loaded into context yet (it's populated by the Evidence tab), so the
@@ -148,6 +154,8 @@ function ShareMenu({
         type="button"
         className="cpanel-action-btn"
         disabled={!enabled}
+        title={disabledReason}
+        aria-label={disabledReason ? `Share (${disabledReason})` : "Share"}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={(e) => { e.stopPropagation(); if (enabled) setOpen((o) => !o) }}
@@ -245,6 +253,7 @@ function useResolvePrd() {
 
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
+  const guestSession = useGuestSession()
   const { content } = useContent()
 
   const { mounted, phase } = useCpanelPhase(contentPanelTab != null)
@@ -490,6 +499,18 @@ export function ContentPanel() {
           aria-orientation="vertical"
           aria-label="Resize panel"
         />
+        {guestSession && (
+          <div style={{ padding: "10px 20px 0", display: "flex", alignItems: "center", gap: 10 }}>
+            <span className="cmdp-kbd" data-testid="cpanel-readonly-badge">READ-ONLY</span>
+            <div style={{ flex: 1 }}>
+              <ShareContextStrip
+                kind="drawer"
+                title={content.prd?.title ?? "Shared document"}
+                sharerName={guestSession.sharerName}
+              />
+            </div>
+          </div>
+        )}
         <div className="cpanel-head">
           <div>
             <div className="cpanel-tabs">
@@ -516,9 +537,15 @@ export function ContentPanel() {
           <div className="cpanel-head-actions">
             {/* The header Share menu exports the Evidence + PRD pair, so it has no
                 meaning on Reports — a report carries its OWN share/PDF actions,
-                on the open document (ReportsTab). */}
+                on the open document (ReportsTab). Force-disabled in guest mode —
+                a guest has no edit/export entitlement (AC15). */}
             {activeTab !== "reports" && (
-              <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
+              <ShareMenu
+                prd={content.prd}
+                evidence={content.evidence}
+                onToast={showToast}
+                disabledReason={guestSession ? "Sign in to a full workspace to share" : undefined}
+              />
             )}
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
@@ -537,9 +564,12 @@ export function ContentPanel() {
 
         {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.
             The PRD tab keeps its OWN footer (autosave + version history + the
-            tickets button), so the shared bar is only for Evidence and Tickets. */}
-        {activeTab === "evidence" && <EvidenceBottomBar />}
-        {activeTab === "tickets" && <TicketsBottomBar />}
+            tickets button), so the shared bar is only for Evidence and Tickets.
+            Hidden entirely in guest mode: both bars' "next step" actions are
+            mutation/generation triggers (Generate PRD, Generate Prototype) a
+            read-only guest is never entitled to fire. */}
+        {activeTab === "evidence" && !guestSession && <EvidenceBottomBar />}
+        {activeTab === "tickets" && !guestSession && <TicketsBottomBar />}
       </aside>
     </>
   )
@@ -630,6 +660,7 @@ let prdEvidenceLoadedKey: string | null = null
 function EvidenceTab() {
   const { expandAiPanel, setAIBarValue } = useNavigation()
   const { content, setContent } = useContent()
+  const guestSession = useGuestSession()
   const { detail, evidence, evidenceGenerating } = content
 
   // Local generation state — used only when coming from the brief/detail flow
@@ -677,6 +708,10 @@ function EvidenceTab() {
   // detail.meta loader above owns the generate-if-clicked-from-a-finding case.
   const prdMeta = content.prdMeta
   useEffect(() => {
+    // Guest evidence is already pre-populated in content.evidence by
+    // GuestArtifactViewer — this effect must never re-fetch via
+    // loadEvidenceByInsight for a guest session (AC11).
+    if (guestSession) return
     if (detail?.meta) return
     if (!prdMeta) return
     const key = `${prdMeta.briefId}:${prdMeta.insightIndex}`
@@ -700,7 +735,7 @@ function EvidenceTab() {
     return () => {
       cancelled = true
     }
-  }, [detail?.meta, prdMeta?.briefId, prdMeta?.insightIndex, evidence, setContent])
+  }, [guestSession, detail?.meta, prdMeta?.briefId, prdMeta?.insightIndex, evidence, setContent])
 
   // Explicit retry after a FAILED generation. force=true skips the backend's
   // failed-row short-circuit and its dedup, starting a genuinely fresh run —
@@ -835,12 +870,17 @@ function EvidenceTab() {
 // open the editable in-panel detail (TicketDetail) — the generated story is the
 // base, edits persist as overrides.
 function StoryRow({ story, index, onOpen, synced, tool }: {
-  story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
+  story: GeneratedStory; index: number; onOpen?: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
   const preview = story.user_story || story.body
   const excluded = story.lifecycle === "excluded"
   return (
-    <button type="button" className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`} onClick={onOpen}>
+    <button
+      type="button"
+      className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`}
+      onClick={onOpen}
+      disabled={!onOpen}
+    >
       <span className="tkv2-key">{`T-${index + 1}`}</span>
       <div className="tkv2-card-main">
         <div className="tkv2-card-title tkv2-rtitle">
@@ -930,6 +970,7 @@ export function relTime(iso: string | null | undefined): string {
 export function TicketsTab() {
   const { showToast } = useNavigation()
   const { content } = useContent()
+  const guestSession = useGuestSession()
   const router = useRouter()
   const prd = content.prd
   const prdId = prd?.prd_id ?? null
@@ -1020,6 +1061,15 @@ export function TicketsTab() {
   useEffect(() => {
     // A new PRD invalidates the open detail.
     setSelectedIndex(null)
+    // A guest session's ticket set is pre-fetched by GuestArtifactViewer into
+    // content.guestTickets — this effect must NEVER call storiesApi.generate/
+    // getJob/getForPrd for a guest (AC12): those are authed-gated (403/404)
+    // AND storiesApi.generate can kick off real, cost-incurring LLM ticket
+    // generation, which must never fire for an unentitled viewer.
+    if (guestSession) {
+      setGenState({ kind: "ready", stories: content.guestTickets ?? [] })
+      return
+    }
     if (prdId == null) {
       setGenState({ kind: "idle" })
       return
@@ -1144,7 +1194,7 @@ export function TicketsTab() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [prdId, regenNonce])
+  }, [prdId, regenNonce, guestSession, content.guestTickets])
 
   // ── Sync state: load per PRD, poll while a sync runs ─────────────────────
   // True while a push/registration flow is mid-flight (destination chosen but
@@ -1155,6 +1205,10 @@ export function TicketsTab() {
   // push flow refreshes itself once registration settles.
   const registeringRef = useRef(false)
   const refreshSync = useCallback(() => {
+    // Tracker sync state is authed-gated (same class of bug as the guarded
+    // effects above) and meaningless for a guest anyway — a guest can never
+    // reach the push/sync UI that would populate it (withheld above).
+    if (guestSession) return
     if (prdId == null) return
     storiesApi.getSyncState(prdId)
       .then((s) => {
@@ -1163,7 +1217,7 @@ export function TicketsTab() {
       })
       // Transient fetch failure must not downgrade a known-configured state.
       .catch(() => setSyncState((prev) => prev ?? { configured: false }))
-  }, [prdId])
+  }, [prdId, guestSession])
 
   useEffect(() => {
     setSyncState(null)
@@ -1215,6 +1269,8 @@ export function TicketsTab() {
   const [trackerMeta, setTrackerMeta] =
     useState<{ provider: TrackerProvider; meta: TrackerMeta } | null>(null)
   useEffect(() => {
+    // Same authed-gated class as refreshSync above — never fetch for a guest.
+    if (guestSession) { setTrackerMeta(null); return }
     if (prdId == null) { setTrackerMeta(null); return }
     let cancelled = false
     storiesApi.getTrackerMeta(prdId)
@@ -1226,7 +1282,7 @@ export function TicketsTab() {
     return () => { cancelled = true }
     // last_synced_at: every completed sync also re-pulled the vocabulary
     // server-side — re-read the cache so the UI shows workspace changes.
-  }, [prdId, syncState?.configured, syncState?.destination_id, syncState?.last_synced_at])
+  }, [prdId, guestSession, syncState?.configured, syncState?.destination_id, syncState?.last_synced_at])
 
   /** Ad-hoc sync of the already-configured destination (the button click). */
   const syncNow = async () => {
@@ -1522,7 +1578,11 @@ export function TicketsTab() {
               ? `Writing tickets · ${stories.length} ready so far`
               : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
-        {stories.length > 0 && (
+        {/* The tracker connect/push/sync button is withheld entirely in guest
+            mode — it's exactly the "tracker-push" affordance AC15 requires
+            absent, and the connect/sync/push actions behind it are all
+            authed-gated mutations a guest is never entitled to trigger. */}
+        {stories.length > 0 && !guestSession && (
           <div className="tkv2-hactions">
             <div style={{ position: "relative", display: "inline-flex" }}>
               <button
@@ -1659,7 +1719,11 @@ export function TicketsTab() {
       <div className={`tkt-list${refreshing ? " tkt-list--stale" : ""}`}>
         {stories.map((s, i) => (
           <StoryRow
-            key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)}
+            key={i} story={s} index={i}
+            // TicketDetail (opened via onOpen) is an editable surface this
+            // ticket hasn't audited for guest-safety — withheld entirely
+            // rather than assumed safe (AC15: no edit control present).
+            onOpen={guestSession ? undefined : () => setSelectedIndex(i)}
             synced={s.id ? syncState?.statuses?.[s.id] : undefined}
             tool={currentTool}
           />

@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
+import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
 import { AuthShell } from "../components/auth/AuthShell"
 import { VerifyEmailView } from "../components/auth/VerifyEmailView"
 
@@ -20,6 +21,8 @@ function VerifyEmailContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const emailParam = searchParams.get("email") ?? ""
+  const shareToken = searchParams.get("share")
+  const [shareMeta, setShareMeta] = useState<ArtifactShareMetadata | null>(null)
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -27,6 +30,24 @@ function VerifyEmailContent() {
   const [message, setMessage] = useState<string | null>(null)
 
   const email = emailParam || (auth.kind === "authed" ? auth.user.email ?? "" : "")
+
+  // Best-effort — an invalid/expired token here just means no strip renders;
+  // verification itself is never blocked by it.
+  useEffect(() => {
+    if (!shareToken) return
+    let cancelled = false
+    artifactShareApi
+      .getMetadata(shareToken)
+      .then((meta) => {
+        if (!cancelled) setShareMeta(meta)
+      })
+      .catch(() => {
+        /* no strip */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [shareToken])
 
   useEffect(() => {
     if (auth.kind === "authed" && auth.isEmailVerified()) {
@@ -92,6 +113,11 @@ function VerifyEmailContent() {
       onCodeChange={setCode}
       onSubmit={onSubmit}
       onResend={onResend}
+      shareContext={
+        shareMeta
+          ? { title: shareMeta.title || "a document", sharerName: shareMeta.sharer_name }
+          : undefined
+      }
     />
   )
 }

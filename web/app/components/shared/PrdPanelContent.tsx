@@ -8,6 +8,7 @@ import {
 } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useGuestSession } from "../../context/GuestSessionContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
@@ -99,6 +100,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
 } = {}) {
   const { showToast, openContentPanel } = useNavigation()
   const { content, setContent } = useContent()
+  const guestSession = useGuestSession()
   const prd = content.prd
 
   // Jump to the Evidence tab from the HTML PRD's injected "View more evidence"
@@ -111,6 +113,14 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   // "Create tickets" ↔ "View tickets" label (cache-read only, no generation).
   const [hasTickets, setHasTickets] = useState(false)
   useEffect(() => {
+    // A guest session's tickets are pre-fetched by GuestArtifactViewer into
+    // content.guestTickets — this must never authed-fetch storiesApi.getForPrd
+    // for a guest (same class of bug as ContentPanel's guarded effects: it's
+    // authed-gated and would 403/404 for an unentitled viewer).
+    if (guestSession) {
+      setHasTickets((content.guestTickets?.length ?? 0) > 0)
+      return
+    }
     const prdId = prd?.prd_id
     if (prdId == null) { setHasTickets(false); return }
     let cancelled = false
@@ -122,7 +132,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       } catch { /* default to "Create tickets" */ }
     })()
     return () => { cancelled = true }
-  }, [prd?.prd_id])
+  }, [prd?.prd_id, guestSession, content.guestTickets])
 
   // NO "load the workspace's latest PRD" fallback lives here any more.
   //
@@ -265,8 +275,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
 
       <div className="prd-frame">
         {/* The markdown editor toolbar (execCommand) doesn't apply to the v3
-            HTML page — it's edited natively inside the iframe — so hide it. */}
-        {!isHtmlPrd && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
+            HTML page — it's edited natively inside the iframe — so hide it.
+            Also hidden in guest mode: a read-only viewer has no edit control
+            (AC15). */}
+        {!isHtmlPrd && !guestSession && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
         {prd && isHtmlPrd ? (
           <>
             {/* Key on the HTML so a scoped edit (e.g. answering a "User input
@@ -294,11 +306,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
             <PrdSummaryStrip prd={prd} />
             <div
               className="prd-body"
-              contentEditable
+              contentEditable={!guestSession}
               spellCheck={false}
               suppressContentEditableWarning
               ref={bodyRef}
-              onInput={handleInput}
+              onInput={guestSession ? undefined : handleInput}
             >
               <div className="prd-meta">{prd.metaLine}</div>
               <h1 className="prd-title">{prd.title}</h1>
@@ -402,6 +414,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           and the prototype CTA. */}
       {prd && (
         <div className="prd-bottom-bar prd-footer-bar">
+          {/* Autosave/version-history are edit affordances — withheld entirely
+              in guest mode (AC15), not merely disabled, since neither reflects
+              anything meaningful for a document a guest can't edit. */}
+          {!guestSession && (
           <button
             type="button"
             className="btn btn-ghost btn-sm"
@@ -411,6 +427,8 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           >
             {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Save now" : "✓ Autosaved"}
           </button>
+          )}
+          {!guestSession && (
           <button
             type="button"
             className="btn btn-ghost btn-sm"
@@ -432,6 +450,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               <path d="M5 7L1 3h8z" />
             </svg>
           </button>
+          )}
 
           {/* Next pipeline step from the PRD is TICKETS. Reads "Create tickets"
               until the PRD has been broken into stories, then "View tickets";
