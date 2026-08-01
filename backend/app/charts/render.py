@@ -46,8 +46,8 @@ pathological spec degrades the whole worker, not just its own request. Nobody
 should read `timeout_s` as a hard kill; there is no such thing here.
 
 So the real defence is refusing the input: `MAX_ROWS` caps what is handed to the
-renderer, and `MAX_SVG_BYTES` caps what comes back. Both are module constants
-with no env var by design — Phase 0 adds no configuration surface, and a knob
+renderer, and `MAX_SVG_BYTES` / `MAX_PNG_BYTES` cap what comes back. All three are
+module constants with no env var by design — Phase 0 adds no configuration surface, and a knob
 here would be a knob on a security boundary.
 """
 from __future__ import annotations
@@ -95,6 +95,16 @@ owns it, because it owns the constants that exist today
 and it is the phase that can measure the swap: ~15 KB of inline SVG against ~48 KB
 of base64 PNG for the same chart. Deciding a total-per-report SVG budget before
 that measurement exists would be guessing.
+"""
+
+MAX_PNG_BYTES = 8_000_000
+"""The same guard for the raster path, which the SVG cap does not cover.
+
+PNG is where a runaway is *cheapest to produce and most expensive to store*: the
+same spec at `scale=2` rasterises four times the pixels, and these bytes go into
+docx/pdf/email payloads rather than into markup. The ratio to a normal chart is
+looser than the SVG one because raster size tracks canvas area rather than data
+volume — a legitimate wide chart at 2x is already a few hundred KB.
 """
 
 T = TypeVar("T")
@@ -281,6 +291,14 @@ def render_png(
         return None
     if not isinstance(png, (bytes, bytearray)) or not bytes(png).startswith(b"\x89PNG"):
         logger.error("chart PNG render returned no PNG")
+        _bump(stats, "charts_dropped")
+        return None
+    if len(png) > MAX_PNG_BYTES:
+        logger.error(
+            "chart PNG is %d bytes, over the %d cap; dropping",
+            len(png),
+            MAX_PNG_BYTES,
+        )
         _bump(stats, "charts_dropped")
         return None
     _bump(stats, "charts_rendered")

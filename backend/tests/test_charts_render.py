@@ -20,6 +20,7 @@ import vl_convert
 from app.charts import emitters as E
 from app.charts.render import (
     DEFAULT_PNG_SCALE,
+    MAX_PNG_BYTES,
     MAX_ROWS,
     MAX_SVG_BYTES,
     render_all_svg,
@@ -182,6 +183,18 @@ def test_oversized_output_is_refused(chart, monkeypatch):
 def test_png_failure_returns_none_not_an_exception(chart, monkeypatch):
     monkeypatch.setattr(
         vl_convert, "vegalite_to_png", lambda p, **k: (_ for _ in ()).throw(RuntimeError())
+    )
+    stats: dict[str, int] = {}
+    assert render_png(chart, stats=stats) is None
+    assert stats == {"charts_dropped": 1}
+
+
+def test_oversized_png_is_refused(chart, monkeypatch):
+    """The SVG cap does not cover the raster path — these bytes land in docx/email."""
+    monkeypatch.setattr(
+        vl_convert,
+        "vegalite_to_png",
+        lambda p, **k: b"\x89PNG\r\n\x1a\n" + b"x" * MAX_PNG_BYTES,
     )
     stats: dict[str, int] = {}
     assert render_png(chart, stats=stats) is None
