@@ -5,11 +5,10 @@
 // ... > AppShell tree) renders AT ALL. Both guest_view sub-cases (a zero-
 // company domain-matched signup, and a same-company-different-workspace
 // member) render GuestArtifactViewer — NEITHER renders `children` — because
-// both sub-cases fail somewhere in that tree (see WJ-04's "the real problem":
-// OnboardingRequiredGuard's infinite loading shell for the zero-company case,
-// require_owned_prd's 404 for the cross-workspace case). Only a "blocked"
-// resolve outcome, or an authed user whose token is invalid/expired, ever
-// renders NotAuthorizedScreen.
+// both sub-cases fail somewhere in that tree: OnboardingRequiredGuard's
+// infinite loading shell for the zero-company case, and require_owned_prd's
+// 404 for the cross-workspace case. Only a "blocked" resolve outcome, or an
+// authed user whose token is invalid/expired, ever renders NotAuthorizedScreen.
 import { useEffect, useState } from "react"
 import { useAuth } from "../../lib/auth"
 import { AuthLoading } from "../../(app)/AuthGate"

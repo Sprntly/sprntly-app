@@ -1,9 +1,9 @@
 "use client"
 
 // Thin route wrapper for postLoginPath()'s "blocked" routing target
-// (`/not-authorized?share={token}&reason={reason}`, per WJ-03). `share` isn't
-// read here — the reason alone is enough to render the right copy, and this
-// screen deliberately never re-resolves the token (no artifact identity is
+// (`/not-authorized?share={token}&reason={reason}`). `share` isn't read here
+// — the reason alone is enough to render the right copy, and this screen
+// deliberately never re-resolves the token (no artifact identity is
 // disclosed to a blocked visitor, per AC3).
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"

@@ -68,6 +68,16 @@ function saveHtmlDraft(prdId: number, html: string) {
  * the HTML page round-trips as HTML — the full edited document is stored in
  * `payload_md`, so the visual system survives an edit. Autosaves on input
  * (debounced) and exposes an imperative `save()` for the panel's "Save now".
+ *
+ * `readOnly`: the model-generated document carries its own native
+ * `contenteditable` markup (part of the page's HTML, not something this
+ * component adds) — a guest-mode caller can't rely on an outer prop to make
+ * arbitrary generated HTML non-editable, so when `readOnly` is set this
+ * component (a) force-disables every `[contenteditable]` element it finds
+ * once the iframe loads, (b) never wires the debounced input→persist
+ * listener, and (c) makes `persist` itself (and therefore the imperative
+ * `save()`) refuse to call `prdApi.update` at all — three independent stops
+ * on the same write path, not just a UI omission.
  */
 export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   html: string
@@ -79,7 +89,11 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
    *  (the panel switches to its Evidence tab). Omitted → no truncation, so the
    *  full list renders (e.g. when the Evidence tab is unavailable). */
   onViewMoreEvidence?: () => void
-}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence }, ref) {
+  /** Guest-mode / read-only rendering — see the doc comment above. Defaults
+   *  to false (existing editable behavior), so every non-guest caller is
+   *  byte-for-byte unchanged. */
+  readOnly?: boolean
+}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence, readOnly = false }, ref) {
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -117,6 +131,10 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   }, [])
 
   const persist = useCallback(async () => {
+    // The real backstop: even if something upstream still calls save() (the
+    // imperative handle, a stray input listener), this refuses to reach
+    // prdApi.update for a guest — never just a UI-level omission.
+    if (readOnly) return
     const doc = readDoc()
     if (doc == null) return
     onStatus?.("saving")
@@ -128,7 +146,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       // Local draft is preserved; surface as saved so the UI isn't stuck.
       onStatus?.("saved")
     }
-  }, [prdId, onStatus, readDoc])
+  }, [prdId, onStatus, readDoc, readOnly])
 
   useImperativeHandle(ref, () => ({ save: persist }), [persist])
 
@@ -167,6 +185,21 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       style.textContent = PANEL_OVERRIDE_CSS
       ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
     }
+    // Guest mode: the document's own `contenteditable` markup is part of the
+    // model-generated HTML, not something this component set — force every
+    // such element to non-editable rather than trusting the source content to
+    // already be safe. Also make designMode explicit (belt-and-suspenders;
+    // designMode defaults to "off" but a same-origin doc can flip it).
+    if (readOnly) {
+      cdoc.querySelectorAll("[contenteditable]").forEach((el) => {
+        el.setAttribute("contenteditable", "false")
+      })
+      try {
+        cdoc.designMode = "off"
+      } catch {
+        /* not fatal — the per-element attribute above is the real guard */
+      }
+    }
     // Fold a long Evidence list to its top 3 with a "View more evidence" link
     // (viewer-only — stripped in readDoc). Guarded so a malformed doc can't break
     // the resize/autosave wiring below.
@@ -195,6 +228,10 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     // Fonts land after load and shift line counts; ResizeObserver catches most
     // of it, but this covers engines that don't reflow the observed box.
     cdoc.fonts?.ready.then(() => resize()).catch(() => { /* best effort */ })
+    // Guest mode: never wire the autosave listener at all — the elements are
+    // already non-editable above, so there's nothing for it to react to, and
+    // this keeps the read-only path from scheduling any persist() call.
+    if (readOnly) return
     const onInput = () => {
       onStatus?.("unsaved")
       // Typing genuinely changes the document's height — refill the budget so a
@@ -205,7 +242,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       saveTimer.current = setTimeout(persist, 2000)
     }
     cdoc.addEventListener("input", onInput)
-  }, [resize, persist, onStatus, onViewMoreEvidence])
+  }, [resize, persist, onStatus, onViewMoreEvidence, readOnly])
 
   useEffect(() => () => {
     if (saveTimer.current) clearTimeout(saveTimer.current)

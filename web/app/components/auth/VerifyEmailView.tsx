@@ -22,7 +22,8 @@ export type VerifyEmailViewProps = {
   onSubmit: (e: React.FormEvent) => void
   onResend: () => void
   /** Set only when this verification originated from a valid `?share=`
-   *  artifact link. Absent renders unchanged from the base signup flow. */
+   *  artifact link. Absent renders unchanged from the OTP-only shape this
+   *  view already had before share-context support was added. */
   shareContext?: { title: string; sharerName: string }
 }
 

@@ -293,6 +293,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               title={prd.title}
               onStatus={setSaveStatus}
               onViewMoreEvidence={evidenceTabAvailable ? handleViewMoreEvidence : undefined}
+              // The v3 HTML PRD's contenteditable + autosave-on-input loop is a
+              // real write path independent of this panel's own Save/toolbar
+              // guards — PrdHtmlView itself must refuse to persist for a guest.
+              readOnly={!!guestSession}
             />
             {qaSections.length > 0 && (
               <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
