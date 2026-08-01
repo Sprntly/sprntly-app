@@ -9,12 +9,15 @@ quietly lose coverage.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from app.charts.spec import (
     ALTAIR_SCHEMA_VERSION,
+    count_rows,
+    primary_rows,
     VEGA_LITE_SCHEMA_URL,
     VL_VERSION,
     ChartProvenance,
@@ -126,6 +129,62 @@ def test_to_payload_round_trips_through_json():
     payload = chart.to_payload()
     assert json.loads(json.dumps(payload)) == payload
     assert ChartSpec.model_validate(payload).spec == chart.spec
+
+
+# ── where the rows live (the cross-implementation contract) ──────────────────
+
+ROW_COUNT_CONTRACT = json.loads(
+    (Path(__file__).parent / "fixtures" / "charts" / "row-count-contract.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "case", ROW_COUNT_CONTRACT["cases"], ids=lambda c: c["name"]
+)
+def test_row_count_contract(case):
+    """The SAME cases the client renderer answers, from the SAME file.
+
+    Both sides use this number for decisions the user sees — the server to
+    decide "empty, degrade to a table" and "over MAX_ROWS, refuse", the client
+    to decide whether to inject rows and offer expand-to-table. Two answers to
+    one question is a chart that reads "No data." in a report and draws fine in
+    the browser, from one stored object, with no error on either side.
+    """
+    assert count_rows(case["spec"]) == case["expected_rows"], case["why"]
+
+
+def test_the_contract_covers_the_shapes_that_actually_broke():
+    """Guard against the fixture being trimmed back to the easy cases."""
+    names = {case["name"] for case in ROW_COUNT_CONTRACT["cases"]}
+    assert {
+        "altair_named_dataset",
+        "layered_rows_per_layer",
+        "layered_root_named_dataset",
+        "named_dataset_referenced_twice",
+    } <= names
+
+
+def test_primary_rows_picks_the_series_not_the_annotation():
+    """A layered chart has several row sets; the table wants the biggest."""
+    spec = {
+        "data": {"values": [{"a": 1}, {"a": 2}, {"a": 3}]},
+        "layer": [
+            {"mark": "line"},
+            {"data": {"values": [{"at": "2026-01-15"}]}, "mark": "rule"},
+        ],
+    }
+    assert primary_rows(spec) == [{"a": 1}, {"a": 2}, {"a": 3}]
+
+
+def test_primary_rows_resolves_a_named_dataset():
+    spec = {
+        "data": {"name": "d"},
+        "datasets": {"d": [{"a": 1}, {"a": 2}]},
+        "mark": "bar",
+    }
+    assert primary_rows(spec) == [{"a": 1}, {"a": 2}]
 
 
 # ── rule 1: data-closed ──────────────────────────────────────────────────────

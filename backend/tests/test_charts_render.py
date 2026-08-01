@@ -28,7 +28,7 @@ from app.charts.render import (
     render_svg,
     render_table_html,
 )
-from app.charts.spec import VL_VERSION, ChartSpec
+from app.charts.spec import VL_VERSION, ChartSpec, ChartSpecError
 
 
 @pytest.fixture
@@ -216,6 +216,118 @@ def test_the_fallback_tabulates_spec_carried_rows_rather_than_claiming_no_data(
     assert "No data." not in out
     assert "<table>" in out
     assert "r0" in out and "r2" in out
+
+
+# ── the shapes Phase 1 actually produces ─────────────────────────────────────
+#
+# These go through `altair` for real rather than hand-writing what we think it
+# emits. The premise "altair.to_dict() inlines data.values" was asserted in code
+# comments on both PRs and is false — it emits a `datasets` map and a `name`
+# reference — and no hand-written fixture would have caught that, because a
+# hand-written fixture encodes the same wrong belief.
+
+def _altair_spec(chart_obj) -> dict:
+    """altair's own output, minus the top-level `config` it always adds.
+
+    Popping `config` is the documented Phase 1 constraint: `spec.py` rejects a
+    spec-level config (it REPLACES the theme rather than merging), and altair
+    attaches one to every chart, so the Phase 1 adapter must strip it.
+    """
+    spec = chart_obj.to_dict()
+    spec.pop("config", None)
+    return spec
+
+
+def test_an_altair_authored_chart_renders_rather_than_saying_no_data():
+    """altair emits `data: {name}` + `datasets`, NOT inline values."""
+    alt = pytest.importorskip("altair")
+    pd = pytest.importorskip("pandas")
+
+    frame = pd.DataFrame({"a": ["A", "B", "C"], "b": [3, 5, 2]})
+    spec = _altair_spec(alt.Chart(frame).mark_bar().encode(x="a:N", y="b:Q"))
+    assert "datasets" in spec and "values" not in (spec.get("data") or {})
+
+    chart = ChartSpec.build(spec=spec, data=[])
+    assert chart.row_count() == 3
+    stats: dict[str, int] = {}
+    out = render_svg(chart, stats=stats)
+    assert out.startswith("<svg"), "an altair chart degraded to a table"
+    assert stats == {"charts_rendered": 1}
+
+
+def test_a_layered_altair_chart_renders_too():
+    """`alt.layer(...)` carries rows per layer — a root-only reader sees none."""
+    alt = pytest.importorskip("altair")
+    pd = pytest.importorskip("pandas")
+
+    frame = pd.DataFrame({"a": ["A", "B"], "b": [3, 5]})
+    spec = _altair_spec(
+        alt.layer(
+            alt.Chart(frame).mark_bar().encode(x="a:N", y="b:Q"),
+            alt.Chart(frame).mark_point().encode(x="a:N", y="b:Q"),
+        )
+    )
+    chart = ChartSpec.build(spec=spec, data=[])
+    assert chart.row_count() > 0
+    assert render_svg(chart).startswith("<svg")
+
+
+def test_altair_always_emits_a_config_which_phase_1_must_strip():
+    """Documents the constraint rather than leaving it to be discovered as a
+    100%-failure-rate mystery: every altair chart carries a top-level `config`,
+    and a spec-level config is refused because it replaces the Sprntly theme."""
+    alt = pytest.importorskip("altair")
+    pd = pytest.importorskip("pandas")
+
+    frame = pd.DataFrame({"a": ["A"], "b": [1]})
+    raw = alt.Chart(frame).mark_bar().encode(x="a:N", y="b:Q").to_dict()
+    assert "config" in raw
+    with pytest.raises(ChartSpecError, match="config"):
+        ChartSpec.build(spec=raw, data=[])
+    # ...and it is fine the moment the adapter pops it.
+    assert ChartSpec.build(spec=_altair_spec(
+        alt.Chart(frame).mark_bar().encode(x="a:N", y="b:Q")
+    ), data=[]).row_count() == 1
+
+
+def test_the_row_cap_sees_rows_carried_by_a_named_dataset(monkeypatch):
+    """The cap calls row_count(), so the datasets shape must reach it too."""
+    spec = {
+        "data": {"name": "d"},
+        "datasets": {"d": [{"a": f"r{i}", "b": i} for i in range(MAX_ROWS + 1)]},
+        "mark": "bar",
+        "encoding": {
+            "x": {"field": "a", "type": "nominal"},
+            "y": {"field": "b", "type": "quantitative"},
+        },
+    }
+    chart = ChartSpec.build(spec=spec, title="Too much, by reference")
+
+    def must_not_be_called(payload, **kwargs):  # pragma: no cover - the assertion
+        raise AssertionError("renderer was called despite the row cap")
+
+    monkeypatch.setattr(vl_convert, "vegalite_to_svg", must_not_be_called)
+    stats: dict[str, int] = {}
+    assert render_svg(chart, stats=stats).startswith("<figure")
+    assert stats == {"charts_dropped": 1}
+
+
+def test_the_fallback_tabulates_rows_held_in_a_named_dataset(monkeypatch):
+    chart = ChartSpec.build(
+        spec={
+            "data": {"name": "d"},
+            "datasets": {"d": [{"a": "keep-me", "b": 1}]},
+            "mark": "bar",
+            "encoding": {"x": {"field": "a", "type": "nominal"}},
+        },
+        title="By reference",
+    )
+    monkeypatch.setattr(
+        vl_convert, "vegalite_to_svg", lambda p, **k: (_ for _ in ()).throw(RuntimeError())
+    )
+    out = render_svg(chart)
+    assert "No data." not in out
+    assert "keep-me" in out
 
 
 def test_oversized_output_is_refused(chart, monkeypatch):

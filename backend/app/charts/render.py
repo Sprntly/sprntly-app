@@ -59,7 +59,7 @@ import queue
 import threading
 from typing import Any, Callable, Sequence, TypeVar
 
-from app.charts.spec import VL_VERSION, ChartSpec
+from app.charts.spec import VL_VERSION, ChartSpec, primary_rows
 from app.charts.theme import Mode, theme_config
 
 logger = logging.getLogger(__name__)
@@ -157,17 +157,18 @@ def _cell(value: Any) -> str:
 def _fallback_rows(chart: ChartSpec) -> list[dict[str, Any]]:
     """The rows to tabulate, from wherever they actually live.
 
-    The envelope's `data` when it has any, else the spec's own inline `values` —
-    the same places `ChartSpec.row_count()` looks. Reading only `chart.data`
-    made the fallback print "No data." over a chart that had plenty, which is
-    worse than looking broken: it is a false claim about the analysis, and it
-    breaks this module's promise that if the presentation fails the rows are
-    still true.
+    The envelope's `data` when it has any, else `spec.primary_rows` — the SAME
+    resolution `row_count()` uses, so the gate and the fallback can never
+    disagree about whether a chart has rows.
+
+    Reading only `chart.data` printed "No data." over a chart that had plenty.
+    Reading only the ROOT `data.values` did the same thing to the two shapes
+    Phase 1 actually produces (altair's `datasets` reference, and layered specs
+    that carry rows per layer). Both are worse than looking broken: they are a
+    false claim about the analysis, and they break this module's promise that if
+    the presentation fails the rows are still true.
     """
-    if chart.data:
-        return chart.data
-    values = (chart.spec.get("data") or {}).get("values")
-    return [row for row in values if isinstance(row, dict)] if isinstance(values, list) else []
+    return chart.data if chart.data else primary_rows(chart.spec)
 
 
 def render_table_html(chart: ChartSpec) -> str:

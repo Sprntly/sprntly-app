@@ -69,6 +69,23 @@ in a real validator rather than `__init__` on purpose — `model_validate()` (ho
 Phase 1/2 will deserialise stored specs) bypasses `__init__` entirely, and a
 security check that a deserialiser can skip is not a security check.
 
+### Two constraints Phase 1 inherits from these rules
+
+`altair.to_dict()` output is NOT accepted as-is, in two specific ways, and both
+are the rules working rather than bugs:
+
+1. **altair attaches a top-level `config` to every chart** (rule 4 refuses it).
+   The Phase 1 adapter must pop it. Left undiscovered this is a 100% failure
+   rate with a confusing message, so: pop `config`, keep the theme.
+2. **`params` is refused** (rule 3), so an altair chart built with
+   `.add_params()` / selections is rejected. Deterministic charts have no
+   interactive state; if a Phase 1 prompt asks for a selection, that is the
+   prompt to fix.
+
+Note also that altair does **not** inline rows by default — it emits
+`data: {"name": …}` plus a top-level `datasets` map — which is why row counting
+is a walk (`count_rows`) rather than a lookup. That shape is fully supported.
+
 ### What is deliberately still allowed
 
 `calculate` and string-form `filter` transforms stay legal. They are the same
@@ -367,6 +384,105 @@ def validate_vega_lite_spec(spec: Any) -> None:
         )
 
 
+# ── where the rows actually live ─────────────────────────────────────────────
+#
+# ONE definition, used by everything that needs to know how much data a chart
+# carries: the row cap, the empty-chart gate, and the table fallback. Three
+# separate answers to the same question is how a chart ends up refused by one of
+# them and rendered by another.
+#
+# It has to be a walk, because "the rows are at `spec['data']['values']`" is
+# false for the two shapes Phase 1 produces:
+#
+#   * `altair.to_dict()` does NOT inline rows by default. It emits
+#     `data: {"name": "data-<hash>"}` plus a top-level `datasets` map — measured
+#     on altair 6.2.2, which is the pin in requirements.txt.
+#   * `alt.layer(a, b)` hangs the rows off each layer, with nothing at the root.
+#
+# Both render perfectly. A root-only reader sees zero rows in each and calls
+# them empty, which is how a real chart becomes the words "No data."
+
+_CONTAINER_KEYS = ("layer", "concat", "hconcat", "vconcat", "spec")
+
+
+def _iter_data_blocks(spec: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Every `data` block in the spec tree: the root's and every container's."""
+    stack: list[Any] = [spec]
+    seen = 0
+    while stack and seen < 10_000:  # bounded; the depth guard covers pathological nesting
+        node = stack.pop()
+        seen += 1
+        if not isinstance(node, dict):
+            continue
+        block = node.get("data")
+        if isinstance(block, dict):
+            yield block
+        for key in _CONTAINER_KEYS:
+            child = node.get(key)
+            if isinstance(child, list):
+                stack.extend(child)
+            elif isinstance(child, dict):
+                stack.append(child)
+
+
+def iter_row_sets(spec: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    """Every distinct set of rows the renderer will receive, in document order.
+
+    Resolves the three ways Vega-Lite carries data:
+
+    * `{"values": [...]}` — inline, the shape our emitters build;
+    * `{"name": "…"}` — a reference into the top-level `datasets` map, which is
+      what altair emits by default;
+    * generated sources (`sequence`, `graticule`) — no rows, contributes nothing.
+
+    A named dataset is counted **once** however many layers reference it, and an
+    *unreferenced* `datasets` entry still counts, because the renderer is handed
+    it either way and this number's job is to describe that payload.
+    """
+    if not isinstance(spec, dict):
+        return []
+    datasets = spec.get("datasets") if isinstance(spec.get("datasets"), dict) else {}
+    row_sets: list[list[dict[str, Any]]] = []
+    used_names: set[str] = set()
+
+    def rows_of(value: Any) -> list[dict[str, Any]]:
+        return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+    for block in _iter_data_blocks(spec):
+        values = block.get("values")
+        if values is not None:
+            row_sets.append(rows_of(values))
+            continue
+        name = block.get("name")
+        if isinstance(name, str) and name in datasets and name not in used_names:
+            used_names.add(name)
+            row_sets.append(rows_of(datasets[name]))
+
+    for name, value in datasets.items():
+        if name not in used_names:
+            row_sets.append(rows_of(value))
+
+    return row_sets
+
+
+def count_rows(spec: dict[str, Any]) -> int:
+    """Total rows the renderer receives. The one number the cap and gate use."""
+    return sum(len(rows) for rows in iter_row_sets(spec))
+
+
+def primary_rows(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """The row set a table should show: the largest one, ties going to the first.
+
+    A layered chart has several; the biggest is the one carrying the series,
+    while the others are usually a one-row annotation (an intervention rule).
+    """
+    best: list[dict[str, Any]] = []
+    for rows in iter_row_sets(spec):
+        if len(rows) > len(best):
+            best = rows
+    return best
+
+
 # ── the model ────────────────────────────────────────────────────────────────
 
 class ChartProvenance(BaseModel):
@@ -451,14 +567,15 @@ class ChartSpec(BaseModel):
     def row_count(self) -> int:
         """Rows this chart would actually draw, from wherever they live.
 
-        The envelope's rows if it has any, else the spec's own inline `values`.
-        Zero means there is nothing to draw — see `render.render_svg`, which
-        degrades to the table rather than emitting an empty plot frame.
+        Delegates to `count_rows`, which is the single shared definition — root,
+        containers (`layer`/`concat`/`hconcat`/`vconcat`/`spec`) and `datasets`
+        references alike. The envelope's own rows are already inlined into the
+        spec by construction, so reading the spec covers both carriers.
+
+        Zero means there is genuinely nothing to draw — see `render.render_svg`,
+        which degrades to the table rather than emitting an empty plot frame.
         """
-        if self.data:
-            return len(self.data)
-        values = (self.spec.get("data") or {}).get("values")
-        return len(values) if isinstance(values, list) else 0
+        return count_rows(self.spec)
 
     @classmethod
     def build(cls, **kwargs: Any) -> "ChartSpec":
