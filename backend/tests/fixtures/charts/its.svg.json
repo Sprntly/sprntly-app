@@ -8,8 +8,8 @@
     "#eef0ee"
   ],
   "tags": {
-    "g": 56,
-    "line": 47,
+    "g": 55,
+    "line": 49,
     "path": 32,
     "svg": 1,
     "text": 29
@@ -23,7 +23,6 @@
     "40",
     "60",
     "80",
-    "Date",
     "Intervention",
     "Jan 01",
     "Jan 03",
@@ -39,6 +38,7 @@
     "Jan 23",
     "Jan 25",
     "Jan 27",
+    "Jan 29",
     "Period",
     "Value",
     "Weekly signups around the change",

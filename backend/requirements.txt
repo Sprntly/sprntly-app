@@ -71,12 +71,14 @@ vl-convert-python==1.9.0.post1
 # altair is the typed Python authoring surface for the same spec
 # (chart.to_dict() == what our emitters build). Phase 1 has the model author
 # charts through it inside the code-execution sandbox. Pinned exactly for the
-# same golden-file reason. NOTE: altair 6 ships only the Vega-Lite *v6* schema,
-# so it is NOT the source of our validation schema — see app/charts/schemas/.
+# same golden-file reason, and for a second one: the wheel also SHIPS THE
+# VEGA-LITE v6.4 JSON SCHEMA, which app/charts/spec.py reads through
+# importlib.resources and validates every chart against. Nothing is vendored and
+# nothing is fetched, so the schema cannot drift from this pin — bumping altair
+# moves the authoring library and the validation schema together, on purpose.
 altair==6.2.2
-# Used directly by app/charts/spec.py to validate every spec against the
-# vendored Vega-Lite v5 schema BEFORE it reaches the renderer (that validation is
-# a security boundary, not a nicety). It arrives transitively via altair, but the
-# code imports it by name, so it is declared explicitly — the same lesson the
-# Pillow entry above records.
+# Used directly by app/charts/spec.py to run that validation BEFORE a spec
+# reaches the renderer (it is a security boundary, not a nicety). It arrives
+# transitively via altair, but the code imports it by name, so it is declared
+# explicitly — the same lesson the Pillow entry above records.
 jsonschema>=4.21

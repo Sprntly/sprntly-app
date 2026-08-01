@@ -171,6 +171,53 @@ def test_oversized_input_is_refused_before_the_renderer_sees_it(monkeypatch):
     assert stats == {"charts_dropped": 1}
 
 
+def _spec_carried(n_rows: int, title: str = "Spec-carried") -> ChartSpec:
+    """The shape the contract blesses and Phase 1's altair sandbox always emits:
+    rows inlined in the spec, envelope `data` empty."""
+    return ChartSpec(
+        spec={
+            "data": {"values": [{"a": f"r{i}", "b": i} for i in range(n_rows)]},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "a", "type": "nominal"},
+                "y": {"field": "b", "type": "quantitative"},
+            },
+        },
+        title=title,
+    )
+
+
+def test_the_row_cap_measures_rows_wherever_they_live(monkeypatch):
+    """`len(chart.data)` reads 0 on a spec-carried chart, so the cap that is the
+    real defence (the timeout is not — it bounds the wait, not the work) never
+    fired on the one shape Phase 1 always produces."""
+    big = _spec_carried(MAX_ROWS + 1, title="Too much")
+    assert not big.data  # the envelope is empty: this is the point
+
+    def must_not_be_called(payload, **kwargs):  # pragma: no cover - the assertion
+        raise AssertionError("renderer was called despite the row cap")
+
+    monkeypatch.setattr(vl_convert, "vegalite_to_svg", must_not_be_called)
+    stats: dict[str, int] = {}
+    assert render_svg(big, stats=stats).startswith("<figure")
+    assert stats == {"charts_dropped": 1}
+
+
+def test_the_fallback_tabulates_spec_carried_rows_rather_than_claiming_no_data(
+    monkeypatch,
+):
+    """Printing "No data." over a chart that has rows is worse than looking
+    broken — it is a false claim about the analysis."""
+    chart = _spec_carried(3)
+    monkeypatch.setattr(
+        vl_convert, "vegalite_to_svg", lambda p, **k: (_ for _ in ()).throw(RuntimeError())
+    )
+    out = render_svg(chart)
+    assert "No data." not in out
+    assert "<table>" in out
+    assert "r0" in out and "r2" in out
+
+
 def test_oversized_output_is_refused(chart, monkeypatch):
     monkeypatch.setattr(
         vl_convert, "vegalite_to_svg", lambda p, **k: "<svg>" + "x" * MAX_SVG_BYTES

@@ -23,9 +23,22 @@ from ._common import (
 XType = Literal["temporal", "ordinal"]
 
 
-def _x(field: str, x_type: XType, title: str | None) -> dict[str, Any]:
+def _x(field: str, x_type: XType, title: str | None = None) -> dict[str, Any]:
+    """A time axis encoding — **always UTC**, never the host's timezone.
+
+    Vega-Lite's default temporal scale is LOCAL time, and that default is a
+    cross-renderer bug rather than a preference: the same stored `ChartSpec`
+    renders `Jan 15` in the server SVG on a UTC box and drops it for a reader in
+    Los Angeles when the browser draws the same spec. One chart, two pictures, no
+    error on either side. It also makes golden files a function of the machine
+    that generated them — five of these fixtures were PDT artifacts before this.
+
+    `scale: {"type": "utc"}` pins it. Both renderers then agree, and so does
+    every reader regardless of where they are sitting.
+    """
     enc: dict[str, Any] = {"field": field, "type": x_type, "title": title}
     if x_type == "temporal":
+        enc["scale"] = {"type": "utc"}
         enc["axis"] = {"format": "%b %d", "labelAngle": 0}
     else:
         enc["axis"] = {"labelAngle": 0}
@@ -174,7 +187,9 @@ def _intervention_layer(
     `spec.py`'s "no expression bindings" rule from ever being inconvenient.
     """
     rule_data = {"values": [{"at": intervention_at}]}
-    x_enc = {"field": "at", "type": x_type}
+    # Same UTC pin as the data layers — an annotation drawn on a local-time scale
+    # would sit at a different x than the series it annotates.
+    x_enc = _x("at", x_type)
     layers: list[dict[str, Any]] = [
         {
             "data": rule_data,

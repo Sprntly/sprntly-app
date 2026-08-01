@@ -279,6 +279,41 @@ def test_expr_as_a_value_ref_is_rejected():
         )
 
 
+def test_params_are_rejected():
+    """Inert server-side; on the client they are input widgets in a PRD panel."""
+    with pytest.raises(ChartSpecError, match="params"):
+        validate_vega_lite_spec(
+            {
+                **_with_data(BASE),
+                "params": [{"name": "cutoff", "value": 5, "bind": {"input": "range"}}],
+            }
+        )
+
+
+def test_params_are_rejected_inside_a_layer_too():
+    with pytest.raises(ChartSpecError, match="params"):
+        validate_vega_lite_spec(
+            {
+                "data": {"values": ROWS},
+                "layer": [{**BASE, "params": [{"name": "grid", "bind": "scales"}]}],
+            }
+        )
+
+
+def test_usermeta_is_stripped_rather_than_stored():
+    """`to_payload()` persists the spec; an arbitrary blob must not ride along.
+
+    Stored, `usermeta` becomes every future consumer's problem — the report path,
+    docx/pdf/email, the API, MCP — each with its own chance to forget to strip it.
+    Stripped rather than rejected because altair writes a benign one of its own.
+    """
+    chart = ChartSpec(
+        spec={**BASE, "usermeta": {"embedOptions": {"actions": True}}}, data=ROWS
+    )
+    assert "usermeta" not in chart.spec
+    assert "usermeta" not in json.dumps(chart.to_payload())
+
+
 # ── rule 4: the theme is ours ────────────────────────────────────────────────
 
 def test_top_level_facet_is_rejected():

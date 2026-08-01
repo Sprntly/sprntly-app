@@ -38,8 +38,10 @@ fetch data over the network and evaluate expressions. So construction of a
    spec-chosen link into a chart the user is invited to click, out of a sandboxed
    report. `href` is refused as a *key anywhere* rather than as an enumerated
    encoding channel — enumerating channels is precisely how such a gap appears.
-3. **No expression bindings.** No `expr` key at any depth — value refs, `params`,
-   transform entries alike. (See the note on `calculate` below.)
+3. **No expression bindings and no `params`.** No `expr` key at any depth —
+   value refs, transform entries alike — and no `params` block, which is how a
+   spec adds bound input widgets and `bind: "scales"` pan/zoom. Inert on the
+   server, but the same spec is handed to `vega-embed` on the client.
 4. **No top-level `config`.** Vega-Lite's `config` REPLACES the one the renderer
    is handed rather than merging, so one spec could opt itself out of the theme.
 5. **No top-level `facet`/`repeat`.** `{facet, spec}` carries a `spec` key, which
@@ -49,6 +51,10 @@ fetch data over the network and evaluate expressions. So construction of a
    itself* (`_top_level_keys`), so it cannot drift from the version we validate
    against.
 7. **Schema-valid** against the Vega-Lite v6.4 JSON schema.
+
+`usermeta` is **stripped**, not rejected — altair writes a benign one, but the
+key is an arbitrary blob that `to_payload()` would persist, and stored blobs
+become every future consumer's problem.
 
 Rules 1-3 read the spec's STRUCTURE, not its rows: inline row payloads
 (`data.values`, `datasets.*`) are not descended into, because a data column named
@@ -278,6 +284,19 @@ def validate_vega_lite_spec(spec: Any) -> None:
                 path=f"{path}.mark",
             )
 
+        # `params` is how a spec adds interactive state: bound input widgets,
+        # and `bind: "scales"` pan/zoom. Server-side it is inert, but the SAME
+        # spec is handed to `vega-embed` on the client, where a model-authored
+        # `params` block would put sliders and dropdowns into a PRD panel that
+        # nobody designed. Emitters have no use for it — a deterministic chart
+        # has no state — so it is refused rather than stripped.
+        if "params" in node:
+            raise ChartSpecError(
+                "'params' is not allowed: it adds interactive state (bound "
+                "inputs, bind:'scales' pan/zoom) to a chart on the client",
+                path=f"{path}.params",
+            )
+
         # Blanket, not an enumeration of channels. Enumerating is how the gap
         # appears: `href` is an encoding channel today, and the next version of
         # Vega-Lite is free to accept it somewhere else.
@@ -413,6 +432,15 @@ class ChartSpec(BaseModel):
         spec that already carries its own `values` through unharmed.
         """
         spec = dict(self.spec)
+        # `usermeta` is an arbitrary blob Vega-Lite ignores and the schema
+        # admits, and `to_payload()` PERSISTS it. Stored, it becomes every future
+        # consumer's problem — the report path, docx/pdf/email, the API, MCP —
+        # each of which gets its own chance to forget to strip it, and one of
+        # them will hand it to something that reads `embedOptions`. Stripped
+        # here, at the only place every chart passes through, it never lands in
+        # the database at all. Stripped rather than rejected because altair
+        # writes a benign one of its own.
+        spec.pop("usermeta", None)
         if self.data:
             spec["data"] = {"values": [dict(row) for row in self.data]}
         spec.setdefault("$schema", VEGA_LITE_SCHEMA_URL)

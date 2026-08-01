@@ -154,6 +154,22 @@ def _cell(value: Any) -> str:
     return html.escape(text, quote=False)
 
 
+def _fallback_rows(chart: ChartSpec) -> list[dict[str, Any]]:
+    """The rows to tabulate, from wherever they actually live.
+
+    The envelope's `data` when it has any, else the spec's own inline `values` —
+    the same places `ChartSpec.row_count()` looks. Reading only `chart.data`
+    made the fallback print "No data." over a chart that had plenty, which is
+    worse than looking broken: it is a false claim about the analysis, and it
+    breaks this module's promise that if the presentation fails the rows are
+    still true.
+    """
+    if chart.data:
+        return chart.data
+    values = (chart.spec.get("data") or {}).get("values")
+    return [row for row in values if isinstance(row, dict)] if isinstance(values, list) else []
+
+
 def render_table_html(chart: ChartSpec) -> str:
     """The chart's rows as an HTML table — the fallback, and a public helper.
 
@@ -170,7 +186,8 @@ def render_table_html(chart: ChartSpec) -> str:
         parts.append(f"<br><span>{html.escape(chart.subtitle, quote=False)}</span>")
     parts.append("</figcaption>")
 
-    rows = chart.data[:_MAX_FALLBACK_ROWS]
+    all_rows = _fallback_rows(chart)
+    rows = all_rows[:_MAX_FALLBACK_ROWS]
     if not rows:
         parts.append("<p><em>No data.</em></p>")
     else:
@@ -188,8 +205,8 @@ def render_table_html(chart: ChartSpec) -> str:
             parts.extend(f"<td>{_cell(row.get(col))}</td>" for col in columns)
             parts.append("</tr>")
         parts.append("</tbody></table>")
-        if len(chart.data) > _MAX_FALLBACK_ROWS:
-            hidden = len(chart.data) - _MAX_FALLBACK_ROWS
+        if len(all_rows) > _MAX_FALLBACK_ROWS:
+            hidden = len(all_rows) - _MAX_FALLBACK_ROWS
             parts.append(f"<p><em>+{hidden} more row(s).</em></p>")
 
     if chart.caption:
@@ -216,10 +233,16 @@ def _render(
         # and it is indistinguishable from a render that silently lost its rows.
         # The table says the true thing in one line.
         raise ValueError("chart carries no rows")
-    if len(chart.data) > MAX_ROWS:
-        raise ValueError(
-            f"chart carries {len(chart.data)} rows, over the {MAX_ROWS} cap"
-        )
+    rows = chart.row_count()
+    if rows > MAX_ROWS:
+        # `row_count()`, not `len(chart.data)`: an envelope with empty `data` and
+        # rows inlined in `spec["data"]["values"]` is a shape the contract
+        # explicitly blesses — and the one Phase 1's altair sandbox always
+        # produces. Measuring the envelope there measures 0, and the cap that is
+        # supposed to be the real defence (the timeout is not, see above) never
+        # fires: 200k rows went through at 7.4 s and 48.9 MB of SVG, dropped by
+        # MAX_SVG_BYTES only after all the work was done, with the GIL held.
+        raise ValueError(f"chart carries {rows} rows, over the {MAX_ROWS} cap")
 
     payload = json.dumps(chart.spec)
     config = theme_config(mode)

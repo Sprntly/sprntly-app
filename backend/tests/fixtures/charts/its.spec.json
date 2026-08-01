@@ -71,6 +71,9 @@
               "labelAngle": 0
             },
             "field": "t",
+            "scale": {
+              "type": "utc"
+            },
             "title": "Date",
             "type": "temporal"
           },
@@ -102,6 +105,9 @@
               "labelAngle": 0
             },
             "field": "t",
+            "scale": {
+              "type": "utc"
+            },
             "title": "Date",
             "type": "temporal"
           },
@@ -127,7 +133,15 @@
         },
         "encoding": {
           "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
             "field": "at",
+            "scale": {
+              "type": "utc"
+            },
+            "title": null,
             "type": "temporal"
           }
         },
@@ -151,7 +165,15 @@
         },
         "encoding": {
           "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
             "field": "at",
+            "scale": {
+              "type": "utc"
+            },
+            "title": null,
             "type": "temporal"
           }
         },

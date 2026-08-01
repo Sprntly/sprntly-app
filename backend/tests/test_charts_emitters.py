@@ -26,11 +26,24 @@ a mark that changed type, a series that vanished, a palette that shifted, a labe
 that stopped being drawn — while ignoring sub-pixel geometry that no reader can
 see.
 
-The goldens in this PR were generated on macOS/arm64. That is safe *because* of
-the tier split: tier 1 has no renderer in it, and tier 2 is the property the
-font probe above shows to be host-independent. If CI ever disagrees, the right
-response is to look at the diff, not to regenerate — a signature diff is a real
-finding.
+The goldens are generated on macOS/arm64. That is safe *because* of the tier
+split — tier 1 has no renderer in it, and tier 2 is the property the font probe
+above shows to be host-independent — but "host-independent" had to be earned
+once. The first version of these fixtures WAS machine-specific: five of them
+were PDT artifacts, because Vega-Lite's default temporal scale is the host's
+local time, so `timeseries` drew 25 text elements here and 26 under `TZ=UTC`.
+Measured: unpinned, Tokyo loses `Jan 01` and Los Angeles loses `Jan 15`; pinned
+to `scale: {"type": "utc"}`, all three are identical. `_x()` in
+`emitters/timeseries.py` carries the pin, `test_every_temporal_encoding_pins_utc`
+guards it on every emitter, and `test_the_same_chart_draws_the_same_dates_in_
+every_timezone` re-runs the render under three timezones to guard the property
+rather than only the spec.
+
+That is the lesson worth keeping: **if CI disagrees with a golden, read the diff
+— do not regenerate.** Regenerating on the CI host would have made this green
+and left the real bug live, because the divergence that matters is not
+Mac-vs-Linux, it is the server SVG against the same spec drawn in a reader's
+browser.
 
 Regenerate deliberately, never reflexively::
 
@@ -40,6 +53,9 @@ Regenerate deliberately, never reflexively::
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -258,6 +274,66 @@ def test_every_chart_is_data_closed_and_carries_its_rows(name):
 @pytest.mark.parametrize("name", CHART_NAMES)
 def test_every_chart_renders(name):
     assert render_svg(_charts()[name]).startswith("<svg")
+
+
+def _temporal_encodings(node, out=None):
+    out = [] if out is None else out
+    if isinstance(node, dict):
+        if node.get("type") == "temporal":
+            out.append(node)
+        for value in node.values():
+            _temporal_encodings(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _temporal_encodings(item, out)
+    return out
+
+
+@pytest.mark.parametrize("name", CHART_NAMES)
+def test_every_temporal_encoding_pins_utc(name):
+    """Vega-Lite's default temporal scale is the HOST's local time.
+
+    That default is a cross-renderer bug, not a preference: the same stored spec
+    renders `Jan 15` in the server SVG on a UTC box and drops it for a reader in
+    Los Angeles when the browser draws it. One chart, two pictures, no error on
+    either side. It also made five of these goldens PDT artifacts.
+    """
+    for encoding in _temporal_encodings(_charts()[name].spec):
+        assert encoding.get("scale", {}).get("type") == "utc", (
+            f"temporal encoding on {encoding.get('field')!r} has no UTC scale"
+        )
+
+
+def _texts_under_tz(tz: str, chart_name: str) -> list[str]:
+    """Render in a subprocess with `TZ` set, and report the drawn text."""
+    script = (
+        "import json,sys;"
+        "sys.path.insert(0, '.');"
+        "from tests.test_charts_emitters import _charts, svg_signature;"
+        "from app.charts.render import render_svg;"
+        f"print(json.dumps(svg_signature(render_svg(_charts()[{chart_name!r}]))['texts']))"
+    )
+    env = {**os.environ, "TZ": tz}
+    out = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize("name", ["timeseries", "its"])
+def test_the_same_chart_draws_the_same_dates_in_every_timezone(name):
+    """The regression itself, not just the spec property that prevents it.
+
+    Before the UTC pin these two gained and lost axis labels depending on the
+    host: `timeseries` drew 25 text elements in PDT and 26 under `TZ=UTC`.
+    """
+    assert _texts_under_tz("UTC", name) == _texts_under_tz("Asia/Tokyo", name)
+    assert _texts_under_tz("UTC", name) == _texts_under_tz("America/Los_Angeles", name)
 
 
 VEGA_DEFAULT_BLUE = "#4c78a8"

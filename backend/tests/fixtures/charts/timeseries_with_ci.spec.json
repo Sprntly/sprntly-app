@@ -46,6 +46,9 @@
               "labelAngle": 0
             },
             "field": "t",
+            "scale": {
+              "type": "utc"
+            },
             "title": "Date",
             "type": "temporal"
           },
@@ -72,6 +75,9 @@
               "labelAngle": 0
             },
             "field": "t",
+            "scale": {
+              "type": "utc"
+            },
             "title": "Date",
             "type": "temporal"
           },

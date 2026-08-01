@@ -7,10 +7,10 @@
   ],
   "tags": {
     "g": 32,
-    "line": 46,
+    "line": 48,
     "path": 16,
     "svg": 1,
-    "text": 25
+    "text": 26
   },
   "texts": [
     "0",
@@ -36,6 +36,7 @@
     "Jan 12",
     "Jan 13",
     "Jan 14",
+    "Jan 15",
     "Teams",
     "Weekly active teams"
   ]
