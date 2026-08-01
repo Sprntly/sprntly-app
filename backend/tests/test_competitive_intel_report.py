@@ -439,3 +439,39 @@ def test_schema_pins_the_skills_enumerations():
     # All three benchmarks are mandatory keys — the radar cannot substitute.
     for key in ("scale_rows", "position_rows", "feature_rows", "radars"):
         assert key in rep.SCHEMA["required"]
+
+
+# ── PDF / re-hosted surfaces ─────────────────────────────────────────────────
+#
+# `.page` is styled as a sheet of paper on a desk. render_report_pdf prints this
+# document to A4 through Chromium with print_background on, so without a print
+# block the desk paints on every page and the sheet's border lands INSIDE the
+# printer margins — a grey rule sliced across every page boundary. This is the
+# contract report_pdf.py documents and voice-of-customer already honours.
+
+def test_print_media_drops_the_sheet_so_the_pdf_has_no_frame():
+    css = rep._STYLE
+    block = re.search(r"@media print\{(.*?)\}\s*$", css, re.S)
+    assert block, "no @media print block — the PDF would draw the page frame"
+    print_css = block.group(1)
+    assert "border:0" in print_css
+    assert "box-shadow:none" in print_css
+    assert "background:#fff" in print_css
+
+
+def test_print_media_wins_over_the_narrow_viewport_block():
+    # A4 minus the printer margins is ~703px, so @media(max-width:820px) ALSO
+    # matches while printing. Neither adds specificity, so the print block only
+    # wins by coming last.
+    css = rep._STYLE
+    assert css.index("@media print") > css.rindex("@media(max-width:820px)")
+
+
+def test_print_media_keeps_the_top_padding_the_brandmark_hangs_in():
+    # .brandmark is absolutely positioned at top:16px inside .page. Zeroing the
+    # padding outright drops it straight onto the <h1>.
+    css = rep._STYLE
+    page_rule = re.search(r"@media print\{.*?\.page\{([^}]*)\}", css, re.S).group(1)
+    assert "padding:34px 0 0" in page_rule
+    top = re.search(r"\.brandmark\{[^}]*top:(\d+)px", css).group(1)
+    assert int(top) < 34
