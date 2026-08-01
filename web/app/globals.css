@@ -16612,6 +16612,61 @@
     word-break: break-all;
   }
 
+  /* Six-box one-time-code entry (OtpInput) — signup confirmation and
+     password reset. Sized so all six boxes fit the auth card at the narrowest
+     supported width without horizontal scroll. */
+  .otp-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin: 4px 0 16px;
+  }
+
+  .otp-box {
+    width: 100%;
+    min-width: 0;
+    max-width: 52px;
+    aspect-ratio: 1 / 1.15;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 21px;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .otp-box:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .otp-box:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .otp-row-invalid .otp-box {
+    border-color: #c13838;
+  }
+
+  .otp-row-invalid .otp-box:focus {
+    box-shadow: 0 0 0 3px rgba(193, 56, 56, 0.14);
+  }
+
+  @media (max-width: 380px) {
+    .otp-row {
+      gap: 6px;
+    }
+
+    .otp-box {
+      font-size: 18px;
+    }
+  }
+
   .spam-note {
     font-size: 11.5px;
     color: var(--ink-3);
