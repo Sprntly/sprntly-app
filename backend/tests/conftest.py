@@ -1269,6 +1269,34 @@ CREATE TABLE llm_usage_events (
     created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
+
+-- Artifact share-grant primitive (mirrors
+-- 20260801130000_artifact_share_links.sql, SQLite-ized: bigint identity /
+-- timestamptz are INTEGER / TEXT here). owner_company_id / owner_workspace_id
+-- are plain TEXT with no FK, matching the workspaces-table note above — route
+-- tests fabricate tenant ids that have no parent rows.
+CREATE TABLE artifact_shares (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    token              TEXT NOT NULL UNIQUE,
+    artifact_type      TEXT NOT NULL DEFAULT 'prd',
+    artifact_id        INTEGER NOT NULL,
+    owner_company_id   TEXT NOT NULL,
+    owner_workspace_id TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at         TEXT
+);
+CREATE INDEX artifact_shares_artifact_idx ON artifact_shares (artifact_type, artifact_id);
+
+CREATE TABLE artifact_share_joins (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    share_id            INTEGER NOT NULL REFERENCES artifact_shares (id),
+    joined_user_id      TEXT NOT NULL,
+    joined_company_id   TEXT NOT NULL,
+    joined_workspace_id TEXT NOT NULL,
+    joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (share_id, joined_user_id)
+);
 """
 
 

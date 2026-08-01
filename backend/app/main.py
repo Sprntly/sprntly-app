@@ -44,6 +44,7 @@ from app.prompts import (
 from app.routes import (
     admin,
     agent_chat,
+    artifact_share,
     artifacts,
     ask,
     brief,
@@ -413,6 +414,7 @@ app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
 app.include_router(internal_mcp.data_router)
+app.include_router(artifact_share.router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)
