@@ -486,6 +486,28 @@ same grounding rules apply: quote the PRD's own content, never invent, and \
 say so when the PRD doesn't cover what was asked."""
 
 
+# ── Ask × a report generated in this chat ───────────────────────────────────
+# When the thread has already produced a report, app.report_context loads it
+# from the `reports` table (capture stamps it with the conversation) into a
+# "REPORT IN THIS CHAT" block and this clause is appended to ASK_SYSTEM.
+# Additive: threads with no captured report keep the unmodified prompt.
+#
+# The last sentence is the one that matters. A report follow-up used to be
+# answered by whatever source the router thought the thread was about — "no
+# tracker is connected", "nothing found in Slack" — for a question the report
+# on screen already answered in full.
+ASK_SYSTEM_REPORT_ADDENDUM = """\
+
+You also have a "REPORT IN THIS CHAT" section: a report generated earlier in \
+this conversation, which the user is looking at. When they say "the report", \
+"your recommendations", "point 1", "the second theme", or ask about any \
+finding, section or figure without naming another document, they mean THAT \
+report — answer from that section first, quoting its own wording and numbers. \
+The same grounding rules apply: never invent, and say plainly when the report \
+does not cover what was asked. Never answer such a question by reporting that \
+a source is unavailable or unconnected; the report itself is the source."""
+
+
 # ── Ask × custom skills (PRD 1854 — company-uploaded method text) ───────────
 # When the bound skill is a company upload (qa_agent resolves the spec from
 # the custom_skills table and injects it), this clause is appended to

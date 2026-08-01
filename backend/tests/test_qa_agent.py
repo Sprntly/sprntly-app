@@ -274,7 +274,8 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", report_context="",
+        on_delta=None: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -531,7 +532,8 @@ def test_answer_prd_id_grounds_direct_answer(monkeypatch):
     )
     seen = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", report_context="",
+                 on_delta=None):
         seen.update(question=q, prd_context=prd_context)
         return {"answer": "generic", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -557,7 +559,8 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", report_context="",
+        on_delta=None: {
             "answer": "plain", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -566,3 +569,100 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
         enterprise_id="ent", question="what changed", dataset="acme", prd_id=404
     )
     assert out["answer"] == "plain"
+
+
+# ── report grounding (a report generated in this chat) ───────────────────────
+# Reported live: "Explain more on your recommendations point 1" right after a
+# Voice of Customer report could not be answered, because the only route back
+# to the document was the 4k-capped history fold. The report is loaded into its
+# own block instead; these cover the dispatch side of that wiring.
+
+def _stub_report_block(monkeypatch, block="THE REPORT BLOCK"):
+    monkeypatch.setattr(qa, "build_report_context", lambda company, conv: block)
+
+
+def test_answer_report_context_reaches_the_direct_path(monkeypatch):
+    """Router → none: the follow-up is a plain question, and the report rides
+    its own kwarg rather than being stuffed into the question text."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    _stub_report_block(monkeypatch)
+    seen = {}
+
+    def _compose(dataset, q, *, enterprise_id, prd_context="", report_context="",
+                 on_delta=None):
+        seen.update(question=q, report_context=report_context)
+        return {"answer": "generic", "key_points": [], "citations": [],
+                "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _compose)
+    qa.answer(
+        enterprise_id="ent", question="explain more on recommendation 1",
+        dataset="acme", conversation_id=77,
+    )
+    assert seen["report_context"] == "THE REPORT BLOCK"
+    assert "THE REPORT BLOCK" not in seen["question"]
+
+
+def test_answer_report_context_reaches_the_skill_path(monkeypatch):
+    """A follow-up that routes to a skill sees the report too — and the system
+    prompt gains the clause that tells it not to answer from a source instead."""
+    from app.prompts import ASK_SYSTEM_REPORT_ADDENDUM
+
+    captured = {}
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: captured.update(k) or _answer_out()
+    )
+    _stub_report_block(monkeypatch)
+    qa.answer(
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill="user-stories", conversation_id=77,
+    )
+    # pinned_skill exempts the LOAD, so nothing was injected here…
+    assert "THE REPORT BLOCK" not in captured["input"]
+    assert ASK_SYSTEM_REPORT_ADDENDUM not in captured["system"]
+
+    captured.clear()
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or (
+        _route_out("user-stories", 0.9, "stories")
+        if k.get("purpose") == "route" else _answer_out()
+    ))
+    qa.answer(
+        enterprise_id="ent", question="turn recommendation 1 into tickets",
+        dataset="acme", conversation_id=77,
+    )
+    assert "THE REPORT BLOCK" in captured["input"]
+    assert ASK_SYSTEM_REPORT_ADDENDUM in captured["system"]
+
+
+def test_answer_report_context_skipped_for_an_explicit_skill_invocation(monkeypatch):
+    """A slash command says "run this skill", not "tell me about the last one".
+    It matters most for a re-run of a report skill: handing a generator its own
+    previous output invites a rewrite instead of a fresh report."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    calls = []
+    monkeypatch.setattr(
+        qa, "build_report_context",
+        lambda company, conv: calls.append(conv) or "THE REPORT BLOCK",
+    )
+    qa.answer(
+        enterprise_id="ent", question="/user-stories do it again",
+        dataset="acme", conversation_id=77,
+    )
+    assert calls == []
+
+
+def test_answer_without_a_conversation_loads_no_report(monkeypatch):
+    """Non-chat callers of the pipeline have no conversation at all, and the
+    builder must not be asked to guess one."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    seen = {}
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", report_context="",
+        on_delta=None: seen.update(report_context=report_context) or {
+            "answer": "generic", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what changed", dataset="acme")
+    assert seen["report_context"] == ""

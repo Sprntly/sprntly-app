@@ -36,8 +36,10 @@ from app.prompts import (
     ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_PRD_ADDENDUM,
+    ASK_SYSTEM_REPORT_ADDENDUM,
     OUT_OF_SCOPE_MESSAGE,
 )
+from app.report_context import build_report_context
 from app.skill_router import (
     detect_intent,
     is_call_digest,
@@ -307,12 +309,17 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
 
 def _answer_single_shot(
     decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
-    on_delta=None, skill_spec=None,
+    on_delta=None, skill_spec=None, report_context: str = "",
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
     grounded on the KG when the tenant's graph has relevant signal — or, for a
     PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
-    prefix and the KG retrieval is skipped)."""
+    prefix and the KG retrieval is skipped).
+
+    `report_context` is ADDITIVE where the other two are exclusive: a report
+    generated in this thread is one more thing the answer may need to read, not
+    a replacement for the tenant's own signal — "how does recommendation 2
+    compare to what support has seen since?" wants both."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
     # Custom skill (PRD 1854): resolve the DB-backed spec and hand it over.
     # resolve_skill is BUILT-IN FIRST, so a vendored id keeps sending the
@@ -339,6 +346,7 @@ def _answer_single_shot(
     system = (
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
+        + (ASK_SYSTEM_REPORT_ADDENDUM if report_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         # skill_spec is not None ⇔ the method text is a company upload, not a
         # vendored skill — tell the model it's user content, never authority.
@@ -346,13 +354,17 @@ def _answer_single_shot(
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
     )
+    report_block = f"{report_context}\n\n---\n\n" if report_context else ""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="qa",
         purpose="skill_answer",
         model=model,
         system=system,
-        input=_render_history(history) + kg_block + f"Question: {question}",
+        input=(
+            _render_history(history) + report_block + kg_block
+            + f"Question: {question}"
+        ),
         user_cacheable_prefix=prd_context or None,
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
@@ -404,7 +416,8 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
 
 
 def _answer_with_script(
-    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
+    report_context: str = "",
 ) -> dict:
     """Skill answer via a tool-use loop so the skill's deterministic script runs
     ON OUR INFRA (app.skills.scripts) instead of the model estimating the math."""
@@ -412,9 +425,11 @@ def _answer_with_script(
     tool = SCRIPT_TOOLS[skill_id]
     spec = get_skill(skill_id)
     prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
+    report_block = f"{report_context}\n\n---\n\n" if report_context else ""
     system = (
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
+        + (ASK_SYSTEM_REPORT_ADDENDUM if report_context else "")
         + f"\n\n## METHOD (skill: {skill_id})\n{spec.method}\n\n"
         f"You have a tool, `{tool.name}`, that runs the skill's deterministic "
         "script. Call it for the math instead of computing it yourself, then "
@@ -427,7 +442,10 @@ def _answer_with_script(
     meta: dict = {}
     text = run_tool_loop(
         system=system,
-        user=_render_history(history) + prd_block + f"Question: {question}",
+        user=(
+            _render_history(history) + prd_block + report_block
+            + f"Question: {question}"
+        ),
         tools=[tool.as_tool()],
         dispatch=dispatch,
         model=HEAVY_MODEL if skill_id in HEAVY_SKILLS else ANSWER_MODEL,
@@ -530,6 +548,7 @@ def answer(
     pinned_skill: Optional[str] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     prd_id: Optional[int] = None,
+    conversation_id: Optional[int] = None,
     on_delta: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
@@ -537,6 +556,12 @@ def answer(
     `prd_id` marks a PRD-tab ask: the open PRD (+ its insight/evidence/tickets/
     prototype) is assembled into a grounding block so "this PRD" questions
     actually see the document.
+
+    `conversation_id` is the chat room this ask runs in. When a report was
+    generated in it, the report is loaded into its own grounding block for the
+    same reason as the PRD — a follow-up like "explain recommendation 1" needs
+    the whole document, and the history fold only carries its first few
+    thousand characters (see app/report_context.py).
 
     `on_delta`, when supplied, token-streams the answer as it generates: it
     receives the PARTIAL-JSON fragments of the structured answer call (the Ask
@@ -703,12 +728,26 @@ def answer(
 
         prd_context = build_prd_context(enterprise_id, prd_id)
 
+    # Report grounding: a report generated in this thread is what "the report",
+    # "your recommendations" and "point 1" refer to. Same best-effort contract
+    # as the PRD block — '' when the thread has produced none, or on any read
+    # failure, which is every ask that isn't a report follow-up.
+    #
+    # An explicit skill invocation is exempt (a slash command, or a pinned skill
+    # — which is how the Artifacts "New report" button generates one). Those say
+    # "run this skill", not "tell me about what you produced", and handing the
+    # previous report to a run that is about to write the next one invites it to
+    # be rewritten rather than regenerated.
+    report_context = ""
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        report_context = build_report_context(enterprise_id, conversation_id)
+
     if not decision.skill_id:
         # Direct path — corpus + KG, unchanged. Fold history into the question.
         q = _render_history(history) + question if history else question
         return compose_ask_answer(
             dataset, q, enterprise_id=enterprise_id, prd_context=prd_context,
-            on_delta=on_delta,
+            report_context=report_context, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic
@@ -727,6 +766,7 @@ def answer(
             payload = _answer_single_shot(
                 decision, enterprise_id, question, history, prd_context=prd_context,
                 on_delta=on_delta, skill_spec=custom_spec,
+                report_context=report_context,
             )
             return _maybe_verify(payload, enterprise_id)
 
@@ -805,11 +845,12 @@ def answer(
 
     if decision.skill_id in SCRIPT_TOOLS:
         payload = _answer_with_script(
-            decision, enterprise_id, question, history, prd_context=prd_context
+            decision, enterprise_id, question, history, prd_context=prd_context,
+            report_context=report_context,
         )
     else:
         payload = _answer_single_shot(
             decision, enterprise_id, question, history, prd_context=prd_context,
-            on_delta=on_delta,
+            on_delta=on_delta, report_context=report_context,
         )
     return _maybe_verify(payload, enterprise_id)

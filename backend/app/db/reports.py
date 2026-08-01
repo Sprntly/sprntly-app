@@ -131,6 +131,33 @@ def list_reports_for_conversation(conversation_id: int, company_id: str) -> list
 
 
 @retry_on_disconnect
+def latest_report_for_conversation(
+    conversation_id: int, company_id: str
+) -> dict | None:
+    """The most recently captured report in one chat thread, WITH its body.
+
+    The listing above deliberately omits `html` because a panel showing N rows
+    must not carry N documents. This read is the opposite case: exactly one row,
+    and the body is the point — it is what grounds a follow-up question about
+    the report the user is looking at (app/report_context.py).
+
+    Same company filter as every other read here, so a conversation id from
+    another tenant returns None rather than their report.
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select(_READ_COLUMNS)
+        .eq("conversation_id", conversation_id)
+        .eq("company_id", company_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
 def set_report_share_config(
     *,
     report_id: int,
