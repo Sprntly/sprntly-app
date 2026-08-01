@@ -134,6 +134,7 @@ def compose_ask_answer(
     *,
     enterprise_id: str | None = None,
     prd_context: str = "",
+    report_context: str = "",
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -144,6 +145,9 @@ def compose_ask_answer(
         corpus load and the KG retrieval: the PRD context block is the
         grounding and rides the cacheable user prefix (see inline comment).
       - Otherwise, load the dataset corpus (cacheable prefix; unchanged grounding).
+      - `report_context` (a report generated in this chat) is ADDITIVE to
+        whichever of those applies — it answers "explain recommendation 1"
+        without displacing the grounding the same answer may still need.
       - If a tenant (`enterprise_id`) is resolvable AND its KG has relevant
         signals/entities, retrieve a ranked, budget-capped context bundle and
         inject it as a "LIVE CONTEXT FROM CONNECTED SOURCES" section, with the KG-aware
@@ -200,6 +204,16 @@ def compose_ask_answer(
             system = ASK_SYSTEM
             user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
+    # A report generated in this chat: prepended to the UNCACHED user body, not
+    # to `cacheable`, which is already spoken for (the PRD block or the shared
+    # corpus prefix) and whose whole value is being byte-stable across tenants
+    # or across turns.
+    if report_context:
+        from app.prompts import ASK_SYSTEM_REPORT_ADDENDUM
+
+        system += ASK_SYSTEM_REPORT_ADDENDUM
+        user = f"{report_context}\n\n---\n\n{user}"
+
     # Bind the tenant's own Claude key (when configured) for this direct
     # (non-gateway) answer call. See app.llm_keys.
     from app.llm_keys import company_llm_key
@@ -233,6 +247,7 @@ def compose_ask_answer(
                     "question": question,
                     "kg_used": bool(bundle),
                     "prd_grounded": bool(prd_context),
+                    "report_grounded": bool(report_context),
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
                 },

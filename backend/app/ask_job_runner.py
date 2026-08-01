@@ -96,6 +96,10 @@ def _run_sync(
         history=history,
         pinned_skill=pinned_skill,
         prd_id=prd_id,
+        # The chat room this ask runs in — grounds a follow-up on the report
+        # this thread already generated (app/report_context.py), and is the
+        # attachment capture_report stamps on any report this ask produces.
+        conversation_id=conversation_id,
         # Cooperative cancellation: the user's Stop flips the job row to
         # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
         # steps and raises AskCancelled to abort before the expensive answer call.
