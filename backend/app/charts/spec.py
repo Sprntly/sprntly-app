@@ -33,16 +33,27 @@ fetch data over the network and evaluate expressions. So construction of a
    not inside a `layer[]` / `hconcat[]` / `vconcat[]` / `concat[]` / `facet.spec` /
    `repeat.spec` child, which is where it actually hides. A `ChartSpec` carries
    its rows; it never fetches. `datasets` values must be inline arrays.
-2. **No `image` marks and no `href` encodings.** Both are network reach that
-   survives SSR: an `image` mark makes the *renderer* fetch, and an `href`
-   encoding puts an attacker-chosen link into a chart the user is invited to
-   click. Neither has a legitimate use in a Sprntly chart.
+2. **No `image` marks and no `href`, anywhere.** Both are network reach that
+   survives SSR: an `image` mark makes a fetch happen, and an `href` puts a
+   spec-chosen link into a chart the user is invited to click, out of a sandboxed
+   report. `href` is refused as a *key anywhere* rather than as an enumerated
+   encoding channel — enumerating channels is precisely how such a gap appears.
 3. **No expression bindings.** No `expr` key at any depth — value refs, `params`,
    transform entries alike. (See the note on `calculate` below.)
-4. **No unknown top-level keys** — the allowlist is *derived from the schema
+4. **No top-level `config`.** Vega-Lite's `config` REPLACES the one the renderer
+   is handed rather than merging, so one spec could opt itself out of the theme.
+5. **No top-level `facet`/`repeat`.** `{facet, spec}` carries a `spec` key, which
+   is ambiguous with this envelope's own `spec`; the client discriminates on
+   exactly that. Facet inside a child spec instead.
+6. **No unknown top-level keys** — the allowlist is *derived from the schema
    itself* (`_top_level_keys`), so it cannot drift from the version we validate
    against.
-5. **Schema-valid** against the Vega-Lite v6.4 JSON schema.
+7. **Schema-valid** against the Vega-Lite v6.4 JSON schema.
+
+Rules 1-3 read the spec's STRUCTURE, not its rows: inline row payloads
+(`data.values`, `datasets.*`) are not descended into, because a data column named
+`url` is a value rather than a fetch instruction, and a rule that fires on the
+data is one people learn to route around. Their shape is still checked.
 
 Rejection raises `ChartSpecError`, a `ValueError` subclass. Note the consequence:
 raised inside a pydantic validator it is converted into a `ValidationError`, so
@@ -226,10 +237,22 @@ def validate_vega_lite_spec(spec: Any) -> None:
     if not isinstance(spec, dict):
         raise ChartSpecError(f"spec must be a JSON object, got {type(spec).__name__}")
 
-    # 1-3. one walk, three structural rules.
+    # 1-4. one walk, four structural rules.
     for path, node in _walk(spec):
         if not isinstance(node, dict):
             continue
+
+        # Row payloads are not descended into (see `_DATA_KEYS`), so their SHAPE
+        # is checked here instead: an inline row set must be an array of rows (or
+        # a raw string, which is how Vega-Lite carries inline CSV/TSV). That is
+        # what makes "not descended into" safe — a dict hiding under `values`
+        # would be spec structure smuggled past the rules below.
+        values = node.get("values")
+        if values is not None and not isinstance(values, (list, str)):
+            raise ChartSpecError(
+                "inline 'values' must be an array of rows",
+                path=f"{path}.values",
+            )
 
         if "url" in node:
             raise ChartSpecError(
@@ -266,20 +289,6 @@ def validate_vega_lite_spec(spec: Any) -> None:
                 path=f"{path}.href",
             )
 
-    # Row payloads are not walked, so their SHAPE is checked here instead: an
-    # inline row set must be a list of rows, which is what makes "not descended
-    # into" safe — a dict hiding under `values` would be spec structure smuggled
-    # past the rules above.
-    for path, node in _walk(spec):
-        if not isinstance(node, dict):
-            continue
-        values = node.get("values")
-        if values is not None and not isinstance(values, (list, str)):
-            raise ChartSpecError(
-                "inline 'values' must be an array of rows",
-                path=f"{path}.values",
-            )
-
     datasets = spec.get("datasets")
     if datasets is not None:
         if not isinstance(datasets, dict):
@@ -291,7 +300,7 @@ def validate_vega_lite_spec(spec: Any) -> None:
                     path=f"$.datasets.{name}",
                 )
 
-    # 4. the theme is ours; a spec does not get to replace it.
+    # 5. the theme is ours; a spec does not get to replace it.
     #    Vega-Lite's `config` REPLACES the config handed to the renderer rather
     #    than merging with it, so one model-authored chart carrying a `config`
     #    would silently opt itself — and only itself — out of the Sprntly theme,
@@ -303,7 +312,7 @@ def validate_vega_lite_spec(spec: Any) -> None:
             path="$.config",
         )
 
-    # 5. no faceting at the top level — a cross-phase structural pin, not taste.
+    # 6. no faceting at the top level — a cross-phase structural pin, not taste.
     #    Vega-Lite's `{facet, spec}` and `{repeat, spec}` forms carry a `spec`
     #    key, which is ambiguous with the `ChartSpec` ENVELOPE's own `spec` key.
     #    The client discriminates the two by treating `facet`/`repeat` as proof
@@ -318,7 +327,7 @@ def validate_vega_lite_spec(spec: Any) -> None:
             path="$.facet" if "facet" in spec else "$.repeat",
         )
 
-    # 6. no unknown top-level keys.
+    # 7. no unknown top-level keys.
     unknown = sorted(set(spec) - _top_level_keys())
     if unknown:
         raise ChartSpecError(
@@ -326,7 +335,7 @@ def validate_vega_lite_spec(spec: Any) -> None:
             + ", ".join(unknown)
         )
 
-    # 7. the schema itself (last: by far the most expensive check).
+    # 8. the schema itself (last: by far the most expensive check).
     errors = sorted(_validator().iter_errors(spec), key=lambda e: list(e.absolute_path))
     if errors:
         first = errors[0]
