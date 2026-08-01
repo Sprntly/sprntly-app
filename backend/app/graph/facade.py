@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.db.client import require_client
+from app.db.companies import display_name_for_company_id
 from app.graph.types import (
     COMPANY_ENTITY_TYPE,
     Entity,
@@ -111,9 +112,12 @@ class GraphFacade:
         dedupe concern here — a plain existence check by type is enough
         since there is only ever one per tenant. `label` is only used the
         first time (entity creation); a later call with a different label
-        does NOT rename an already-existing company entity. Falls back to
-        `enterprise_id` as the label if none is supplied, so this is always
-        safe to call with just an enterprise_id.
+        does NOT rename an already-existing company entity. When no label
+        is supplied, falls back to `companies.display_name` for this
+        enterprise (the human-readable name every real tenant already has),
+        and only as a last resort — no `companies` row, or `display_name`
+        itself unset — to the raw `enterprise_id`, so this is always safe
+        to call with just an enterprise_id.
 
         A shared primitive rather than a private helper on one caller,
         because more than one write path needs "find or create this
@@ -123,9 +127,11 @@ class GraphFacade:
         existing = self.query_entities(enterprise_id, type=COMPANY_ENTITY_TYPE)
         if existing:
             return existing[0].id
+        if label is None:
+            label = display_name_for_company_id(enterprise_id) or enterprise_id
         ent = Entity(
             enterprise_id=enterprise_id, type=COMPANY_ENTITY_TYPE,
-            canonical_label=label or enterprise_id,
+            canonical_label=label,
         )
         self.create_entity(enterprise_id, ent)
         return ent.id

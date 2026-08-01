@@ -473,7 +473,28 @@ def test_ensure_company_entity_is_idempotent_and_does_not_rename(facade):
     assert len(facade.query_entities("ent-A", type="company")) == 1
 
 
-def test_ensure_company_entity_falls_back_to_enterprise_id_label(facade):
+def test_ensure_company_entity_falls_back_to_display_name(facade, isolated_settings):
+    """No label passed, but a `companies` row with a display_name exists for
+    this enterprise → the created entity's canonical_label is the
+    display_name, not the raw enterprise_id."""
+    isolated_settings["supabase"].table("companies").insert(
+        {"id": "ent-A", "slug": "acme", "display_name": "Acme Inc"}
+    ).execute()
+
+    company_id = facade.ensure_company_entity("ent-A")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent.canonical_label == "Acme Inc"
+
+
+def test_ensure_company_entity_falls_back_to_enterprise_id_label_as_last_resort(facade):
+    """No label passed AND no `companies` row for this enterprise (e.g. a
+    legacy/demo dataset with no tenant row) → falls all the way back to the
+    raw enterprise_id, same as before this fallback was improved.
+
+    (`companies.display_name` is a NOT NULL column per the schema — a
+    `companies` row existing with a null/empty display_name isn't a state
+    the real DB can produce, so "no row at all" is the only realistic
+    last-resort case worth covering here.)"""
     company_id = facade.ensure_company_entity("ent-A")
     ent = facade.get_entity("ent-A", company_id)
     assert ent.canonical_label == "ent-A"
