@@ -103,6 +103,7 @@ past this module cannot fetch. Belt and braces, on purpose.
 from __future__ import annotations
 
 import json
+from collections import deque
 from functools import lru_cache
 from typing import Any, Iterator
 
@@ -206,6 +207,26 @@ def _top_level_keys() -> frozenset[str]:
 # bad chart into a 500.
 _MAX_DEPTH = 64
 
+# Breadth guard, the companion to the depth one. Structural nodes only — the walk
+# skips row payloads (`_DATA_KEYS`), so this counts SHAPE, not data volume: a
+# 200k-row chart and a 2-row chart of the same shape count the same.
+#
+# It exists because the SCHEMA VALIDATOR has no breadth budget of its own and is
+# the expensive step: a spec with ~10k sibling views took `ChartSpec.build` 60.3
+# seconds on a dev machine, all of it inside jsonschema, holding a worker the
+# whole time. The structural walk runs BEFORE validation, so capping here is what
+# keeps such a spec from reaching it. Rejecting is right rather than harsh —
+# vega's embedded V8 blows its stack on that many sibling views anyway, so the
+# chart could not render even if we spent the minute deciding to try.
+#
+# 5,000 is measured, not guessed:
+#   * every emitter in this package:            22-98 nodes (worst: `its`, 98)
+#   * a deliberately elaborate 20-view dashboard:   412 nodes
+#   * the pathological 10,050-sibling-view spec: 20,111 nodes
+# So the cap sits ~12x above an elaborate legitimate spec and ~50x above anything
+# we emit, while still refusing the shape that costs a minute of a worker.
+_MAX_NODES = 5_000
+
 
 # Row payloads, not spec structure. The structural rules below (`url`, `href`,
 # `expr`, `image`) are about what the SPEC instructs the renderer to do; a data
@@ -215,7 +236,9 @@ _MAX_DEPTH = 64
 _DATA_KEYS = frozenset({"values", "datasets"})
 
 
-def _walk(node: Any, path: str = "$", depth: int = 0) -> Iterator[tuple[str, Any]]:
+def _walk(
+    node: Any, path: str = "$", depth: int = 0, budget: list[int] | None = None
+) -> Iterator[tuple[str, Any]]:
     """Yield `(json_path, node)` for every structural dict/list node in the tree.
 
     A full recursive walk is what makes the nested cases (`layer[]`, `hconcat[]`,
@@ -231,15 +254,24 @@ def _walk(node: Any, path: str = "$", depth: int = 0) -> Iterator[tuple[str, Any
             f"spec nests deeper than {_MAX_DEPTH} levels; rejected as malformed",
             path=path,
         )
+    if budget is None:
+        budget = [_MAX_NODES]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise ChartSpecError(
+            f"spec has more than {_MAX_NODES} structural nodes; rejected as "
+            "malformed before it reaches the schema validator",
+            path=path,
+        )
     yield path, node
     if isinstance(node, dict):
         for key, value in node.items():
             if key in _DATA_KEYS:
                 continue
-            yield from _walk(value, f"{path}.{key}", depth + 1)
+            yield from _walk(value, f"{path}.{key}", depth + 1, budget)
     elif isinstance(node, list):
         for i, value in enumerate(node):
-            yield from _walk(value, f"{path}[{i}]", depth + 1)
+            yield from _walk(value, f"{path}[{i}]", depth + 1, budget)
 
 
 def _mark_type(mark: Any) -> str | None:
@@ -522,6 +554,17 @@ def total_row_payload(spec: dict[str, Any]) -> int:
 
     Kept as a separate name rather than folded into `count_rows` precisely so
     neither question can quietly answer the other.
+
+    Two details that are load-bearing rather than incidental:
+
+    * The traversal is **breadth-first, in document order**. It was LIFO, which
+      meant `{"layer": [<200k rows>, …10,050 empty marks]}` popped the empty
+      marks first, exhausted the node budget before ever reaching the data, and
+      returned 0 — so the cap did not fire on the largest payload in the spec.
+    * Exhausting the budget **raises** rather than returning what it counted so
+      far. A partial count fails OPEN on a cap, which is the same bug in a
+      quieter form: the one input the budget exists to stop is the one that would
+      slip through. `render` catches it and degrades to the table.
     """
     if not isinstance(spec, dict):
         return 0
@@ -529,11 +572,16 @@ def total_row_payload(spec: dict[str, Any]) -> int:
     datasets = raw if isinstance(raw, dict) else {}
     total = sum(len(_rows_of(rows)) for rows in datasets.values())
 
-    stack: list[Any] = [spec]
+    queue: deque[Any] = deque([spec])
     seen = 0
-    while stack and seen < 10_000:
-        node = stack.pop()
+    while queue:
         seen += 1
+        if seen > _MAX_NODES:
+            raise ChartSpecError(
+                f"spec has more than {_MAX_NODES} container nodes; refusing to "
+                "size it rather than under-count and let the row cap pass"
+            )
+        node = queue.popleft()
         if not isinstance(node, dict):
             continue
         block = node.get("data")
@@ -542,9 +590,9 @@ def total_row_payload(spec: dict[str, Any]) -> int:
         for key in _CONTAINER_KEYS:
             child = node.get(key)
             if isinstance(child, list):
-                stack.extend(child)
+                queue.extend(child)
             elif isinstance(child, dict):
-                stack.append(child)
+                queue.append(child)
     return total
 
 

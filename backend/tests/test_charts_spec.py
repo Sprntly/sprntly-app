@@ -296,6 +296,57 @@ def test_total_row_payload_sums_what_the_renderer_is_handed():
     assert total_row_payload(spec) == 3  # what actually gets rendered
 
 
+def test_total_row_payload_is_breadth_first_so_ordering_cannot_hide_the_payload():
+    """It was LIFO: 10,050 empty sibling marks popped first, the budget ran out
+    before reaching the 200k-row layer, and the function returned 0 — the cap
+    failing OPEN on the largest payload in the spec."""
+    from app.charts.spec import total_row_payload as payload
+
+    spec = {
+        "layer": [{"data": {"values": [{"a": i} for i in range(500)]}, "mark": "bar"}]
+        + [{"mark": "rule"} for _ in range(200)]
+    }
+    assert payload(spec) == 500
+
+
+def test_total_row_payload_raises_rather_than_under_counting():
+    """A partial count fails open on a cap — the same bug, quieter."""
+    from app.charts.spec import _MAX_NODES
+    from app.charts.spec import total_row_payload as payload
+
+    spec = {"layer": [{"mark": "rule"} for _ in range(_MAX_NODES + 10)]}
+    with pytest.raises(ChartSpecError, match="refusing to size it"):
+        payload(spec)
+
+
+def test_pathological_breadth_is_refused_before_the_validator_sees_it():
+    """The schema validator has no breadth budget and is the expensive step:
+    ~10k sibling views took `ChartSpec.build` 60.3s, all inside jsonschema,
+    holding a worker. The structural walk runs first, so it is the place to
+    stop that. vega's V8 blows its stack on that shape anyway."""
+    from app.charts.spec import _MAX_NODES
+
+    spec = {"layer": [{"mark": "rule"} for _ in range(_MAX_NODES)]}
+    with pytest.raises(ChartSpecError, match="structural nodes"):
+        validate_vega_lite_spec(spec)
+
+
+def test_an_elaborate_but_legitimate_dashboard_is_not_caught_by_the_breadth_cap():
+    """The cap is measured against real shapes: our worst emitter is 98 nodes and
+    a 20-view dashboard is 412, against a limit of 5,000."""
+    inner = {
+        "layer": [
+            {"mark": "line", "encoding": dict(BASE["encoding"])},
+            {"mark": "point", "encoding": dict(BASE["encoding"])},
+        ]
+    }
+    dashboard = {
+        "data": {"values": ROWS},
+        "vconcat": [{"hconcat": [inner for _ in range(4)]} for _ in range(5)],
+    }
+    validate_vega_lite_spec(dashboard)  # must not raise
+
+
 def test_total_row_payload_counts_a_named_dataset_once():
     spec = {
         "datasets": {"d": [{"a": 1}, {"a": 2}, {"a": 3}]},
