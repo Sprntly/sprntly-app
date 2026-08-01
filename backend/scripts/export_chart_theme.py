@@ -1,6 +1,6 @@
 """Regenerate the chart-theme mirror consumed by the frontend.
 
-    python scripts/export_chart_theme.py          # writes backend/app/charts/theme.json
+    python scripts/export_chart_theme.py           # writes web/app/lib/chart-theme.json
     python scripts/export_chart_theme.py --check   # exits 1 if the file is stale
 
 `app/charts/theme.py` is the single source of truth for chart styling; the JSON
