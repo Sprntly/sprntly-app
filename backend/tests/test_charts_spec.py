@@ -154,10 +154,18 @@ both trees in one PR.
 """
 
 
-def _shared_cases():
+def _shared_fixture() -> dict:
     if not SHARED_ROW_FIXTURE.exists():
-        return []
-    return json.loads(SHARED_ROW_FIXTURE.read_text(encoding="utf-8"))["cases"]
+        return {}
+    return json.loads(SHARED_ROW_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _shared_cases():
+    return _shared_fixture().get("cases", [])
+
+
+def _shared_contract_cases():
+    return _shared_fixture().get("contractCases", [])
 
 
 @pytest.mark.parametrize("case", _shared_cases(), ids=lambda c: c["name"])
@@ -174,7 +182,38 @@ def test_row_extraction_contract(case):
     assert count_rows(case["spec"]) == case["rowCount"]
 
 
-def test_the_shared_fixture_is_actually_present():
+@pytest.mark.parametrize(
+    "case", _shared_contract_cases(), ids=lambda c: c["name"]
+)
+def test_accept_reject_contract(case):
+    """The fixture pins WHAT IS IN CONTRACT, not just where rows live.
+
+    This half used to exist only as two separate codebases' opinions, which is
+    how a spec ends up stored by one side and refused by the other. `rejected`
+    is the shared answer; this asserts the backend gives it.
+    """
+    rejected = True
+    try:
+        validate_vega_lite_spec(case["spec"])
+        rejected = False
+    except ChartSpecError:
+        pass
+    assert rejected == case["rejected"], case.get("$note", case["name"])
+
+
+def test_the_depth_limit_is_the_contract_value_not_a_coincidence():
+    """`limits.maxDepth` is the pin; the constant is asserted against it.
+
+    It was unpinned drift — client 64, server 16, agreeing up to 16 and
+    diverging from 17. Two constants that happen to match is not a contract.
+    """
+    from app.charts.spec import _MAX_DEPTH
+
+    limits = _shared_fixture().get("limits", {})
+    assert limits.get("maxDepth") == _MAX_DEPTH
+
+
+def test_the_shared_fixture_is_actually_present_and_pins_all_three_things():
     """A silently-empty parametrize would make the contract vacuous.
 
     Skips rather than fails only if the fixture is relocated out from under us —
@@ -182,9 +221,11 @@ def test_the_shared_fixture_is_actually_present():
     """
     if not SHARED_ROW_FIXTURE.exists():  # pragma: no cover - relocation guard
         pytest.skip(f"shared row fixture not at {SHARED_ROW_FIXTURE}")
-    cases = _shared_cases()
-    assert len(cases) >= 15
-    names = " ".join(case["name"] for case in cases)
+    fixture = _shared_fixture()
+    assert len(fixture["cases"]) >= 17           # row extraction
+    assert len(fixture["contractCases"]) >= 13   # accept/reject
+    assert fixture["limits"]["maxDepth"] == 64   # the limit
+    names = " ".join(case["name"] for case in fixture["cases"])
     assert "altair" in names and "layer" in names
 
 
