@@ -113,7 +113,7 @@ export function validateShareDomainEmail(
   if (!requiredDomain) return null
   const domain = emailDomain(email)
   if (!domain || domain !== requiredDomain.trim().toLowerCase()) {
-    return `Use your work email at ${requiredDomain} to create an account.`
+    return `This link is only accessible to people with an @${requiredDomain} email address.`
   }
   return null
 }
