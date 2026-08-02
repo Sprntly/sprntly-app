@@ -191,6 +191,24 @@ def test_out_of_scope_message_judges_topic_not_data():
     assert "must NEVER get that canned reply" in ASK_SYSTEM
 
 
+def test_ask_system_forbids_raw_html_and_redrawn_skill_chrome():
+    """An ask answer is rendered by a markdown renderer with no raw-HTML pass,
+    so any markup the model emits is PRINTED as tag text. A reader who asked
+    "create a ticket to address this" on a VoC report (no PRD → the ask path
+    answers in markdown instead of opening the Tickets surface) got the
+    user-stories skill's action row as literal source:
+    `<div style="display:flex…"><button style="background:#2e8a57">✓ Push to
+    Jira</button>…`. A skill's delivery format specifies the surface the APP
+    renders; ASK_SYSTEM is where the model is told that, and that its own
+    output channel is markdown."""
+    from app.prompts import ASK_SYSTEM
+
+    assert "never raw HTML" in ASK_SYSTEM
+    assert "Never draw a skill's UI chrome" in ASK_SYSTEM
+    for tag in ("<div>", "<button>", 'style="…"'):
+        assert tag in ASK_SYSTEM, f"ASK_SYSTEM must name {tag} as never-emit"
+
+
 def test_answer_out_of_scope_returns_canned(monkeypatch):
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
