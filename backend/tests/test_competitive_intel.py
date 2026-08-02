@@ -968,6 +968,78 @@ def test_query_mode_read_failure_falls_through_to_a_full_run(monkeypatch):
     assert "couldn't source anything substantive" in out["answer"]
 
 
+# ── Phase frames: naming the leg of a multi-minute sweep ────────────────────
+# A Scan is ~5-10 minutes and a staged Review ~10-20; none of it published
+# anything, so the wait looked identical to a two-second answer. Only legs with
+# hard boundaries speak, and each label is authored beside the call it names.
+
+
+def test_phases_name_capture_then_synthesis_in_order(monkeypatch):
+    phases: list[str] = []
+    _full(monkeypatch, latest=None)
+    ci.answer(enterprise_id="e1", question="run a competitive review",
+              on_phase=phases.append)
+    assert phases == [
+        "Researching 2 competitors on the web…",
+        "Writing the review from 2 sourced observations…",
+    ]
+
+
+def test_capture_phase_counts_the_competitors_actually_researched(monkeypatch):
+    """A baseline is trimmed to _MAX_COMPETITORS_BASELINE before capture, so the
+    count in the label has to be the trimmed one — not the roster size."""
+    phases: list[str] = []
+    _full(monkeypatch, latest=None,
+          roster=("Globex", "Initech", "Umbrella", "Stark", "Wayne"))
+    ci.answer(enterprise_id="e1", question="run a competitive review",
+              on_phase=phases.append)
+    assert phases[0] == "Researching 3 competitors on the web…"
+
+
+def test_query_mode_names_its_own_leg_and_never_claims_web_research(monkeypatch):
+    """A follow-up answered from the stored run does no web work at all, so it
+    must not borrow the capture label."""
+    phases: list[str] = []
+    _patch_run_io(monkeypatch, latest=dict(PRIOR_RUN))
+    monkeypatch.setattr(ci, "llm_call", lambda **kw: SimpleNamespace(output={
+        "answer": "Globex shipped Asset Studio.", "key_points": [],
+        "citations": [], "confidence": 0.7, "unanswered": "",
+    }))
+    out = ci.answer(enterprise_id="e1", question="what did Globex ship?",
+                    on_phase=phases.append)
+    assert out["_skill_source"] == "competitive-intel-query"
+    assert phases == ["Reading the last competitive review…"]
+
+
+def test_no_phase_before_the_run_is_even_viable(monkeypatch):
+    """No competitor set → the pipeline returns a plain message without doing
+    any of the work the labels describe, so it publishes nothing."""
+    phases: list[str] = []
+    _patch_profile(monkeypatch)
+    _patch_set(monkeypatch, roster=(), discovered=())
+    out = ci.answer(enterprise_id="e1", question="run a competitive review",
+                    on_phase=phases.append)
+    assert "couldn't work out who to compare you against" in out["answer"]
+    assert phases == []
+
+
+def test_synthesis_phase_is_not_published_when_capture_found_nothing(monkeypatch):
+    """An empty capture short-circuits before synthesis — claiming to be writing
+    a review that will never be written is exactly the unbacked label this
+    surface exists to remove."""
+    phases: list[str] = []
+    _full(monkeypatch, latest=None, records=[])
+    ci.answer(enterprise_id="e1", question="run a competitive review",
+              on_phase=phases.append)
+    assert phases == ["Researching 2 competitors on the web…"]
+
+
+def test_pipeline_runs_unchanged_without_a_phase_sink(monkeypatch):
+    _full(monkeypatch, latest=None)
+    out = ci.answer(enterprise_id="e1", question="run a competitive review")
+    assert out["answer"].startswith("<!DOCTYPE html>")
+
+
 # ── Routing wire (qa_agent divert) ──────────────────────────────────────────
 
 def test_qa_agent_routes_cir_to_the_web_pipeline(monkeypatch):

@@ -56,7 +56,7 @@ from app.prompt_history import clamp_turn_text
 # qa_agent imports THIS module lazily (inside answer()), so a module-level
 # import back is safe and keeps the cancellation type identical to the one
 # the ask worker catches.
-from app.qa_agent import AskCancelled
+from app.qa_agent import AskCancelled, emit_phase
 from app.report_records import parse_records
 from app.usage_context import Feature, usage_scope
 
@@ -886,12 +886,23 @@ def _log_capture(enterprise_id: str, result: CaptureResult, calls: int,
 
 def answer(*, enterprise_id: str, question: str,
            history: list[dict] | None = None,
-           is_cancelled: Callable[[], bool] | None = None) -> dict | None:
+           is_cancelled: Callable[[], bool] | None = None,
+           on_phase: Callable[[str], None] | None = None) -> dict | None:
     """Run the competitive-intelligence pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
     falls through to the generic skill answer; every other degraded case returns
     a helpful plain message instead.
+
+    `on_phase`, when supplied, is called as each leg of the sweep begins. This
+    is the longest wait in the product — a Scan is roughly one web-search call
+    per competitor (~5-10 min) and a staged Review runs the module sequence per
+    competitor (~10-20 min) — and until now none of it published anything, so a
+    four-minute wait emitted the same signal as a four-second one. Only the
+    three legs with hard boundaries speak: query mode, capture, and synthesis.
+    The per-competitor passes INSIDE `_capture` stay silent, because their
+    boundaries move with the mode and a label that is right for a Scan is wrong
+    for a staged Review.
     """
     from app.research.market import company_profile
 
@@ -903,6 +914,11 @@ def answer(*, enterprise_id: str, question: str,
     if is_followup_query(question):
         prior_run = _latest_run(enterprise_id)
         if prior_run:
+            # Query mode: one call over the run already on file, no web sweep.
+            # Published here rather than inside _answer_from_run because this is
+            # the branch that commits to it — a failure below falls through to
+            # the full pipeline, whose own phases then supersede this label.
+            emit_phase(on_phase, "Reading the last competitive review…")
             try:
                 return _answer_from_run(
                     enterprise_id=enterprise_id, question=question,
@@ -961,6 +977,15 @@ def answer(*, enterprise_id: str, question: str,
 
     try:
         _check_cancelled(is_cancelled)
+        # CAPTURE begins: `names` and the depth are both settled above, so the
+        # count in this label is the number of competitors actually about to be
+        # researched (a baseline has already been trimmed to
+        # _MAX_COMPETITORS_BASELINE). This is the minutes-long leg.
+        emit_phase(
+            on_phase,
+            f"Researching {len(names)} competitor"
+            f"{'' if len(names) == 1 else 's'} on the web…",
+        )
         capture = _capture(
             enterprise_id, scope=scope, names=names, mode=mode,
             prior_state=prior_state if isinstance(prior_state, dict) else {},
@@ -996,6 +1021,12 @@ def answer(*, enterprise_id: str, question: str,
     try:
         # Last checkpoint before the document-scale synthesis call.
         _check_cancelled(is_cancelled)
+        # The web work is over and the records are counted, so this label states
+        # a fact rather than a forecast: the synthesis call is fed exactly these
+        # records, and the deterministic render follows it.
+        emit_phase(
+            on_phase, f"Writing the review from {len(records)} sourced observations…"
+        )
         data = _analyse(
             enterprise_id, question=question, history=history, mode=mode,
             names=names, set_source=set_source, records=records,

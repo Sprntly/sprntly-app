@@ -377,11 +377,12 @@ def get_ask(
 ):
     """Status + result for an Ask job.
 
-    Returns `{status, answer, key_points, citations, confidence, unanswered, error}`.
-    Once `status == 'ready'` the answer/key_points/citations/etc. fields carry
-    the SAME citation-stripped shape the old synchronous POST returned, so
-    downstream rendering is unchanged. 404 if the job doesn't belong to the
-    caller's company (no cross-tenant existence disclosure)."""
+    Returns `{status, answer, key_points, citations, confidence, unanswered,
+    error, routed_skill, routed_skill_action}`. Once `status == 'ready'` the
+    answer/key_points/citations/etc. fields carry the SAME citation-stripped
+    shape the old synchronous POST returned, so downstream rendering is
+    unchanged. 404 if the job doesn't belong to the caller's company (no
+    cross-tenant existence disclosure)."""
     row = get_ask_job(ask_id)
     if not row or row.get("company_id") != company.company_id:
         raise HTTPException(404, "Ask not found")
@@ -390,13 +391,25 @@ def get_ask(
     return {
         "status": status,
         "error": row.get("error"),
+        # The skill the router picked, readable from `generating` onwards — the
+        # rest of this body is empty until the job is ready, so this is the only
+        # thing a waiting client can learn about what is actually running.
+        # Both stay null when the router selected nothing (a direct answer, an
+        # out-of-scope refusal, or one of qa_agent's pre-routing interceptors):
+        # null means "no skill", never "unknown skill", and the client is
+        # expected to show nothing rather than fall back to a guess.
+        "routed_skill": row.get("routed_skill"),
+        "routed_skill_action": row.get("routed_skill_action"),
         "answer": payload.get("answer", ""),
         "key_points": payload.get("key_points", []),
         "citations": payload.get("citations", []),
         "confidence": payload.get("confidence", 0),
         "unanswered": payload.get("unanswered", ""),
         # Pass through any extra fields the qa_agent attaches (e.g. confirm-gate
-        # metadata, routed skill) so the contract stays a superset of the old body.
+        # metadata, the payload's own `_skill`) so the contract stays a superset
+        # of the old body. The two routed_skill* keys are excluded so the job
+        # row's columns stay authoritative for them at every status — a stored
+        # payload can never shadow the value the client already saw mid-run.
         **{
             k: v
             for k, v in payload.items()
@@ -407,6 +420,8 @@ def get_ask(
                 "citations",
                 "confidence",
                 "unanswered",
+                "routed_skill",
+                "routed_skill_action",
             }
         },
     }

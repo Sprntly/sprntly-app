@@ -17,7 +17,11 @@ import logging
 from app import qa_agent
 from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
-from app.db.asks import ORPHAN_ASK_JOB_HEARTBEAT_SECONDS, touch_ask_job
+from app.db.asks import (
+    ORPHAN_ASK_JOB_HEARTBEAT_SECONDS,
+    set_ask_job_route,
+    touch_ask_job,
+)
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
 from app.report_capture import capture_report
@@ -101,6 +105,15 @@ def _run_sync(
         # steps and raises AskCancelled to abort before the expensive answer call.
         is_cancelled=lambda: is_ask_cancelled(ask_id),
         on_delta=extractor,
+        # The routed skill goes onto the job row the INSTANT the router resolves
+        # — seconds into a run that can last minutes — so GET /v1/ask/{id} can
+        # name the running skill while the job is still `generating`. Two
+        # different transports on purpose: the skill is durable state the poll
+        # must still find after a reload, whereas a phase is an ephemeral "which
+        # leg is live right now" that only means anything to a client currently
+        # attached to the stream.
+        on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
+        on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
     )
     # Append-only analytics log, same as the old inline path.
     try:
