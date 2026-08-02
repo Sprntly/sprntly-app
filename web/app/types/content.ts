@@ -265,6 +265,11 @@ export type ConnectorType =
   | "code"
   | "monitoring"
   | "design"
+  // User research — interview/usability repositories (Marvin) and the research
+  // artifacts a team uploads by hand. Distinct from "customer-voice" (inbound,
+  // unsolicited) and "meetings" (sales/CSM calls): research is deliberately
+  // gathered evidence about users. Mirrors backend catalog.py RESEARCH.
+  | "research"
 
 export interface ConnectorItemRow {
   id: string
@@ -342,6 +347,18 @@ export interface ConnectorCategoryRow {
    * the field) to restore the dropzone.
    */
   allowsManualUpload?: boolean
+  /**
+   * Keep this category visible in `connectableCatalog()` even when none of its
+   * connectors is wired yet. Defaults to FALSE: normally an all-"Coming soon"
+   * category is dropped so we never show a shelf the user can't act on.
+   *
+   * Set only for Research, where the manual upload strip — not the connector
+   * grid — is the feature: Marvin is still coming-soon, so without this the
+   * whole shelf (and the only way to hand us research) would vanish from
+   * Settings AND the onboarding wizard. A category setting this must therefore
+   * allow manual upload; a shelf with neither connectors nor uploads is empty.
+   */
+  keepWhenEmpty?: boolean
 }
 
 export interface DetailQuoteRow {

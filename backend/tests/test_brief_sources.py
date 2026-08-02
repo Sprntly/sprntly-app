@@ -65,6 +65,25 @@ def test_categorized_upload_makes_its_source_type_real(isolated_settings, tmp_pa
     assert "analytics" not in allowed
 
 
+def test_research_upload_alone_makes_customer_voice_real(
+    isolated_settings, tmp_path, monkeypatch
+):
+    """A research readout dropped into the Research shelf is real evidence with
+    no connector at all — that shelf ships with only a coming-soon Marvin, so
+    the upload path is the whole feature."""
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    from app import datasets
+
+    monkeypatch.setattr(datasets, "dataset_path", lambda slug: tmp_path / slug)
+    (tmp_path / "acme").mkdir(parents=True, exist_ok=True)
+    datasets.set_file_categories("acme", ["interviews.docx"], "research")
+
+    allowed = allowed_source_types("ent-A", "acme")
+    assert "customer_voice" in allowed
+    assert "analytics" not in allowed
+
+
 def test_display_filter_drops_unreal_and_falls_back_to_documents():
     allowed = {"customer_voice", "pm_manual"}
     # Mixed: only the real channel survives.

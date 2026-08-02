@@ -26,9 +26,13 @@ describe("wizard categories", () => {
     // v6 order: Voice follows (Sprinklr OAuth + Fireflies API-key wired),
     // then CRM (HubSpot). Settings-only extras (docs, revenue) never appear.
     expect(cats[1].key).toBe("voice")
+    // Research follows Voice with NO connectors of its own (Marvin is still
+    // coming-soon) — it survives the empty-category drop on `keepWhenEmpty`
+    // because its upload strip is what onboarding is asking for.
     expect(cats.map((c) => c.key)).toEqual([
-      "analytics", "voice", "crm", "pm", "design", "code", "comms",
+      "analytics", "voice", "research", "crm", "pm", "design", "code", "comms",
     ])
+    expect(cats.find((c) => c.key === "research")!.items).toEqual([])
   })
 
   it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {
