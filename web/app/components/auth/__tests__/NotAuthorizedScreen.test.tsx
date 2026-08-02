@@ -32,7 +32,7 @@ describe("NotAuthorizedScreen", () => {
   })
 
   it("renders the danger-tinted verify-icon recipe", () => {
-    render(<NotAuthorizedScreen reason="domain_mismatch" />)
+    render(<NotAuthorizedScreen reason="invalid_token" />)
     const icon = document.querySelector(".verify-icon")
     expect(icon).not.toBeNull()
     expect(icon?.className).toContain("verify-icon--danger")
@@ -42,17 +42,32 @@ describe("NotAuthorizedScreen", () => {
     const { unmount: u1 } = render(<NotAuthorizedScreen reason="different_company" />)
     const differentCompanyText = document.querySelector(".auth-sub")?.textContent
     u1()
-    const { unmount: u2 } = render(<NotAuthorizedScreen reason="domain_mismatch" />)
-    const domainMismatchText = document.querySelector(".auth-sub")?.textContent
-    u2()
     render(<NotAuthorizedScreen reason="invalid_token" />)
     const invalidTokenText = document.querySelector(".auth-sub")?.textContent
-    expect(differentCompanyText).not.toEqual(domainMismatchText)
-    expect(domainMismatchText).not.toEqual(invalidTokenText)
+    expect(differentCompanyText).not.toEqual(invalidTokenText)
   })
 
-  it("offers a way back to the app", () => {
+  it("offers a way back to the app, defaulting to '/' when no continueHref is given", () => {
     render(<NotAuthorizedScreen reason="invalid_token" />)
-    expect(screen.getByText(/Continue to your workspace/)).not.toBeNull()
+    const link = screen.getByText(/Continue to your workspace/)
+    expect(link).not.toBeNull()
+    expect(link.closest("a")?.getAttribute("href")).toBe("/")
+  })
+
+  it("test_not_authorized_screen_uses_the_given_continueHref — the user's own account state, not the artifact", () => {
+    render(<NotAuthorizedScreen reason="different_company" continueHref="/onboarding/your-name" />)
+    const link = screen.getByText(/Continue to your workspace/)
+    expect(link.closest("a")?.getAttribute("href")).toBe("/onboarding/your-name")
+  })
+
+  it("has no rendering path left for the retired domain_mismatch reason", () => {
+    // Mutation-proof for the cleanup: NotAuthorizedReason's type union no
+    // longer includes "domain_mismatch" at all — this is a compile-time
+    // guarantee (see the file's type export), not just a runtime one.
+    const reasons: import("../NotAuthorizedScreen").NotAuthorizedReason[] = [
+      "different_company",
+      "invalid_token",
+    ]
+    expect(reasons).toHaveLength(2)
   })
 })

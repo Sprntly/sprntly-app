@@ -17,6 +17,7 @@ const profileMaybeSingleMock = vi.fn()
 const fetchWorkspaceMock = vi.fn()
 const acceptInviteMock = vi.fn()
 const resolveArtifactShareMock = vi.fn()
+const tryAutoJoinCompanyMock = vi.fn()
 
 // postLoginPath calls the module-local getSupabase(), so we can't intercept it
 // by mocking the re-export. Instead satisfy getSupabasePublicConfig() with env
@@ -49,10 +50,12 @@ vi.mock("../../teamApi", () => ({
   teamApi: { acceptInvite: (...a: unknown[]) => acceptInviteMock(...a) },
 }))
 
-// postLoginPath lazily imports artifactShareApi's resolveArtifactShare, same
-// pattern as tryAcceptInvite's lazy teamApi import above.
+// postLoginPath lazily imports artifactShareApi's resolveArtifactShare +
+// tryAutoJoinCompanyOnDomainMatch, same pattern as tryAcceptInvite's lazy
+// teamApi import above.
 vi.mock("../../artifactShareApi", () => ({
   resolveArtifactShare: (...a: unknown[]) => resolveArtifactShareMock(...a),
+  tryAutoJoinCompanyOnDomainMatch: (...a: unknown[]) => tryAutoJoinCompanyMock(...a),
 }))
 
 import { postLoginPath } from "../client"
@@ -183,7 +186,7 @@ describe("postLoginPath — guest account state (pending share token)", () => {
     expect(resolveArtifactShareMock).not.toHaveBeenCalled()
   })
 
-  it("routes to the artifact on a guest_view resolve outcome", async () => {
+  it("routes to the artifact on a guest_view resolve outcome, auto-joining company FIRST", async () => {
     newConfirmedUser({ pending_share_token: "abc123" })
     resolveArtifactShareMock.mockResolvedValue({
       outcome: "guest_view",
@@ -194,15 +197,23 @@ describe("postLoginPath — guest account state (pending share token)", () => {
     })
     expect(await postLoginPath()).toBe("/?prd=42&share=abc123")
     expect(resolveArtifactShareMock).toHaveBeenCalledWith("abc123")
+    // Mutation-proof: the one-shot auto-join call actually fires, and fires
+    // BEFORE /resolve (so a fresh domain-matched signup's brand-new company
+    // membership is already in place by the time resolve_share_access runs
+    // server-side).
+    expect(tryAutoJoinCompanyMock).toHaveBeenCalledWith("abc123")
+    const autoJoinOrder = tryAutoJoinCompanyMock.mock.invocationCallOrder[0]
+    const resolveOrder = resolveArtifactShareMock.mock.invocationCallOrder[0]
+    expect(autoJoinOrder).toBeLessThan(resolveOrder)
   })
 
-  it("routes to /not-authorized on a blocked resolve outcome", async () => {
+  it("routes to /not-authorized (with the reason) on a blocked resolve outcome", async () => {
     newConfirmedUser({ pending_share_token: "abc123" })
     resolveArtifactShareMock.mockResolvedValue({
       outcome: "blocked",
-      reason: "domain_mismatch",
+      reason: "different_company",
     })
-    expect(await postLoginPath()).toBe("/not-authorized?share=abc123")
+    expect(await postLoginPath()).toBe("/not-authorized?share=abc123&reason=different_company")
   })
 
   it("falls open to onboarding when resolve fails (network/other error)", async () => {
@@ -253,5 +264,15 @@ describe("postLoginPath — guest account state (pending share token)", () => {
       sharer_name: "Ada",
     })
     expect(await postLoginPath()).toBe("/?prd=7&share=abc123")
+  })
+
+  it("never calls the auto-join mechanism when there's no pending token to begin with", async () => {
+    newConfirmedUser()
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(tryAutoJoinCompanyMock).not.toHaveBeenCalled()
   })
 })

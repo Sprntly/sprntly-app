@@ -2,11 +2,20 @@
 // takes ONLY a `reason` — never a title/artifact id — so an invalid/expired/
 // blocked token can never leak the shared artifact's identity to a viewer this
 // screen is actively denying (AC3: no artifact title anywhere in the DOM).
+//
+// "domain_mismatch" is retired (revision 2026-08-02): a mismatched-domain
+// signup is now blocked at the FORM level, before any account/session exists
+// to even reach this screen — see validateShareDomainEmail in
+// lib/auth-validation.ts. resolve_share_access no longer ever returns that
+// reason (see its docstring), so there is nothing left to route here under
+// it. A zero-membership caller now reads as "different_company" — see that
+// copy's wording below, deliberately worded to cover both "your account
+// already belongs elsewhere" AND "your account belongs nowhere yet".
 import Link from "next/link"
 import { AuthShell } from "./AuthShell"
 import { InfoCircle } from "./icons"
 
-export type NotAuthorizedReason = "different_company" | "domain_mismatch" | "invalid_token"
+export type NotAuthorizedReason = "different_company" | "invalid_token"
 
 const COPY: Record<NotAuthorizedReason, { heading: React.ReactNode; body: string; hint: string }> = {
   different_company: {
@@ -15,17 +24,8 @@ const COPY: Record<NotAuthorizedReason, { heading: React.ReactNode; body: string
         This isn&apos;t for <em>your team.</em>
       </>
     ),
-    body: "The shared document belongs to a different company than the one your account already belongs to.",
-    hint: "Ask the person who shared it to invite you to their company instead, or use an account that isn't already part of another workspace.",
-  },
-  domain_mismatch: {
-    heading: (
-      <>
-        Wrong <em>email domain.</em>
-      </>
-    ),
-    body: "This link is restricted to a specific company's email domain, and your account doesn't match it.",
-    hint: "Sign in or sign up with your work email at the company this was shared from, or ask the sharer to re-send it.",
+    body: "The shared document belongs to a company your account isn't a member of.",
+    hint: "Ask the person who shared it to invite you to their company instead, or use an account that's already a member.",
   },
   invalid_token: {
     heading: (
@@ -38,7 +38,18 @@ const COPY: Record<NotAuthorizedReason, { heading: React.ReactNode; body: string
   },
 }
 
-export function NotAuthorizedScreen({ reason }: { reason: NotAuthorizedReason }) {
+export function NotAuthorizedScreen({
+  reason,
+  continueHref = "/",
+}: {
+  reason: NotAuthorizedReason
+  /** The signed-in user's own real home — computed from THEIR account state
+   *  (never the artifact), so it's safe to add without violating the
+   *  no-title/no-artifact-id invariant above. Defaults to "/" so this
+   *  component still renders correctly with no behavior change for any
+   *  existing caller that doesn't pass it. */
+  continueHref?: string
+}) {
   const copy = COPY[reason]
   return (
     <AuthShell tag="Not authorized" cardClassName="auth-card-center">
@@ -52,7 +63,7 @@ export function NotAuthorizedScreen({ reason }: { reason: NotAuthorizedReason })
         <div>{copy.hint}</div>
       </div>
       <div className="auth-foot">
-        <Link href="/">Continue to your workspace</Link>
+        <Link href={continueHref}>Continue to your workspace</Link>
       </div>
     </AuthShell>
   )

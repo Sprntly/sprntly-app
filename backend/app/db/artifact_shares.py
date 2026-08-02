@@ -29,27 +29,40 @@ def _email_domain(email: str | None) -> str | None:
 
 @retry_on_disconnect
 def owning_company_domain(company_id: str) -> str | None:
-    """Domain (lowercase, no '@') of the earliest company_members row's
-    profiles.email for `company_id`. None if unresolvable (no members / no
-    profile row / malformed email) — callers MUST treat None as "cannot
+    """Domain (lowercase, no '@') of `company_id`'s resolved admin/owner
+    member's profiles.email. None if unresolvable (no owner/admin member /
+    no profile row / malformed email) — callers MUST treat None as "cannot
     verify, deny" (fail closed), never as "no domain requirement".
 
-    Resolution is the earliest-created member ONLY (the company creator —
-    stable across later membership churn), not a majority vote."""
+    Resolution: the `role = 'owner'` member; if none, the earliest-created
+    `role = 'admin'` member; if neither exists, unresolvable. NOT the
+    earliest-created member regardless of role (that was the pre-revision
+    behaviour) — a real `role` column exists and is the honest signal now."""
     client = require_client()
-    members = (
+    owners = (
         client.table("company_members")
         .select("user_id")
         .eq("company_id", company_id)
-        .order("created_at", desc=False)
+        .eq("role", "owner")
         .limit(1)
         .execute()
         .data
         or []
     )
-    if not members:
-        return None
-    user_id = members[0].get("user_id")
+    user_id = owners[0].get("user_id") if owners else None
+    if not user_id:
+        admins = (
+            client.table("company_members")
+            .select("user_id")
+            .eq("company_id", company_id)
+            .eq("role", "admin")
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        user_id = admins[0].get("user_id") if admins else None
     if not user_id:
         return None
     profiles = (
@@ -117,13 +130,27 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
 
     Returns one of:
       {"outcome": "not_found"}
-      {"outcome": "blocked", "reason": "different_company"|"domain_mismatch", "share": <row>}
+      {"outcome": "blocked", "reason": "different_company", "share": <row>}
       {"outcome": "guest_view", "share": <row>, "sharer_name": str|None,
-       "owning_company_name": str|None, "same_company": bool}
+       "owning_company_name": str|None, "same_company": True}
 
-    `same_company` distinguishes a same-company-different-workspace caller
-    (join grants a WORKSPACE membership only) from a fresh domain-matched
-    signup (join grants company + workspace membership).
+    Revision note: a caller with ZERO company memberships is now ALWAYS
+    blocked, regardless of email domain — sign-in (or any call into this
+    function) never grants NEW membership; only a genuine fresh signup
+    through `auto_join_company_on_domain_match` does, and that mechanism
+    runs BEFORE this function on the next call, so a domain-matched fresh
+    signup arrives here already holding a real `company_members` row and
+    takes the same_company branch naturally. `same_company` is therefore
+    always True on a guest_view outcome now (kept in the return shape for
+    self-documentation) — the reason "domain_mismatch" is retired from this
+    function entirely; it now only ever originates from the sign-up form's
+    client-side gate (web/app/sign-up/page.tsx), which never calls this
+    function (no signup attempt is made on a domain mismatch, so there is
+    nothing here to resolve).
+
+    `user_email` is accepted for call-site/signature stability across
+    /resolve, /join, /content but is no longer used to compute the
+    outcome — company membership, not domain, is the only signal now.
     """
     share = get_share_by_token(token)
     if not share or share.get("revoked_at"):
@@ -132,17 +159,10 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
     from app.db.companies import memberships_for_user
 
     memberships = memberships_for_user(user_id)
-    same_company = False
-    if memberships:
-        if memberships[0].get("company_id") == share["owner_company_id"]:
-            same_company = True
-        else:
-            return {"outcome": "blocked", "reason": "different_company", "share": share}
-    else:
-        domain = owning_company_domain(share["owner_company_id"])
-        email_domain = _email_domain(user_email)
-        if domain is None or not email_domain or email_domain != domain:
-            return {"outcome": "blocked", "reason": "domain_mismatch", "share": share}
+    if not memberships:
+        return {"outcome": "blocked", "reason": "different_company", "share": share}
+    if memberships[0].get("company_id") != share["owner_company_id"]:
+        return {"outcome": "blocked", "reason": "different_company", "share": share}
 
     from app.db.companies import display_name_for_company_id, profile_name_for_user
 
@@ -151,8 +171,69 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
         "share": share,
         "sharer_name": profile_name_for_user(share["created_by_user_id"]),
         "owning_company_name": display_name_for_company_id(share["owner_company_id"]),
-        "same_company": same_company,
+        "same_company": True,
     }
+
+
+@retry_on_disconnect
+def auto_join_company_on_domain_match(
+    *, token: str, user_id: str, user_email: str | None
+) -> str | None:
+    """One-shot, signup-time-only mechanism: grants COMPANY membership
+    (role='member') — NEVER workspace membership — to a caller whose
+    verified email domain matches the share's owning company's admin/owner
+    domain (`owning_company_domain`). Intended to run exactly once, right
+    after email verification succeeds, from postLoginPath()'s guest branch
+    (web/app/lib/supabase/client.ts), BEFORE the next resolve_share_access()
+    call — so resolve_share_access's same_company branch then fires
+    naturally on that very next call.
+
+    Deliberately separate from resolve_share_access (which performs no
+    mutation and must stay safe to call repeatedly): this is the ONE place
+    a fresh signup gains company membership through this primitive. A
+    caller who already has ANY company membership is a no-op here — this
+    only ever grants a FIRST company (the one-company-per-user invariant
+    forbids a second anyway), and it is never the mechanism for an existing
+    member's sign-in (see resolve_share_access's docstring).
+
+    Returns the granted company_id on success, None on any no-op (missing/
+    revoked token, caller already has a company, unresolvable/mismatched
+    domain). Never raises — this is a best-effort convenience grant, not a
+    security boundary; the real gate is resolve_share_access, re-run
+    server-side by /resolve, /join, and /content regardless of whether this
+    ran or what it returned.
+    """
+    share = get_share_by_token(token)
+    if not share or share.get("revoked_at"):
+        return None
+
+    from app.db.companies import memberships_for_user
+
+    if memberships_for_user(user_id):
+        return None
+
+    domain = owning_company_domain(share["owner_company_id"])
+    email_domain = _email_domain(user_email)
+    if domain is None or not email_domain or email_domain != domain:
+        return None
+
+    client = require_client()
+    try:
+        client.table("company_members").insert(
+            {
+                "id": uuid.uuid4().hex,
+                "company_id": share["owner_company_id"],
+                "user_id": user_id,
+                "role": "member",
+            }
+        ).execute()
+    except Exception:  # noqa: BLE001 — already a member (race/double-call)
+        pass
+
+    from app.db.authcache import invalidate_user
+
+    invalidate_user(user_id)
+    return share["owner_company_id"]
 
 
 @retry_on_disconnect

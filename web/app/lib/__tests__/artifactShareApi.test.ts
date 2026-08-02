@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { API_URL } from "../api"
-import { artifactShareApi, resolveArtifactShare } from "../artifactShareApi"
+import {
+  artifactShareApi,
+  resolveArtifactShare,
+  tryAutoJoinCompanyOnDomainMatch,
+} from "../artifactShareApi"
 
 describe("artifactShareApi URL construction", () => {
   let originalFetch: typeof globalThis.fetch
@@ -53,6 +57,54 @@ describe("artifactShareApi URL construction", () => {
   it("URL-encodes a token requiring encoding for join", async () => {
     await artifactShareApi.join("a b/c")
     expect(lastCall!.url).toBe(`${API_URL}/v1/artifact-share/a%20b%2Fc/join`)
+  })
+
+  it("autoJoinCompany POSTs to /v1/artifact-share/{token}/auto-join-company with an empty body", async () => {
+    await artifactShareApi.autoJoinCompany("abc123")
+    expect(lastCall!.url).toBe(`${API_URL}/v1/artifact-share/abc123/auto-join-company`)
+    expect(lastCall!.init?.method).toBe("POST")
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({})
+  })
+})
+
+describe("tryAutoJoinCompanyOnDomainMatch", () => {
+  let originalFetch: typeof globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it("returns the joined_company_id on success (a match)", async () => {
+    originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ joined_company_id: "co-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof globalThis.fetch
+
+    expect(await tryAutoJoinCompanyOnDomainMatch("abc123")).toBe("co-1")
+  })
+
+  it("returns null on a no-op (no match / already a member)", async () => {
+    originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ joined_company_id: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof globalThis.fetch
+
+    expect(await tryAutoJoinCompanyOnDomainMatch("abc123")).toBeNull()
+  })
+
+  it("returns undefined (never throws) on a network/4xx/5xx failure", async () => {
+    originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as typeof globalThis.fetch
+
+    expect(await tryAutoJoinCompanyOnDomainMatch("missing-token")).toBeUndefined()
   })
 })
 
