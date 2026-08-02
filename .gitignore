@@ -26,6 +26,7 @@ backend/data/*/
 
 # Claude Code local state
 .claude/
+CLAUDE.md
 
 # Pytest / coverage
 .pytest_cache/
