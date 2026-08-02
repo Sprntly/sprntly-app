@@ -5,8 +5,8 @@
 // The unified home surface (ChatScreen) renders two distinct composers:
 //   • the LANDING composer — the fresh-chat state shown when an active chat tab
 //     has an empty thread (reached via `?new=1` / the "+" New chat button). It
-//     lives in `.chat-home-composer`.
-//   • the THREAD composer — `.bc-composer` inside `.bc-dock`, shown once the
+//     lives in `.cx`.
+//   • the THREAD composer — `.cx` inside `.bc-dock`, shown once the
 //     active chat tab has at least one turn.
 //
 // These tests mount the REAL ChatScreen inside the real Navigation + Content
@@ -197,7 +197,7 @@ afterEach(() => {
 describe("ChatScreen landing composer (A1 / A2)", () => {
   // A1: the landing composer (reached via ?new=1) renders a hidden file input
   // and an "Attach file" button wired to open it.
-  it("renders a hidden file input and a wired 'Attach file' button on the landing", () => {
+  it("renders a hidden file input reachable from the + menu on the landing", async () => {
     searchString = "new=1"
     renderScreen()
     // We are on the chat landing, not the brief surface.
@@ -206,14 +206,123 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     const input = fileInput()
     expect(input).toBeTruthy()
     expect(input!.type).toBe("file")
-    // It's hidden (opened programmatically by the Attach button).
+    // It's hidden (opened programmatically from the + menu).
     expect(input!.style.display).toBe("none")
-    // The Attach button carries the accessible label and is NOT a plain inert
-    // span — it's a real button (the guarded bug: a landing Attach with no
-    // onClick / no file input).
-    const attach = screen.getByLabelText("Attach file")
-    expect(attach.tagName).toBe("BUTTON")
-    expect(attach.textContent).toMatch(/Attach/i)
+
+    // The lone Attach button became a `+` action menu, so skills are reachable
+    // with a mouse too. It is a real button with menu semantics.
+    const plus = screen.getByLabelText("Add attachment or skill")
+    expect(plus.tagName).toBe("BUTTON")
+    expect(plus.getAttribute("aria-haspopup")).toBe("menu")
+    expect(plus.getAttribute("aria-expanded")).toBe("false")
+
+    const clickSpy = vi.spyOn(input!, "click")
+    await act(async () => { fireEvent.click(plus) })
+    expect(plus.getAttribute("aria-expanded")).toBe("true")
+    const menu = screen.getByRole("menu")
+    expect(within(menu).getByText("Attach a file")).toBeTruthy()
+    expect(within(menu).getByText("Browse skills")).toBeTruthy()
+
+    // "Attach a file" opens the hidden input — the wiring the old Attach button
+    // owned, now behind the menu.
+    await act(async () => { fireEvent.click(within(menu).getByText("Attach a file")) })
+    expect(clickSpy).toHaveBeenCalled()
+    expect(screen.queryByRole("menu")).toBeNull()
+  })
+
+  // The `+` menu's other item opens the skills palette — the whole point of the
+  // menu, since 78 skills were previously reachable only by typing "/".
+  it("opens the skills palette from the + menu", async () => {
+    searchString = "new=1"
+    renderScreen()
+    await act(async () => { fireEvent.click(screen.getByLabelText("Add attachment or skill")) })
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("menu")).getByText("Browse skills"))
+    })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    expect(within(palette).getAllByRole("option").length).toBeGreaterThan(0)
+  })
+
+  // ⌘/ is advertised in both composers' footers and, before this, nothing in the
+  // app listened for it. The hint is now true.
+  it("opens the skills palette on ⌘/", async () => {
+    searchString = "new=1"
+    renderScreen()
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "/", metaKey: true })
+    })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    expect(within(palette).getAllByRole("option").length).toBeGreaterThan(0)
+  })
+
+  // Selecting a skill pins a removable CHIP instead of pasting
+  // "/prioritize " into the draft as raw text the user must not delete — and the
+  // trigger is re-attached to the query on send, so the backend's deterministic
+  // slash fast-path is unchanged.
+  it("pins a skill chip instead of pasting the trigger, and sends the trigger", async () => {
+    searchString = "new=1"
+    renderScreen()
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "/prior" } })
+    })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    await act(async () => {
+      fireEvent.mouseDown(within(palette).getAllByRole("option")[0])
+    })
+
+    // The draft is clear (no "/prioritize " text) and a chip names the skill.
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
+    const chip = document.querySelector('[data-testid="skill-chip"]') as HTMLElement
+    expect(chip).toBeTruthy()
+    expect(chip.textContent).toContain("Prioritize")
+    expect(within(chip).getByLabelText(/Remove the .* skill/)).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.change(document.querySelector(".cx-input")!, { target: { value: "rank these ideas" } })
+    })
+    await act(async () => {
+      fireEvent.click(within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send"))
+    })
+    await waitFor(() => expect(askedQueries.length).toBeGreaterThan(0))
+    expect(askedQueries[askedQueries.length - 1]).toContain("rank these ideas")
+    expect(askedQueries[askedQueries.length - 1].startsWith("/")).toBe(true)
+  })
+
+  // Removing the chip un-pins the skill; the next send carries no trigger.
+  it("removes the pinned skill chip", async () => {
+    searchString = "new=1"
+    renderScreen()
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => { fireEvent.change(textarea, { target: { value: "/prior" } }) })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    await act(async () => { fireEvent.mouseDown(within(palette).getAllByRole("option")[0]) })
+    const chip = document.querySelector('[data-testid="skill-chip"]') as HTMLElement
+    await act(async () => {
+      fireEvent.click(within(chip).getByLabelText(/Remove the .* skill/))
+    })
+    expect(document.querySelector('[data-testid="skill-chip"]')).toBeNull()
+  })
+
+  // The send button is OFF below the backend's own min_length=3, and says why
+  // rather than sitting there inert with no explanation.
+  it("disables Send below 3 characters and titles it with the reason", async () => {
+    searchString = "new=1"
+    renderScreen()
+    const send = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send") as HTMLButtonElement
+    expect(send.disabled).toBe(true)
+    expect(send.getAttribute("title")).toBe("Type at least 3 characters")
+    await act(async () => {
+      fireEvent.change(document.querySelector(".cx-input")!, { target: { value: "hi" } })
+    })
+    expect((within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send") as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      fireEvent.change(document.querySelector(".cx-input")!, { target: { value: "hey" } })
+    })
+    const ready = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send") as HTMLButtonElement
+    expect(ready.disabled).toBe(false)
+    expect(ready.getAttribute("title")).toBeNull()
   })
 
   // Custom skills (PRD 1854): typing "/" opens the slash palette with the
@@ -222,7 +331,7 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
   it("lists custom skills first in the slash palette and filters by slug", async () => {
     searchString = "new=1"
     renderScreen()
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
 
     await act(async () => {
@@ -263,7 +372,7 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     })
     searchString = "new=1"
     renderScreen()
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
 
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "/prior" } })
@@ -297,12 +406,12 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     })
 
     // Type into the landing composer and send.
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "use the notes" } })
     })
-    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -351,12 +460,12 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
       await screen.findByText("first question")
       const before = scrollSpy.mock.calls.length
 
-      const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+      const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
       await act(async () => {
         fireEvent.change(textarea, { target: { value: "a brand new question" } })
       })
       await act(async () => {
-        fireEvent.click(within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send"))
+        fireEvent.click(within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send"))
       })
 
       // The new user turn renders…
@@ -370,8 +479,9 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     }
   })
 
-  // A3: the thread composer renders a hidden file input + a wired Attach button.
-  it("renders a hidden file input and an Attach button on the thread composer", () => {
+  // A3: the thread composer renders a hidden file input reachable from the same
+  // `+` menu as the landing — one composer component, so the two cannot drift.
+  it("renders a hidden file input and a + menu on the thread composer", async () => {
     seedThreadTab()
     renderScreen()
     // The seeded thread is showing (user bubble + assistant reply).
@@ -380,11 +490,26 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     const input = fileInput()
     expect(input).toBeTruthy()
     expect(input!.style.display).toBe("none")
-    // The thread Attach button lives in `.bc-composer-tools` as a `.bc-tool`.
     const dock = document.querySelector(".bc-dock") as HTMLElement
     expect(dock).toBeTruthy()
-    const attach = within(dock).getByText(/Attach/i)
-    expect(attach.closest("button")).toBeTruthy()
+    const plus = within(dock).getByLabelText("Add attachment or skill")
+    expect(plus.tagName).toBe("BUTTON")
+    await act(async () => { fireEvent.click(plus) })
+    expect(within(dock).getByText("Attach a file")).toBeTruthy()
+    expect(within(dock).getByText("Browse skills")).toBeTruthy()
+  })
+
+  // The ⌘/ hint used to render only on the dock — the landing is where a new
+  // user starts, so it renders on both now.
+  it("shows the ⌘/ hint on the thread composer AND the landing", () => {
+    seedThreadTab()
+    renderScreen()
+    expect((document.querySelector(".cx") as HTMLElement).querySelector(".cx-kbd")).toBeTruthy()
+    cleanup()
+    sessionStorage.clear()
+    searchString = "new=1"
+    renderScreen()
+    expect((document.querySelector(".cx--home") as HTMLElement).querySelector(".cx-kbd")).toBeTruthy()
   })
 
   // A2: NO Voice affordance on the thread composer either.
@@ -425,7 +550,7 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
   it("clears the composer's inline height on send (no clipped resting box)", async () => {
     seedThreadTab()
     renderScreen()
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
 
     // Simulate a grown composer: the input handler measures scrollHeight (0 in
@@ -437,7 +562,7 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     textarea.style.height = "96px"
     expect(textarea.style.height).toBe("96px")
 
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -477,12 +602,12 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", tabId)
     renderScreen()
 
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "get all in to do status" } })
     })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -515,12 +640,12 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     searchString = "new=1"
     renderScreen()
 
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "analyze my data" } })
     })
-    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -541,11 +666,11 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     searchString = "new=1"
     renderScreen()
 
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "analyze my data" } })
     })
-    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -574,12 +699,12 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     })
 
     // Type into the thread composer and send.
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "summarize this" } })
     })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -614,11 +739,11 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
       expect(within(dock).getByText("report.txt")).toBeTruthy()
     })
 
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "summarize the attached report" } })
     })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => {
       fireEvent.click(sendBtn)
     })
@@ -668,12 +793,12 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
       expect(within(dock).getByText("brief.txt")).toBeTruthy()
     })
 
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "read this please" } })
     })
     await act(async () => {
-      fireEvent.click(within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send"))
+      fireEvent.click(within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send"))
     })
 
     // The card is present; the content is hidden until clicked.

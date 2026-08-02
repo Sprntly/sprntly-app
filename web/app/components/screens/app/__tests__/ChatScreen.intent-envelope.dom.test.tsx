@@ -115,10 +115,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 

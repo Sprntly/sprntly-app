@@ -152,10 +152,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -288,10 +288,10 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // Now a GENERIC "generate a PRD" (no topic) — it must build the PRD from the
     // conversation (the user's turn), NOT the brief's top insight.
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(threadInput).toBeTruthy()
     await act(async () => { fireEvent.change(threadInput, { target: { value: "generate a PRD" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
@@ -306,10 +306,10 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 })
 
 async function typeAndSendInThread(text: string) {
-  const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+  const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(threadInput).toBeTruthy()
   await act(async () => { fireEvent.change(threadInput, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 

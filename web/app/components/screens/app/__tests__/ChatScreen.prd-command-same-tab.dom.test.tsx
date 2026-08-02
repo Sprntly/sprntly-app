@@ -147,19 +147,19 @@ function renderChat() {
 
 // First message of a session goes through the landing composer…
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
 // …follow-ups go through the active tab's thread composer.
 async function typeAndSendInThread(text: string) {
-  const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+  const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(threadInput).toBeTruthy()
   await act(async () => { fireEvent.change(threadInput, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 

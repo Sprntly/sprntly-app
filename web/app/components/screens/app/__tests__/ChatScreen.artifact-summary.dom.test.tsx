@@ -100,10 +100,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -235,9 +235,9 @@ describe("ChatScreen — artifact chat summary on fresh PRD generation", () => {
     await waitFor(() => expect(chatSummary).toHaveBeenCalledTimes(1))
 
     // A question sent while the summary is still being written.
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "what did we decide?" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
 
@@ -260,9 +260,9 @@ describe("ChatScreen — artifact chat summary on fresh PRD generation", () => {
     await waitFor(() => expect(chatSummary).toHaveBeenCalledTimes(1))
 
     // A plain ask afterwards must not re-trigger anything.
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "what did we decide?" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(chatSummary).toHaveBeenCalledTimes(1)
