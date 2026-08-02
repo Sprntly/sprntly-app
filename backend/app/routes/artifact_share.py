@@ -57,7 +57,7 @@ from app.db.artifact_shares import (
     resolve_share_access,
 )
 from app.db.companies import display_name_for_company_id, profile_name_for_user
-from app.db.prds import get_prd_rendered
+from app.db.prds import get_prd, get_prd_rendered
 from app.deps.ownership import require_owned_prd
 
 logger = logging.getLogger(__name__)
@@ -154,9 +154,15 @@ def resolve(token: str, session: dict = Depends(require_session)) -> dict:
         )
         return {"outcome": "blocked", "reason": result["reason"]}
     share = result["share"]
+    prd = get_prd(share["artifact_id"])
     return {
         "outcome": "guest_view",
         "artifact_id": share["artifact_id"],
+        # The opaque, unguessable identifier postLoginPath()'s redirect and
+        # the "Copy share link" mint action put in the URL instead of
+        # artifact_id — see the prds.public_id migration's own comment for
+        # why the raw sequential id must never land in a copyable link.
+        "public_id": (prd or {}).get("public_id"),
         "artifact_type": share["artifact_type"],
         "owning_company_name": result["owning_company_name"],
         "sharer_name": result["sharer_name"],

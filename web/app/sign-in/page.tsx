@@ -58,7 +58,10 @@ function SignInForm() {
     try {
       const outcome = await artifactShareApi.resolve(shareToken)
       if (outcome.outcome === "guest_view") {
-        return `/?prd=${outcome.artifact_id}&share=${shareToken}`
+        // public_id (never artifact_id, the raw sequential id) — see the
+        // prds.public_id migration's own comment.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}&share=${shareToken}`
       }
       if (outcome.outcome === "blocked") {
         return `/not-authorized?share=${shareToken}&reason=${outcome.reason}`

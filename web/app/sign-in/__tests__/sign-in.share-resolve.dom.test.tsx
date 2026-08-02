@@ -59,13 +59,37 @@ async function signIn() {
 }
 
 describe("/sign-in — resolves a ?share= token for a returning user", () => {
-  it("routes to the guest-view URL on a resolved guest_view outcome", async () => {
+  it("routes to the guest-view URL using public_id (never the raw sequential artifact_id)", async () => {
     searchParamsMock.share = "tok-42"
     signInWithPasswordMock.mockResolvedValue(undefined)
     resolveMock.mockResolvedValue({
       outcome: "guest_view",
       artifact_type: "prd",
       artifact_id: 482,
+      public_id: "042494cd-22c0-4c20-9967-cc761d192ae0",
+      owning_company_name: "Acme Co",
+      sharer_name: "Priya Shah",
+    })
+    render(<SignInPage />)
+
+    await signIn()
+
+    await waitFor(() => {
+      expect(routerMock.replace).toHaveBeenCalledWith(
+        "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0&share=tok-42",
+      )
+    })
+    expect(resolveMock).toHaveBeenCalledWith("tok-42")
+  })
+
+  it("falls back to the raw artifact_id only when public_id is absent (defensive, not the normal path)", async () => {
+    searchParamsMock.share = "tok-42"
+    signInWithPasswordMock.mockResolvedValue(undefined)
+    resolveMock.mockResolvedValue({
+      outcome: "guest_view",
+      artifact_type: "prd",
+      artifact_id: 482,
+      public_id: null,
       owning_company_name: "Acme Co",
       sharer_name: "Priya Shah",
     })
@@ -76,7 +100,6 @@ describe("/sign-in — resolves a ?share= token for a returning user", () => {
     await waitFor(() => {
       expect(routerMock.replace).toHaveBeenCalledWith("/?prd=482&share=tok-42")
     })
-    expect(resolveMock).toHaveBeenCalledWith("tok-42")
   })
 
   it("routes to /not-authorized with the reason on a blocked outcome", async () => {

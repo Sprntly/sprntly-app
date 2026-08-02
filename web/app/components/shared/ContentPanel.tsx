@@ -154,7 +154,13 @@ function ShareMenu({
     setOpen(false)
     try {
       const { token } = await artifactShareApi.mint("prd", prd.prd_id)
-      const url = `${window.location.origin}/?prd=${prd.prd_id}&share=${token}`
+      // public_id (never the raw sequential prd_id) is what this copyable
+      // link must carry — see the prds.public_id migration's own comment
+      // for why. Fallback to prd_id only covers a PrdState with no
+      // public_id at all (not currently reachable — every load path sets
+      // it), matching the same defensive-fallback shape used elsewhere.
+      const prdParam = prd.public_id ?? String(prd.prd_id)
+      const url = `${window.location.origin}/?prd=${encodeURIComponent(prdParam)}&share=${token}`
       await navigator.clipboard.writeText(url)
       onToast("Share link copied", "Anyone with the link can view this PRD.")
     } catch {

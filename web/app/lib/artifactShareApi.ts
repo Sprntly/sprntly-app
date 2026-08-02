@@ -16,6 +16,9 @@ export type ArtifactShareResolveOutcome =
       outcome: "guest_view"
       artifact_type: "prd"
       artifact_id: number
+      /** The PRD's opaque, unguessable external identifier — what a
+       *  redirect/copyable link should use instead of artifact_id. */
+      public_id: string | null
       owning_company_name: string
       sharer_name: string
     }

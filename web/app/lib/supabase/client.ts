@@ -230,7 +230,13 @@ export async function postLoginPath(): Promise<string> {
       await tryAutoJoinCompanyOnDomainMatch(pendingToken)
       const outcome = await resolveArtifactShare(pendingToken)
       if (outcome?.outcome === "guest_view") {
-        return `/?prd=${outcome.artifact_id}&share=${pendingToken}`
+        // public_id (never artifact_id, the raw sequential id) is what this
+        // guest's own landing URL should carry — the fallback to the int
+        // only covers the (currently unreachable) case of a PRD row with no
+        // public_id at all, same defensive-fallback shape useArtifactUrlSync
+        // uses for its own reflect effect.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}&share=${pendingToken}`
       }
       if (outcome?.outcome === "blocked") {
         return `/not-authorized?share=${pendingToken}&reason=${outcome.reason}`

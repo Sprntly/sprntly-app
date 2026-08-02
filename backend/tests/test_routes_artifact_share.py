@@ -151,6 +151,38 @@ def test_resolve_route_same_company_different_workspace_guest_view(isolated_sett
     assert r.json()["outcome"] == "guest_view"
 
 
+def test_resolve_route_returns_public_id_never_the_raw_id_alone(isolated_settings, monkeypatch):
+    """A guest_view outcome must carry the PRD's opaque public_id — what
+    postLoginPath()'s redirect and the sign-in page's own resolve both use
+    instead of the raw sequential artifact_id, so a copied/bookmarked link
+    never discloses a blind-enumerable id."""
+    ctx = company_client(monkeypatch)
+    db = isolated_settings["db"]
+    from app.db.client import require_client
+    from app.db.artifact_shares import mint_share
+    import uuid
+
+    brief_id = db.save_brief("acme", "W", {"insights": []}, schema_version=1)
+    prd_id = db.start_prd(
+        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v2"
+    )
+    public_id = str(uuid.uuid4())
+    require_client().table("prds").update({"public_id": public_id}).eq("id", prd_id).execute()
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=prd_id, owner_company_id=ctx.company_id,
+        owner_workspace_id="ws-1", created_by_user_id=ctx.user_id,
+    )
+
+    r = ctx.client.get(f"/v1/artifact-share/{share['token']}/resolve")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["outcome"] == "guest_view"
+    assert body["artifact_id"] == prd_id
+    assert body["public_id"] == public_id
+
+
 def test_resolve_route_different_company_blocked(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     other_company = seed_company(user_id="other-" + uuid.uuid4().hex[:8], slug="rival2")

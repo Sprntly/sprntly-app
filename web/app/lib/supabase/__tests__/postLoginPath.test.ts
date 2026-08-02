@@ -195,16 +195,19 @@ describe("postLoginPath — guest account state (pending share token)", () => {
     expect(resolveArtifactShareMock).not.toHaveBeenCalled()
   })
 
-  it("routes to the artifact on a guest_view resolve outcome, auto-joining company FIRST", async () => {
+  it("routes to the artifact via public_id (never the raw artifact_id), auto-joining company FIRST", async () => {
     newConfirmedUser({ pending_share_token: "abc123" })
     resolveArtifactShareMock.mockResolvedValue({
       outcome: "guest_view",
       artifact_type: "prd",
       artifact_id: 42,
+      public_id: "042494cd-22c0-4c20-9967-cc761d192ae0",
       owning_company_name: "Acme",
       sharer_name: "Ada",
     })
-    expect(await postLoginPath()).toBe("/?prd=42&share=abc123")
+    expect(await postLoginPath()).toBe(
+      "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0&share=abc123",
+    )
     expect(resolveArtifactShareMock).toHaveBeenCalledWith("abc123")
     // Mutation-proof: the one-shot auto-join call actually fires, and fires
     // BEFORE /resolve (so a fresh domain-matched signup's brand-new company
@@ -214,6 +217,19 @@ describe("postLoginPath — guest account state (pending share token)", () => {
     const autoJoinOrder = tryAutoJoinCompanyMock.mock.invocationCallOrder[0]
     const resolveOrder = resolveArtifactShareMock.mock.invocationCallOrder[0]
     expect(autoJoinOrder).toBeLessThan(resolveOrder)
+  })
+
+  it("falls back to the raw artifact_id only when public_id is absent (defensive, not the normal path)", async () => {
+    newConfirmedUser({ pending_share_token: "abc123" })
+    resolveArtifactShareMock.mockResolvedValue({
+      outcome: "guest_view",
+      artifact_type: "prd",
+      artifact_id: 42,
+      public_id: null,
+      owning_company_name: "Acme",
+      sharer_name: "Ada",
+    })
+    expect(await postLoginPath()).toBe("/?prd=42&share=abc123")
   })
 
   it("routes to /not-authorized (with the reason) on a blocked resolve outcome", async () => {
