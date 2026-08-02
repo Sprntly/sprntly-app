@@ -278,7 +278,7 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
         title="Company lens"
         sub={
           canEdit
-            ? "Edit any field below — your edits are marked as authoritative and won't be overwritten by the agent. Saving a change to Company shape below re-runs the research agent."
+            ? "Edit any field below — a field you change is marked as yours and the research agent will not overwrite it. Fields you leave alone stay agent-maintained and can change on the next refresh; clearing a field hands it back to the agent. Saving a change to Company shape below re-runs the research agent."
             : "Read-only. Only admins can edit or update the business context."
         }
       >
@@ -411,7 +411,7 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
             onChange={(e) => onChangeIndustry(e.target.value)}
             disabled={!canEdit}
           >
-            {INDUSTRIES.map((i) => (
+            {withCurrentOption(INDUSTRIES, industry).map((i) => (
               <option key={i}>{i}</option>
             ))}
           </select>
@@ -427,7 +427,7 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
             onChange={(e) => onChangeBusinessType(e.target.value)}
             disabled={!canEdit}
           >
-            {BUSINESS_TYPES.map((b) => (
+            {withCurrentOption(BUSINESS_TYPES, businessType).map((b) => (
               <option key={b}>{b}</option>
             ))}
           </select>
@@ -470,6 +470,17 @@ function techStackChanged(next: string[], prev: string[]): boolean {
   return a.some((v, i) => v !== b[i])
 }
 
+/** The option list, with `current` prepended when it isn't one of the listed
+ *  options — a React <select> whose value matches no <option> renders blank
+ *  and reports value === "", so the next save would write "" over a real
+ *  stored value. Injecting the option is what makes the round-trip exact. */
+export function withCurrentOption(
+  options: readonly string[],
+  current: string,
+): string[] {
+  return current && !options.includes(current) ? [current, ...options] : [...options]
+}
+
 /** Container for the company-shape section. Reads the workspace company-shape
  *  fields and persists edits via updateWorkspace.
  *
@@ -497,20 +508,12 @@ export function CompanyShapeSettings({
 
   useEffect(() => {
     if (!workspace) return
-    const ind = workspace.industry
-    setIndustry(
-      ind && INDUSTRIES.includes(ind as (typeof INDUSTRIES)[number])
-        ? ind
-        : ind
-          ? "Other"
-          : INDUSTRIES[0],
-    )
-    const bt = workspace.business_type
-    setBusinessType(
-      bt && BUSINESS_TYPES.includes(bt as (typeof BUSINESS_TYPES)[number])
-        ? bt
-        : BUSINESS_TYPES[0],
-    )
+    // Values outside the option lists (onboarding free text, an import, or an
+    // older list) are kept verbatim. Coercing them here silently rewrote the
+    // stored value on the next save and registered a phantom change, which
+    // then spent real money on a research refresh nobody asked for.
+    setIndustry(workspace.industry || INDUSTRIES[0])
+    setBusinessType(workspace.business_type || BUSINESS_TYPES[0])
     setTechStack(workspace.tech_stack ?? [])
   }, [workspace])
 
@@ -525,8 +528,8 @@ export function CompanyShapeSettings({
     // — a no-op resave of identical values must not spend real money on a
     // business-context refresh.
     const changed =
-      industry !== (workspace.industry ?? INDUSTRIES[0]) ||
-      businessType !== (workspace.business_type ?? BUSINESS_TYPES[0]) ||
+      industry !== (workspace.industry || INDUSTRIES[0]) ||
+      businessType !== (workspace.business_type || BUSINESS_TYPES[0]) ||
       techStackChanged(techStack, workspace.tech_stack ?? [])
     try {
       await updateWorkspace(workspace.id, {
