@@ -137,6 +137,40 @@ def test_custom_block_rides_input_not_the_cacheable_prefix(monkeypatch):
     assert calls[0]["input"].rstrip().endswith(f"Question: {NEUTRAL_Q}")
 
 
+def test_system_prompt_describes_where_the_block_actually_is(monkeypatch):
+    """The system prompt's account of WHERE the company block sits must match
+    `input`'s real layout.
+
+    Regression for 2026-08-02: the prompt said the list came AFTER the question
+    ("The question may be followed by ...") while `input` has always been
+    block → history → question, so the block leads and the question closes.
+    That sentence is the ONLY thing authorising the model to return a company
+    id, and it aimed the model at the one position the block is never in.
+
+    Asserted as an INVARIANT rather than a fixed string: whatever wording the
+    prompt uses, the position it claims has to agree with the assembly. A
+    future edit that moves the block without re-describing it fails here.
+    """
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    body = calls[0]["input"]
+    block_at = body.index("Company skills")
+    question_at = body.index(f"Question: {NEUTRAL_Q}")
+    # Ground truth: the block really does precede the question.
+    assert block_at < question_at
+
+    system = calls[0]["system"]
+    # The prompt must not tell the model to look for the list after the
+    # question — the discredited framing, in any casing.
+    assert "followed by a \"Company skills\"" not in system
+    assert "question may be followed by" not in system.lower()
+    # ...and it must still say the block exists, or nothing licenses the pick.
+    assert "Company skills" in system
+
+
 def test_router_gate_still_rejects_another_companys_slug(monkeypatch):
     """Even if the model hallucinates a slug the caller's company doesn't own,
     `_routable(sid, enterprise_id)` refuses it and routing falls through."""
