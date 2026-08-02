@@ -111,6 +111,73 @@ def test_route_skill_match_wins_over_scope_flag(monkeypatch):
     assert d.skill_id == "retention-churn" and d.source == "llm"
 
 
+# ── router determinism + schema shape ────────────────────────────────────────
+
+def test_route_pins_temperature_to_zero(monkeypatch):
+    """Routing is multiple-choice classification, so it must not sample.
+
+    Passing no temperature left the call at the Anthropic API default of 1.0
+    (`app/llm.py::_build_base_kwargs` only sets the key when it is not None), so
+    the same question could route to a different skill run to run. A regex or
+    slash fast-path never reaches the LLM router, so this uses a question with
+    no regex rule.
+    """
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: captured.append(k) or _route_out("retention-churn", 0.9, "churn"),
+    )
+    d = qa.route("why do users drop off after week two?", enterprise_id="ent")
+    assert d.source == "llm", "test needs a question that reaches the LLM router"
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == 0
+
+
+def test_route_temperature_reaches_the_anthropic_call(monkeypatch):
+    """The kwarg is not merely accepted by `llm_call` — it survives the gateway.
+
+    `conftest` patches `app.llm.call_json`, but the gateway imported that name
+    into its own namespace, so this patches `app.graph.gateway.call_json` (the
+    same reason `test_ask_skill_routing._patch_gateway_call_json` exists). That
+    makes the REAL `llm_call` run, proving temperature is threaded end to end
+    rather than swallowed by the gateway signature.
+    """
+    import app.graph.gateway as gateway_mod
+
+    captured: list[dict] = []
+
+    def _fake_call_json(**kwargs):
+        captured.append(kwargs)
+        return {"reason": "churn", "skill_id": "retention-churn",
+                "confidence": 0.9, "in_scope": True}
+
+    monkeypatch.setattr(gateway_mod, "call_json", _fake_call_json, raising=True)
+
+    d = qa.route("why do users drop off after week two?", enterprise_id="ent")
+    assert d.skill_id == "retention-churn" and d.source == "llm"
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == 0
+    # ...and it is the router's own schema that was sent.
+    assert list(captured[0]["schema"]["properties"])[0] == "reason"
+
+
+def test_route_schema_generates_reason_before_the_label():
+    """Forced-tool JSON is emitted in schema order, so `reason` must come first.
+
+    With `skill_id` first the label was already committed before the model wrote
+    its justification, making that text post-hoc rationalisation. Anthropic's
+    ticket-routing guide: "always include your classification reasoning before
+    your actual intent output". `additionalProperties: False` pins the contract
+    to exactly these four fields.
+    """
+    props = list(qa._ROUTE_SCHEMA["properties"])
+    assert props[0] == "reason", f"reason must be generated first, got {props}"
+    assert set(props) == {"reason", "skill_id", "confidence", "in_scope"}
+    assert qa._ROUTE_SCHEMA["additionalProperties"] is False
+    # Every property stays required — the reorder must not drop the contract.
+    assert set(qa._ROUTE_SCHEMA["required"]) == set(props)
+
+
 def test_out_of_scope_message_judges_topic_not_data():
     """The canned refusal must judge TOPIC, never data volume. The old 'I
     don't have grounded data on that topic, so I won't guess' sentence taught

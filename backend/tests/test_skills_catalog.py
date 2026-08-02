@@ -27,6 +27,47 @@ def test_all_installed_skills_load():
         assert spec.description, f"{sid} has no frontmatter description"
 
 
+MIN_ROUTER_DESCRIPTION_CHARS = 60
+
+
+def test_every_routable_skill_has_a_usable_router_description():
+    """A routable skill the router cannot read is invisible to it.
+
+    `_router_menu()` renders one `- <id>: <description>` line per routable skill
+    and that menu is the ONLY semantic signal the LLM router gets. prd-author
+    shipped with `description: >` in its frontmatter, which the no-YAML-dep
+    parser reduced to the single character ">", so its menu line was
+    `- prd-author: >` — unpickable on meaning, and reachable only because
+    `skill_router`'s regex fast-path caught PRD phrasings first.
+
+    `test_all_installed_skills_load` already asserts the description is truthy,
+    which is exactly why this went unnoticed: ">" is truthy. A length floor is
+    what actually catches it, so the next author who writes a block scalar the
+    parser mishandles gets a red build instead of a silent hole in the menu.
+    60 chars is comfortably below every real description (the shortest genuine
+    one is well clear of it) and far above any stray marker.
+    """
+    too_short = [
+        (s["id"], s["description"])
+        for s in routable_manifest()
+        if len(s["description"].strip()) < MIN_ROUTER_DESCRIPTION_CHARS
+    ]
+    assert too_short == [], (
+        "routable skills whose router menu line carries no usable description "
+        f"(likely an unparsed YAML block scalar in SKILL.md frontmatter): {too_short}"
+    )
+
+
+def test_router_menu_lines_carry_each_skill_description():
+    """The menu the router actually sees — proving the fix at the surface that
+    matters, not just at the loader."""
+    from app.qa_agent import _router_menu
+
+    menu = _router_menu()
+    assert "- prd-author: >" not in menu, "prd-author menu line lost its description"
+    assert "Product Requirements Document" in menu
+
+
 def test_manifest_covers_every_installed_skill():
     manifest_ids = {s["id"] for s in build_manifest()}
     assert manifest_ids == set(list_skills())

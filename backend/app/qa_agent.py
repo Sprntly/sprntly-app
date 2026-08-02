@@ -107,15 +107,31 @@ _REGEX_ROUTE_THRESHOLD = 0.75
 # How many prior turns to feed the router / answer for follow-up context.
 _HISTORY_TURNS = 6
 
+# Property ORDER is load-bearing, not cosmetic. Forced-tool JSON is generated in
+# schema order, so whatever comes first is decided first. `reason` used to sit
+# third, behind `skill_id` — meaning the label was already committed by the time
+# the model wrote its justification, making that text post-hoc rationalisation
+# rather than reasoning the choice could depend on. `reason` now leads, so the
+# tokens explaining the choice exist before the choice is emitted.
+#
+# HYPOTHESIS, not a measured gain. Anthropic's ticket-routing guide is explicit
+# that classification reasoning belongs first ("Remember to always include your
+# classification reasoning before your actual intent output"), but it demonstrates
+# that with XML tags in free text, not tool-input JSON. Whether grammar-constrained
+# tool-input generation honours property order strongly enough to reproduce the
+# effect is not documented anywhere we could find. The change is free and aligned
+# with vendor guidance; treat any accuracy improvement as unproven until the
+# routing evals can actually run (they are integration-gated on an API key CI
+# does not set).
 _ROUTE_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "reason": {"type": "string", "description": "One short clause."},
         "skill_id": {
             "type": "string",
             "description": "Exact id of the single best-fit skill, or 'none' if the question is general and no skill clearly applies.",
         },
         "confidence": {"type": "number", "description": "0..1"},
-        "reason": {"type": "string", "description": "One short clause."},
         "in_scope": {
             "type": "boolean",
             "description": (
@@ -125,7 +141,11 @@ _ROUTE_SCHEMA: dict = {
             ),
         },
     },
-    "required": ["skill_id", "confidence", "reason", "in_scope"],
+    "required": ["reason", "skill_id", "confidence", "in_scope"],
+    # The router's contract is exactly these four fields; anything else is the
+    # model improvising. Reading stays tolerant either way (`route` uses .get
+    # with defaults), so this tightens generation without adding a failure mode.
+    "additionalProperties": False,
 }
 
 _ROUTER_SYSTEM = (
@@ -240,6 +260,19 @@ def route(
             json_schema=_ROUTE_SCHEMA,
             user_cacheable_prefix=_router_menu(),
             max_tokens=300,
+            # Routing is a pure classification decision — one question, one
+            # best-fit id off a fixed menu. Passing no temperature left this
+            # call at the Anthropic API default of 1.0 (app/llm.py only sets the
+            # key when it is not None), i.e. maximum sampling randomness on a
+            # multiple-choice problem, so the same question could route to a
+            # different skill on separate runs. That reads to users as flakiness
+            # rather than a bug. The Messages API reference directs temperature
+            # "closer to 0.0 for analytical / multiple choice", and Anthropic's
+            # ticket-routing guide pins temperature=0 for exactly this shape of
+            # classifier. Note their caveat: even at 0.0 results are not fully
+            # deterministic — this removes the sampling spread, it does not
+            # promise a byte-identical answer forever.
+            temperature=0,
         )
         out = result.output if isinstance(result.output, dict) else {}
         sid = (out.get("skill_id") or "none").strip()

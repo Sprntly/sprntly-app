@@ -270,6 +270,12 @@ def llm_call(
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "cache_read_input_tokens": result.cache_read_input_tokens,
+                    # The write side of the cache, without which the read count
+                    # alone can't yield a hit rate from the audit spine —
+                    # `LLMResult` has carried it all along, it just never landed
+                    # in `factors`. Needed to measure whether the router's
+                    # cacheable menu prefix is actually being hit.
+                    "cache_creation_input_tokens": result.cache_creation_input_tokens,
                     "cost_usd": result.cost_usd,
                     "latency_ms": result.latency_ms,
                 },

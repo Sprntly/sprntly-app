@@ -188,6 +188,92 @@ def test_skill_without_references_has_empty_dicts():
     assert spec.assets == {}
 
 
+# ---------- frontmatter block scalars ----------
+
+def test_folded_block_scalar_description_parses_to_full_text():
+    """`description: >` must yield the whole folded paragraph, not ">".
+
+    The parser is a no-YAML-dep line splitter doing `partition(":")`, so a folded
+    block scalar captured only the ">" marker. The router classifies against
+    `description`, so prd-author reached the menu as `- prd-author: >` with zero
+    semantic signal.
+    """
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter(
+        "---\n"
+        "name: demo\n"
+        "description: >\n"
+        "  Author the human-readable half of a PRD from a problem,\n"
+        "  signals, and business context.\n"
+        "\n"
+        "  A second paragraph stays separate.\n"
+        "kind: method\n"
+        "---\n\nbody\n"
+    )
+    assert fm["name"] == "demo"
+    # Folded: lines join with a single space, blank line = paragraph break.
+    assert fm["description"] == (
+        "Author the human-readable half of a PRD from a problem, signals, "
+        "and business context.\nA second paragraph stays separate."
+    )
+    # The block must not swallow the key that follows it.
+    assert fm["kind"] == "method"
+
+
+def test_literal_block_scalar_keeps_its_newlines():
+    """`description: |` is the literal form — every newline survives, and the
+    block's own indentation is stripped while deeper nesting is kept."""
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter(
+        "---\n"
+        "description: |\n"
+        "  line one\n"
+        "    indented two\n"
+        "  line three\n"
+        "name: demo\n"
+        "---\n"
+    )
+    assert fm["description"] == "line one\n  indented two\nline three"
+    assert fm["name"] == "demo"
+
+
+def test_plain_single_line_frontmatter_is_unchanged():
+    """The flat form every other vendored skill uses must parse exactly as
+    before — this fix adds a case, it does not change the existing one."""
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter("---\nname: demo\ndescription: One flat line.\n---\n")
+    assert fm == {"name": "demo", "description": "One flat line."}
+
+
+def test_block_scalar_indicators_are_tolerated():
+    """Chomping/indent indicators (`>-`, `|+`) still open a block scalar rather
+    than being captured as the literal value."""
+    from app.skills.loader import _parse_frontmatter
+
+    assert _parse_frontmatter(
+        "---\ndescription: >-\n  folded and chomped\n---\n"
+    )["description"] == "folded and chomped"
+    assert _parse_frontmatter(
+        "---\ndescription: |+\n  literal and kept\n---\n"
+    )["description"] == "literal and kept"
+
+
+def test_prd_author_description_is_the_real_summary():
+    """The regression this fix exists for: prd-author's description was the
+    single character ">". It is loaded from disk, so this also proves the fix
+    works against the real vendored file rather than only a fixture."""
+    desc = get_skill("prd-author").description
+    assert desc != ">"
+    assert len(desc) > 60
+    assert "Product Requirements Document" in desc
+    assert "Part A" in desc
+    # Folded to one flowing line, not a ragged column of source fragments.
+    assert "\n" not in desc
+
+
 def test_unknown_skill_raises():
     with pytest.raises(UnknownSkillError):
         get_skill("does-not-exist")
