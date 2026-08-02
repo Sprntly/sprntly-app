@@ -19,7 +19,7 @@ This skill runs at whatever cadence the recipient chose (daily, weekly, or month
 
 **3. Report the finding, don't prescribe the fix.** The PM is the one who decides what to build. A card's job is to tell them something they didn't know, size it, and show its basis well enough that they can form their own view. Leading with "we've drafted the PRD, approve it" skips the step where they judge whether the problem is real — and readers experience that as being sold to rather than informed. The evidence comes first; the PRD is something they generate once they agree.
 
-Pin everything that shouldn't vary (layout, colors, taxonomy, CTA placement — all in `assets/brief-template.html`) and generate only the prose.
+Everything that shouldn't vary (layout, colors, taxonomy, CTA placement) is already pinned in `assets/brief-template.html`, which the frontend implements. You generate only the prose.
 
 ## Categories
 
@@ -286,13 +286,23 @@ The View/Draft and View/Generate variants switch on whether the artifact exists 
 
 Score the draft against `references/rubric.md`. If any hard gate fails — a number without a source, a body that needs its title, a color mismatching valence, a wrong CTA pair, a title missing pain or value, a carried finding rendered as a card, a greeting whose time framing contradicts the cadence — rewrite that card once and re-check.
 
-### 10. Render and emit
+### 10. Emit
 
-**Every run produces a rendered HTML file.** This is not optional and not conditional on the caller asking — populating `assets/brief-template.html` is part of what it means to have run this skill. A run that emits only the structured object has not finished.
+**Emit the structured `brief` object (`references/signal-schema.json`), and nothing else.**
+That object IS the brief. Sprntly's frontend renders it into the pinned layout — you neither
+produce nor see HTML, and the call that runs this skill is a forced-tool JSON call, so there is
+no channel through which markup could reach anyone even if you wrote it. Prose is your entire
+output surface; spend it on the cards.
 
-Populate the template: greeting, cards, the report shelf, and nothing else. Emit the structured `brief` object (`references/signal-schema.json`) as the source of truth alongside it; the HTML is a view of that object, so the two can never disagree. Layout, tokens, fonts, the green CTAs, chips, the shelf, and the dismiss/undo behavior all live in the template — the renderer only fills slots and never restyles.
+Layout, tokens, fonts, the green CTAs, chips, the shelf, and the dismiss/undo behaviour are all
+pinned in `assets/brief-template.html`, which the FRONTEND implements. Nothing you emit can
+restyle it, so do not try — write the slots and let the renderer place them.
 
-On a quiet cycle the HTML is still produced: greeting, no cards, and the shelf. A one-line file is a valid brief. Also emit the updated `ledger` (what was shown, in what state, when) and the full ranked `backlog[]` — the backlog page reads from that, and the next cycle's freshness logic reads from the ledger. Everything not carded this cycle is on the backlog, so nothing is lost by leaving it off the brief.
+On a quiet cycle you still emit a complete object: greeting, no cards, and the shelf. A brief
+with zero cards is a valid brief. Also emit the updated `ledger` (what was shown, in what state,
+when) and the full ranked `backlog[]` — the backlog page reads from that, and the next cycle's
+freshness logic reads from the ledger. Everything not carded this cycle is on the backlog, so
+nothing is lost by leaving it off the brief.
 
 ## Edge cases
 
@@ -319,9 +329,17 @@ On a quiet cycle the HTML is still produced: greeting, no cards, and the shelf. 
 
 ## Reference files
 
-- `README.md` — orientation and quickstart.
+Everything under `references/` is **already in your prompt** — Sprntly folds each one into the
+METHOD block above under a `### REFERENCE: <name>` heading. "Read `references/rubric.md`" means
+scroll up to that heading, not fetch a file. You have no filesystem.
+
 - `references/sources.md` — category registry, adapter contracts, cadence table. Read before fetching.
 - `references/signal-schema.json` — `brief_config`, `finding`, `ledger`, `brief`, and `backlog` structures. Read before composing.
 - `references/rubric.md` — scoring rubric and the deterministic linter checklist used in step 9.
 - `references/examples.md` — golden examples and counter-examples with why-they-fail.
-- `assets/brief-template.html` — canonical render template; all visual tokens live here.
+
+Repository material, **not** sent to you — do not try to read it:
+
+- `README.md` — orientation and quickstart for maintainers.
+- `assets/brief-template.html` — the canonical render template. The FRONTEND implements it; all
+  visual tokens live there and nothing you emit can change them.
