@@ -1547,6 +1547,52 @@ def _no_llm_usage_background_writer():
 
 
 @pytest.fixture(autouse=True)
+async def _drain_orphaned_executor_work():
+    """STRUCTURAL fix for cross-test contamination via orphaned
+    `asyncio.to_thread`/`loop.run_in_executor` background work — the actual
+    root cause behind an intermittent class of failures in the ticket-sync /
+    fake-tracker test family (test_ticket_sync.py, test_ticket_lifecycle.py,
+    test_tracker_native_sync.py and any other test sharing that fixture
+    machinery) that reproduced even after the targeted per-test fixes below
+    (see git history on this fixture's neighbors) and got WORSE, not better,
+    on GitHub's 2-vCPU runners — a slower run gives an orphaned thread more
+    real wall-clock time to land badly.
+
+    `asyncio.run()` is safe: its cleanup calls `shutdown_default_executor()`,
+    which BLOCKS until every `to_thread` call has actually finished (verified
+    directly — a fire-and-forget `asyncio.create_task(...)` whose coroutine is
+    suspended inside `to_thread` when the outer coroutine returns still keeps
+    `asyncio.run()` from returning until that executor thread is done,
+    because cancelling the asyncio-level future does NOT interrupt an
+    already-dispatched executor thread).
+
+    pytest-asyncio's own per-test event loop teardown does NOT do this — it
+    calls `loop.close()` directly (see `pytest_asyncio/plugin.py`), with no
+    executor drain. Confirmed directly: with that teardown, an orphaned
+    `to_thread` call keeps running for its FULL duration strictly AFTER
+    "the test" has already returned and the next one has started — meaning
+    ANY test (not just the couple already found and stubbed) that exercises a
+    route/function scheduling `asyncio.create_task(...)` fire-and-forget work
+    (PRD/impl-spec pre-warm, ticket-generation warm, connector sync kicks,
+    etc.) without itself explicitly draining that work is a potential source,
+    regardless of which specific test files happen to intersect with the
+    ticket-sync fixture family. This fixture makes every pytest-asyncio-
+    managed test wait the same way `asyncio.run()` already does, closing the
+    hole at its source rather than in each downstream victim.
+
+    Async (not sync) so pytest-asyncio hands it a REAL running loop to await
+    on for its teardown — `asyncio_mode = auto` still wraps this correctly
+    for sync test functions too (verified). A test with no orphaned work
+    pays ~nothing (shutdown_default_executor() on an idle executor returns
+    immediately)."""
+    yield
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.shutdown_default_executor()
+
+
+@pytest.fixture(autouse=True)
 def _no_leftover_daemon_threads():
     """Guard against a fire-and-forget daemon thread (`kick_prd_sync_from_key`,
     `kick_comment_push`, `kick_comment_delete`, `app.kg_ingest.auto_sync`'s

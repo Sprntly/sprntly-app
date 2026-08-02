@@ -20,6 +20,10 @@ from tests.test_ticket_sync import (
     fake_tracker,  # noqa: F401 — fixture reuse
 )
 
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID/FakeTracker
+# fixture family, pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
+
 
 def _ctx(cid: str = CID) -> CompanyContext:
     return CompanyContext(company_id=cid, role="owner", user_id="u")

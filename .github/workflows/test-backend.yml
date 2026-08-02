@@ -41,7 +41,13 @@ jobs:
 
       - name: Run pytest (fast lane — no integration tests)
         working-directory: backend
-        run: python -m pytest tests/ -q --strict-markers -m "not integration" -n auto
+        # --dist=loadgroup: honors @pytest.mark.xdist_group so the ticket-sync /
+        # FakeTracker fixture family (test_ticket_sync.py + siblings — several
+        # unrelated files share one hardcoded CID + easily-colliding prd_ids)
+        # runs as one contiguous unit on a single worker, instead of being
+        # interleaved with unrelated tests elsewhere in the suite. Ungrouped
+        # tests still load-balance normally across all workers.
+        run: python -m pytest tests/ -q --strict-markers -m "not integration" -n auto --dist=loadgroup
 
   # Integration lane: gates merge-to-main + runs nightly
   # Includes real vite builds, real tsc, real Node subprocesses.
@@ -101,7 +107,7 @@ jobs:
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
-        run: python -m pytest tests/ -v -m "not real_build" -n auto
+        run: python -m pytest tests/ -v -m "not real_build" -n auto --dist=loadgroup
 
       # Step 2 — the real-`vite build`/`tsc` tests, run SEQUENTIALLY on their own.
       # ROOT-CAUSE FIX for the "vite build timed out" flake: when these ran inside
