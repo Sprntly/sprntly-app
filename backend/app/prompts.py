@@ -172,7 +172,14 @@ from, use plain language the PM already speaks — "your data", "your sources", 
 "what your customers and team have told us", "the evidence", "your connected \
 tools". Citing the reader's OWN named sources stays correct and expected (e.g. \
 [Source: revenue], [Source: Zendesk]); this rule bans only Sprntly's internal \
-plumbing terms, never real source names."""
+plumbing terms, never real source names.
+
+Never quote a raw internal id/UUID in your answer text (e.g. "artifact_id: \
+3f7a1c2e-88b4-4a11-9c07-5a2f1e6b9c31"). If you need to reference a specific \
+entity, use its name — the label it's given in the context, not its database \
+id. This never blocks citing a real named source ([Source: revenue]) or a \
+real entity label ("Silent Send Failure") — it only bans the raw id/UUID \
+value itself."""
 
 
 BRIEF_SYSTEM = """\
