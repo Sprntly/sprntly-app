@@ -789,17 +789,16 @@ def start_scheduler() -> None:
 
     # Extraction evals: sampled structural check of recent extraction output
     # against each vendored connector-extraction skill's declared shape
-    # contract. Opt-in via EXTRACTION_EVAL_ENABLED; read-only + sampled, own
-    # cadence decoupled from the connector refresh interval above.
-    if settings.extraction_eval_enabled:
-        eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
-        _scheduler.add_job(
-            _run_extraction_eval_cycle,
-            trigger=IntervalTrigger(hours=eval_hours),
-            id="extraction_eval",
-            name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
-            replace_existing=True,
-        )
+    # contract. Read-only + sampled, own cadence decoupled from the connector
+    # refresh interval above.
+    eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+    _scheduler.add_job(
+        _run_extraction_eval_cycle,
+        trigger=IntervalTrigger(hours=eval_hours),
+        id="extraction_eval",
+        name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
+        replace_existing=True,
+    )
 
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and
