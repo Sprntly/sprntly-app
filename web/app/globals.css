@@ -16898,6 +16898,20 @@
     text-align: left;
   }
 
+  /* Artifact-share entry-gate variants — additive modifiers, existing tokens
+     only. .welcome-banner--share tints the sign-up/verify/guest-drawer share
+     context strip; .verify-icon--danger re-tints the verify-icon recipe for
+     NotAuthorizedScreen. */
+  .welcome-banner--share {
+    background: var(--accent-soft);
+  }
+
+  .verify-icon--danger {
+    background: var(--danger-soft);
+    border-color: var(--danger-border);
+    color: var(--danger);
+  }
+
   .auth-msg {
     font-size: 12.5px;
     color: var(--accent-hover);

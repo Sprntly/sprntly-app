@@ -93,6 +93,31 @@ export function validateWorkEmail(email: string): string | null {
   return null
 }
 
+/** Gate a sign-up email against a share link's `required_email_domain`
+ *  BEFORE any Supabase signUp() call is attempted — the entry gate's
+ *  metadata fetch (getMetadata()) already carries this domain. Returns null
+ *  when there's no requirement (a non-share signup, or the metadata simply
+ *  had no domain hint) or the email already matches; otherwise the inline
+ *  error to show under the email field.
+ *
+ *  This is a UX-level gate, not a security backstop: it only stops the
+ *  in-app form from attempting a doomed signup and shows a clear reason
+ *  early. A client could still call Supabase's signUp() directly, bypassing
+ *  this entirely — the real backstop is unchanged and stays server-side
+ *  (resolve_share_access's company-membership check, re-run on every
+ *  /resolve, /join, /content call). */
+export function validateShareDomainEmail(
+  email: string,
+  requiredDomain: string | null | undefined,
+): string | null {
+  if (!requiredDomain) return null
+  const domain = emailDomain(email)
+  if (!domain || domain !== requiredDomain.trim().toLowerCase()) {
+    return `This link is only accessible to people with an @${requiredDomain} email address.`
+  }
+  return null
+}
+
 export type PasswordStrength = "weak" | "fair" | "good" | "strong"
 
 /** How strong a password is, for the meter under the field. Distinct from

@@ -97,4 +97,17 @@ describe("VerifyEmailView (v4 page 04)", () => {
     expect(html).toContain("That code isn&#x27;t right.")
     expect(html).toContain("otp-row-invalid")
   })
+
+  it("mounts the share-context strip when shareContext is present", () => {
+    const html = render({
+      shareContext: { title: "Q3 Retention PRD", sharerName: "Priya Shah" },
+    })
+    expect(html).toContain('data-testid="share-context-strip"')
+    expect(html).toContain("Priya Shah")
+  })
+
+  it("renders unchanged (no strip) when shareContext is absent", () => {
+    const html = render()
+    expect(html).not.toContain('data-testid="share-context-strip"')
+  })
 })

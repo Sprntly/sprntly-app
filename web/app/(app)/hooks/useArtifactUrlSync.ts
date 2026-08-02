@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { evidenceApi } from "../../lib/api"
+import { evidenceApi, prdApi } from "../../lib/api"
 
 /**
  * Shell-mounted (AppShell) hook — the single, page-agnostic wiring point for
@@ -67,6 +67,13 @@ function parsePositiveInt(raw: string | null): number | null {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+/** A PRD's `public_id` shape (uuid) — the canonical `?prd=` form going
+ *  forward (2026-08-02: prds.public_id migration). A legacy bare-integer
+ *  `?prd=` link is still accepted (see the URL→drawer effect below) for any
+ *  bookmark/saved link predating this change; every NEWLY reflected URL uses
+ *  this form exclusively, never the raw sequential id. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export function useArtifactUrlSync() {
   const router = useRouter()
   const pathname = usePathname()
@@ -114,9 +121,32 @@ export function useArtifactUrlSync() {
     if (consumedRef.current.prd === raw) return
     consumedRef.current.prd = raw
     const prdId = parsePositiveInt(raw)
-    if (prdId == null) return
+    if (prdId != null) {
+      // Legacy bare-integer form — still fully supported, unchanged from
+      // before the public_id migration. Every NEW reflected URL uses
+      // public_id instead (see the drawer→URL effect below); this branch
+      // only exists for a link/bookmark saved before that change.
+      pendingUrlOpenRef.current = true
+      openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
+      return
+    }
+    // Not a legacy int — try it as the canonical public_id form. Resolves
+    // to the real internal id via the SAME ownership check GET /{id}
+    // already enforces (no new access, only a different identifier shape),
+    // then hands off to the identical openPrdTab/loadPrdById path every
+    // other PRD-open already uses — that path never sees a public_id.
+    if (!UUID_RE.test(raw)) return
     pendingUrlOpenRef.current = true
-    openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
+    void prdApi
+      .resolveIdByPublicId(raw)
+      .then(({ id }) => {
+        openPrdTab({ title: "PRD", source: { kind: "load", prdId: id, meta: null } })
+      })
+      .catch(() => {
+        // 404 (unknown/foreign public_id) — no content, no crash, matching
+        // the evidence effect's own failure handling just below.
+        pendingUrlOpenRef.current = false
+      })
   }, [searchParams, openPrdTab, ownsPrdParamElsewhere])
 
   useEffect(() => {
@@ -220,7 +250,17 @@ export function useArtifactUrlSync() {
       contentPanelTab === "evidence" && content.evidenceId != null
         ? { key: EVIDENCE_PARAM, value: String(content.evidenceId) }
         : (contentPanelTab === "prd" || contentPanelTab === "tickets") && content.prd?.prd_id
-          ? { key: PRD_PARAM, value: String(content.prd.prd_id) }
+          ? {
+              key: PRD_PARAM,
+              // public_id is the canonical reflected form (an opaque,
+              // unguessable identifier — never the raw sequential prd_id;
+              // see the prds.public_id migration's own comment). Every
+              // PRD-load path sets it; the prd_id fallback only covers a
+              // PrdState built before this field existed (none currently —
+              // kept as a defensive degrade to the still-accepted legacy
+              // form, not a silent reintroduction of the id in a NEW url).
+              value: content.prd.public_id ?? String(content.prd.prd_id),
+            }
           : null
 
     // Nothing resolved yet (e.g. still generating, id not known client-side) —

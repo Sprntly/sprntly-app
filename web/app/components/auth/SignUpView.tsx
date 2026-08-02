@@ -4,6 +4,7 @@ import Link from "next/link"
 import { AuthShell } from "./AuthShell"
 import { PasswordStrengthBar } from "./PasswordStrengthBar"
 import { ArrowRight, Eye, EyeOff, Google, Key } from "./icons"
+import { ShareContextStrip } from "../shared/ShareContextStrip"
 
 // Roles from design-v4 page 03 ("Who are you?").
 export const V4_ROLES = [
@@ -33,11 +34,22 @@ export type SignUpStep1ViewProps = {
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
   onGoogle: () => void
+  /** Set only when this sign-up originated from a valid `?share=` artifact
+   *  link — mounts the ShareContextStrip + a domain-naming hint. Absent (the
+   *  default) renders byte-identically to before this ticket. */
+  shareContext?: { title: string; sharerName: string; requiredDomain: string | null }
 }
 
 export function SignUpStep1View(props: SignUpStep1ViewProps) {
   return (
     <AuthShell tag="1 of 2 · Create account">
+      {props.shareContext && (
+        <ShareContextStrip
+          kind="sign-up"
+          title={props.shareContext.title}
+          sharerName={props.shareContext.sharerName}
+        />
+      )}
       <div className="auth-h">Create your <em>account.</em></div>
       <div className="auth-sub">Start with the basics. We&apos;ll personalize the rest next.</div>
 
@@ -55,6 +67,11 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
             autoComplete="email"
             required
           />
+          {props.shareContext?.requiredDomain && (
+            <div className="field-hint" data-testid="sign-up-domain-hint">
+              Use your {props.shareContext.requiredDomain} work email to view what was shared with you.
+            </div>
+          )}
         </div>
         <div className="field">
           <div className="field-l">

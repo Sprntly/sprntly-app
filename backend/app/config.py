@@ -458,6 +458,16 @@ class Settings(BaseSettings):
     # unsigned/forgeable grant.
     design_agent_token_secret: str = ""
 
+    # Artifact share-grant token secret. A DISTINCT secret from jwt_secret AND
+    # from design_agent_token_secret — never reuse either. Provisioned now
+    # (harmless, currently unused) so a future revocation/rotation ticket that
+    # wants HMAC-signed short-lived view grants (mirroring da_view_grant) has
+    # the secret already reviewed. The share primitive itself is DB-row-token-
+    # backed (an opaque uuid4 looked up by exact match, like
+    # prototypes.share_token) — a bare DB-token lookup needs no secret, so
+    # nothing in this ticket signs or verifies an HMAC with this value.
+    artifact_share_token_secret: str = ""
+
     # Bundle-proxy public origin (Decision 2 — same-origin serving). The prototype
     # bundle is served from the APP origin (e.g. https://app.sprntly.ai) via an
     # nginx reverse-proxy to the FastAPI /v1/design-agent/.../bundle routes, under

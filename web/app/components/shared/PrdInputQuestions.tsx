@@ -52,6 +52,7 @@ export function prdStateFromRecord(rec: PrdRecord): PrdState {
   return {
     ...markdownToPrdState(rec.payload_md),
     prd_id: rec.id,
+    public_id: rec.public_id,
     figma_file_key: undefined,
     llmPart: rec.llm_part,
     briefId: rec.brief_id,

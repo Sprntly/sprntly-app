@@ -138,6 +138,7 @@ async function _pollPrdLoop(
     prd: {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
+      public_id: prd.public_id,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
@@ -226,6 +227,7 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
     prd: {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
+      public_id: prd.public_id,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
@@ -256,6 +258,7 @@ export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
     prd: {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
+      public_id: prd.public_id,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,

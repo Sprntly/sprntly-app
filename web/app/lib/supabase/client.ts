@@ -209,6 +209,72 @@ export async function postLoginPath(): Promise<string> {
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
+    // Guest account state: a user with zero company memberships who signed
+    // up via a shared-artifact link carries the token in user_metadata (set
+    // server-side at signUp() time — see lib/auth.tsx's SignUpInput — so it
+    // survives the verify-email hop even across devices). Resolve it before
+    // falling through to onboarding, which would otherwise create a brand
+    // new company for someone who only meant to view/join an existing one.
+    const pendingToken = user.user_metadata?.pending_share_token
+    if (typeof pendingToken === "string" && pendingToken) {
+      const { resolveArtifactShare, tryAutoJoinCompanyOnDomainMatch } = await import(
+        "../artifactShareApi"
+      )
+      // One-shot, best-effort: right after email verification succeeds,
+      // grant COMPANY (never workspace) membership when the verified email
+      // domain matches the share's owning company. No-op if the caller
+      // already has a company, the domain doesn't match, or the token is
+      // bad — the /resolve call right below is the real gate either way, and
+      // its existing same_company branch picks up a successful auto-join
+      // naturally on this very next call.
+      await tryAutoJoinCompanyOnDomainMatch(pendingToken)
+      const outcome = await resolveArtifactShare(pendingToken)
+      if (outcome?.outcome === "guest_view") {
+        // public_id (never artifact_id, the raw sequential id) is what this
+        // guest's own landing URL should carry — the fallback to the int
+        // only covers the (currently unreachable) case of a PRD row with no
+        // public_id at all, same defensive-fallback shape useArtifactUrlSync
+        // uses for its own reflect effect.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}&share=${pendingToken}`
+      }
+      if (outcome?.outcome === "blocked") {
+        return `/not-authorized?share=${pendingToken}&reason=${outcome.reason}`
+      }
+      // outcome undefined (network/other error, or a stale/malformed token
+      // server-side has no row for) — fail OPEN to onboarding, never to a
+      // stuck screen. The real security gate (view/join) is enforced
+      // server-side by resolve/join regardless of how the user got here.
+    }
+
+    // Bare-link ("full parity") guest account state — the token-less
+    // sibling of the pendingToken branch above, same rationale: a user who
+    // signed up via a bare `?prd=` visit (no share row) carries the PRD's
+    // opaque public_id in user_metadata (never the raw sequential id) so it
+    // survives the verify-email hop on any device. `access=guest` on the
+    // redirect target is what lets AuthGate keep routing THIS guest's own
+    // future visits/refreshes through the guest pipeline without affecting
+    // a real member's ordinary bare `?prd=` navigation (see AuthGate.tsx's
+    // prdOnlyGuestMode). The redirect itself carries the public_id, NOT
+    // outcome.artifact_id (the real int) — reflecting the int here would
+    // reintroduce, on this guest's very first landing URL, exactly the
+    // blind-enumeration exposure this scope exists to close.
+    const pendingPrdPublicId = user.user_metadata?.pending_prd_public_id
+    if (typeof pendingPrdPublicId === "string" && pendingPrdPublicId) {
+      const { resolvePrdAccess, tryAutoJoinCompanyOnDomainMatchForPrd } = await import(
+        "../prdAccessApi"
+      )
+      await tryAutoJoinCompanyOnDomainMatchForPrd(pendingPrdPublicId)
+      const outcome = await resolvePrdAccess(pendingPrdPublicId)
+      if (outcome?.outcome === "guest_view") {
+        return `/?prd=${encodeURIComponent(pendingPrdPublicId)}&access=guest`
+      }
+      if (outcome?.outcome === "blocked") {
+        return `/not-authorized?reason=${outcome.reason}`
+      }
+      // fail OPEN to onboarding — same rationale as the pendingToken branch.
+    }
+
     // Pre-onboarding profile gate: a brand-new user whose profile is missing
     // a first name OR the company-vs-personal account type goes to the
     // unnumbered `your-name` gate first. Google sign-ups always miss the
@@ -258,6 +324,67 @@ async function hasCompleteSignupProfile(userId: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * Where NotAuthorizedScreen's "Continue to your workspace" action should
+ * send the currently signed-in user — their own account's real home, NEVER
+ * a re-resolution of the share token that just blocked them (so this can
+ * never loop back to /not-authorized: unlike postLoginPath()'s guest
+ * branch, this never looks at pending_share_token at all).
+ *
+ * "Has a real workspace" mirrors the backend's own require_workspace /
+ * _resolve_workspace invariant exactly (backend/app/auth.py): an owner/admin
+ * company role implicitly administers every workspace in their company (no
+ * workspace_members row needed), while a plain member/viewer needs a real
+ * workspace_members row or every workspace-scoped read 403s. This is
+ * deliberately NOT the same check postLoginPath() uses elsewhere
+ * (fetchWorkspaceForUser only checks company membership) — a company member
+ * with zero workspace_members rows would otherwise be sent to "/" and hit a
+ * wall of 403s.
+ *
+ *  - has one → "/" (their home; safe, no loop).
+ *  - has a company but no workspace → their OWN company's onboarding step
+ *    (the exact path shape postLoginPath()'s existing-company branch uses —
+ *    never a fresh "create a company" flow, they already have one).
+ *  - has no company at all → the same zero-company onboarding entry
+ *    postLoginPath()'s guest branch uses for a brand-new user.
+ */
+export async function notAuthorizedContinuePath(): Promise<string> {
+  const supabase = getSupabase()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return "/sign-in"
+
+  const { data: membership } = await supabase
+    .from("company_members")
+    .select("role")
+    .eq("user_id", user.id)
+    .limit(1)
+    .maybeSingle()
+
+  if (!membership) {
+    if (!(await hasCompleteSignupProfile(user.id))) return "/onboarding/your-name"
+    return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
+  }
+
+  const role = String((membership as { role?: unknown }).role ?? "")
+  if (role === "owner" || role === "admin") return "/"
+
+  const { data: workspaceMember } = await supabase
+    .from("workspace_members")
+    .select("id")
+    .eq("user_id", user.id)
+    .limit(1)
+    .maybeSingle()
+  if (workspaceMember) return "/"
+
+  // A company member with no workspace_members row yet — continue THEIR
+  // company's own onboarding at its real step.
+  const workspace = await fetchWorkspaceForUser(user.id)
+  if (workspace) return `/onboarding/${slugForStep(workspace.onboarding_step)}`
+  return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
 }
 
 /** Outcome of the sign-in invite-accept attempt:

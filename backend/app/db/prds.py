@@ -180,6 +180,33 @@ def get_prd(prd_id: int) -> dict | None:
     return resp.data[0] if resp.data else None
 
 
+@retry_on_disconnect
+def resolve_prd_id_by_public_id(public_id: str) -> int | None:
+    """The real internal `id` for a PRD's opaque, unguessable `public_id` —
+    the ONLY identifier a URL (internal `?prd=` deep-link, or the bare-link
+    guest-access primitive) should ever carry, so a raw sequential id is
+    never exposed for blind enumeration. Callers MUST still run their own
+    ownership check on the resolved id (this function does none) — it only
+    translates the identifier shape, same non-disclosure posture either way:
+    an invalid/malformed/foreign public_id resolves to None here exactly
+    like a missing/foreign integer id would fail ownership downstream.
+
+    Validates UUID shape BEFORE querying: the `public_id` column is a real
+    Postgres `uuid`, so a non-UUID string (e.g. a stale bare integer `?prd=`
+    link, or a bot probing garbage input) would otherwise make PostgREST
+    raise a query error the client library surfaces as a 500 — a malformed
+    identifier must 404 exactly like an unknown one, never 500."""
+    import uuid as uuid_module
+
+    try:
+        uuid_module.UUID(public_id)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    c = require_client()
+    resp = c.table("prds").select("id").eq("public_id", public_id).limit(1).execute()
+    return resp.data[0]["id"] if resp.data else None
+
+
 def get_prd_rendered(prd_id: int) -> dict | None:
     """Canonical PRD read: the raw row with status='applied' prd_patches folded
     into payload_md at read time (F11 render-on-read). prds.payload_md is NEVER
