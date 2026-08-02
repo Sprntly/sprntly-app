@@ -1517,6 +1517,65 @@ def _no_real_browser_in_preview_capture(monkeypatch):
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_llm_usage_background_writer():
+    """Disable `app.db.llm_usage`'s process-wide background flusher thread
+    before ANY test in this worker/process runs.
+
+    `_ensure_writer()` lazily spawns a daemon thread (`llm-usage-writer`) the
+    FIRST time any code path calls `record_usage()` (e.g. any `install_metering`-
+    wrapped LLM client). That thread runs `while True` for the rest of the
+    process, flushing whatever's buffered via `require_client()` on its own
+    5-second cadence — resolved dynamically, so it keeps firing long after
+    whichever test originally started it, into WHATEVER test's fake DB happens
+    to be current at that moment. `test_llm_usage_metering.py` already opts
+    itself out locally (`disable_background_writer()` + `reset_for_tests()`),
+    but that only helps once THAT file happens to run — under `-n auto`, most
+    worker processes never execute it at all, so the writer stays live and
+    contends `_fake_supabase._LOCK` at unpredictable points for their entire
+    session. Confirmed via instrumentation: this thread is the direct cause of
+    an intermittent class of unrelated test failures (ticket-sync tests
+    observing a mid-flight state their own setup never produced) that only
+    reproduces under parallel execution. Disabling it session-wide, once, up
+    front removes the hazard outright — buffered rows are just queued
+    (harmless; this ledger is explicitly fail-open/analytics-only, see
+    `app/db/llm_usage.py`'s module docstring) until a test explicitly calls
+    `flush()`, exactly as that module already documents."""
+    from app.db import llm_usage
+
+    llm_usage.disable_background_writer()
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_daemon_threads():
+    """Guard against a fire-and-forget daemon thread (`kick_prd_sync_from_key`,
+    `kick_comment_push`, `kick_comment_delete`, `app.kg_ingest.auto_sync`'s
+    kickoffs, and anything else following that pattern) outliving its own
+    test and racing a LATER test's freshly-reset fake DB / class-level fixture
+    state.
+
+    These kicks resolve their targets (`_Tracker`, `supabase_client()`, etc.)
+    by NAME at call time, not at thread-spawn time — so a thread still mid-
+    flight when the next test's `isolated_settings`/`fake_tracker` fixtures
+    reset that state runs against the NEW test's fake DB using the OLD test's
+    captured ids, corrupting a completely unrelated test (this is the
+    documented "intermittent, order-dependent" hazard `_no_background_
+    connector_sync` calls out; a handful of tests intentionally exercise a
+    real kick thread and only wait on an observable side effect, not a
+    `join()`). Snapshot the live threads before the test, then after, join
+    anything NEW with a bounded grace period — a legitimate daemon thread has
+    already done its (in-memory, fast) work by the time the test's own
+    assertions pass, so this is a no-op in the common case and only matters
+    when a thread is still mid-unwind."""
+    import threading
+
+    before = set(threading.enumerate())
+    yield
+    for t in threading.enumerate():
+        if t not in before and t is not threading.current_thread() and t.daemon:
+            t.join(timeout=5)
+
+
 @pytest.fixture
 def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Patch every imported reference to `call_json` so no test ever hits Anthropic."""
