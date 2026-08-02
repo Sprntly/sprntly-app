@@ -15,8 +15,10 @@
 // mirrors that same direct-click behavior on the avatar itself rather than
 // inventing a menu.
 import { useCallback, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { IconLayoutKanban, IconMessageCircle, IconBulb } from "@tabler/icons-react"
 import { useAuth } from "../../lib/auth"
+import { useGuestSession } from "../../context/GuestSessionContext"
 
 const DISABLED_NAV = [
   { label: "Top Insights", icon: <IconBulb size={18} /> },
@@ -46,6 +48,8 @@ function useGuestDisplayName(): string {
 
 export function GuestRail() {
   const auth = useAuth()
+  const router = useRouter()
+  const guestSession = useGuestSession()
   const displayName = useGuestDisplayName()
   const [signingOut, setSigningOut] = useState(false)
   const signingOutRef = useRef(false)
@@ -55,15 +59,23 @@ export function GuestRail() {
     signingOutRef.current = true
     setSigningOut(true)
     try {
-      // ArtifactShareGate (the wrapper above GuestArtifactViewer) watches
-      // auth.kind and renders EntryGateScreen once it flips to "anonymous" —
-      // no manual redirect/reload needed here.
       await auth.signOut()
+      // Left to its own devices, ArtifactShareGate (the wrapper above
+      // GuestArtifactViewer) reacts to auth.kind flipping to "anonymous" by
+      // rendering EntryGateScreen — the "shared with you" card, correct for
+      // a first-time visitor but not what a deliberate sign-out should show.
+      // Route to the real sign-in screen instead, same as EntryGateScreen's
+      // own "Sign in" button — carrying the share token through when one
+      // exists (GuestRail is only ever mounted inside a resolved share
+      // session, but guestSession is defensively allowed to be null so this
+      // still degrades to a bare /sign-in rather than throwing).
+      const shareQuery = guestSession ? `?share=${encodeURIComponent(guestSession.token)}` : ""
+      router.replace(`/sign-in${shareQuery}`)
     } finally {
       signingOutRef.current = false
       setSigningOut(false)
     }
-  }, [auth])
+  }, [auth, router, guestSession])
 
   return (
     <aside className="sidebar sidebar--collapsed" aria-label="Guest navigation">

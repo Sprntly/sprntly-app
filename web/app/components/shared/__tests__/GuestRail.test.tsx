@@ -18,10 +18,22 @@ vi.mock("../../../lib/auth", () => ({
   useAuth: () => authMock.state(),
 }))
 
+const routerMock = vi.hoisted(() => ({ replace: vi.fn() }))
+vi.mock("next/navigation", () => ({
+  useRouter: () => routerMock,
+}))
+
+const guestSessionMock = vi.hoisted(() => ({ state: vi.fn() }))
+vi.mock("../../../context/GuestSessionContext", () => ({
+  useGuestSession: () => guestSessionMock.state(),
+}))
+
 import { GuestRail } from "../GuestRail"
 
 afterEach(() => {
   cleanup()
+  routerMock.replace.mockClear()
+  guestSessionMock.state.mockReturnValue(null)
 })
 
 const AUTHED_PRIYA = {
@@ -83,6 +95,35 @@ describe("GuestRail", () => {
     fireEvent.click(screen.getByTestId("guest-rail-pill"))
     await waitFor(() => {
       expect(signOut).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("redirects to the real /sign-in screen (not the share entry gate) after signing out, carrying the token", async () => {
+    const signOut = vi.fn().mockResolvedValue(undefined)
+    authMock.state.mockReturnValue({ ...AUTHED_PRIYA, signOut })
+    guestSessionMock.state.mockReturnValue({
+      token: "tok-1",
+      sharerName: "Priya Shah",
+      owningCompanyName: "Acme Co",
+      artifactId: 482,
+    })
+    render(<GuestRail />)
+
+    fireEvent.click(screen.getByTestId("guest-rail-pill"))
+    await waitFor(() => {
+      expect(routerMock.replace).toHaveBeenCalledWith("/sign-in?share=tok-1")
+    })
+  })
+
+  it("falls back to a bare /sign-in when there's no guest session token (e.g. a plain ?prd= URL)", async () => {
+    const signOut = vi.fn().mockResolvedValue(undefined)
+    authMock.state.mockReturnValue({ ...AUTHED_PRIYA, signOut })
+    guestSessionMock.state.mockReturnValue(null)
+    render(<GuestRail />)
+
+    fireEvent.click(screen.getByTestId("guest-rail-pill"))
+    await waitFor(() => {
+      expect(routerMock.replace).toHaveBeenCalledWith("/sign-in")
     })
   })
 
