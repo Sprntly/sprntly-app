@@ -19,8 +19,8 @@ import { GuestSessionProvider, type GuestSession } from "../../context/GuestSess
 import { artifactShareApi } from "../../lib/artifactShareApi"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { markdownToEvidenceState } from "../../lib/evidence-adapter"
+import { IconLock } from "@tabler/icons-react"
 import { GuestRail } from "./GuestRail"
-import { EmptyPane } from "./EmptyPane"
 import { ContentPanel } from "./ContentPanel"
 import { Toast } from "./Toast"
 import { JoinWorkspaceBanner } from "./JoinWorkspaceBanner"
@@ -99,10 +99,45 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
           onJoin={() => setJoinModalOpen(true)}
         />
         <main className="main" data-testid="guest-viewer-main">
-          <EmptyPane
-            title="Shared with you"
-            hint={`${sharerName} shared this from ${owningCompanyName}.`}
-          />
+          <div className="home-landing-eyeline">
+            <div className="od-center-inner od-center-inner--home">
+              <div className="chat-greeting">
+                <h1 className="chat-greeting-title">
+                  Shared with <em>you</em>.
+                </h1>
+                <p className="chat-greeting-sub">
+                  {sharerName} shared this from {owningCompanyName}.
+                </p>
+              </div>
+              <div className="home-landing-composer">
+                <div
+                  className="chat-home-composer"
+                  aria-disabled="true"
+                  style={{ opacity: 0.55, cursor: "not-allowed" }}
+                >
+                  <textarea
+                    className="chat-home-composer-input"
+                    placeholder="Join the workspace to chat about this document"
+                    rows={1}
+                    disabled
+                    readOnly
+                    style={{ cursor: "not-allowed" }}
+                  />
+                  <div className="chat-home-composer-footer">
+                    <div className="chat-home-composer-actions" />
+                    <button
+                      type="button"
+                      className="chat-home-composer-send"
+                      aria-label="Chat is locked — join the workspace to send messages"
+                      disabled
+                    >
+                      <IconLock size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </main>
       </div>
       <ContentPanel />
