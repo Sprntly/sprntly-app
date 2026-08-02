@@ -9679,15 +9679,6 @@
     white-space: nowrap;
   }
 
-  /* tabular-nums so the row never jitters as the digits change. */
-  .cw-elapsed {
-    margin-left: auto;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--ink-4);
-    font-variant-numeric: tabular-nums;
-  }
-
   .cw-note {
     font-size: 11.5px;
     color: var(--ink-3);
