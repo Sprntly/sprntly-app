@@ -982,30 +982,6 @@ def answer(
         except Exception:  # noqa: BLE001 — never let the index break the answer
             logger.exception("call-index single-call failed for %s", enterprise_id)
 
-    # INDEX-DRIVEN routing: the question names a window and this company
-    # actually has calls in it. Ask the data rather than the vocabulary — the
-    # set of words meaning "call" is unbounded, and every miss answered from the
-    # wrong source. Two reported failures ("top 3 product requests from last
-    # week", and the same with "customer conversations") carried no digest verb,
-    # fell to the generic path, were answered off an uploaded simulated CSV from
-    # January, and then asserted no source covered the period — while the index
-    # held real calls from that week.
-    #
-    # `windowed_call_question` resolves freshness itself, AFTER its own cheap
-    # regex/window gates, so a question with no explicit window never triggers a
-    # sync on its way past.
-    if not pinned_skill:
-        try:
-            window = call_index.windowed_call_question(enterprise_id, question)
-        except Exception:  # noqa: BLE001 — routing must never break the answer
-            window = None
-        if window is not None:
-            from app import call_digest
-
-            return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
-            )
-
     # On-demand call digest: "summarize the customer calls from last week" needs a
     # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
@@ -1065,6 +1041,39 @@ def answer(
         return chat_analysis.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
+
+    # INDEX-DRIVEN routing: the question names a window and this company
+    # actually has calls in it. Ask the data rather than the vocabulary — the
+    # set of words meaning "call" is unbounded, and every miss answered from the
+    # wrong source. Two reported failures ("top 3 product requests from last
+    # week", and the same with "customer conversations") carried no digest verb,
+    # fell to the generic path, were answered off an uploaded simulated CSV from
+    # January, and then asserted no source covered the period — while the index
+    # held real calls from that week.
+    #
+    # `windowed_call_question` resolves freshness itself, AFTER its own cheap
+    # regex/window gates, so a question with no explicit window never triggers a
+    # sync on its way past.
+    #
+    # DELIBERATELY BELOW the DS interception. `is_data_analysis_request` is a
+    # lexical gate that does not check whether tabular data exists, and
+    # `_NOT_CALLS` covers csv/spreadsheet/dashboard but not "numbers" or
+    # "metrics" — so "what do the numbers say about last week" matches BOTH.
+    # Routing that to the call digest would hijack a DS question, and the DS
+    # engine already vetoes itself on call/meeting/transcript/feedback nouns.
+    # The failures this routing exists to fix ("top 3 product requests from
+    # last week") match no DS rule, so they are unaffected by sitting here.
+    if not pinned_skill:
+        try:
+            window = call_index.windowed_call_question(enterprise_id, question)
+        except Exception:  # noqa: BLE001 — routing must never break the answer
+            window = None
+        if window is not None:
+            from app import call_digest
+
+            return call_digest.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
 
     # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
     # Checked BEFORE the tracker lookup below, which would otherwise claim it —

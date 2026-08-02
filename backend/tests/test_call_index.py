@@ -853,3 +853,38 @@ def test_listing_with_no_window_reads_naturally(monkeypatch):
     out = ci.answer_listing("ent-A", "which calls have we had", fresh=_fresh())
     assert "recorded at all" in out["answer"]
     assert "that period" not in out["answer"]
+
+
+def test_a_ds_question_with_a_window_is_not_hijacked_to_the_calls(monkeypatch):
+    """Ordering regression.
+
+    `is_data_analysis_request` is a lexical gate that never checks whether
+    tabular data exists, and `_NOT_CALLS` covers csv/spreadsheet/dashboard but
+    NOT "numbers" or "metrics" — so "what do the numbers say about last week"
+    matches the DS rules AND the windowed-calls route. The DS interception must
+    win; the index route sits below it.
+    """
+    import app.qa_agent as qa
+    from app.skill_router import is_data_analysis_request
+
+    question = "what do the numbers say about last week"
+    assert is_data_analysis_request(question), "premise: this IS a DS question"
+    assert not ci._NOT_CALLS.search(question), "premise: _NOT_CALLS misses it"
+
+    src = __import__("inspect").getsource(qa.answer)
+    ds_at = src.index("is_data_analysis_request(question)")
+    window_at = src.index("call_index.windowed_call_question")
+    assert ds_at < window_at, (
+        "the windowed-calls route must sit BELOW the DS interception, or a DS "
+        "question with a named window routes to the call digest"
+    )
+
+
+def test_the_index_routing_still_precedes_the_call_digest(monkeypatch):
+    """The other half of the ordering: the cheap index paths must come before
+    the ~168s digest, which is the saving this whole module is for."""
+    import app.qa_agent as qa
+
+    src = __import__("inspect").getsource(qa.answer)
+    assert src.index("call_index.is_listing_request") < src.index("is_call_digest(question)")
+    assert src.index("call_index.is_single_call_request") < src.index("is_call_digest(question)")
