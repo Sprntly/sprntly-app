@@ -20,6 +20,10 @@ from tests.test_ticket_sync import (
     fake_tracker,  # noqa: F401 — fixture reuse
 )
 
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID/FakeTracker
+# fixture family, pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
+
 
 def _ctx(cid: str = CID) -> CompanyContext:
     return CompanyContext(company_id=cid, role="owner", user_id="u")
@@ -37,6 +41,40 @@ def quiet_kicks(monkeypatch):
     monkeypatch.setattr(
         "app.stories.sync.kick_comment_push", lambda *a, **k: False,
     )
+
+
+@pytest.fixture()
+def _joined_kick_threads(monkeypatch):
+    """For the two tests that exercise a REAL instant-push daemon thread
+    (`kick_prd_sync_from_key` / `kick_comment_push`, unlike every other test
+    here which routes through `quiet_kicks`): guarantee the thread is fully
+    finished before this test — and its `fake_tracker`/`isolated_settings`
+    fixtures — tear down.
+
+    Each test's own poll only proves the thread reached its LAST observable
+    side effect (a DB write); it does not `join()` the OS thread. Under
+    parallel test execution the daemon thread can still be mid-unwind when
+    this test returns, and since `_Tracker`/`run_prd_sync` are looked up by
+    NAME inside the thread's closure at call time (not captured at spawn
+    time), a thread that's still alive when the NEXT test's `fake_tracker`
+    fixture resets `FakeTracker.instances`/`meta_seed`/etc. can construct an
+    extra tracker instance or write to the fake DB mid-reset — corrupting a
+    completely unrelated, later test. Wrapping `threading.Thread` here and
+    joining every instance the test spawned removes that window outright."""
+    import threading
+
+    real_thread = threading.Thread
+    started: list[threading.Thread] = []
+
+    class _TrackedThread(real_thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", _TrackedThread)
+    yield started
+    for t in started:
+        t.join(timeout=5)
 
 
 #: A customized Jira-style destination: renamed workflow, real priority
@@ -807,7 +845,9 @@ def test_sync_pass_pushes_post_binding_comments_only(isolated_settings, fake_tra
     assert fake_tracker.instances[1].comments == []
 
 
-def test_kick_comment_push_pushes_and_marks(isolated_settings, monkeypatch, fake_tracker):  # noqa: F811
+def test_kick_comment_push_pushes_and_marks(
+    isolated_settings, monkeypatch, fake_tracker, _joined_kick_threads,  # noqa: F811
+):
     import time
 
     from app.db.client import require_client
@@ -866,7 +906,7 @@ def test_comment_routes_kick_instant_push(isolated_settings, monkeypatch):
 # ── Instant push (edit → tracker immediately, no scheduler wait) ─────────────
 
 
-def test_kick_prd_sync_from_key(isolated_settings, monkeypatch):
+def test_kick_prd_sync_from_key(isolated_settings, monkeypatch, _joined_kick_threads):
     import threading
 
     from app.db.ticket_sync import get_sync_config, upsert_sync_config

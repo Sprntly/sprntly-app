@@ -312,6 +312,19 @@ def test_generate_via_prd_author_skill_through_canonical_path(
 
     monkeypatch.setattr(prd_runner, "llm_call", _capture)
 
+    # The route itself schedules `generate_prd_and_warm` as a fire-and-forget
+    # background task (asyncio.create_task) — whether that task gets a chance
+    # to run before this request returns is a scheduling race, not something
+    # this test controls. Neutralize it so the ONLY generation this test
+    # observes is the explicit `generate_prd` call below; otherwise the
+    # background task can ALSO invoke `llm_call` and double-count skills_seen.
+    from app.routes import prd as prd_routes
+
+    async def _noop_warm(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", _noop_warm)
+
     resp = t.client.post(
         "/v1/prd/generate",
         json={"brief_id": brief_id, "insight_index": 0, "force": True},
