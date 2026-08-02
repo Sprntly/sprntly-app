@@ -203,12 +203,18 @@ export function AssistantWaitState({
           <span className="cw-long-mark" aria-hidden>◐</span>
           <div>{WAIT_NOTE_STREAM_DROPPED}</div>
         </div>
-      ) : runningLong ? (
+      ) : /* Rung 3's "you can leave and it keeps generating" note is switched
+             off for now. The logic behind it is deliberately left intact —
+             `runningLong`, WAIT_RUNG3_MS and WAIT_NOTE_RUNNING_LONG are all
+             still computed and exported — so restoring it is a matter of
+             deleting this comment, not rebuilding the rung. Past 30s the wait
+             now falls through to the rung-2 pacing note instead.
+        runningLong ? (
         <div className="cw-long">
           <span className="cw-long-mark" aria-hidden>↻</span>
           <div>{WAIT_NOTE_RUNNING_LONG}</div>
         </div>
-      ) : pastRung2 ? (
+      ) : */ pastRung2 ? (
         <div className="cw-note">{longSkill ? WAIT_NOTE_LONG_SKILL : WAIT_NOTE_GENERIC}</div>
       ) : null}
 
