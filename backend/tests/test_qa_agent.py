@@ -162,17 +162,30 @@ def test_route_temperature_reaches_the_anthropic_call(monkeypatch):
 
 
 def test_route_schema_generates_reason_before_the_label():
-    """Forced-tool JSON is emitted in schema order, so `reason` must come first.
+    """Forced-tool JSON is emitted in schema order, so ORDER is a mechanism here.
 
-    With `skill_id` first the label was already committed before the model wrote
-    its justification, making that text post-hoc rationalisation. Anthropic's
-    ticket-routing guide: "always include your classification reasoning before
-    your actual intent output". `additionalProperties: False` pins the contract
-    to exactly these four fields.
+    Two orderings are load-bearing, for the same underlying reason:
+
+    * `reason` first. With `skill_id` first the label was already committed
+      before the model wrote its justification, making that text post-hoc
+      rationalisation. Anthropic's ticket-routing guide: "always include your
+      classification reasoning before your actual intent output".
+    * `company_skill_id` before `skill_id` (2026-08-02). The company's own
+      library has to be judged on its own merits BEFORE the 74-entry menu is
+      considered; judged afterwards it competed as one flat peer among 74 and
+      reliably lost to a near-miss built-in.
+
+    `additionalProperties: False` pins the contract to exactly these six fields.
     """
     props = list(qa._ROUTE_SCHEMA["properties"])
     assert props[0] == "reason", f"reason must be generated first, got {props}"
-    assert set(props) == {"reason", "skill_id", "confidence", "in_scope"}
+    assert set(props) == {
+        "reason", "company_skill_id", "company_confidence",
+        "skill_id", "confidence", "in_scope",
+    }
+    assert props.index("company_skill_id") < props.index("skill_id"), (
+        f"the company library must be judged before the menu, got {props}"
+    )
     assert qa._ROUTE_SCHEMA["additionalProperties"] is False
     # Every property stays required — the reorder must not drop the contract.
     assert set(qa._ROUTE_SCHEMA["required"]) == set(props)

@@ -180,6 +180,28 @@ async function pollAskToResult(
   }
 }
 
+/**
+ * Console trace of what a question routed to. Debug aid, not product UI.
+ *
+ * Until this existed there was NO way — for a user or an engineer — to see
+ * which skill answered a plain (no-slash) question: the composer only ever
+ * shows a chip when you type the trigger yourself, so automatic selection was
+ * completely opaque. That is why a router bug survived unnoticed; you cannot
+ * report "it picked the wrong skill" when nothing tells you what it picked.
+ *
+ * `routed_skill` is null when the router deliberately chose no skill, which is
+ * a real outcome and is logged as such rather than skipped — "answered
+ * directly" is exactly the case worth seeing when a skill was expected.
+ */
+function logAskRoute(askId: number, s: AskStatusResponse): void {
+  const skill = s.routed_skill ?? null
+  // eslint-disable-next-line no-console
+  console.info(
+    `[ask:route] #${askId} ${s.status} → ${skill ?? "(no skill — answered directly)"}`,
+    { skill, action: s.routed_skill_action ?? null, status: s.status },
+  )
+}
+
 async function _pollAskLoop(
   askId: number,
   company: string,
@@ -187,10 +209,24 @@ async function _pollAskLoop(
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
 ): Promise<AskResponse> {
+  // Log the routing decision ONCE, the first poll that reveals it — the column
+  // is populated the moment `route()` returns, so this fires while the answer
+  // is still generating rather than after it lands. Repeating it every poll
+  // would bury the one line that matters under a dozen identical ones.
+  let loggedRoute = false
   const final = await pollUntil<AskStatusResponse>({
     // A single transient "Failed to fetch" during polling must not kill an ask
     // whose server-side job is still running fine — retry the status read.
-    fetchStatus: () => withTransientRetry(() => askApi.get(askId)),
+    fetchStatus: () =>
+      withTransientRetry(() => askApi.get(askId)).then((s) => {
+        // Terminal states always log, even if the route never appeared, so a
+        // failed or skill-less ask still produces exactly one trace line.
+        if (!loggedRoute && (s.routed_skill != null || s.status !== "generating")) {
+          loggedRoute = true
+          logAskRoute(askId, s)
+        }
+        return s
+      }),
     isDone: (v) => v.status !== "generating",
     maxMs: MAX_MS,
     intervalMs: POLL_INTERVAL_MS,

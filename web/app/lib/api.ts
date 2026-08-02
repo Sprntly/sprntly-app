@@ -559,7 +559,18 @@ export type AskStartResponse = {
 export type AskStatusResponse = AskResponse & {
   status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
-  /** Extra qa_agent metadata (e.g. routed skill) passed through verbatim. */
+  /** The skill `qa_agent.route()` chose, or null when it answered directly with
+   *  no skill. Backed by the `ask_jobs.routed_skill` column and returned at
+   *  EVERY status — including `generating` — so it is known while the answer is
+   *  still being written, not only once it lands.
+   *
+   *  Declared explicitly rather than left to the index signature below: these
+   *  two are a real part of the contract (routes/ask.py excludes them from the
+   *  payload passthrough so the columns stay authoritative), and typing them as
+   *  `unknown` is what let them sit unread here since they shipped. */
+  routed_skill?: string | null
+  routed_skill_action?: string | null
+  /** Extra qa_agent metadata passed through verbatim. */
   [extra: string]: unknown
 }
 

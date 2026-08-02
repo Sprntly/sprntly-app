@@ -137,6 +137,246 @@ def test_custom_block_rides_input_not_the_cacheable_prefix(monkeypatch):
     assert calls[0]["input"].rstrip().endswith(f"Question: {NEUTRAL_Q}")
 
 
+# ─── custom-first precedence ─────────────────────────────────────────────────
+# A company skill used to compete as one flat peer among 74 menu entries and
+# reliably lost to a near-miss built-in. Reported 2026-08-02: "should we
+# prioritise the stripe integration or the notion one?" chose the vendored
+# `decision-by-traffic-lights` over the company's own integration-review skill.
+
+
+def test_a_company_pick_beats_the_menu_pick(monkeypatch):
+    """Both fields populated → the company's own skill wins. This is the
+    requirement: a team that wrote a skill for the job wants THEIRS."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "my-estimator", "company_confidence": 0.8,
+        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+    })
+
+    decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "my-estimator"
+    assert decision.source == "llm_custom"
+
+
+def test_no_company_fit_leaves_the_menu_pick_alone(monkeypatch):
+    """'none' means no company skill fits. The menu decides, exactly as before —
+    custom-first must not become custom-always."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "none", "company_confidence": 0.0,
+        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+    })
+
+    decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+    assert decision.source == "llm"
+
+
+def test_a_weak_company_pick_does_not_win(monkeypatch):
+    """Custom skills win TIES, not arguments: the same confidence bar a menu
+    pick clears. Below it, the menu pick stands."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "my-estimator", "company_confidence": 0.3,
+        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+    })
+
+    decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+
+
+def test_a_builtin_id_in_the_company_field_is_refused(monkeypatch):
+    """A company line can never advertise a built-in id (`_custom_skill_block`
+    skips colliding slugs), so a built-in here is the model confusing the two
+    lists. Honouring it would hand the BUILT-IN's answer to a skill the user
+    believes they wrote — which is precisely what the 2026-07-30 no-override
+    ruling forbids."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "prd-author", "company_confidence": 0.99,
+        "skill_id": "prioritize", "confidence": 0.8, "in_scope": True,
+    })
+
+    decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+    assert decision.source == "llm"
+
+
+def test_another_companys_slug_is_refused_in_the_company_field(monkeypatch):
+    """The tenant boundary holds on the new field too: a hallucinated slug the
+    caller's company doesn't own is rejected by `_routable`."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "my-estimator", "company_confidence": 0.99,
+        "skill_id": "none", "confidence": 0.0, "in_scope": True,
+    })
+
+    decision = qa.route(NEUTRAL_Q, enterprise_id="co-2")
+
+    assert decision.skill_id is None
+
+
+def test_a_company_pick_also_beats_a_keyword_hit(monkeypatch):
+    """The two mechanisms compose: the keyword tier hands down a prior, and the
+    company's own skill is still what may override it."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {
+        "company_skill_id": "my-estimator", "company_confidence": 0.8,
+        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+    })
+
+    decision = qa.route(REGEX_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "my-estimator"
+    assert decision.source == "llm_custom"
+
+
+# ─── the keyword tier as a prior, not a verdict ──────────────────────────────
+# A tier-2 rule hard-codes a VENDORED id and fires before the classifier, so a
+# custom skill — which exists only on the LLM tier — could never win a question
+# containing one of those keywords. Reported 2026-08-02: "should we prioritise
+# the stripe integration or the notion one?" went to `prioritize` at 0.9 and the
+# company's own integration-review skill was never offered.
+
+# Hits the `prioritize` rule at 0.90, well over _REGEX_ROUTE_THRESHOLD.
+REGEX_Q = "Prioritize these features with RICE: SSO, export, dark mode"
+
+
+def test_keyword_tier_stays_terminal_when_the_company_has_no_skills(monkeypatch):
+    """The zero-LLM fast path is preserved for companies with no uploads —
+    that is most of them, and this tier exists to save exactly that call."""
+    _seed_library(monkeypatch, {})
+    calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    decision = qa.route(REGEX_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+    assert decision.source == "regex"
+    assert calls == []  # the classifier was never consulted
+
+
+def test_a_company_skill_can_override_the_keyword_tier(monkeypatch):
+    """With uploads present the keyword hit becomes a prior the classifier may
+    depart from — and the company's own skill is what it may depart to."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    calls = _capture_router(
+        monkeypatch, {"skill_id": "my-estimator", "confidence": 0.9, "in_scope": True}
+    )
+
+    decision = qa.route(REGEX_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "my-estimator"
+    assert decision.source == "llm"
+    # The classifier was told what the keywords matched, rather than the hit
+    # being silently discarded.
+    assert 'Keyword match: a keyword rule matched "prioritize"' in calls[0]["input"]
+
+
+def test_the_keyword_hit_survives_an_abstaining_classifier(monkeypatch):
+    """The hit is OVERRIDDEN, never LOST. Before this tier became advisory it
+    had already returned, so 'none' could not undo it — and it still can't."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    decision = qa.route(REGEX_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+    assert decision.source == "regex"
+
+
+def test_the_keyword_hit_survives_a_failing_classifier(monkeypatch):
+    """Same guarantee when the router call raises outright: a company with
+    uploads is never worse off than one without."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+
+    def _boom(**_kwargs):
+        raise RuntimeError("router down")
+
+    monkeypatch.setattr(qa, "llm_call", _boom)
+
+    decision = qa.route(REGEX_Q, enterprise_id="co-1")
+
+    assert decision.skill_id == "prioritize"
+    assert decision.source == "regex"
+
+
+def test_the_keyword_prior_never_reaches_the_cacheable_blocks(monkeypatch):
+    """The matched ID varies per QUESTION, so it must ride `input` only —
+    in `system` or the prefix it would fork the ~9.6k-token menu's cache entry
+    once per distinct keyword hit.
+
+    Asserted as byte-equality across two questions matching DIFFERENT rules,
+    which is the cache invariant itself. (The word "Keyword match:" does appear
+    in `system` — the sentence explaining what such a line means is
+    tenant-invariant and belongs there. Only the matched id must not.)
+    """
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    qa.route(REGEX_Q, enterprise_id="co-1")
+    qa.route("Write an incident runbook for a sev-1 outage", enterprise_id="co-1")
+
+    first, second = calls[0], calls[1]
+    # Different rules matched, so the per-question block really does differ...
+    assert 'matched "prioritize"' in first["input"]
+    assert 'matched "incident-runbook"' in second["input"]
+    # ...while both cacheable blocks stay byte-identical.
+    assert first["system"] == second["system"]
+    assert first["user_cacheable_prefix"] == second["user_cacheable_prefix"]
+    assert first["user_cacheable_prefix"] == qa._router_menu()
+    # The matched id never leaks into the system block.
+    for call in (first, second):
+        assert 'a keyword rule matched "' not in call["system"]
+
+
+def test_no_keyword_hit_means_no_prior(monkeypatch):
+    """A question that trips no rule must not carry a phantom prior."""
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    assert "Keyword match:" not in calls[0]["input"]
+
+
+def test_system_prompt_describes_where_the_block_actually_is(monkeypatch):
+    """The system prompt's account of WHERE the company block sits must match
+    `input`'s real layout.
+
+    Regression for 2026-08-02: the prompt said the list came AFTER the question
+    ("The question may be followed by ...") while `input` has always been
+    block → history → question, so the block leads and the question closes.
+    That sentence is the ONLY thing authorising the model to return a company
+    id, and it aimed the model at the one position the block is never in.
+
+    Asserted as an INVARIANT rather than a fixed string: whatever wording the
+    prompt uses, the position it claims has to agree with the assembly. A
+    future edit that moves the block without re-describing it fails here.
+    """
+    _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
+    calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
+
+    qa.route(NEUTRAL_Q, enterprise_id="co-1")
+
+    body = calls[0]["input"]
+    block_at = body.index("Company skills")
+    question_at = body.index(f"Question: {NEUTRAL_Q}")
+    # Ground truth: the block really does precede the question.
+    assert block_at < question_at
+
+    system = calls[0]["system"]
+    # The prompt must not tell the model to look for the list after the
+    # question — the discredited framing, in any casing.
+    assert "followed by a \"Company skills\"" not in system
+    assert "question may be followed by" not in system.lower()
+    # ...and it must still say the block exists, or nothing licenses the pick.
+    assert "Company skills" in system
+
+
 def test_router_gate_still_rejects_another_companys_slug(monkeypatch):
     """Even if the model hallucinates a slug the caller's company doesn't own,
     `_routable(sid, enterprise_id)` refuses it and routing falls through."""
