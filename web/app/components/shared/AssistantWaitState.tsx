@@ -16,8 +16,8 @@
 //                     only flickers, so the user bubble + agent head stand alone
 //   rung 1  0.4–10s   "Working on your question" — the job is `generating`,
 //                     which is always true while this component is mounted
-//   rung 2  10–30s    + elapsed + note + inline Stop. NN/g's 10-second limit is
-//                     where attention leaves the task; that is where a clock
+//   rung 2  10–30s    + note + inline Stop. NN/g's 10-second limit is where
+//                     attention leaves the task; that is where an escape hatch
 //                     earns its place, not before
 //   rung 3  30s+      + "you can leave" — the job genuinely survives navigation
 //                     and reload (jobResume persists ask_id per tab)
@@ -79,14 +79,6 @@ const LONG_RUNNING_SKILL_IDS: ReadonlySet<string> = new Set([
 /** True when a slash-pinned skill is one of the multi-minute research skills. */
 export function isLongRunningSkill(skillId: string | null | undefined): boolean {
   return !!skillId && LONG_RUNNING_SKILL_IDS.has(skillId)
-}
-
-/** `m:ss`, tabular-nums in CSS so the row never jitters as digits change. */
-export function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  const mins = Math.floor(total / 60)
-  const secs = total % 60
-  return `${mins}:${String(secs).padStart(2, "0")}`
 }
 
 type Props = {
@@ -164,11 +156,12 @@ export function AssistantWaitState({
   // reader knows the surface is working even with no visible indicator.
   if (!gatePassed && !streaming && !children) return null
 
-  // The clock and the inline Stop both start at rung 2. Once shown they STAY —
-  // including through the first streamed token, which is where the old surface
-  // yanked the whole status row away the instant `partial` arrived.
-  const showElapsed = elapsed >= WAIT_RUNG2_MS
-  const showStop = showElapsed && !!onStop
+  // Rung 2 onward: the pacing note, the third skeleton line and the inline Stop
+  // all start here. Once shown they STAY — including through the first streamed
+  // token, which is where the old surface yanked the whole status row away the
+  // instant `partial` arrived.
+  const pastRung2 = elapsed >= WAIT_RUNG2_MS
+  const showStop = pastRung2 && !!onStop
   const runningLong = elapsed >= WAIT_RUNG3_MS
 
   return (
@@ -176,18 +169,12 @@ export function AssistantWaitState({
       <div className="cw-status">
         <span className="cw-orb" aria-hidden />
         {/* The single announcement point. Its text changes ONLY when the phase
-            changes, so a polite live region here announces per phase — not per
-            token and not per elapsed tick (which is why the clock beside it is
-            aria-hidden and why role="timer" is deliberately not used). */}
+            changes, so a polite live region here announces per phase, not per
+            token. */}
         <span className="cw-phase" role="status" aria-live="polite" aria-atomic="true">
           {phaseLine}
         </span>
         {skillLabel ? <span className="cw-skill">{skillLabel}</span> : null}
-        {showElapsed ? (
-          <span className="cw-elapsed" aria-hidden>
-            {formatElapsed(elapsed)}
-          </span>
-        ) : null}
       </div>
 
       {children ? (
@@ -203,7 +190,7 @@ export function AssistantWaitState({
           <div className="cw-skel" aria-hidden>
             <span className="assistant-skel-line" />
             <span className="assistant-skel-line" />
-            {showElapsed && !compact ? <span className="assistant-skel-line" /> : null}
+            {pastRung2 && !compact ? <span className="assistant-skel-line" /> : null}
           </div>
         </>
       )}
@@ -221,7 +208,7 @@ export function AssistantWaitState({
           <span className="cw-long-mark" aria-hidden>↻</span>
           <div>{WAIT_NOTE_RUNNING_LONG}</div>
         </div>
-      ) : showElapsed ? (
+      ) : pastRung2 ? (
         <div className="cw-note">{longSkill ? WAIT_NOTE_LONG_SKILL : WAIT_NOTE_GENERIC}</div>
       ) : null}
 
