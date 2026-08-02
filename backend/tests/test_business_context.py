@@ -574,19 +574,101 @@ def test_put_bumps_version(company_client):
 
 
 def test_refresh_route_runs_agent(company_client, monkeypatch):
-    import app.routes.business_context as routes
+    """The route is async now (fires the refresh via
+    app.business_context_refresh_runner), but under pytest it still awaits
+    the job inline (see refresh_business_context's "pytest" in sys.modules
+    branch) so the response already reflects the terminal state — no polling
+    needed in a test."""
+    import app.business_context_refresh_runner as runner
 
     def fake_run(facade, company_id):
         assert company_id == "co-test"
         return {"version": 3, "fields_filled": ["identity.one_liner"],
                 "overall_confidence": "med", "confidence": {}, "projection": {}}
 
-    monkeypatch.setattr(routes, "run_business_context", fake_run)
+    monkeypatch.setattr(runner, "run_business_context", fake_run)
     r = company_client.post("/v1/company/business-context/refresh")
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True and body["version"] == 3
-    assert body["overall_confidence"] == "med"
+    assert body["ok"] is True and body["status"] == "done"
+    assert body["error"] is None
+
+    status = company_client.get("/v1/company/business-context/refresh-status")
+    assert status.status_code == 200
+    assert status.json() == {"status": "done", "error": None}
+
+
+def test_refresh_route_returns_fast_and_signals_generating_outside_pytest(
+    company_client, monkeypatch,
+):
+    """Outside the pytest inline shortcut, the route must not await the job —
+    it fires a background task and returns 'generating' immediately.
+    `_run_inline_for_tests` is a dedicated seam for exactly this — patching it
+    (rather than the real `sys.modules` registry) exercises the true
+    fire-and-forget branch safely."""
+    import app.routes.business_context as routes
+
+    started = []
+
+    async def fake_job(company_id):
+        started.append(company_id)
+
+    monkeypatch.setattr(routes, "run_business_context_refresh_job", fake_job)
+    monkeypatch.setattr(routes, "_run_inline_for_tests", lambda: False)
+
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "status": "generating"}
+    # The background task is fire-and-forget and scheduled on the SAME loop
+    # the TestClient's portal drives; by the time the sync post() call returns
+    # the ASGI cycle (including the scheduled task) has already run.
+    assert started == ["co-test"]
+
+
+def test_refresh_route_is_a_noop_when_already_generating(company_client):
+    """A second trigger while one is already live for this tenant does not
+    start a new job — mirrors company_research_runs' "already researching"
+    branch. No LLM call is made (there's nothing patched in to make one, so a
+    real attempt would raise/hang)."""
+    from app.db import start_business_context_refresh
+
+    assert start_business_context_refresh("co-test") is True  # first wins
+
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "generating"
+    assert body.get("already_running") is True
+
+
+def test_refresh_status_defaults_to_idle(company_client):
+    r = company_client.get("/v1/company/business-context/refresh-status")
+    assert r.status_code == 200
+    assert r.json() == {"status": "idle", "error": None}
+
+
+def test_refresh_route_surfaces_a_pipeline_error_via_the_status_endpoint(
+    company_client, monkeypatch,
+):
+    """No change to run_business_context()'s own logic: a domain error it
+    raises (e.g. missing display_name) is caught by the runner's fail-open
+    handler and surfaced through the poll endpoint's `error` field, not as an
+    HTTP status on the (now async, already-returned) POST."""
+    import app.business_context_refresh_runner as runner
+
+    def fake_run(facade, company_id):
+        raise ValueError("Company has no display_name — finish onboarding first")
+
+    monkeypatch.setattr(runner, "run_business_context", fake_run)
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+    status = company_client.get("/v1/company/business-context/refresh-status").json()
+    assert status["status"] == "error"
+    assert "display_name" in status["error"]
 
 
 def test_routes_require_company():

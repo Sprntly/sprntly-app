@@ -451,6 +451,13 @@ CREATE TABLE companies (
     business_context_summary TEXT,
     business_context_accepted_at TEXT,
     metric_definitions  TEXT NOT NULL DEFAULT '[]',
+    -- Async business-context refresh state, singleton per tenant (mirrors
+    -- 20260802140000_business_context_refresh_status.sql). status defaults
+    -- 'idle' (never NULL) — see that migration for why.
+    business_context_refresh_status TEXT NOT NULL DEFAULT 'idle',
+    business_context_refresh_error TEXT,
+    business_context_refresh_started_at TEXT,
+    business_context_refresh_heartbeat_at TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

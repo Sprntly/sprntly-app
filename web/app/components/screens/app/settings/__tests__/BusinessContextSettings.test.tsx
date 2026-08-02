@@ -151,6 +151,23 @@ describe("BusinessContextSettingsView — admin vs read-only", () => {
   })
 })
 
+describe("BusinessContextSettingsView — async refresh state (triggered by Company Shape save)", () => {
+  it("shows a regenerating indicator while refreshing is true", () => {
+    const html = render({ refreshing: true })
+    expect(html).toContain("Regenerating business context")
+  })
+
+  it("shows no regenerating indicator when refreshing is false", () => {
+    const html = render({ refreshing: false })
+    expect(html).not.toContain("Regenerating business context")
+  })
+
+  it("still surfaces refreshError with no button present", () => {
+    const html = render({ refreshError: "web tool unavailable" })
+    expect(html).toContain("web tool unavailable")
+  })
+})
+
 describe("BusinessContextSettingsView — empty / 404 state", () => {
   it("admin sees the generate prompt + button when doc is null (404)", () => {
     const html = render({ doc: null })

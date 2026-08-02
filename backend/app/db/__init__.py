@@ -120,6 +120,17 @@ from app.db.website_analysis import (
     start_analysis_job,
 )
 
+# Async business-context refresh status (singleton per tenant, columns on
+# companies — see app/db/business_context_refresh.py)
+from app.db.business_context_refresh import (
+    business_context_refresh_state,
+    complete_business_context_refresh,
+    fail_business_context_refresh,
+    fail_orphan_business_context_refreshes,
+    start_business_context_refresh,
+    touch_business_context_refresh,
+)
+
 # Datasets
 from app.db.datasets import (
     dataset_exists,
@@ -277,6 +288,13 @@ __all__ = [
     "fail_analysis_job",
     "get_analysis_job",
     "start_analysis_job",
+    # async business-context refresh status
+    "business_context_refresh_state",
+    "complete_business_context_refresh",
+    "fail_business_context_refresh",
+    "fail_orphan_business_context_refreshes",
+    "start_business_context_refresh",
+    "touch_business_context_refresh",
     # datasets
     "dataset_exists",
     "delete_dataset",
