@@ -54,7 +54,7 @@ def test_template_version_is_current():
     # (vision context for screenshot-sourced runs); v9 = mobile-capability
     # requirements in the mobile/both platform directives. Each invalidates
     # cached prototypes so they regenerate.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 10
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
@@ -247,6 +247,82 @@ def test_screenshot_directive_negative_space():
     assert "not spec" in low
 
 
+# ---- external-entry-point placeholder directive -----------------------------
+
+
+def test_scaffold_user_includes_external_directive_when_hint_present():
+    kwargs = dict(prd_md="# X", target_platform="both", instructions="", figma_frames="")
+    with_hint = p.render_scaffold_user(
+        **kwargs, external_surface_hint="a confirmation email sent to the customer"
+    )
+    without = p.render_scaffold_user(**kwargs)
+    default = p.render_scaffold_user(**kwargs, external_surface_hint=None)
+
+    assert "EXTERNAL ENTRY POINT" in with_hint
+    assert "a confirmation email sent to the customer" in with_hint
+    assert "EXTERNAL ENTRY POINT" not in without
+    # Omitted / None (the default) is byte-identical to the pre-amendment render.
+    assert without == default
+    assert with_hint.startswith(without)
+
+
+def test_screenshot_precedence_over_external_directive():
+    """A real screenshot always wins: when BOTH has_screenshot and
+    external_surface_hint are truthy, ONLY the screenshot directive renders —
+    the placeholder directive never appends alongside it."""
+    kwargs = dict(prd_md="# X", target_platform="both", instructions="", figma_frames="")
+    out = p.render_scaffold_user(
+        **kwargs,
+        has_screenshot=True,
+        external_surface_hint="an SMS the user receives",
+    )
+
+    assert p.DESIGN_AGENT_SCREENSHOT_DIRECTIVE in out
+    assert "EXTERNAL ENTRY POINT" not in out
+
+
+def test_blank_external_hint_treated_as_absent():
+    kwargs = dict(prd_md="# X", target_platform="both", instructions="", figma_frames="")
+    out = p.render_scaffold_user(**kwargs, external_surface_hint="   ")
+    default = p.render_scaffold_user(**kwargs)
+
+    assert out == default
+    assert "EXTERNAL ENTRY POINT" not in out
+
+
+def test_external_directive_length_and_required_content():
+    # LLM-facing text property test: enough substance to steer the agent, and
+    # the load-bearing framing present (generic placeholder + single CTA +
+    # minimal-effort scoping).
+    d = p.DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE
+    assert len(d) >= 300
+    low = d.lower()
+    for required in ("generic", "placeholder", "continue", "minimal"):
+        assert required in low, f"directive missing {required!r}"
+    assert "{surface_description}" in d
+
+
+def test_external_directive_is_generalized_not_email_specific():
+    """The template body itself names multiple surface shapes as EXAMPLES (not
+    a closed list) and formats cleanly with a non-email description — proving
+    it is not hardcoded to one channel."""
+    low = p.DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE.lower()
+    # Multiple example surface shapes named, not just email.
+    assert "email" in low
+    assert "sms" in low or "message" in low
+    assert "partner" in low or "third-party" in low or "portal" in low
+
+    rendered_sms = p.DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE.format(
+        surface_description="an SMS text the user receives on their phone"
+    )
+    rendered_portal = p.DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE.format(
+        surface_description="the partner's external booking website"
+    )
+    assert "an SMS text the user receives on their phone" in rendered_sms
+    assert "the partner's external booking website" in rendered_portal
+    assert rendered_sms != rendered_portal
+
+
 # ---- form-factor directive --------------------------------------------------
 #
 # The rendered user prompt must not merely LABEL the selected form factor — it
@@ -398,7 +474,7 @@ def test_scaffold_render_byte_stable():
 def test_design_agent_template_version_bumped_once():
     # The mobile-capability directive change is template-invalidating: exactly
     # one increment (8 → 9) against the screenshot design-reference version.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 10
 
 
 def test_prd_side_frozen_version_and_marker():
@@ -467,7 +543,7 @@ def test_inert_affordance_default_documented_as_pending():
 def test_recreate_discipline_append_only_and_version_line():
     # Template-invalidating changes move the version (currently 9 — the
     # mobile-capability platform directives).
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 10
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
     # Append-only: the pre-existing discipline halves are all still present.
     assert "RE-EXPRESS, DON'T PARAPHRASE." in DISCIPLINE

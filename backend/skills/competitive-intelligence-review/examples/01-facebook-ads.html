@@ -1,0 +1,370 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Competitive Review — Facebook Ads</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+:root{--green:#1A6B47;--ink:#1F241F;--sub:#5B615B;--page:#FFFFFF;--desk:#F7F7F5;--rule:#E3E1D8;
+--happy:#E7F1EA;--happy-t:#1A6B47;--edge:#FBF0DC;--edge-t:#8A5A12;--fail:#F9E7E4;--fail-t:#9C3223;--cool:#E9EEF4;--cool-t:#2E4A6B;}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font-size:15px;line-height:1.62;padding:24px 16px 80px}
+.frame{max-width:960px;margin:0 auto}
+.page{background:var(--page);border:1px solid #DDDBD3;border-radius:2px;box-shadow:0 1px 2px rgba(31,36,31,.06),0 14px 36px rgba(31,36,31,.08);padding:58px 62px 68px}
+h1{font:600 35px/1.13 'Spectral',serif;letter-spacing:-.012em;margin-bottom:16px}
+.opener{font:400 17.5px/1.55 'Spectral',serif;color:#3A403A;margin-bottom:22px}
+.opener b{font-weight:600;color:var(--ink)}
+.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:42px 0 10px;padding-top:20px;border-top:1px solid var(--rule)}
+.eyeburb{font-size:13px;color:var(--sub);margin:-4px 0 12px}
+h2{font:600 21px/1.25 'Spectral',serif;margin:26px 0 3px}
+h3{font:600 11px/1 'Inter',sans-serif;letter-spacing:.11em;text-transform:uppercase;color:var(--sub);margin:20px 0 7px}
+p{margin-bottom:10px}
+.t{font:600 8.5px/1 'IBM Plex Mono',monospace;padding:3px 4px;border-radius:3px;vertical-align:2px;margin-left:3px;letter-spacing:.03em}
+.t.h{background:var(--happy);color:var(--happy-t)} .t.s{background:var(--edge);color:var(--edge-t)} .t.i{background:var(--cool);color:var(--cool-t)} .t.v{background:#EFE4F0;color:#6B3572}
+table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;border:1px solid var(--rule);border-radius:6px;overflow:hidden;margin:11px 0 6px}
+th{font:600 9.5px/1.3 'Inter',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:var(--sub);text-align:left;padding:9px;border-bottom:1px solid var(--rule);background:#FCFBF8;vertical-align:bottom}
+td{padding:9px;border-bottom:1px solid #F0EEE7;vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.us,th.us{background:#F4F9F6}
+.cls{display:inline-block;font:600 8.5px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;letter-spacing:.04em;white-space:nowrap}
+.cls.new{background:var(--happy);color:var(--happy-t)} .cls.par{background:#EFEDE6;color:var(--sub)} .cls.dep{background:var(--fail);color:var(--fail-t)} .cls.mkt{background:var(--cool);color:var(--cool-t)} .cls.beta{background:var(--edge);color:var(--edge-t)}
+.sev{display:inline-block;font:600 9px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;white-space:nowrap}
+.sev.rm{background:var(--fail);color:var(--fail-t)} .sev.rs{background:var(--edge);color:var(--edge-t)} .sev.dn{background:#EFEDE6;color:var(--sub)}
+.def{font:600 9px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;background:var(--fail);color:var(--fail-t)}
+.def.some{background:var(--edge);color:var(--edge-t)} .def.yes{background:var(--happy);color:var(--happy-t)}
+.blank{border:1px dashed #C9C5B6;border-radius:6px;padding:12px 15px;margin:11px 0;font-size:12.5px;color:var(--sub);background:#FBFAF7}
+.blank .k{font:600 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;text-transform:uppercase;color:#9A968A;display:block;margin-bottom:6px}
+.callout{border:1px solid var(--rule);border-left:3px solid var(--green);background:#FCFBF8;border-radius:0 6px 6px 0;padding:14px 17px;margin:13px 0}
+.callout.warn{border-left-color:var(--fail-t)}
+.callout .lbl{font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--green);display:block;margin-bottom:6px}
+.callout.warn .lbl{color:var(--fail-t)}
+.q{font-family:'Spectral',serif;font-style:italic;font-size:15px;line-height:1.55;border-left:2px solid #D8D5C9;padding:2px 0 2px 14px;margin:10px 0;color:#3A403A}
+.q .attr{display:block;font:400 11px/1.5 'IBM Plex Mono',monospace;font-style:normal;color:var(--sub);margin-top:5px}
+.radarwrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0 4px}
+.rc{border:1px solid var(--rule);border-radius:8px;background:#FCFBF8;padding:14px 12px 8px}
+.rc .cap{font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--green);text-align:center;margin-bottom:4px}
+.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px;margin:12px 0}
+.stat .b{border:1px solid var(--rule);border-radius:6px;padding:11px 13px;background:#FCFBF8}
+.stat .b.me{background:#EDF5F0;border-color:#BCD9C8}
+.stat .n2{font:600 18px/1.15 'IBM Plex Mono',monospace;display:block;color:var(--ink)}
+.stat .k{font:600 9px/1.3 'Inter',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--green);display:block;margin-bottom:5px}
+.stat .d{font-size:10.5px;color:var(--sub);line-height:1.4;display:block;margin-top:4px}
+.rec{border:1px solid var(--rule);border-radius:8px;margin:14px 0;overflow:hidden}
+.rec .hd{background:#F4F9F6;border-bottom:1px solid var(--rule);padding:12px 16px}
+.rec .num{font:600 10px/1 'IBM Plex Mono',monospace;color:var(--green);letter-spacing:.1em;display:block;margin-bottom:5px}
+.rec .ttl{font:600 17px/1.3 'Inter',sans-serif}
+.rec .bd{padding:14px 16px}
+.rec .row{display:grid;grid-template-columns:100px 1fr;gap:12px;padding:7px 0;border-bottom:1px solid #F2F0EA;font-size:13px}
+.rec .row:last-child{border-bottom:none}
+.rec .rk{font:600 9.5px/1.4 'IBM Plex Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--sub)}
+.srcgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin:12px 0}
+.srcbox{border:1px solid var(--rule);border-radius:6px;background:#FCFBF8;padding:11px 13px;font-size:11.5px;line-height:1.55;color:var(--sub)}
+.srcbox b{display:block;font:600 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--green);margin-bottom:6px}
+ul{margin:0 0 10px 18px} li{margin-bottom:5px}
+ul.tight li{margin-bottom:3px}
+.legend{font:400 11px/1.6 'IBM Plex Mono',monospace;color:var(--sub);margin-top:5px}
+.src{font-size:11.5px;color:var(--sub)}
+.metaline{font:400 11px/1.7 'IBM Plex Mono',monospace;color:#9A968A;border-top:1px solid var(--rule);margin-top:34px;padding-top:12px}
+@media(max-width:820px){.page{padding:32px 20px 42px}.radarwrap{grid-template-columns:1fr}.rec .row{grid-template-columns:1fr}}
+
+.pos{display:grid;grid-template-columns:108px repeat(3,1fr);grid-auto-rows:minmax(88px,auto);gap:4px;margin:14px 0 0;font-size:11.5px}
+.pos .axl{display:flex;align-items:center;justify-content:flex-end;padding-right:9px;font:600 9.5px/1.3 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);text-align:right}
+.c{border:1px solid var(--rule);border-radius:5px;padding:9px;background:#FCFBF8}
+.c.me{background:#EDF5F0;border-color:#BCD9C8}
+.c b{display:block;font:600 12px/1.3 'Inter',sans-serif;margin-bottom:3px}
+.c span{color:var(--sub);font-size:11px;line-height:1.4;display:block}
+.xax{display:grid;grid-template-columns:108px repeat(3,1fr);gap:4px;font:600 9.5px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);margin-bottom:14px}
+.xax div{text-align:center;padding-top:5px}
+.y{color:var(--happy-t);font-weight:600}.n{color:#C4C0B2}.pt{color:var(--edge-t);font-weight:600}
+@media(max-width:820px){.pos,.xax{grid-template-columns:1fr}.pos .axl{justify-content:flex-start;text-align:left;padding:6px 0 0}}
+</style></head><body><div class="frame"><div class="page">
+
+<h1>Where Facebook Ads Stands</h1>
+
+<div class="opener"><b>The automation race is over and everyone finished.</b> Every platform we compete with now ships fully automated buying with AI creative attached — Reddit in January, Google's Gemini rebuild in May, TikTok's agent in June. What was our structural advantage two years ago is the category's entry ticket. Two competitors are now attacking the same seam, independently, and it is ours: <b>Reddit sells automation you can see into</b> and grew ad revenue 74%; <b>Snap sells onboarding and support</b> and has nearly tripled SMB advertisers. Neither can beat us on reach, so neither is trying.</div>
+<div class="opener" style="margin-bottom:0"><b>But the thing that could actually take the business is not in the feature set.</b> Product discovery is moving upstream into AI assistants — AI platforms are projected to carry $20.9B of retail spend this year, nearly four times last year — and we own no surface in that journey. OpenAI built a working ad platform in five months, partly with our people. That is the section to read first.</div>
+
+<div class="eyebrow">Where we win and where we lose</div>
+<div class="eyeburb">Eight dimensions that decide this category, scored 0–5. Scoring is judgment <span class="t i">I</span>; the facts underneath are sourced throughout. Run twice, because averaging a small specialist into a six-way chart hides the shape worth seeing.</div>
+<div class="radarwrap">
+<div class="rc"><div class="cap">Against the scale players</div><svg viewBox="0 0 500 470" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:500px;display:block;margin:0 auto">
+<polygon points="250.0,205.0 271.2,213.8 280.0,235.0 271.2,256.2 250.0,265.0 228.8,256.2 220.0,235.0 228.8,213.8" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,175.0 292.4,192.6 310.0,235.0 292.4,277.4 250.0,295.0 207.6,277.4 190.0,235.0 207.6,192.6" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,145.0 313.6,171.4 340.0,235.0 313.6,298.6 250.0,325.0 186.4,298.6 160.0,235.0 186.4,171.4" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,115.0 334.9,150.1 370.0,235.0 334.9,319.9 250.0,355.0 165.1,319.9 130.0,235.0 165.1,150.1" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,85.0 356.1,128.9 400.0,235.0 356.1,341.1 250.0,385.0 143.9,341.1 100.0,235.0 143.9,128.9" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="85.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="400.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="385.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="100.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<text x="250.0" y="69.4" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Reach</text>
+<text x="369.2" y="118.8" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Intent signal</text>
+<text x="418.6" y="238.0" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Creative tooling</text>
+<text x="369.2" y="357.2" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Automation transparency</text>
+<text x="250.0" y="406.6" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Trust & provenance</text>
+<text x="130.8" y="357.2" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Measurement proof</text>
+<text x="81.4" y="238.0" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Advertiser experience</text>
+<text x="130.8" y="118.8" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Commerce proximity</text>
+<polygon points="250.0,85.0 313.6,171.4 370.0,235.0 271.2,256.2 250.0,265.0 186.4,298.6 190.0,235.0 186.4,171.4" fill="#1A6B47" fill-opacity="0.10" stroke="#1A6B47" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,85.0 356.1,128.9 370.0,235.0 271.2,256.2 250.0,265.0 165.1,319.9 160.0,235.0 165.1,150.1" fill="#9C3223" fill-opacity="0.10" stroke="#9C3223" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,115.0 313.6,171.4 400.0,235.0 292.4,277.4 250.0,385.0 207.6,277.4 160.0,235.0 165.1,150.1" fill="#2E4A6B" fill-opacity="0.10" stroke="#2E4A6B" stroke-width="2" stroke-linejoin="round"/>
+<rect x="90" y="418" width="11" height="11" rx="2" fill="#1A6B47" fill-opacity="0.25" stroke="#1A6B47" stroke-width="1.6"/><text x="107" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Us</text>
+<rect x="220" y="418" width="11" height="11" rx="2" fill="#9C3223" fill-opacity="0.25" stroke="#9C3223" stroke-width="1.6"/><text x="237" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Google</text>
+<rect x="350" y="418" width="11" height="11" rx="2" fill="#2E4A6B" fill-opacity="0.25" stroke="#2E4A6B" stroke-width="1.6"/><text x="367" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">TikTok</text>
+</svg></div>
+<div class="rc"><div class="cap">Against the specialists</div><svg viewBox="0 0 500 470" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:500px;display:block;margin:0 auto">
+<polygon points="250.0,205.0 271.2,213.8 280.0,235.0 271.2,256.2 250.0,265.0 228.8,256.2 220.0,235.0 228.8,213.8" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,175.0 292.4,192.6 310.0,235.0 292.4,277.4 250.0,295.0 207.6,277.4 190.0,235.0 207.6,192.6" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,145.0 313.6,171.4 340.0,235.0 313.6,298.6 250.0,325.0 186.4,298.6 160.0,235.0 186.4,171.4" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,115.0 334.9,150.1 370.0,235.0 334.9,319.9 250.0,355.0 165.1,319.9 130.0,235.0 165.1,150.1" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,85.0 356.1,128.9 400.0,235.0 356.1,341.1 250.0,385.0 143.9,341.1 100.0,235.0 143.9,128.9" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="85.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="400.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="385.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="100.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<text x="250.0" y="69.4" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Reach</text>
+<text x="369.2" y="118.8" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Intent signal</text>
+<text x="418.6" y="238.0" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Creative tooling</text>
+<text x="369.2" y="357.2" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Automation transparency</text>
+<text x="250.0" y="406.6" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Trust & provenance</text>
+<text x="130.8" y="357.2" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Measurement proof</text>
+<text x="81.4" y="238.0" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Advertiser experience</text>
+<text x="130.8" y="118.8" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Commerce proximity</text>
+<polygon points="250.0,85.0 313.6,171.4 370.0,235.0 271.2,256.2 250.0,265.0 186.4,298.6 190.0,235.0 186.4,171.4" fill="#1A6B47" fill-opacity="0.10" stroke="#1A6B47" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,175.0 334.9,150.1 340.0,235.0 356.1,341.1 250.0,295.0 165.1,319.9 130.0,235.0 207.6,192.6" fill="#9C3223" fill-opacity="0.10" stroke="#9C3223" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,145.0 356.1,128.9 280.0,235.0 271.2,256.2 250.0,325.0 228.8,256.2 190.0,235.0 165.1,150.1" fill="#2E4A6B" fill-opacity="0.10" stroke="#2E4A6B" stroke-width="2" stroke-linejoin="round"/>
+<rect x="90" y="418" width="11" height="11" rx="2" fill="#1A6B47" fill-opacity="0.25" stroke="#1A6B47" stroke-width="1.6"/><text x="107" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Us</text>
+<rect x="220" y="418" width="11" height="11" rx="2" fill="#9C3223" fill-opacity="0.25" stroke="#9C3223" stroke-width="1.6"/><text x="237" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Reddit</text>
+<rect x="350" y="418" width="11" height="11" rx="2" fill="#2E4A6B" fill-opacity="0.25" stroke="#2E4A6B" stroke-width="1.6"/><text x="367" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">OpenAI</text>
+</svg></div>
+</div>
+<p><strong>Read the left chart first.</strong> Our shape and Google's are nearly the same shape — that is the definition of a commoditised contest, and they are ahead of us on intent, which is structural and uncopyable. TikTok extends past both of us on two axes: creative tooling and trust. Their trust score is not a judgment call about brand — it is a shipped feature, applied automatically to every asset they generate.</p>
+<p><strong>The right chart is the uncomfortable one.</strong> Reddit is a company at roughly 1% of our ad revenue, and it extends past us on <em>four</em> of eight dimensions — automation transparency, measurement proof, advertiser experience and intent signal. OpenAI, five months into having a product at all, already extends past us on intent and commerce proximity. Neither of them is trying to be us. They have each found an axis where scale is irrelevant and taken it.</p>
+<p>Where all shapes overlap is commodity. Where a rival extends past us is their sales pitch. And the only axis where we extend past everyone is reach — which is the one attribute a challenger never has to beat.</p>
+
+<div class="eyebrow">Scale benchmark</div>
+<div class="eyeburb">Where each competitor actually sits. Most recent reported quarter for each.</div>
+<table>
+<thead><tr><th style="width:11%">Platform</th><th style="width:14%">Ad revenue</th><th style="width:9%">Growth</th><th style="width:20%">Their differentiator</th><th>What they take from us</th></tr></thead>
+<tbody>
+<tr><td class="us"><strong>Us</strong></td><td class="us"><strong>$55.0B</strong> <span class="src">Q1</span></td><td class="us"><strong>+33%</strong></td><td class="us">Reach x signal x automation depth</td><td class="us">&mdash;</td></tr>
+<tr><td><strong>Google</strong></td><td><strong>$81.6B</strong> <span class="src">Q2</span></td><td>+14.5%</td><td>Intent &mdash; structural, uncopyable</td><td>The other half of every performance budget; now moving onto creative</td></tr>
+<tr><td><strong>TikTok</strong></td><td><span class="src">est. $28&ndash;44B, 2026</span></td><td><span class="src">not disclosed</span></td><td>Free creative suite, safe by default</td><td>Creative-led budget and younger reach</td></tr>
+<tr><td><strong>Snapchat</strong></td><td><strong>$1.24B</strong> <span class="src">Q1</span></td><td>+3%</td><td>AR formats; SMB onboarding</td><td>SMB advertisers at the low end</td></tr>
+<tr><td><strong>Reddit</strong></td><td><strong>$625M</strong> <span class="src">Q1</span></td><td><strong>+74%</strong></td><td>Community intelligence; transparent automation</td><td>Performance budget from advertisers tired of black boxes</td></tr>
+<tr><td><strong>OpenAI</strong></td><td><span class="src">not disclosed</span></td><td><span class="src">5 months old</span></td><td>Conversational intent nobody else sees</td><td>The pre-purchase research moment &mdash; and our people</td></tr>
+</tbody></table>
+<p class="legend">TikTok is private. Published 2026 estimates range from roughly $28B to $44B across reputable sources <span class="t s">S</span>; the spread is wide enough that any single figure quoted internally will be wrong.</p>
+<p>Growth rate is not where we are behind. We grow advertising faster than Google in absolute dollars and by an order of magnitude over Snap. Two readings matter more than the totals: Reddit is compounding at 74% off a small base while selling the thing advertisers say we lack, and Snap&rsquo;s advertising line has effectively stalled at +3% while its overall business grows 12% &mdash; which makes their SMB push a fight for position rather than an opportunistic expansion.</p>
+
+<div class="eyebrow">Market position</div>
+<div class="eyeburb">Advertiser reach against how differentiated the buying experience is. Placement is our read <span class="t i">I</span>; the facts behind it are sourced throughout.</div>
+<div class="pos">
+<div class="axl">High reach</div>
+<div class="c"><b>&mdash;</b><span>Nobody holds scale without a distinct buying story.</span></div>
+<div class="c"><b>Google Ads</b><span>Intent is structural. Creative tooling now credible too.</span></div>
+<div class="c me"><b>Us</b><span>Largest reach, deepest automation. Both attributes commoditised this year.</span></div>
+<div class="axl">Mid reach</div>
+<div class="c"><b>Snapchat</b><span>483M DAU, advertising +3%. Reach without a distinct buying story.</span></div>
+<div class="c"><b>TikTok</b><span>Free, provenance-safe creative suite. Fastest ship cadence in the set.</span></div>
+<div class="c"><b>&mdash;</b></div>
+<div class="axl">Emerging</div>
+<div class="c"><b>&mdash;</b></div>
+<div class="c"><b>Reddit</b><span>Community intelligence and transparent automation. Small base, +74%.</span></div>
+<div class="c"><b>OpenAI</b><span>Conversational intent. Five months old, four holding companies signed.</span></div>
+</div>
+<div class="xax"><div></div><div>Undifferentiated buying</div><div>Differentiated</div><div>Structurally differentiated</div></div>
+<p>We sit top-right on scale and automation depth &mdash; the two attributes that commoditised this year. Google sits beside us on intent, which cannot be copied. Reddit and OpenAI sit in the emerging row on differentiators that also cannot be copied. Ours can be, and largely has been.</p>
+
+<div class="eyebrow">Feature benchmark</div>
+<div class="eyeburb">Capability by capability. The radar shows the shape; this shows which specific features are commodity and which belong to one company.</div>
+<table>
+<thead><tr><th style="width:25%">Capability</th><th class="us" style="width:7%">Us</th><th style="width:7%">Google</th><th style="width:7%">TikTok</th><th style="width:7%">Snap</th><th style="width:7%">Reddit</th><th style="width:7%">OpenAI</th><th style="width:16%">Status</th></tr></thead>
+<tbody>
+<tr><td>Fully automated campaign type</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td>AI creative generation, free</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="pt">partial</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td>Automated bidding and budget</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td>Dynamic product / catalog ads</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td><strong>Automation you can see into</strong></td><td class="us n">&mdash;</td><td class="n">&mdash;</td><td class="pt">partial</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td><span class="cls dep">Reddit only</span></td></tr>
+<tr><td><strong>Provenance by default</strong></td><td class="us n">&mdash;</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td class="pt">partial</td><td class="pt">partial</td><td><span class="cls dep">TikTok only</span></td></tr>
+<tr><td>Agentic campaign assembly</td><td class="us n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td>Generation from a brief, not an asset</td><td class="us n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td><span class="cls dep">Google only</span></td></tr>
+<tr><td>Conversational placement</td><td class="us n">&mdash;</td><td class="pt">partial</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td>AR / immersive formats</td><td class="us pt">partial</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td><span class="cls dep">Snap only</span></td></tr>
+<tr><td>Agency manager accounts</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n"><strong>&mdash;</strong></td><td><span class="cls new">Their gap</span></td></tr>
+<tr><td><strong>Cross-app reach at scale</strong></td><td class="us y"><strong>&#10003;</strong></td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td><span class="cls new">Us and Google</span></td></tr>
+</tbody></table>
+<p>Four of twelve capabilities are table stakes; twelve months ago three of those four were differentiators. We hold one row uniquely with Google. Three competitors each hold a row we do not have, and each of those three rows &mdash; transparency, provenance, brief-based generation &mdash; appears again in the recommendations. The single row where a competitor is behind everyone is OpenAI&rsquo;s missing agency manager account, and given who they have hired, it is unlikely to stay open.</p>
+
+<div class="eyebrow">What they launched</div>
+<div class="eyeburb">Everything shipped in the window, dated and classified. <span class="cls new">net-new</span> opened a capability nobody had · <span class="cls par">parity</span> closed a gap · <span class="cls mkt">market</span> same product, new ground · <span class="cls dep">retired</span> pulled back.</div>
+
+<h2>Google Ads</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>Jan · NRF</td><td>Gemini retail commerce suite — discovery, decision and purchase inside the assistant, showcased by Pichai <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>20–26 May</td><td>Asset Studio rebuilt on Gemini — generation from a marketing brief, brand guidelines and website content <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>May</td><td>Gemini Omni multimodal video workflows inside Asset Studio <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>May</td><td>1-Click Creative Testing — surfaces high-performing assets against the objective <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>May</td><td>Imagen 4 image generation upgrade across campaign types <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>May</td><td>Veo image-to-video in Merchant Center, coming to Ads <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>May</td><td>AI outpainting — expands video beyond its original frame, App campaigns first <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> four net-new against three parity. They closed the creative-tooling gap with us and opened a commerce one we have no answer to. The NRF launch matters more than everything below it.</p>
+
+<h2>OpenAI Ads</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>16 Jan</td><td>Ads principles published — trust and transparency stated before any inventory existed <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>9 Feb</td><td>Ads live in ChatGPT, US, Free and Go tiers. Contextual matching from the chat thread; no ads for paid tiers or users predicted under 18 <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>Feb</td><td>Personalised Ads setting — chat history and ad interaction as signal, user-controlled <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>Mar</td><td>Pivoted away from in-ChatGPT Instant Checkout after a fraction of promised integrations shipped <span class="t s">S</span></td><td><span class="cls dep">retired</span></td></tr>
+<tr><td>5–6 May</td><td>Self-serve Ads Manager beta, CPC bidding, expanded measurement. Dentsu, Omnicom, Publicis, WPP as partners <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>May</td><td>Market pilots — Canada, Australia, New Zealand, then UK, Mexico, Brazil, Japan, South Korea <span class="t h">H</span></td><td><span class="cls mkt">market</span></td></tr>
+<tr><td>9 Jul</td><td>Static ad format change <span class="t s">S</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>22 Jul</td><td>"Advertise in ChatGPT" self-serve opens; Best Buy, Lowe's, VistaPrint named <span class="t s">S</span></td><td><span class="cls par">parity</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> zero to functioning ad platform in five months. The retired row is the interesting one — they tried to own checkout, hit real operational limits in fulfilment, payments, tax and fraud, and pulled back. That is an execution failure, not a strategic retreat, and it buys us time rather than removing the threat.</p>
+
+<h2>TikTok Ads</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>Apr</td><td>Smart+ and Symphony unified at the workflow level without collapsing the optimisation layers <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>13 May</td><td>Symphony Creative Studio free to all advertisers globally, on ByteDance's Seedance 2.0 <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>May</td><td>Smart+ Auto Selection — centralises every creative source and picks per audience segment <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>May</td><td>AI dubbing in 15+ languages, preserving speaker tone <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>Ongoing</td><td>AI label, invisible watermark and C2PA credentials applied automatically to every render <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>22 Jun</td><td>Symphony Agent — agentic layer across Creative Studio, Content Suite and TikTok One <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>22 Jun</td><td>Custom Creator Networks — employees and advocates as a compensated creator pool, Starbucks first pilot <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> five net-new against two parity — the most aggressive ratio in the set. They are opening gaps, not closing them, and doing it while their US regulatory position was being resolved.</p>
+
+<h2>Reddit Ads</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>5 Jan · CES</td><td>Max campaigns beta — automated targeting, bidding, creative rotation, placement and budget on Community Intelligence <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>5 Jan</td><td>Top Audience Personas — AI-clustered, readable audience reporting that exists <em>only</em> in automated campaigns <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>Q1</td><td>Brand auto-bidding to all advertisers — reported 16% pricing improvement <span class="t h">H</span> <span class="t v">V</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>Q1</td><td>Dynamic Product Ads <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>Q1</td><td>Shopify integration for conversion campaigns <span class="t h">H</span></td><td><span class="cls mkt">market</span></td></tr>
+<tr><td>20 May</td><td>Max extended to app promotion — 15% lower CPA, 28% more results in early tests <span class="t h">H</span> <span class="t v">V</span></td><td><span class="cls par">parity</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> almost entirely parity — they are catching up on capability. The one net-new row is the whole strategy. Top Audience Personas makes the <em>automated</em> campaign more transparent than the manual one, inverting the trade-off every other platform asks advertisers to accept.</p>
+
+<h2>Snapchat Ads</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>Q1</td><td>AI Sponsored Snaps — interactive AI-powered conversations with brands inside Chat <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>Q1</td><td>Sponsored Snaps scaled — per-impression CTR +226%, 7-day conversions +59% <span class="t h">H</span> <span class="t v">V</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>Q1</td><td>Promoted Places — Carl's Jr. reported 18% lift in incremental visits <span class="t h">H</span> <span class="t v">V</span></td><td><span class="cls par">parity</span></td></tr>
+<tr><td>Q1</td><td>Creator Subscriptions <span class="t h">H</span></td><td><span class="cls mkt">market</span></td></tr>
+<tr><td>Q1</td><td>Lens+ subscription tier and Memories Storage <span class="t h">H</span></td><td><span class="cls mkt">market</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> one genuine net-new in ads, and three launches outside advertising entirely. Their product energy has moved to subscriptions, which grew 87% while advertising grew 3%.</p>
+
+<div class="eyebrow">New markets, new technology, and what could actually take the business</div>
+<div class="eyeburb">Rated on severity, timing, and whether we have a defence. Where the defence is none, it says none.</div>
+
+<table>
+<thead><tr><th style="width:22%">Threat</th><th style="width:10%">Severity</th><th style="width:9%">Timing</th><th style="width:11%">Our defence</th><th>What's actually happening</th></tr></thead>
+<tbody>
+<tr><td><strong>Discovery moves upstream into AI assistants</strong></td><td><span class="sev rm">Removes us</span></td><td>Now</td><td><span class="def">None named</span></td><td>AI platforms are projected to carry <strong>$20.9B</strong> of retail spend in 2026, nearly quadrupling 2025 <span class="t s">S</span>. Etsy, Target and Walmart have all put inventory onto Gemini and Copilot on top of earlier ChatGPT deals <span class="t h">H</span>. When product discovery happens inside an assistant, the feed is no longer where the decision starts — and we own no assistant surface in that journey.</td></tr>
+<tr><td><strong>Commerce protocols standardise around someone else</strong></td><td><span class="sev rs">Reshapes us</span></td><td>This year</td><td><span class="def">None named</span></td><td>Google is pushing UCP with Walmart live since January; Amazon blocked OpenAI's crawlers and pulled <strong>600M products</strong> from ChatGPT results <span class="t s">S</span>. If an open protocol becomes the way agents find products, whoever owns the agent owns the discovery moment and everyone else becomes an API.</td></tr>
+<tr><td><strong>Brand loyalty erodes under AI mediation</strong></td><td><span class="sev rs">Reshapes us</span></td><td>This year</td><td><span class="def">None named</span></td><td>Deloitte's 2026 Retail Outlook found <strong>81%</strong> of surveyed retail executives expect generative AI to weaken brand loyalty by 2027 <span class="t s">S</span>. Our targeting advantage is built on brand-to-consumer relationships. If the agent chooses, the brand affinity we monetise is worth less.</td></tr>
+<tr><td><strong>OpenAI's ad platform matures</strong></td><td><span class="sev rs">Reshapes us</span></td><td>This year</td><td><span class="def some">Partial</span></td><td>Five months from first test to open self-serve with four holding companies. Weak on analytics and delivery consistency today, and no agency manager account yet <span class="t s">S</span> — both fixable, and they have hired the people who know how.</td></tr>
+<tr><td><strong>Transparency becomes the category standard</strong></td><td><span class="sev dn">Dents us</span></td><td>Now</td><td><span class="def">None named</span></td><td>Reddit is compounding at 74% on a positioning we cannot rebut with scale. If "automation you can see into" becomes what advertisers expect, our automation looks dated rather than deep.</td></tr>
+<tr><td><strong>Synthetic-media disclosure regulation</strong></td><td><span class="sev dn">Dents us</span></td><td>Watch</td><td><span class="def">None named</span></td><td>TikTok already applies C2PA credentials automatically. If any major market mandates provenance, they comply on day one and we run a migration.</td></tr>
+<tr><td><strong>Agency relationships rebuilt inside a competitor</strong></td><td><span class="sev rs">Reshapes us</span></td><td>Now</td><td><span class="def some">Unknown</span></td><td>OpenAI hired <strong>Dave Dugan</strong>, our VP of global clients and agencies, in March as VP of Global Ad Solutions <span class="t h">H</span>. Their CEO of Applications spent a decade at Facebook. Currently hiring a Head of Scaled Ads Solutions at <strong>$302–385K</strong> and a Head of Ads Enterprise Marketing to own the conversation at Cannes, CES and Advertising Week <span class="t h">H</span>.</td></tr>
+</tbody></table>
+
+<div class="callout warn"><span class="lbl">The one that matters</span>
+<p>Five of seven threats have no named defence. That is not a scoring artefact — it reflects that our roadmap is organised around competing inside the feed while the contested ground has moved to what happens before anyone reaches one.</p>
+<p style="margin-bottom:0"><strong>The timing is better than it looks.</strong> OpenAI pulled back from in-ChatGPT checkout in March after discovering that fulfilment, payments, tax compliance and fraud are genuinely hard <span class="t s">S</span>. Agentic commerce is arriving slower than its advocates promised. That buys us a window — it does not remove the threat, and the window is the only reason recommendation 5 is a research brief rather than an emergency.</p></div>
+
+<div class="eyebrow">What advertisers say</div>
+<h3>What each competitor is praised for</h3>
+<table>
+<thead><tr><th style="width:13%">Platform</th><th>The theme in public commentary</th></tr></thead>
+<tbody>
+<tr><td><strong>Reddit</strong></td><td>Transparency. Advertisers keep creative insights, audience learnings and performance signals inside automated campaigns rather than losing them. Roughly half of Max advertisers use the AI creative features. <span class="t h">H</span></td></tr>
+<tr><td><strong>Snap</strong></td><td>SMB onboarding, automation and support — the company's own stated explanation for a near-tripling of SMB advertisers over three years. <span class="t h">H</span></td></tr>
+<tr><td><strong>TikTok</strong></td><td>Safety without effort. Labels, watermarking and C2PA on every asset, with nothing asked of the advertiser. <span class="t h">H</span></td></tr>
+<tr><td><strong>Google</strong></td><td>The brief as input. Asset Studio starts from a marketing brief and brand guidelines rather than an uploaded asset — closer to how brand teams actually work. <span class="t h">H</span></td></tr>
+<tr><td><strong>OpenAI</strong></td><td>Restraint. Clearly labelled, visually separate from answers, conversations not shared with advertisers. Criticised on the opposite axis: limited analytics, inconsistent delivery, no standard effectiveness metrics. <span class="t h">H</span> <span class="t s">S</span></td></tr>
+</tbody></table>
+<h3>What is said about us</h3>
+<div class="q">It freezes, it doesn't publish ads — even if it looks like the ad is active, it doesn't actually publish but doesn't let you know. What's in Ads Manager doesn't correspond well with what you see in a browser.<span class="attr">App Store review, Meta Ads Manager <span class="t h">H</span></span></div>
+<div class="q">The most frustrating aspect is its unpredictable ad approval process and lack of transparency. Ads can be rejected with vague explanations, and appealing decisions can be slow or ineffective. Algorithm changes can cause sudden performance drops without warning.<span class="attr">SoftwareReviews, Meta Ads Manager <span class="t h">H</span></span></div>
+<table>
+<thead><tr><th style="width:20%">Our complaint theme</th><th>What advertisers describe</th><th style="width:19%">Who sells against it</th></tr></thead>
+<tbody>
+<tr><td><strong>Reliability</strong></td><td>Freezing, failure to publish while showing active, mobile diverging from browser state, settings and drafts not saving <span class="t h">H</span></td><td><em>Nobody — pure loss</em></td></tr>
+<tr><td><strong>Opacity</strong></td><td>Vague rejection reasons, slow or ineffective appeals, unexplained drops after algorithm changes <span class="t h">H</span></td><td><strong>Reddit</strong></td></tr>
+<tr><td><strong>Support</strong></td><td>Bot-only support, responsive on billing and absent elsewhere, no personalisation on restrictions <span class="t h">H</span></td><td><strong>Snap</strong></td></tr>
+<tr><td><strong>AI creative quality</strong></td><td>Mangled logos, invented product features, generic copy; QA time offsetting the efficiency gain <span class="t s">S</span></td><td><strong>TikTok, Google</strong></td></tr>
+</tbody></table>
+<p>The right column is the finding. Three of our four public complaint themes map directly to something a named competitor is actively marketing. These are not scattered gripes — they are a competitive roadmap written by our own advertisers. The fourth maps to nobody, which makes it avoidable loss rather than competitive pressure.</p>
+<div class="blank"><span class="k">Not yet sourced</span><strong>Numeric sentiment across the full set.</strong> We have qualitative advertiser sentiment for ourselves and thematic sentiment for competitors, but no like-for-like rating and review-volume comparison. Pulling iOS and Play ratings plus review counts and velocity for each ads manager is free and would make this section quantitative and trendable. <strong>Traffic, channel mix and share of search</strong> require a paid source and are not estimated here.</div>
+
+<div class="eyebrow">What to do</div>
+<div class="eyeburb">Five, drawing on every section above. Ranked by leverage.</div>
+
+<div class="rec"><div class="hd"><span class="num">01 · Product</span><div class="ttl">Make Advantage+ delivery legible</div></div><div class="bd">
+<div class="row"><span class="rk">From</span><span>Radar (transparency, worst gap) · Reddit launch log (Top Audience Personas is their only net-new and their whole strategy) · sentiment (opacity, mapped to Reddit) · threat scan (transparency becoming category standard, no defence)</span></div>
+<div class="row"><span class="rk">Build</span><span>A per-campaign delivery explanation in Ads Manager and mobile: top three drivers of budget allocation this period in plain language; audience clusters receiving delivery, labelled readably rather than as opaque IDs; creative-level share of delivery with the reason each asset won or lost; a timestamped change log of automated decisions, so a performance drop has a visible cause.</span></div>
+<div class="row"><span class="rk">Why now</span><span>Two competitors validated the demand independently with their own roadmaps, and Reddit proved transparency and automation are not a trade-off — they made the automated campaign more legible than the manual one.</span></div>
+<div class="row"><span class="rk">Measure</span><span>Support contacts tagged to unexplained performance change · Advantage+ retention after a delivery drop · movement in the opacity theme by month three.</span></div>
+<div class="row"><span class="rk">Watch</span><span>Explanations that expose auction mechanics. Scope to advertiser-actionable causes only.</span></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">02 · Product + Policy</span><div class="ttl">Provenance by default on every generated asset</div></div><div class="bd">
+<div class="row"><span class="rk">From</span><span>Radar (trust — TikTok extends furthest past us) · TikTok launch log (applied automatically, net-new) · threat scan (disclosure regulation, no defence)</span></div>
+<div class="row"><span class="rk">Build</span><span>C2PA credentials, invisible watermark and a platform-applied label attached at generation rather than publish, surviving duplication, editing and delivery reporting. Remove the advertiser-facing toggle — provenance becomes a property of the asset, not a setting.</span></div>
+<div class="row"><span class="rk">Why now</span><span>Consumer distrust of heavy brand AI use doubled from 20% to 40% in a year. TikTok already complies on day one of any mandate; we would run a migration.</span></div>
+<div class="row"><span class="rk">Measure</span><span>Share of generated assets carrying credentials · generation-to-publish rate, which is the real risk.</span></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">03 · Product</span><div class="ttl">Brand guardrails — make generated creative safe for advertisers who won't risk their brand</div></div><div class="bd">
+<div class="row"><span class="rk">From</span><span>Sentiment (AI creative quality, mapped to TikTok and Google) · Google launch log (brief-based generation claims the brand workflow) · radar (creative tooling)</span></div>
+<div class="row"><span class="rk">Build</span><span>Three primitives. <strong>Brand kit lock</strong> — generation bounded by uploaded logo, palette and type, violations block rather than warn. <strong>Claim allowlist</strong> — the model may not assert a product attribute absent from the supplied catalog or brand profile. <strong>Hero-creative gate</strong> — designated assets that automation may not alter under any enhancement.</span></div>
+<div class="row"><span class="rk">Why now</span><span>Adoption is not the problem — over 4M advertisers use the generative tools. Usable adoption is. Every generation feature shipped without this widens the gap between advertisers who tried the tools and advertisers who trust them with a launch.</span></div>
+<div class="row"><span class="rk">Measure</span><span>Share of generated assets published without edit · large-advertiser opt-in to Advantage+ creative.</span></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">04 · Product · Cheapest win here</span><div class="ttl">Fix mobile Ads Manager reliability and the support floor</div></div><div class="bd">
+<div class="row"><span class="rk">From</span><span>Sentiment (reliability and support — the only themes with no competitive beneficiary) · radar (advertiser experience, where both Reddit and Snap extend past us)</span></div>
+<div class="row"><span class="rk">Build</span><span>Publish-state integrity as a tracked reliability SLO with alerting; a mobile-web parity audit on every campaign-editing surface, with web-only fields explicitly labelled in-app rather than silently missing; a restriction path that names the specific triggering policy instead of a generic category.</span></div>
+<div class="row"><span class="rk">Why now</span><span>Nothing here costs strategy, and it is visible to every advertiser who opens the app. Snap is winning SMB on exactly this ground and says so publicly.</span></div>
+<div class="row"><span class="rk">Measure</span><span>App-store rating and review sentiment, tracked monthly here · publish-failure rate · support contacts per 1,000 active advertisers.</span></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">05 · Strategy · Largest exposure</span><div class="ttl">Build a position on discovery moving upstream</div></div><div class="bd">
+<div class="row"><span class="rk">From</span><span>Threat scan (three of the top four threats, all with no named defence) · Google launch log (NRF commerce suite) · OpenAI launch log (checkout retired — the delay that buys the window) · radar (commerce proximity, where we trail four of five)</span></div>
+<div class="row"><span class="rk">Build</span><span>Not an assistant. Three things: a <strong>consideration-stage signal strategy</strong> — what can we observe about pre-purchase research on our own surfaces that we currently discard; a <strong>position on commerce protocols</strong> before one standardises without us; and a <strong>measurement standard for AI-surface advertising</strong>, which is available precisely because OpenAI's analytics are immature today.</span></div>
+<div class="row"><span class="rk">Why now</span><span>AI platforms are projected to carry $20.9B of retail spend this year against roughly $5B last. Agentic checkout slipped in March, which is why this is a research and standards brief rather than an emergency — but the window closes when someone else defines the standard.</span></div>
+<div class="row"><span class="rk">Escalate</span><span>The commercial half of this is not a product problem. Agency relationships being rebuilt inside a competitor by the person who owned them here belongs with leadership, not a roadmap.</span></div>
+</div></div>
+
+<div class="eyebrow">Sources</div>
+<div class="srcgrid">
+<div class="srcbox"><b>Google / Alphabet</b>Q2 2026 8-K Exhibit 99.1 and Form 10-Q, filed 22 Jul — revenue by line, capex. Google Marketing Live announcements, blog.google, 20 May — Asset Studio. Search Engine Land, 26 May — Gemini Omni, 1-Click Testing. Retail Dive on NRF, Jan — Gemini commerce suite.</div>
+<div class="srcbox"><b>OpenAI</b>openai.com ads announcements 16 Jan, 9 Feb, 5 May; Help Centre "Ads in ChatGPT". Adweek, WSJ and Proactive, 23 Mar — Dugan hire. Adweek, 22 May — ads marketing role. Teal, 26 Jun — Head of Scaled Ads Solutions listing. Digiday, 21 Jan — engineers before sellers, cash burn. Fast Company and The Drum, Mar–May — Instant Checkout pivot.</div>
+<div class="srcbox"><b>TikTok / ByteDance</b>TikTok World '26, 13 May — Seedance 2.0, Symphony free. Cannes Lions coverage, 22 Jun — Symphony Agent, Custom Creator Networks. Sacra equity research, 15 Jun — USDS joint venture structure, revenue mix. Revenue estimates vary $28–44B across sources; treated as a range, not a figure.</div>
+<div class="srcbox"><b>Snap</b>Q1 2026 investor letter and 8-K, 6 May — advertising vs other revenue, SMB, upfronts, restructuring. Businesswire, 6 May — Sponsored Snaps, AI Sponsored Snaps, Promoted Places. StockStory earnings-call deep dive, 8 May — subscription and AR commentary.</div>
+<div class="srcbox"><b>Reddit</b>Q1 2026 results reporting, May — ad revenue, advertisers, margins, DAU. Social Media Today and Adweek, 5 Jan — Max launch, Top Audience Personas. eMarketer, Jan — alpha split-test results. Global Dating Insights, 21 May — Max for app promotion.</div>
+<div class="srcbox"><b>Market &amp; sentiment</b>eMarketer via Ekamoira, Dec 2025 — $20.9B AI retail spend projection. Deloitte 2026 Retail Industry Global Outlook via Retail Dive — brand loyalty. Fractl and Gartner 2026 — consumer trust in brand AI. Apple App Store, Google Play and SoftwareReviews listings for Meta Ads Manager. Marketing Brew, 7 Apr — buyer resistance.</div>
+</div>
+
+<div class="metaline">Window Jan – 26 Jul 2026 · set derived as Google (direct) · TikTok (direct) · Snapchat, Reddit (adjacent, taking SMB and performance budget) · OpenAI (entrant) · confidence <span class="t h">H</span> hard, sourced · <span class="t s">S</span> soft, grounded estimate · <span class="t i">I</span> inferred judgment · <span class="t v">V</span> vendor-reported, the company's own claim about itself. Figures about us are drawn from public filings and financial press, not internal systems — replace with reported internals before wider circulation. Our Q2 results land 29 July and postdate this review.</div>
+
+</div></div></body></html>

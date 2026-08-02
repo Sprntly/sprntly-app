@@ -25,6 +25,7 @@ exactly. The mapping is fixed:
 | Part B · EARS requirements (traced to Part A IDs) | The trace spine: `ticket → Part A §5 R# → Part B EARS E# → spec-first tests → PRD goal` on every build ticket |
 | Part B · Spec-first tests (success + failure branches) | **Acceptance criteria, inherited verbatim** — never rewritten. Failure branches render as `[failure]`-tagged criteria. AC count is shown on the ticket card (`5 AC`) |
 | Part B · Tasks (dependency-ordered, `[P]`) | Ticket dependency order; `[P]` marks parallel-safe tickets; agent-shaped tasks are regrouped into vertically-sliced user-valued tickets and attached as subtasks |
+| Part B · Release plan (B7) | **Story-map release slices, inherited verbatim** — each ticket's `release` label comes from the phase shipping its task; only a Part B without one (or no Part B) triggers phase synthesis |
 | Part B · Stakes gate | Routing: `agent-ready → Claude Code` (reversible, fully specified) vs `needs-human` (stakes-gated or escalation-blocked) |
 | Part B · `[ESCALATE]` items | **Decision tickets** — the decision, an owner, decide-by, and the build tickets each blocks |
 | Part B · `[ASSUMPTION → T0]` contracts | A **spike ticket (T-0)**, timeboxed, whose exit condition is the contract's validation; result writes back to Part B |
@@ -57,13 +58,25 @@ design (`tech-spec`).
    edit here" is enforced on inherited blocks.
 3. **Auto story-map decision (the sizing gate)** — the map is additive, never
    the default. Score the PRD against five signals: {multiple user activities
-   in Part A §4, more than ~12 requirements in §5, more than one release in
-   the rollout plan, a phased rollout, cross-team delivery}. **≥2 signals → the skill MUST
+   in Part A §4, more than ~12 requirements in §5, requirements that only
+   deliver value in more than one coherent slice when sequenced, a Part B
+   release plan with more than one phase, cross-team delivery}. **≥2 signals → the skill MUST
    build the story map, integrated in the same output as a "Story map" tab
    beside "Tickets" — one skill, one output; otherwise tickets only.**
    The intro line always states the call and why (e.g. "Story map: not needed
    — sized flat (1 activity, 8 requirements, single release)" or "Story map:
    built — 3 activities across 2 releases").
+
+   **Rollout phases are SYNTHESIZED here, not read from the PRD** (prd-author
+   v4.4 retired the Rollout section; the human PRD deliberately carries no
+   release plan). When the map is warranted, derive ordered phases from the
+   §5 requirements and Part B's dependency order — Release 1 is always the
+   walking skeleton — and label each ticket's `release` with its phase
+   ("Release 1 — walking skeleton", "Release 2 — <short scope name>", …).
+   Phase labels name scope only: never invent dates, audiences, or exit
+   criteria. When Part B ships a release plan, inherit its phases verbatim
+   instead of synthesizing. The phases are a PROPOSAL — they surface as the
+   map's release slices, editable like any ticket field before push.
 
    **When the map is built (method absorbed from the retired
    `story-mapping`):** Jeff Patton mapping over the same tickets — the map
@@ -77,8 +90,9 @@ design (`tech-spec`).
    3. *Walking skeleton* — the top row: the minimal end-to-end path; this is
       release 1 and matches the tickets already marked walking-skeleton.
    4. *Release slices* — horizontal lines grouping tickets into releases,
-      aligned to Part A §8's rollout phases; every slice leaves the user able
-      to complete the journey (thinner, then richer).
+      aligned to the synthesized rollout phases (or Part B's release plan
+      when present); every slice leaves the user able to complete the
+      journey (thinner, then richer).
    5. *Gaps & alternatives* — missing steps and error paths surface as
       `[NEED]`/`[edge]` notes on the map, feeding back to the PRD, never
       silently added as tickets.

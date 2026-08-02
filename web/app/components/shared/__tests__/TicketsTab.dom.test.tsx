@@ -121,6 +121,25 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.queryByText("P1")).toBeNull()
   })
 
+  it("the first generation shows a full working state, not a bare spinner", async () => {
+    content = { prd: { prd_id: 42, title: "Onboarding PRD" }, connectedConnectorIds: [] }
+    // Hold the cache read open so the first-generation state stays observable.
+    getForPrd.mockReturnValue(new Promise(() => {}))
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    // A 40-90s run has to look like work: the named PRD, a live phase line, a
+    // moving progress bar and ticket-SHAPED placeholders — not one small
+    // spinner that reads as a stalled tab.
+    const wip = screen.getByTestId("tickets-generating")
+    expect(screen.getByText(/Breaking/)).toBeTruthy()
+    expect(screen.getByText(/Reading the PRD end to end/i)).toBeTruthy()
+    expect(wip.querySelectorAll(".gwip-skel")).toHaveLength(3)
+    expect(wip.querySelector(".gwip-bar-pill")).toBeTruthy()
+  })
+
   it("streams partial ticket batches (with progress) while still generating", async () => {
     content = { prd: { prd_id: 42, title: "Workspaces PRD" }, connectedConnectorIds: [] }
     generate.mockResolvedValue({ job_id: 7, status: "generating" })
@@ -141,6 +160,9 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     await waitFor(() => expect(screen.getByText("Create workspace")).toBeTruthy())
     expect(screen.getByTestId("tickets-streaming")).toBeTruthy()
     expect(screen.getByText(/batch 1 of 3/i)).toBeTruthy()
+    // The banner carries the measured counter too, so progress is legible
+    // without reading the sentence.
+    expect(screen.getByText("1/3")).toBeTruthy()
     expect(screen.queryByTestId("tickets-generating")).toBeNull()
   })
 
@@ -246,6 +268,11 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.queryByTestId("tickets-generating")).toBeNull()
     expect(screen.getByText(/updating these tickets/i)).toBeTruthy()
     expect(screen.queryByRole("button", { name: /^regenerate$/i })).toBeNull()
+    // The regeneration is a banner, and the outgoing set is labelled + held
+    // back visually — a stale list must not read as the current one.
+    expect(screen.getByTestId("tickets-refreshing")).toBeTruthy()
+    expect(screen.getByText(/previous tickets — being replaced/i)).toBeTruthy()
+    expect(document.querySelector(".tkt-list--stale")).toBeTruthy()
 
     // The job completes → the new set replaces the old one atomically.
     await act(async () => {
@@ -256,6 +283,7 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     await waitFor(() => expect(screen.getByText("Fresh ticket")).toBeTruthy())
     expect(screen.queryByText("Old ticket")).toBeNull()
     expect(screen.queryByText(/updating these tickets/i)).toBeNull()
+    expect(document.querySelector(".tkt-list--stale")).toBeNull()
   })
 
   it("a failed background refresh keeps the previous tickets with a note", async () => {

@@ -58,13 +58,23 @@ interface BriefV2CardBase {
   actionLabel: string
   tagType: BriefTagType
   tagLabel: string
-  // Weekly-brief skill taxonomy (the canonical design): the finding's type,
+  // Top-insights skill taxonomy (the canonical design): the finding's type,
   // its accent hex (derived from the type, not the model's mismatchable accent),
   // and the type-name pill label (no P0/P1, per the skill). Render layers prefer
   // these over category/priority for the card accent + pill.
   skillType: BriefSkillType
   skillAccent: string
   skillLabel: string
+  /** Ledger freshness ('updated' renders a quiet chip — the body opens with
+   *  what changed). Null/absent for new findings, pre-ledger briefs, and
+   *  fixtures built before the field existed. */
+  skillState?: "updated" | null
+  // The user-facing insight-type categories this finding belongs to (from the
+  // backend's `insight_types`). Drives the per-user filter on the Top Insights
+  // tab — a member sees the findings whose types intersect their Settings
+  // selection. Optional: the adapter always sets it (to [] for legacy briefs),
+  // but hand-built test fixtures needn't. Consumers treat absent as "no types".
+  insightTypes?: string[]
   // The skill card's CTAs (View/Draft PRD, View/Generate prototype) when the
   // backend attached `_card`; empty for legacy briefs (callers fall back).
   ctas: BriefSkillCta[]
@@ -78,7 +88,7 @@ interface BriefV2CardBase {
   title: string
   body: string
   metricHighlight: string
-  // The weekly-brief skill's honest "From" source chips (`_card.sources`) — the
+  // The top-insights skill's honest "From" source chips (`_card.sources`) — the
   // provenance row the skill specifies (e.g. From · Sentry · Analytics). Empty
   // for legacy briefs with no `_card`.
   fromSources: string[]
@@ -112,7 +122,7 @@ export interface BriefV2State {
   headline: string | null
   weekOf: string | null
   /** Raw ISO timestamp of when the brief was generated — drives the
-   *  "Monday brief · 7:01 AM" line in the chat head. Optional so test
+   *  "Top Insights · 7:01 AM" line in the chat head. Optional so test
    *  fixtures built before it existed stay valid. */
   generatedAt?: string | null
   company: string
@@ -121,6 +131,11 @@ export interface BriefV2State {
   hero: BriefV2HeroFinding | null
   supporting: BriefV2CompactFinding[]
   sourcesLine: string
+  /** Quiet one-liner under the cards summarizing what the ledger held back
+   *  this cycle ("Also tracked: 2 unchanged · 1 deferred (back 3 Aug) · 1 in
+   *  progress"). Null when nothing was held back or on pre-ledger briefs —
+   *  the line simply doesn't render. */
+  heldBackLine?: string | null
   /** Backend evidence-gate flag (mirrors Brief._insufficient_evidence): the
    *  brief is empty because the KG lacked enough connected-source evidence, NOT
    *  because the account is brand-new with no data. Lets the greeting copy
@@ -386,6 +401,8 @@ function buildCardBase(
     skillType: resolveSkillType(insight),
     skillAccent: accentForInsight(insight),
     skillLabel: labelForInsight(insight),
+    skillState: insight._card?.state === "updated" ? "updated" : null,
+    insightTypes: Array.isArray(insight.insight_types) ? insight.insight_types : [],
     ctas: Array.isArray(insight._card?.ctas) ? insight._card!.ctas : [],
     category: categoryFor(insight, m.actionAccent),
     priority,
@@ -491,8 +508,56 @@ function buildSourcesLine(insights: Insight[]): string {
 
 // ---- Public entry point ---------------------------------------------------
 
-export function briefToBriefV2State(brief: Brief): BriefV2State {
-  const insights = (brief.insights || []).filter((i) => Boolean(i))
+// Choose which findings this reader sees. With NO filter we render the
+// canonical top-3 brief unchanged. With a filter we draw from `_pool` — the
+// wider ranked superset the backend retained (top POOL_SIZE) — and keep the
+// findings whose `insight_types` intersect the reader's selection, capped to
+// the same 3 slots the render uses (hero + up to 2 supporting). Findings stay
+// in the pool's best-first order, so the top matches lead. If a filter matches
+// nothing this week (a type with no findings), we fall back to the unfiltered
+// top 3 so the surface is never blank.
+const MAX_RENDERED_FINDINGS = 3
+
+// Stable partition: findings whose `insight_types` intersect `selectedTypes`
+// keep their relative order and lead; everything else keeps its relative
+// order behind them. No selection ⇒ input returned unchanged (same order,
+// same array) — this is the identity case callers rely on to skip reordering
+// entirely when the reader hasn't picked anything.
+export function orderPoolForTypes(insights: Insight[], selectedTypes: string[]): Insight[] {
+  if (!selectedTypes || selectedTypes.length === 0) return insights
+  const wanted = new Set(selectedTypes)
+  const matching: Insight[] = []
+  const rest: Insight[] = []
+  for (const ins of insights) {
+    if (Array.isArray(ins.insight_types) && ins.insight_types.some((t) => wanted.has(t))) {
+      matching.push(ins)
+    } else {
+      rest.push(ins)
+    }
+  }
+  return [...matching, ...rest]
+}
+
+export function selectFindingsForTypes(brief: Brief, selectedTypes: string[]): Insight[] {
+  const topThree = (brief.insights || []).filter((i): i is Insight => Boolean(i))
+  if (!selectedTypes || selectedTypes.length === 0) return topThree
+  const pool = ((brief._pool && brief._pool.length ? brief._pool : brief.insights) || []).filter(
+    (i): i is Insight => Boolean(i),
+  )
+  // orderPoolForTypes's stable partition puts every matching finding first, in
+  // pool order — filtering it back down to just that leading group is
+  // equivalent to filtering `pool` directly (the matching bucket's relative
+  // order is untouched), but routes through the shared ordering helper so the
+  // two stay in lockstep if this matched-only rule ever grows fuzzier.
+  const wanted = new Set(selectedTypes)
+  const matched = orderPoolForTypes(pool, selectedTypes).filter(
+    (i) => Array.isArray(i.insight_types) && i.insight_types.some((t) => wanted.has(t)),
+  )
+  return (matched.length ? matched : topThree).slice(0, MAX_RENDERED_FINDINGS)
+}
+
+export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []): BriefV2State {
+  const insights = selectFindingsForTypes(brief, selectedTypes)
   const insufficientEvidence = brief._insufficient_evidence === true
   const emptyReason = brief._empty_reason?.trim() || null
   const empty: BriefV2State = {
@@ -505,6 +570,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
     hero: null,
     supporting: [],
     sourcesLine: "",
+    heldBackLine: buildHeldBackLine(brief),
     insufficientEvidence,
     emptyReason,
   }
@@ -540,7 +606,50 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
     hero,
     supporting,
     sourcesLine: buildSourcesLine(insights),
+    heldBackLine: buildHeldBackLine(brief),
     insufficientEvidence,
     emptyReason,
   }
+}
+
+/** Compress `_backlog` into one honest, figure-light line. Counts only —
+ *  anything worth acting on should have been a card; this is the "what am I
+ *  not seeing" answer, not a second card list. */
+function buildHeldBackLine(brief: Brief): string | null {
+  const backlog = brief._backlog
+  if (!Array.isArray(backlog) || backlog.length === 0) return null
+  const counts = new Map<string, number>()
+  let deferredUntil: string | null = null
+  for (const item of backlog) {
+    counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1)
+    if (item.reason === "deferred" && item.deferred_until && !deferredUntil) {
+      deferredUntil = item.deferred_until
+    }
+  }
+  const label = (reason: string, n: number): string => {
+    switch (reason) {
+      case "carried":
+        return `${n} unchanged since last surfaced`
+      case "dismissed":
+        return `${n} dismissed`
+      case "deferred": {
+        const back = deferredUntil
+          ? new Date(deferredUntil).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+          : null
+        return back ? `${n} deferred (back ${back})` : `${n} deferred`
+      }
+      case "in_progress":
+        return `${n} already in progress`
+      case "rotation_exhausted":
+        return `${n} retired after repeated surfacing`
+      case "sibling_deferred":
+        return `${n} held with a deferred finding on the same topic`
+      case "sibling_dismissed":
+        return `${n} held with a dismissed finding on the same topic`
+      default:
+        return `${n} held back`
+    }
+  }
+  const parts = [...counts.entries()].map(([reason, n]) => label(reason, n))
+  return `Also tracked this cycle: ${parts.join(" · ")}`
 }

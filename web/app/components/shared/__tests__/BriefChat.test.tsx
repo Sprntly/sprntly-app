@@ -83,7 +83,12 @@ vi.mock("../../../lib/api", () => ({
     body: unknown = null
   },
   askApi: { ask: vi.fn() },
-  briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+  briefApi: {
+    current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
+    dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+    defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+    restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
+  },
 }))
 vi.mock("../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
@@ -136,7 +141,7 @@ vi.mock("../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { ContentProvider, useContent } from "../../../context/ContentContext"
-import { NavigationProvider } from "../../../context/NavigationContext"
+import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../context/NavigationContext"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -416,6 +421,37 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(restored.querySelector(".fc-actions")).not.toBeNull()
   })
 
+  it("test_defer_greys_card_with_not_now_hint: 'Not now' greys the card and records a deferral, not a dismissal", async () => {
+    const { briefApi } = await import("../../../lib/api")
+    await act(async () => {
+      renderBrief()
+    })
+
+    fireEvent.click(within(cardFor(HERO.title)).getByLabelText("Defer finding"))
+
+    const deferred = cardFor(HERO.title)
+    expect(deferred.className).toContain("fc--dismissed") // same grey treatment
+    expect(within(deferred).getByText(/Not now — back next cycle/i)).not.toBeNull()
+    // Server ledger: defer recorded, dismiss NOT.
+    expect(briefApi.defer).toHaveBeenCalledTimes(1)
+    expect(briefApi.dismiss).not.toHaveBeenCalled()
+
+    // Undo restores the full card and clears the deferral server-side.
+    fireEvent.click(deferred)
+    const restored = cardFor(HERO.title)
+    expect(restored.className).not.toContain("fc--dismissed")
+    expect(briefApi.restore).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_dismiss_records_server_ledger: clicking X posts the dismissal", async () => {
+    const { briefApi } = await import("../../../lib/api")
+    await act(async () => {
+      renderBrief()
+    })
+    fireEvent.click(within(cardFor(HERO.title)).getByLabelText("Dismiss finding"))
+    expect(briefApi.dismiss).toHaveBeenCalledTimes(1)
+  })
+
   it("test_dismiss_is_per_card: dismissing one finding leaves the other untouched", async () => {
     await act(async () => {
       renderBrief()
@@ -453,7 +489,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
   })
 })
 
-describe("BriefChat finding card — 'From' source chips (weekly-brief skill format)", () => {
+describe("BriefChat finding card — 'From' source chips (top-insights skill format)", () => {
   it("renders the skill's source chips and NOT the legacy mini-chart / KPI stat columns", async () => {
     await act(async () => {
       renderBrief()
@@ -517,13 +553,11 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     expect(screen.queryByText("Generate prototype")).toBeNull()
   })
 
-  it("still lets you OPEN an existing prototype on a non-prototypeable finding (view, not generate)", async () => {
-    // A prototype was already built for insight 0 (e.g. from the PRD chat, which
-    // doesn't consult `prototypeable`), but the synthesis LLM marked the finding
-    // non-prototypeable. The card must NOT hide an existing prototype behind the
-    // visualizability gate — it stays reachable as "View prototype". (The gate is
-    // reopened by `prototypeReady`, i.e. a real prototype exists — NOT merely by a
-    // PRD existing — so we still never offer *generate* on an ops/data finding.)
+  it("offers NO prototype button even when a prototype is already built (top-insights CTA posture)", async () => {
+    // The top-insights skill removed the prototype affordance from finding
+    // cards entirely — even a built-and-saved prototype is reached from the
+    // PRD flow, never from the card. The card's pair is evidence (primary) +
+    // PRD (ghost), nothing else.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
@@ -534,11 +568,11 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     await act(async () => {
       renderBriefWith(brief)
     })
-    const btn = within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })
-    expect(btn).toBeTruthy()
-    // Clicking opens THAT insight's prototype (prd 42), not any generate flow.
-    fireEvent.click(btn)
-    expect(pushSpy).toHaveBeenCalledWith(prototypePath(42))
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+    // The evidence CTA is the primary in its place.
+    expect(
+      within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }),
+    ).toBeTruthy()
   })
 
   it("keeps hiding the prototype option on a non-prototypeable finding with only a PRD (no prototype)", async () => {
@@ -653,7 +687,7 @@ describe("BriefChat — greeting paragraph", () => {
     expect((greeting.match(/Good day/g) ?? []).length).toBe(1)
   })
 
-  it("renders the 'Monday brief · <time>' timestamp in the agent head", async () => {
+  it("renders the 'Top Insights · <time>' timestamp in the agent head", async () => {
     await act(async () => {
       renderBrief()
     })
@@ -663,7 +697,7 @@ describe("BriefChat — greeting paragraph", () => {
     expect(head).not.toBeNull()
     const status = head!.querySelector(".bc-agent-status") as HTMLElement | null
     expect(status).not.toBeNull()
-    expect(status!.textContent).toMatch(/Monday brief · /)
+    expect(status!.textContent).toMatch(/Top Insights · /)
     expect(status!.textContent).toContain("7:01")
   })
 })
@@ -693,27 +727,27 @@ describe("BriefChat finding card — no prototype preview thumbnail", () => {
     expect(card.querySelector(".fc-preview")).toBeNull()
     expect(card.querySelector(".fc-preview-img")).toBeNull()
     expect(within(card).queryByText("Prototype preview · open design")).toBeNull()
-    // …but the prototypeable finding still offers the "View prototype" button
-    // (insight 0 has a READY prototype in the seeded map).
-    expect(within(card).queryByText("View prototype")).not.toBeNull()
+    // …and the card offers no prototype entry point at all — the top-insights
+    // CTA pair is evidence (primary) + PRD (ghost); prototypes live in the PRD
+    // flow.
+    expect(within(card).queryByText("View prototype")).toBeNull()
+    expect(within(card).queryByRole("button", { name: "View Evidence" })).not.toBeNull()
   })
 })
 
-// ── Prototype CTA relabels Generate → View once one is built + saved ───────────
-// The finding card's prototype button must reflect real DB state (the brief→
-// prototype map's prototypeReady), mirroring the chat surface: "Generate
-// prototype" until one is built, "View prototype" once it's saved. Previously the
-// label was a static adapter CTA string that never flipped.
-describe("BriefChat finding card — prototype affordance is view-only (generate removed)", () => {
-  it("renders NO prototype button with no built prototype, then 'View prototype' once ready in the DB", async () => {
-    // Empty map → no prototype built yet for this insight → no button at all
-    // (Generate prototype was removed from the brief; generation lives in the
-    // PRD panel footer).
+// ── Prototype affordance is gone from cards entirely ──────────────────────────
+// The top-insights skill CTA posture: a card carries exactly two CTAs —
+// "View the evidence" (primary) and Generate/View PRD (ghost). No prototype
+// button in any state, built or not; prototypes stay reachable from the PRD.
+describe("BriefChat finding card — prototype affordance removed from cards", () => {
+  it("renders NO prototype button with no built prototype, and none once one is ready in the DB either", async () => {
+    // Empty map → no prototype built yet for this insight → no button.
     await act(async () => { renderBrief() })
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
 
     cleanup()
-    // Seed a READY prototype for insight 0 (HERO's insightIndex) → View appears.
+    // Even a READY prototype for insight 0 (HERO's insightIndex) adds no card
+    // button — it is reached from the PRD flow instead.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
@@ -721,8 +755,8 @@ describe("BriefChat finding card — prototype affordance is view-only (generate
       prototype: { ready: true, preview_image_url: null },
     } as never)
     await act(async () => { renderBrief() })
-    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })).toBeTruthy()
-    expect(within(cardFor(HERO.title)).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" })).toBeTruthy()
   })
 })
 
@@ -750,5 +784,119 @@ describe("BriefChat finding card — PRD CTA neutral while map loads", () => {
     const card = cardFor(HERO.title)
     expect(within(card).getByRole("button", { name: "View PRD" })).toBeTruthy()
     expect(within(card).queryByRole("button", { name: "Loading…" })).toBeNull()
+  })
+})
+
+// ── "View Evidence" opens a chat tab, never a panel over Top Insights ─────────
+// Evidence used to slide the content panel in OVER the Top Insights surface,
+// while "View PRD" right beside it opened its own chat tab with the same panel
+// over that. Both cards' CTAs now take the same route: openPrdTab hands the
+// finding off, ChatScreen spawns the tab, and the panel slides in landed on
+// Evidence. These tests lock the hand-off (and its no-meta fallback).
+describe("BriefChat finding card — View Evidence opens its own chat tab", () => {
+  // openPrdTab stores the request in navigation state before routing; reading it
+  // from a probe is how we assert the hand-off itself rather than its aftermath.
+  let seenPendingPrdTab: PrdTabRequest | null = null
+  let seenPanelTab: string | null = null
+  function NavProbe() {
+    const { pendingPrdTab, contentPanelTab } = useNavigation()
+    seenPendingPrdTab = pendingPrdTab
+    seenPanelTab = contentPanelTab
+    return null
+  }
+
+  // openPrdTab scrolls the new surface to the top; jsdom has no scrollTo.
+  const scrollSpy = vi.fn()
+
+  function renderWithProbe(briefDetails?: Record<string, unknown>) {
+    window.scrollTo = scrollSpy as unknown as typeof window.scrollTo
+    function Inject() {
+      const { setContent } = useContent()
+      React.useEffect(() => {
+        setContent({
+          briefV2: BRIEF,
+          userName: "Apurva Jain",
+          briefDetails: (briefDetails ?? {
+            "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
+            "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
+          }) as never,
+        })
+      }, [setContent])
+      return null
+    }
+    return render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(Inject),
+          React.createElement(NavProbe),
+          React.createElement(BriefChat),
+        ),
+      ),
+    )
+  }
+
+  afterEach(() => {
+    seenPendingPrdTab = null
+    seenPanelTab = null
+  })
+
+  it("test_evidence_opens_new_tab: hands the finding to openPrdTab as an `evidence` source and routes to the chat surface", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab).toEqual({
+      title: `Evidence · ${HERO.title}`,
+      insightBody: HERO.body,
+      source: {
+        kind: "evidence",
+        meta: { briefId: 1, insightIndex: 0 },
+        detail: { meta: { briefId: 1, insightIndex: 0 } },
+      },
+    })
+    // Routed to the chat surface, where ChatScreen consumes the request.
+    expect(pushSpy).toHaveBeenCalledWith("/")
+  })
+
+  it("test_evidence_does_not_open_panel_in_place: the panel never opens over Top Insights itself", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    // The panel is opened by ChatScreen over the NEW tab — not here, which is
+    // exactly what used to bury the evidence under the brief.
+    expect(seenPanelTab).toBeNull()
+  })
+
+  it("carries the finding that was clicked, not the first one", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(SUPPORTING.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab?.title).toBe(`Evidence · ${SUPPORTING.title}`)
+    expect(seenPendingPrdTab?.source).toMatchObject({ meta: { briefId: 1, insightIndex: 1 } })
+  })
+
+  it("falls back to opening the panel in place for a legacy finding with no insight pointer", async () => {
+    // No meta → nothing to scope a tab to. Opening the panel where we stand
+    // still shows the tab's own empty state, which beats a dead button.
+    await act(async () => { renderWithProbe({}) })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab).toBeNull()
+    expect(seenPanelTab).toBe("evidence")
   })
 })

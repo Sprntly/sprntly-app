@@ -426,3 +426,33 @@ def test_answer_route_unknown_question_404(tenant_client, isolated_settings):
         f"/v1/prd/{prd_id}/input-questions/424242/answer", json={"answer": "x"}
     )
     assert resp.status_code == 404
+
+
+# ── apply_chat_edit (free-form chat instruction editor) ──────────────────────
+
+def test_apply_chat_edit_round_trip(isolated_settings, monkeypatch):
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({
+            "html": "<html>v2</html>", "sections_changed": ["Goal"], "summary": "s",
+        })
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    out = prd_questions.apply_chat_edit(
+        "<html>v1</html>", "shorten the goal", enterprise_id="ent-1"
+    )
+    assert out == {"html": "<html>v2</html>", "sections_changed": ["Goal"], "summary": "s"}
+    assert seen["enterprise_id"] == "ent-1"
+    assert seen["purpose"] == "apply_prd_chat_edit"
+    assert "shorten the goal" in seen["input"] and "<html>v1</html>" in seen["input"]
+
+
+def test_apply_chat_edit_raises_on_empty_html(isolated_settings, monkeypatch):
+    monkeypatch.setattr(prd_questions, "llm_call", lambda **kw: _llm_result({
+        "html": "", "sections_changed": [], "summary": "",
+    }))
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        prd_questions.apply_chat_edit("<html>v1</html>", "shorten", enterprise_id="e")

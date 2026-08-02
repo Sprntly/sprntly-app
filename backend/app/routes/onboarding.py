@@ -13,6 +13,12 @@ client polls GET /v1/onboarding/analyze-website/{job_id}. A backgrounded or
 remounted onboarding tab keeps the analysis running server-side and re-attaches
 by polling, instead of orphaning the in-flight request.
 
+The same POST also kicks the DEEP company-research sweep
+(app/company_research.py) — a staged web-research run that seeds the company
+knowledge graph. That one is fire-and-forget with NO polling at all: the wizard
+proceeds immediately and `company_research_runs` is its only handle. It is
+flag-gated and fully isolated, so it can never delay or fail this endpoint.
+
 Resilient by design: the analyzer NEVER raises — a blocked / unreachable / empty
 site returns `ok: false` with empty fields so onboarding falls back to manual
 entry. The GET's `result` carries the SAME dict `analyze_website` returns today,
@@ -46,9 +52,60 @@ router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"])
 # done-callback discards each task on completion (mirrors routes/ask.py).
 _inflight_tasks: set[asyncio.Task] = set()
 
+# The deep company-research sweep costs real money and several minutes, so it is
+# NOT kicked under the test runner by default (every existing onboarding test
+# would otherwise fan out into it). Tests that exercise the kick monkeypatch this
+# to True; production ignores it.
+KICK_COMPANY_RESEARCH_UNDER_PYTEST = False
+
 
 class AnalyzeWebsiteIn(BaseModel):
     url: str
+
+
+async def _maybe_kick_company_research(company_id: str, url: str) -> None:
+    """Fire-and-forget the DEEP company-research sweep alongside the small
+    website analysis.
+
+    Zero frontend change by design: the wizard already proceeds the moment the
+    small analysis returns, and nothing polls this run — the
+    `company_research_runs` row is its only handle, so a backgrounded or closed
+    onboarding tab has no effect on it.
+
+    Fully isolated. Flag-gated (`company_research`, fail-open ON) and wrapped so
+    that ANY failure here — flag read, import, scheduling — leaves the small
+    website analysis and this endpoint's 200 completely untouched.
+    """
+    try:
+        from app.entitlements import (
+            company_research_enabled,
+            feature_flags_for_company,
+        )
+
+        if not company_research_enabled(feature_flags_for_company(company_id)):
+            logger.info(
+                "company_research flag off for %s — skipping the deep sweep",
+                company_id,
+            )
+            return
+        if "pytest" in sys.modules and not KICK_COMPANY_RESEARCH_UNDER_PYTEST:
+            return
+
+        from app.company_research_job_runner import run_company_research_job
+
+        coro = run_company_research_job(company_id, url, trigger="onboarding")
+        if "pytest" in sys.modules:
+            # The TestClient does not keep the app's event loop alive between
+            # requests, so a bare create_task would never run. Await inline for
+            # deterministic tests (mirrors the website-analysis path below).
+            await coro
+            return
+        task = asyncio.create_task(coro)
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+    except Exception:  # noqa: BLE001 — must never affect onboarding
+        logger.exception(
+            "Failed to kick deep company research for %s", company_id)
 
 
 @router.post("/analyze-website")
@@ -67,6 +124,10 @@ async def analyze_website_route(
     """
     company_id = company.company_id
     job_id = start_analysis_job(company_id=company_id, url=body.url)
+
+    # ALSO kick the deep company-research sweep (KG-seeding, minutes-long).
+    # Independent of the small analysis in both directions — see the helper.
+    await _maybe_kick_company_research(company_id, body.url)
 
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
@@ -249,6 +310,13 @@ def _record_welcome(drip_db, company_id, user_id, email, *, status):
 
 class WorkspaceNameIn(BaseModel):
     name: str
+    # Workspace-owned fields (2026-07-22, moved off the companies row). Sent by
+    # the onboarding "Your workspace" step alongside the name; each optional.
+    team_scope: str | None = None
+    team_strategy: str | None = None
+    team_roadmap: str | None = None
+    sizing_methodology: str | None = None
+    additional_context: str | None = None
 
     @property
     def clean_name(self) -> str:
@@ -287,7 +355,15 @@ def post_onboarding_workspace(
     )
 
     ws = ensure_default_workspace(company.company_id)
-    updated = update_workspace(ws["id"], name=name) or {**ws, "name": name}
+    updated = update_workspace(
+        ws["id"],
+        name=name,
+        team_scope=body.team_scope,
+        team_strategy=body.team_strategy,
+        team_roadmap=body.team_roadmap,
+        sizing_methodology=body.sizing_methodology,
+        additional_context=body.additional_context,
+    ) or {**ws, "name": name}
     upsert_workspace_member(ws["id"], company.user_id, "admin")
     company_slug = slug_for_company_id(company.company_id)
     if company_slug:

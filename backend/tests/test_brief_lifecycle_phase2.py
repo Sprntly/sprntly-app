@@ -1,4 +1,4 @@
-"""Phase 2 weekly-brief lifecycle — route-level behavior.
+"""Phase 2 top-insights lifecycle — route-level behavior.
 
   - POST /v1/prd/generate records the insight's theme as 'prd_created'
   - POST /v1/brief/dismiss records the finding as 'dismissed'
@@ -110,6 +110,52 @@ def test_dismiss_foreign_brief_is_404(tenant_client, isolated_settings):
         "/v1/brief/dismiss", json={"brief_id": brief_id, "insight_index": 0}
     )
     assert resp.status_code == 404
+
+
+# ── defer + restore endpoints (phase 2A) ─────────────────────────────────────
+
+def test_defer_records_deferred_with_window(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post("/v1/brief/defer", json={"theme_id": "theme-xyz"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deferred"] is True and body["theme_id"] == "theme-xyz"
+    assert body["deferred_until"]
+
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert len(rows) == 1
+    assert rows[0]["action"] == "deferred"
+    assert rows[0]["deferred_until"]
+
+
+def test_defer_by_brief_insight_resolves_theme_id(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief(db_mod, "acme", [
+        {"title": "Insight A", "theme_id": "theme-aaa"},
+    ])
+    resp = t.client.post(
+        "/v1/brief/defer", json={"brief_id": brief_id, "insight_index": 0, "days": 14}
+    )
+    assert resp.status_code == 200
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert rows[0]["theme_id"] == "theme-aaa"
+    assert rows[0]["action"] == "deferred"
+
+
+def test_defer_missing_identifiers_is_400(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    assert t.client.post("/v1/brief/defer", json={}).status_code == 400
+
+
+def test_restore_clears_dismiss_and_deferral(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    assert t.client.post("/v1/brief/defer", json={"theme_id": "t-1"}).status_code == 200
+    resp = t.client.post("/v1/brief/restore", json={"theme_id": "t-1"})
+    assert resp.status_code == 200
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert rows[0]["action"] == "surfaced"
+    assert rows[0].get("deferred_until") in (None, "")
 
 
 # ── completed read endpoint ──────────────────────────────────────────────────

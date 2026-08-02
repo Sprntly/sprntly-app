@@ -168,6 +168,14 @@ CREATE TABLE prototype_exports (
     is_stale          INTEGER NOT NULL DEFAULT 0,
     UNIQUE (prototype_id, checkpoint_id)
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

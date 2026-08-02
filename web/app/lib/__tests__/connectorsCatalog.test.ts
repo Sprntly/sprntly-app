@@ -20,18 +20,26 @@ const EXPECTED_CATEGORIES = [
   "Design",
   "Codebase",
   "Communications",
-  "Business documentation",
+  // "Company documentation" merges the user's own uploaded documents with the
+  // external doc tools (Notion, Google Docs) — see the `docs` category.
+  "Company documentation",
   "Revenue",
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 10 categories, in v6 order (CRM added; docs + revenue appended)", () => {
+  it("has exactly the 10 categories, in v6 order (Uploaded documents merged into Company documentation; revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 40 connector rows across all categories (v6: + Segment, App/Play Store, CRM roster)", () => {
+  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(40)
+    expect(total).toBe(43)
+    // 42 distinct connectors — the extra row is dual-typed Slack's second
+    // placement, not a second connector.
+    const distinct = new Set(
+      CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
+    )
+    expect(distinct.size).toBe(42)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -74,7 +82,9 @@ describe("CONNECTOR_CATALOG — category sub-labels", () => {
 
   it("other categories have no sub-label", () => {
     const others = CONNECTOR_CATALOG.filter(
-      (c) => c.title !== "Analytics" && c.title !== "Monitoring & Reliability",
+      (c) =>
+        c.title !== "Analytics"
+        && c.title !== "Monitoring & Reliability",
     )
     for (const c of others) {
       expect(c.subLabel).toBeUndefined()
@@ -102,15 +112,30 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Business documentation: Notion, Google Docs", () => {
-    expect(items("Business documentation")).toEqual(["Notion", "Google Docs"])
+  it("Company documentation: Uploaded documents, Notion, Google Docs, Confluence", () => {
+    expect(items("Company documentation")).toEqual([
+      "Uploaded documents", "Notion", "Google Docs", "Confluence",
+    ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+    // Slack is dual-typed (communication + customer-voice) so its card sits
+    // on this shelf too — same item, same connection as in Communications.
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong",
+      "Fireflies", "Gong", "Slack",
     ])
+  })
+
+  it("Slack appears in both Voice and Communications as the SAME item (multi-type dual placement)", () => {
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const comms = CONNECTOR_CATALOG.find((c) => c.key === "comms")!
+    const voiceSlack = voice.items.find((i) => i.id === "slack")
+    const commsSlack = comms.items.find((i) => i.id === "slack")
+    // One shared object — the two shelves can never drift apart.
+    expect(voiceSlack).toBeDefined()
+    expect(voiceSlack).toBe(commsSlack)
+    expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -149,17 +174,21 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
-        "asana", "clickup", "figma", "github", "google_drive",
+        "asana", "clickup", "confluence", "figma", "github", "google_drive",
         "hubspot", "jira", "slack", "sprinklr",
       ].sort(),
     )
   })
 
   it("is derived from the catalog (oauth flag) — they stay in sync", () => {
-    const flaggedOauth = CONNECTOR_CATALOG.flatMap((c) => c.items)
-      .filter((i) => i.oauth)
-      .map((i) => i.id)
-    expect(flaggedOauth.sort()).toEqual([...CONNECTOR_IDS_WITH_OAUTH].sort())
+    // Set-dedup: dual-placed Slack is flagged oauth on both shelves but is
+    // one connector.
+    const flaggedOauth = new Set(
+      CONNECTOR_CATALOG.flatMap((c) => c.items)
+        .filter((i) => i.oauth)
+        .map((i) => i.id),
+    )
+    expect([...flaggedOauth].sort()).toEqual([...CONNECTOR_IDS_WITH_OAUTH].sort())
   })
 
   it("excludes Fireflies (it's API-key based, not OAuth)", () => {
@@ -168,11 +197,12 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
 })
 
 describe("CONNECTOR_IDS_CONNECTABLE", () => {
-  it("contains all OAuth providers PLUS API-key (Fireflies) and credentials (Superset) ones", () => {
+  it("contains all OAuth providers PLUS API-key (Fireflies), credentials (Superset) and upload (Uploaded documents) ones", () => {
     expect([...CONNECTOR_IDS_CONNECTABLE].sort()).toEqual(
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -182,28 +212,34 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "slack",
         "sprinklr",
         "superset",
+        "uploads",
       ].sort(),
     )
   })
 })
 
 describe("Google Docs uses the existing google_drive OAuth backend", () => {
-  it("the Google Docs row in Business documentation has id 'google_drive' (matches backend provider)", () => {
-    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
+  it("the Google Docs row in Company documentation has id 'google_drive' (matches backend provider)", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
     const gdocs = docs.items.find((i) => i.name === "Google Docs")
     expect(gdocs?.id).toBe("google_drive")
     expect(gdocs?.oauth).toBe(true)
   })
 })
 
-describe("Business documentation category", () => {
-  it("contains Notion + Google Docs and they no longer sit under Project Management", () => {
-    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
-    expect(docs.items.map((i) => i.id)).toEqual(["notion", "google_drive"])
+describe("Company documentation category", () => {
+  it("merges Uploaded documents with Notion + Google Docs; docs tools stay out of Project Management", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
+    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive", "confluence"])
     const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
     const pmIds = pm.items.map((i) => i.id)
     expect(pmIds).not.toContain("notion")
     expect(pmIds).not.toContain("google_drive")
+  })
+
+  it("has no standalone 'Company Documents' category — it was merged in", () => {
+    expect(CONNECTOR_CATALOG.find((c) => c.title === "Company Documents")).toBeUndefined()
+    expect(CONNECTOR_CATALOG.filter((c) => c.key === "uploads")).toEqual([])
   })
 })
 
@@ -217,19 +253,22 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
       "Design",
       "Codebase",
       "Communications",
-      "Business documentation",
+      "Company documentation",
     ])
   })
 
-  it("shows only the 11 wired connectors (OAuth + API key + credentials) and nothing else", () => {
-    const ids = connectableCatalog()
-      .flatMap((c) => c.items)
-      .map((i) => i.id)
-      .sort()
+  it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
+    // Set-dedup: Slack's card renders on two shelves but is one connector.
+    const ids = [...new Set(
+      connectableCatalog()
+        .flatMap((c) => c.items)
+        .map((i) => i.id),
+    )].sort()
     expect(ids).toEqual(
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -239,6 +278,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "slack",
         "sprinklr",
         "superset",
+        "uploads",
       ].sort(),
     )
   })
@@ -250,12 +290,17 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
     expect(byTitle("Analytics")).toEqual(["superset"])
-    expect(byTitle("Voice of Customer & Support")).toEqual(["sprinklr", "fireflies"])
+    // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
+    expect(byTitle("Voice of Customer & Support")).toEqual([
+      "sprinklr", "fireflies", "slack",
+    ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
-    expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Codebase")).toEqual(["github"])
     expect(byTitle("Communications")).toEqual(["slack"])
+    // Merged category keeps only its WIRED rows (Notion isn't wired yet):
+    // Uploaded documents (upload) + Google Docs (google_drive OAuth).
+    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

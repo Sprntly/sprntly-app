@@ -350,6 +350,78 @@ def test_projection_idempotent(facade, isolated_settings, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 15. KG projection: company root wiring (forward wiring)
+# --------------------------------------------------------------------------- #
+def test_projection_creates_company_root_and_wires_new_nodes(facade, isolated_settings, monkeypatch):
+    """Every segment/competitor entity and constraint/good_outcome signal the
+    projection creates gets a SCOPED_TO/INFORMS edge to the tenant's single
+    `company` root entity, written in the same run that creates the node."""
+    from app.research import business_context_projection as proj
+    monkeypatch.setattr(proj, "embed_texts", lambda t, **k: [[0.1] * 4 for _ in t])
+
+    d = _doc()
+    d.market_competition.main_alternatives = Meta(
+        value=["Slush Puppie"], src="web", conf="med", evidence="x")
+
+    proj.project_business_context(facade, "ent-A", d)
+
+    company = facade.query_entities("ent-A", type="company")
+    assert len(company) == 1
+    assert company[0].canonical_label == "Frazil"  # from doc.identity.legal_name
+
+    seg = facade.query_entities("ent-A", type="segment")[0]
+    comp = facade.query_entities("ent-A", type="competitor")[0]
+    scoped = facade.edges_from("ent-A", seg.id, type="SCOPED_TO")
+    assert len(scoped) == 1
+    assert scoped[0].target_id == company[0].id
+    assert scoped[0].target_kind == "entity"
+    scoped_comp = facade.edges_from("ent-A", comp.id, type="SCOPED_TO")
+    assert len(scoped_comp) == 1 and scoped_comp[0].target_id == company[0].id
+
+    sigs = {s.kind: s for s in facade.active_signals("ent-A")}
+    for kind in ("constraint", "good_outcome"):
+        informs = facade.edges_from("ent-A", sigs[kind].id, type="INFORMS")
+        assert len(informs) == 1
+        assert informs[0].target_id == company[0].id
+        assert informs[0].source_kind == "signal"
+
+
+def test_projection_company_root_created_once_across_reruns(facade, isolated_settings, monkeypatch):
+    """A re-run (e.g. the periodic business-context refresh) must not create
+    a second `company` entity or duplicate its edges for nodes that resolve
+    to an existing entity/signal via dedupe."""
+    from app.research import business_context_projection as proj
+    monkeypatch.setattr(proj, "embed_texts", lambda t, **k: [[0.1] * 4 for _ in t])
+
+    d = _doc()
+    proj.project_business_context(facade, "ent-A", d)
+    seg = facade.query_entities("ent-A", type="segment")[0]
+
+    monkeypatch.setattr(
+        facade, "find_candidates",
+        lambda eid, typ, vec, k=10: [(seg, 0.99)] if typ == "segment" else [])
+    proj.project_business_context(facade, "ent-A", d)
+
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+    # the segment resolved to the SAME existing node both runs → still one edge
+    assert len(facade.edges_from("ent-A", seg.id, type="SCOPED_TO")) == 1
+
+
+def test_projection_company_root_falls_back_to_enterprise_id_label(facade, isolated_settings, monkeypatch):
+    """A doc whose identity.legal_name is unknown still gets a company root —
+    labeled with the enterprise_id rather than failing/blocking projection."""
+    from app.research import business_context_projection as proj
+    monkeypatch.setattr(proj, "embed_texts", lambda t, **k: [[0.1] * 4 for _ in t])
+
+    d = _doc(identity=Identity())  # legal_name unknown
+    proj.project_business_context(facade, "ent-nolabel", d)
+
+    company = facade.query_entities("ent-nolabel", type="company")
+    assert len(company) == 1
+    assert company[0].canonical_label == "ent-nolabel"
+
+
+# --------------------------------------------------------------------------- #
 # 12–14. Routes: GET 404 when empty, PUT stamps user, refresh via dep override
 # --------------------------------------------------------------------------- #
 def test_get_404_when_empty(company_client):

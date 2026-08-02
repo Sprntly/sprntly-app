@@ -31,6 +31,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: {
@@ -165,6 +166,14 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(42))
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
+
+  // NOT COVERED HERE: refocusing a tab whose PRD is still GENERATING must open
+  // the rail (handleOpenPrd used to bail out early on `prdGenerating`, leaving a
+  // tab that said "Generating PRD…" beside a closed panel). It cannot be seeded
+  // through this file's harness — `prdGenerating` is deliberately stripped from
+  // sessionStorage, so a RESTORED tab always comes back with it false. The state
+  // only exists in memory, mid-run, which needs a live generation held open and
+  // a tab switch — see ChatScreen.import-command's pending-import pattern.
 
   it("restores when the PRD tab becomes active AFTER mount (async company/tab re-seed)", async () => {
     // The panel restore must key on the active tab, not a tab captured at first

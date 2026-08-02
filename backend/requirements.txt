@@ -46,3 +46,14 @@ pandas>=2.0
 numpy>=1.24
 scipy>=1.10
 scikit-learn>=1.3
+# Chart recompression for the DS Claude analysis report (app/ds/claude_analysis
+# _shrink_png): an oversized matplotlib PNG is downscaled and re-encoded so it
+# fits the embed budget instead of being dropped from the report. Pillow was
+# already present transitively, which meant the path silently worked in dev and
+# would have been INERT on a clean install — hence the explicit declaration.
+# A floor rather than an exact pin: we use only Image.open/convert/resize/save,
+# an API stable across majors, so pinning would buy churn instead of safety.
+# The floor is a security one — this code decodes image bytes produced inside the
+# model's sandbox, so it must not run on a Pillow with known decoder CVEs;
+# >=10.3 clears CVE-2024-28219 (_imagingcms buffer overflow, fixed in 10.3.0).
+Pillow>=10.3

@@ -67,7 +67,7 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
               className="inp"
               value={props.password}
               onChange={(e) => props.onPasswordChange(e.target.value)}
-              placeholder="Min 8 chars, 1 number, 1 symbol"
+              placeholder="Min 8 chars, 1 uppercase, 1 number"
               autoComplete="new-password"
               required
             />

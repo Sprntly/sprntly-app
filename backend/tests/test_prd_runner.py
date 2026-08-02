@@ -892,3 +892,148 @@ def test_import_mode_feeds_doc_as_source_and_skips_grounding(
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["title"] == "Imported"
+
+
+# ── Chat-attached documents: extra_source_md layers on top of grounding ──────
+
+def test_chat_docs_are_the_source_and_are_not_re_laid_out(isolated_settings, monkeypatch):
+    """`extra_source_md` (the user's chat material) is the source for a chat PRD.
+
+    It is still NOT the import path: the document is input to be authored FROM,
+    not an existing PRD to be faithfully re-laid-out, so the re-layout framing
+    must stay absent.
+    """
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="Chat task")
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+
+    doc = "--- requirements.pdf ---\nMUST prefill cart from deal. Doc-marker-ABC."
+    insight = {"title": "Chat task", "summary": "from chat", "query": "cart prefill"}
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            prd_runner.generate_prd(
+                prd_id, brief_id, 0,
+                insight_override=insight, extra_source_md=doc,
+            )
+        )
+    finally:
+        loop.close()
+
+    assert len(captured) == 1
+    user_input = captured[0]["input"]
+    # The user's material + its source framing are in the prompt…
+    assert "Doc-marker-ABC" in user_input
+    assert "SOURCE MATERIAL — THIS CONVERSATION" in user_input
+    # …authored FROM, not re-laid-out (that is the import path's contract)…
+    assert "FAITHFUL RE-LAYOUT" not in user_input
+    # …and no workspace corpus rides along (see CHAT_SOURCE_EXCLUSIVE).
+    assert "corpus body" not in user_input
+
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def _run_chat_prd(db_mod, brief_id, prd_id, monkeypatch, doc):
+    """Generate a chat-task PRD (extra_source_md set) and return the prompt."""
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    insight = {"title": "Chat task", "summary": "from chat", "query": "car ticket"}
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            prd_runner.generate_prd(
+                prd_id, brief_id, 0, insight_override=insight, extra_source_md=doc
+            )
+        )
+    finally:
+        loop.close()
+    return captured[0]["input"]
+
+
+_CHAT_DOC = "User: get me a ticket of car\n\nSprntly: KAN-1033 — Build a car driving feature"
+
+
+def test_chat_prd_grounds_on_the_thread_alone(isolated_settings, monkeypatch):
+    """With CHAT_SOURCE_EXCLUSIVE on, a chat PRD sees the user's material and
+    NOTHING from the workspace.
+
+    Reported twice: a PRD requested for Jira ticket KAN-1033 came back about the
+    workspace's unrelated reconditioning/MRT theme, because retrieval matched on
+    the shared word "ticket". Demoting that block below the user's material was
+    not enough — its presence alone kept pulling the document off-topic — so
+    retrieval is skipped for this path entirely.
+    """
+    assert prd_runner.CHAT_SOURCE_EXCLUSIVE is True
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="Chat task")
+
+    user_input = _run_chat_prd(db_mod, brief_id, prd_id, monkeypatch, _CHAT_DOC)
+
+    # The thread is there — including the ASSISTANT's reply, which is where the
+    # ticket actually lives and what used to be dropped.
+    assert "SOURCE MATERIAL — THIS CONVERSATION" in user_input
+    assert "KAN-1033" in user_input
+    # …and the workspace corpus is nowhere in the prompt.
+    assert "corpus body" not in user_input
+    assert "SUPPORTING WORKSPACE CONTEXT" not in user_input
+    # No DANGLING reference to a workspace block either. The first attempt told
+    # the model that workspace context "supplied after this block" was background
+    # only — with retrieval skipped there was no such block, and the model
+    # rendered the reference literally ("[none provided]") and echoed the
+    # transcript back instead of authoring a PRD.
+    assert "BACKGROUND ONLY" not in user_input
+    # Delimited like the import path, and told outright not to restate the chat.
+    assert "--- BEGIN CONVERSATION ---" in user_input
+    assert "INPUT, never output" in user_input
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def test_layered_mode_still_works_when_the_flag_is_flipped_back(
+    isolated_settings, monkeypatch
+):
+    """The experiment is reversible: with CHAT_SOURCE_EXCLUSIVE off, the user's
+    material LEADS and the workspace evidence follows it as background.
+
+    Pinned so the fallback stays working while the thread-only version is being
+    evaluated — flipping one flag must be all it takes to go back.
+    """
+    monkeypatch.setattr(prd_runner, "CHAT_SOURCE_EXCLUSIVE", False)
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="Chat task")
+
+    user_input = _run_chat_prd(db_mod, brief_id, prd_id, monkeypatch, _CHAT_DOC)
+
+    primary_at = user_input.index("PRIMARY SOURCE")
+    supporting_at = user_input.index("SUPPORTING WORKSPACE CONTEXT")
+    corpus_at = user_input.index("corpus body")
+    # User material first, then the demoted workspace block, with the retrieved
+    # evidence inside it — order matters as much as the wording.
+    assert primary_at < supporting_at < corpus_at
+    assert "BACKGROUND ONLY" in user_input
+
+
+def test_no_chat_docs_leaves_prompt_unchanged(isolated_settings, monkeypatch):
+    """extra_source_md=None (every pre-existing caller) must not inject the
+    user-material framing, nor demote its own grounding."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="t")
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert "PRIMARY SOURCE" not in captured[0]["input"]
+    assert "SOURCE MATERIAL — THIS CONVERSATION" not in captured[0]["input"]
+    # The brief/insight paths have no competing user material, so their grounding
+    # is NOT background — it is the evidence, and must not be relabelled.
+    assert "SUPPORTING WORKSPACE CONTEXT" not in captured[0]["input"]

@@ -6,11 +6,16 @@ something sensible. It replaces the "email ourselves the transcripts every
 morning" idea: same information, filterable, and no customer conversation
 content sitting in anyone's inbox.
 
-Auth is a single shared access code (TRANSCRIPTS_ACCESS_CODE_HASH, argon2id)
-→ a 12h JWT with aud=sprntly-transcripts (see app.auth.require_transcripts).
-It is deliberately NOT the staff credential: reading transcripts shouldn't also
-grant the ability to edit entitlements. Unset env ⇒ every route, login
-included, 404s — the surface is invisible, not merely forbidden.
+Auth is a single shared access code → a 12h JWT with aud=sprntly-transcripts
+(see app.auth.require_transcripts). It is deliberately NOT the staff credential:
+reading transcripts shouldn't also grant the ability to edit entitlements.
+
+The code may be TRANSCRIPTS_ACCESS_CODE (plaintext) or
+TRANSCRIPTS_ACCESS_CODE_HASH (argon2id) — and, right now, ALSO the hardcoded
+app.auth.TRANSCRIPTS_DEFAULT_CODE, which is accepted even when an env credential
+is set. So the "unset env ⇒ every route 404s, the surface is invisible" posture
+is currently DISABLED: while that constant is non-empty this surface is live
+wherever it's deployed. Blank it to restore fail-closed.
 
   POST /v1/transcripts/login                  → access-code login → JWT
   GET  /v1/transcripts/companies              → companies that have chats (filter list)

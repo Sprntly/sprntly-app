@@ -103,10 +103,77 @@
     --app-shell-header-min: 82px;
     /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
+
+    /* Scrollbars — see the quiet-scrollbar block below. The gutter is a fixed
+       width in BOTH states; only the thumb's colour changes. */
+    --scroll-gutter: 10px;
+    --scroll-thumb: rgba(18, 32, 26, 0.16);
+    --scroll-thumb-hover: rgba(18, 32, 26, 0.3);
+
+    /* Artifact-panel drawer timing. The panel slide, the main column's
+       padding, and ContentPanel's unmount timer all read these numbers —
+       keep CPANEL_IN_MS / CPANEL_OUT_MS in ContentPanel.tsx in step. */
+    --cpanel-in-ms: 260ms;
+    --cpanel-out-ms: 200ms;
   }
 
   * {
     box-sizing: border-box;
+  }
+
+  /* ── Quiet scrollbars (app-wide) ──────────────────────────────────────────
+     One treatment for every scrolling region: the track is invisible and the
+     thumb is fully TRANSPARENT at rest, tinting in only while the pointer is
+     inside that region. Reading surfaces (the artifact panel's document, the
+     chat thread) then carry no permanent grey rail down their edge, which is
+     what made stacked scroll containers — panel body + PRD scroller — read as
+     "two scrollbars" even when only one of them was scrollable.
+
+     The gutter width is IDENTICAL in both states on purpose. WebKit's styled
+     scrollbars are classic (they occupy layout width), not overlays, so a
+     scrollbar that appeared on hover would reflow the text under it every
+     time the pointer crossed the region. Only the colour changes.
+
+     Firefox has no ::-webkit pseudo-elements; `scrollbar-width` +
+     `scrollbar-color` give it the same rest/hover pair (it swaps the colour
+     without a transition, which is fine — the end states match). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover {
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: var(--scroll-gutter);
+    height: var(--scroll-gutter);
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* 3px transparent border + padding-box clip = a ~4px thumb floating in a
+     10px gutter, so it never crowds the text it sits beside. */
+  *::-webkit-scrollbar-thumb {
+    background: transparent;
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: 8px;
+  }
+
+  *:hover::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--scroll-thumb-hover);
+    background-clip: padding-box;
   }
 
   html,
@@ -256,6 +323,26 @@
   .btn-accent:hover:not(:disabled) {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
+  }
+
+  /* Destructive confirm (delete a ticket, and any future irreversible action).
+     Red is reserved for actions that DESTROY something — never for a plain
+     "are you sure", or it stops carrying any weight. */
+  .btn-danger {
+    background: #DC2626;
+    color: #fff;
+    border-color: #DC2626;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: #B91C1C;
+    border-color: #B91C1C;
+  }
+
+  .btn-danger:disabled {
+    background: #DC2626;
+    color: #fff;
+    border-color: #DC2626;
   }
 
   .btn-ghost {
@@ -1104,7 +1191,15 @@
     overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    transition: padding-left 0.2s ease;
+    /* padding-right eases the column open and shut as the artifact panel
+       slides (see .app--cpanel-open). Declaring it here — the CLOSED state —
+       is what makes the closing direction animate at all: a transition
+       declared only on the open-state rule stops existing the moment that
+       class comes off, so the column used to snap shut. This copy carries the
+       EXIT timing; .app--cpanel-open carries the (longer) entry timing, which
+       is how the column matches the panel in both directions. */
+    transition: padding-left 0.2s ease,
+      padding-right var(--cpanel-out-ms, 200ms) var(--ease);
   }
 
   .main-column>.main {
@@ -1192,7 +1287,7 @@
        but WITHOUT this its overflow leaked up to .main-column (overflow-y:auto),
        so the whole page scrolled — dragging the pinned composer up with it once
        a thread grew past the viewport. Clipping here keeps the scroll INSIDE the
-       thread and pins the composer, exactly as the Weekly-brief tab already does. */
+       thread and pins the composer, exactly as the Top Insights tab already does. */
     overflow: hidden;
   }
 
@@ -1201,6 +1296,263 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* Chat tab strip — the grey browser-style bar above the thread. It carries
+     the chrome (border, background, height) so the tab list nested inside can
+     scroll on its own while the artifact button stays pinned to the right end.
+     Tab styling itself is still inline on the tabs; only the strip's two-part
+     layout and the button live here. */
+  .chat-tab-strip {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    height: 44px;
+    flex-shrink: 0;
+    /* MUST stay. The strip is a grid item of .od-layout, whose single auto
+       column is floored by its items' min-content width — and a strip full of
+       nowrap tabs measures far wider than the column. Without this the track
+       inflates to the tabs' natural width, so the whole chat (thread, decision
+       cards, composer) is laid out wider than .main-column and clipped at its
+       edge — reading as "the artifact panel is covering the chat" the moment
+       the panel's padding-right narrows the column. .od-center carries the same
+       min-width: 0 for the same reason. The strip's own tab list scrolls
+       (overflow-x on the inner div), so nothing is lost by letting it shrink —
+       BEFORE this wrapper existed, that scrolling list WAS the grid item and
+       its scroll container gave it a 0 automatic minimum size for free. */
+    min-width: 0;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-2, #f7f5f0);
+  }
+
+  /* The strip's scrolling half, and the wrapper that carries its overflow
+     fades. Now that the strip shrinks with the column (min-width: 0 above), a
+     few open tabs genuinely overflow it whenever the artifact panel is open.
+     A scrollbar — even a slim one — is the wrong affordance inside a 44px
+     strip: it eats a third of the tab height and sits directly on the seam
+     where the active tab merges into the content below. So the bar is hidden
+     outright and the overflow is signalled by a fade at whichever edge still
+     has tabs beyond it (data-ov, set by ChatScreen). */
+  .chat-tab-scroller {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .chat-tab-scroller::before,
+  .chat-tab-scroller::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 28px;
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.18s var(--ease, ease);
+  }
+
+  /* Same token the strip paints itself with, so the fade always resolves to the
+     strip's own colour. The far stop is bare `transparent` — gradients
+     interpolate premultiplied, so it fades to nothing rather than through a
+     white (or black) haze the way an explicit rgba(…, 0) would risk. */
+  /* Offset past the PINNED Top Insights tab (--tab-pin-w, measured by
+     ChatScreen's syncTabOverflow), which sticks to the strip's left edge while
+     the chat tabs scroll under it. Anchored at 0 the fade would either wash over
+     the pin or hide behind it; starting at the pin's right edge is what makes it
+     read as "tabs have scrolled away under here". Falls back to 0 before the
+     first measure, which is the pre-pin behaviour. */
+  .chat-tab-scroller::before {
+    left: var(--tab-pin-w, 0px);
+    background: linear-gradient(90deg, var(--surface-2, #f7f5f0) 15%, transparent 100%);
+  }
+
+  .chat-tab-scroller::after {
+    right: 0;
+    background: linear-gradient(270deg, var(--surface-2, #f7f5f0) 15%, transparent 100%);
+  }
+
+  .chat-tab-scroller[data-ov~="start"]::before,
+  .chat-tab-scroller[data-ov~="end"]::after {
+    opacity: 1;
+  }
+
+  .chat-tab-list {
+    /* Bar hidden in every engine; the fades above carry the affordance. */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    /* NO `scroll-behavior: smooth` here. The scrollLeft setter obeys it, so it
+       animated the wheel and drag gestures too — every tick queued its own
+       animation and the strip lagged behind the pointer. The one scroll that
+       SHOULD glide (bringing a selected tab into view) asks for it explicitly,
+       via scrollTo({behavior:"smooth"}) in ChatScreen. */
+    overscroll-behavior-x: contain;
+  }
+
+  .chat-tab-list::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  /* Drag-to-pan (ChatScreen adds .is-panning for the duration of the gesture).
+     The grab cursor has to beat the tabs' own `cursor: pointer`, hence the
+     descendant selector; text selection would otherwise sweep across the labels
+     as the pointer moves. */
+  .chat-tab-list.is-panning,
+  .chat-tab-list.is-panning * {
+    cursor: grabbing;
+    user-select: none;
+  }
+
+  /* Tab separators, Chrome's rule: a hairline between adjacent tabs, so a strip
+     of narrow tabs reads as distinct cards instead of one run-on row. It is
+     drawn on a tab's LEFT edge and suppressed wherever a real edge already
+     divides them — either side of the active tab (which is a bordered card) and
+     either side of a hovered tab (which gets its own tinted background). The
+     first tab has no separator: `+ .chat-tab` never matches it.
+
+     Every rule here is scoped to :not([data-tab-active]) because the ACTIVE
+     tab's ::before is something else entirely — its left shoulder (below). The
+     two must never match the same element. */
+  .chat-tab-list .chat-tab + .chat-tab:not([data-tab-active])::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 18px;
+    background: var(--line, #E8E6E0);
+    transition: opacity 0.12s var(--ease, ease);
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active] + .chat-tab:not([data-tab-active])::before,
+  .chat-tab-list .chat-tab:not([data-tab-active]):hover::before,
+  .chat-tab-list .chat-tab:hover + .chat-tab:not([data-tab-active])::before {
+    opacity: 0;
+  }
+
+  /* ── The active tab's shoulders ────────────────────────────────────────────
+     Chrome's tab isn't a plain rounded rectangle: at the bottom its sides flare
+     OUTWARD on a concave curve that lands on the toolbar line, so the tab reads
+     as a physical tab merging into the page rather than a card sitting on top
+     of it. That flare is what these two pseudo-elements draw — ::before the left
+     shoulder, ::after the right.
+
+     Each is an 8px box parked just outside the tab's bottom corner, painted by a
+     radial-gradient centred on the corner NEAREST the strip: inside the radius
+     it's transparent (the strip shows through, carving the concave curve), a
+     1px ring of --line continues the tab's own border around that curve, and
+     everything beyond is the tab's fill flowing down into the content area.
+     The gradient is tangent to the tab's vertical edge where they meet, which is
+     what keeps the join invisible.
+
+     The 9px width is 8px of shoulder + 1px lapping back OVER the tab's own
+     side border, so that border stops at the curve instead of continuing as a
+     stub down the inside of it. */
+  .chat-tab-list .chat-tab[data-tab-active]::before,
+  .chat-tab-list .chat-tab[data-tab-active]::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    width: 9px;
+    height: 8px;
+    pointer-events: none;
+    /* Neutralises the separator rule's centring transform, in case a future
+       edit lets both match. */
+    top: auto;
+    transform: none;
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active]::before {
+    left: -8px;
+    background: radial-gradient(
+      circle at top left,
+      transparent 6.9px,
+      var(--line, #E8E6E0) 7.1px,
+      var(--line, #E8E6E0) 7.9px,
+      var(--surface, #fff) 8.1px
+    );
+  }
+
+  .chat-tab-list .chat-tab[data-tab-active]::after {
+    right: -8px;
+    background: radial-gradient(
+      circle at top right,
+      transparent 6.9px,
+      var(--line, #E8E6E0) 7.1px,
+      var(--line, #E8E6E0) 7.9px,
+      var(--surface, #fff) 8.1px
+    );
+  }
+
+  /* Hover on an inactive tab — the other half of telling narrow tabs apart:
+     the one under the pointer lifts out of the strip before you click it.
+     Inline styles set the background, so this needs the extra specificity. */
+  .chat-tab-list .chat-tab:not([data-tab-active]):hover {
+    background: var(--surface-3, rgba(0, 0, 0, 0.04)) !important;
+  }
+
+  /* The pinned tab keeps the scrolling tabs off itself with a real border
+     rather than a separator: the separator belongs to the tab on its right,
+     which slides away under the pin. Only when inactive — active, its own card
+     border already does the job. The 1px is already reserved (the inline style
+     paints it transparent), so nothing shifts. */
+  .chat-tab-list .chat-tab--pinned:not([data-tab-active]) {
+    border-right-color: var(--line, #E8E6E0) !important;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chat-tab-scroller::before,
+    .chat-tab-scroller::after { transition: none; }
+    .chat-tab-list .chat-tab::before { transition: none; }
+  }
+
+  /* The way back to a closed artifact panel. An accent disc, because it's the
+     only ACTION in a strip that is otherwise pure navigation — it needs to
+     read as a button at a glance without competing with the active tab for
+     attention, which is why it's tinted rather than filled, and icon-only
+     rather than a labelled pill. Its name lives in `title` + `aria-label`. */
+  .chat-artifact-reopen {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    margin: 0 12px 0 10px;
+    padding: 0;
+    color: var(--accent-ink);
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-alpha-22);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.14s var(--ease, ease), border-color 0.14s,
+      box-shadow 0.14s, transform 0.14s;
+  }
+
+  .chat-artifact-reopen:hover {
+    background: var(--accent-soft);
+    border-color: var(--accent-alpha-40);
+    box-shadow: 0 1px 3px rgba(23, 148, 99, 0.16);
+  }
+
+  .chat-artifact-reopen:active {
+    transform: translateY(1px);
+    box-shadow: none;
+  }
+
+  .chat-artifact-reopen:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-alpha-18);
+  }
+
+  .chat-artifact-reopen svg {
+    flex-shrink: 0;
+    opacity: 0.9;
   }
 
   /* .home-chat-root>.od-layout {
@@ -1231,9 +1583,15 @@
     box-sizing: border-box;
   }
 
+  /* 820px, matched to `.bc-dock`/`.bc-thread` (868px cap − 48px padding). The
+     landing composer used to cap at 760 while the dock capped at 976, so the
+     first send grew the box 216px wider in the same frame it shrank 24px
+     shorter. One number now governs the composer before and after the send AND
+     the thread between them — narrowing only one of the three would replace the
+     jump with a composer/thread edge mismatch. */
   .home-landing-composer {
     width: 100%;
-    max-width: 760px;
+    max-width: 820px;
     margin: 22px auto 0;
   }
 
@@ -1250,13 +1608,17 @@
     box-sizing: border-box;
   }
 
+  /* No cap of its own — the starter chips sit inside `.home-landing-composer`
+     and must span exactly the composer above them. The old `max-width: 760px`
+     was already redundant with that parent's 760, and became visibly wrong the
+     moment the composer moved to 820; letting the parent govern is what stops it
+     drifting again. */
   .home-chip-row--under-chat {
     justify-content: center;
     flex-wrap: wrap;
     gap: 10px;
     padding: 14px 0 0;
     margin: 0 auto;
-    max-width: 760px;
   }
 
   .home-chip-row--under-chat .home-chip {
@@ -2151,7 +2513,7 @@
     width: 100%;
   }
 
-  /** Weekly brief, Evidence, PRD — same max width as hub screens, less outer gutter + bottom pad. */
+  /** Top Insights, Evidence, PRD — same max width as hub screens, less outer gutter + bottom pad. */
   .main.main--reading {
     max-width: 1120px;
     padding: 12px 24px 56px;
@@ -2212,7 +2574,7 @@
     margin-right: 0;
   }
 
-  /** Weekly brief only — extra vertical rhythm (headline · company row · cards). */
+  /** Top Insights only — extra vertical rhythm (headline · company row · cards). */
   .main.main--brief .main-header {
     margin-bottom: 30px;
   }
@@ -2328,134 +2690,305 @@
     font-weight: 600;
   }
 
-  .chat-home-composer {
+  /* ── Composer (`.cx-*`) ───────────────────────────────────────────────────
+     ONE class family for both chat composers. There used to be two — the
+     landing's `.chat-home-composer` here and the dock's `.bc-composer` 5,500
+     lines away — and they had drifted on width (760 vs 976), resting height
+     (≈125 vs ≈101), textarea clamp (min(200px,36vh) vs a flat 200px), and even
+     on tokens: this block hardcoded #12201a26, #179463, #dbf1e7 and #aab3ae
+     while the dock used --line-strong, --accent, --accent-soft and --ink-4 for
+     the same four things.
+     `.cx--home` is now the ONLY difference — type size and shadow. Anatomy is
+     header (chips) → textarea → footer bar, so the card grows in one direction
+     instead of two.
+
+     Resting height is 118px on both: 60px input + 1px bar border + 8/38/9 bar
+     + 2px card borders. `min-height` is border-box (see the universal
+     box-sizing at the top of this file), so it is the whole lever — the dock's
+     old `min-height: 30px` was inert next to 24px of padding and one 14px
+     line. */
+  .cx {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 0;
     width: 100%;
-    padding: 14px 16px 12px;
-    border: 1px solid #12201a26;
-    border-radius: 16px;
-    background: #fff;
-    box-shadow: 0 1px 0 rgba(18,32,26,.02), 0 14px 36px -18px rgba(18,32,26,.10);
-    transition: box-shadow 0.15s;
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow 0.15s var(--ease), border-color 0.15s var(--ease);
   }
 
-  .chat-home-composer:focus-within {
-    box-shadow: 0 0 0 4px #dbf1e7,0 1px 0 rgba(18,32,26,.02), 0 14px 36px -18px rgba(18,32,26,.10);
-    border-color: #179463;
+  .cx--home {
+    box-shadow: var(--shadow-md);
   }
 
-  .chat-home-composer-input {
-    flex: 1;
+  .cx:focus-within {
+    border-color: var(--accent-alpha-40);
+    box-shadow: var(--shadow-lg), 0 0 0 3px var(--accent-alpha-08);
+  }
+
+  /* Chips ABOVE the text: an attachment row under the whole card made it grow
+     downward while the textarea grew upward. */
+  .cx-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px 0;
+  }
+
+  .cx-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 230px;
+    padding: 4px 6px 4px 9px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    font-size: 11.5px;
+    color: var(--ink-2);
+  }
+
+  .cx-chip b {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cx-chip--skill {
+    background: var(--accent-muted);
+    border-color: var(--accent-soft);
+    color: var(--accent-ink);
+  }
+
+  .cx-chip-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: currentColor;
+    opacity: 0.6;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+    font-family: inherit;
+  }
+
+  .cx-chip-x:hover {
+    opacity: 1;
+    background: var(--surface-4);
+  }
+
+  .cx-input {
+    display: block;
+    width: 100%;
     min-width: 0;
     border: none;
     outline: none;
     background: transparent;
-    font-size: 15px;
-    padding: 4px 4px 8px;
-    line-height: 1.45;
-    color: var(--ink);
     resize: none;
-    min-height: 54px;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+    padding: 14px 16px 8px;
+    min-height: 60px;
+    /* The dock used a flat 200px. The clamp only engages below a ~555px
+       viewport height, so this is a split-screen / short-window guard rather
+       than a laptop one — but there is no reason for the two to differ. */
     max-height: min(200px, 36vh);
     overflow-y: auto;
-    font-family: inherit;
   }
 
-  .chat-home-composer-input::placeholder {
-    color: #aab3ae;
+  .cx--home .cx-input {
+    font-size: 15px;
+    padding: 16px 18px 8px;
   }
 
-  .chat-home-composer-footer {
+  .cx-input::placeholder {
+    color: var(--ink-4);
+  }
+
+  .cx-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-top: 6px;
-    margin-top:2px;
-    border-top: 1px dashed #12201a17;
+    gap: 8px;
+    padding: 8px 10px 9px;
+    border-top: 1px solid var(--line);
   }
 
-  .chat-home-composer-actions {
+  .cx-tools {
     display: flex;
     align-items: center;
     gap: 2px;
+    min-width: 0;
   }
 
-  .chat-home-action-btn {
+  .cx-tool {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 5px 10px;
-    border: none;
-    background: none;
-    font-size: 11.5px;
+    gap: 6px;
+    font-size: 12.5px;
     font-weight: 500;
     color: var(--ink-3);
+    background: none;
+    border: none;
+    padding: 5px 9px;
+    border-radius: 7px;
     cursor: pointer;
-    border-radius: 6px;
     font-family: inherit;
-    transition: background 0.12s, color 0.12s;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
   }
 
-  .chat-home-action-btn:hover {
+  .cx-tool:hover {
     background: var(--surface-3);
-    color: var(--ink-2);
+    color: var(--ink);
   }
 
-  .chat-home-composer-send {
+  .cx-tool--plus {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    justify-content: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .cx-kbd {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 2px;
+    padding: 4px;
+  }
+
+  .cx-kbd kbd {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.4;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--ink-3);
+  }
+
+  .cx-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Only rendered inside the last 10% of the question budget — a permanent
+     counter is chrome that says nothing 99% of the time. */
+  .cx-count {
+    font-size: 11px;
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Send and Stop are the SAME box in the SAME place, so flipping between them
+     on send moves nothing. */
+  .cx-send {
     flex-shrink: 0;
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    border: 1px solid var(--chat-user-border);
-    background: var(--chat-user-bubble);
-    color: var(--ink);
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
-    font-weight: 600;
-    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
   }
 
-  /* Once there's a sendable message (the button is enabled), the send turns
-     green — an at-a-glance "ready to send" affordance in a new chat. An empty or
-     too-short draft keeps it neutral (and faded via :disabled below). */
-  .chat-home-composer-send:not(:disabled) {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-
-  .chat-home-composer-send:hover:not(:disabled) {
+  .cx-send:hover:not(:disabled) {
     background: var(--accent-hover);
-    border-color: var(--accent-hover);
-    box-shadow: var(--shadow-md);
   }
 
-  .chat-home-composer-send:disabled {
-    opacity: 0.35;
+  .cx-send:disabled {
+    background: var(--surface-3);
+    color: var(--ink-4);
     cursor: not-allowed;
   }
 
-  /* Stop variant — replaces Send while an ask is generating. Dark button with a
-     white glyph so it reads as "halt", distinct from the green send affordance. */
-  .chat-home-composer-send--stop,
-  .chat-home-composer-send--stop:not(:disabled) {
+  .cx-send--stop {
     background: var(--ink);
-    border-color: var(--ink);
     color: #fff;
   }
 
-  .chat-home-composer-send--stop:hover:not(:disabled) {
+  .cx-send--stop:hover:not(:disabled) {
     background: var(--ink);
-    border-color: var(--ink);
     opacity: 0.85;
-    box-shadow: var(--shadow-md);
+  }
+
+  .cx-hint {
+    padding: 0 14px 10px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  .cx-hint b {
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+
+  /* The `+` action menu. 78 skills used to be reachable only by typing "/" or
+     already knowing ⌘/, so a person who never read the hint never learnt they
+     existed. */
+  .cx-menu {
+    position: absolute;
+    bottom: 52px;
+    left: 8px;
+    width: 236px;
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    padding: 5px;
+    z-index: 21;
+  }
+
+  .cx-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 8px 9px;
+    border: none;
+    background: none;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--ink-2);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .cx-menu-item:hover,
+  .cx-menu-item.is-active {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .cx-menu-item small {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-4);
   }
 
   .chat-landing-cards {
@@ -4430,6 +4963,20 @@
     justify-content: flex-end;
   }
 
+  /* ConfirmDialog — a question, not a workspace: narrower than the 560px
+     option-picker modals so the sentence stays one comfortable measure. */
+  .modal.cfm {
+    max-width: 420px;
+  }
+
+  .modal.cfm .modal-title {
+    font-size: 19px;
+  }
+
+  .modal.cfm .modal-foot {
+    padding: 18px 24px 20px;
+  }
+
   /* ---------- Right-side drawers ---------- */
   .drawer-overlay {
     position: fixed;
@@ -4603,11 +5150,19 @@
   /* -------- Content Panel (Evidence / PRD / Tickets) -------- */
   /* Width driven by --cpanel-width on <html> (set by the resize handle).
      Both the panel and padding-right read the same var so they stay in sync.
-     Hard-capped at 60vw — panel never takes more than 60% of the screen. */
+     Unresized, the panel opens at 35% and leaves the thread 65%. The clamp
+     bounds mirror clampCpanelWidth() in ContentPanel, so the first drag picks
+     up exactly where the default sat instead of jumping to another floor. */
+  /* Entry timing only. A transition applies with the value the element is
+     transitioning TO, so adding this class uses the duration below (matching
+     .cpanel--in) and removing it falls back to the base .main-column rule's
+     shorter one (matching .cpanel--out) — the column and the panel's edge
+     travel together in both directions. */
   .app--cpanel-open .main-column {
-    padding-right: min(var(--cpanel-width, 60vw), 60vw);
+    padding-right: clamp(420px, var(--cpanel-width, 35vw), 60vw);
     box-sizing: border-box;
-    transition: padding-right 0.22s ease;
+    transition: padding-left 0.2s ease,
+      padding-right var(--cpanel-in-ms, 260ms) var(--ease);
   }
 
   .cpanel-overlay {
@@ -4620,7 +5175,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(var(--cpanel-width, 60vw), 60vw);
+    width: clamp(420px, var(--cpanel-width, 35vw), 60vw);
     max-width: 60vw;
     z-index: 50;
     background: #fff;
@@ -4629,6 +5184,64 @@
     flex-direction: column;
     box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08);
     transition: width 0.22s ease;
+  }
+
+  /* Enter/exit: a drawer slide on the compositor (transform + opacity), timed
+     and eased to match the main column's padding so the two edges travel
+     together instead of one chasing the other.
+
+     The transform is applied by a SHORT-LIVED class, not left on .cpanel —
+     ContentPanel drops `.cpanel--in` once the animation ends. A transform on
+     the panel makes it the containing block for `position: fixed` children,
+     and the panel has several (the ticket destination picker's click-away
+     backdrop, the Jira push modal): pinned to the panel instead of the
+     viewport, those stop covering the page. So the transform exists only for
+     the ~260ms it is actually animating. */
+  .cpanel--in {
+    animation: cpanel-in var(--cpanel-in-ms, 260ms) var(--ease) both;
+  }
+
+  .cpanel--out {
+    animation: cpanel-out var(--cpanel-out-ms, 200ms) var(--ease) both;
+    /* The panel is on its way out — don't let a click land on it mid-flight. */
+    pointer-events: none;
+  }
+
+  @keyframes cpanel-in {
+    from {
+      transform: translate3d(100%, 0, 0);
+      opacity: 0;
+    }
+    to {
+      transform: translate3d(0, 0, 0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes cpanel-out {
+    from {
+      transform: translate3d(0, 0, 0);
+      opacity: 1;
+    }
+    to {
+      transform: translate3d(100%, 0, 0);
+      opacity: 0;
+    }
+  }
+
+  /* Reduced motion: the panel still opens and closes, it just doesn't travel.
+     Both .main-column selectors are listed because the open-state one outranks
+     a bare `.main-column` here and would otherwise keep its transition. */
+  @media (prefers-reduced-motion: reduce) {
+    .cpanel--in,
+    .cpanel--out {
+      animation: none;
+    }
+
+    .main-column,
+    .app--cpanel-open .main-column {
+      transition: none;
+    }
   }
 
   /* Left-edge drag handle */
@@ -4665,6 +5278,22 @@
   html.cpanel-resizing {
     cursor: ew-resize;
     user-select: none;
+  }
+
+  /* Everything the cursor crosses mid-drag keeps the resize cursor — otherwise
+     it flickers to a pointer/text caret over each button and paragraph the
+     panel edge sweeps past, which reads as the drag having let go. */
+  html.cpanel-resizing * {
+    cursor: ew-resize !important;
+  }
+
+  /* The panel body hosts iframes (PRD and report frames). An iframe consumes
+     the pointer stream in its own document, so a drag whose edge crossed one
+     used to freeze and then keep running past the release. Pointer capture is
+     the real fix (see ContentPanel); this makes the frames inert for the
+     duration so nothing inside them can react to a gesture that isn't theirs. */
+  html.cpanel-resizing iframe {
+    pointer-events: none;
   }
 
   html.cpanel-resizing .cpanel,
@@ -4802,6 +5431,12 @@
   .cpanel-body:has(.ev-panel) {
     padding: 0;
     overflow: hidden;
+  }
+
+  /* Reports tab — a report is a full-bleed HTML document in an iframe, so the
+     panel's 24px reading gutter only shrinks the page it is trying to show. */
+  .cpanel-body:has(.reports-panel) {
+    padding: 10px;
   }
 
   .cpanel-empty {
@@ -5779,7 +6414,7 @@
     background: var(--accent-hover);
   }
 
-  /* -------- Weekly Brief chat surface (reference image 2) -------- */
+  /* -------- Top Insights chat surface (reference image 2) -------- */
   /* Fill the main column: fixed header on top, scrolling thread in the middle,
      floating composer pinned at the bottom. The inner .bc-scroll is the scroll
      container (not .main-column), so the header + composer stay put while the
@@ -5884,30 +6519,8 @@
     min-height: 0;
     overflow-y: auto;
     padding: 18px 0 10px;
-    /* Slim, light scrollbar (Firefox) */
-    scrollbar-width: thin;
-    scrollbar-color: rgba(18, 32, 26, 0.16) transparent;
-  }
-
-  /* Slim, light scrollbar (WebKit/Chromium) — ~6px visible thumb, padded */
-  .bc-scroll::-webkit-scrollbar {
-    width: 10px;
-  }
-
-  .bc-scroll::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .bc-scroll::-webkit-scrollbar-thumb {
-    background: rgba(18, 32, 26, 0.16);
-    border-radius: 8px;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-  }
-
-  .bc-scroll::-webkit-scrollbar-thumb:hover {
-    background: rgba(18, 32, 26, 0.28);
-    background-clip: padding-box;
+    /* Scrollbar styling is the app-wide quiet treatment (top of this file) —
+       transparent at rest, tinting in while the pointer is over the thread. */
   }
 
   /* Persistent PM-agent intro — the always-on educational line above the
@@ -6117,9 +6730,13 @@
     min-width: 0;
   }
 
+  /* 868 − 48px padding = an 820px column, matched to the composer. At the old
+     1024 cap the prose ran ~119 characters per line (after this padding and
+     `.bc-agent-body`'s 38px agent gutter) against a 45–75 comfortable band; 820
+     lands at ~66. Moves with `.bc-dock` — the two are one decision. */
   .bc-thread {
     width: 100%;
-    max-width: 1024px;
+    max-width: 868px;
     margin: 0 auto;
     padding: 0 24px;
     display: flex;
@@ -6183,6 +6800,13 @@
     line-height: 1.5;
     overflow-wrap: anywhere;
     word-break: break-word;
+    /* The member's own line breaks are kept. A multi-line ask (Shift+Enter, a
+       pasted list) reaches the thread and the database with its newlines intact
+       — the default `white-space: normal` collapsed every one of them, so a
+       carefully structured question came back as a single run-on line the
+       moment it was sent. Mirrors .tvw-turn-body--plain in the staff
+       transcript viewer, which has always kept them. */
+    white-space: pre-wrap;
   }
 
   /* Attached-file cards on a user turn — shown INSTEAD of dumping the document
@@ -7229,7 +7853,7 @@
     font-weight: 600;
   }
 
-  /* Per-card "From · source · source" provenance row — the weekly-brief skill's
+  /* Per-card "From · source · source" provenance row — the top-insights skill's
      honest source chips (replaces the legacy mini-chart + KPI stat columns). */
   .fc-from {
     display: flex;
@@ -7314,6 +7938,186 @@
   .bc-action-btn--primary:hover:not(:disabled) {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
+  }
+
+  /* Clarify-first gate: the whole question batch as ONE answerable card
+     (ClarifyQuestionsCard). Rendered inside an existing .bc-agent-body, so it
+     styles only its own internals and inherits the agent chrome. */
+  .cqc-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .cqc-intro {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink);
+  }
+
+  .cqc-list {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .cqc-q {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-left: 14px;
+    /* A quiet spine down the batch: each question reads as its own unit without
+       four heavy boxes stacking up in the thread. */
+    border-left: 2px solid var(--line);
+  }
+
+  .cqc-q-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .cqc-q-num {
+    flex: none;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cqc-q-prompt {
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .cqc-q-check {
+    flex: none;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 12px;
+  }
+
+  .cqc-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .cqc-choice {
+    font-size: 12px;
+    padding: 5px 11px;
+    /* Options are frequently a full clause ("p95 targets per surface"), so they
+       wrap inside the pill rather than forcing a horizontal scroll. */
+    text-align: left;
+    white-space: normal;
+  }
+
+  .cqc-choice--active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--surface-3);
+  }
+
+  .cqc-choice--other {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  .cqc-choice--other:hover:not(:disabled) {
+    color: var(--ink-2);
+  }
+
+  .cqc-input {
+    width: 100%;
+    min-height: 56px;
+    resize: vertical;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .cqc-skip-hint {
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink-4);
+  }
+
+  .cqc-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 2px;
+  }
+
+  .cqc-count {
+    font-size: 11.5px;
+    color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Settled batch — the same blocks, now a read-only record. Deliberately keeps
+     the numbering and the left spine so the answered form is recognisably the
+     thing that was answered, rather than a different-looking summary. */
+  .cqc-intro--resolved {
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+
+  .cqc-card--resolved .cqc-list {
+    gap: 12px;
+  }
+
+  .cqc-q--resolved {
+    gap: 4px;
+  }
+
+  /* An answered question earns the accent spine; a skipped one stays quiet, so
+     the shape of the decision is readable at a glance. */
+  .cqc-q--answered {
+    border-left-color: var(--accent);
+  }
+
+  .cqc-answer {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink);
+    /* Typed answers can be multi-line; keep the author's own breaks. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .cqc-answer-check {
+    flex: none;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 11.5px;
+  }
+
+  .cqc-answer-text {
+    font-weight: 600;
+  }
+
+  .cqc-answer--skipped {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--ink-4);
+    font-style: italic;
   }
 
   /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
@@ -7442,11 +8246,14 @@
 
   /* Composer dock — transparent so the composer + suggestions float over the
      thread rather than sitting on a grey footer panel. */
+  /* 868 − 48px padding = an 820px card, identical to `.bc-thread`'s column and
+     to `.home-landing-composer`. `.bc-suggest` below pins to `right: 24px` of
+     THIS box, so it tracks the new edge without a change of its own. */
   .bc-dock {
     position: relative;
     flex-shrink: 0;
     width: 100%;
-    max-width: 1024px;
+    max-width: 868px;
     margin: 0 auto;
     padding: 0 24px 16px;
     background: transparent;
@@ -7650,134 +8457,10 @@
     .chat-slash-enter { transition: none; }
   }
 
-  .bc-composer {
-    background: transparent;
-    border: 1px solid var(--line-strong);
-    border-radius: 18px;
-    box-shadow: var(--shadow-sm);
-    overflow: hidden;
-  }
-
-  .bc-composer:focus-within {
-    border-color: var(--accent-alpha-40);
-    box-shadow: var(--shadow-lg), 0 0 0 3px var(--accent-alpha-08);
-  }
-
-  .bc-composer-input {
-    display: block;
-    width: 100%;
-    border: none;
-    background: transparent;
-    resize: none;
-    padding: 15px 18px 9px;
-    font-size: 14px;
-    font-family: inherit;
-    line-height: 1.5;
-    color: var(--ink);
-    min-height: 30px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .bc-composer-input:focus {
-    outline: none;
-  }
-
-  .bc-composer-input::placeholder {
-    color: var(--ink-4);
-  }
-
-  .bc-composer-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 8px 10px 9px;
-    border-top: 1px solid var(--line);
-  }
-
-  .bc-composer-tools {
-    display: flex;
-    gap: 2px;
-    min-width: 0;
-    flex-wrap: wrap;
-  }
-
-  .bc-tool {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ink-3);
-    background: none;
-    border: none;
-    padding: 5px 9px;
-    border-radius: 7px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-    white-space: nowrap;
-  }
-
-  .bc-tool:hover {
-    background: var(--surface-3);
-    color: var(--ink);
-  }
-
-  .bc-tool-kbd {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    margin-left: 2px;
-    padding: 4px 4px;
-  }
-
-  .bc-tool-kbd kbd {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    line-height: 1.4;
-    background: var(--surface-3);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 1px 5px;
-    color: var(--ink-3);
-  }
-
-  .bc-send {
-    flex-shrink: 0;
-    width: 38px;
-    height: 38px;
-    border-radius: 11px;
-    border: none;
-    background: var(--accent);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: background 0.15s, opacity 0.15s;
-  }
-
-  .bc-send:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .bc-send:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  /* Stop variant — replaces Send while an ask is generating. Dark button with a
-     white glyph so it reads as "halt", distinct from the accent send button. */
-  .bc-send--stop {
-    background: var(--ink);
-    color: #fff;
-  }
-
-  .bc-send--stop:hover:not(:disabled) {
-    background: var(--ink);
-    opacity: 0.85;
-  }
+  /* `.bc-composer` / `.bc-composer-input` / `.bc-composer-bar` / `.bc-tool` /
+     `.bc-send` used to live here — the dock's private copy of the composer.
+     They are gone: both composers now render the `.cx-*` family defined beside
+     `.chat-greeting-sub`, which is what stops the two drifting apart again. */
 
   .bc-hints {
     display: flex;
@@ -8934,18 +9617,169 @@
   }
 
   /* Assistant “thinking” placeholder (POST in flight — skeleton + indeterminate bar) */
-  .assistant-thinking {
+  /* ── The wait (`.cw-*`) ───────────────────────────────────────────────────
+     The chat waiting surface: status line, indeterminate bar, skeleton, pacing
+     notes and the terminal stopped/timed-out/failed states. Replaces
+     `.assistant-thinking*`, whose label line existed to type out one of ten
+     randomly-picked sentences. `.assistant-skel-line` below is deliberately
+     KEPT and reused — the onboarding ReviewStep shares its nth-child widths. */
+  .cw {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 10px;
     min-width: 0;
   }
 
-  .assistant-thinking--compact {
-    gap: 10px;
+  .cw-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 20px;
   }
 
-  .assistant-thinking-bar {
+  .cw-orb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: conic-gradient(from 0deg, var(--accent-2), var(--accent), var(--accent-2));
+    animation: cw-spin 1.4s linear infinite;
+    position: relative;
+  }
+
+  .cw-orb::after {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--surface-2);
+  }
+
+  @keyframes cw-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .cw-phase {
+    font-size: 12.5px;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
+
+  .cw-skill {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  .cw-note {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .cw-long {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--info-soft);
+    border: 1px solid var(--info-border);
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .cw-long--warn {
+    background: var(--warn-soft);
+    border-color: var(--warn-border);
+  }
+
+  .cw-long-mark {
+    color: var(--info);
+    flex-shrink: 0;
+    font-weight: 700;
+  }
+
+  .cw-long--warn .cw-long-mark {
+    color: var(--warn);
+  }
+
+  .cw-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .cw-btn {
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+
+  .cw-btn:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .cw-btn--primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .cw-btn--primary:hover {
+    background: var(--accent-hover);
+    color: #fff;
+  }
+
+  /* The stopped note is muted and italic, NOT red — a stop is a choice, not a
+     failure. */
+  .cw-stopped {
+    color: var(--ink-4);
+    font-size: 13px;
+    line-height: 1.5;
+    font-style: italic;
+  }
+
+  .cw-err {
+    padding: 11px 13px;
+    border-radius: var(--radius-sm);
+    background: var(--danger-soft);
+    border: 1px solid var(--danger-border);
+    color: var(--danger-ink);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .cw-err b {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  /* Streamed text held after the live preview dropped — marked as frozen rather
+     than left looking live. */
+  .cw-partial {
+    border-left: 2px solid var(--accent-soft);
+    padding-left: 12px;
+  }
+
+  .cw-bar {
     position: relative;
     height: 3px;
     border-radius: 999px;
@@ -8953,7 +9787,7 @@
     overflow: hidden;
   }
 
-  .assistant-thinking-bar-pill {
+  .cw-bar-pill {
     position: absolute;
     top: 0;
     left: 0;
@@ -8961,10 +9795,10 @@
     height: 100%;
     border-radius: 999px;
     background: linear-gradient(90deg, var(--accent-2), var(--accent));
-    animation: assistant-thinking-pill 1.35s ease-in-out infinite;
+    animation: cw-bar-sweep 1.35s ease-in-out infinite;
   }
 
-  @keyframes assistant-thinking-pill {
+  @keyframes cw-bar-sweep {
     0% {
       left: -36%;
       opacity: 0.85;
@@ -8980,14 +9814,14 @@
     }
   }
 
-  .assistant-thinking-skel {
+  .cw-skel {
     display: flex;
     flex-direction: column;
     gap: 10px;
     min-width: 0;
   }
 
-  .assistant-thinking--compact .assistant-thinking-skel {
+  .cw--compact .cw-skel {
     gap: 8px;
   }
 
@@ -9013,7 +9847,7 @@
     animation: assistant-skel-glide 1.2s ease-in-out infinite;
   }
 
-  .assistant-thinking--compact .assistant-skel-line {
+  .cw--compact .assistant-skel-line {
     height: 9px;
   }
 
@@ -9051,30 +9885,22 @@
     }
   }
 
-  .assistant-thinking-label {
-    font-size: 10px;
-    line-height: 1.35;
-    /* Reserve one line so the label doesn't jump while a message types in */
-    min-height: 1.35em;
-    color: var(--muted);
-  }
-
-  .assistant-thinking--compact .assistant-thinking-label {
-    font-size: 10px;
-  }
-
-  .assistant-thinking-caret {
+  /* Blinking cursor at the tail of a live-streaming answer, so "still writing"
+     is unambiguous rather than inferred from text that happens to be moving. */
+  .cw-cursor {
     display: inline-block;
-    width: 1px;
-    height: 1em;
+    width: 7px;
+    height: 14px;
+    vertical-align: -2px;
     margin-left: 2px;
-    vertical-align: text-bottom;
-    background: currentColor;
-    animation: assistant-thinking-caret-blink 1s steps(2, start) infinite;
+    background: var(--accent);
+    opacity: 0.75;
+    border-radius: 1px;
+    animation: cw-cursor-blink 1s steps(2, start) infinite;
   }
 
-  @keyframes assistant-thinking-caret-blink {
-    0%, 49% { opacity: 1; }
+  @keyframes cw-cursor-blink {
+    0%, 49% { opacity: 0.75; }
     50%, 100% { opacity: 0; }
   }
 
@@ -9107,11 +9933,22 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .assistant-thinking-bar-pill {
+    /* The orb stops, the cursor stops, and the bar parks mid-track rather than
+       sweeping — the wait still READS as indeterminate without any motion. */
+    .cw-bar-pill {
       animation: none;
       left: 12%;
       width: 28%;
       opacity: 1;
+    }
+
+    .cw-orb {
+      animation: none;
+    }
+
+    .cw-cursor {
+      animation: none;
+      opacity: 0.75;
     }
 
     .assistant-skel-line::after {
@@ -12866,6 +13703,120 @@
     white-space: nowrap;
   }
 
+  /* ─── Uploaded document sources + per-category files ───
+     These rows carry a name, an OPTIONAL second line (a source description, or
+     a file's kind · size · added meta) and ONE action (Remove). Borrowing
+     .src-row's file-shaped grid clipped the action whenever a second line was
+     present, so they get their own three-track list and stack name + meta in
+     one cell. */
+  .src-row--source {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+  }
+
+  /* Labeled divider that separates the user's own uploaded documents/files
+     from the connector card(s) above, so an upload never reads as "attached"
+     to a connector. Sits in every category that accepts file uploads. */
+  .set-conn-uploads-head {
+    margin: 20px 0 10px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+
+  .src-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .src-row--source .src-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Picked-file rows in the upload modal: icon, full name, size. The name
+     WRAPS rather than truncating — a filename the user is about to commit to
+     should be readable in full, and the modal has the width to spare. */
+  .src-row--file {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .src-row--file .src-row-name {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
+
+  .src-row--file .src-meta {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .src-row-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+
+  /* Row actions are quiet ghosts at rest — the row is a list item, not a call
+     to action — on the same 6px/11.5px rhythm as `.set-conn-row .ac`. */
+  .src-act {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .src-act i {
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .src-act:hover:not(:disabled) {
+    color: var(--accent-ink);
+    background: var(--accent-muted);
+    border-color: var(--accent-alpha-14);
+  }
+
+  .src-act:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* The destructive action stays neutral at rest and only declares itself on
+     hover — same restraint as `.src-trash`. */
+  .src-act--danger:hover:not(:disabled) {
+    color: var(--danger-ink);
+    background: var(--danger-soft);
+    border-color: var(--danger-border);
+  }
+
+  .src-act--danger:focus-visible {
+    box-shadow: 0 0 0 3px var(--danger-soft);
+  }
+
+  .src-act:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
   .src-trash {
     display: inline-flex;
     align-items: center;
@@ -12889,6 +13840,19 @@
   .src-trash:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* Spin animation for the @tabler/icons-react <IconLoader2> busy spinner used
+     across the connectors pane (trash buttons, upload strips). The `ti`
+     webfont isn't shipped, so these are real SVG components, not font glyphs. */
+  .icon-spin {
+    animation: icon-spin 0.8s linear infinite;
+  }
+
+  @keyframes icon-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .src-dropzone {
@@ -14560,6 +15524,108 @@
     background: var(--surface-2, #fff);
   }
 
+  /* ─── Connectors master/detail split ───
+     Category rail on the left, the selected category's connectors on the
+     right. Fixed rail width so the connector cards don't reflow as the user
+     moves between categories with different name lengths. */
+  .set-conn-split {
+    display: grid;
+    grid-template-columns: 192px minmax(0, 1fr);
+    gap: 24px;
+    align-items: start;
+    /* The detail column drops .set-block's own margin, so the split owns the
+       gap down to the "Uploaded files" block. */
+    margin-bottom: 18px;
+  }
+
+  .set-conn-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .set-conn-rail-item {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    text-align: left;
+    padding: 7px 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .set-conn-rail-item:hover:not(.is-active) {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* Selected category: dark filled pill, per the design mock. */
+  .set-conn-rail-item.is-active {
+    background: var(--ink);
+    color: var(--paper);
+    font-weight: 500;
+  }
+
+  .set-conn-rail-item:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* The detail column is a plain container, not a card — the connector rows
+     inside it carry their own borders (see `.set-conn-rows .set-conn-row`). */
+  .set-conn-detail {
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    margin-bottom: 0;
+  }
+
+  .set-conn-detail .pset-card-head {
+    margin-bottom: 12px;
+  }
+
+  .set-conn-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  @media (max-width: 860px) {
+    /* Narrow: the rail collapses to a horizontally scrollable chip row above
+       the detail column. */
+    .set-conn-split {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .set-conn-rail {
+      flex-direction: row;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: thin;
+    }
+
+    .set-conn-rail-item {
+      flex: 0 0 auto;
+      white-space: nowrap;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+    }
+
+    .set-conn-rail-item.is-active {
+      border-color: var(--ink);
+    }
+  }
+
   .set-conn-row {
     display: flex;
     align-items: center;
@@ -14570,6 +15636,15 @@
 
   .set-conn-row:last-of-type {
     border-bottom: none;
+  }
+
+  /* Inside the detail column each connector is its own bordered card rather
+     than a hairline-separated list row. */
+  .set-conn-rows .set-conn-row {
+    padding: 11px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
   }
 
   .set-conn-row .logo {
@@ -14722,6 +15797,81 @@
     margin-left: auto;
     font-size: 10.5px;
     color: #aab2ac;
+  }
+
+  /* Import-from-your-AI strip (Settings → Connectors → Documents). Shares the
+     upload strip's frame but holds two buttons and a status line, so it wraps
+     rather than staying on one row, and it is not itself clickable — the
+     actions are. */
+  .set-conn-llm-context {
+    flex-wrap: wrap;
+    cursor: default;
+  }
+  .set-conn-llm-context:hover {
+    /* No hover affordance: the row isn't the click target, the buttons are. */
+    border-color: rgba(18, 32, 26, 0.18);
+    background: transparent;
+    color: #4a564f;
+  }
+
+  .set-conn-llm-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  /* The instruction copy sits on its own full-width row under the title +
+     actions, so it can be a proper step-by-step sentence rather than a cramped
+     inline label. Overrides the generic .set-conn-upload .muted (right-aligned,
+     ultra-light) — this one is the primary guidance, so it reads left and a
+     touch darker. */
+  .set-conn-llm-context .set-conn-llm-desc {
+    flex-basis: 100%;
+    width: 100%;
+    margin: 2px 0 0;
+    line-height: 1.5;
+    color: #5b655e;
+  }
+
+  /* The lead-in takes the description's slot: its own full-width row under the
+     title, so the Upload button stays pinned to the title line. Its own
+     bottom margin is dropped here — "Show prompt" below supplies the gap. */
+  .set-conn-llm-context .ctx-import-lead {
+    flex-basis: 100%;
+    width: 100%;
+    margin: 4px 0 0;
+  }
+
+  /* "Show prompt" sits on its own row directly under the description — a
+     left-aligned trigger, so it wraps full-width but the button keeps its
+     natural size. */
+  .set-conn-llm-context .set-conn-llm-show {
+    flex-basis: 100%;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  /* The reveal-and-edit prompt panel (shared onb-prompt-panel styling) also
+     drops onto its own full-width row inside the card, like the status line. */
+  .set-conn-llm-context .onb-prompt-panel {
+    flex-basis: 100%;
+    width: 100%;
+    margin-top: 6px;
+  }
+
+  /* Inside a settings pane (Business Context) the import card stacks above the
+     other cards, so give it the same bottom rhythm the pset cards use instead
+     of butting up against the next one. Scoped to .pset-body so the Connectors
+     usage — where the strip sits flush in the upload list — is unaffected. */
+  .pset-body .set-conn-llm-context {
+    margin-bottom: 18px;
+  }
+
+  /* The status line drops onto its own full-width row beneath the actions. */
+  .set-conn-llm-context .muted[role="status"] {
+    flex-basis: 100%;
+    margin-left: 0;
+    line-height: 1.5;
   }
 
   /* Busy state while a manual upload converts + persists server-side. Gives
@@ -14971,6 +16121,48 @@
   }
 
   .conn-slack-radio input {
+    accent-color: var(--accent);
+    margin: 0;
+    width: 16px;
+    height: 16px;
+  }
+
+  /* SlackSyncChannelsPicker — the multi-select pull-channel checklist.
+     Same card look as the radios, in a scrollable column so a big
+     workspace doesn't blow the drawer out. */
+  .conn-slack-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .conn-slack-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 9px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .conn-slack-check:hover {
+    border-color: var(--ink-3);
+    background: var(--surface-2);
+  }
+
+  .conn-slack-check:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .conn-slack-check input {
     accent-color: var(--accent);
     margin: 0;
     width: 16px;
@@ -15313,6 +16505,80 @@
     cursor: default;
   }
 
+  /* Account-choice buttons on /invite-conflict (kept-session mode). Stacked,
+     full-width, left-aligned rows — a small caption over the (often long)
+     email — so addresses read cleanly and wrap instead of crowding a centered
+     single-line label. */
+  .auth-card .ic-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 24px;
+  }
+
+  .auth-card .ic-choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    width: 100%;
+    text-align: left;
+    padding: 13px 16px;
+    border-radius: 14px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  }
+
+  .auth-card .ic-choice:hover:not(:disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .auth-card .ic-choice:disabled {
+    opacity: 0.6;
+    cursor: default;
+    box-shadow: none;
+  }
+
+  .auth-card .ic-choice-cap {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-3);
+  }
+
+  .auth-card .ic-choice-email {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
+  /* Primary (stay) choice — brand-filled so the default reads first. */
+  .auth-card .ic-choice.is-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .auth-card .ic-choice.is-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    box-shadow: none;
+  }
+
+  .auth-card .ic-choice.is-primary .ic-choice-cap {
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  .auth-card .ic-choice.is-primary .ic-choice-email {
+    color: #fff;
+  }
+
   .auth-divider {
     display: flex;
     align-items: center;
@@ -15562,6 +16828,61 @@
     text-align: center;
     margin: 16px 0;
     word-break: break-all;
+  }
+
+  /* Six-box one-time-code entry (OtpInput) — signup confirmation and
+     password reset. Sized so all six boxes fit the auth card at the narrowest
+     supported width without horizontal scroll. */
+  .otp-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin: 4px 0 16px;
+  }
+
+  .otp-box {
+    width: 100%;
+    min-width: 0;
+    max-width: 52px;
+    aspect-ratio: 1 / 1.15;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 21px;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .otp-box:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .otp-box:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .otp-row-invalid .otp-box {
+    border-color: #c13838;
+  }
+
+  .otp-row-invalid .otp-box:focus {
+    box-shadow: 0 0 0 3px rgba(193, 56, 56, 0.14);
+  }
+
+  @media (max-width: 380px) {
+    .otp-row {
+      gap: 6px;
+    }
+
+    .otp-box {
+      font-size: 18px;
+    }
   }
 
   .spam-note {
@@ -16031,6 +17352,301 @@
     background: rgba(193, 56, 56, 0.08);
     border-radius: var(--radius-sm);
     margin-bottom: 16px;
+  }
+
+  /* Import-context step (onboarding 02) — bring existing AI-assistant
+     context in. One option card (copy the prompt / upload the .md) plus a
+     manual-entry escape hatch beneath it. The card is a <div>, not a
+     <button>: it holds two independent actions, so it must not itself be one
+     clickable region. */
+  .onb-import-options {
+    display: grid;
+    gap: 12px;
+    margin-top: 4px;
+  }
+
+  /* The lead-in above the import card — the one thing on this surface people
+     must not miss, so it's the only tinted block here. Shared by BOTH places
+     that offer the import (onboarding step 02 and Settings → Business
+     context), hence the surface-neutral name. An accent tint plus a solid left
+     rule reads as a highlight without becoming a filled slab that would fight
+     the card's own is-recommended border directly beneath it. */
+  .ctx-import-lead {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    border: 1px solid var(--accent-alpha-28);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent-alpha-08);
+  }
+
+  .ctx-import-lead > i {
+    flex-shrink: 0;
+    margin-top: 1px;
+    font-size: 16px;
+    color: var(--accent-ink);
+  }
+
+  .ctx-import-lead-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .ctx-import-lead-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent-ink);
+  }
+
+  .ctx-import-lead-text {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .onb-import-card {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    text-align: left;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    font: inherit;
+    color: inherit;
+  }
+
+  /* The shortcut reads as the primary path without shouting: a stronger
+     border, not a filled block that would drown out the manual escape hatch
+     underneath it. */
+  .onb-import-card.is-recommended {
+    border-color: var(--ink);
+    border-width: 1.5px;
+  }
+
+  .onb-import-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .onb-import-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-import-card-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .onb-import-card-desc code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-2);
+  }
+
+  .onb-import-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .onb-badge {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--surface-3, var(--surface-2));
+    color: var(--ink-2);
+  }
+
+  /* Revealed prompt panel — "Show prompt" expands this beneath the card:
+     a labelled header, the prompt itself, and Copy in the footer. Sits as a
+     sibling of the card rather than inside it so the long monospace block
+     doesn't stretch the card's own layout. */
+  .onb-prompt-panel {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    overflow: hidden;
+  }
+
+  .onb-prompt-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .onb-prompt-panel-head i {
+    font-size: 14px;
+    color: var(--ink-3);
+  }
+  .onb-prompt-panel-head code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-2);
+  }
+
+  /* An editable textarea, styled to read as a code block. Fixed height with
+     its own scroll: the prompt is long enough to push the footer off-screen on
+     a laptop, and Copy must stay reachable without scrolling the page.
+     Resizing is vertical-only — horizontal drag would break the card's
+     layout. */
+  textarea.onb-prompt-panel-body {
+    display: block;
+    width: 100%;
+    height: 260px;
+    margin: 0;
+    padding: 14px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    resize: vertical;
+    overflow-y: auto;
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    -moz-tab-size: 2;
+    tab-size: 2;
+  }
+  textarea.onb-prompt-panel-body:focus {
+    outline: 0;
+    background: var(--surface-2);
+  }
+
+  .onb-prompt-panel-foot {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  /* Pushes the buttons right and explains that edits are what get copied. */
+  .onb-prompt-panel-hint {
+    margin-right: auto;
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+
+  /* Success readout after an import — states plainly what got pre-filled, so
+     the user knows exactly what to check on the steps that follow. */
+  .onb-import-result {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+  .onb-import-result strong {
+    color: var(--ink);
+  }
+
+  .onb-import-manual {
+    font-size: 12px;
+    color: var(--ink-3);
+    text-align: center;
+    margin: 16px 0 0;
+  }
+
+  .onb-linkish {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--ink);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  /* "Ran our prompt in your AI? Upload the .md" — the second-chance import on
+     the workspace step, which asks for the most typing in the flow. Boxed and
+     emphasised (per the v7 screenshot) so it reads as a shortcut past the
+     long-form fields above it, not as another field. */
+  .onb-md-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 20px;
+    padding: 14px 16px;
+    border: 1.5px solid var(--ink);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+
+  .onb-md-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .onb-md-banner-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .onb-md-banner-title code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11.5px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-1);
+  }
+
+  .onb-md-banner-desc {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  /* The banner's status line spans the full row under both columns. */
+  .onb-md-banner .onb-field-hint {
+    flex-basis: 100%;
+    margin: 0;
+  }
+
+  @media (max-width: 560px) {
+    .onb-import-card,
+    .onb-md-banner {
+      flex-direction: column;
+      align-items: stretch;
+    }
   }
 
   /* Buttons — scoped pill styling, mirrors the auth port. */
@@ -17083,7 +18699,7 @@
     line-height: 1.45;
   }
 
-  /* Recurring weekly-brief cadence note, set off from the line above it. */
+  /* Recurring top-insights cadence note, set off from the line above it. */
   .onb-card .gen-ready .s.brief-cadence {
     margin-top: 8px;
   }
@@ -18529,20 +20145,34 @@
   .bl-detail-msg--you .bl-detail-msg-from { color: var(--ink); }
   .bl-detail-msg--ai .bl-detail-msg-from { color: var(--accent-ink); }
 
+  /* Pinned action bar. Sits outside `.bl-detail-body` (the scroll container),
+     so the two CTAs stay visible however long the evidence list gets. */
+  .bl-detail-footer {
+    flex: none;
+    padding: 14px 18px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+
+  /* Both CTAs on one line, splitting the width evenly. */
   .bl-detail-actions {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     gap: 8px;
   }
 
   .bl-detail-btn {
+    flex: 1 1 0;
+    min-width: 0;
     font-size: 13px;
     padding: 10px 16px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    white-space: nowrap;
     transition: background 0.12s, border-color 0.12s;
   }
 
@@ -19023,13 +20653,71 @@
   color: var(--ink-3);
 }
 .skl-by svg { color: var(--accent); }
-/* ── Weekly-brief skill design — 7-type taxonomy accents ──────────────────────
+
+/* Custom-skill cards: invoke card + a hover/focus-revealed delete affordance.
+   The wrapper exists because the card is itself a <button> — the delete
+   control must be an absolutely-positioned sibling, not a nested button. */
+.skl-card-wrap { position: relative; display: flex; }
+.skl-card-wrap .skl-card { flex: 1; }
+.skl-card-del {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.skl-card-wrap:hover .skl-card-del,
+.skl-card-del:focus-visible { opacity: 1; }
+.skl-card-del:hover {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+.skl-card-confirm {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  white-space: nowrap;
+}
+.skl-del-yes { color: var(--danger); }
+.skl-del-spin {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  animation: onbSpin 0.9s linear infinite;
+}
+
+/* ── Top-insights skill design — 8-type taxonomy accents ──────────────────────
    Each finding card sets `--card-accent` inline (lib/brief-skill-taxonomy,
    derived from the finding type, NOT the model's mismatchable accent). The left
-   accent bar, the type pill, and its dot read it. The PRD CTA stays brand-green
-   (`--accent`) — the skill specifies View PRD as a green primary regardless of
-   type. Titles go serif (Spectral/Inter is the skill's stack; we use the app's
-   serif var as the closest loaded face). */
+   accent bar, the type pill, and its dot read it. The primary CTA (View the
+   evidence) stays brand-green (`--accent`) — the skill specifies the primary
+   as green regardless of type; the PRD sits in the ghost slot. Titles go serif
+   (Spectral/Inter is the skill's stack; we use the app's serif var as the
+   closest loaded face). */
 
 /* BriefChat (.fc) cards */
 .fc--skill { position: relative; }
@@ -19046,6 +20734,13 @@
 .fc-pill--skill {
   color: var(--card-accent, var(--accent));
   background: color-mix(in srgb, var(--card-accent, var(--accent)) 13%, transparent);
+}
+/* Ledger freshness chip — quiet, neutral; sits after the type pill on findings
+   that re-carded because they materially changed. */
+.fc-pill--updated {
+  color: var(--ink-3);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  margin-left: 6px;
 }
 .fc-pill--skill .fc-dot { background: var(--card-accent, var(--accent)); }
 .fc--skill .fc-title {
@@ -19217,6 +20912,35 @@
   border-bottom: 1px solid var(--line);
 }
 .tkv2-descwide { padding: 22px 26px 6px; border-bottom: 1px solid var(--line); }
+
+/* ── detail: lifecycle (exclude from the tracker / delete) ── */
+.tkv2-lcactions { margin-left: auto; display: inline-flex; gap: 6px; }
+.tkv2-lcbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11.5px; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--line); background: #fff; color: var(--soft);
+  cursor: pointer;
+}
+.tkv2-lcbtn:hover:not(:disabled) { background: #f6f6f5; color: var(--ink); }
+.tkv2-lcbtn:disabled { opacity: .5; cursor: default; }
+.tkv2-lcbtn--danger { border-color: #FCA5A5; background: #FEF2F2; color: #DC2626; }
+.tkv2-lcbtn--danger:hover:not(:disabled) { background: #FEE2E2; color: #B91C1C; }
+/* Banner on an excluded ticket — it is still fully editable, so this states
+   the one thing that differs rather than dimming the whole panel. */
+.tkv2-lcbanner {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; padding: 8px 26px;
+  background: #FFFBEB; color: #92400E;
+  border-bottom: 1px solid #FDE68A;
+}
+/* Excluded row in the ticket list. */
+.tkv2-row--excluded .tkv2-rtitle { color: var(--soft); }
+.tkv2-exbadge {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; padding: 1px 6px; border-radius: 4px;
+  background: #FEF3C7; color: #92400E; vertical-align: middle;
+}
 
 /* ── detail: sections + description ── */
 .tkv2-sec { margin-bottom: 24px; }
@@ -20015,4 +21739,665 @@
   .docs-article-title { font-size: 32px; }
   .docs-hero-title { font-size: 34px; }
   .docs-topbar-search { display: none; }
+}
+
+/* ============================================================
+   Settings → Usage (LLM spend + token usage)
+   Marks use the brand accent as a SINGLE hue: both the daily
+   chart and the feature bars encode magnitude, not identity, so
+   no series is distinguished by colour alone and no categorical
+   palette is involved. Text stays on ink tokens throughout.
+   ============================================================ */
+
+.usage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.usage-ranges {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.usage-range {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.usage-range:hover { color: var(--ink); }
+
+.usage-range.is-active {
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: 0 1px 2px var(--ink-alpha-06);
+}
+
+/* --- hero ------------------------------------------------- */
+
+.usage-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.usage-hero-value {
+  font-size: 40px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-hero-label {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.usage-stats {
+  display: flex;
+  gap: 26px;
+  flex-wrap: wrap;
+}
+
+.usage-stat { display: flex; flex-direction: column; gap: 2px; }
+
+.usage-stat-value {
+  font-size: 17px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.usage-keymode {
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-alpha-14);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.usage-h {
+  margin: 22px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+/* --- daily chart ------------------------------------------ */
+
+.usage-chart { position: relative; }
+
+.usage-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+/* Recessive grid — present, never competing with the data. */
+.usage-grid { stroke: var(--line-strong); stroke-width: 1; }
+.usage-grid-soft { stroke: var(--line); stroke-dasharray: 3 4; }
+
+.usage-area { fill: var(--accent-alpha-10); stroke: none; }
+
+.usage-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.usage-crosshair {
+  stroke: var(--ink-4);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+/* 2px surface ring so the marker separates from the area fill. */
+.usage-dot {
+  fill: var(--accent);
+  stroke: var(--surface-2);
+  stroke-width: 2;
+}
+
+.usage-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 2px;
+}
+
+.usage-tooltip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--ink);
+  box-shadow: 0 4px 14px var(--ink-alpha-06);
+  pointer-events: none;
+}
+
+.usage-tooltip-sub { color: var(--muted); font-size: 11px; }
+
+/* --- feature bars ----------------------------------------- */
+
+.usage-bars { list-style: none; margin: 0; padding: 0; }
+
+.usage-bar-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr) 84px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+}
+
+.usage-bar-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* Lets the name truncate instead of forcing the grid column wider. */
+  min-width: 0;
+}
+
+.usage-bar-name {
+  font-size: 13px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Calls/tokens sit under the name so the detail is readable without hovering
+   — a tooltip-only figure is invisible on touch and to keyboard users. */
+.usage-bar-sub {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-bar-track {
+  height: 10px;
+  background: var(--surface-3);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  /* 4px rounded data-end, anchored flat to the baseline. */
+  border-radius: 0 4px 4px 0;
+}
+
+.usage-bar-value {
+  font-size: 13px;
+  color: var(--ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-foot {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .usage-hero { align-items: flex-start; }
+  .usage-hero-value { font-size: 32px; }
+  .usage-stats { gap: 18px; }
+  .usage-bar-row { grid-template-columns: minmax(110px, 1fr) minmax(0, 1fr) 72px; }
+  /* Two pill groups don't fit one narrow row — stack them left-aligned
+     rather than letting space-between fling them to opposite edges. */
+  .usage-toolbar { justify-content: flex-start; }
+  .usage-ranges { flex-wrap: wrap; }
+}
+
+/* ============================================================
+   Settings → Admin: Claude API key card
+   Two rows. The stored key sits on its own line with the
+   actions that operate on it (test / remove) pinned right; the
+   input for a NEW key sits below with its submit inline.
+   ============================================================ */
+
+.akey-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.akey-current-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.akey-current-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.akey-current-value {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.akey-current-muted { color: var(--muted); font-style: italic; }
+
+.akey-current-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Square icon button — same border/hover language as .btn, no text padding. */
+.akey-icon-btn {
+  padding: 0;
+  width: 35px;
+  height: 35px;
+  flex-shrink: 0;
+  color: var(--ink-2);
+}
+
+.akey-icon-btn:hover:not(:disabled) {
+  color: #B4372E;
+  border-color: #B4372E;
+  background: var(--surface-2);
+}
+
+.akey-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+/* stretch (not a fixed height) so the button always matches the input, even if
+   the input's font-size or padding changes later. */
+.akey-submit {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .akey-current { align-items: flex-start; }
+  .akey-input-row { flex-direction: column; align-items: stretch; }
+}
+
+/* ── Jira change confirmation ─────────────────────────────────────────────────
+   The gate between a proposed change and a real edit to someone's ticket. Styled
+   as a distinct bordered card rather than inline chat text so it reads as an
+   action to take, not as more of the agent's prose — the one place in the chat
+   where a click leaves the product and changes a system a whole team watches. */
+/* Confirm cards for a change the agent PROPOSED in chat. Two of them share this
+   chrome — the Jira field/status/comment card (JiraChangeConfirm) and the
+   PRD-grounded ticket rewrite (TicketChangeConfirm) — because they are the same
+   promise to the reader: here is exactly what will happen, and nothing happens
+   until you say so. The `.jira-confirm*` names came first and stay as-is so the
+   existing card and its tests are untouched. */
+.jira-confirm,
+.ticket-confirm {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.jira-confirm-head,
+.ticket-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.jira-confirm-kind,
+.ticket-confirm-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent-ink, #1f6f4a);
+  background: var(--accent-soft, #e8f3ed);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.jira-confirm-key,
+.ticket-confirm-key { font-weight: 600; font-size: 13px; }
+.jira-confirm-summary,
+.ticket-confirm-summary { color: var(--ink-3); font-size: 13px; }
+
+.jira-confirm-lines,
+.ticket-confirm-lines {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.jira-confirm-lines li,
+.ticket-confirm-lines li { margin: 2px 0; }
+
+.jira-confirm-actions,
+.ticket-confirm-actions { display: flex; gap: 8px; }
+
+/* The proposed description in full. A rewrite REPLACES what is there, so the
+   card shows the replacement text itself rather than only describing it —
+   capped and scrollable so a long one can't push the Confirm button off the
+   thread. */
+.ticket-confirm-body {
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+.ticket-confirm-criteria {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.ticket-confirm-criteria-head {
+  font-weight: 600;
+  font-size: 12px;
+  margin-top: 10px;
+}
+
+/* Deliberately stated under the buttons, not above them: the reassurance is
+   most useful at the moment of hesitation, right where the cursor is. */
+.jira-confirm-note,
+.ticket-confirm-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.jira-confirm-result,
+.jira-confirm--done,
+.ticket-confirm-result,
+.ticket-confirm--done {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.jira-confirm-error,
+.ticket-confirm-error {
+  font-size: 12px;
+  color: var(--danger, #b23c3c);
+  margin-bottom: 8px;
+}
+
+/* ============================================================================
+   Generation work-in-progress (`gwip-*`) — the shared "this artifact is being
+   built" treatment for Evidence, PRD and Tickets (GenerationState.tsx).
+
+   Every pipeline artifact is a 30-90s LLM job, and each one used to announce
+   that with a ~20px spinner plus one muted 12-13px line — at that weight a run
+   in flight reads as a stalled panel. Two surfaces replace those:
+     • .gwip        — nothing to show yet: a full working state.
+     • .gwip-banner — content is already on screen and more is coming.
+
+   PALETTE: the rules below consume `--gw-*` only. The defaults map to the app
+   palette; inside `.tkv2` they remap to the ticket palette, so the same
+   treatment reads as native in both places. Add a surface by remapping the
+   tokens — never by forking the rules.
+   ========================================================================== */
+.gwip,
+.gwip-banner {
+  --gw-ink: var(--ink);
+  --gw-ink2: var(--ink-2);
+  --gw-soft: var(--ink-3);
+  --gw-line: var(--line);
+  --gw-paper: var(--surface-2);
+  --gw-panel: var(--surface);
+  --gw-chip: var(--surface-3);
+  --gw-accent: var(--accent);
+  --gw-accent-d: var(--accent-ink);
+  --gw-accent-s: var(--accent-muted);
+  --gw-accent-b: var(--accent-soft);
+  --gw-warn: var(--warn);
+  --gw-warn-b: var(--warn-soft);
+  --gw-warn-br: var(--warn-border);
+}
+/* `--ink`, `--line`, `--paper` are already redefined by `.tkv2` itself and
+   inherit; only the names that differ need remapping here. */
+.tkv2 .gwip,
+.tkv2 .gwip-banner {
+  --gw-ink2: var(--ink2);
+  --gw-soft: var(--soft);
+  --gw-panel: var(--panel);
+  --gw-chip: var(--chip);
+  --gw-accent: var(--green);
+  --gw-accent-d: var(--green-d);
+  --gw-accent-s: var(--green-s);
+  --gw-accent-b: var(--green-b);
+  --gw-warn: var(--high);
+  --gw-warn-b: var(--high-b);
+  --gw-warn-br: var(--high-br);
+}
+
+.gwip { display: flex; flex-direction: column; color: var(--gw-ink); }
+
+.gwip-head {
+  background: linear-gradient(180deg, var(--gw-accent-s), var(--gw-panel));
+  border: 1px solid var(--gw-accent-b);
+  border-radius: 12px; padding: 22px 26px;
+}
+.gwip-headrow { display: flex; gap: 16px; align-items: flex-start; }
+
+/* The pulse ring is the loudest "this is alive" signal on the surface — it
+   keeps moving even when the phase copy hasn't changed for seconds. */
+.gwip-orb {
+  position: relative; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px; border-radius: 50%;
+  background: var(--gw-paper); color: var(--gw-accent-d);
+  border: 1px solid var(--gw-accent-b);
+}
+.gwip-orb::after {
+  content: ""; position: absolute; inset: -5px; border-radius: 50%;
+  border: 2px solid var(--gw-accent);
+  animation: gwip-pulse 1.9s ease-out infinite;
+}
+@keyframes gwip-pulse {
+  0%   { transform: scale(.85); opacity: .55; }
+  70%  { transform: scale(1.2); opacity: 0; }
+  100% { transform: scale(1.2); opacity: 0; }
+}
+
+.gwip-headtext { min-width: 0; }
+.gwip-title {
+  font-family: var(--font-serif); font-weight: 500; font-size: 24px;
+  color: var(--gw-ink); line-height: 1.3;
+}
+.gwip-title em { font-style: italic; font-weight: 600; color: var(--gw-accent-d); }
+.gwip-phase {
+  display: flex; align-items: center; min-height: 1.5em;
+  margin-top: 7px; font-size: 14.5px; font-weight: 500; color: var(--gw-ink2);
+}
+.gwip-dot {
+  width: 7px; height: 7px; margin-left: 8px; border-radius: 50%;
+  background: var(--gw-accent); animation: gwip-blink 1.1s ease-in-out infinite;
+}
+@keyframes gwip-blink { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+
+.gwip-bar {
+  position: relative; height: 5px; margin-top: 18px;
+  border-radius: 999px; background: var(--gw-accent-b); overflow: hidden;
+}
+.gwip-bar--slim { height: 4px; margin-top: 10px; }
+.gwip-bar-pill {
+  position: absolute; top: 0; left: 0; height: 100%; width: 38%;
+  border-radius: 999px; background: linear-gradient(90deg, var(--gw-accent), var(--gw-accent-d));
+  animation: gwip-sweep 1.5s ease-in-out infinite;
+}
+@keyframes gwip-sweep { 0% { left: -38%; } 100% { left: 100%; } }
+.gwip-bar-fill {
+  position: absolute; top: 0; left: 0; height: 100%;
+  border-radius: 999px; background: linear-gradient(90deg, var(--gw-accent), var(--gw-accent-d));
+  transition: width .45s ease;
+}
+
+.gwip-note { margin-top: 13px; font-size: 13.5px; color: var(--gw-soft); line-height: 1.55; }
+
+/* Placeholders shaped like the artifact — a ticket list fills in as rows, a
+   PRD or evidence brief as prose blocks. */
+.gwip-skels { display: flex; flex-direction: column; }
+.gwip-skel {
+  display: flex; gap: 22px; margin-top: 14px; padding: 20px 22px;
+  background: var(--gw-paper); border: 1px solid var(--gw-line); border-radius: 12px;
+}
+.gwip-skel:nth-child(2) { opacity: .74; }
+.gwip-skel:nth-child(3) { opacity: .5; }
+.gwip-skel-key {
+  flex: none; width: 46px; height: 28px; border-radius: 8px;
+  background: var(--gw-panel); border: 1px solid var(--gw-line);
+}
+.gwip-skel-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.gwip-skel--doc .gwip-skel-lines { gap: 12px; }
+.gwip-skel-line {
+  position: relative; overflow: hidden;
+  height: 12px; border-radius: 6px; background: var(--gw-chip);
+}
+.gwip-skel--row .gwip-skel-line:nth-child(1) { width: 58%; height: 15px; }
+.gwip-skel--row .gwip-skel-line:nth-child(2) { width: 100%; }
+.gwip-skel--row .gwip-skel-line:nth-child(3) { width: 76%; }
+/* A prose block: one heading rule, then body copy of ragged width. */
+.gwip-skel-line--head { width: 42%; height: 17px; margin-bottom: 4px; }
+.gwip-skel--doc .gwip-skel-line:nth-child(2) { width: 100%; }
+.gwip-skel--doc .gwip-skel-line:nth-child(3) { width: 94%; }
+.gwip-skel--doc .gwip-skel-line:nth-child(4) { width: 68%; }
+.gwip-skel-line::after {
+  content: ""; position: absolute; inset: 0 -40%;
+  background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, .9) 45%, transparent 88%);
+  transform: translateX(-55%);
+  animation: gwip-glide 1.25s ease-in-out infinite;
+}
+.gwip-skel:nth-child(2) .gwip-skel-line::after { animation-delay: .16s; }
+.gwip-skel:nth-child(3) .gwip-skel-line::after { animation-delay: .32s; }
+@keyframes gwip-glide {
+  0%   { transform: translateX(-55%); }
+  100% { transform: translateX(55%); }
+}
+
+/* ── Banner: a run in flight over content that is already on screen ─────────
+   Accent = adding to it (streaming). Warn = REPLACING it, which is the state a
+   user most needs to notice before acting on what's currently shown. */
+.gwip-banner {
+  display: flex; gap: 13px; align-items: flex-start;
+  margin: 14px 0; padding: 13px 16px;
+  border: 1px solid var(--gw-accent-b); border-left: 3px solid var(--gw-accent);
+  border-radius: 10px; background: var(--gw-accent-s);
+}
+.gwip-banner--warn {
+  border-color: var(--gw-warn-br); border-left-color: var(--gw-warn); background: var(--gw-warn-b);
+}
+.gwip-banner-spin {
+  flex: none; width: 17px; height: 17px; margin-top: 2px;
+  border-radius: 50%; border: 2px solid var(--gw-accent-b); border-top-color: var(--gw-accent-d);
+  animation: gwip-spin .85s linear infinite;
+}
+.gwip-banner--warn .gwip-banner-spin { border-color: var(--gw-warn-br); border-top-color: var(--gw-warn); }
+@keyframes gwip-spin { to { transform: rotate(360deg); } }
+.gwip-banner-main { flex: 1; min-width: 0; }
+.gwip-banner-title { font-size: 14.5px; font-weight: 700; color: var(--gw-ink); }
+.gwip-banner-sub { margin-top: 2px; font-size: 13.5px; color: var(--gw-ink2); line-height: 1.5; }
+.gwip-banner-count {
+  flex: none; font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+  color: var(--gw-accent-d); background: var(--gw-paper);
+  border: 1px solid var(--gw-accent-b); border-radius: 999px; padding: 3px 10px;
+}
+.gwip-banner--warn .gwip-bar { background: var(--gw-warn-br); }
+.gwip-banner--warn .gwip-bar-pill,
+.gwip-banner--warn .gwip-bar-fill {
+  background: linear-gradient(90deg, var(--gw-warn), var(--gw-warn));
+}
+
+/* The outgoing content: readable and still clickable, but visibly not current. */
+.gwip-stale-lbl {
+  display: flex; align-items: center; gap: 8px; margin: 24px 0 -4px;
+  font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--high, var(--warn));
+}
+.gwip-stale-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+  animation: gwip-blink 1.4s ease-in-out infinite;
+}
+.tkt-list--stale { opacity: .5; filter: saturate(.75); transition: opacity .25s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gwip-orb::after { animation: none; opacity: .3; }
+  .gwip-dot,
+  .gwip-stale-dot { animation: none; opacity: 1; }
+  .gwip-banner-spin { animation: none; }
+  .gwip-skel-line::after { animation: none; }
+  .gwip-bar-pill { animation: none; left: 0; width: 100%; opacity: .55; }
 }

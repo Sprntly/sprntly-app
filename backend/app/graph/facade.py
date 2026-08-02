@@ -15,7 +15,15 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.db.client import require_client
-from app.graph.types import Entity, Relationship, Signal, Source
+from app.db.companies import display_name_for_company_id
+from app.graph.types import (
+    COMPANY_ENTITY_TYPE,
+    Entity,
+    Relationship,
+    Signal,
+    Source,
+    compute_evidence_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +100,42 @@ class GraphFacade:
         self._tbl("kg_entity").insert(row).execute()
         return entity
 
+    def ensure_company_entity(
+        self, enterprise_id: str, label: Optional[str] = None
+    ) -> str:
+        """Find-or-create the tenant's single root `company` entity — the KG's
+        tenant-scoped anchor node. Every enterprise gets exactly one; other
+        entities/signals that belong to this tenant wire to it (SCOPED_TO /
+        INFORMS) instead of floating disconnected.
+
+        Unlike theme/segment/competitor entities, there's no embedding
+        dedupe concern here — a plain existence check by type is enough
+        since there is only ever one per tenant. `label` is only used the
+        first time (entity creation); a later call with a different label
+        does NOT rename an already-existing company entity. When no label
+        is supplied, falls back to `companies.display_name` for this
+        enterprise (the human-readable name every real tenant already has),
+        and only as a last resort — no `companies` row, or `display_name`
+        itself unset — to the raw `enterprise_id`, so this is always safe
+        to call with just an enterprise_id.
+
+        A shared primitive rather than a private helper on one caller,
+        because more than one write path needs "find or create this
+        tenant's company root" — today `business_context_projection`, and
+        any later reconciliation pass over existing tenants needs the exact
+        same find-or-create semantics."""
+        existing = self.query_entities(enterprise_id, type=COMPANY_ENTITY_TYPE)
+        if existing:
+            return existing[0].id
+        if label is None:
+            label = display_name_for_company_id(enterprise_id) or enterprise_id
+        ent = Entity(
+            enterprise_id=enterprise_id, type=COMPANY_ENTITY_TYPE,
+            canonical_label=label,
+        )
+        self.create_entity(enterprise_id, ent)
+        return ent.id
+
     def write_signal(self, enterprise_id: str, signal: Signal) -> Signal:
         self._assert_tenant(enterprise_id, signal.enterprise_id)
         row = {
@@ -109,6 +153,10 @@ class GraphFacade:
             "confidence": signal.confidence,
             "weight": signal.weight,
             "provenance": signal.provenance,
+            "skill_id": signal.skill_id,
+            "origin": signal.origin,
+            "channel": signal.channel,
+            "evidence_eligible": signal.evidence_eligible,
         }
         self._tbl("kg_signal").insert(row).execute()
         return signal
@@ -158,6 +206,59 @@ class GraphFacade:
             .eq("id", signal_id)
             .execute()
         )
+
+    def expire_signals(self, enterprise_id: str, signal_ids: list[str]) -> int:
+        """Immediately retire the given signals. Returns the number expired.
+
+        This is the "replace semantics" primitive: a versioned document (today
+        the workspace roadmap) that no longer asserts a fact must retire that
+        fact without deleting history — the row stays, bitemporally closed.
+        Distinct from ``supersede_signal``, which points one signal at its
+        replacement; here there is no successor, the bet was simply dropped.
+
+        Writes BOTH markers, because they reach different readers:
+
+          * ``stale_after = now`` — what ``active_signals`` (and everything built
+            on it, e.g. retrieval's recent-signals pass) filters on.
+          * ``properties["expired_at"] = now`` — what the content readers filter
+            on via ``signal_is_retired``. They deliberately read UNFILTERED
+            signals (``all_signals`` / ``get_signals``) and would otherwise keep
+            a merely-stale signal in briefs, Ask answers and PRD evidence at
+            near-full weight until its source_type window elapsed (60 days for
+            pm_manual). ``stale_after`` alone is NOT enough — see graph.types.
+
+        Tenant-scoped read-modify-write (same pattern as supersede_signal): ids
+        belonging to another enterprise are silently ignored, never touched.
+        """
+        ids = [i for i in dict.fromkeys(signal_ids) if i]
+        if not ids:
+            return 0
+        now = _iso(datetime.now(timezone.utc))
+        expired = 0
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(ids), chunk):
+            batch = ids[i:i + chunk]
+            rows = (
+                self._tbl("kg_signal").select("id, properties")
+                .eq("enterprise_id", enterprise_id)
+                .in_("id", batch)
+                .execute().data or []
+            )
+            # Per-row (not one bulk `.in_()` update) because each row's
+            # `properties` jsonb has to be merged, not overwritten — a bulk
+            # update would clobber whatever else the signal carries.
+            for row in rows:
+                props = row.get("properties") or {}
+                props["expired_at"] = now
+                (
+                    self._tbl("kg_signal")
+                    .update({"stale_after": now, "properties": props})
+                    .eq("enterprise_id", enterprise_id)
+                    .eq("id", row["id"])
+                    .execute()
+                )
+                expired += 1
+        return expired
 
     def update_entity_properties(
         self, enterprise_id: str, entity_id: str, patch: dict[str, Any]
@@ -350,6 +451,24 @@ class GraphFacade:
             kept.append(self._row_to_signal(r))
         return kept
 
+    def recent_signals_by_skill(
+        self, enterprise_id: str, skill_id: str, limit: int = 25
+    ) -> list[Signal]:
+        """The most recent signals a given vendored extraction skill
+        produced for this enterprise, newest-transaction-first — the
+        sampling primitive for `app.graph.evals`'s structural eval harness.
+        Read-only and bounded by `limit`; never used on a live
+        request/ingestion path. Tenant-scoped like every other facade read."""
+        rows = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("skill_id", skill_id)
+            .order("transaction_at", desc=True)
+            .limit(limit)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
     def has_signals_since(self, enterprise_id: str, iso_ts: str) -> bool:
         """True if any `kg_signal` for this enterprise has `created_at > iso_ts`.
 
@@ -475,6 +594,19 @@ class GraphFacade:
         sig.confidence = float(r.get("confidence") or 1.0)
         sig.weight = float(r.get("weight") or 1.0)
         sig.provenance = r.get("provenance") or {}
+        # Typed-field promotion: the DB column wins when present;
+        # a pre-migration row (column null) falls back to the informal
+        # provenance dict key, mirroring Signal.__post_init__ — this
+        # reconstruction path bypasses __init__/__post_init__ entirely
+        # (Signal.__new__), so the same fallback has to be repeated here.
+        sig.skill_id = r.get("skill_id") if r.get("skill_id") is not None else sig.provenance.get("skill_id")
+        sig.origin = r.get("origin") if r.get("origin") is not None else sig.provenance.get("origin")
+        sig.channel = r.get("channel") if r.get("channel") is not None else sig.provenance.get("channel")
+        raw_eligible = r.get("evidence_eligible")
+        sig.evidence_eligible = (
+            bool(raw_eligible) if raw_eligible is not None
+            else compute_evidence_eligible(sig.source_type, sig.origin)
+        )
         return sig
 
     def _row_to_relationship(self, r: dict) -> Relationship:

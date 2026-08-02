@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -11,29 +11,51 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
+import {
+  AssistantWaitState,
+  WaitFailedState,
+  WaitStoppedState,
+  WaitTimedOutState,
+  WAIT_FAILED_TITLE,
+  isLongRunningSkill,
+} from "../../shared/AssistantWaitState"
 import { AskReplyBody } from "../../shared/AskReplyBody"
-import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
-import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
-import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
+import {
+  ClarifyQuestionsCard,
+  type ClarifyAnswer,
+  type ClarifyQuestion,
+  type ClarifyResolution,
+} from "../../shared/ClarifyQuestionsCard"
+import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+// The strip's reopen button is icon-only, so the Evidence case needs an icon of
+// its own — the same one ContentPanel's Evidence tab wears, so the button reads
+// as "reopen that tab".
+import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError } from "../../../lib/runAskGeneration"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
-import type { PrdState, PrdContent } from "../../../types/content"
+import type { DetailState, PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
+
+/** "This thread has no reports we can vouch for" — one shared instance so the
+ *  scoped-reports memo below returns a STABLE reference, and the callbacks and
+ *  memos that depend on it don't re-run on every render of a report-less chat. */
+const NO_REPORTS: ReportSummary[] = []
 
 type ThreadTurn = {
   id: string
@@ -43,13 +65,60 @@ type ThreadTurn = {
   query: string
   /** Files attached to this turn, shown as clickable cards above the ask. Each
    *  carries the extracted/plain-text `content` so the card can open a viewer —
-   *  this is the SAME text folded into the backend query, never re-fetched. */
-  attachments?: { name: string; content?: string }[]
+   *  this is the SAME text folded into the backend query, never re-fetched — plus
+   *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
+   *  the real document (PDF/image inline) and offer a download after a reload. */
+  attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders
    *  a muted "stopped" note instead of the thinking skeleton or an error bubble. */
   stopped?: boolean
+  /** A reload killed this turn's in-flight work before its reply landed — set
+   *  only by the sessionStorage RESTORE path (the persist effect marks a PRD
+   *  command still awaiting its deferred reply; see deferredAckRef). Renders an
+   *  honest "send it again" note instead of "No response was generated". */
+  interrupted?: boolean
+  /** The artifact chat summary for this turn is still being written (the
+   *  panel's artifact is done; the summary call is in flight). Renders a
+   *  "Summarizing…" indicator instead of appearing out of nowhere seconds
+   *  later. Transient: resolved turns drop the flag, failed/empty summaries
+   *  remove the whole turn, and the persist effect never saves a still-pending
+   *  one (a reload cannot restore a skeleton nothing will ever fill). */
+  summaryPending?: boolean
+  /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
+   *  (options as buttons, one submit for the batch) instead of the flattened
+   *  numbered list that `reply.answer` carries. Both live on the same turn: the
+   *  card is what the user sees while the gate is open, and `reply.answer` is
+   *  the durable form that persists, rehydrates and feeds the transcript filter.
+   *  The card renders while the tab's `pendingClarify` is live and, once
+   *  settled, as the read-only record below; only a full history rehydration
+   *  (which rebuilds turns from text alone) falls back to `reply.answer`. */
+  clarify?: ClarifyQuestion[]
+  /** How the batch above was settled — answers given, or the assumptions each
+   *  unanswered question fell back to. Its presence is what flips the card from
+   *  input to record, so the structure the user answered in SURVIVES answering
+   *  instead of collapsing back to an undifferentiated wall of text. */
+  clarifyResolved?: ClarifyResolution
+  /** Live answer markdown streamed over SSE while this turn's ask generates —
+   *  rendered in place of the thinking skeleton so the reply appears
+   *  word-by-word. Display only: `reply` (from the poll) is authoritative and
+   *  replaces it. Transient — stripped from the persisted thread, because a
+   *  reload can't re-attach the stream that was feeding it. */
+  partial?: string
+  /** The SSE preview channel dropped after it had already delivered text, while
+   *  the poll still reports `generating`. Display only — it downgrades the phase
+   *  line to "Finishing the answer" and names what happened, because the old
+   *  behaviour was a half-sentence frozen under a blinking cursor with no
+   *  explanation. Never an error: the poll still delivers the real answer.
+   *  Transient, like `partial`. */
+  streamDropped?: boolean
+  /** The 12-minute client budget expired while the job was still generating.
+   *  NOT a failure — the persisted ask_id is deliberately left in place, so a
+   *  reload re-attaches and picks the answer up. Transient: after a reload the
+   *  resume effect puts this turn back into the generating state, which is what
+   *  the message promises. */
+  timedOut?: boolean
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -75,15 +144,116 @@ type ChatTab = {
   prdId: number | null
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
+  /** This tab was opened from a Top Insights card's "View Evidence" — the
+   *  finding's EVIDENCE is what it is about, so refocusing it restores the panel
+   *  on the Evidence tab rather than closing it (a tab with no PRD) or jumping to
+   *  a PRD that merely happens to exist for the same insight. Cleared in effect
+   *  once a PRD actually lands on the tab, which then takes precedence. PERSISTED
+   *  (small boolean) so the behaviour survives a reload. */
+  evidenceOnly?: boolean
+  /** The originating finding's drill-down state, which scopes ContentPanel's
+   *  Evidence tab to this insight (it loads/generates from `detail.meta`).
+   *  Transient — never persisted; after a reload an `evidenceOnly` tab falls back
+   *  to the read-only load keyed off `briefMeta`. */
+  evidenceDetail?: DetailState | null
   prdGenerating: boolean
+  /** True while an EXISTING PRD is being fetched from the DB — distinct from
+   *  `prdGenerating`, which means a document is being written.
+   *
+   *  The load path used to borrow `prdGenerating`, so reopening a chat that
+   *  already HAS a PRD flashed "Generating PRD…" before settling on "View PRD" —
+   *  claiming work was underway when the PRD had been finished for hours.
+   *  Transient; never persisted. */
+  prdLoading?: boolean
   evidenceGenerating: boolean
+  /** This PRD tab was opened by an IN-CHAT COMMAND (import a doc + "generate prd",
+   *  "generate a PRD for X", "create tickets from this doc") — its first thread
+   *  turn IS the user's command. When true, the insight/PRD card + clarifying
+   *  questions render INLINE as the reply BELOW that command turn (chronological
+   *  order), not pinned above the whole thread. Falsy for header opens (brief
+   *  insight / ideation / backlog-load), where the insight card IS the tab's
+   *  opening message and stays at the top. PERSISTED (in the slim tab payload) so
+   *  the ordering survives reload — must NOT be stripped like `prd`/`prdGenerating`. */
+  prdInFlow?: boolean
+  /** The thread id of the command turn a `prdInFlow` tab anchors its inline PRD
+   *  card + questions to. A command typed in a REUSED chat tab lands mid-thread,
+   *  so `thread[0]` (the legacy anchor) is the wrong turn there. PERSISTED with
+   *  the thread (same slim payload), whose turn ids it references. */
+  prdFlowTurnId?: string
   /** True while a resumed conversation's turns are being fetched in the
    *  background (row click in All chats navigates instantly; the tab shows a
    *  loading state until the history lands). Transient — never persisted. */
   hydrating?: boolean
+  /** Clarify-first gate (issue d): set when the sufficiency check found the
+   *  task too thin and posted questions into this tab's thread. The NEXT
+   *  message in this tab is treated as the answers (or a "generate now" skip)
+   *  and generation runs with the combined task. Transient — never persisted;
+   *  a reload simply drops back to a fresh command. */
+  pendingClarify?: {
+    task: string
+    sourceDocs?: { name: string; content: string }[]
+    /** The thread turn carrying the questions, so whichever path answers them —
+     *  the card's submit or a prose reply in the composer — can stamp its
+     *  resolution back onto the right turn. */
+    turnId: string
+  }
+  /** True from the moment a PRD command is acknowledged until the agent's NEXT
+   *  visible response — the clarifying questions, or the generation starting.
+   *  Drives a live thinking indicator under the acknowledgment.
+   *
+   *  Without it that window is dead air: the ack says a PRD is coming, the rail
+   *  is deliberately not open yet (it may turn out to be questions, not a
+   *  document), and nothing on screen moves while the sufficiency check runs —
+   *  which reads as a hung app. Transient; never persisted. */
+  prdCommandThinking?: boolean
 }
 
-// The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
+// The DURABLE form of the clarify gate's questions: a flattened numbered list.
+//
+// What the user actually sees is `ClarifyQuestionsCard` (options as buttons, one
+// submit for the batch) — this text is what gets PERSISTED as the assistant turn
+// and what a reloaded thread falls back to, since the card's answering machinery
+// (`pendingClarify`) is transient. It is also what `PRD_CLARIFY_ANSWER_RE`
+// matches to keep the questions out of the PRD's grounding transcript, so the
+// leading sentence must keep its "Before I write this PRD" opening.
+export function clarifyQuestionsText(questions: ClarifyQuestion[]): string {
+  const lines = questions.map((q, i) => {
+    const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
+    // Skips are informed, not silent: each question states the assumption the
+    // author proceeds with when it goes unanswered.
+    const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
+    // Blank-line separated: single newlines are soft-wrapped away by the
+    // markdown renderer, which ran the whole list together on one line.
+    return `${i + 1}. ${q.prompt}${opts}${skip}`
+  })
+  return (
+    "Before I write this PRD, a few details would make it much stronger. " +
+    "Answer what you can in one message — or say \"generate now\" and I'll " +
+    "proceed with what I have:\n\n" +
+    lines.join("\n\n")
+  )
+}
+
+function clarifyQuestionsReply(questions: ClarifyQuestion[]): AskResponse {
+  return {
+    answer: clarifyQuestionsText(questions),
+    sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+  } as AskResponse
+}
+
+// The user's card answers, rendered as the message they'd otherwise have typed.
+// Q/A pairs (not bare answers) so the generator can tell which question each one
+// settles — the composer path sends prose, and this must be at least as legible.
+export function clarifyAnswersText(answers: ClarifyAnswer[]): string {
+  return answers.map((a) => `${a.prompt}\n${a.answer}`).join("\n\n")
+}
+
+// "generate now" / "just proceed" — the user declines the clarify questions
+// and wants the PRD from the original material as-is.
+const CLARIFY_SKIP_RE =
+  /^\s*(?:just\s+)?(?:generate|proceed|go\s+ahead|skip|continue)(?:\s+(?:it|now|anyway|as\s+is|without|the\s+prd))?\s*[.!]*\s*$/i
+
+// The Top Insights brief is a pinned, non-closable FIRST tab on this surface.
 // It is synthesized in the render — never stored in the `tabs` state or
 // localStorage — and is identified by this sentinel id. `activeTabId ===
 // BRIEF_TAB_ID` means the brief tab is active (so we render <BriefChat/> instead
@@ -114,54 +284,179 @@ function conversationToPrdTask(thread: ThreadTurn[]): string {
   return joined.length > CHAT_PRD_TASK_MAX ? `${joined.slice(0, CHAT_PRD_TASK_MAX)}…` : joined
 }
 
+// Documents attached EARLIER in this tab's conversation — extracted text lives
+// on each turn (stamped after extraction on live sends, rehydrated from
+// conversation_turns.attachments on reloaded threads). A "generate a PRD"
+// command grounds on these: the reported bug was a document attached two
+// messages before the command being silently forgotten. Caps mirror the
+// backend's TaskSourceDoc limits; when over the doc cap, the MOST RECENT
+// attachments win (they're most likely what the user means).
+const PRD_DOC_MAX_CHARS = 60000
+const PRD_DOCS_MAX = 8
+export function conversationPrdDocs(
+  thread: ThreadTurn[],
+): { name: string; content: string }[] {
+  const docs: { name: string; content: string }[] = []
+  for (const t of thread) {
+    for (const a of t.attachments ?? []) {
+      if (a.content?.trim()) docs.push({ name: a.name, content: a.content.slice(0, PRD_DOC_MAX_CHARS) })
+    }
+  }
+  return docs.slice(-PRD_DOCS_MAX)
+}
+
+// The conversation ITSELF as grounding material.
+//
+// "Generate a PRD for this" means "build it from what we've been discussing" —
+// and the substance usually sits in the AGENT's replies (a fetched Jira ticket,
+// a retrieved finding, a summary), not only in what the user typed.
+// conversationToPrdTask reads user turns only, so a request like
+//   "get me a ticket of car"  →  <the KAN-1033 ticket>  →  "generate a prd for this"
+// sent the backend five words and left the ticket in the browser. With nothing
+// else to go on, KG retrieval grounded the document on whatever the workspace
+// happened to be about, and the PRD came back about an unrelated subject.
+//
+// This rides the EXISTING source-doc channel, which the backend layers on top of
+// KG grounding as authoritative material (routes/prd.py `extra_source_md`), so
+// the thread leads and the workspace stays the supporting layer. It deliberately
+// does NOT replace grounding — that is the uploaded-file import path
+// (`import_source_md`), which is untouched.
+const PRD_TRANSCRIPT_DOC_NAME = "Conversation (this chat)"
+// Sprntly's own process chatter about making a PRD is not product material: the
+// command acknowledgment and the clarify gate's question list would both read as
+// requirements if fed back in. Matched on TEXT, not turn ids, so the filter still
+// holds for a thread rehydrated from Supabase (which rebuilds turns with fresh
+// ids and reconstructs replies as plain answers).
+const PRD_ACK_ANSWER_RE = /View PRD button/
+const PRD_CLARIFY_ANSWER_RE = /^Before I write this PRD/
+// Artifact summaries end with a per-kind pointer line ("…View Evidence button…",
+// "…View Prototype button…") precisely so this text-based filter can strip them
+// here: a summary OF an artifact fed back as grounding would read as fresh
+// requirements. PRD summaries are already covered by PRD_ACK_ANSWER_RE.
+const EVIDENCE_SUMMARY_ANSWER_RE = /View Evidence button/
+const PROTOTYPE_SUMMARY_ANSWER_RE = /View Prototype button/
+export function conversationTranscriptDoc(
+  thread: ThreadTurn[],
+): { name: string; content: string } | null {
+  const parts: string[] = []
+  for (const t of thread) {
+    const q = t.query?.trim()
+    if (q) parts.push(`User: ${q}`)
+    const a = typeof t.reply?.answer === "string" ? t.reply.answer.trim() : ""
+    if (
+      a &&
+      !PRD_ACK_ANSWER_RE.test(a) &&
+      !PRD_CLARIFY_ANSWER_RE.test(a) &&
+      !EVIDENCE_SUMMARY_ANSWER_RE.test(a) &&
+      !PROTOTYPE_SUMMARY_ANSWER_RE.test(a)
+    ) {
+      parts.push(`Sprntly: ${a}`)
+    }
+  }
+  const joined = parts.join("\n\n").trim()
+  if (!joined) return null
+  // Newest wins on overflow — the tail of a long chat is what "this" refers to.
+  return {
+    name: PRD_TRANSCRIPT_DOC_NAME,
+    content: joined.length > PRD_DOC_MAX_CHARS ? joined.slice(-PRD_DOC_MAX_CHARS) : joined,
+  }
+}
+
+// Everything a chat-command PRD grounds on: documents attached in this thread
+// PLUS the conversation. The transcript takes one of the backend's 8 doc slots,
+// so attachments yield a slot rather than silently pushing it out, and it goes
+// LAST so the most recent context sits closest to the end of the prompt.
+export function prdGroundingDocs(
+  thread: ThreadTurn[],
+): { name: string; content: string }[] {
+  const attachments = conversationPrdDocs(thread)
+  const transcript = conversationTranscriptDoc(thread)
+  if (!transcript) return attachments
+  return [...attachments.slice(-(PRD_DOCS_MAX - 1)), transcript]
+}
+
+// ── ChatScreen-local PRD tab sources ────────────────────────────────────────
+// The in-chat command flows ("convert this doc to a PRD", "generate a PRD for
+// X") must render the tab's seed turn + generating skeleton on the CURRENT
+// commit and only THEN hit the network — otherwise the composer clears, the
+// message "leaves", and nothing shows for the multi-second import/generate,
+// which reads as a frozen app. So instead of the caller awaiting
+// importDoc/generateFromTask and passing a ready `resume` prd_id, these two
+// kinds hand the *unstarted* work to openPrdInTab, which renders first and kicks
+// the backend call INSIDE its async block (network AFTER the optimistic render).
+type LocalPrdSource =
+  // "convert this document to a PRD" — POST /v1/prd/import happens in-panel.
+  | { kind: "importDoc"; file: File; company: string; openTickets?: boolean }
+  // "generate a PRD for <task>" — POST /v1/prd/generate happens in-panel.
+  // `sourceDocs` = documents attached earlier in the thread (extracted text);
+  // the backend grounds the PRD on them alongside the task/KG evidence.
+  | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
+type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
+  source: PrdTabRequest["source"] | LocalPrdSource
+  /** Generate IN THIS TAB: pin the target to an existing chat tab so the PRD
+   *  lands in the ACTIVE tab's artifacts panel (its command turn appended to the
+   *  live thread) instead of spawning a new tab. Set by the in-chat command
+   *  flows when the active tab is a plain, PRD-less chat. */
+  inTabId?: string
+}
+
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
 // request). Shown as the reply to the user's seeded command turn, so the chat
 // explains what the spinning panel on the right is doing and how to get back to
 // it (the PRD card above the thread hosts the View PRD button).
-function commandAckReply(req: PrdTabRequest): AskResponse {
+function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   const source = req.source
-  const importing = source.kind === "resume" && source.origin !== "task"
-  const fromTask = source.kind === "resume" && source.origin === "task"
-  const withTickets = source.kind === "resume" && !!source.openTickets
+  const importing = (source.kind === "resume" && source.origin !== "task") || source.kind === "importDoc"
+  const fromTask = (source.kind === "resume" && source.origin === "task") || source.kind === "generateTask"
+  const withTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
   // An Ideation idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
-  const answer = withTickets
-    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
+  // WHERE the View PRD button actually lands, which differs by open kind and
+  // must match the render (see `inlinePrdCards`): an in-chat command puts the
+  // PRD card right below this reply, a header open pins it at the top of the
+  // thread. The copy said "above" for every case, so a command-opened chat
+  // pointed the user at a button that was in fact sitting under this message.
+  const inline = source.kind === "importDoc" || source.kind === "generateTask"
+    || (source.kind === "resume" && !!req.seedQuery)
+  const locator = inline
+    ? "Use the View PRD button just below to reopen the panel anytime."
+    : "Use the View PRD button above to reopen the panel anytime."
+  const lead = withTickets
+    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
-    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype. Use the View PRD button above to reopen the panel anytime."
+    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
     : fromTask
-      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready."
       : importing
-        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-  return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready."
+  return { answer: `${lead} ${locator}`, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
-// Attached-file chips shown under a composer. Rendered by BOTH the landing and
-// thread composers — attachments live in shared state, so a file attached on
-// the landing screen must be visible right there (the toast alone disappears in
-// seconds, which read as "the upload didn't work"), not only after first send.
+// Attached-file chips. Rendered by BOTH composers — attachments live in shared
+// state, so a file attached on the landing screen must be visible right there
+// (the toast alone disappears in seconds, which read as "the upload didn't
+// work"), not only after first send.
+//
+// They now sit in the composer's HEADER, above the textarea, instead of in a row
+// below the whole card. The card used to grow downward (chips) at the same time
+// the textarea grew upward, so attaching a file while typing moved both edges at
+// once.
 function AttachmentChips({ attachments, onRemove }: {
   attachments: { name: string }[]
   onRemove: (index: number) => void
 }) {
-  if (attachments.length === 0) return null
   return (
-    <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
+    <>
       {attachments.map((a, i) => (
-        <span key={i} data-testid="attachment-chip" style={{
-          display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
-          padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
-          color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
-        }}>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          {a.name}
-          <button type="button" aria-label={`Remove ${a.name}`} onClick={() => onRemove(i)}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
+        <span key={i} data-testid="attachment-chip" className="cx-chip cx-chip--file">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <b>{a.name}</b>
+          <button type="button" className="cx-chip-x" aria-label={`Remove ${a.name}`} onClick={() => onRemove(i)}>×</button>
         </span>
       ))}
-    </div>
+    </>
   )
 }
 
@@ -181,17 +476,22 @@ function attachmentMeta(name: string, content?: string): string {
 }
 
 /** A clickable file card on a user turn — Claude-style: an icon tile, the file
- *  name, and a type/size sub-line. Clicking opens the content viewer. */
+ *  name, and a type/size sub-line. Clicking opens the viewer (renders the ORIGINAL
+ *  file when it was stored, else the extracted text). `downloadable` reflects that
+ *  the original file was stored, so the card is viewable even with no extracted
+ *  text (e.g. a PDF imported straight to a PRD). */
 function TurnAttachmentCard({
   name,
   content,
+  downloadable,
   onOpen,
 }: {
   name: string
   content?: string
+  downloadable?: boolean
   onOpen: () => void
 }) {
-  const viewable = !!content
+  const viewable = !!content || !!downloadable
   return (
     <button
       type="button"
@@ -216,15 +516,20 @@ function TurnAttachmentCard({
   )
 }
 
-/** Full-screen overlay that renders an attachment's extracted content (the same
- *  text sent to the agent). Opened by clicking a file card on a user turn. */
+/** Full-screen overlay that renders an attachment. When the ORIGINAL file was
+ *  stored (`key`), it fetches a fresh signed URL and renders the real document —
+ *  PDF/image inline, everything else offered as a download — falling back to the
+ *  extracted text. Opened by clicking a file card on a user turn. */
 function AttachmentViewer({
   attachment,
   onClose,
 }: {
-  attachment: { name: string; content: string }
+  attachment: { name: string; content: string; key?: string | null; mime?: string | null }
   onClose: () => void
 }) {
+  const [urls, setUrls] = useState<{ view_url: string; download_url: string; mime: string } | null>(null)
+  const [status, setStatus] = useState<"idle" | "loading" | "error">(attachment.key ? "loading" : "idle")
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
@@ -232,6 +537,23 @@ function AttachmentViewer({
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
   }, [onClose])
+
+  // Sign-on-open: the stored URL expires, so mint a fresh one each time the
+  // viewer opens. Best-effort — a failure falls back to the extracted text.
+  useEffect(() => {
+    if (!attachment.key) return
+    let cancelled = false
+    setStatus("loading")
+    attachmentsApi.sign(attachment.key, attachment.name)
+      .then((u) => { if (!cancelled) { setUrls(u); setStatus("idle") } })
+      .catch(() => { if (!cancelled) setStatus("error") })
+    return () => { cancelled = true }
+  }, [attachment.key, attachment.name])
+
+  const mime = urls?.mime || attachment.mime || ""
+  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(attachment.name)
+  const isImage = /^image\//i.test(mime) || /\.(png|jpe?g|gif|webp)$/i.test(attachment.name)
+  const hasText = !!attachment.content.trim()
 
   return (
     <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
@@ -244,15 +566,58 @@ function AttachmentViewer({
             </svg>
             {attachment.name}
           </span>
-          <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            {urls?.download_url ? (
+              <a
+                className="bc-file-viewer-download"
+                href={urls.download_url}
+                download={attachment.name}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Download ${attachment.name}`}
+                aria-label={`Download ${attachment.name}`}
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 6, color: "inherit", opacity: 0.75 }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </a>
+            ) : null}
+            <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </span>
         </div>
         <div className="bc-file-viewer-body">
-          {attachment.content.trim() ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+          {attachment.key && status === "loading" ? (
+            <p className="bc-file-viewer-empty">Loading document…</p>
+          ) : urls && isPdf ? (
+            <iframe
+              src={urls.view_url}
+              title={attachment.name}
+              data-testid="attachment-pdf-frame"
+              style={{ width: "100%", height: "100%", minHeight: "70vh", border: "none" }}
+            />
+          ) : urls && isImage ? (
+            <img
+              src={urls.view_url}
+              alt={attachment.name}
+              data-testid="attachment-image"
+              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block", margin: "0 auto" }}
+            />
+          ) : hasText ? (
+            <>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+              {urls && !isPdf && !isImage ? (
+                <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
+              ) : null}
+            </>
+          ) : urls ? (
+            <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
           ) : (
             <p className="bc-file-viewer-empty">No preview available for this file.</p>
           )}
@@ -315,8 +680,237 @@ function SlashSkillMenu({ skills, activeIndex, onSelect, onHover, inset = false 
   )
 }
 
+/** The typed question's character budget — the ask route's own
+ *  `question: str = Field(..., min_length=3, max_length=120_000)`
+ *  (backend/app/routes/ask.py). Attached-document text is folded in on top of
+ *  this server-side, which is why the extraction path clamps separately. */
+const DRAFT_MAX_CHARS = 120_000
+/** The counter appears only inside the last 10% of the budget. A permanent
+ *  character count is chrome that says nothing on the message a person actually
+ *  types. */
+const DRAFT_COUNTER_FROM = Math.floor(DRAFT_MAX_CHARS * 0.9)
+/** The backend's own `min_length=3`. */
+const DRAFT_MIN_CHARS = 3
+
+/** Terminal ellipsis dropped: a placeholder is a prompt, not a sentence trailing
+ *  off (Cloudscape's guidance, and what the rest of the app already does). */
+const COMPOSER_PLACEHOLDER = "Ask Sprntly anything, or type / for skills"
+
+/** Pressing Enter while an ask is in flight used to be a silent no-op — the
+ *  keystroke simply vanished, with the draft still sitting there. The guard is
+ *  correct (one ask per tab); the silence was the bug. */
+export const BUSY_ENTER_HINT_LEAD = "Sprntly is still answering. Your message is saved — send it when the answer lands, or "
+export const BUSY_ENTER_HINT_TAIL = " to interrupt."
+/** How long the busy-Enter hint stays before clearing itself. */
+const BUSY_HINT_MS = 6000
+
+/** A skill pinned onto the draft by the slash palette or the `+` menu. */
+type PinnedSkill = { id: string; label: string; trigger: string }
+
+/**
+ * The chat composer — ONE component for both the landing and the thread dock.
+ *
+ * They were two hand-maintained copies before this, and had drifted on width,
+ * resting height, textarea clamp, tokens and affordances (the ⌘/ hint existed
+ * only on the dock, which is the one place a new user never starts). `home` is
+ * now the only difference and it changes type size and shadow, nothing else.
+ *
+ * Anatomy, top to bottom: header chips → textarea → footer bar.
+ */
+function ChatComposer({
+  home,
+  busy,
+  draft,
+  pinnedSkill,
+  attachments,
+  hint,
+  menuOpen,
+  menuActiveIndex,
+  slashMenu,
+  composerRef,
+  fileInputRef,
+  onInput,
+  onKeyDown,
+  onSend,
+  onStop,
+  onToggleMenu,
+  onMenuActive,
+  onMenuSelect,
+  onCloseMenu,
+  onRemoveAttachment,
+  onRemoveSkill,
+  onFileSelect,
+}: {
+  home?: boolean
+  busy: boolean
+  draft: string
+  pinnedSkill: PinnedSkill | null
+  attachments: { name: string }[]
+  hint: React.ReactNode | null
+  menuOpen: boolean
+  menuActiveIndex: number
+  slashMenu: React.ReactNode
+  composerRef: React.RefObject<HTMLTextAreaElement | null>
+  fileInputRef: React.RefObject<HTMLInputElement | null>
+  onInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void
+  onSend: () => void
+  onStop: () => void
+  onToggleMenu: () => void
+  onMenuActive: (index: number) => void
+  onMenuSelect: (index: number) => void
+  onCloseMenu: () => void
+  onRemoveAttachment: (index: number) => void
+  onRemoveSkill: () => void
+  onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void
+}) {
+  const menuRef = useRef<HTMLDivElement>(null)
+  // Opening the menu moves focus into it, so it is operable from the keyboard at
+  // all — the affordance exists precisely for people who never learnt ⌘/.
+  useEffect(() => {
+    if (!menuOpen) return
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>(".cx-menu-item")
+    items?.[menuActiveIndex]?.focus()
+  }, [menuOpen, menuActiveIndex])
+
+  const canSend = draft.trim().length >= DRAFT_MIN_CHARS
+  const showCount = draft.length >= DRAFT_COUNTER_FROM
+  const hasHead = !!pinnedSkill || attachments.length > 0
+
+  return (
+    <div className={`cx${home ? " cx--home" : ""}${busy ? " cx--busy" : ""}`}>
+      {slashMenu}
+      {hasHead ? (
+        <div className="cx-head">
+          {pinnedSkill ? (
+            // The trigger IS the skill — qa_agent's slash fast-path treats it as
+            // a deterministic selection — so this label is a fact, not a guess.
+            // Before this it was pasted into the draft as raw "/competitive-intel "
+            // text the user had to be careful not to delete.
+            <span className="cx-chip cx-chip--skill" data-testid="skill-chip">
+              <b>{pinnedSkill.label}</b>
+              <button
+                type="button"
+                className="cx-chip-x"
+                aria-label={`Remove the ${pinnedSkill.label} skill`}
+                onClick={onRemoveSkill}
+              >
+                ×
+              </button>
+            </span>
+          ) : null}
+          <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />
+        </div>
+      ) : null}
+
+      <textarea
+        ref={composerRef}
+        className="cx-input"
+        placeholder={COMPOSER_PLACEHOLDER}
+        rows={1}
+        maxLength={DRAFT_MAX_CHARS}
+        value={draft}
+        onChange={onInput}
+        onKeyDown={onKeyDown}
+      />
+
+      <div className="cx-bar">
+        <div className="cx-tools">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx"
+            style={{ display: "none" }}
+            onChange={onFileSelect}
+          />
+          <button
+            type="button"
+            className="cx-tool cx-tool--plus"
+            aria-label="Add attachment or skill"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={onToggleMenu}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+          <span className="cx-kbd" aria-hidden>
+            <kbd>⌘</kbd>
+            <kbd>/</kbd>
+          </span>
+        </div>
+        <div className="cx-right">
+          {showCount ? (
+            <span className="cx-count">
+              {draft.length.toLocaleString()} / {DRAFT_MAX_CHARS.toLocaleString()}
+            </span>
+          ) : null}
+          {/* Send and Stop occupy the SAME slot at the SAME size, so the footer
+              never reflows at the moment of sending. There is deliberately no
+              error variant here: a retry belongs on the failed turn, next to the
+              question that failed. */}
+          {busy ? (
+            <button type="button" className="cx-send cx-send--stop" aria-label="Stop generating" onClick={onStop}>
+              <IconStop size={16} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="cx-send"
+              aria-label="Send"
+              disabled={!canSend}
+              title={canSend ? undefined : "Type at least 3 characters"}
+              onClick={onSend}
+            >
+              <IconSendUp size={18} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {menuOpen ? (
+        <div
+          ref={menuRef}
+          className="cx-menu"
+          role="menu"
+          aria-label="Add to this message"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); onMenuActive((menuActiveIndex + 1) % 2); return }
+            if (e.key === "ArrowUp") { e.preventDefault(); onMenuActive((menuActiveIndex + 1) % 2); return }
+            if (e.key === "Escape") { e.preventDefault(); onCloseMenu(); composerRef.current?.focus() }
+          }}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className={`cx-menu-item${menuActiveIndex === 0 ? " is-active" : ""}`}
+            onClick={() => onMenuSelect(0)}
+          >
+            Attach a file
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={`cx-menu-item${menuActiveIndex === 1 ? " is-active" : ""}`}
+            onClick={() => onMenuSelect(1)}
+          >
+            Browse skills
+            <small>⌘/</small>
+          </button>
+        </div>
+      ) : null}
+
+      {hint ? (
+        <div className="cx-hint" role="status">{hint}</div>
+      ) : null}
+    </div>
+  )
+}
+
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
-  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
+  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
   { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
   { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
@@ -337,31 +931,42 @@ function ChatArtifactActions({
   prdExists,
   prdWaiting,
   prdGenerating,
+  prdLoading,
   onViewEvidence,
   onOpenPrd,
   prototypePrdId,
   prototypeReady,
   onViewPrototype,
+  onPrototypeSettled,
 }: {
   evidenceExists: boolean
   prdExists: boolean
   prdWaiting: boolean
   prdGenerating: boolean
+  prdLoading?: boolean
   onViewEvidence: () => void
   onOpenPrd: () => void
   prototypePrdId: number | null
   prototypeReady: boolean
   onViewPrototype: () => void
+  /** A chat-kicked prototype build finished (success or failure) — the host
+   *  posts the artifact chat summary from here. */
+  onPrototypeSettled?: (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => void
 }) {
+  // Order matters: GENERATING (a document is being written) outranks LOADING
+  // (one exists and is being fetched), which outranks the settled View/Generate
+  // choice. Loading covers both fetching a known PRD and not yet knowing whether
+  // one exists — in neither case is anything being authored, so neither may say
+  // "Generating".
   const first = evidenceExists
     ? { label: "View Evidence", onClick: onViewEvidence, disabled: false }
     : {
         label: prdGenerating
           ? "Generating PRD…"
-          : prdWaiting ? "Loading…"
+          : prdLoading || prdWaiting ? "Loading PRD…"
           : prdExists ? "View PRD" : "Generate PRD",
         onClick: onOpenPrd,
-        disabled: prdGenerating || prdWaiting,
+        disabled: prdGenerating || prdLoading || prdWaiting,
       }
   const canPrototype = prototypePrdId != null
   return (
@@ -377,6 +982,7 @@ function ChatArtifactActions({
       <GeneratePrototypeCTA
         prdId={prototypePrdId}
         skipExistenceCheck
+        onGenerationSettled={onPrototypeSettled}
         render={({ onClick }) => (
           <button
             type="button"
@@ -409,6 +1015,8 @@ export function ChatScreen() {
     pendingPrdTab,
     setPendingPrdTab,
     openPrdTab,
+    pendingReportFocus,
+    setPendingReportFocus,
     showToast,
     openContentPanel,
     closeContentPanel,
@@ -417,14 +1025,21 @@ export function ChatScreen() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const auth = useAuth()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
+  // Action-envelope dispatch (DEFAULT ON; staff-panel kill switch): one
+  // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
+  // decides what each message asks for, replacing the client regex/classifier
+  // ladder in submitAsk. parseFeatureFlags fills a missing key from
+  // DEFAULT_FEATURE_FLAGS (true), so only an explicit staff-set false — or a
+  // workspace that hasn't loaded — lands on the legacy ladder.
+  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
   // Per-tab chat state is SESSION-scoped: it lives in sessionStorage, not
   // localStorage. So a fresh open (new browser tab/window, or reopening the app
-  // after closing it) starts with ONLY the pinned Weekly-brief tab — never last
+  // after closing it) starts with ONLY the pinned Top Insights tab — never last
   // session's accumulated chat tabs. It still survives an in-session reload or a
   // navigate-away-and-back, so clicking around the app never nukes open chats.
   // Keys are ALSO user+company scoped so neither a different tenant nor a
@@ -433,6 +1048,11 @@ export function ChatScreen() {
   const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
   const tabsKey = `sprntly_chat_tabs_${authUserId}_${activeCompany}`
   const activeTabKey = `sprntly_chat_active_tab_${authUserId}_${activeCompany}`
+  // The last CHAT tab the user was on — the pinned brief tab is never written
+  // here. This is what the sidebar's "Workbench" nav (`/?tab=last`) restores, so
+  // it always lands on real work rather than the brief. Session-scoped and
+  // user+company-scoped for the same reasons as the tabs themselves.
+  const lastTabKey = `sprntly_chat_last_tab_${authUserId}_${activeCompany}`
 
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
@@ -449,8 +1069,14 @@ export function ChatScreen() {
         prd: null,
         prdId: t.prdId ?? null,
         evidence: null,
+        // Persisted: an evidence tab reopens on its Evidence panel, not closed.
+        evidenceOnly: t.evidenceOnly ?? false,
+        evidenceDetail: null,
         prdGenerating: false,
         evidenceGenerating: false,
+        // Persisted: preserves the inline-vs-header card ordering across reload.
+        prdInFlow: t.prdInFlow ?? false,
+        prdFlowTurnId: t.prdFlowTurnId,
       }))
     } catch { return [] }
   })
@@ -484,10 +1110,15 @@ export function ChatScreen() {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
-  // When set, ChatScreen slides the content panel (Evidence / PRD / Tickets) open
-  // on the NEXT commit — deferred one commit so the route-change panel-close (a
-  // PRD opened from another surface routes to `/`) can't swallow it.
-  const [prdPanelPending, setPrdPanelPending] = useState(false)
+  // When set, ChatScreen slides the content panel open on the NEXT commit, on
+  // THIS tab — deferred one commit so the route-change panel-close (an artifact
+  // opened from another surface routes to `/`) can't swallow it. The value is the
+  // tab to land on: "prd" for every PRD open, "evidence" for a Top Insights
+  // "View Evidence", which starts no PRD work.
+  const [prdPanelPending, setPrdPanelPending] = useState<"evidence" | "prd" | "tickets" | null>(null)
+  // Tab id of a chat just re-opened from history that owns a PRD — consumed by
+  // the effect that opens its panel once that tab is the active one.
+  const [resumePanelTabId, setResumePanelTabId] = useState<string | null>(null)
 
   // When the storage key changes (workspace switch OR a different user signs
   // in), reload tabs from the new user+company-scoped session storage so we
@@ -504,6 +1135,8 @@ export function ChatScreen() {
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+          evidenceOnly: t.evidenceOnly ?? false, evidenceDetail: null,
+          prdInFlow: t.prdInFlow ?? false, prdFlowTurnId: t.prdFlowTurnId,
         })))
       } else {
         setTabs([])
@@ -522,7 +1155,38 @@ export function ChatScreen() {
   // strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, ...rest }) => rest)
+      // prdCommandThinking is stripped with the rest: the in-flight call it
+      // tracks does not survive a reload, so restoring it would leave a
+      // thinking indicator spinning forever with nothing behind it. Turn-level
+      // `partial` (live streamed answer text) is stripped for the same reason —
+      // the resume path re-attaches the stream and rebuilds it from replay.
+      // `evidenceDetail` is stripped as a large field like `prd`/`evidence`; the
+      // small `evidenceOnly` flag beside it is what survives, and it's enough for
+      // a reloaded tab to reopen on its Evidence panel (read-loaded by briefMeta).
+      const slim = tabs.map(({ prd: _p, evidence: _e, evidenceDetail: _ed, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
+        // A still-pending summary indicator is dropped from the SAVED copy:
+        // its in-flight call dies with the page, so restoring it would strand
+        // a "Summarizing…" skeleton nothing will ever fill. The summary itself
+        // persists (as the turn's reply, and as a conversation row) only once
+        // it actually lands.
+        const stripped = {
+          ...rest,
+          thread: rest.thread
+            .filter((tn) => !(tn.summaryPending && !tn.reply))
+            .map(({ partial: _partial, streamDropped: _sd, timedOut: _to, ...turn }) => turn),
+        }
+        // A PRD command awaiting its deferred reply (the clarify gate is still
+        // deciding — see deferredAckRef) has a reply-less seed turn, and the
+        // in-flight promise that would fill it dies with the page. Persisted
+        // as-is, a reload restored it into "No response was generated for this
+        // message." — false and a dead end. Mark it in the SAVED copy only, so
+        // a restore can say what actually happened; a normal settle re-runs
+        // this effect with the ref cleared and the mark comes straight off.
+        if (!deferredAckRef.current.has(stripped.id)) return stripped
+        const last = stripped.thread[stripped.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return stripped
+        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
+      })
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
@@ -530,12 +1194,32 @@ export function ChatScreen() {
     try { sessionStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
 
+  // Remember the last CHAT tab (never the pinned brief tab, never the tab-less
+  // landing) so "Workbench" can return the user to their open work. Written on
+  // every switch; read only by the `?tab=last` handler below.
+  useEffect(() => {
+    if (!activeTabId || activeTabId === BRIEF_TAB_ID) return
+    try { sessionStorage.setItem(lastTabKey, activeTabId) } catch { /* ignore */ }
+  }, [activeTabId, lastTabKey])
+
   // The pinned brief tab is synthesized (not in `tabs`), so when it's active
   // `activeTab` is null. `isBriefTab` lets the render swap in <BriefChat/> for
   // the chat landing/thread + composer.
   const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []
+  // The last turn a REPLY could still land on. A pending artifact-summary
+  // placeholder is transparent here: it is appended the moment the artifact
+  // lands, which would otherwise steal "last" from a genuinely in-flight ask
+  // (flipping it to "No response was generated" mid-answer) and move the
+  // artifact-action row onto a turn that has nothing to act on. Equals
+  // `thread.length - 1` whenever no summary is pending.
+  const lastLiveTurnIdx = (() => {
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (!(thread[i].summaryPending && !thread[i].reply)) return i
+    }
+    return thread.length - 1
+  })()
 
   // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
   const chatBriefId = activeTab?.briefMeta?.briefId ?? null
@@ -567,6 +1251,27 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // The message the user just sent, rendered the INSTANT they hit send.
+  //
+  // Every send now opens with an awaited backend decision (POST /v1/chat/intent —
+  // a full LLM round-trip) before ANY branch knows whether this message becomes a
+  // chat turn or a command that seeds its own turn. That await used to sit in
+  // front of every render, so the composer cleared into an empty screen for
+  // multiple seconds and the send read as dropped. This is the bridge: the user's
+  // words + a thinking skeleton, on screen on the send's own commit.
+  //
+  // Deliberately NOT a ThreadTurn and never persisted — the command flows
+  // (openPrdInTab's seedTurn, seedCommandTurn) own the real turn they seed, and a
+  // pre-rendered turn here would duplicate both the bubble and the Supabase row.
+  // Whichever branch wins renders its real turn and clears this in the SAME
+  // commit, so the handoff is invisible. `tabId` is the tab the send was aimed at
+  // (null on the landing surface) so it only shows where it was typed.
+  // `startedAt` is the wall clock of the send itself. It is handed to the real
+  // turn when the dispatch settles, so the wait's elapsed-time ladder measures
+  // ONE wait across the two mounts rather than restarting at the handoff.
+  const [pendingSend, setPendingSend] = useState<
+    { tabId: string | null; query: string; attachments: { name: string }[]; startedAt: number } | null
+  >(null)
   // Insight keys ("briefId:insightIndex") known to already have a saved evidence
   // brief — flips the chat's first action to "View Evidence" (else it offers the
   // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
@@ -577,9 +1282,48 @@ export function ChatScreen() {
   const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
+  // The company's custom skills (PRD 1854), kept separate from built-ins so
+  // the two fetches can't race each other's setState; merged for the palette.
+  const [customSkills, setCustomSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
+  // The palette was opened from the `+` menu or ⌘/ rather than by typing "/".
+  // Typing then must not slam it shut on the first keystroke, the way the
+  // "draft no longer starts with /" rule does for a typed open.
+  const [slashFromMenu, setSlashFromMenu] = useState(false)
+  // A skill pinned onto the NEXT message. Selecting from the palette used to
+  // paste "/competitive-intel " into the draft as raw text the user had to keep
+  // intact; it is a removable chip now, and the trigger is re-attached to the
+  // query at send time so the backend's deterministic slash fast-path is
+  // unchanged.
+  const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
+  // The composer's `+` menu (Attach a file / Browse skills).
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const [plusMenuActive, setPlusMenuActive] = useState(0)
+  // Transient composer hint line (role="status"), currently only the busy-Enter
+  // answer. Auto-clears so it never becomes permanent chrome.
+  const [composerHint, setComposerHint] = useState<"busy" | null>(null)
+  const composerHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showComposerHint = useCallback((kind: "busy") => {
+    setComposerHint(kind)
+    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
+    composerHintTimerRef.current = setTimeout(() => setComposerHint(null), BUSY_HINT_MS)
+  }, [])
+  useEffect(() => () => {
+    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
+  }, [])
+  // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
+  // the wait component owns its own tick, so this only has to be READ during
+  // render — and it must survive the pending-send → real-turn handoff so the
+  // rung ladder doesn't restart its clock halfway through one wait.
+  const askStartRef = useRef<Map<string, number>>(new Map())
+  // Turn ids whose ask was RE-ATTACHED (resumeAskGeneration) rather than POSTed
+  // — the one thing that makes "Picking up where this left off" true.
+  const resumedTurnsRef = useRef<Set<string>>(new Set())
+  // Bumped whenever a resume re-attaches, purely to re-render the thread so the
+  // wait picks the resumed copy up (the ref above carries no reactivity).
+  const [, setResumeTick] = useState(0)
   // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
   // inlined as text client-side. The File feeds the PRD-import command
   // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
@@ -587,7 +1331,7 @@ export function ChatScreen() {
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
-  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string } | null>(null)
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -609,16 +1353,22 @@ export function ChatScreen() {
   const scrollThreadToBottom = useCallback((behavior: ScrollBehavior) => {
     const el = threadScrollRef.current
     if (!el) return
-    // Defer to the next frame so the just-added turn (and its thinking skeleton)
-    // is laid out before we measure scrollHeight.
-    requestAnimationFrame(() => {
+    const jump = () => {
+      const node = threadScrollRef.current
+      if (!node) return
       try {
-        el.scrollTo({ top: el.scrollHeight, behavior })
+        node.scrollTo({ top: node.scrollHeight, behavior })
       } catch {
         // jsdom / older engines without Element.scrollTo — set position directly.
-        el.scrollTop = el.scrollHeight
+        node.scrollTop = node.scrollHeight
       }
-    })
+    }
+    // An instant jump lands on THIS frame: a send has to be on screen on its own
+    // commit, not a frame later. The rAF pass then repeats it once the just-added
+    // turn (and its thinking skeleton) is laid out, catching the height the first
+    // call couldn't measure yet.
+    if (behavior !== "smooth") jump()
+    requestAnimationFrame(jump)
   }, [])
 
   // Track whether the user is pinned near the bottom of the thread. Auto-follow
@@ -651,14 +1401,29 @@ export function ChatScreen() {
   }, [])
   useEffect(() => () => threadResizeObsRef.current?.disconnect(), [])
 
-  // A new turn (the user just asked) → re-pin and smooth-scroll so the question
-  // + the assistant's thinking sit in view; the ResizeObserver then follows the
-  // answer as it grows. Guard on a real length increase so a reply landing on an
-  // existing turn doesn't double-trigger (the observer already handles growth).
+  // The send itself is what has to move the viewport. `pendingSend` renders the
+  // user's message on the send's own commit — seconds before the real turn lands
+  // (the intent decision is a round-trip away), so a scroll keyed on thread
+  // growth left the message parked below the fold that whole time. Re-pin and
+  // JUMP: from far up a long thread a smooth animation both takes too long and
+  // un-pins the follow behavior on its own way down (the scroll handler samples
+  // it mid-animation, well short of the bottom), which is exactly how the answer
+  // then streamed in off-screen.
+  useEffect(() => {
+    if (!pendingSend || pendingSend.tabId !== activeTabId) return
+    threadPinnedRef.current = true
+    scrollThreadToBottom("auto")
+  }, [pendingSend, activeTabId, scrollThreadToBottom])
+
+  // A new turn (the user just asked, or a command seeded its own turn) → re-pin
+  // and jump so the question + the assistant's thinking sit in view; the
+  // ResizeObserver then follows the answer as it grows. Guard on a real length
+  // increase so a reply landing on an existing turn doesn't double-trigger (the
+  // observer already handles growth).
   useEffect(() => {
     if (thread.length > prevThreadLenRef.current) {
       threadPinnedRef.current = true
-      scrollThreadToBottom("smooth")
+      scrollThreadToBottom("auto")
     }
     prevThreadLenRef.current = thread.length
   }, [thread.length, scrollThreadToBottom])
@@ -685,7 +1450,9 @@ export function ChatScreen() {
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
-        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
+        // Keep the raw File on text attachments too — the original bytes are
+        // uploaded on send so the chip can render/download the real file later.
+        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000), file }])
       }
       reader.readAsText(file)
     })
@@ -708,6 +1475,24 @@ export function ChatScreen() {
         { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources", category: "Verification" },
       ])
     })
+    // Custom skills join the same palette (mapped into the SkillInfo shape,
+    // category "Custom"). Optional-chained so suites that mock lib/api without
+    // skillsApi keep working; a fetch failure just leaves built-ins only —
+    // the palette must never blank because this list couldn't load.
+    Promise.resolve(skillsApi?.list?.())
+      .then((r) => {
+        if (!r) return
+        setCustomSkills(
+          r.skills.map((s) => ({
+            id: `custom-${s.id}`,
+            label: s.name,
+            trigger: s.trigger,
+            description: s.description,
+            category: "Custom",
+          })),
+        )
+      })
+      .catch(() => {})
   }, [])
 
   // Create a new tab or, if a tab with the same title already exists, switch to it
@@ -733,7 +1518,7 @@ export function ChatScreen() {
     const next = tabsRef.current.filter((t) => t.id !== tabId)
     setTabs(next)
     // Closing the ACTIVE tab hands focus to the last surviving chat tab; when
-    // none remain, the pinned Weekly-brief tab becomes active — never the
+    // none remain, the pinned Top Insights tab becomes active — never the
     // tab-less landing (which left NO tab looking active in the strip).
     if (activeTabIdRef.current === tabId) {
       setActiveTabId(next.length > 0 ? next[next.length - 1].id : BRIEF_TAB_ID)
@@ -764,8 +1549,24 @@ export function ChatScreen() {
           const reply = next?.role === "assistant"
             ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse
             : undefined
-          restored.push({ id: `prdhist-${conversation.id}-${i}`, query: t.content, reply })
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: t.content,
+            reply,
+            // Carry the file chip (with its storage key) so a reopened import-PRD
+            // chat can still render/download the original document.
+            ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+          })
           if (reply) i++
+        } else if (t.role === "assistant" && t.content.trim()) {
+          // Unconsumed assistant row (the artifact summary posted after the
+          // ack) → agent-only turn, mirroring buildRestored. Dropping it made
+          // the summary vanish from every reopened PRD chat.
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: "",
+            reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+          })
         }
       }
       if (restored.length === 0) return
@@ -790,6 +1591,12 @@ export function ChatScreen() {
     if (resolvedInsightPrdId == null || activeTabId == null) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab) return
+    // …but an EVIDENCE tab is not a PRD tab. It was opened for a finding, and the
+    // insight may well have a PRD in the DB — adopting that id here would make the
+    // tab claim a document it never opened, so refocusing it would restore that
+    // PRD instead of its evidence. It becomes a PRD tab only when one actually
+    // lands in it (the panel's PRD tab resolving one, which stamps `prdId`).
+    if (tab.evidenceOnly && tab.prd == null && tab.prdId == null) return
     if (tab.prdId == null) {
       setTabs((prev) => prev.map((t) =>
         t.id === activeTabId && t.prdId == null ? { ...t, prdId: resolvedInsightPrdId } : t))
@@ -798,6 +1605,107 @@ export function ChatScreen() {
       void hydratePrdThread(activeTabId, resolvedInsightPrdId)
     }
   }, [activeTabId, resolvedInsightPrdId, hydratePrdThread])
+
+  // The DB conversation id for a command-seeded PRD tab, promised per tab.
+  // `seedCommandTurn` registers it (synchronously, via
+  // persistence.ensureConversation) the instant a command opens a tab; the
+  // import/generate call inside `openPrdInTab` awaits it and hands the id to
+  // the backend, which binds conversation → PRD itself.
+  //
+  // Why this exists: the conversation row is necessarily created BEFORE the
+  // prd_id is known, and the client used to back-patch the link from a React
+  // effect. Navigating away mid-generation unmounted that effect, so the chat
+  // kept prd_id=NULL and came back from history with no PRD attached at all.
+  // The backend can't lose the link that way. Best-effort throughout: no id (or
+  // a slow create) just falls back to the client back-patch below.
+  const seedConvIdRef = useRef<Map<string, Promise<number | null>>>(new Map())
+
+  // ── Deferred command acknowledgment (clarify-first) ────────────────────────
+  // "Generate a PRD for X" may be answered with QUESTIONS instead of a document,
+  // so its acknowledgment ("Generating a PRD for that — it'll open in the panel
+  // on the right…") can't be written when the command is seeded: half the time
+  // it turns out to be false, and it sat above the questions claiming a PRD was
+  // on its way while the agent was still asking what to build. The seed now
+  // leaves the reply EMPTY (the thinking indicator carries that window) and the
+  // gate's outcome decides what lands on the turn — the ack, or the questions.
+  //
+  // This holds the rail/DB turn id the deferred write needs. Keyed by tab;
+  // seeded synchronously by seedCommandTurn, consumed one network round-trip
+  // later inside openPrdInTab's async block, so the race is never live.
+  // ONE entry per tab is an invariant, not an accident: every generateTask
+  // command enters through submitAsk, whose prdCommandThinking guard holds any
+  // send on this tab until the gate settles — so a second command can never
+  // overwrite a live entry and cross-wire the two replies.
+  const deferredAckRef = useRef<Map<string, { turnId: string; req: LocalPrdTabRequest }>>(new Map())
+  // finalizeConversationTurn is declared further down (it depends on state
+  // helpers defined after openPrdInTab), so openPrdInTab reaches it through a
+  // ref rather than a closure it cannot legally capture at render time.
+  const finalizeTurnRef = useRef<
+    ((turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => void) | null
+  >(null)
+  // postArtifactSummary is likewise declared after the generation flows that
+  // call it (it depends on `persistence`), so completion sites reach it through
+  // this ref — assigned right after its definition, consumed only in async
+  // completion handlers, so it is never read before assignment.
+  const postSummaryRef = useRef<
+    ((tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => void) | null
+  >(null)
+  /** Write the reply the clarify gate settled on — the ack, or the questions —
+   *  onto the command turn's thread entry AND its conversation row. No-op when
+   *  the command wasn't seeded (a header open, or a re-issued command with no
+   *  seed query), which is exactly when there's no turn to answer. */
+  const settleCommandAck = useCallback((tabId: string, seedTurnId: string, reply: AskResponse, clarify?: ClarifyQuestion[]) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t,
+          thread: t.thread.map((tn) =>
+            tn.id === seedTurnId ? { ...tn, reply, ...(clarify ? { clarify } : {}) } : tn),
+        }
+      : t))
+    const deferred = deferredAckRef.current.get(tabId)
+    if (!deferred) return
+    deferredAckRef.current.delete(tabId)
+    finalizeTurnRef.current?.(deferred.turnId, { reply }, tabId)
+  }, [])
+  /** The command died before the gate could settle it (generate POST failed, or
+   *  came back unavailable). A deferred ack that is never written leaves the turn
+   *  reading "No response was generated for this message." — so say what actually
+   *  happened instead. No-op once the ack or the questions have already landed. */
+  const failDeferredAck = useCallback((tabId: string, seedTurnId: string | undefined, message: string) => {
+    if (!seedTurnId || !deferredAckRef.current.has(tabId)) return
+    const turnId = deferredAckRef.current.get(tabId)!.turnId
+    deferredAckRef.current.delete(tabId)
+    const detail = message.trim().slice(0, 200)
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t,
+          thread: t.thread.map((tn) => tn.id === seedTurnId
+            ? { ...tn, error: detail ? `I couldn't start that PRD — ${detail}` : "I couldn't start that PRD." }
+            : tn),
+        }
+      : t))
+    finalizeTurnRef.current?.(turnId, { error: detail }, tabId)
+  }, [])
+
+  // Bind a tab's chat conversation to the PRD it just started, for the case the
+  // conversation didn't exist yet when the generate call went out (a brand-new
+  // command tab). Runs inside the generate promise chain — NOT a React effect —
+  // so it still completes after the user navigates away, which is precisely when
+  // the old effect-based back-patch was lost. The write itself is the backend's
+  // (ownership-checked PATCH); we only supply the pairing.
+  const bindConvToPrd = useCallback(async (tabId: string, prdId: number) => {
+    try {
+      const pending = seedConvIdRef.current.get(tabId)
+      const convId = pending
+        ? await pending
+        : tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      if (convId == null) return
+      const { conversationsApi } = await import("../../../lib/api")
+      await conversationsApi.update(convId, { prd_id: prdId })
+    } catch {
+      // Non-fatal: the tabs effect below re-attempts while the screen is mounted.
+    }
+  }, [])
 
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
@@ -808,18 +1716,48 @@ export function ChatScreen() {
   // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
   // normal chat the user can keep talking in. Returns the target tab's id so
   // the consumer can persist a seeded command turn against it.
-  const openPrdInTab = useCallback((req: PrdTabRequest): string => {
+  const openPrdInTab = useCallback((req: LocalPrdTabRequest): string => {
     const { title, source } = req
-    const meta = source.kind === "generateIdeation" ? null : source.meta
-    const existing = tabsRef.current.find((t) => t.title === title)
+    const meta = source.kind === "generateIdeation" || source.kind === "importDoc" || source.kind === "generateTask"
+      ? null : source.meta
+    // Same-tab generation: a pinned `inTabId` (a PRD command typed in a plain
+    // chat tab) reuses THAT tab, so the PRD lands beside the conversation that
+    // motivated it. Otherwise fall back to the title-match reuse (a re-issued
+    // command) or a fresh tab.
+    const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
+      ?? tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
     // "generate a PRD"): seed the thread with the user's message + an
     // acknowledgment, so the chat shows WHY a generation is running instead of
     // sitting empty next to the spinning panel.
+    // …EXCEPT for "generate a PRD for X", where the acknowledgment is deferred
+    // until the clarify gate says which response the user is actually getting
+    // (see deferredAckRef). Its reply-less turn shows the thinking indicator for
+    // that window and is filled in by settleCommandAck.
+    const deferAck = source.kind === "generateTask"
     const seedTurn: ThreadTurn | null = req.seedQuery
-      ? { id: `seed-${Date.now()}`, query: req.seedQuery, reply: commandAckReply(req) }
+      ? {
+          id: `seed-${Date.now()}`,
+          query: req.seedQuery,
+          ...(deferAck ? {} : { reply: commandAckReply(req) }),
+          // "convert this document into a PRD": the attached file IS the subject
+          // of the command, so show it as a chip on the user's turn (matching a
+          // plain attachment send) rather than only inside the panel.
+          ...(source.kind === "importDoc" ? { attachments: [{ name: source.file.name }] } : {}),
+        }
       : null
+    // Was this tab opened by an IN-CHAT COMMAND (its first turn is the user's
+    // command) rather than as a header from a brief insight / ideation idea /
+    // backlog load? Only the fix-#1 command kinds — doc import, "generate a PRD
+    // for X" (generateTask, or BriefChat's resume+seedQuery command) — flow the
+    // insight card + questions INLINE below the command turn. generateIdeation
+    // carries a seedQuery too but is a HEADER open (its framing card stays on
+    // top), so it's deliberately excluded here. See the render block below.
+    const prdInFlow =
+      source.kind === "importDoc" ||
+      source.kind === "generateTask" ||
+      (source.kind === "resume" && !!req.seedQuery)
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
@@ -831,6 +1769,12 @@ export function ChatScreen() {
           ...t,
           insightBody: t.insightBody ?? req.insightBody ?? null,
           thread: seedTurn ? [...t.thread, seedTurn] : t.thread,
+          // Never downgrade a header tab to in-flow, but a command re-issued on a
+          // command tab keeps it in-flow.
+          prdInFlow: t.prdInFlow || prdInFlow,
+          // Anchor the inline PRD card to THIS command turn — in a reused chat
+          // tab the command lands mid-thread, not at thread[0].
+          ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
         } : t))
       }
     } else {
@@ -838,11 +1782,46 @@ export function ChatScreen() {
         id: tabId, title, thread: seedTurn ? [seedTurn] : [], dbConvId: null, briefMeta: meta,
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+        prdInFlow,
+        ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
       }])
       setActiveTabId(tabId)
     }
     setDraft("")
-    setPrdPanelPending(true)
+    // A "generate a PRD for X" command may be answered with QUESTIONS rather
+    // than a document — the clarify-first gate runs before any generation.
+    // Opening the rail now would park an EMPTY PRD panel beside those questions,
+    // and an empty panel is exactly what used to get filled with the workspace's
+    // most recent (unrelated) PRD, reading as if it were the answer. So this one
+    // kind waits: the panel opens the moment generation actually starts, either
+    // straight after the gate passes (below) or when the user answers.
+    const clarifyFirst = source.kind === "generateTask"
+    if (!clarifyFirst) setPrdPanelPending(source.kind === "evidence" ? "evidence" : "prd")
+
+    // ── Evidence-first open ──────────────────────────────────────────────────
+    // A Top Insights card's "View Evidence" opens the finding as its own chat tab
+    // with the panel on Evidence — the same slide-in every PRD gets, just landed
+    // on a different tab. NO PRD work starts here: the PRD tab in that panel
+    // resolves one on demand (find-or-create) if the user asks for it.
+    //
+    // `detail` scopes ContentPanel's Evidence tab to this insight (that tab owns
+    // the load/generate). `prdMeta` is set alongside so the panel's PRD tab knows
+    // which insight to resolve, and `prd` is cleared unless this very tab already
+    // holds one — the panel is global, so another PRD tab's document must never
+    // linger over this finding.
+    if (source.kind === "evidence") {
+      setTabs((prev) => prev.map((t) => t.id === tabId
+        ? { ...t, evidenceOnly: true, evidenceDetail: source.detail }
+        : t))
+      setContent({
+        detail: source.detail,
+        prd: existing?.prd ?? null,
+        prdMeta: source.meta,
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      return tabId
+    }
 
     // Reopening an EXISTING PRD (ready | load)? Rehydrate its saved chat thread by
     // prd_id so the user's prior questions come back. New PRDs (generate*) have no
@@ -852,6 +1831,9 @@ export function ChatScreen() {
       : source.kind === "resume" ? source.prdId
       : null
     if (knownPrdId != null) void hydratePrdThread(tabId, knownPrdId)
+    // "convert this PRD into tickets" — the resume/importDoc paths land the panel
+    // on the Tickets tab (and kick user-stories generation) once the PRD is ready.
+    const wantsTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
 
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
@@ -872,8 +1854,19 @@ export function ChatScreen() {
     // not only on success: `prdId` is what survives the sessionStorage
     // round-trip, so a reload mid-generation can find and resume the run
     // instead of orphaning it client-side.
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, prdId: knownPrdId ?? t.prdId, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t, prd: null, prdId: knownPrdId ?? t.prdId, briefMeta: meta,
+          // `clarifyFirst` shows a thinking indicator in the CHAT instead of a
+          // generating rail, since we don't yet know which of the two the agent
+          // is about to produce.
+          ...(clarifyFirst ? { prdCommandThinking: true } : { prdGenerating: true }),
+        }
+      : t))
+    // `clarifyFirst` holds the generating state back too — the card would
+    // otherwise read "Generating PRD…" while the agent is still asking what to
+    // build. Both flip on together once the gate passes.
+    if (!clarifyFirst) setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
       // Live preview: forward the accumulating Part A HTML (throttled inside
       // runPrdGeneration) into shared content so PrdPanelContent renders the
@@ -886,6 +1879,106 @@ export function ChatScreen() {
           source.kind === "generate" ? await runPrdGeneration(source.meta, onPartial)
           : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId, onPartial)
           : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined, onPartial)
+          // importDoc | generateTask: the seed turn + generating skeleton are
+          // ALREADY on screen (rendered synchronously above). Only NOW do we hit
+          // the network — this ordering is the entire reason these command flows
+          // route through openPrdInTab instead of the caller awaiting
+          // importDoc/generateFromTask first (which cleared the composer and left
+          // the chat empty for the multi-second call, reading as a frozen app).
+          // The POST returns a generating prd_id we poll to ready via the SAME
+          // resume machinery used everywhere else.
+          : source.kind === "importDoc" || source.kind === "generateTask"
+          ? await (async () => {
+              const { prdApi } = await import("../../../lib/api")
+              if (source.kind === "generateTask") {
+                // Clarify-first gate (issue d): ALWAYS check sufficiency before
+                // generating — even a detailed-looking prompt can be missing
+                // users or success criteria. Fail-open on any error so the gate
+                // can never block a PRD. Insufficient → park the task on the
+                // tab, post the questions into its thread, and stop here; the
+                // user's next message in this tab carries the answers.
+                const verdict = await Promise.resolve()
+                  .then(() => prdApi.clarifyTask(source.task, source.sourceDocs))
+                  .catch(() => ({ sufficient: true, questions: [], missing: [] }))
+                if (!verdict.sufficient && verdict.questions.length) {
+                  // A command with no seed turn (opened from a button rather
+                  // than typed) has nothing to answer, so the questions arrive
+                  // as their own agent-only turn. Either way ONE turn carries
+                  // them, and `pendingClarify` names it.
+                  const orphanTurnId = `clarify-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`
+                  const clarifyTurnId = seedTurn?.id ?? orphanTurnId
+                  setTabs((prev) => prev.map((t) => t.id === tabId
+                    ? {
+                        ...t,
+                        prdGenerating: false,
+                        // The questions ARE the response — indicator off.
+                        prdCommandThinking: false,
+                        pendingClarify: { task: source.task, sourceDocs: source.sourceDocs, turnId: clarifyTurnId },
+                        // The questions ANSWER the command turn — they are not a
+                        // second message under a stale "generating…" ack. Landing
+                        // them on that turn is also what makes the pair survive a
+                        // reload: history rebuilds as user→assistant, and the
+                        // orphaned agent-only turn had nowhere to go.
+                        ...(seedTurn ? {} : { thread: [...t.thread, {
+                          id: orphanTurnId,
+                          query: "",
+                          reply: clarifyQuestionsReply(verdict.questions),
+                          clarify: verdict.questions,
+                        }] }),
+                      }
+                    : t))
+                  if (seedTurn) {
+                    settleCommandAck(tabId, seedTurn.id, clarifyQuestionsReply(verdict.questions), verdict.questions)
+                  }
+                  if (activeTabIdRef.current === tabId) {
+                    setContent({ prdGenerating: false, prdPartialHtml: null })
+                  }
+                  return { ok: false as const, message: "", clarify: true }
+                }
+                // Sufficient (or the gate failed open): generation starts NOW,
+                // so this is the moment the rail earns its place on screen —
+                // still before the generate POST, so the spinner is optimistic
+                // exactly as it is for every other command kind.
+                // The generating rail + card take over the "working" signal here,
+                // so the chat indicator hands off rather than stacking.
+                setTabs((prev) => prev.map((t) => t.id === tabId
+                  ? { ...t, prdGenerating: true, prdCommandThinking: false } : t))
+                // …and NOW the acknowledgment is true, so it lands on the command
+                // turn (thread + conversation row) — the write the seed deferred.
+                if (seedTurn) settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
+                if (activeTabIdRef.current === tabId) {
+                  setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+                  setPrdPanelPending("prd")
+                }
+              }
+              // This chat's DB conversation, IF it already has one (a command
+              // issued in an existing chat). Read synchronously — the POST must
+              // never wait on persistence: gating it on the conversation create
+              // delayed the whole generation behind a round-trip, which is the
+              // latency bug this flow exists to avoid. A brand-new command tab
+              // has no id yet and binds a moment later (bindConvToPrd below).
+              const knownConvId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+              const start = source.kind === "importDoc"
+                ? await prdApi.importDoc(source.file, source.company, knownConvId)
+                : await prdApi.generateFromTask(source.task, false, source.sourceDocs, knownConvId)
+              // Not bound at creation? Bind now, from THIS promise chain rather
+              // than a React effect — the chain outlives the screen, so leaving
+              // the page mid-generation no longer orphans the chat from its PRD.
+              if (knownConvId == null) void bindConvToPrd(tabId, start.prd_id)
+              // Stamp the now-known prd_id immediately (as the resume path does
+              // upfront) so a reload past this point can find + resume the run,
+              // and adopt the backend's cleaner title over the placeholder.
+              setTabs((prev) => prev.map((t) => t.id === tabId
+                ? {
+                    ...t,
+                    prdId: start.prd_id,
+                    title: start.title
+                      ? (source.kind === "generateTask" ? `PRD · ${start.title}` : start.title)
+                      : t.title,
+                  }
+                : t))
+              return resumePrdGeneration(start.prd_id, undefined, onPartial)
+            })()
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
@@ -895,12 +1988,12 @@ export function ChatScreen() {
           // (fire-and-forget; the backend dedups in-flight jobs) so work starts
           // before the Tickets tab even mounts and does its cache-read→generate
           // round-trip. The tab's own poll picks the job up.
-          if (source.kind === "resume" && source.openTickets) {
+          if (wantsTickets) {
             void storiesApi.generate(result.prd.prd_id).catch(() => {})
           }
           // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
-          if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
+          if (wantsTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
           }
           // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
@@ -909,25 +2002,54 @@ export function ChatScreen() {
           // conversation (no-op); an existing one restores the user's prior turns.
           // The upfront ready/load path already hydrated, so skip those here.
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
-        } else {
-          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+          // Chat summary of what got built — only for kinds that carry EXPLICIT
+          // generation intent (a typed command, a doc conversion, an ideation
+          // framing). Bare `generate` is excluded: its find-or-create regularly
+          // resolves an existing PRD on a "View PRD" click, and a reopen must
+          // never re-summarize. resume/ready/load are reopens by definition.
+          if (
+            source.kind === "generateTask" ||
+            source.kind === "importDoc" ||
+            source.kind === "generateIdeation"
+          ) {
+            postSummaryRef.current?.(tabId, "prd", result.prd.prd_id)
+          }
+        } else if (!(result as { clarify?: boolean }).clarify) {
+          // (The clarify outcome already cleared its own spinner and posted the
+          // questions — it is a handled stop, not a failure.)
+          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+          failDeferredAck(tabId, seedTurn?.id, result.message)
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
-        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+        // Both flags off on ANY failure — an indicator that never stops is worse
+        // than the dead air it was added to fix.
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
         if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        failDeferredAck(tabId, seedTurn?.id, e instanceof Error ? e.message : String(e))
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
     return tabId
-  }, [setContent, showToast, hydratePrdThread, openContentPanel])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd, settleCommandAck, failDeferredAck])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    if (!tab || tab.prdGenerating) return
+    if (!tab) return
+    // Mid-generation: there is no document to load yet, and kicking another
+    // build would duplicate the run — but the rail still has something to show
+    // (the live streaming draft / the generating state), and this is the path
+    // that refocusing a tab goes through. Returning early here left a tab that
+    // said "Generating PRD…" sitting next to a CLOSED panel, with no way back
+    // to it until the run finished. Show the panel, start nothing.
+    if (tab.prdGenerating) {
+      setContent({ prd: null, prdMeta: tab.briefMeta, prdGenerating: true })
+      openContentPanel("prd")
+      return
+    }
     // Already generated (loaded on this tab) — sync to context and open panel.
     if (tab.prd) {
       setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
@@ -945,19 +2067,27 @@ export function ChatScreen() {
     const savedPrdId = tab.prdId ?? (chatInsightState?.hasPrd ? chatInsightState.prdId : null)
     if (savedPrdId != null) {
       const prdId = savedPrdId
-      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+      // LOADING, not generating. Borrowing `prdGenerating` here is what made a
+      // reopened chat flash "Generating PRD…" over a document that finished
+      // hours ago. The panel still shows its spinner (content.prdGenerating);
+      // only the tab's own label distinguishes fetching from writing.
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: true } : t))
       setContent({ prd: null, prdMeta: null, prdGenerating: true })
       openContentPanel("prd")
       try {
         const result = await loadPrdById(prdId)
         if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
         } else if (result.generating) {
           // A healthy IN-FLIGHT PRD, not a failure — e.g. a reload restored this
           // tab mid-generation (the stamped-at-kickoff prdId is how we know it).
           // Re-enter poll+stream instead of toasting: the SSE replay frame
           // repaints everything generated so far, then live deltas continue.
+          // It really IS being written — hand the label over from loading to
+          // generating, which is the one case where "Generating PRD…" is true.
+          setTabs((prev) => prev.map((t) => t.id === activeTabId
+            ? { ...t, prdLoading: false, prdGenerating: true } : t))
           const resumed = await resumePrdGeneration(prdId, undefined, (html) => {
             if (activeTabIdRef.current === activeTabId) setContent({ prdPartialHtml: html })
           })
@@ -970,12 +2100,14 @@ export function ChatScreen() {
             showToast("PRD generation failed", resumed.message)
           }
         } else {
-          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prdGenerating: false } : t))
           setContent({ prdGenerating: false })
           showToast("Couldn't load PRD", result.message)
         }
       } catch (e) {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        // Both flags off on any failure — a label stuck on "Loading PRD…" with
+        // a disabled button would leave no way back to the document.
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prdGenerating: false } : t))
         setContent({ prdGenerating: false })
         showToast("Couldn't load PRD", e instanceof Error ? e.message : "Unknown error")
       }
@@ -997,7 +2129,10 @@ export function ChatScreen() {
       openContentPanel("prd")
       try {
         const { prdApi } = await import("../../../lib/api")
-        const start = await prdApi.generateFromTask(convTask)
+        // Same grounding as the typed command: this button means the same thing
+        // ("build a PRD from this chat"), so it must send the same material —
+        // it was previously passing the task text alone, not even attachments.
+        const start = await prdApi.generateFromTask(convTask, false, prdGroundingDocs(tab.thread))
         // Stamp the id on the tab NOW (it persists to sessionStorage) so a
         // reload mid-generation can resume this run instead of orphaning it.
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdId: start.prd_id } : t))
@@ -1007,6 +2142,9 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+          // The Generate button on a PRD-less tab is explicit generation intent
+          // — same summary the typed command gets.
+          postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1031,6 +2169,10 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
         setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+        // Reached only when neither the tab nor the insight map knows a PRD
+        // (savedPrdId was null) — the CTA read "Generate PRD", so this is a
+        // fresh build, not a View reopen.
+        postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
         setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1073,6 +2215,9 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
         setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
+        // Chat summary only when something was BUILT — the read-first path
+        // marks a mere reopen of already-ready evidence with `existing`.
+        if (!result.existing) postSummaryRef.current?.(tabId, "evidence", result.evidenceId)
       } else {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
         setContent({ evidenceGenerating: false, evidencePartialHtml: null })
@@ -1144,6 +2289,9 @@ export function ChatScreen() {
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
               setContent({ evidencePartialHtml: null })
+              // This path only exists because a FRESH generation was in flight
+              // when the screen unmounted (pending-job marker) — summarize it.
+              postSummaryRef.current?.(activeTabId, "evidence", result.evidenceId)
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
               setContent({ evidencePartialHtml: null })
@@ -1189,6 +2337,82 @@ export function ChatScreen() {
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, setContent])
+
+  // Mirror the active tab's CONVERSATION id into content, so the panel knows
+  // which thread it's showing (the Reports tab lists that thread's reports).
+  // Kept separate from the artifact sync above because it must also fire when a
+  // tab GAINS its id — a brand-new chat has none until its first ask persists,
+  // and keying on activeTabId alone would leave the panel on a stale thread.
+  const activeConvId = tabs.find((t) => t.id === activeTabId)?.dbConvId ?? null
+  const prevConvForFocusRef = useRef(activeConvId)
+  useEffect(() => {
+    // A genuine thread change retires the report POINTER along with the thread.
+    // `content.reportFocusId` is written from four places (a report card in the
+    // thread, the Artifacts hand-off, the tab strip's reopen button, an Artifacts
+    // row) and used to be cleared from exactly one — ReportsTab's "All reports"
+    // button, which only exists on a thread with more than one report. So it
+    // outlived the thread that set it, and the panel opened the document it named
+    // over whatever chat you had moved to.
+    //
+    // Guarded on an actual change rather than running on mount, because the
+    // Artifacts → report hand-off sets the focus a beat AFTER the tab it belongs
+    // to gains its conversation id.
+    const changed = prevConvForFocusRef.current !== activeConvId
+    prevConvForFocusRef.current = activeConvId
+    setContent(changed
+      ? { conversationId: activeConvId, reportFocusId: null, reportFocusStandalone: false }
+      : { conversationId: activeConvId })
+  }, [activeConvId, setContent])
+
+  // This thread's captured reports, newest first — fetched once by
+  // useThreadReportsSync (AppShell). Defaulted for the surfaces/tests that render
+  // ChatScreen against partial content.
+  //
+  // SCOPED to the conversation the fetch was actually for. That hook runs in
+  // AppShell — our PARENT — and React flushes a child's effects before its
+  // parent's, so on the commit where the active tab changes, content still holds
+  // the OLD thread's rows. Everything downstream (the auto-open below, the tab
+  // strip's reopen button, a report card resolving its own document) has to read
+  // that as "this thread's list hasn't landed yet", never as this thread's
+  // answer — reading it as an answer is what auto-opened a brand-new chat's panel
+  // on the previous thread's report.
+  const threadReports = useMemo(
+    () => (content.threadReportsConversationId === activeConvId
+      ? (content.threadReports ?? NO_REPORTS)
+      : NO_REPORTS),
+    [content.threadReports, content.threadReportsConversationId, activeConvId],
+  )
+
+  // Open the report a CHAT TURN is about, from its title.
+  //
+  // Title is the join key because the reply the thread holds carries no report
+  // id: capture runs after the ask completes, deliberately (it must never delay
+  // the answer), so the id doesn't exist yet when the reply is stored. Both sides
+  // derive the title from the document's own <h1> — the client via
+  // reportTitleFromHtml, the server via report_capture.report_title — so they
+  // agree by construction.
+  //
+  // Matched exactly first, then leniently (case/whitespace, then either side
+  // being a prefix of the other) — a title that drifts by a dash or a truncation
+  // should still open the right document rather than dumping the reader on a
+  // list, which is the failure this whole path exists to avoid.
+  //
+  // No match at all means capture hasn't landed yet (or the row is gone): open
+  // the tab and let it show what it has, rather than pointing at a report that
+  // isn't there.
+  const openReportByTitle = useCallback((title: string) => {
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
+    const want = norm(title)
+    const match =
+      threadReports.find((r) => r.title === title) ??
+      threadReports.find((r) => norm(r.title) === want) ??
+      threadReports.find((r) => {
+        const have = norm(r.title)
+        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
+      })
+    if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
+    openContentPanel("reports")
+  }, [threadReports, setContent, openContentPanel])
 
   // Chat-task PRDs generate an Evidence artifact server-side (semantic KG
   // retrieval over the task — skipped when the KG has no backing). Once a tab
@@ -1298,6 +2522,29 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
+  // Back-patch a conversation's prd_id once BOTH the PRD id and the DB
+  // conversation id are known. The in-chat command flows (import a document,
+  // "generate a PRD for X") create the conversation from their seed turn BEFORE
+  // the async import/generate call returns the prd_id — so the conversation is
+  // first persisted with prd_id=null. Without this back-patch, reopening that
+  // chat from history has no prd_id to rebind the tab to, so the "View PRD"
+  // button never renders and the content panel never reopens (the reported bug).
+  // Fires at most once per conversation; a failed PATCH is retried on a later
+  // render (the id is removed from the seen-set so the next pass re-attempts).
+  const patchedPrdConvRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    for (const t of tabs) {
+      if (t.prdId == null || t.dbConvId == null) continue
+      if (patchedPrdConvRef.current.has(t.dbConvId)) continue
+      const convId = t.dbConvId
+      const prdId = t.prdId
+      patchedPrdConvRef.current.add(convId)
+      void import("../../../lib/api")
+        .then(({ conversationsApi }) => conversationsApi.update(convId, { prd_id: prdId }))
+        .catch(() => { patchedPrdConvRef.current.delete(convId) })
+    }
+  }, [tabs])
+
   // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
@@ -1314,9 +2561,41 @@ export function ChatScreen() {
         turns?: { role: string; content: string }[]
         /** Preview-derived thread used when the background fetch yields nothing. */
         fallbackTurns?: { role: string; content: string }[]
+        /** The PRD this conversation is about (from ConversationRecord.prd_id),
+         *  when it was opened from a PRD tab. Re-binds the resumed tab to its PRD
+         *  so the "View PRD" button renders and the content panel auto-reopens —
+         *  without it, a resumed PRD chat came back as a plain, PRD-less tab. */
+        prdId?: number | null
+      }
+      // Re-bind a resumed tab to its PRD: set prdId (only when still null so a
+      // reused, live tab is never clobbered) and rehydrate the PRD's saved thread
+      // if this tab hasn't got one. Setting prdId is what makes the existing
+      // reload-restore effect reopen the panel + render the in-chat PRD button.
+      // Also mark the tab `prdInFlow` so the PRD card + clarifying questions render
+      // INLINE, right after the command turn (thread[0]) — a resumed PRD chat reads
+      // chronologically (question → card → questions). Without it the card +
+      // questions were pinned ABOVE the user's own "generate a PRD" message (the
+      // reported out-of-order bug). The card node anchors to thread[0] by INDEX, so
+      // it survives the background rehydrate that rebuilds turns with fresh ids.
+      const bindPrd = (tabId: string, prdId?: number | null) => {
+        if (prdId == null) return
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId && t.prdId == null ? { ...t, prdId, prdInFlow: true } : t))
+        void hydratePrdThread(tabId, prdId)
+        // Opening a chat from history is an EXPLICIT request for that chat, so
+        // its PRD panel opens every time — not just the first.
+        //
+        // Neither existing trigger covers a re-open: the reload-restore effect
+        // fires at most once per tab (autoRestoredTabsRef), and the switch
+        // reconcile needs activeTabId to actually change, which it does not when
+        // you re-open the chat you were already on. Between them, the panel
+        // appeared the first time and never again. Clearing the claim lets the
+        // restore run again for this tab.
+        autoRestoredTabsRef.current.delete(tabId)
+        setResumePanelTabId(tabId)
       }
       const buildRestored = (
-        turns: { role: string; content: string }[],
+        turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -1325,8 +2604,28 @@ export function ChatScreen() {
           if (t.role === "user") {
             const next = turns[i + 1]
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
-            restored.push({ id: `${keyPrefix}-${i}`, query: t.content, reply })
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: t.content,
+              reply,
+              // Rehydrate persisted attachment texts so the card viewer AND a
+              // later "generate a PRD" (conversationPrdDocs) see them after a
+              // reload — the second half of the forgotten-document bug.
+              ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+            })
             if (reply) i++
+          } else if (t.role === "assistant" && t.content.trim()) {
+            // An assistant row NOT consumed as some user turn's reply — e.g.
+            // the artifact summary posted after a generation's ack. These used
+            // to be silently dropped, so a persisted summary survived in the
+            // DB but vanished from every restored thread. Restore it as an
+            // agent-only turn (empty `query` renders no user bubble — the
+            // same convention the clarify gate's orphan turn uses live).
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: "",
+              reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            })
           }
         }
         return restored
@@ -1337,8 +2636,9 @@ export function ChatScreen() {
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
         // per-tab now, no shared ref.
-        openTab(data.title || "Resumed chat", preloaded, data.dbId)
+        const preTabId = openTab(data.title || "Resumed chat", preloaded, data.dbId)
         setActiveConv(0)
+        bindPrd(preTabId, data.prdId)
         return
       }
 
@@ -1346,6 +2646,7 @@ export function ChatScreen() {
       if (!data.dbId) return
       const tabId = openTab(data.title || "Resumed chat", [], data.dbId)
       setActiveConv(0)
+      bindPrd(tabId, data.prdId)
       // openTab reuses an existing same-title tab; if it already carries a
       // thread there's nothing to hydrate.
       const existing = tabsRef.current.find((t) => t.id === tabId)
@@ -1388,7 +2689,7 @@ export function ChatScreen() {
         }
       })()
     } catch { /* ignore corrupt data */ }
-  }, [openTab, showToast])
+  }, [openTab, showToast, hydratePrdThread])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
@@ -1401,7 +2702,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   // The brief is the pinned first tab of this surface. When the route lands on
-  // the brief screen (sidebar "Weekly brief" → goTo("brief") → /brief, which
+  // the brief screen (sidebar "Top Insights" → goTo("brief") → /brief, which
   // also renders ChatScreen), activate the pinned brief tab — even if the surface
   // was already mounted on a chat tab.
   useEffect(() => {
@@ -1412,7 +2713,12 @@ export function ChatScreen() {
   }, [currentScreen])
 
   const pushPendingConversation = useCallback(
-    (turnId: string, query: string, targetTabId: string) => {
+    (
+      turnId: string,
+      query: string,
+      targetTabId: string,
+      turnAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
+    ) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
@@ -1461,7 +2767,7 @@ export function ChatScreen() {
       }
       // Persist to Supabase against THIS tab's conversation (create-once per tab).
       // Fire-and-forget — failures are swallowed inside the helper.
-      void persistence.pushUserTurn(targetTabId, { turnId, title, query })
+      void persistence.pushUserTurn(targetTabId, { turnId, title, query, attachments: turnAttachments })
     },
     [setContent, persistence],
   )
@@ -1495,49 +2801,427 @@ export function ChatScreen() {
     },
     [setContent, persistence],
   )
+  // Published for openPrdInTab, which is declared above this and settles the
+  // clarify-first ack a network round-trip later (see deferredAckRef).
+  finalizeTurnRef.current = finalizeConversationTurn
+
+  // Persist a command-seeded turn (the user's command + the agent's ack) to the
+  // conversations rail + Supabase, mirroring the pendingPrdTab effect below — the
+  // in-chat command flows open the PRD tab DIRECTLY through openPrdInTab (so the
+  // render is immediate, not a route-hop away), so they own this persistence that
+  // the pendingPrdTab effect does for cross-surface opens. No-op without a seed.
+  const seedCommandTurn = useCallback((req: LocalPrdTabRequest, tabId: string) => {
+    if (!req.seedQuery) return
+    const seedQuery = req.seedQuery
+    const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const title = seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery
+    // Create this tab's conversation NOW and publish its id, so the in-flight
+    // import/generate can hand it to the backend (see seedConvIdRef). This only
+    // creates the row — the turns still persist through pushPendingConversation
+    // below, which reuses the very same conversation (create-once per tab). The
+    // registration is synchronous, so the generate call awaiting it a microtask
+    // later always finds it. Doc imports especially need this: their turn
+    // persistence waits on a file upload first, which is far too late.
+    seedConvIdRef.current.set(
+      tabId,
+      persistence.ensureConversation(tabId, { turnId, title, query: seedQuery }),
+    )
+    // "convert this document into a PRD": the doc BECOMES the PRD, so there's no
+    // in-chat extracted text (content empty — conversationPrdDocs skips it so it
+    // never re-feeds as a source doc). Upload the ORIGINAL file so the chip on the
+    // ask can render/download the real document after a reopen; persist with its
+    // storage key, and patch the optimistic seed turn so it's viewable live too.
+    if (req.source.kind === "importDoc") {
+      const file = req.source.file
+      void (async () => {
+        // Best-effort upload (the `.then` wrapper catches a sync throw too); the
+        // seed turn still persists as a name-only chip if storage is unavailable.
+        const stored = await Promise.resolve().then(() => attachmentsApi.upload(file)).catch(() => null)
+        const attachment = { name: file.name, content: "", key: stored?.key ?? null, mime: stored?.mime ?? null, size: stored?.size ?? null }
+        if (stored?.key) {
+          setTabs((prev) => prev.map((t) => t.id === tabId
+            ? { ...t, thread: t.thread.map((tn) => tn.query === seedQuery ? { ...tn, attachments: [attachment] } : tn) }
+            : t))
+        }
+        pushPendingConversation(turnId, seedQuery, tabId, [attachment])
+        finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+      })()
+      return
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
+    // "generate a PRD for X": the reply isn't known yet — the clarify gate may
+    // answer with QUESTIONS, and persisting "Generating a PRD for that…" here
+    // wrote a promise the agent then didn't keep, sitting in the thread (and in
+    // the conversation history) above the questions it contradicted. Register
+    // the turn instead; settleCommandAck writes whichever reply actually wins.
+    if (req.source.kind === "generateTask") {
+      deferredAckRef.current.set(tabId, { turnId, req })
+      return
+    }
+    finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+  }, [pushPendingConversation, finalizeConversationTurn, persistence])
 
   // "Generate a PRD …" is a COMMAND, not a conversation: it opens the PRD as its
   // OWN chat tab (with the Evidence/PRD/Tickets panel), never as a chat message.
   // Without this the ask agent routes it to the prd-author skill and answers with
-  // a raw HTML document dumped into the chat bubble. Mirror BriefChat's prdFlow:
-  // resolve the current brief's top insight (index 0) and hand off via openPrdTab.
-  // openPrdTab's generate path is find-or-create (POST /v1/prd/generate reuses an
-  // existing DB PRD when one exists), so an already-generated PRD is served from
-  // the DB rather than regenerated.
-  const prdCommandFlow = useCallback(async (seedQuery?: string) => {
-    try {
-      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
-      // the PRD from the user's own words: the backend synthesizes the insight
-      // (find-or-create keyed on the task text) and returns a generating prd_id
-      // that opens in the standard PRD tab via the resume path.
-      //
-      // A GENERIC "generate a PRD" (no topic) is seeded from THIS conversation —
-      // the user's turns in the active tab — so the PRD is about what was actually
-      // discussed. (Previously a bare command defaulted to the brief's top insight,
-      // which served an unrelated PRD.) With no conversation to seed from, we ask
-      // for a topic rather than opening something irrelevant.
-      const task = seedQuery ? prdCommandTask(seedQuery) : null
-      const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
-      const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
-      if (effectiveTask) {
-        const { prdApi } = await import("../../../lib/api")
-        const start = await prdApi.generateFromTask(effectiveTask)
-        openPrdTab({
-          title: `PRD · ${start.title}`,
-          seedQuery,
-          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
-        })
-        return
+  // a raw HTML document dumped into the chat bubble.
+  //
+  // OPTIMISTIC-FIRST (the latency bug): the previous version awaited
+  // prdApi.generateFromTask BEFORE opening the tab, so the composer cleared and
+  // the chat sat empty for the multi-second generate call — reading as a frozen
+  // app. We now hand the UNSTARTED task to openPrdInTab, which seeds the chat
+  // turn + shows the panel spinner on THIS commit and runs generateFromTask
+  // inside its own async block (network AFTER the render). The find-or-create
+  // backend still serves an already-generated PRD from the DB rather than
+  // regenerating it.
+  // The user answered the clarify questions (or said "generate now") in a tab
+  // whose task was parked by the sufficiency gate: run generation IN THIS TAB
+  // with the combined task. Mirrors the generateTask panel block, minus the
+  // clarify gate (one round of questions, then we generate — re-gating would
+  // loop a terse but sufficient answer back into more questions).
+  const runClarifiedGeneration = useCallback((
+    prdApi: Pick<typeof import("../../../lib/api").prdApi, "generateFromTask">,
+    targetTabId: string,
+    rawTask: string,
+    sourceDocs: { name: string; content: string }[] | undefined,
+    userMessage: string,
+  ) => {
+    // The combined task (original command + the user's clarify answers, which
+    // echo each question's prompt for legibility) can outgrow the backend's
+    // 4000-char `task` cap — a 422 AFTER the "Generating a PRD…" ack is on
+    // screen. Trim the tail to fit: losing the last answer's tail beats losing
+    // the whole generation.
+    const TASK_MAX = 4000
+    const task = rawTask.length > TASK_MAX ? `${rawTask.slice(0, TASK_MAX - 1)}…` : rawTask
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const ack: AskResponse = {
+      answer:
+        // This ack lands on a LATER turn of an existing command tab, so the PRD
+        // card sits further up the thread (it anchors to thread[0]) — neither
+        // "above" nor "below" is reliably true here, so point at the chat.
+        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    setTabs((prev) => prev.map((t) => t.id === targetTabId
+      ? {
+          ...t,
+          pendingClarify: undefined,
+          prdGenerating: true,
+          thread: [...t.thread, { id, query: userMessage, reply: ack }],
+        }
+      : t))
+    if (targetTabId === activeTabIdRef.current) {
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      // The rail was deliberately NOT opened while the questions were pending
+      // (see `clarifyFirst` in openPrdInTab), so answering them is what opens
+      // it — otherwise the generation would run with no panel to land in.
+      setPrdPanelPending("prd")
+    }
+    pushPendingConversation(id, userMessage, targetTabId)
+    finalizeConversationTurn(id, { reply: ack }, targetTabId)
+    void (async () => {
+      const onPartial = (html: string) => {
+        if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
       }
+      try {
+        // Same durable binding as the command flows, and free here: the tab has
+        // been chatting (the clarifying questions landed in it), so its
+        // conversation already exists and the id is a synchronous read — no
+        // round-trip in front of the user's generation.
+        const knownConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
+        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+        if (knownConvId == null) void bindConvToPrd(targetTabId, start.prd_id)
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
+          : t))
+        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === targetTabId
+            ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
+            : t))
+          if (activeTabIdRef.current === targetTabId) {
+            setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
+          }
+          // Always a fresh generation here (the clarify gate only parks NEW
+          // tasks) — post the chat summary of what got built.
+          postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+          if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+          showToast("PRD unavailable", result.message.slice(0, 200))
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+        if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      }
+    })()
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd])
+
+  /** Freeze the questions turn into its settled, read-only form. Both answering
+   *  paths call this — the card's submit and a prose reply in the composer — so
+   *  the batch never reverts to the flattened text the moment it's answered. */
+  const markClarifyResolved = useCallback(
+    (tabId: string, turnId: string, resolution: ClarifyResolution) => {
+      setTabs((prev) => prev.map((t) => t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) =>
+              tn.id === turnId ? { ...tn, clarifyResolved: resolution } : tn),
+          }
+        : t))
+    },
+    [],
+  )
+
+  // The clarify CARD's submit — the same landing point as answering in the
+  // composer (submitAsk's pendingClarify intercept), reached from the buttons
+  // instead of prose. An empty answer set is a "generate now": the original task,
+  // every question left to its stated default. Both paths converge on
+  // runClarifiedGeneration, so the card is an affordance over the existing flow
+  // rather than a second one to keep in sync.
+  // ── Artifact chat summaries ────────────────────────────────────────────────
+  // When a PRD / evidence report / prototype finishes generating in the panel,
+  // the chat posts a short LLM summary of what got built — the thread's record
+  // of the outcome, instead of going quiet after the acknowledgment. Posted as
+  // an agent-only turn (empty query) and persisted via pushAssistantTurn, so it
+  // survives reload AND reopening from history (the restore paths rebuild
+  // unconsumed assistant rows as agent-only turns — see buildRestored).
+  //
+  // Fresh generations only: every caller sits on a path that just RAN a
+  // generation, never on a reopen/load path, and the per-artifact guard below
+  // makes even a double-fired completion idempotent. Best-effort throughout —
+  // a failed summary changes nothing about the artifact flow.
+  const postedSummariesRef = useRef<Set<string>>(new Set())
+  const postArtifactSummary = useCallback(
+    (tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => {
+      const key = `${tabId}:${kind}:${artifactId}`
+      if (postedSummariesRef.current.has(key)) return
+      postedSummariesRef.current.add(key)
+      // The pointer line doubles as the transcript-filter marker (see
+      // *_SUMMARY_ANSWER_RE / PRD_ACK_ANSWER_RE): it is what keeps the summary
+      // out of the next PRD's grounding.
+      const pointer =
+        kind === "prd"
+          ? "Use the View PRD button in this chat to reopen it anytime."
+          : kind === "evidence"
+            ? "Use the View Evidence button in this chat to reopen it anytime."
+            : "Use the View Prototype button in this chat to reopen it anytime."
+      // The turn appears NOW, in a "Summarizing…" state — the summary call is
+      // its own model round-trip, and an answer materializing out of nowhere
+      // seconds after the panel settled read as unrelated. Resolved → the same
+      // turn takes the reply (typing reveal included); empty/failed → the turn
+      // is removed outright, never left as a skeleton nothing will fill.
+      const turnId = `summary-${kind}-${artifactId}-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId
+          ? { ...t, thread: [...t.thread, { id: turnId, query: "", summaryPending: true }] }
+          : t))
+      const dropPendingTurn = () =>
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId ? { ...t, thread: t.thread.filter((tn) => tn.id !== turnId) } : t))
+      void (async () => {
+        try {
+          const { artifactsApi } = await import("../../../lib/api")
+          const { summary } = await artifactsApi.chatSummary(kind, artifactId)
+          if (!summary?.trim()) {
+            dropPendingTurn()
+            return
+          }
+          const text = `${summary.trim()}\n\n${pointer}`
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  thread: t.thread.map((tn) =>
+                    tn.id === turnId
+                      ? {
+                          ...tn,
+                          summaryPending: undefined,
+                          reply: {
+                            answer: text,
+                            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+                          } as AskResponse,
+                        }
+                      : tn),
+                }
+              : t))
+          // Hold the WRITE (not the render) until any ask in flight on this
+          // tab has landed its own reply. chatPersistence's per-tab queue
+          // preserves ENQUEUE order, so persisting mid-ask would slot the
+          // summary between a user turn and its answer — the history restore
+          // pairs strictly user→next-assistant, so it would show the summary
+          // as the answer to that question and orphan the real reply. Capped
+          // so a wedged ask can never strand the summary entirely.
+          for (let waited = 0; askingTabsRef.current.has(tabId) && waited < 60_000; waited += 250) {
+            await new Promise((r) => setTimeout(r, 250))
+          }
+          // Persist directly — an agent-only message has no rail turn to
+          // finalize. No-ops harmlessly on tabs without a conversation (those
+          // never appear in Chat history, so nothing the user could reopen is
+          // missing it).
+          void persistence.pushAssistantTurn(tabId, text)
+        } catch {
+          // Best-effort: the artifact flow already succeeded — just retire the
+          // indicator.
+          dropPendingTurn()
+        }
+      })()
+    },
+    [persistence],
+  )
+  postSummaryRef.current = postArtifactSummary
+
+  // A chat-kicked prototype build settled. Resolve the owning tab AT SETTLE
+  // TIME from the prototype's own prd_id — the build outlives renders (and the
+  // user may have switched tabs mid-build), so any render-time closure could
+  // name the wrong tab. Failure results post nothing: the overlay/toast already
+  // reports those, and a summary of a failed build would be noise.
+  const handlePrototypeSettled = useCallback(
+    (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => {
+      if (!result?.ok) return
+      const prdId = result.prototype.prd_id
+      const tab = prdId != null
+        ? tabsRef.current.find((t) => t.prdId === prdId)
+        : tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+      if (!tab) return
+      postArtifactSummary(tab.id, "prototype", result.prototype.id)
+    },
+    [postArtifactSummary],
+  )
+
+  const submitClarifyAnswers = useCallback(async (answers: ClarifyAnswer[]) => {
+    const tabId = activeTabIdRef.current
+    if (!tabId) return
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab?.pendingClarify) return
+    const { task, sourceDocs, turnId } = tab.pendingClarify
+    const detail = clarifyAnswersText(answers)
+    const combined = detail ? `${task}\n\nAdditional details from the user:\n${detail}` : task
+    // Stamp the outcome onto the questions turn BEFORE generation starts, so the
+    // card flips straight from input to record with no frame of flattened text
+    // in between. `clarifyResolved` (not `pendingClarify`) is what holds the
+    // structure open from here on.
+    markClarifyResolved(tabId, turnId, {
+      answers,
+      mode: answers.length ? "card" : "skip",
+    })
+    const { prdApi } = await import("../../../lib/api")
+    runClarifiedGeneration(prdApi, tabId, combined, sourceDocs, detail || "Generate now")
+  }, [runClarifiedGeneration, markClarifyResolved])
+
+  // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
+  // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
+  // document actually changes (issue b — before this, the ask agent answered in
+  // text and the PRD stayed untouched). Renders the user turn + thinking
+  // skeleton optimistically, then confirms which sections changed and refreshes
+  // the panel with the server's updated document — the same refresh contract
+  // the input-question answer flow uses.
+  const prdChatEditFlow = useCallback(async (instruction: string, targetTabId: string, prdId: number) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query: instruction }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, instruction, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      const res = await prdApi.chatEdit(prdId, instruction)
+      if (res.sections_changed.length) {
+        // The scoped edit produced a fresh document — drop stale local drafts so
+        // the panel shows the server copy, then push it into the tab + panel.
+        clearPrdDrafts(prdId)
+        const prd = prdStateFromRecord(res.prd)
+        setTabs((prev) => prev.map((t) => (t.id === targetTabId ? { ...t, prd } : t)))
+        if (targetTabId === activeTabIdRef.current) setContent({ prd })
+      }
+      const answer = res.sections_changed.length
+        ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
+        : res.summary ||
+          "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it."
+      finalize({ answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize({
+        answer: `I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent])
+
+  // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
+  // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
+  // on screen next to the document — instead of spawning a new tab. Only a
+  // plain, PRD-less chat tab qualifies: a tab already bound to a PRD
+  // (prd/prdId/generating) keeps its binding (one PRD per tab — a new-topic
+  // command there still opens its own tab), and a brief-insight tab (briefMeta)
+  // keeps its insight→PRD flow (the chatInsightState effect stamps the INSIGHT's
+  // prd id onto the tab, which would fight an unrelated task-PRD). A
+  // still-hydrating resumed tab is skipped too (its background thread fetch
+  // would race the seeded command turn). No active tab (landing / brief
+  // surface) → undefined → the command opens its own tab as before.
+  const reusableActiveTab = useCallback((): ChatTab | undefined => {
+    const t = tabsRef.current.find((x) => x.id === activeTabIdRef.current)
+    return t && t.prd == null && t.prdId == null && !t.prdGenerating &&
+      t.briefMeta == null && !t.hydrating
+      ? t : undefined
+  }, [])
+
+  const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
+    // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+    // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
+    // seeded from THIS conversation — the user's turns in the active tab — so the
+    // PRD is about what was actually discussed. (Previously a bare command
+    // defaulted to the brief's top insight, which served an unrelated PRD.) With
+    // no conversation to seed from, we ask for a topic rather than open junk.
+    // `taskOverride` carries the classifier-extracted task on the LLM-fallback
+    // path, where the regex extractor (prdCommandTask) by definition can't parse
+    // the phrasing.
+    const task = taskOverride ?? (seedQuery ? prdCommandTask(seedQuery) : null)
+    const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+    const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
+    // What the PRD grounds on: documents attached earlier in this conversation
+    // AND the conversation itself — the agent's replies included, since that is
+    // where a fetched ticket or finding actually lives. (The doc-on-the-SAME-
+    // message case routes to importPrdCommandFlow before this flow is ever
+    // called, and keeps its own replace-grounding behaviour.)
+    const sourceDocs = prdGroundingDocs(activeTabNow?.thread ?? [])
+    if (!effectiveTask) {
       // No explicit topic and no conversation to ground it — ask for a topic.
+      // This branch stays synchronous (no network), so it never has the gap.
       showToast(
         "What should the PRD cover?",
         "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\" — or describe the problem first and I'll build one from our chat.",
       )
-    } catch (e) {
-      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      return
     }
-  }, [openPrdTab, showToast])
+    // The title is a placeholder derived from the task until the backend's real
+    // title lands (openPrdInTab renames the tab once generateFromTask resolves).
+    const placeholder = effectiveTask.length > 37 ? `${effectiveTask.slice(0, 37)}…` : effectiveTask
+    const inTab = reusableActiveTab()
+    const req: LocalPrdTabRequest = {
+      title: `PRD · ${placeholder}`,
+      seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
+      source: {
+        kind: "generateTask",
+        task: effectiveTask,
+        ...(sourceDocs.length ? { sourceDocs } : {}),
+      },
+    }
+    const tabId = openPrdInTab(req)
+    seedCommandTurn(req, tabId)
+  }, [openPrdInTab, reusableActiveTab, seedCommandTurn, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
@@ -1545,23 +3229,46 @@ export function ChatScreen() {
   // into the chat-PRD format) — then open the imported PRD as its own chat tab.
   // With `openTickets` ("convert this PRD into tickets") the panel lands on the
   // Tickets tab once the PRD is ready, which generates user stories for it.
-  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      const start = await prdApi.importDoc(file, activeCompany)
-      openPrdTab({
-        title: start.title || file.name,
-        seedQuery: opts.seedQuery,
-        source: { kind: "resume", prdId: start.prd_id, meta: null, openTickets: opts.openTickets },
-      })
-    } catch (e) {
-      showToast("PRD import failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+  //
+  // OPTIMISTIC-FIRST (the reported latency bug): the previous version awaited
+  // prdApi.importDoc BEFORE opening the tab, so a "generate PRD" over a big deck
+  // cleared the composer and showed NOTHING for several seconds. We now hand the
+  // UNSTARTED import to openPrdInTab, which seeds the chat turn + shows the panel
+  // spinner on THIS commit and runs importDoc inside its async block (network
+  // AFTER the render). The placeholder title is the file name until the backend's
+  // real title lands.
+  const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+    const inTab = reusableActiveTab()
+    const req: LocalPrdTabRequest = {
+      title: file.name,
+      seedQuery: opts.seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
+      source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
     }
-  }, [activeCompany, openPrdTab, showToast])
+    const tabId = openPrdInTab(req)
+    seedCommandTurn(req, tabId)
+  }, [activeCompany, openPrdInTab, reusableActiveTab, seedCommandTurn])
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const trimmed = rawQuery.trim()
+      // A doc-only send (empty ask + attachment) is allowed; a truly empty send is
+      // a no-op. Hoisted above the pending-send render below (it used to sit just
+      // before the optimistic turn) so an empty send can never strand a
+      // placeholder on screen.
+      if (trimmed.length < 1 && attachments.length === 0) return
+      // Show the user's message NOW — before the dispatch decision, which is a
+      // network round-trip away. `settlePendingSend()` retires it at every exit
+      // below; the branch that wins renders its own real turn in the same commit.
+      // See the `pendingSend` declaration for why this isn't a ThreadTurn.
+      const askStartedAt = Date.now()
+      setPendingSend({
+        tabId: activeTabId,
+        query: trimmed,
+        attachments: attachments.map((a) => ({ name: a.name })),
+        startedAt: askStartedAt,
+      })
+      const settlePendingSend = () => setPendingSend(null)
       // Command phrasings are COMMANDS, not questions for the ask agent —
       // intercept before any tab/ask work. Tickets is checked FIRST: "create
       // tickets from this PRD" matches the PRD rule too, but the user asked for
@@ -1576,13 +3283,119 @@ export function ChatScreen() {
       // With an attachment, "this PRD"/"this document" names the FILE, so the
       // import flows below still run unchanged.
       const activeTab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+      // The clarify gate is mid-decision on this tab (a PRD command's reply is
+      // deferred — see deferredAckRef). A send landing INSIDE that window broke
+      // two invariants at once: its user turn queued ahead of the deferred
+      // assistant write (inverting the persisted user→assistant pairing the
+      // history restore depends on), and a second PRD command would overwrite
+      // the tab's deferred-ack entry, persisting one command's reply against
+      // the other's turn. The window is a single clarify round-trip (~seconds,
+      // under a visible thinking indicator), so hold the message and hand it
+      // back rather than letting it corrupt the record.
+      if (activeTab?.prdCommandThinking) {
+        settlePendingSend()
+        setDraft(rawQuery)
+        showToast("One moment", "Still working out that PRD request — I'll take your next message in a second.")
+        return
+      }
       const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
       const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
       const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
+      // Clarify-first answers: this tab's PRD task is parked behind the
+      // sufficiency gate's questions — the message IS the answers (or a
+      // "generate now" skip), never a fresh command/ask. Checked before every
+      // other branch so an answer like "make it for enterprise admins" can't
+      // be misread as an edit or command phrasing.
+      if (activeTab?.pendingClarify && !docFile) {
+        const { task, sourceDocs, turnId } = activeTab.pendingClarify
+        const skipped = CLARIFY_SKIP_RE.test(trimmed)
+        const combined = skipped
+          ? task
+          : `${task}\n\nAdditional details from the user:\n${trimmed}`
+        // The prose path settles the batch too, so answering in the composer
+        // keeps the same formatted record the card leaves behind. There's no
+        // per-question mapping in free text, so it resolves as "chat" (or
+        // "skip" for a bare "generate now") rather than inventing one.
+        markClarifyResolved(activeTab.id, turnId, { answers: [], mode: skipped ? "skip" : "chat" })
+        const { prdApi } = await import("../../../lib/api")
+        runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
+        settlePendingSend()
+        return
+      }
+      // ── Action-envelope dispatch (flag: chat_intent_envelope) ─────────────
+      // ONE backend decision per message (POST /v1/chat/intent): the resolver
+      // sees the conversation history and the open PRD, so keyword-free and
+      // deictic phrasings ("draft it up", "break this into work items", "make
+      // it shorter") resolve to the right executor — the regex ladder below
+      // judges only the newest message and cannot. Each intent maps onto the
+      // SAME flows the ladder drives today; `answer` (and any unhandled case)
+      // falls through to the grounded ask path. Fail-open: a network/HTTP
+      // failure falls back to the full legacy ladder, so command dispatch
+      // never degrades below today's behavior.
+      let envelopeDecided = false
+      // A "/skill …" message is EXPLICIT intent with its own backend fast-path
+      // (qa_agent's slash route) — never spend an envelope call reinterpreting
+      // it.
+      if (envelopeDispatchEnabled && !trimmed.startsWith("/")) {
+        const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
+        const envelope = await import("../../../lib/api")
+          .then(({ chatIntentApi }) =>
+            chatIntentApi.resolve(trimmed, {
+              conversationId: activeTab?.dbConvId ?? null,
+              prdId: tabPrdId,
+              hasAttachments: attachments.length > 0,
+            }),
+          )
+          .catch(() => null)
+        if (envelope) {
+          envelopeDecided = true
+          if (envelope.intent === "generate_tickets") {
+            if (docFile) {
+              setAttachments([])
+              importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+              settlePendingSend()
+              return
+            }
+            if (activeTab?.prd) {
+              setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+              openContentPanel("tickets")
+              settlePendingSend()
+              return
+            }
+            // No PRD on this tab → the ask path answers (user-stories skill in
+            // markdown), same as the ladder's fall-through.
+          } else if (envelope.intent === "edit_prd") {
+            const targetPrd = envelope.prd_id ?? tabPrdId
+            if (!docFile && activeTab && targetPrd != null && envelope.instruction) {
+              void prdChatEditFlow(envelope.instruction, activeTab.id, targetPrd)
+              settlePendingSend()
+              return
+            }
+            // No resolvable target/instruction → grounded ask (it can at least
+            // answer about the document).
+          } else if (envelope.intent === "generate_prd") {
+            if (docFile) {
+              setAttachments([])
+              importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+              settlePendingSend()
+              return
+            }
+            prdCommandFlow(trimmed, envelope.task)
+            settlePendingSend()
+            return
+          }
+          // generate_prototype: ChatScreen has no chat prototype flow (parity
+          // with the ladder, which never intercepted prototype phrasings here);
+          // answer / unhandled → the ask path below.
+        }
+      }
+      // ── Legacy ladder (flag off, or envelope fetch failed) ────────────────
+      if (!envelopeDecided) {
       if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+          importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+          settlePendingSend()
           return
         }
         // No document: mirror the reply-footer "Create tickets" action when this
@@ -1591,91 +3404,115 @@ export function ChatScreen() {
         if (activeTab?.prd) {
           setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
           openContentPanel("tickets")
+          settlePendingSend()
           return
         }
+      } else if (
+        !docFile && isPrdTab && isPrdEditCommand(trimmed) &&
+        (activeTab?.prd?.prd_id ?? activeTab?.prdId) != null
+      ) {
+        // Edit-phrased message beside an open, READY PRD → the scoped chat-edit
+        // flow: the document actually changes (issue b). This branch runs BEFORE
+        // the command branch below so a non-deictic edit ("add SSO to the PRD")
+        // can't fall into isPrdCommand and spawn an unrelated NEW PRD — the
+        // second failure mode of the old deictic guard. A still-generating tab
+        // (no prd id yet) skips this branch and gets a grounded text answer.
+        void prdChatEditFlow(trimmed, activeTab!.id, (activeTab!.prd?.prd_id ?? activeTab!.prdId)!)
+        settlePendingSend()
+        return
       } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+          importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+          settlePendingSend()
           return
         }
         // No document — open the PRD tab from the brief's top insight instead of
         // sending it to the ask agent (which would answer with a raw prd-author
         // HTML dump).
-        void prdCommandFlow(trimmed)
+        prdCommandFlow(trimmed)
+        settlePendingSend()
         return
+      } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
+        // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
+        // recognize a command — "various words a person might use" ("let's get
+        // a PRD going for checkout") can't all be regexed. Ask haiku before
+        // letting it fall through to the ask agent. Skipped on a PRD tab with
+        // no attachment: there, a PRD mention is near-always about the OPEN
+        // artifact and belongs to the grounded ask path (same reasoning as the
+        // deictic guard above). Fail-open: classifier error/low confidence →
+        // the message proceeds to the ask path exactly as before this tier.
+        const verdict = await import("../../../lib/api")
+          .then(({ prdApi }) => prdApi.classifyCommand(trimmed))
+          .catch(() => null)
+        if (verdict?.is_prd_command && verdict.confidence >= 0.7) {
+          if (docFile) {
+            setAttachments([])
+            importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+            settlePendingSend()
+            return
+          }
+          prdCommandFlow(trimmed, verdict.task)
+          settlePendingSend()
+          return
+        }
       }
-      // Append attached file content as context. Text attachments inline
-      // directly; document attachments (.pdf/.pptx/.docx/.doc) are parsed to
-      // markdown server-side (POST /v1/ask/extract-file) so a deck attached to
-      // a plain question reaches the agent too — they used to be silently
-      // dropped here, which read as "no document was attached" replies.
+      }
+      // Attached file content is folded into the ask as context. Text
+      // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
+      // are parsed to markdown server-side (POST /v1/ask/extract-file) so a deck
+      // attached to a plain question reaches the agent too — they used to be
+      // silently dropped here, which read as "no document was attached" replies.
       // `displayQuery` is what the thread shows (the user's ask, plus a chip per
       // attachment — never the raw document dump). `sendQuery` is what the ask
       // agent receives: the same text with the parsed attachment content folded
-      // in, exactly as before. Keeping them separate means the backend is
-      // unaffected while the UI stays clean, the way Claude's chat renders it.
+      // in. Keeping them separate means the backend is unaffected while the UI
+      // stays clean, the way Claude's chat renders it.
       const displayQuery = trimmed
-      let turnAttachments: { name: string; content?: string }[] = []
-      let sendQuery = trimmed
-      if (attachments.length > 0) {
-        let ctx: string
-        try {
-          // Extract each attachment's text ONCE: plain-text attachments inline
-          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
-          // markdown server-side. Order is preserved via the resolved array so
-          // the same text feeds BOTH the backend query and the clickable card's
-          // viewer — the document is never re-fetched to display it.
-          const extracted = await Promise.all(
-            attachments.map(async (a) => {
-              const text = a.file
-                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
-                : a.content
-              return { name: a.name, content: text }
-            }),
-          )
-          // Clamp the TOTAL context so question + attachments stay under the
-          // ask endpoint's 120k question cap even with several attachments.
-          ctx = extracted
-            .map((e) => `--- ${e.name} ---\n${e.content}`)
-            .join("\n\n")
-            .slice(0, 100000)
-          turnAttachments = extracted.map((e) => ({ name: e.name, content: e.content }))
-        } catch (e) {
-          // Keep the attachments so the user can retry or remove the bad one —
-          // a silent drop is exactly the failure mode this path exists to fix.
-          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-          return
-        }
-        sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
-        setAttachments([]) // clear after successful extraction only
-      }
-      if (sendQuery.length < 1) return
+      // (The empty-send no-op is checked at the top of this function, before the
+      // pending-send placeholder is rendered.)
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
       // targetTabId is resolved below — needed for the no-active-tab case where
       // openTab creates the target.)
-      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
+      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
+        settlePendingSend()
+        return
+      }
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
-      // The thread turn shows the ASK (displayQuery) + a chip per attachment,
-      // never the folded-in document content that rides sendQuery to the backend.
+      const hasAttachments = attachments.length > 0
+      // OPTIMISTIC RENDER FIRST (the reported latency bug): the thread turn — the
+      // user's message + a chip per attachment — must appear on THIS commit,
+      // BEFORE the extractFile network call, so the composer never clears into a
+      // void. The chips render from NAMES here; each attachment's extracted
+      // content is folded onto the turn AFTER extraction resolves (below). The
+      // folded-in document text still rides `sendQuery` to the backend, never the
+      // thread bubble.
       const newTurn: ThreadTurn = {
         id,
         query: displayQuery,
-        ...(turnAttachments.length ? { attachments: turnAttachments } : {}),
+        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
       }
       // The tab title/handle falls back to the first attachment's name when the
       // ask itself is empty, so a doc-only send still reads sensibly in the tab.
-      const handle = displayQuery || turnAttachments[0]?.name || "New chat"
+      const handle = displayQuery || attachments[0]?.name || "New chat"
+      // Remember where we started so an extraction failure can roll the optimistic
+      // turn back cleanly: remove a freshly-spawned tab (restoring the prior
+      // surface) or drop just this turn + undo a New-chat rename on an existing one.
+      const prevActiveTabId = activeTabId
+      const spawnedNewTab = !activeTabId || activeTabId === BRIEF_TAB_ID
+      const prevTitle = spawnedNewTab
+        ? null
+        : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
       // No active tab, OR the active "tab" is the synthetic, thread-less brief
       // tab → spawn a FRESH chat tab seeded with the query. A chat started from
-      // the weekly brief must never thread inline into it (the brief tab carries
+      // the Top Insights brief must never thread inline into it (the brief tab carries
       // no `tabs` entry, so appending would silently no-op anyway).
-      if (!activeTabId || activeTabId === BRIEF_TAB_ID) {
+      if (spawnedNewTab) {
         const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         targetTabId = openTab(title, [newTurn])
       } else {
@@ -1689,11 +3526,104 @@ export function ChatScreen() {
           return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
-      pushPendingConversation(id, displayQuery, targetTabId)
-      setActiveConv(0)
+      // The real turn is now on the tab, so the placeholder has been handed off.
+      // Same tick as the openTab/setTabs above → React batches both into ONE
+      // commit, so the swap from placeholder to turn never flickers.
+      settlePendingSend()
+      // Hand the placeholder's clock over with it, so the wait ladder measures
+      // one continuous wait rather than resetting to rung 0 at the handoff.
+      askStartRef.current.set(id, askStartedAt)
       // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
       // the new one is never treated as pre-stopped.
       stoppedTabsRef.current.delete(targetTabId)
+
+      // Now — AFTER the turn is on screen — parse the attachments. Mark the tab
+      // busy FIRST so the just-rendered turn shows the thinking skeleton (not the
+      // terminal "no response" fallback, which needs live busy state) while the
+      // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
+      // eventual clear on the ask's completion.
+      let sendQuery = displayQuery
+      // Extracted attachment texts + the ORIGINAL file's storage key, persisted
+      // with the turn (survives reload; text read back by conversationPrdDocs for
+      // a later "generate a PRD"; key lets the chip render/download the real file).
+      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
+      if (hasAttachments) {
+        setBusyTabs((prev) => addToSet(prev, targetTabId))
+        const pending = attachments
+        let ctx: string
+        try {
+          // Per attachment, in parallel: (1) extract its text ONCE — plain-text
+          // inlines its content, documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side; (2) upload the ORIGINAL file to storage so the
+          // chip can render/download the real document after a reload. The upload
+          // is best-effort (a failure leaves the text-only chip, never blocks the
+          // send). Order is preserved via the resolved array.
+          const extracted = await Promise.all(
+            pending.map(async (a) => {
+              const [text, stored] = await Promise.all([
+                // Text files were already read client-side (content present) — use
+                // it. Only binary docs (content empty, raw file kept) need the
+                // server-side markdown extraction.
+                a.content
+                  ? Promise.resolve(a.content)
+                  : a.file
+                  ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
+                  : Promise.resolve(a.content),
+                // Best-effort — an upload failure (or a missing storage backend)
+                // must never block the send. The `.then` wrapper also catches a
+                // synchronous throw, not just a rejection.
+                a.file
+                  ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
+                  : Promise.resolve(null),
+              ])
+              return {
+                name: a.name,
+                content: text,
+                key: stored?.key ?? null,
+                mime: stored?.mime ?? null,
+                size: stored?.size ?? null,
+              }
+            }),
+          )
+          // Clamp the TOTAL context so question + attachments stay under the
+          // ask endpoint's 120k question cap even with several attachments.
+          ctx = extracted
+            .map((e) => `--- ${e.name} ---\n${e.content}`)
+            .join("\n\n")
+            .slice(0, 100000)
+          // Backfill the extracted content + stored file key onto the optimistic
+          // turn so its card opens a viewer / downloads the original.
+          const withContent = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
+          persistedAttachments = withContent
+          setTabs((prev) => prev.map((t) => t.id === targetTabId
+            ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
+            : t))
+          sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
+          setAttachments([]) // clear after successful extraction only
+        } catch (e) {
+          // Extraction failed: roll the optimistic turn back so no ghost
+          // "thinking" bubble is stranded, but KEEP the attachments so the user
+          // can retry or remove the bad one — a silent drop is exactly the failure
+          // mode this path exists to fix.
+          setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+          if (spawnedNewTab) {
+            // This tab existed only for the failed send — remove it and restore
+            // the prior surface rather than leaving an empty stray tab behind.
+            setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
+            setActiveTabId(prevActiveTabId)
+          } else {
+            // Appended to an existing tab — drop just this turn and undo any
+            // New-chat rename so the tab looks exactly as it did before the send.
+            setTabs((prev) => prev.map((t) => t.id === targetTabId
+              ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
+              : t))
+          }
+          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+          return
+        }
+      }
+      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
+      setActiveConv(0)
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in
       // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
@@ -1708,29 +3638,92 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => {
-          // PRD-tab chat: send the tab's PRD id (and its conversation for
-          // follow-up history) so the answer is grounded on the open PRD +
-          // its insight/evidence/tickets/prototype. Resolved at send time —
-          // tabsRef, not the closure — so a PRD that finished generating
-          // after the tab opened is still picked up. `sendQuery` carries any
-          // attached-document content; `isStopped` lets the user stop the ask.
+        ask: async () => {
+          // The conversation id this ask belongs to. On a FOLLOW-UP the tab
+          // already carries it and this resolves without a round trip; on the
+          // tab's FIRST message the row is still being created —
+          // pushPendingConversation fires the create and deliberately does not
+          // await it — so reading `dbConvId` synchronously here would yield
+          // null. That is how a first-message HTML report got captured with
+          // conversation_id NULL and the Reports panel then said "No reports in
+          // this chat" (staging P1, 2026-07-30): the id is fixed at REQUEST
+          // time and nothing backfills it afterwards.
+          //
+          // `ensureConversation` shares the very same in-flight create the turn
+          // persistence uses (create-once per tab), so awaiting it costs at most
+          // the remainder of one already-issued request and never mints a second
+          // conversation. It resolves null on failure, so a create that fails
+          // still lets the ask through — exactly the previous behaviour.
+          const convId =
+            tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
+            (await persistence.ensureConversation(targetTabId, {
+              turnId: id,
+              title: displayQuery.length > 52
+                ? `${displayQuery.slice(0, 49)}…`
+                : displayQuery,
+              query: displayQuery,
+            }))
+          // Resolved AFTER the await — tabsRef, not the closure — so a
+          // conversation created (or a PRD that finished generating) AFTER the
+          // tab opened is still picked up. `sendQuery` carries any attached-
+          // document content; `isStopped` lets the user stop the ask.
           const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
           return runAskGeneration(sendQuery, activeCompany, targetTabId, {
             isCancelled: () => !mountedRef.current,
             isStopped: () => stoppedTabsRef.current.has(targetTabId),
-            ...(targetTab?.prdId != null
-              ? {
-                  prd_id: targetTab.prdId,
-                  ...(targetTab.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+            // Live token stream: the accumulating answer markdown renders in
+            // place of the thinking skeleton as the model writes it. Display
+            // only — onResult's authoritative reply replaces it.
+            onPartial: (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped
+                      // A delta arriving after a drop means the preview came
+                      // back — clear the note rather than leave it contradicting
+                      // text that is visibly moving again.
+                      ? { ...turn, partial: text, streamDropped: false }
+                      : turn),
                 }
-              : {}),
+              ))
+            },
+            // The live preview died mid-answer while the poll carries on. Purely
+            // a display downgrade ("Finishing the answer" + a note) — the poll
+            // is still authoritative and a stream failure is never an error.
+            onStreamDrop: () => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
+                }
+              ))
+            },
+            // Replay this tab's conversation so the model sees the prior turns
+            // (history) on EVERY follow-up, not just PRD-tab chats — the backend
+            // loads history by conversation_id, so without this each ask is
+            // context-free and a follow-up like "get all in to-do status" loses
+            // the thread it was answering. It is ALSO what attaches a captured
+            // HTML report to this chat room (app/report_capture.py).
+            ...(convId != null ? { conversation_id: convId } : {}),
+            // PRD-tab chat: also send the PRD id so the answer is grounded on the
+            // open PRD + its insight/evidence/tickets/prototype.
+            ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
           })
         },
         onResult: (tabId, res) => {
+          // If the answer already streamed in live, replaying the simulated
+          // typewriter over the (identical) final text would type the whole
+          // reply out twice — mark it as already animated.
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
+          askStartRef.current.delete(id)
+          resumedTurnsRef.current.delete(id)
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+              ...t, thread: t.thread.map((turn) => turn.id === id
+                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+                : turn)
             }
           ))
           finalizeConversationTurn(id, { reply: res }, tabId)
@@ -1743,6 +3736,22 @@ export function ChatScreen() {
           // User hit Stop: the stopped turn is already rendered by handleStopAsk.
           // Not a failure — no error bubble/toast.
           if (e instanceof AskStoppedError) return
+          askStartRef.current.delete(id)
+          resumedTurnsRef.current.delete(id)
+          // The 12-minute client budget expired while the job was still
+          // generating. The ask_id is deliberately still persisted, so this is
+          // NOT a failure: the turn says the answer is still running and a
+          // reload will pick it up, which the resume effect then does.
+          if (e instanceof AskTimeoutError) {
+            setTabs((prev) => prev.map((t) =>
+              t.id !== tabId ? t : {
+                ...t, thread: t.thread.map((turn) => turn.id === id
+                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+                  : turn),
+              }
+            ))
+            return
+          }
           const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
             ? (e.body as { detail: unknown }).detail
             : null
@@ -1762,15 +3771,25 @@ export function ChatScreen() {
                 : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+              // Drop any streamed partial too: a half-answer above an error
+              // bubble would read as the reply having (partly) succeeded.
+              ...t, thread: t.thread.map((turn) => turn.id === id
+                ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
+                : turn)
             }
           ))
+          // `msg` is kept on the turn and in the persisted conversation row as
+          // the RECORD of what failed. It is not what the user reads: the failed
+          // turn renders fixed copy, and so does this toast. A backend detail
+          // string means nothing to the person who asked the question, and the
+          // 404 the tenant gate raises must not tell a foreign tenant that the
+          // row it asked for exists somewhere.
           finalizeConversationTurn(id, { error: msg }, tabId)
-          showToast("Ask failed", msg.slice(0, 120))
+          showToast("Ask failed", WAIT_FAILED_TITLE)
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
+    [activeCompany, activeTabId, attachments, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -1807,12 +3826,31 @@ export function ChatScreen() {
         if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
       }
       if (idx === -1) return t
-      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true } : turn) }
+      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined } : turn) }
     }))
   }, [activeTabId, activeCompany, setBusyTabs])
 
+  // "Ask again" on a stopped / timed-out / failed turn — the surface used to be
+  // a dead end at all three.
+  //
+  // Attachments are NOT re-sent: their bytes left component state on the
+  // original send, and quietly re-asking the same words WITHOUT the files the
+  // user attached is a different question. So a turn that carried files hands
+  // its text back to the composer instead, which is also what the failure copy
+  // ("try it with fewer files attached") tells the reader to do.
+  const handleAskAgain = useCallback((turn: ThreadTurn) => {
+    const q = turn.query.trim()
+    if (!q) return
+    if (turn.attachments?.length) {
+      setDraft(turn.query)
+      composerRef.current?.focus()
+      return
+    }
+    void submitAsk(q)
+  }, [submitAsk])
+
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
-  // A question typed on the weekly-brief surface must open its OWN chat tab, not
+  // A question typed on the top-insights surface must open its OWN chat tab, not
   // thread inline into the brief. BriefChat sets pendingChatHandoff; we consume
   // it once here by running it through submitAsk. With the brief tab active (the
   // only place this fires), submitAsk spawns a fresh tab seeded with the query —
@@ -1850,8 +3888,9 @@ export function ChatScreen() {
   // opening it here a commit later (route now settled) survives that close.
   useEffect(() => {
     if (!prdPanelPending) return
-    setPrdPanelPending(false)
-    openContentPanel("prd")
+    const landOn = prdPanelPending
+    setPrdPanelPending(null)
+    openContentPanel(landOn)
   }, [prdPanelPending, openContentPanel])
 
   // The content panel is a single global overlay, but it must FOLLOW the active
@@ -1862,6 +3901,8 @@ export function ChatScreen() {
   //     it (handleOpenPrd syncs the cached PRD or DB-loads by id). This is what
   //     makes REFOCUSING a PRD tab bring its panel back, instead of leaving it
   //     closed after you'd visited another tab.
+  //   • an evidence tab (Top Insights → View Evidence) that hasn't grown a PRD of
+  //     its own → reopen it on the Evidence tab, scoped to its finding.
   //   • the brief tab, or a plain (non-PRD) chat → close any lingering panel so it
   //     never hangs over the wrong surface.
   // Gated on an actual switch (prevTabForPanelRef) so a manual panel-close while
@@ -1871,15 +3912,71 @@ export function ChatScreen() {
   // it opens the panel) suppresses the reconcile during that hand-off.
   const autoRestoredTabsRef = useRef<Set<string>>(new Set())
   const prevTabForPanelRef = useRef(activeTabId)
+
+  // Tabs whose Reports panel has already been opened for them ON THIS VISIT.
+  // Shared by the Artifacts hand-off and the auto-open further down, so that
+  // between them they open a thread's reports exactly once — and a panel the user
+  // then CLOSES stays closed instead of being reopened by the other path.
+  //
+  // The claim is retired when you LEAVE the tab (below), which is what makes
+  // coming back to a report thread bring its panel back. That mirrors the PRD
+  // branch of the reconcile, which re-opens a PRD tab's document on every
+  // refocus: a thread's artifact is what the thread is about, so returning to it
+  // should show it. Scoping the claim to the visit is the whole difference
+  // between "a manual close sticks while you're here" and "a manual close hides
+  // this thread's report forever".
+  const reportsAutoOpenedRef = useRef<Set<string>>(new Set())
+
+  // A chat re-opened from history whose conversation carries a PRD: open its
+  // panel once the resumed tab is actually active. Deferred through state rather
+  // than called inline because checkResume sets the active tab in the same pass —
+  // handleOpenPrd reads `activeTabId`, which has not updated yet at that point.
+  useEffect(() => {
+    if (!resumePanelTabId || activeTabId !== resumePanelTabId) return
+    setResumePanelTabId(null)
+    autoRestoredTabsRef.current.add(resumePanelTabId)
+    void handleOpenPrd()
+  }, [resumePanelTabId, activeTabId, handleOpenPrd])
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
+    // Leaving a tab retires its Reports auto-open claim, so refocusing it later
+    // opens its report again (see reportsAutoOpenedRef). Done here, before the
+    // early returns below, because it must happen on EVERY switch — including
+    // the ones this reconcile then declines to act on.
+    if (switchedTab && prevTabForPanelRef.current) {
+      reportsAutoOpenedRef.current.delete(prevTabForPanelRef.current)
+    }
     prevTabForPanelRef.current = activeTabId
-    if (!switchedTab || prdPanelPending) return
+    // `pendingReportFocus` suppresses the reconcile for the same reason
+    // `prdPanelPending` does: a report opened from Artifacts resumes its thread,
+    // which IS a tab switch, and that thread often carries no PRD — so this would
+    // close the very panel the hand-off below is about to open.
+    if (!switchedTab || prdPanelPending || pendingReportFocus) return
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    const ownsPrd = !!tab?.prd || !!tab?.prdGenerating || tab?.prdId != null
-      || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+    // A PRD that landed IN THIS TAB, as opposed to one that merely exists in the
+    // DB for the same insight. The distinction only matters for evidence tabs
+    // (below), which must not be hijacked by a PRD they were never opened for.
+    const tabOwnsPrd = !!tab?.prd || !!tab?.prdGenerating || tab?.prdId != null
+    const ownsPrd = tabOwnsPrd || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+    // An evidence tab (Top Insights → View Evidence) restores ITS evidence: the
+    // finding is what the tab is about, so refocusing must neither close the panel
+    // (it holds no PRD) nor jump to the insight's PRD. Once a PRD does land in the
+    // tab — the panel's PRD tab resolves one on demand — that takes precedence.
+    // After a reload `evidenceDetail` is gone; `prdMeta` alone still populates the
+    // Evidence tab, via its read-only load-by-insight path.
+    if (tab?.evidenceOnly && !tabOwnsPrd) {
+      setContent({
+        detail: tab.evidenceDetail ?? null,
+        prd: null,
+        prdMeta: tab.briefMeta,
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      openContentPanel("evidence")
+      return
+    }
     if (ownsPrd) {
       // Sync the global panel to THIS tab's PRD — ALWAYS, even if it already reads
       // "prd", because another PRD tab may have left ITS doc in the shared panel
@@ -1891,7 +3988,92 @@ export function ChatScreen() {
     } else if (contentPanelTab) {
       closeContentPanel()
     }
-  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, chatInsightState, handleOpenPrd, closeContentPanel])
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, pendingReportFocus, chatInsightState, handleOpenPrd, closeContentPanel, openContentPanel, setContent])
+
+  // ── Report → its own thread hand-off ──────────────────────────────────────
+  // Clicking a report in Artifacts writes the ordinary `sprntly_resume_conv`
+  // hand-off and fills `pendingReportFocus`: checkResume spawns/refocuses that
+  // conversation's tab, and this lands the panel on the report once that tab is
+  // ACTUALLY active. Gated on the id matching so the panel can never open over a
+  // different thread — if the resume fails, nothing opens rather than the wrong
+  // thing. Declared after the reconcile above so that, on the commit where both
+  // run, this open is the last word.
+  useEffect(() => {
+    if (!pendingReportFocus) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.dbConvId !== pendingReportFocus.conversationId) return
+    setContent({ reportFocusId: pendingReportFocus.reportId, reportFocusStandalone: false })
+    setPendingReportFocus(null)
+    // Claim the tab: this IS its one auto-open, so closing the panel here must
+    // not hand straight over to the auto-open effect below.
+    reportsAutoOpenedRef.current.add(tab.id)
+    openContentPanel("reports")
+  }, [pendingReportFocus, setPendingReportFocus, activeTabId, tabs, setContent, openContentPanel])
+
+  // ── A thread whose only artifact is reports opens on them ──────────────────
+  // Opening a chat should SHOW what that chat produced. The PRD-bound paths
+  // above already do that for PRDs; this covers the thread whose artifact is a
+  // report, which otherwise came back with the panel shut and no sign the
+  // document existed.
+  //
+  // Lands on the NEWEST report, not a list — the list is what "All reports"
+  // is for, and a thread with several still has one that was just written.
+  //
+  // A PRD in the thread takes precedence and is left as the active tab — it's
+  // the document the chat is about, and Reports is one click away in the tab bar
+  // (that ordering is the explicit ask). Fires at most once per VISIT to a tab, so
+  // a manual close is never undone while you are on it, and never over an
+  // already-open panel — but coming back to the thread does show its report
+  // again, the same as refocusing a PRD tab does.
+  //
+  // The list has to be THIS thread's, not merely loaded. `threadReports` is
+  // already scoped to the active tab's conversation (see its memo above), and the
+  // dbConvId check below states the other half: a tab with no conversation id yet
+  // is a brand-new chat that cannot have reports, whatever the shared content
+  // happens to be holding at this instant. Both together are what stopped a fresh
+  // tab from sliding the previous thread's report in over an empty conversation.
+  useEffect(() => {
+    if (!activeTabId || isBriefTab || pendingReportFocus) return
+    if (reportsAutoOpenedRef.current.has(activeTabId)) return
+    // Only act on a KNOWN list — "not loaded yet" must not read as "no reports".
+    if (content.threadReportsStatus !== "ready" || threadReports.length === 0) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.dbConvId == null) return
+    if (content.threadReportsConversationId !== tab.dbConvId) return
+    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
+    if (contentPanelTab) return // something is already open — don't hijack it
+    reportsAutoOpenedRef.current.add(activeTabId)
+    setContent({ reportFocusId: threadReports[0].id, reportFocusStandalone: false })
+    openContentPanel("reports")
+  }, [
+    activeTabId, isBriefTab, pendingReportFocus, contentPanelTab,
+    threadReports, content.threadReportsStatus, content.threadReportsConversationId,
+    setContent, openContentPanel,
+  ])
+
+  // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
+  // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
+  // PRD", and clicking the panel's PRD tab on an evidence tab — and it writes only
+  // to the SHARED content, since it knows nothing about chat tabs. Left there, the
+  // tab would still read as PRD-less: refocusing it would restore evidence (or
+  // close the panel) while another tab's document sat in the shared panel — the
+  // "wrong PRD on refocus" bug, from the other direction.
+  //
+  // So mirror it onto the active tab, gated on the PRD's own (briefId,
+  // insightIndex) matching that tab's insight, so a document belonging to some
+  // other tab is never adopted. Stamping `prdId` is also what lets a reload
+  // recover the PRD by id.
+  useEffect(() => {
+    const prd = content.prd
+    if (!prd || !activeTabId || isBriefTab) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.prd?.prd_id === prd.prd_id) return
+    const meta = tab.briefMeta
+    if (!meta || prd.briefId !== meta.briefId || prd.insightIndex !== meta.insightIndex) return
+    setTabs((prev) => prev.map((t) => t.id === activeTabId
+      ? { ...t, prd, prdId: prd.prd_id, prdGenerating: false }
+      : t))
+  }, [content.prd, activeTabId, isBriefTab])
 
   // ── Restore the PRD panel after a reload ───────────────────────────────────
   // Tabs persist across reloads (localStorage) but their cached `prd` does NOT —
@@ -1935,6 +4117,12 @@ export function ChatScreen() {
       void handleOpenPrd()
       return
     }
+    // An evidence tab holds a FINDING, not a PRD — there is nothing for this
+    // effect to restore. Its panel is opened by `prdPanelPending` on the open
+    // itself and by the switch reconcile on refocus. Without this guard the map
+    // branch below would drag the tab onto a PRD that merely exists for the same
+    // insight, which is not the document it was opened for.
+    if (tab.evidenceOnly) return
     // Otherwise it must be a brief-insight tab whose DB PRD the map confirms. A
     // not-yet-resolved map reads as hasPrd=false → treat as "wait", not "give up",
     // and re-check on the next render (the empty pre-fetch window latch bug).
@@ -1972,6 +4160,14 @@ export function ChatScreen() {
       askingTabsRef.current.add(targetTabId)
       setBusyTabs((prev) => addToSet(prev, targetTabId))
       stoppedTabsRef.current.delete(targetTabId)
+      // This ask is being RE-ATTACHED by id, not re-POSTed — the one observable
+      // fact behind "Picking up where this left off". The clock restarts from
+      // this mount because the original start time is not available client-side,
+      // which is exactly why the copy says the answer was already running rather
+      // than claiming the elapsed number covers the whole job.
+      resumedTurnsRef.current.add(turnId)
+      askStartRef.current.set(turnId, Date.now())
+      setResumeTick((n) => n + 1)
       void (async () => {
         try {
           const res = await resumeAskGeneration(
@@ -1980,10 +4176,35 @@ export function ChatScreen() {
             targetTabId,
             () => !mountedRef.current,
             () => stoppedTabsRef.current.has(targetTabId),
+            // Re-attached mid-generation: the stream's replay frame catches the
+            // preview up with everything already written, then live deltas.
+            (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === turnId && !turn.reply && !turn.stopped
+                      ? { ...turn, partial: text, streamDropped: false }
+                      : turn),
+                }
+              ))
+            },
+            () => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === turnId && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
+                }
+              ))
+            },
           )
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === targetTabId)?.thread.find((turn) => turn.id === turnId)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(turnId)
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
+              ...t, thread: t.thread.map((turn) => turn.id === turnId
+                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+                : turn),
             }
           ))
           finalizeConversationTurn(turnId, { reply: res }, targetTabId)
@@ -1994,14 +4215,30 @@ export function ChatScreen() {
           // User stopped the resumed ask: the stopped turn is rendered by
           // handleStopAsk; not a failure, so no error bubble.
           if (e instanceof AskStoppedError) return
+          // The resumed poll hit the 12-minute budget too — same honest state as
+          // a first-run timeout, not a failure.
+          if (e instanceof AskTimeoutError) {
+            setTabs((prev) => prev.map((t) =>
+              t.id !== targetTabId ? t : {
+                ...t, thread: t.thread.map((turn) => turn.id === turnId
+                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+                  : turn),
+              }
+            ))
+            return
+          }
           const msg = e instanceof Error ? e.message : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, error: msg } : turn),
+              ...t, thread: t.thread.map((turn) => turn.id === turnId
+                ? { ...turn, error: msg, streamDropped: undefined }
+                : turn),
             }
           ))
           finalizeConversationTurn(turnId, { error: msg }, targetTabId)
         } finally {
+          askStartRef.current.delete(turnId)
+          resumedTurnsRef.current.delete(turnId)
           askingTabsRef.current.delete(targetTabId)
           setBusyTabs((prev) => removeFromSet(prev, targetTabId))
         }
@@ -2013,14 +4250,34 @@ export function ChatScreen() {
     const q = draft.trim()
     // Backend rejects questions under 3 chars — match BriefChat's guard (the
     // send buttons are also disabled below 3, this covers Enter-to-send).
-    if (q.length < 3) {
+    if (q.length < DRAFT_MIN_CHARS) {
       if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
       return
     }
     // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
-    if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
+    //
+    // This used to be a bare `return` — the single worst micro-interaction on
+    // the surface. Enter while an ask was in flight did nothing at all: no
+    // send, no message, the draft just sat there and the keystroke vanished.
+    // The guard stays (one ask per tab); the silence does not.
+    if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
+      showComposerHint("busy")
+      return
+    }
+    // A send is already mid-dispatch (its intent decision is still in flight).
+    // The busy/asking markers aren't set until the ask itself starts, so without
+    // this a second Enter during that window would double-send.
+    if (pendingSend) return
+    // A pinned skill is re-attached to the query as its slash trigger, so the
+    // backend's deterministic fast-path sees exactly what typing it by hand
+    // would have produced — the chip is a composer affordance, not a new
+    // protocol. The trigger stays visible on the sent turn, which is what makes
+    // the wait's skill chip verifiable from the thread itself.
+    const sent = pinnedSkill ? `${pinnedSkill.trigger} ${q}` : q
     setDraft("")
-    void submitAsk(q)
+    setPinnedSkill(null)
+    setPlusMenuOpen(false)
+    void submitAsk(sent)
     const ta = composerRef.current
     if (ta) {
       // Clear the inline height so the textarea snaps back to its CSS resting
@@ -2030,23 +4287,46 @@ export function ChatScreen() {
     }
   }
 
-  const filteredSkills = useMemo(
-    () =>
-      skills.filter((s) =>
+  const filteredSkills = useMemo(() => {
+    // Custom skills first — the user's own workflows outrank the catalog.
+    // Two skills may share a NAME (an upload no longer replaces a built-in),
+    // and both are listed: their descriptions are what tells them apart, and
+    // their triggers differ, so picking either one invokes what was picked.
+    return [...customSkills, ...skills].filter(
+      (s) =>
         slashFilter === "" ||
         s.trigger.toLowerCase().includes("/" + slashFilter) ||
         s.label.toLowerCase().includes(slashFilter) ||
         s.description.toLowerCase().includes(slashFilter),
-      ),
-    [skills, slashFilter],
-  )
+    )
+  }, [customSkills, skills, slashFilter])
   const slashOpen = showSlash && filteredSkills.length > 0
   // Keep the highlight in range as the filtered list shrinks/grows.
   useEffect(() => {
     setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
   }, [filteredSkills.length])
 
+  // ⌘/ (Ctrl+/ on Windows) opens the skills palette from the keyboard.
+  //
+  // Both composers have advertised this shortcut in their footer for a while and
+  // NOTHING was listening for it — there is no metaKey handler for "/" anywhere
+  // in the app. The `+` menu now points at it too ("Browse skills ⌘/"), so the
+  // hint had to become true rather than be repeated twice.
+  const openSkillPalette = useCallback(() => {
+    setSlashFromMenu(true)
+    setSlashFilter("")
+    setSlashActive(0)
+    setShowSlash(true)
+    setPlusMenuOpen(false)
+    composerRef.current?.focus()
+  }, [])
+
   const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "/") {
+      e.preventDefault()
+      openSkillPalette()
+      return
+    }
     // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
     // dismisses it — the composer's own Enter-to-send yields to the picker.
     if (slashOpen) {
@@ -2068,6 +4348,7 @@ export function ChatScreen() {
       if (e.key === "Escape") {
         e.preventDefault()
         setShowSlash(false)
+        setSlashFromMenu(false)
         return
       }
     }
@@ -2085,18 +4366,119 @@ export function ChatScreen() {
     // Slash command detection: show dropdown when text starts with /
     if (val.startsWith("/")) {
       setShowSlash(true)
+      setSlashFromMenu(false)
       setSlashFilter(val.slice(1).toLowerCase())
       setSlashActive(0)
-    } else {
+    } else if (!slashFromMenu) {
+      // A palette opened by TYPING closes as soon as the draft stops being a
+      // slash command. One opened from the `+` menu or ⌘/ stays put — a person
+      // browsing skills over a half-written question would otherwise lose the
+      // list on their next keystroke.
       setShowSlash(false)
     }
   }
 
   const handleSlashSelect = (skill: SkillInfo) => {
     setShowSlash(false)
-    setDraft(skill.trigger + " ")
+    setSlashFromMenu(false)
+    setSlashFilter("")
+    // Pin the skill as a removable CHIP instead of pasting "/competitive-intel "
+    // into the draft as raw text. The old behaviour handed the user a string
+    // they had to preserve character-for-character or silently lose the skill,
+    // sitting in the middle of a sentence they were about to write.
+    setPinnedSkill({ id: skill.id, label: skill.label, trigger: skill.trigger })
+    // Only a draft the palette itself put there is cleared — a question already
+    // typed survives having a skill pinned onto it.
+    setDraft((d) => (d.startsWith("/") ? "" : d))
     composerRef.current?.focus()
   }
+
+  // The `+` menu: Attach a file / Browse skills. The slash palette used to be
+  // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
+  // invisible to anyone who never read the footer hint.
+  const handlePlusMenuSelect = useCallback((index: number) => {
+    setPlusMenuOpen(false)
+    if (index === 0) {
+      fileInputRef.current?.click()
+      return
+    }
+    openSkillPalette()
+  }, [openSkillPalette])
+
+  // Esc stops the answer. The Stop button already sits in the composer and now
+  // beside the wait itself, but the fastest way out of a run you regret is the
+  // key everybody already presses to cancel things.
+  //
+  // It yields to anything that owns Esc more locally: the attachment viewer, the
+  // slash palette and the `+` menu each close on Esc first.
+  useEffect(() => {
+    if (!busy) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      if (viewerAttachment || slashOpen || plusMenuOpen) return
+      handleStopAsk()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [busy, viewerAttachment, slashOpen, plusMenuOpen, handleStopAsk])
+
+  /** The skill a question DETERMINISTICALLY selected, or null.
+   *
+   *  Only a leading slash trigger counts: qa_agent's fast path treats it as an
+   *  explicit selection, so naming it is a fact. What the ROUTER picked for a
+   *  plain question is not knowable here — `_skill` is written into
+   *  `ask_jobs.response` by `complete_ask_job`, so the payload is `{}` for the
+   *  whole time the wait is on screen. Rather than guess, no chip is shown.
+   *  (Surfacing the routed skill mid-run needs a `routed_skill` column; that is
+   *  a separate backend change.) */
+  const skillForQuery = useCallback((query: string): SkillInfo | null => {
+    const first = query.trim().split(/\s+/)[0]
+    if (!first || !first.startsWith("/")) return null
+    const wanted = first.toLowerCase()
+    return [...customSkills, ...skills].find((s) => s.trigger.toLowerCase() === wanted) ?? null
+  }, [customSkills, skills])
+
+  /** ONE composer, rendered on the landing and in the thread dock. `home` is the
+   *  only difference between the two calls — everything else is shared state, so
+   *  the pair cannot drift again the way `.chat-home-composer` and
+   *  `.bc-composer` did. */
+  const renderComposer = (home: boolean) => (
+    <ChatComposer
+      home={home}
+      busy={busy}
+      draft={draft}
+      pinnedSkill={pinnedSkill}
+      attachments={attachments}
+      hint={composerHint === "busy" ? (
+        <>
+          {BUSY_ENTER_HINT_LEAD}<b>Stop</b>{BUSY_ENTER_HINT_TAIL}
+        </>
+      ) : null}
+      menuOpen={plusMenuOpen}
+      menuActiveIndex={plusMenuActive}
+      slashMenu={slashOpen ? (
+        <SlashSkillMenu
+          skills={filteredSkills}
+          activeIndex={slashActive}
+          onSelect={handleSlashSelect}
+          onHover={setSlashActive}
+        />
+      ) : null}
+      composerRef={composerRef}
+      fileInputRef={fileInputRef}
+      onInput={handleComposerInput}
+      onKeyDown={handleComposerKeyDown}
+      onSend={handleComposerSubmit}
+      onStop={handleStopAsk}
+      onToggleMenu={() => { setPlusMenuActive(0); setPlusMenuOpen((o) => !o) }}
+      onMenuActive={setPlusMenuActive}
+      onMenuSelect={handlePlusMenuSelect}
+      onCloseMenu={() => setPlusMenuOpen(false)}
+      onRemoveAttachment={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))}
+      onRemoveSkill={() => setPinnedSkill(null)}
+      onFileSelect={handleFileSelect}
+    />
+  )
 
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
@@ -2191,25 +4573,47 @@ export function ChatScreen() {
     router.replace("/")
   }, [searchParams, startNewThread, router])
 
-  // ── PRD deep-link (`/brief?prd=<id>`) ─────────────────────────────────────
-  // The Slack "your PRD is ready" ping links here carrying the prd id. Open that
-  // PRD as a chat tab + panel via the SAME load flow the command palette / brief
-  // "View PRD" use (openPrdTab → kind:"load"). openPrdTab routes to `/`, which
-  // strips the `?prd=` param, so no separate replace is needed. Latched like the
-  // new-chat handler so it fires once per arrival and re-arms when absent.
-  const consumedPrdRef = useRef(false)
+  // NOTE: the `/brief?prd=<id>` deep-link (Slack "your PRD is ready" ping) used
+  // to be consumed HERE. It's now handled shell-level by
+  // `(app)/hooks/useArtifactUrlSync.ts` (mounted once in AppShell), alongside
+  // its `?evidence=`/`?ticket=` siblings, so the same param works from any
+  // `(app)` page rather than only when ChatScreen happens to be mounted. See
+  // that hook for the current implementation + tests.
+
+  // ── "Workbench" hand-off (`/?tab=last`) ───────────────────────────────────
+  // The sidebar's two doors into this surface are deliberately split: "Top
+  // Insights" (→ /brief) always activates the pinned brief tab, and "Workbench"
+  // (→ /?tab=last, goToWorkbench) always activates the user's last CHAT tab, so
+  // neither nav can strand you on the other's surface. Resolution order:
+  //   1. the remembered tab, if it's still open (it may have been closed since),
+  //   2. otherwise the last tab in the strip — the user has open work either way,
+  //   3. otherwise a fresh chat tab, so the nav is never a no-op.
+  // Latched + param-stripped exactly like the new-chat handler above.
+  const consumedLastTabRef = useRef(false)
   useEffect(() => {
-    const raw = searchParams.get("prd")
-    if (raw == null) {
-      consumedPrdRef.current = false
+    if (searchParams.get("tab") !== "last") {
+      consumedLastTabRef.current = false
       return
     }
-    if (consumedPrdRef.current) return
-    const prdId = Number(raw)
-    if (!Number.isInteger(prdId) || prdId <= 0) return
-    consumedPrdRef.current = true
-    openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
-  }, [searchParams, openPrdTab])
+    if (consumedLastTabRef.current) return
+    consumedLastTabRef.current = true
+    let remembered: string | null = null
+    try { remembered = sessionStorage.getItem(lastTabKey) } catch { /* ignore */ }
+    const open = tabsRef.current
+    const target =
+      remembered && open.some((t) => t.id === remembered)
+        ? remembered
+        : open.length > 0
+          ? open[open.length - 1].id
+          : null
+    if (target) {
+      setActiveTabId(target)
+      setDraft("")
+    } else {
+      startNewThread()
+    }
+    router.replace("/")
+  }, [searchParams, lastTabKey, startNewThread, router])
 
   const hasThread = thread.length > 0
   // A tab bound to a PRD or brief insight opens with the insight itself as the
@@ -2228,7 +4632,13 @@ export function ChatScreen() {
   const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating || activeTab?.prdId != null)
   // A resumed tab whose history is still fetching shows the thread view (with
   // a loading skeleton) — never the "Welcome back" landing.
-  const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating
+  // Is the just-sent message aimed at the surface currently on screen? Scoped to
+  // the tab it was typed in, so switching tabs mid-dispatch doesn't drag the
+  // placeholder along. On the landing surface both sides are null, which is the
+  // match we want: the first message of a brand-new chat renders instantly there
+  // too, before the ask path's openTab has run.
+  const pendingSendHere = !!pendingSend && pendingSend.tabId === activeTabId
+  const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating || pendingSendHere
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
@@ -2292,6 +4702,382 @@ export function ChatScreen() {
   const showChipRow = !hasThread
   const showEmptyStarters = false
 
+  // ── Insight/PRD card + clarifying questions, as reusable nodes ──────────────
+  // Same markup, two placements: a HEADER open (brief insight / ideation /
+  // backlog load) renders them at the TOP of the thread — the card IS the tab's
+  // opening agent message. An IN-CHAT COMMAND open (`prdInFlow`: import a doc,
+  // "generate a PRD for X") renders them INLINE, right after the command turn
+  // (thread[0]), so the conversation reads in chronological order instead of the
+  // PRD card + questions being pinned ABOVE the user's own command message.
+  // We anchor to the FIRST turn by INDEX, not a stored id: hydratePrdThread
+  // rebuilds the thread from Supabase with fresh turn ids on reload, but thread[0]
+  // is still the command turn, so index-anchoring survives rehydrate.
+  const insightCardNode = showInsightMsg ? (
+    <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
+      <div className="bc-agent-head">
+        <span className="bc-agent-mark">
+          <IconSparkle size={14} />
+        </span>
+        <span className="bc-agent-name">{AGENT_NAME}</span>
+        <span className="bc-agent-badge">
+          <IconSparkle size={10} />
+          Product Coworker
+        </span>
+      </div>
+      <div className="bc-agent-body">
+        <div className="bc-insight-msg">
+          <span className="bc-insight-msg-kind">PRD</span>
+          <span className="bc-insight-msg-text">{insightText}</span>
+        </div>
+        {/* Insight body — the finding's content under the heading.
+            Rendered as markdown so LLM-supplied **bold** shows. */}
+        {insightBody ? (
+          <div className="bc-insight-msg-body fc-body--md">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+          </div>
+        ) : null}
+      </div>
+      <ChatArtifactActions
+        evidenceExists={chatEvidenceExists}
+        prdExists={chatPrdExists}
+        prdWaiting={chatPrdCtaWaiting}
+        prdGenerating={!!activeTab?.prdGenerating}
+        prdLoading={!!activeTab?.prdLoading}
+        onViewEvidence={handleOpenEvidence}
+        onOpenPrd={handleOpenPrd}
+        prototypePrdId={chatProtoPrdId}
+        prototypeReady={chatPrototypeReady}
+        onViewPrototype={handleViewPrototype}
+        onPrototypeSettled={handlePrototypeSettled}
+      />
+    </div>
+  ) : null
+  // "User input needed" items from the PRD, surfaced as chat messages with answer
+  // buttons. Answering patches only the affected PRD sections and refreshes the
+  // panel live.
+  const prdQuestionsNode = activeTab?.prd ? (
+    <PrdInputQuestions
+      prdId={activeTab.prd.prd_id}
+      onPrdUpdated={handleInputPrdUpdated}
+    />
+  ) : null
+  // Command-opened PRD tab with at least one turn → render the card + questions
+  // INLINE after the command turn; otherwise (header open, or an empty thread)
+  // keep them at the TOP as before.
+  const inlinePrdCards = !!activeTab?.prdInFlow && thread.length > 0
+  // Which turn the inline card anchors AFTER. Precedence: the tab's recorded
+  // command-turn id (same-tab generation appends the command mid-thread, and the
+  // thread — ids included — persists with the tab); else the last
+  // command-looking turn (a fresh-session reopen rehydrates the merged
+  // conversation with fresh ids, so the id lookup misses); else thread[0] (the
+  // legacy command-opened tab, whose first turn IS the command).
+  const inlinePrdAnchorIdx = useMemo(() => {
+    if (!inlinePrdCards) return -1
+    if (activeTab?.prdFlowTurnId) {
+      const i = thread.findIndex((t) => t.id === activeTab.prdFlowTurnId)
+      if (i >= 0) return i
+    }
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (thread[i].query && isPrdCommand(thread[i].query)) return i
+    }
+    return 0
+  }, [inlinePrdCards, activeTab?.prdFlowTurnId, thread])
+
+  // ── Reopen the artifact panel from the tab strip ────────────────────────────
+  // Closing the panel (its × or the overlay) used to be one-way: the only route
+  // back was the View PRD button on the insight card, which sits at the TOP of
+  // the thread — buried by any long conversation, and parked mid-thread on a
+  // command-opened tab. This puts the SAME action (handleOpenPrd — sync the
+  // cached doc or DB-load this tab's own id; never a regeneration) at the top
+  // right of the tab strip, which is chrome: it holds still while the thread
+  // scrolls. The in-thread button stays where it is; this is an additional way
+  // in, not a replacement.
+  //
+  // ONE button for every artifact this thread has — PRD, report, or evidence.
+  // It opens whichever was written LAST, so it always means "show me what I was
+  // just working on" rather than being a PRD button that a report thread has to
+  // duplicate. Null (hidden) when the panel is already open, on the brief tab
+  // (BriefChat owns its own panel wiring, and handleOpenPrd no-ops there since
+  // BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact to reopen.
+  //
+  // The button is icon-only and the icon is FIXED (the strip is chrome, and a
+  // labelled pill competed with the tabs for attention). Which document it opens
+  // is carried by the tooltip and the accessible name, not by a changing glyph —
+  // a glyph that swaps per artifact reads as a different button appearing.
+  const reopenArtifact = useMemo(() => {
+    if (isBriefTab || contentPanelTab || !activeTabId) return null
+    const prdInScope = chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading
+    const newestReport = threadReports[0] ?? null
+
+    // With a PRD *and* reports in the same thread, the button opens whichever was
+    // written LAST — that's the document the user was just working on, and one
+    // button that opens "the current artifact" beats two competing ones. Reports
+    // are newest-first, so [0] is the thread's newest. A PRD still in flight has
+    // no timestamp yet but is by definition the newest thing here, so it wins;
+    // otherwise a missing timestamp (a streaming draft) never beats a real one.
+    const reportIsNewer = (() => {
+      if (!newestReport) return false
+      if (!prdInScope) return true
+      if (activeTab?.prdGenerating || activeTab?.prdLoading) return false
+      const prdAt = activeTab?.prd?.generatedAt
+      if (!prdAt) return true
+      return new Date(newestReport.created_at).getTime() > new Date(prdAt).getTime()
+    })()
+
+    if (reportIsNewer && newestReport) {
+      return {
+        label: threadReports.length > 1 ? "View reports" : "View report",
+        onClick: () => {
+          // Reopening lands on the newest report rather than a list — same as the
+          // auto-open. The list is behind "All reports" when there's more than one.
+          setContent({ reportFocusId: newestReport.id, reportFocusStandalone: false })
+          openContentPanel("reports")
+        },
+      }
+    }
+    if (prdInScope) return { label: "View PRD", onClick: handleOpenPrd }
+    if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
+    return null
+  }, [
+    isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
+    activeTab?.prdGenerating, activeTab?.prdLoading, activeTab?.prd?.generatedAt,
+    handleOpenPrd, handleOpenEvidence, threadReports, setContent, openContentPanel,
+  ])
+
+  // ── Tab strip overflow ──────────────────────────────────────────────────────
+  // The strip has no scrollbar (a 6px rail inside a 44px strip sat right on the
+  // seam where the active tab merges into the content below, and read as grime
+  // rather than as chrome). What replaces it: a fade at whichever edge still
+  // has tabs past it, plain wheel scrolling, and keeping the active tab in
+  // view. Together those make the overflow legible without drawing a rail.
+  const tabListRef = useRef<HTMLDivElement | null>(null)
+  const tabScrollerRef = useRef<HTMLDivElement | null>(null)
+
+  // Which edges are overflowing → `data-ov="start end"` on the wrapper, which
+  // is what fades the pseudo-elements in. Recomputed on scroll, on resize (the
+  // artifact panel opening narrows the strip), and whenever the tab set changes.
+  const syncTabOverflow = useCallback(() => {
+    const list = tabListRef.current
+    const scroller = tabScrollerRef.current
+    if (!list || !scroller) return
+    // 1px of slack: fractional scroll positions otherwise leave a fade stuck on
+    // at a hard end.
+    const atStart = list.scrollLeft <= 1
+    const atEnd = list.scrollLeft + list.clientWidth >= list.scrollWidth - 1
+    const edges = [atStart ? null : "start", atEnd ? null : "end"].filter(Boolean).join(" ")
+    scroller.setAttribute("data-ov", edges)
+    // The left fade must start where the PINNED tab ends, not at the strip's
+    // edge — otherwise it paints over the pin (or hides behind it) instead of
+    // marking the scrolled-away tabs sliding under it. Measured rather than
+    // hard-coded because the pin's width is its label's, which is font-dependent.
+    // Measured off bounding rects, not offsetLeft: engines disagree on whether
+    // offsetLeft reflects a sticky element's shifted position, and the fade must
+    // sit at the pin's VISUAL right edge in both states (at rest and while stuck).
+    const pin = list.querySelector<HTMLElement>("[data-tab-pinned='true']")
+    const pinW = pin
+      ? Math.max(0, pin.getBoundingClientRect().right - scroller.getBoundingClientRect().left)
+      : 0
+    scroller.style.setProperty("--tab-pin-w", `${pinW}px`)
+  }, [])
+
+  // Keep the ACTIVE tab inside the strip's visible corridor — which is narrower
+  // than the strip itself at both ends: the sticky Top Insights pin covers the
+  // left, and on the right the artifact panel takes up to 60vw off `.main-column`
+  // (padding-right), shrinking the strip under whatever is currently scrolled
+  // there. So opening the panel on a tab that sat near the right edge left that
+  // tab clipped behind the panel with nothing to bring it back. This slides the
+  // tabs to its left out of the way until it's fully in the corridor again, and
+  // the reverse when the panel closes and the corridor grows back.
+  //
+  // Minimum movement, not centring: an already-visible tab must not jump.
+  const keepActiveTabVisible = useCallback((smooth: boolean) => {
+    const list = tabListRef.current
+    if (!list) return
+    const active = list.querySelector<HTMLElement>("[data-tab-active='true']")
+    // The pin is always visible by definition — nothing to scroll to.
+    if (!active || active.dataset.tabPinned === "true") return
+    const pin = list.querySelector<HTMLElement>("[data-tab-pinned='true']")
+    const view = list.getBoundingClientRect()
+    const rect = active.getBoundingClientRect()
+    const leftBound = pin ? pin.getBoundingClientRect().right : view.left
+    // A little air so the tab doesn't sit flush against the panel's edge.
+    const rightBound = view.right - 12
+    let delta = 0
+    if (rect.right > rightBound) delta = rect.right - rightBound
+    else if (rect.left < leftBound) delta = rect.left - leftBound
+    // A tab wider than the corridor can't satisfy both bounds — prefer its LEFT
+    // edge, so the title reads from the start rather than the middle.
+    delta = Math.min(delta, rect.left - leftBound)
+    if (delta === 0) return
+    const left = list.scrollLeft + delta
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+    // scrollTo is absent in jsdom, hence the guard.
+    if (smooth && !reduced && typeof list.scrollTo === "function") {
+      list.scrollTo({ left, behavior: "smooth" })
+    } else {
+      list.scrollLeft = left
+    }
+  }, [])
+
+  useEffect(() => {
+    const list = tabListRef.current
+    if (!list) return
+    syncTabOverflow()
+
+    // A vertical wheel/trackpad gesture over the strip scrolls it SIDEWAYS —
+    // there is nothing to scroll vertically in a 44px strip, so without this
+    // the event bubbles and scrolls the thread underneath instead, leaving an
+    // overflowed tab unreachable by plain mouse wheel.
+    //
+    // Wired natively rather than via React's onWheel: React registers wheel
+    // listeners at the root as PASSIVE, so preventDefault() there is ignored
+    // (and warns) and the thread would still scroll.
+    const onWheel = (e: WheelEvent) => {
+      if (list.scrollWidth <= list.clientWidth) return
+      // A genuine horizontal gesture (trackpad swipe, shift+wheel) already
+      // works natively — only redirect the vertical-dominant ones.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+      e.preventDefault()
+      // deltaY is only in PIXELS for trackpads and Chromium mice. A real wheel
+      // in Firefox reports LINES (deltaMode 1, deltaY ±3) and some report PAGES
+      // (2) — taken raw, a wheel notch there moved the strip 3px and read as
+      // "scrolling doesn't work". Convert to pixels before applying.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? list.clientWidth : 1
+      // Instant, not animated — the strip must track the gesture 1:1. That's why
+      // `scroll-behavior: smooth` is off on .chat-tab-list (the scrollLeft setter
+      // would otherwise obey it and queue an animation per wheel tick).
+      list.scrollLeft += e.deltaY * unit
+    }
+
+    // ── Drag-to-pan ──────────────────────────────────────────────────────────
+    // Press anywhere on the strip and drag sideways to pull the tabs along, the
+    // way you'd shove a row of paper tabs. The strip has no scrollbar to grab and
+    // a plain mouse has no horizontal wheel, so without this the ONLY way to
+    // reach an overflowed tab is a wheel gesture that happens to be over the
+    // strip — which is what "I can't scroll it with the mouse" was.
+    //
+    // Mouse only: touch and pen already pan natively (and hijacking those
+    // pointers would fight the browser's own inertia).
+    let panning = false
+    let panStartX = 0
+    let panStartScroll = 0
+    let panMoved = false
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.button !== 0) return
+      if (list.scrollWidth <= list.clientWidth) return
+      // Never start a pan on a control — the × close and the "+" new-tab button
+      // must stay ordinary clicks.
+      if ((e.target as HTMLElement | null)?.closest("button")) return
+      panning = true
+      panMoved = false
+      panStartX = e.clientX
+      panStartScroll = list.scrollLeft
+    }
+
+    // A few px of slack before it counts as a drag, so a slightly shaky click on
+    // a tab still selects it instead of nudging the strip.
+    const PAN_THRESHOLD = 5
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panning) return
+      const dx = e.clientX - panStartX
+      if (!panMoved) {
+        if (Math.abs(dx) < PAN_THRESHOLD) return
+        panMoved = true
+        // Marks the drag for CSS (grabbing cursor, no text selection).
+        list.classList.add("is-panning")
+      }
+      // Drag direction is the CONTENT's: pull right → tabs move right → the
+      // viewport moves left. Absolute (from the press position), not
+      // incremental, so the tabs stay glued to the pointer even if a move event
+      // is dropped.
+      list.scrollLeft = panStartScroll - dx
+      e.preventDefault()
+    }
+
+    const endPan = () => {
+      if (!panning) return
+      panning = false
+      list.classList.remove("is-panning")
+      // `panMoved` stays set until the click handler below consumes it: the
+      // click fires AFTER pointerup, and releasing on top of a tab must not
+      // also switch to that tab.
+    }
+
+    const onClickCapture = (e: MouseEvent) => {
+      if (!panMoved) return
+      panMoved = false
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    list.addEventListener("scroll", syncTabOverflow, { passive: true })
+    list.addEventListener("wheel", onWheel, { passive: false })
+    list.addEventListener("pointerdown", onPointerDown)
+    // Move/up on the WINDOW so a drag that leaves the 44px strip (easy — it's
+    // short) keeps panning, and a release anywhere still ends it.
+    window.addEventListener("pointermove", onPointerMove, { passive: false })
+    window.addEventListener("pointerup", endPan)
+    window.addEventListener("pointercancel", endPan)
+    list.addEventListener("click", onClickCapture, true)
+    const onResize = () => {
+      syncTabOverflow()
+      // Instant, not a glide: while the panel animates open (or the user drags
+      // its resize handle) this fires continuously, and a queued smooth scroll
+      // per frame would stutter. Instant tracking reads as the tabs sliding
+      // aside to make room, which is the intent.
+      keepActiveTabVisible(false)
+    }
+    window.addEventListener("resize", onResize)
+    // The strip also resizes without a window resize — the artifact panel
+    // opening/closing re-lays the column out underneath it.
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(onResize) : null
+    ro?.observe(list)
+    return () => {
+      list.removeEventListener("scroll", syncTabOverflow)
+      list.removeEventListener("wheel", onWheel)
+      list.removeEventListener("pointerdown", onPointerDown)
+      window.removeEventListener("pointermove", onPointerMove)
+      window.removeEventListener("pointerup", endPan)
+      window.removeEventListener("pointercancel", endPan)
+      list.removeEventListener("click", onClickCapture, true)
+      window.removeEventListener("resize", onResize)
+      ro?.disconnect()
+    }
+  }, [syncTabOverflow, keepActiveTabVisible])
+
+  // Tab opened/closed/renamed → the overflow edges moved.
+  useEffect(() => { syncTabOverflow() }, [tabs, syncTabOverflow])
+
+  // Selecting a tab that's scrolled out of view (a command opening a new one,
+  // or the palette jumping to an old one) should bring it back, not leave the
+  // user hunting for a highlight they can't see. A glide, not a jump — the user
+  // didn't drive this scroll directly, so an instant snap reads as the strip
+  // flinching.
+  useEffect(() => {
+    const list = tabListRef.current
+    if (!list) return
+    // rAF: on a just-opened tab the node lands in the same commit, so measuring
+    // before paint would scroll to a stale position.
+    const raf = requestAnimationFrame(() => {
+      keepActiveTabVisible(true)
+      syncTabOverflow()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [activeTabId, syncTabOverflow, keepActiveTabVisible])
+
+  // The artifact panel opening/closing is the other thing that moves the strip's
+  // right edge. The ResizeObserver above tracks the column's padding animating,
+  // but only fires while the box actually changes — this is the settle, so the
+  // active tab ends up fully clear of the panel (and, on close, so the strip
+  // relaxes back now that the corridor is wide again). The delay clears the
+  // panel's own 260ms transition; a glide because the strip has stopped moving
+  // by then.
+  useEffect(() => {
+    const t = setTimeout(() => keepActiveTabVisible(true), 300)
+    return () => clearTimeout(t)
+  }, [contentPanelTab, keepActiveTabVisible])
+
   return (
     <AppLayout
       mainClassName="main--home-chat"
@@ -2310,96 +5096,165 @@ export function ChatScreen() {
           {/* Tab bar — always visible. Browser-style: grey strip, the ACTIVE tab
               is a white card (side+top borders, rounded top corners) that merges
               with the white content area below by overlapping the strip's bottom
-              border; inactive tabs are plain grey labels on the strip. */}
-          <div data-testid="chat-tab-bar" style={{
-            display: "flex", alignItems: "stretch", gap: 0,
-            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface-2, #F7F5F0)",
-            height: 44, paddingLeft: 8, overflowX: "auto", overflowY: "visible", flexShrink: 0,
-          }}>
-            {/* Pinned brief tab — always first, never closable (synthesized, not
-                in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
+              border; inactive tabs are plain grey labels on the strip.
+              The strip is two parts: the tab list, which SCROLLS once enough
+              tabs are open, and the artifact button pinned to its right end,
+              which must not — so the strip's chrome (border, background,
+              height) sits on this wrapper and only the list scrolls. */}
+          <div className="chat-tab-strip">
+            {/* The list scrolls; the wrapper carries the edge fades that say so
+                (the strip has no scrollbar — see .chat-tab-list in globals.css).
+                The fades must sit on a NON-scrolling box or they'd scroll away
+                with the tabs, hence the wrapper. */}
+            <div className="chat-tab-scroller" ref={tabScrollerRef}>
             <div
-              key={BRIEF_TAB_ID}
-              onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+              className="chat-tab-list"
+              data-testid="chat-tab-bar"
+              ref={tabListRef}
               style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "0 14px", fontSize: 13, cursor: "pointer",
-                color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                fontWeight: isBriefTab ? 500 : 400,
-                background: isBriefTab ? "var(--surface, #fff)" : "transparent",
-                borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRadius: "8px 8px 0 0",
-                marginTop: 8, marginBottom: -1,
-                whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                userSelect: "none", flexShrink: 0,
+                display: "flex", alignItems: "stretch", gap: 0,
+                flex: "1 1 auto", minWidth: 0,
+                // NO padding-left. The strip's 8px lead-in lives inside the
+                // pinned tab's own left padding instead — as list padding it was
+                // an 8px gap the pin couldn't cover, and scrolling tabs showed
+                // through it to the left of the pin.
+                overflowX: "auto", overflowY: "visible",
               }}
             >
-              <span style={{ lineHeight: "1.3" }}>Top Insights</span>
-            </div>
-            {tabs.map((tab) => {
-              const isActive = activeTabId === tab.id
-              return (
-                <div
-                  key={tab.id}
-                  onClick={() => { setActiveTabId(tab.id); setDraft("") }}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
-                    color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                    fontWeight: isActive ? 500 : 400,
-                    background: isActive ? "var(--surface, #fff)" : "transparent",
-                    borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRadius: "8px 8px 0 0",
-                    marginTop: 8, marginBottom: -1,
-                    whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                    userSelect: "none", flexShrink: 0,
-                  }}
-                >
-                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
-                    {tab.title}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+              {/* Pinned brief tab — always first, never closable (synthesized, not
+                  in `tabs`/localStorage). Selecting it renders <BriefChat/> below.
+                  PINNED IN THE LITERAL SENSE: `position: sticky` holds it at the
+                  strip's left edge while the chat tabs scroll horizontally UNDER
+                  it, so the way back to Top Insights is never itself scrolled out
+                  of reach. It outranks the scroller's left overflow fade (z-index
+                  2), which is offset past it via --tab-pin-w so the fade still
+                  reads as "more tabs that way" instead of washing over the pin.
+                  `left: 0` — FLUSH, deliberately. Stuck at any inset, the gap
+                  between the strip's edge and the pin is a window the scrolling
+                  tabs show through; the strip's 8px lead-in is therefore carried
+                  as this tab's own extra left padding (22 = 14 + 8), which puts
+                  the label in exactly the same place but backs it with the pin's
+                  opaque fill all the way to the edge. */}
+              <div
+                key={BRIEF_TAB_ID}
+                className="chat-tab chat-tab--pinned"
+                data-tab-active={isBriefTab ? "true" : undefined}
+                data-tab-pinned="true"
+                onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+                style={{
+                  position: "sticky", left: 0, zIndex: 3,
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "0 14px 0 22px", fontSize: 13, cursor: "pointer",
+                  color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                  fontWeight: isBriefTab ? 500 : 400,
+                  // OPAQUE even when inactive (the strip's own colour, so it looks
+                  // unchanged at rest) — a transparent pin would let the scrolling
+                  // tabs show straight through it.
+                  background: isBriefTab ? "var(--surface, #fff)" : "var(--surface-2, #f7f5f0)",
+                  borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRadius: "8px 8px 0 0",
+                  marginTop: 8, marginBottom: -1,
+                  whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                  userSelect: "none", flexShrink: 0,
+                }}
+              >
+                <span style={{ lineHeight: "1.3" }}>Top Insights</span>
+              </div>
+              {tabs.map((tab) => {
+                const isActive = activeTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className="chat-tab"
+                    data-tab-active={isActive ? "true" : undefined}
+                    onClick={() => { setActiveTabId(tab.id); setDraft("") }}
                     style={{
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      width: 16, height: 16, flexShrink: 0,
-                      background: "none", border: "none", cursor: "pointer",
-                      fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
-                      borderRadius: 3,
+                      // Positioned so the separator / shoulder pseudo-elements
+                      // anchor to it; raised when active so its shoulders, which
+                      // reach 8px into both neighbours, paint OVER them (a later
+                      // sibling would otherwise cover the right one).
+                      position: "relative",
+                      zIndex: isActive ? 1 : undefined,
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
+                      color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                      fontWeight: isActive ? 500 : 400,
+                      background: isActive ? "var(--surface, #fff)" : "transparent",
+                      borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRadius: "8px 8px 0 0",
+                      marginTop: 8, marginBottom: -1,
+                      whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                      userSelect: "none", flexShrink: 0,
                     }}
-                    title="Close tab"
-                  >×</button>
-                </div>
-              )
-            })}
-            {/* New-tab button — styled like Chrome's: a small rounded control
-                just to the right of the last tab, vertically centered in the
-                strip, with a subtle circular highlight on hover. */}
-            <button
-              type="button"
-              onClick={startNewThread}
-              aria-label="New chat"
-              title="New chat"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
-                background: "transparent", border: "none", cursor: "pointer",
-                borderRadius: "50%", fontSize: 18, lineHeight: 1,
-                color: "var(--ink-3, #8C8A84)", flexShrink: 0,
-                transition: "background 0.12s",
-              }}
-            >+</button>
+                  >
+                    <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
+                      {tab.title}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 16, height: 16, flexShrink: 0,
+                        background: "none", border: "none", cursor: "pointer",
+                        fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
+                        borderRadius: 3,
+                      }}
+                      title="Close tab"
+                    >×</button>
+                  </div>
+                )
+              })}
+              {/* New-tab button — styled like Chrome's: a small rounded control
+                  just to the right of the last tab, vertically centered in the
+                  strip, with a subtle circular highlight on hover. */}
+              <button
+                type="button"
+                onClick={startNewThread}
+                aria-label="New chat"
+                title="New chat"
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
+                  background: "transparent", border: "none", cursor: "pointer",
+                  borderRadius: "50%", fontSize: 18, lineHeight: 1,
+                  color: "var(--ink-3, #8C8A84)", flexShrink: 0,
+                  transition: "background 0.12s",
+                }}
+              >+</button>
+            </div>
+            </div>
+            {/* The way back to a closed artifact panel. Pinned to the strip's
+                right end — outside the scrolling list — so no number of open
+                tabs and no scroll position can put it out of reach. Hidden
+                while the panel is open (it has its own close) and on tabs with
+                no artifact to reopen. */}
+            {reopenArtifact ? (
+              <button
+                type="button"
+                className="chat-artifact-reopen"
+                data-testid="chat-reopen-artifact"
+                title={`${reopenArtifact.label} — reopen the panel`}
+                aria-label={reopenArtifact.label}
+                onClick={() => { void reopenArtifact.onClick() }}
+              >
+                {/* ONE control, one icon, whatever it opens. The strip is chrome:
+                    a glyph that changes per artifact type reads as a different
+                    button appearing, when it is the same "open what this thread
+                    has" affordance throughout. The label says which document. */}
+                <IconDocument size={15} />
+              </button>
+            ) : null}
           </div>
 
           {isBriefTab ? (
-            // Pinned brief tab → the full weekly-brief surface. ChatScreen already
+            // Pinned brief tab → the full top-insights surface. ChatScreen already
             // provides AppLayout, so BriefChat renders bare (it owns its own
             // header + finding cards + composer + content-panel wiring).
             <BriefChat />
@@ -2423,60 +5278,7 @@ export function ChatScreen() {
                     </div>
 
                     <div className="home-landing-composer">
-                      <div className="chat-home-composer" style={{ position: "relative" }}>
-                        {/* Slash command palette (home) */}
-                        {slashOpen && (
-                          <SlashSkillMenu
-                            skills={filteredSkills}
-                            activeIndex={slashActive}
-                            onSelect={handleSlashSelect}
-                            onHover={setSlashActive}
-                          />
-                        )}
-                        <textarea
-                          ref={composerRef}
-                          className="chat-home-composer-input"
-                          placeholder="Ask Sprntly anything, or type / for skills…"
-                          rows={1}
-                          value={draft}
-                          onChange={handleComposerInput}
-                          onKeyDown={handleComposerKeyDown}
-                        />
-                        <div className="chat-home-composer-footer">
-                          <div className="chat-home-composer-actions">
-                            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
-                            <button type="button" className="chat-home-action-btn" aria-label="Attach file" onClick={() => fileInputRef.current?.click()}>
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-                              </svg>
-                              Attach
-                            </button>
-                          </div>
-                          {busy ? (
-                            <button
-                              type="button"
-                              className="chat-home-composer-send chat-home-composer-send--stop"
-                              aria-label="Stop generating"
-                              onClick={handleStopAsk}
-                            >
-                              <IconStop size={14} />
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="chat-home-composer-send"
-                              aria-label="Send"
-                              disabled={draft.trim().length < 3}
-                              onClick={handleComposerSubmit}
-                            >
-                              <IconSendUp size={16} />
-                            </button>
-                          )}
-                        </div>
-                        {/* Attached files preview — the landing composer must show
-                            what's attached too, not rely on the transient toast */}
-                        <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
-                      </div>
+                      {renderComposer(true)}
                       {showChipRow ? (
                         <div className="home-chip-row home-chip-row--under-chat" role="list">
                           {displayChips.map(({ kind, card }) => (
@@ -2513,59 +5315,14 @@ export function ChatScreen() {
               ) : (
                 <div className="bc-scroll">
                   <div className="bc-thread" ref={setThreadContentEl}>
-                    {/* Insight message — the chat opens with its insight as the
-                        agent's first message (in the flow, not a pinned heading).
-                        Hosts the Generate/View PRD + Generate/View Prototype
-                        actions, which relabel to "View …" once the artifact is
-                        saved (PRD: loaded on the tab; prototype: ready in the DB
-                        via the brief-prototype map). */}
-                    {showInsightMsg ? (
-                      <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
-                        <div className="bc-agent-head">
-                          <span className="bc-agent-mark">
-                            <IconSparkle size={14} />
-                          </span>
-                          <span className="bc-agent-name">{AGENT_NAME}</span>
-                          <span className="bc-agent-badge">
-                            <IconSparkle size={10} />
-                            Product Coworker
-                          </span>
-                        </div>
-                        <div className="bc-agent-body">
-                          <div className="bc-insight-msg">
-                            <span className="bc-insight-msg-kind">PRD</span>
-                            <span className="bc-insight-msg-text">{insightText}</span>
-                          </div>
-                          {/* Insight body — the finding's content under the heading.
-                              Rendered as markdown so LLM-supplied **bold** shows. */}
-                          {insightBody ? (
-                            <div className="bc-insight-msg-body fc-body--md">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
-                            </div>
-                          ) : null}
-                        </div>
-                        <ChatArtifactActions
-                          evidenceExists={chatEvidenceExists}
-                          prdExists={chatPrdExists}
-                          prdWaiting={chatPrdCtaWaiting}
-                          prdGenerating={!!activeTab?.prdGenerating}
-                          onViewEvidence={handleOpenEvidence}
-                          onOpenPrd={handleOpenPrd}
-                          prototypePrdId={chatProtoPrdId}
-                          prototypeReady={chatPrototypeReady}
-                          onViewPrototype={handleViewPrototype}
-                        />
-                      </div>
-                    ) : null}
-                    {/* "User input needed" items from the PRD, surfaced as chat
-                        messages with answer buttons. Answering patches only the
-                        affected PRD sections and refreshes the panel live. */}
-                    {activeTab?.prd ? (
-                      <PrdInputQuestions
-                        prdId={activeTab.prd.prd_id}
-                        onPrdUpdated={handleInputPrdUpdated}
-                      />
-                    ) : null}
+                    {/* Insight message — for a HEADER open, the chat opens with its
+                        insight as the agent's first message (a pinned heading at the
+                        top). For an IN-CHAT COMMAND open (`inlinePrdCards`) the card
+                        + questions instead render inside `thread.map`, right after
+                        the command turn — see that block below. Hosts the
+                        Generate/View PRD + Generate/View Prototype actions. */}
+                    {!inlinePrdCards ? insightCardNode : null}
+                    {!inlinePrdCards ? prdQuestionsNode : null}
                     {/* Resumed-conversation loading state: the tab opened
                         instantly on row click; its history is still in flight. */}
                     {activeTab?.hydrating && thread.length === 0 ? (
@@ -2575,15 +5332,27 @@ export function ChatScreen() {
                             <IconSparkle size={14} />
                           </span>
                           <span className="bc-agent-name">{AGENT_NAME}</span>
-                          <span className="bc-agent-status">loading conversation…</span>
                         </div>
                         <div className="bc-agent-body">
-                          <AssistantThinkingSkeleton compact />
+                          {/* Nothing is generating here — history is loading —
+                              so this keeps its own copy ("loading conversation…",
+                              which used to sit in the head above) rather than
+                              inheriting the ask's "Working on your question". */}
+                          <AssistantThinkingSkeleton compact phase="loading conversation…" />
                         </div>
                       </div>
                     ) : null}
                     {thread.map((turn, idx) => {
-                      const isLast = idx === thread.length - 1
+                      // "Last" for the purposes of in-flight state and the
+                      // artifact-action row means the last turn a REPLY could
+                      // still land on — a pending artifact-summary placeholder
+                      // is transparent to both. Without this, appending that
+                      // placeholder while an ask is in flight stole `isLast`
+                      // from the real in-flight turn, flipping it to "No
+                      // response was generated" mid-answer and yanking the
+                      // View PRD row off screen. Identical to `isLast` whenever
+                      // no summary is pending.
+                      const isLast = idx === lastLiveTurnIdx
                       // A turn shows the "thinking" skeleton ONLY while its ask is
                       // genuinely in flight — the active tab is busy AND this is the
                       // last (in-flight) turn. Any other reply-less turn is terminal:
@@ -2591,15 +5360,40 @@ export function ChatScreen() {
                       // or a restored orphan turn from history). Basing this on live
                       // busy state — not merely `reply === undefined` — means a
                       // sessionStorage-cached thread renders correctly on reload too.
-                      const isGenerating = busy && isLast
+                      // A PRD generation counts as in-flight too. Its command
+                      // turn's reply is the acknowledgment, and if that reply is
+                      // missing while the PRD is still being built, "No response
+                      // was generated" is the one thing that is certainly false —
+                      // the response is what the panel is rendering right now.
+                      const isGenerating =
+                        isLast &&
+                        (busy || !!activeTab?.prdGenerating || !!activeTab?.prdCommandThinking)
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
+                      // Wait-state signals for this turn. Every one is an
+                      // observable fact, not an inference: the skill only when
+                      // the question LEADS with a known trigger, the resume flag
+                      // only when resumeAskGeneration re-attached by id.
+                      const waitSkill = skillForQuery(turn.query)
+                      const waitStartedAt = askStartRef.current.get(turn.id)
+                      const waitResumed = resumedTurnsRef.current.has(turn.id)
                       return (
-                        <div key={turn.id} className="bc-turn">
-                          <div className="bc-user-head">
-                            <span className="bc-avatar">{userInitials}</span>
-                            <span className="bc-user-name">{name}</span>
-                          </div>
+                        <Fragment key={turn.id}>
+                        <div className="bc-turn" {...(isGenerating && !turn.reply ? { "aria-busy": true } : {})}>
+                          {/* Only when the user actually said something. A turn
+                              can be AGENT-ONLY — the clarify gate posts its
+                              questions as a turn with an empty `query` — and an
+                              unconditional header put the user's name and avatar
+                              above a message they never sent, reading as a blank
+                              question of their own. Attachments count as saying
+                              something: a file sent with no text is still the
+                              user's turn. */}
+                          {turn.query || turn.attachments?.length ? (
+                            <div className="bc-user-head">
+                              <span className="bc-avatar">{userInitials}</span>
+                              <span className="bc-user-name">{name}</span>
+                            </div>
+                          ) : null}
                           {turn.attachments?.length ? (
                             <div className="bc-user-attachments">
                               {turn.attachments.map((a, i) => (
@@ -2607,8 +5401,9 @@ export function ChatScreen() {
                                   key={i}
                                   name={a.name}
                                   content={a.content}
+                                  downloadable={!!a.key}
                                   onOpen={() =>
-                                    setViewerAttachment({ name: a.name, content: a.content ?? "" })
+                                    setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime })
                                   }
                                 />
                               ))}
@@ -2626,23 +5421,142 @@ export function ChatScreen() {
                             </span>
                           </div>
                           <div className="bc-agent-body">
-                            {turn.error ? <div className="bc-error">{turn.error}</div> : null}
-                            {turn.stopped && !turn.reply ? (
-                              <div className="bc-stopped">You stopped this response.</div>
+                            {/* The failed turn is an ALERT. The chat surface had
+                                no alert, status or live region of any kind, so a
+                                screen-reader user got total silence on failure.
+                                The copy is fixed — the raw backend detail that
+                                used to render here is kept on the turn as the
+                                record, not shown as the message. */}
+                            {turn.error ? (
+                              <WaitFailedState onAskAgain={() => handleAskAgain(turn)} />
                             ) : null}
+                            {turn.stopped && !turn.reply ? (
+                              <WaitStoppedState onAskAgain={() => handleAskAgain(turn)} />
+                            ) : null}
+                            {/* A "generate a PRD" command gets NO instant
+                                acknowledgment: half the time the real answer is
+                                questions, and "Generating a PRD…" above them was
+                                a promise the agent didn't keep. The reply is
+                                deferred until the gate settles (settleCommandAck)
+                                and this indicator carries the window — the same
+                                anti-dead-air guarantee, minus the false claim. */}
                             {!turn.reply && !turn.error && !turn.stopped ? (
-                              isGenerating ? (
-                                <AssistantThinkingSkeleton compact />
+                              turn.summaryPending ? (
+                                // The artifact is done; its chat summary is one
+                                // model call behind. Say so — a bare skeleton
+                                // here read as another full answer coming.
+                                <div data-testid="summary-pending">
+                                  <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />
+                                </div>
+                              ) : isGenerating ? (
+                                turn.partial ? (
+                                  // Rung 4/5. Live token stream: the accumulating
+                                  // answer markdown renders as the model writes
+                                  // it — no simulated typing, the stream IS the
+                                  // typing, and the poll's authoritative reply
+                                  // replaces it. The status row STAYS above it:
+                                  // the first token used to blow the whole
+                                  // indicator away, taking Stop and the clock
+                                  // with it.
+                                  <AssistantWaitState
+                                    compact
+                                    startedAt={waitStartedAt}
+                                    streaming
+                                    streamDropped={turn.streamDropped}
+                                    resumed={waitResumed}
+                                    skillLabel={waitSkill?.label ?? null}
+                                    longSkill={isLongRunningSkill(waitSkill?.id)}
+                                    onStop={handleStopAsk}
+                                  >
+                                    <div data-testid="ask-streaming-partial">
+                                      <AskReplyBody
+                                        reply={{
+                                          answer: turn.partial, key_points: [], citations: [],
+                                          confidence: 0, unanswered: "",
+                                        } as unknown as AskResponse}
+                                      />
+                                      {!turn.streamDropped ? <span className="cw-cursor" aria-hidden /> : null}
+                                    </div>
+                                  </AssistantWaitState>
+                                ) : activeTab?.prdCommandThinking ? (
+                                  // The PRD command's own window keeps its own
+                                  // honest copy — it is a sufficiency check, not
+                                  // an ask — and only gains the new shape.
+                                  <div data-testid="prd-command-thinking">
+                                    <AssistantThinkingSkeleton compact />
+                                  </div>
+                                ) : (
+                                  // Rungs 0–3.
+                                  <AssistantWaitState
+                                    compact
+                                    startedAt={waitStartedAt}
+                                    streamDropped={turn.streamDropped}
+                                    resumed={waitResumed}
+                                    skillLabel={waitSkill?.label ?? null}
+                                    longSkill={isLongRunningSkill(waitSkill?.id)}
+                                    onStop={handleStopAsk}
+                                  />
+                                )
+                              ) : turn.timedOut ? (
+                                // The 12-minute client budget, not a failure —
+                                // the server job may still land and the pending
+                                // ask_id was deliberately left in place.
+                                <div data-testid="turn-timed-out">
+                                  <WaitTimedOutState
+                                    onReload={() => window.location.reload()}
+                                    onAskAgain={() => handleAskAgain(turn)}
+                                  />
+                                </div>
+                              ) : turn.interrupted ? (
+                                // A reload killed the clarify gate mid-decision
+                                // (see the persist effect) — the truthful state,
+                                // with the way out.
+                                <div className="bc-stopped" data-testid="turn-interrupted">
+                                  That request was interrupted before I could respond — send it again and I&apos;ll pick it up.
+                                </div>
                               ) : (
                                 <div className="bc-stopped">No response was generated for this message.</div>
                               )
                             ) : null}
-                            {turn.reply ? (
+                            {/* Clarify-first questions render as a CARD — options
+                                as buttons, one submit for the batch — in place of
+                                the flattened numbered list that `reply.answer`
+                                carries for persistence. It stays a card after
+                                answering, as a read-only record of what was
+                                decided (and what each blank fell back to):
+                                collapsing it back to text at the moment it became
+                                an audit trail threw the structure away exactly
+                                when it was worth the most.
+
+                                The interactive form is still gated on the tab's
+                                live `pendingClarify`, so a card with no answering
+                                machinery behind it (a thread rehydrated from
+                                history) can never take a dead answer — it falls
+                                through to the plain text instead. */}
+                            {turn.clarify?.length && (turn.clarifyResolved || activeTab?.pendingClarify) ? (
+                              <ClarifyQuestionsCard
+                                questions={turn.clarify}
+                                resolved={turn.clarifyResolved}
+                                busy={busy || !!activeTab?.prdGenerating}
+                                onSubmit={(answers) => submitClarifyAnswers(answers)}
+                                onSkip={() => submitClarifyAnswers([])}
+                              />
+                            ) : turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
                                 animateIn={hasFreshReply}
                                 simulateTyping={hasFreshReply}
+                                // A report answer is an ARTIFACT: it reads in the
+                                // panel's Reports tab like every other artifact of
+                                // this thread, and the turn itself is just the card
+                                // that opens it — on THIS report, not on a list.
+                                onOpenReport={openReportByTitle}
                               />
+                            ) : null}
+                            {isLast && turn.reply && activeTab?.prdCommandThinking ? (
+                              <div data-testid="prd-command-thinking">
+                                <AssistantThinkingSkeleton compact />
+                              </div>
                             ) : null}
                           </div>
                           {/* Artifact-action row (Generate/View PRD + prototype)
@@ -2659,16 +5573,80 @@ export function ChatScreen() {
                               prdExists={chatPrdExists}
                               prdWaiting={chatPrdCtaWaiting}
                               prdGenerating={!!activeTab?.prdGenerating}
+                              prdLoading={!!activeTab?.prdLoading}
                               onViewEvidence={handleOpenEvidence}
                               onOpenPrd={handleOpenPrd}
                               prototypePrdId={chatProtoPrdId}
                               prototypeReady={chatPrototypeReady}
                               onViewPrototype={handleViewPrototype}
+                              onPrototypeSettled={handlePrototypeSettled}
                             />
                           ) : null}
                         </div>
+                        {/* IN-CHAT COMMAND open: the insight/PRD card + clarifying
+                            questions render as the reply BELOW the command turn —
+                            `inlinePrdAnchorIdx` resolves which turn that is (the
+                            recorded command turn for same-tab generation, thread[0]
+                            for legacy command-opened tabs) — instead of being
+                            pinned above the whole conversation (the out-of-order
+                            bug). Header opens render them at the top (see the
+                            block above) and skip this. */}
+                        {inlinePrdCards && idx === inlinePrdAnchorIdx ? (
+                          <>
+                            {insightCardNode}
+                            {prdQuestionsNode}
+                          </>
+                        ) : null}
+                        </Fragment>
                       )
                     })}
+                    {/* PENDING SEND — the user's message plus a thinking
+                        skeleton, rendered from the send's own commit while the
+                        dispatch decision (POST /v1/chat/intent) is still in
+                        flight. Not a thread turn: whichever branch wins seeds
+                        its own real turn and clears this in the same commit.
+                        Attachment chips are name-only and inert here, exactly
+                        as the optimistic turn renders them before extraction. */}
+                    {pendingSendHere && pendingSend ? (
+                      <div className="bc-turn" data-testid="pending-send" aria-busy="true">
+                        <div className="bc-user-head">
+                          <span className="bc-avatar">{userInitials}</span>
+                          <span className="bc-user-name">{name}</span>
+                        </div>
+                        {pendingSend.attachments.length ? (
+                          <div className="bc-user-attachments">
+                            {pendingSend.attachments.map((a, i) => (
+                              <TurnAttachmentCard key={i} name={a.name} onOpen={() => {}} />
+                            ))}
+                          </div>
+                        ) : null}
+                        {pendingSend.query ? (
+                          <div className="bc-user-bubble">{pendingSend.query}</div>
+                        ) : null}
+                        <div className="bc-agent-head">
+                          <span className="bc-agent-mark">
+                            <IconSparkle size={14} />
+                          </span>
+                          <span className="bc-agent-name">{AGENT_NAME}</span>
+                          <span className="bc-agent-badge">
+                            <IconSparkle size={10} />
+                            Product Coworker
+                          </span>
+                        </div>
+                        <div className="bc-agent-body">
+                          {/* The same ladder the real turn will pick up — and
+                              the same clock, handed over with the turn — so a
+                              send opens on rung 0 (nothing) rather than a
+                              spinner that flickers for 300ms on a cache hit. */}
+                          <AssistantWaitState
+                            compact
+                            startedAt={pendingSend.startedAt}
+                            skillLabel={skillForQuery(pendingSend.query)?.label ?? null}
+                            longSkill={isLongRunningSkill(skillForQuery(pendingSend.query)?.id)}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -2683,64 +5661,7 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
-                {/* Slash command palette */}
-                {slashOpen && (
-                  <SlashSkillMenu
-                    skills={filteredSkills}
-                    activeIndex={slashActive}
-                    onSelect={handleSlashSelect}
-                    onHover={setSlashActive}
-                    inset
-                  />
-                )}
-                <div className="bc-composer">
-                  <textarea
-                    ref={composerRef}
-                    className="bc-composer-input"
-                    placeholder="Ask Sprntly anything, or type / for skills…"
-                    rows={1}
-                    value={draft}
-                    onChange={handleComposerInput}
-                    onKeyDown={handleComposerKeyDown}
-                  />
-                  <div className="bc-composer-bar">
-                    <div className="bc-composer-tools">
-                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
-                      <button type="button" className="bc-tool" onClick={() => fileInputRef.current?.click()}>
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                          <path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />
-                        </svg>
-                        Attach
-                      </button>
-                      <span className="bc-tool-kbd">
-                        <kbd>⌘</kbd>
-                        <kbd>/</kbd>
-                      </span>
-                    </div>
-                    {busy ? (
-                      <button
-                        type="button"
-                        className="bc-send bc-send--stop"
-                        aria-label="Stop generating"
-                        onClick={handleStopAsk}
-                      >
-                        <IconStop size={16} />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="bc-send"
-                        aria-label="Send"
-                        disabled={draft.trim().length < 3}
-                        onClick={handleComposerSubmit}
-                      >
-                        <IconSendUp size={18} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {/* Attached files preview */}
-                <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
+                {renderComposer(false)}
               </div>
             ) : null}
           </main>

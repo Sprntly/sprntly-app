@@ -29,11 +29,21 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
+import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
+import { useThreadReportsSync } from "../components/shared/useThreadReports"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
+import { useArtifactUrlSync } from "./hooks/useArtifactUrlSync"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useGenerationNotify()
+  // Shell-level, page-agnostic `?prd=`/`?evidence=`/`?ticket=` deep-link sync
+  // (both directions) — see the hook's doc comment for the full design.
+  useArtifactUrlSync()
+  // Single owner of the active thread's reports (mirrored into ContentContext),
+  // same shape as useBriefHydration below: the panel and ChatScreen both read
+  // that list, and neither should fetch it.
+  useThreadReportsSync()
   const auth = useAuth()
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()
@@ -92,6 +102,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       })
       .catch(() => {})
   }, [setContent, workspace?.id])
+
+  // The Top Insights filter is workspace-level: an admin picks the insight
+  // types in onboarding / Settings → Comms & Brief, stored on
+  // companies.notification_settings.brief_insight_types, and every member sees
+  // the same filtered brief. Empty = surface everything. Mirrored into
+  // ContentContext so BriefChat reads it without taking on workspace deps.
+  //
+  // Narrowed to the types the pickers still offer: a workspace that saved a
+  // since-retired type would otherwise keep filtering by it with no chip to
+  // clear, and (if that was its only pick) the narrowed [] correctly falls back
+  // to surfacing everything.
+  useEffect(() => {
+    if (!workspace) return
+    const types = selectableInsightTypes(workspace.notification_settings?.brief_insight_types)
+    setContent({ insightTypeFilter: types })
+  }, [setContent, workspace])
 
   // Load real team members from the database so ticket reassignment and
   // other assignee pickers show actual company users instead of demo data.

@@ -89,15 +89,90 @@ def test_modules_and_templates_loaded():
     assert "business-context-schema.yaml" in bc.templates
 
 
+# ---------- CIR v3 vendoring ----------
+
+def test_cir_v3_keeps_the_v2_module_sequence_on_disk():
+    """The v3 SKILL.md upgrade replaced the method text ONLY. The v2 modules
+    stay vendored because the weekly competitor deep-dive binds them BY FILENAME
+    (`app/research/competitor.py` CIR_DIAGNOSTIC_MODULES + CIR_SYNTHESIS_MODULE),
+    and v3 itself says stages E–G are "retained in full from v2". Deleting any
+    of these breaks the deep-dive at runtime, not at import."""
+    from app.research.competitor import (
+        CIR_DIAGNOSTIC_MODULES,
+        CIR_SYNTHESIS_MODULE,
+    )
+
+    cir = get_skill("competitive-intelligence-review")
+    for module in [*CIR_DIAGNOSTIC_MODULES, CIR_SYNTHESIS_MODULE]:
+        assert module in cir.modules, f"deep-dive binds {module!r} by filename"
+    # The two the deep-dive deliberately skips are still vendored (the skill
+    # self-scopes across all of 00..08 on the chat path).
+    assert "00-scope.md" in cir.modules
+    assert "01-us-first.md" in cir.modules
+
+
+def test_cir_v3_description_is_the_new_frontmatter():
+    """The router classifies against the frontmatter description, so the v3
+    text (two modes, derived set, entrant, never-fabricates) must be what the
+    loader parsed — not the v2 "McKinsey-grade" line."""
+    cir = get_skill("competitive-intelligence-review")
+    desc = cir.description
+    assert desc, "frontmatter description missing"
+    assert "McKinsey-grade" not in desc
+    for phrase in ("monthly Scan", "quarterly Review", "competitive intelligence",
+                   "where do we stand vs competitors", "Never fabricates"):
+        assert phrase in desc, f"v3 description is missing {phrase!r}"
+
+
+def test_cir_v3_references_are_loaded_for_the_method_prefix():
+    """`references/*` ride the gateway's cacheable METHOD prefix, so the state
+    contract and the follow-up guide are actually in-prompt at runtime."""
+    cir = get_skill("competitive-intelligence-review")
+    assert "state-spec.md" in cir.references
+    assert "query-guide.md" in cir.references
+    assert "ci-state.json" in cir.references["state-spec.md"]
+    assert "decisions" in cir.references["state-spec.md"]
+    assert "stored run" in cir.references["query-guide.md"]
+    # SKILL.md points at both, so a model following the method reads them.
+    assert "references/state-spec.md" in cir.method
+    assert "references/query-guide.md" in cir.method
+
+
+def test_cir_v3_ships_the_reference_example_in_tree():
+    """`examples/` is NOT injected into prompts, but it is the design anchor the
+    deterministic renderer is pinned to and it counts toward content_hash (same
+    as public-feedback-report). It must stay vendored, iframe-safe (no <script>)
+    and self-contained."""
+    example = (
+        SKILLS_ROOT / "competitive-intelligence-review"
+        / "examples" / "01-facebook-ads.html"
+    )
+    assert example.is_file()
+    html = example.read_text(encoding="utf-8")
+    assert html.lstrip().startswith("<!DOCTYPE html>")
+    # The chat renders reports in a script-less sandboxed iframe.
+    assert "<script" not in html.lower()
+    # The v3 sections the renderer mirrors are all present in the anchor.
+    for marker in ("Scale benchmark", "Feature benchmark", "Market position",
+                   "Sources", "radarwrap"):
+        assert marker in html, f"example lost the {marker!r} section"
+
+
+def test_cir_v3_ships_a_readme():
+    readme = SKILLS_ROOT / "competitive-intelligence-review" / "README.md"
+    assert readme.is_file()
+    assert "v3" in readme.read_text(encoding="utf-8")
+
+
 def test_references_and_assets_loaded():
-    """The weekly-brief skill's `references/*` (schema, rubric, examples) and
+    """The top-insights skill's `references/*` (schema, rubric, examples) and
     `assets/*` (the render template) are read into the SkillSpec so the gateway
     can fold the references into the cacheable METHOD prefix."""
-    wb = get_skill("weekly-brief")
+    wb = get_skill("top-insights")
     assert set(wb.references) == {
-        "signal-schema.json", "rubric.md", "examples.md"
+        "signal-schema.json", "rubric.md", "examples.md", "sources.md"
     }
-    assert "signal-brief-composer schemas" in wb.references["signal-schema.json"]
+    assert "top-insights schemas" in wb.references["signal-schema.json"]
     assert "Deterministic linters" in wb.references["rubric.md"]
     assert "golden reference" in wb.references["examples.md"]
     # assets are loaded (for fingerprinting/inspection) but stay OUT of the prompt.
@@ -111,6 +186,92 @@ def test_skill_without_references_has_empty_dicts():
     spec = get_skill("prioritize")
     assert spec.references == {}
     assert spec.assets == {}
+
+
+# ---------- frontmatter block scalars ----------
+
+def test_folded_block_scalar_description_parses_to_full_text():
+    """`description: >` must yield the whole folded paragraph, not ">".
+
+    The parser is a no-YAML-dep line splitter doing `partition(":")`, so a folded
+    block scalar captured only the ">" marker. The router classifies against
+    `description`, so prd-author reached the menu as `- prd-author: >` with zero
+    semantic signal.
+    """
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter(
+        "---\n"
+        "name: demo\n"
+        "description: >\n"
+        "  Author the human-readable half of a PRD from a problem,\n"
+        "  signals, and business context.\n"
+        "\n"
+        "  A second paragraph stays separate.\n"
+        "kind: method\n"
+        "---\n\nbody\n"
+    )
+    assert fm["name"] == "demo"
+    # Folded: lines join with a single space, blank line = paragraph break.
+    assert fm["description"] == (
+        "Author the human-readable half of a PRD from a problem, signals, "
+        "and business context.\nA second paragraph stays separate."
+    )
+    # The block must not swallow the key that follows it.
+    assert fm["kind"] == "method"
+
+
+def test_literal_block_scalar_keeps_its_newlines():
+    """`description: |` is the literal form — every newline survives, and the
+    block's own indentation is stripped while deeper nesting is kept."""
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter(
+        "---\n"
+        "description: |\n"
+        "  line one\n"
+        "    indented two\n"
+        "  line three\n"
+        "name: demo\n"
+        "---\n"
+    )
+    assert fm["description"] == "line one\n  indented two\nline three"
+    assert fm["name"] == "demo"
+
+
+def test_plain_single_line_frontmatter_is_unchanged():
+    """The flat form every other vendored skill uses must parse exactly as
+    before — this fix adds a case, it does not change the existing one."""
+    from app.skills.loader import _parse_frontmatter
+
+    fm = _parse_frontmatter("---\nname: demo\ndescription: One flat line.\n---\n")
+    assert fm == {"name": "demo", "description": "One flat line."}
+
+
+def test_block_scalar_indicators_are_tolerated():
+    """Chomping/indent indicators (`>-`, `|+`) still open a block scalar rather
+    than being captured as the literal value."""
+    from app.skills.loader import _parse_frontmatter
+
+    assert _parse_frontmatter(
+        "---\ndescription: >-\n  folded and chomped\n---\n"
+    )["description"] == "folded and chomped"
+    assert _parse_frontmatter(
+        "---\ndescription: |+\n  literal and kept\n---\n"
+    )["description"] == "literal and kept"
+
+
+def test_prd_author_description_is_the_real_summary():
+    """The regression this fix exists for: prd-author's description was the
+    single character ">". It is loaded from disk, so this also proves the fix
+    works against the real vendored file rather than only a fixture."""
+    desc = get_skill("prd-author").description
+    assert desc != ">"
+    assert len(desc) > 60
+    assert "Product Requirements Document" in desc
+    assert "Part A" in desc
+    # Folded to one flowing line, not a ragged column of source fragments.
+    assert "\n" not in desc
 
 
 def test_unknown_skill_raises():
@@ -149,16 +310,40 @@ def _tool_msg(payload=None):
 
 
 def _capture_client(captured: dict):
-    """A fake Anthropic client that records the kwargs of messages.create.
+    """A fake Anthropic client that records the kwargs of messages.create AND
+    messages.stream (call_with_web_search streams on the long timeout).
 
     Returns a tool_use response when a schema/tools call is made (json_schema
     path), else a plain text response (call_md path)."""
+    def _reply(kw):
+        return _tool_msg() if kw.get("tools") else _msg("done")
+
     def _create(**kw):
         captured.update(kw)
-        if kw.get("tools"):
-            return _tool_msg()
-        return _msg("done")
-    return SimpleNamespace(messages=SimpleNamespace(create=_create))
+        return _reply(kw)
+
+    class _FakeStream:
+        def __init__(self, kw):
+            self._kw = kw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        @property
+        def text_stream(self):
+            return iter(())
+
+        def get_final_message(self):
+            return _reply(self._kw)
+
+    def _stream(**kw):
+        captured.update(kw)
+        return _FakeStream(kw)
+
+    return SimpleNamespace(messages=SimpleNamespace(create=_create, stream=_stream))
 
 
 def test_gateway_skill_prepends_method_to_cacheable_prefix(isolated_settings, monkeypatch):
@@ -210,22 +395,22 @@ def test_gateway_method_prefix_includes_skill_references(isolated_settings):
     self-critique against the rubric). The `assets/*` render template stays OUT."""
     from app.graph.gateway import _build_method_prefix
 
-    block, suffix = _build_method_prefix("weekly-brief", None)
-    spec = get_skill("weekly-brief")
-    assert block.startswith(f"## METHOD (skill: weekly-brief @{spec.content_hash})")
+    block, suffix = _build_method_prefix("top-insights", None)
+    spec = get_skill("top-insights")
+    assert block.startswith(f"## METHOD (skill: top-insights @{spec.content_hash})")
     # all three reference docs are folded in, each under its own header.
     assert "### REFERENCE: signal-schema.json" in block
     assert "### REFERENCE: rubric.md" in block
     assert "### REFERENCE: examples.md" in block
     # ...and their actual content (not just the header) is present.
-    assert "signal-brief-composer schemas" in block      # schema
+    assert "top-insights schemas" in block      # schema
     assert "Deterministic linters" in block               # rubric hard gates
     assert "golden reference" in block                    # examples
     # the 247-line HTML render template is NOT injected (app renders from the
     # structured payload; the template is a downstream view, not a prompt input).
     assert "<!DOCTYPE html>" not in block
     assert "### REFERENCE: brief-template.html" not in block
-    assert suffix == f"+weekly-brief@{spec.content_hash}"
+    assert suffix == f"+top-insights@{spec.content_hash}"
 
 
 def test_gateway_method_prefix_no_references_unchanged(isolated_settings):
@@ -304,8 +489,8 @@ def test_gateway_md_path_routes_method_to_cacheable_prefix(isolated_settings, mo
 
 # ---------- agent bindings ----------
 
-def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
-    """The synthesis brief COMPOSITION call binds the `weekly-brief` skill — its
+def test_synthesis_binds_top_insights(isolated_settings, monkeypatch):
+    """The synthesis brief COMPOSITION call binds the `top-insights` skill — its
     METHOD is prepended to the cacheable prefix (re-platformed off `prioritize`,
     which only ever scored the candidates upstream)."""
     from app import llm
@@ -327,7 +512,7 @@ def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
     monkeypatch.setattr(synth, "compute_convergence", lambda f, e: [cand])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda e: None)
 
-    spec = get_skill("weekly-brief")
+    spec = get_skill("top-insights")
     with patch.object(synth, "save_brief"), \
          patch.object(synth, "deliver_brief", return_value={
              "slack": {"delivered": False, "reason": "slack_not_connected"},
@@ -342,13 +527,13 @@ def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
             pass
 
     prefix_text = captured["messages"][0]["content"][0]["text"]
-    assert prefix_text.startswith(f"## METHOD (skill: weekly-brief @{spec.content_hash})")
+    assert prefix_text.startswith(f"## METHOD (skill: top-insights @{spec.content_hash})")
     # The skill's reference doc set is now in the compose prompt (cacheable
     # prefix), so the skill can run its full documented workflow: the input/
     # output schema, the rubric's hard gates (step-6 self-critique), and the
     # golden/counter examples are all grounding the single compose generation.
     assert "### REFERENCE: signal-schema.json" in prefix_text
-    assert "signal-brief-composer schemas" in prefix_text
+    assert "top-insights schemas" in prefix_text
     assert "### REFERENCE: rubric.md" in prefix_text
     assert "Deterministic linters" in prefix_text
     assert "### REFERENCE: examples.md" in prefix_text

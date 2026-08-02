@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 02 — "Your product" (v6 screenshot
+// Container mount test for onboarding step 05 — "Your product" (v6 screenshot
 // spec 2026-07-17). Covers: the product name/URL fields, the 4 surface chips
 // (Web / Mobile app / API / Hardware), the SINGLE monetization select and the
 // users textarea render; name + surfaces are required for EVERYONE (error, no
@@ -133,7 +133,7 @@ describe("parseCompetitors — comma-separated competitors field", () => {
   })
 })
 
-describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization + users)", () => {
+describe("ProductStep (onboarding step 05 — name* + surfaces* + monetization + users)", () => {
   it("renders name/URL, the 4 surface chips, the single monetization select and the users textarea", () => {
     const { container } = mount()
     expect(nameInput()).not.toBeNull()
@@ -187,7 +187,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue persists the product + competitors and routes to metrics", async () => {
+  it("a valid Continue persists the product + competitors and routes to workspace", async () => {
     upsertProductMock.mockResolvedValue(
       makeProduct({
         website: "https://acme.com",
@@ -217,7 +217,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
     })
     // The single monetization pick is stored as a 1-element array.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
@@ -230,9 +230,45 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     // Competitors are parsed/deduped onto the company row with the step bump.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       competitors: ["Fitbit", "Oura"],
-      onboarding_step: 3,
+      onboarding_step: 6,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
+  })
+
+  it("fills fields from a context import that lands AFTER mount, without overwriting typed input", () => {
+    // The background import lands ~30-60s after upload. The step mounts empty
+    // (no product yet), the user may start typing, and when the import applies
+    // its extracted values onto the workspace the still-empty fields must adopt
+    // them while anything already typed stays put. The old `if (draft) return`
+    // full-reset seeded once on mount and never saw the late workspace update.
+    const { rerender } = mount()
+    expect(urlInput().value).toBe("")
+    // User types their own users description before the import arrives.
+    fireEvent.change(usersTextarea(), { target: { value: "My own users" } })
+
+    const imported = makeWorkspace({
+      onboarding_step: 2,
+      competitors: ["Cursor", "Devin"],
+      product: makeProduct({
+        name: "Acme",
+        website: "https://sprntly.ai",
+        surfaces: ["web", "api"],
+        monetization: ["seat"],
+        users_description: "Imported users that must NOT override the typed value",
+      }),
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(ProductStep))
+    })
+
+    // Empty fields adopt the import…
+    expect(urlInput().value).toBe("https://sprntly.ai")
+    expect(surfaceChip("Web").getAttribute("aria-pressed")).toBe("true")
+    expect(surfaceChip("API").getAttribute("aria-pressed")).toBe("true")
+    expect(monetizationSelect().value).toBe("seat")
+    // …but the field the user already typed is left exactly as they left it.
+    expect(usersTextarea().value).toBe("My own users")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

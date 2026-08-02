@@ -32,9 +32,11 @@ import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
 import type { CredentialsValues } from "./CredentialsPromptModal"
 import { openOauthTab } from "../../lib/connectorsOauth"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
+import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -615,12 +617,34 @@ export function ConnectorConnectModal({
         />
       )
     } else if (providerId === "slack") {
+      // Both Slack roles get configured right at connect time: where the
+      // brief gets DELIVERED (channel/DM target — per-user, so hidden on
+      // the company's shared connection), and which channels the corpus
+      // sync PULLS from (company-wide, the customer-voice side).
       slot = (
-        <SlackChannelPicker
-          savedChannelId={connection.config?.channel_id as string | undefined}
-          savedChannelName={
-            connection.config?.channel_name as string | undefined
-          }
+        <>
+          {connection.config?.company_connection ? null : (
+            <SlackChannelPicker
+              savedChannelId={connection.config?.channel_id as string | undefined}
+              savedChannelName={
+                connection.config?.channel_name as string | undefined
+              }
+              onSaved={onConnected}
+            />
+          )}
+          <SlackSyncChannelsPicker
+            savedChannelIds={connection.config?.sync_channel_ids}
+            onSaved={onConnected}
+          />
+        </>
+      )
+    } else if (providerId === "confluence") {
+      // Straight after connect is exactly when the space selection matters:
+      // with nothing chosen the puller reads every readable space, so this
+      // is the user's chance to narrow it before the first sync.
+      slot = (
+        <ConfluenceSpacesPicker
+          savedSpaceIds={connection.config?.sync_space_ids}
           onSaved={onConnected}
         />
       )

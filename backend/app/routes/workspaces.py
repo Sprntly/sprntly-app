@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -47,6 +49,19 @@ class WorkspaceIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
+class WorkspacePatchIn(BaseModel):
+    """PATCH body — every field optional. `name` renames; the five
+    workspace-owned fields (2026-07-22, moved off the companies row) are patched
+    only when present, so a caller can update any subset."""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    team_scope: Optional[str] = None
+    team_strategy: Optional[str] = None
+    team_roadmap: Optional[str] = None
+    sizing_methodology: Optional[str] = None
+    additional_context: Optional[str] = None
+
+
 def _require_org_admin(company: CompanyContext) -> None:
     if company.role not in ("owner", "admin"):
         raise HTTPException(403, "Workspace management is restricted to admins")
@@ -68,6 +83,12 @@ def _public(ws: dict, *, role: str | None = None) -> dict:
         "is_default": bool(ws.get("is_default")),
         "product_id": ws.get("product_id"),
         "dataset": ws.get("dataset") or dataset_slug_for_workspace(ws["id"]),
+        # Workspace-owned fields (2026-07-22, moved off the companies row).
+        "team_scope": ws.get("team_scope"),
+        "team_strategy": ws.get("team_strategy"),
+        "team_roadmap": ws.get("team_roadmap"),
+        "sizing_methodology": ws.get("sizing_methodology"),
+        "additional_context": ws.get("additional_context"),
         **({"role": role} if role is not None else {}),
     }
 
@@ -122,17 +143,34 @@ def post_workspace(
 @router.patch("/{workspace_id}")
 def patch_workspace(
     workspace_id: str,
-    body: WorkspaceIn,
+    body: WorkspacePatchIn,
     company: CompanyContext = Depends(require_company),
 ):
+    """Update a workspace: an optional rename plus any subset of the five
+    workspace-owned fields. Only the fields present in the body are written."""
     ws = get_workspace(workspace_id)
     if not ws or ws.get("company_id") != company.company_id:
         raise HTTPException(404, "Workspace not found")
     _require_ws_admin(workspace_id, company)
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(422, "Workspace name cannot be empty")
-    updated = update_workspace(workspace_id, name=name) or {**ws, "name": name}
+
+    kwargs: dict = {}
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(422, "Workspace name cannot be empty")
+        kwargs["name"] = name
+    fields = body.model_dump(exclude_unset=True)
+    for key in (
+        "team_scope",
+        "team_strategy",
+        "team_roadmap",
+        "sizing_methodology",
+        "additional_context",
+    ):
+        if key in fields:
+            kwargs[key] = fields[key]
+
+    updated = update_workspace(workspace_id, **kwargs) or ws
     invalidate_workspace_caches()
     return _public(updated)
 

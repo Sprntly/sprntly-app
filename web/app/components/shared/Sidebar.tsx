@@ -7,7 +7,7 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2 } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 import { publicPath } from "../../lib/public-path"
@@ -17,8 +17,14 @@ interface SidebarProps {
   onSwitchCompany?: (slug: string) => void
 }
 
+// The rail's Search button is HIDDEN for now (product call, 2026-07-31) — the
+// search itself is untouched: AppShell still renders <CommandPalette/> and owns
+// the ⌘K/Ctrl+K hotkey, so the palette and every result it can reach still work.
+// Only this one trigger is withheld. Flip to true to put the button back.
+const SHOW_SIDEBAR_SEARCH = false
+
 export function Sidebar(_props: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
   const {
@@ -177,20 +183,23 @@ export function Sidebar(_props: SidebarProps = {}) {
       </div>
 
       {/* Global search (⌘K) — the modal itself is rendered by AppShell so the
-          hotkey works even when the sidebar is collapsed or hidden. */}
-      <button
-        type="button"
-        className="sb-rail-search"
-        title="Search"
-        aria-label="Search (Ctrl+K)"
-        onClick={openPalette}
-        data-testid="palette-trigger"
-      >
-        <IconSearch size={18} />
-        <span className="sb-rail-label">Search</span>
-        <kbd className="sb-rail-search-kbd">⌘K</kbd>
-        <span className="nav-tooltip">Search</span>
-      </button>
+          hotkey works even when the sidebar is collapsed or hidden, which is why
+          hiding this trigger (SHOW_SIDEBAR_SEARCH) costs no functionality. */}
+      {SHOW_SIDEBAR_SEARCH && (
+        <button
+          type="button"
+          className="sb-rail-search"
+          title="Search"
+          aria-label="Search (Ctrl+K)"
+          onClick={openPalette}
+          data-testid="palette-trigger"
+        >
+          <IconSearch size={18} />
+          <span className="sb-rail-label">Search</span>
+          <kbd className="sb-rail-search-kbd">⌘K</kbd>
+          <span className="nav-tooltip">Search</span>
+        </button>
+      )}
 
       {/* New chat */}
       <button
@@ -209,15 +218,33 @@ export function Sidebar(_props: SidebarProps = {}) {
 
       {/* Main nav icons */}
       <div className="sb-rail-nav">
+        {/* Workbench — the door to your OPEN WORK on the home surface: it lands
+            on the last chat tab you were on, never on the pinned Top Insights
+            tab (which has its own item right below). Not a RailItem because it
+            isn't a plain screen nav: goToWorkbench pushes the one-shot
+            `/?tab=last` that ChatScreen consumes to restore that tab. Highlighted
+            on the chat surface (`/`), the route it always lands on. */}
+        <button
+          type="button"
+          className={`sb-rail-item${currentScreen === "chat" ? " active" : ""}`}
+          title="Workbench"
+          aria-label="Workbench"
+          onClick={goToWorkbench}
+          data-testid="sidebar-workbench"
+        >
+          <IconBrowser size={18} />
+          <span className="sb-rail-label">Workbench</span>
+          <span className="nav-tooltip">Workbench</span>
+        </button>
         <RailItem screen="brief" icon={<IconSparkles size={18} />} label="Top Insights" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="Chat history" />
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
         {/* <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" /> */}
-        {/* Skills and Sources are both hidden from the rail (keep
-            functionality) — their screens, routes (/skills, /sources) and
-            backends remain intact and reachable; uncomment to restore. */}
-        {/* <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" /> */}
+        {/* Skills is back on the rail with Custom Skills (PRD 1854) — the
+            library is now a real user surface (upload + invoke), not just a
+            catalog. Sources stays hidden (screen/route/backends intact). */}
+        <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" />
         {/* <RailItem screen="sources" icon={<IconSources />} label="Sources" /> */}
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}

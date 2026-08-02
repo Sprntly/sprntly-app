@@ -21,7 +21,7 @@ binders populate it:
     BackgroundTasks) inherit the binding via the contextvars snapshot taken at
     task creation.
   * `company_llm_key(company_id)` binds it explicitly for NON-request contexts
-    that carry a company id — the KG gateway, the weekly-brief scheduler, warm
+    that carry a company id — the KG gateway, the top-insights scheduler, warm
     Ask jobs, and the design-agent worker process (which runs outside any HTTP
     request).
 
@@ -124,13 +124,35 @@ def resolve_llm_api_key(platform_key: str | None) -> str | None:
     * Key posture could not be read (DB/decrypt failure) → raise
       KeyResolutionUnavailableError (503, retryable, never cached).
     """
+    return resolve_llm_api_key_with_mode(platform_key)[0]
+
+
+# Which key paid for a call — the billing-responsibility dimension on every
+# usage row. "customer" = the workspace's own Anthropic key (billed to them),
+# "platform" = ours (billed to us).
+KEY_MODE_CUSTOMER = "customer"
+KEY_MODE_PLATFORM = "platform"
+
+
+def resolve_llm_api_key_with_mode(platform_key: str | None) -> tuple[str | None, str]:
+    """`resolve_llm_api_key`, plus WHICH key was chosen.
+
+    Returns `(key, key_mode)` where `key_mode` is `KEY_MODE_CUSTOMER` when the
+    acting company's own key was selected and `KEY_MODE_PLATFORM` otherwise
+    (including the unbound and no-company-key fallbacks).
+
+    The mode is derived here — at the one place the choice is actually made —
+    rather than inferred later by comparing key strings at the call site, so the
+    two can never disagree. Usage metering reads it to attribute spend to the
+    party whose key was billed; see `app.llm_metering`.
+    """
     company_id = _current_company_id.get()
     if company_id is None:
-        return platform_key
+        return platform_key, KEY_MODE_PLATFORM
     res = _resolve(company_id)
     if res.company_key:
-        return res.company_key
-    return platform_key
+        return res.company_key, KEY_MODE_CUSTOMER
+    return platform_key, KEY_MODE_PLATFORM
 
 
 @contextlib.contextmanager

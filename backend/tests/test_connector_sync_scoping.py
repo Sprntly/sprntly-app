@@ -14,6 +14,15 @@ Covers the gaps closed in fix/connector-sync-scoping:
     token → refresh called, new token persisted + returned; non-expired →
     no refresh; refresh failure → clear error (no dead token handed back).
 
+Plus the cross-tenant DATASET gate (fix/connectors/sync-dataset-ownership).
+The scoping tests above all posted `dataset: "acme"` — the CALLER'S OWN slug
+(`_company_helpers.seed_company` defaults to it) — so they proved the
+connection lookup was company-scoped but asserted nothing about the
+client-supplied `body.dataset`. The section at the bottom of this file seeds a
+SECOND company with a real corpus on disk and drives every sync route at the
+victim's slug, asserting 404 + an untouched victim corpus + no corpus-seed
+kickoff on a mismatched (company_id, slug) pair.
+
 All outbound HTTP is mocked; the fake in-memory Supabase backs the DB.
 """
 from __future__ import annotations
@@ -22,13 +31,14 @@ import importlib
 import json
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 
-from tests._company_helpers import company_client, seed_connection
+from tests._company_helpers import company_client, seed_company, seed_connection
 
 
 def _reload_app_modules():
@@ -425,3 +435,321 @@ def test_figma_sync_to_corpus_triggers_refresh(sync_env, monkeypatch):
     assert r.status_code == 200, r.text
     # The fetch used the refreshed token, not the stale one.
     assert seen_tokens and seen_tokens[0] == "figma-access-NEW"
+
+
+# ═══════════════ cross-tenant dataset ownership (body.dataset) ═══════════════
+#
+# Every sync route below takes its target dataset slug from the REQUEST BODY.
+# `require_company` proves who the caller is and
+# `_require_admin_for_org_connector` proves they're an admin OF THEIR OWN
+# company — neither looks at `body.dataset`. The tests here drive each route at
+# a second tenant's slug and assert the ownership gate 404s before any sink
+# runs. The three sinks, all reachable from that one unvalidated string:
+#
+#   1. settings.data_path / <slug> / "<fixed>.md" — fixed filenames, so a write
+#      OVERWRITES the victim's real corpus file of the same name.
+#   2. _seed_corpus_after_sync → kickoff_corpus_seed(attacker_company, slug) →
+#      load_corpus(slug) globs the victim's whole corpus into the ATTACKER's
+#      kg_signal rows.
+#   3. db.upsert_input_source(slug, …) — flips enterprise_input_sources rows on
+#      another tenant's dataset.
+
+VICTIM_SLUG = "victim"
+
+# The fixed filenames each connector sync writes. Fixed (not per-file) is what
+# makes sink 1 an overwrite rather than a stray extra file.
+_SINK_FILES = (
+    "figma_design_context.md",
+    "github_active_prs.md",
+    "slack_channels.md",
+    "hubspot_contacts.md",
+    "hubspot_companies.md",
+    "hubspot_deals.md",
+)
+
+_SENTINEL = "VICTIM CORPUS — MUST SURVIVE A CROSS-TENANT SYNC\n"
+
+# (path, body) for every route that takes a client-supplied dataset slug.
+# `{slug}` is substituted per-test.
+_SYNC_ROUTES = [
+    ("/v1/connectors/figma/sync-to-corpus", {"file_key": "abc", "dataset": "{slug}"}),
+    ("/v1/connectors/github/sync-to-corpus", {"dataset": "{slug}"}),
+    ("/v1/connectors/hubspot/sync", {"dataset": "{slug}"}),
+    ("/v1/connectors/hubspot/sync-to-corpus", {"dataset": "{slug}"}),
+    ("/v1/connectors/slack/sync-to-corpus", {"dataset": "{slug}"}),
+    ("/v1/connectors/google-drive/files", {"files": [], "dataset": "{slug}"}),
+    ("/v1/connectors/google-drive/sync", {"dataset": "{slug}"}),
+]
+
+_SYNC_ROUTE_IDS = [
+    "figma", "github", "hubspot-sync", "hubspot-sync-to-corpus",
+    "slack", "drive-files", "drive-sync",
+]
+
+
+def _body_for(template: dict, slug: str) -> dict:
+    return {
+        k: (v.format(slug=slug) if isinstance(v, str) else v)
+        for k, v in template.items()
+    }
+
+
+class _FakeSyncResult:
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def to_dict(self):
+        return {"ok": True, "dataset": self.dataset}
+
+
+def _seed_victim(slug: str = VICTIM_SLUG) -> SimpleNamespace:
+    """A second tenant with a real corpus on disk.
+
+    Seeds the `companies` row (what company_id_for_dataset resolves the slug
+    through), its `datasets` row, and a sentinel file under every fixed
+    filename a connector sync would clobber."""
+    from app import db
+    from app.config import settings
+
+    company_id = seed_company(user_id="victim-user", slug=slug)
+    db.insert_dataset(slug, slug.title())
+    corpus = settings.data_path / slug
+    corpus.mkdir(parents=True, exist_ok=True)
+    for name in _SINK_FILES:
+        (corpus / name).write_text(_SENTINEL, encoding="utf-8")
+    return SimpleNamespace(company_id=company_id, slug=slug, corpus=corpus)
+
+
+def _assert_corpus_intact(victim: SimpleNamespace) -> None:
+    """Sink 1: not one of the victim's corpus files may have been rewritten."""
+    for name in _SINK_FILES:
+        p = victim.corpus / name
+        assert p.exists(), f"{name} disappeared from the victim's corpus"
+        assert p.read_text(encoding="utf-8") == _SENTINEL, (
+            f"{name} was OVERWRITTEN by a cross-tenant sync"
+        )
+
+
+def _clobbering_sync(dataset, *_a, **_kw):
+    """Stand-in for sync_slack / sync_hubspot: writes the same fixed filenames
+    into DATA_DIR/<dataset> the real ones do. If the gate ever regresses, the
+    corpus assertion — not just the status code — catches it."""
+    from app.config import settings
+
+    d = settings.data_path / str(dataset)
+    d.mkdir(parents=True, exist_ok=True)
+    for name in _SINK_FILES:
+        (d / name).write_text("CLOBBERED BY ANOTHER TENANT\n", encoding="utf-8")
+    return _FakeSyncResult(dataset)
+
+
+def _clobbering_drive_sync(*, company_id=None, dataset=None, files=None):  # noqa: ARG001
+    return _clobbering_sync(dataset)
+
+
+@pytest.fixture
+def cross_tenant(sync_env, monkeypatch):
+    """Attacker client (slug 'acme') + victim tenant, with every outbound sync
+    stubbed so the ONLY thing that can stop a cross-tenant write is the
+    ownership gate. Connections are seeded for the caller so a 404 can never be
+    'you aren't connected' masquerading as the gate."""
+    ctx = company_client(monkeypatch)
+    victim = _seed_victim()
+
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="figma",
+        token_blob=_figma_token_blob(expires_in=7776000),
+        label="mine@co.com",
+    )
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="google_drive",
+        token_blob={"access_token": "drive-mine"},
+        label="mine@co.com",
+    )
+
+    seeds: list[tuple] = []
+    import app.db as db_mod
+    import app.routes.connectors as conn_route
+
+    monkeypatch.setattr(
+        conn_route, "kickoff_corpus_seed",
+        lambda cid, slug: seeds.append((cid, slug)),
+    )
+
+    # Sink 3 is observed with a spy rather than by reading the table back: the
+    # fake Supabase schema doesn't carry enterprise_input_sources, and every
+    # caller wraps upsert_input_source in a try/except that would swallow the
+    # write we're trying to assert about.
+    input_sources: list[tuple] = []
+    monkeypatch.setattr(
+        db_mod, "upsert_input_source",
+        lambda dataset, source_type, **kw: input_sources.append(
+            (dataset, source_type)
+        ),
+    )
+
+    fake_file = {"name": "D", "lastModified": "x", "document": {"children": []}}
+    with (
+        patch("app.routes.connectors.figma_oauth.fetch_file", return_value=fake_file),
+        patch(
+            "app.routes.connectors.figma_oauth.fetch_file_styles",
+            return_value={"meta": {"styles": []}},
+        ),
+        patch("app.connectors.hubspot_sync.sync_hubspot", side_effect=_clobbering_sync),
+        patch("app.connectors.slack_sync.sync_slack", side_effect=_clobbering_sync),
+        patch(
+            "app.routes.connectors.sync_google_drive",
+            side_effect=_clobbering_drive_sync,
+        ),
+    ):
+        yield SimpleNamespace(
+            ctx=ctx, victim=victim, seeds=seeds, input_sources=input_sources,
+        )
+
+
+@pytest.mark.parametrize("path,body", _SYNC_ROUTES, ids=_SYNC_ROUTE_IDS)
+def test_sync_route_404s_on_another_companys_dataset(cross_tenant, path, body):
+    """The core regression: a signed-in admin of company A naming company B's
+    dataset slug gets 404 (never 403 — no existence disclosure) and B's corpus
+    is untouched."""
+    r = cross_tenant.ctx.client.post(
+        path, json=_body_for(body, cross_tenant.victim.slug)
+    )
+
+    assert r.status_code == 404, (
+        f"{path} accepted a foreign dataset slug: {r.status_code} {r.text}"
+    )
+    _assert_corpus_intact(cross_tenant.victim)
+
+
+@pytest.mark.parametrize("path,body", _SYNC_ROUTES, ids=_SYNC_ROUTE_IDS)
+def test_sync_route_never_seeds_kg_from_another_companys_corpus(
+    cross_tenant, path, body
+):
+    """Sink 2: kickoff_corpus_seed must never be handed a (company_id, slug)
+    pair that don't belong together — that call is what globs the victim's
+    whole corpus into the ATTACKER's kg_signal rows."""
+    cross_tenant.ctx.client.post(path, json=_body_for(body, cross_tenant.victim.slug))
+
+    assert cross_tenant.victim.slug not in [s for _cid, s in cross_tenant.seeds], (
+        f"{path} kicked a corpus seed for the victim's slug: {cross_tenant.seeds}"
+    )
+    for cid, slug in cross_tenant.seeds:
+        assert cid == cross_tenant.ctx.company_id
+        assert slug != cross_tenant.victim.slug
+
+
+@pytest.mark.parametrize("path,body", _SYNC_ROUTES, ids=_SYNC_ROUTE_IDS)
+def test_sync_route_never_flips_another_companys_input_source(
+    cross_tenant, path, body
+):
+    """Sink 3: enterprise_input_sources rows on the victim's dataset must be
+    untouched (figma/github/google_drive auto-enable their source on sync)."""
+    cross_tenant.ctx.client.post(path, json=_body_for(body, cross_tenant.victim.slug))
+
+    touched = [d for d, _t in cross_tenant.input_sources]
+    assert cross_tenant.victim.slug not in touched, (
+        f"{path} flipped an input source on the victim's dataset: "
+        f"{cross_tenant.input_sources}"
+    )
+
+
+@pytest.mark.parametrize("path,body", _SYNC_ROUTES, ids=_SYNC_ROUTE_IDS)
+def test_sync_route_rejects_path_traversal_slug(cross_tenant, path, body):
+    """`../../escaped` must never reach `settings.data_path / slug`. The slug is
+    shape-validated (422) before any filesystem join, so the traversal primitive
+    is gone rather than merely unreachable."""
+    from app.config import settings
+
+    r = cross_tenant.ctx.client.post(path, json=_body_for(body, "../../escaped"))
+
+    assert r.status_code == 422, (
+        f"{path} accepted a traversal slug: {r.status_code} {r.text}"
+    )
+    escaped = (settings.data_path / ".." / ".." / "escaped").resolve()
+    assert not escaped.exists(), f"{path} wrote outside DATA_DIR at {escaped}"
+
+
+@pytest.mark.parametrize(
+    "bad_slug",
+    ["../../escaped", "../sibling", "a/b", "", "  ", "UPPER/CASE", "x" * 64],
+    ids=["traversal", "parent", "subpath", "empty", "blank", "slashy", "too-long"],
+)
+def test_slack_sync_rejects_malformed_slugs(cross_tenant, bad_slug):
+    """Slack has NO admin gate — any member can call it — so it gets the
+    fullest slug-shape sweep. Nothing non-slug-shaped may reach the sink."""
+    r = cross_tenant.ctx.client.post(
+        "/v1/connectors/slack/sync-to-corpus", json={"dataset": bad_slug}
+    )
+    assert r.status_code == 422, f"slack accepted {bad_slug!r}: {r.text}"
+
+
+def test_slack_sync_404s_on_foreign_dataset_for_plain_member(cross_tenant, monkeypatch):
+    """Slack's sync route is deliberately open to non-admins
+    (`_PERSONAL_PROVIDERS`), so the dataset gate is the ONLY thing standing
+    between an ordinary member and another tenant's corpus."""
+    from app.db.client import require_client
+
+    require_client().table("company_members").update(
+        {"role": "member"}
+    ).eq("company_id", cross_tenant.ctx.company_id).execute()
+
+    r = cross_tenant.ctx.client.post(
+        "/v1/connectors/slack/sync-to-corpus",
+        json={"dataset": cross_tenant.victim.slug},
+    )
+    assert r.status_code == 404, r.text
+    _assert_corpus_intact(cross_tenant.victim)
+
+
+def test_drive_sync_404s_on_foreign_slug_planted_in_connection_config(
+    cross_tenant,
+):
+    """The Drive routes resolve their slug as `body.dataset or
+    config["dataset"]`, and the OAuth authorize step writes that config value
+    from an equally unchecked `?dataset=`. Gating only the body would leave the
+    stored value as a live bypass, so the EFFECTIVE slug is what's gated."""
+    from app import db
+    from app.connectors import google_oauth
+
+    db.patch_connection_config(
+        cross_tenant.ctx.company_id,
+        google_oauth.GOOGLE_DRIVE_PROVIDER,
+        {"dataset": cross_tenant.victim.slug},
+    )
+
+    r = cross_tenant.ctx.client.post("/v1/connectors/google-drive/sync", json={})
+    assert r.status_code == 404, r.text
+    _assert_corpus_intact(cross_tenant.victim)
+    assert cross_tenant.victim.slug not in [s for _c, s in cross_tenant.seeds]
+
+
+# ───────────────── same-tenant happy paths (must stay green) ─────────────────
+#
+# These are the other half of the gate: they prove the 404s above come from the
+# ownership check and not from the stubs, the RBAC gate, or a missing
+# connection — the identical request against the caller's OWN slug still 200s.
+
+
+@pytest.mark.parametrize("path,body", _SYNC_ROUTES, ids=_SYNC_ROUTE_IDS)
+def test_sync_route_still_accepts_the_callers_own_dataset(cross_tenant, path, body):
+    r = cross_tenant.ctx.client.post(path, json=_body_for(body, "acme"))
+    assert r.status_code == 200, f"{path} rejected the caller's own slug: {r.text}"
+
+
+def test_drive_sync_still_accepts_an_absent_dataset(cross_tenant):
+    """`GoogleDriveSyncIn.dataset` is optional; when absent and nothing is
+    stored on the connection, the slug stays None and the downstream fallback
+    (`slug_for_company_id`) owns the decision. The gate must not turn that into
+    a 404 or make the field required."""
+    r = cross_tenant.ctx.client.post("/v1/connectors/google-drive/sync", json={})
+    assert r.status_code == 200, r.text
+
+
+def test_drive_files_still_accepts_an_absent_dataset(cross_tenant):
+    r = cross_tenant.ctx.client.post(
+        "/v1/connectors/google-drive/files", json={"files": []}
+    )
+    assert r.status_code == 200, r.text

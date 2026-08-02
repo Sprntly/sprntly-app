@@ -336,3 +336,84 @@ def test_get_prd_evidence_route(tenant_client, isolated_settings):
     body = resp.json()
     assert body["id"] == ev_id
     assert body["status"] == "ready"
+
+
+# ── source_docs: documents attached earlier in the chat thread ───────────────
+
+def _capture_warm(monkeypatch):
+    """Replace the fire-and-forget generation with a kwargs capture."""
+    seen = {}
+
+    async def _fake(*args, **kwargs):
+        seen["args"] = args
+        seen.update(kwargs)
+
+    monkeypatch.setattr("app.routes.prd.generate_prd_and_warm", _fake)
+    return seen
+
+
+def test_generate_from_task_forwards_source_docs(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    seen = _capture_warm(monkeypatch)
+
+    resp = t.client.post("/v1/prd/generate-from-task", json={
+        "task": "cart prefill from deal",
+        "source_docs": [
+            {"name": "requirements.pdf", "content": "MUST prefill. Doc-marker-1"},
+            {"name": "notes.md", "content": "Brand locked. Doc-marker-2"},
+        ],
+    })
+    assert resp.status_code == 200
+
+    md = seen["extra_source_md"]
+    # Both docs ride along, name-framed, order preserved.
+    assert "--- requirements.pdf ---" in md and "Doc-marker-1" in md
+    assert "--- notes.md ---" in md and "Doc-marker-2" in md
+    assert md.index("Doc-marker-1") < md.index("Doc-marker-2")
+
+
+def test_generate_from_task_without_docs_passes_none(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    seen = _capture_warm(monkeypatch)
+
+    resp = t.client.post(
+        "/v1/prd/generate-from-task", json={"task": "dark mode on mobile"}
+    )
+    assert resp.status_code == 200
+    assert seen["extra_source_md"] is None
+
+
+def test_generate_from_task_rejects_out_of_bounds_docs(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    seen = _capture_warm(monkeypatch)
+
+    # Too many docs (max 8).
+    nine = [{"name": f"d{i}.md", "content": "x"} for i in range(9)]
+    assert t.client.post(
+        "/v1/prd/generate-from-task", json={"task": "abc", "source_docs": nine}
+    ).status_code == 422
+    # A single doc over the per-doc content cap (60k).
+    assert t.client.post(
+        "/v1/prd/generate-from-task",
+        json={"task": "abc", "source_docs": [{"name": "big.md", "content": "x" * 60_001}]},
+    ).status_code == 422
+    assert "extra_source_md" not in seen  # nothing was scheduled
+
+
+def test_render_source_docs_clamps_total_budget():
+    from app.routes.prd import TaskSourceDoc, _render_source_docs
+
+    docs = [
+        TaskSourceDoc(name=f"d{i}.md", content="y" * 60_000) for i in range(4)
+    ]
+    md = _render_source_docs(docs)
+    assert len(md) <= 150_000

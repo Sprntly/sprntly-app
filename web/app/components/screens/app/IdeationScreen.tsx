@@ -46,7 +46,7 @@ const TYPE_STYLE: Record<IdeaType, { color: string; bg: string; border: string }
 
 // ── API → idea mapping ────────────────────────────────────────────────────────
 // Ideas come from the weekly analysis: ranks ≥ 4 (the top 3 go into the brief),
-// with the weekly prioritization pass shortlisting the 25-30 worth showing —
+// with the weekly prioritization pass shortlisting the 25-40 worth showing —
 // the backend returns only that visible set. It returns an empty list when no
 // brief exists for the company, so an empty page means "no analysis yet".
 
@@ -357,7 +357,7 @@ function ProposedContent({
           .sort((a, b) => a.rank - b.rank)
           .map(ideationItemToIdea)
         setIdeas(mapped)
-        // The shortlist refreshes when the weekly brief generates; the newest
+        // The shortlist refreshes when the Top Insights brief generates; the newest
         // updated_at is when this list was last prioritized.
         const newest = res.items
           .map((i) => i.updated_at)
@@ -443,7 +443,7 @@ function ProposedContent({
     )
   }
 
-  // Empty state — no weekly brief has been generated yet, so the analysis has
+  // Empty state — no Top Insights brief has been generated yet, so the analysis has
   // produced no ideas (the backend returns an empty list with no brief).
   if (load === "ready" && ideas.length === 0) {
     return (
@@ -676,13 +676,15 @@ function IdeaDetailModal({
   onClose,
   onGenerateBrief,
   onGeneratePrototype,
+  onMarkDone,
   busy,
 }: {
   idea: IdeationIdea
   onClose: () => void
   onGenerateBrief: (idea: IdeationIdea, detail: IdeationDetail | null) => void
   onGeneratePrototype: (idea: IdeationIdea) => void
-  busy: null | "prd" | "prototype"
+  onMarkDone: (idea: IdeationIdea) => void
+  busy: null | "prd" | "prototype" | "done"
 }) {
   const [detail, setDetail] = useState<IdeationDetail | null>(null)
   const [load, setLoad] = useState<LoadState>("loading")
@@ -738,7 +740,7 @@ function IdeaDetailModal({
 
           {/* Why it's here: Ideation is defined by NOT being prioritized. */}
           <p className="bl-modal-why">
-            Not prioritized in the weekly brief — it ranked #{idea.rank} behind
+            Not prioritized in the Top Insights brief — it ranked #{idea.rank} behind
             this week&apos;s top 3.
           </p>
 
@@ -784,9 +786,12 @@ function IdeaDetailModal({
               <cite>{sourceLabel(e.source_type)}</cite>
             </blockquote>
           ))}
+        </div>
 
-          {/* CTA — into the existing chat → PRD → tickets → prototype pipeline */}
-          <div className="bl-detail-label">Next steps</div>
+        {/* CTA — into the existing chat → PRD → tickets → prototype pipeline.
+            A sibling of the scrolling body, so the two actions stay pinned to
+            the modal footer however far down the evidence the user scrolls. */}
+        <div className="bl-detail-footer">
           <div className="bl-detail-actions">
             <button
               type="button"
@@ -795,7 +800,7 @@ function IdeaDetailModal({
               onClick={() => onGenerateBrief(idea, detail)}
             >
               <SparkleIcon size={13} />
-              Generate a brief
+              Generate PRD
             </button>
             <button
               type="button"
@@ -805,6 +810,15 @@ function IdeaDetailModal({
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               {busy === "prototype" ? "Preparing prototype…" : "Generate prototype"}
+            </button>
+            <button
+              type="button"
+              className="bl-detail-btn bl-detail-btn--ghost"
+              disabled={busy !== null}
+              onClick={() => onMarkDone(idea)}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="20 6 9 17 4 12" /></svg>
+              {busy === "done" ? "Marking done…" : "Mark done"}
             </button>
           </div>
           <p className="bl-modal-hint">
@@ -839,7 +853,7 @@ export function IdeationScreen() {
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
   const [reloadKey, setReloadKey]           = useState(0)
-  const [busy, setBusy]                     = useState<null | "prd" | "prototype">(null)
+  const [busy, setBusy]                     = useState<null | "prd" | "prototype" | "done">(null)
   const [chatValue, setChatValue]           = useState("")
   const [selectedIdea, setSelectedIdea]     = useState<IdeationIdea | null>(null)
   const textareaRef                         = useRef<HTMLTextAreaElement>(null)
@@ -863,7 +877,7 @@ export function IdeationScreen() {
     }, 800)
   }
 
-  // Generate a brief from an Ideation idea: open it as a NEW CHAT TAB on the
+  // "Generate PRD" from an Ideation idea: open it as a NEW CHAT TAB on the
   // chat surface, with the Evidence / PRD / Tickets panel sliding over it.
   // openPrdTab routes to `/` and ChatScreen drives runPrdGenerationFromIdeation
   // in that tab — the same funnel the brief and command-palette paths use, so
@@ -904,6 +918,24 @@ export function IdeationScreen() {
       setBusy(null)
     }
   }, [router, showToast])
+
+  // Mark an idea done: persists the status transition (which, on the backend,
+  // also creates the outcome-entity + VALIDATES edge closing the decision
+  // chain), then closes the modal and re-fetches the Proposed list so the now-
+  // done idea drops out of view (list_visible_ideation_items excludes done).
+  const handleMarkDone = useCallback(async (idea: IdeationIdea) => {
+    setBusy("done")
+    try {
+      await ideationApi.setStatus(idea.id, "done")
+      showToast("Marked done", `"${idea.title}" moved to Completed initiatives.`)
+      setSelectedIdea(null)
+      setReloadKey((k) => k + 1)
+    } catch (err) {
+      showToast("Couldn't mark done", err instanceof Error ? err.message : "Please try again.")
+    } finally {
+      setBusy(null)
+    }
+  }, [showToast])
 
   const handleChat = (e: React.FormEvent) => {
     e.preventDefault()
@@ -975,6 +1007,7 @@ export function IdeationScreen() {
               onClose={() => setSelectedIdea(null)}
               onGenerateBrief={handleGenerateBrief}
               onGeneratePrototype={handleGeneratePrototype}
+              onMarkDone={handleMarkDone}
               busy={busy}
             />
           )}

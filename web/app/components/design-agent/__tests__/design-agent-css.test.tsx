@@ -488,6 +488,40 @@ describe("done-turn response body colour", () => {
     expect(rule).toContain("margin: 0 0 4px;")
   })
 
+  it("test_da_activity_terminal_base_rule_is_a_flex_row — the shared .da-activity-terminal rule (skipped/error single-line layout) stays an unstacked flex row", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-terminal\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex;")
+    expect(rule).toContain("align-items: center;")
+    expect(rule).not.toContain("flex-direction")
+  })
+
+  it("test_da_activity_terminal_done_overrides_to_a_column_stack — the done variant overrides the shared row layout into a full-width column stack (label above the response body, not squeezed beside it)", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-terminal--done\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("flex-direction: column;")
+    expect(rule).toContain("align-items: stretch;")
+  })
+
+  it("test_da_activity_terminal_skipped_and_error_unaffected_by_done_override — the --skipped/error terminal kinds are untouched by the done-only column override", () => {
+    expect(CSS).not.toMatch(
+      /\.design-agent-surface\s+\.da-activity-terminal--skipped\s*\{[^}]*flex-direction/,
+    )
+    // the --skipped selector itself still exists unmodified (icon + text rules).
+    expect(CSS).toContain(
+      ".design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-icon {",
+    )
+    expect(CSS).toContain(
+      ".design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-text {",
+    )
+  })
+
   it("test_da_activity_agent_label_color_unchanged — .da-activity-agent-label keeps its accent colour (regression pin, label unaffected)", () => {
     const match = CSS.match(
       /\.design-agent-surface\s+\.da-activity-agent-label\s*\{([^}]*)\}/,

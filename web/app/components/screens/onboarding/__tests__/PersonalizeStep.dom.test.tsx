@@ -113,12 +113,28 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     const { container } = mount()
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("9")
+    ).toBe("10")
     expect(
       (container.querySelector(".onb-card .onb-h") as HTMLElement).textContent,
     ).toBe("Personalize your workspace.")
-    expect(chip("Top user problems & opportunities")).not.toBeNull()
-    expect(chip("Wins to celebrate")).not.toBeNull()
+    expect(chip("Top Customer Problem")).not.toBeNull()
+    expect(chip("Competitor & market moves")).not.toBeNull()
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
+  it("offers only the insight types that have a skill behind them, in the specified order", async () => {
+    analyticsConnected()
+    const { container } = mount()
+    const labels = Array.from(
+      container.querySelectorAll('[data-field="surfaces"] button'),
+    ).map((b) => (b.textContent ?? "").trim())
+    expect(labels).toEqual([
+      "Top Customer Problem",
+      "Competitor & market moves",
+      "What to build next",
+    ])
+    // The free-text override is gone with them.
+    expect(container.querySelector("textarea")).toBeNull()
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
@@ -135,12 +151,13 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
 
   it("with analytics live, Continue saves preferences and hands off to define-metrics", async () => {
     analyticsConnected()
-    mount()
+    const workspaceUnderTest = makeWorkspace({ onboarding_step: 9 })
+    mount(workspaceUnderTest)
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
 
     // Toggle one chip off and another on so the saved array isn't just defaults.
-    fireEvent.click(chip("Top user problems & opportunities"))
-    fireEvent.click(chip("Wins to celebrate"))
+    fireEvent.click(chip("Top Customer Problem"))
+    fireEvent.click(chip("Competitor & market moves"))
 
     await act(async () => {
       continueBtn().click()
@@ -149,11 +166,12 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/define-metrics")
     })
-    const patch = updateWorkspaceMock.mock.calls[0][1]
-    expect(patch.notification_settings.brief_insight_types).toEqual([
-      "drive_metric",
-      "wins",
-    ])
+    // The insight-type selection is WORKSPACE-level, persisted on
+    // companies.notification_settings.brief_insight_types.
+    const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
+    // default ["top_problems","build_priorities"], toggled top_problems off +
+    // competitor_moves on
+    expect(ns.brief_insight_types).toEqual(["build_priorities", "competitor_moves"])
     // The closer belongs to define-metrics on this branch.
     expect(finishMock).not.toHaveBeenCalled()
   })
@@ -198,7 +216,16 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     })
     mount()
 
+    // Wait for the button to be ENABLED, not merely labelled. `hasAnalytics`
+    // starts null, which is falsy — so "Looks right · enter Sprntly" renders on
+    // the very first paint, while `continueDisabled` (saving || hasAnalytics ===
+    // null) still holds the button shut until the connector probe resolves.
+    // Matching the label alone let the click land on a disabled button, where it
+    // was swallowed and `replace` never ran; the test then failed on whether the
+    // probe happened to win the race, which it lost on a loaded CI runner. The
+    // sibling probe-failure test below already waits on `disabled` this way.
     await waitFor(() => {
+      expect(continueBtn().disabled).toBe(false)
       expect(continueBtn().textContent).toMatch(/Looks right · enter Sprntly/)
     })
 

@@ -1,6 +1,6 @@
-"""Timezone-aware schedule logic for the weekly brief (v0 checklist 2.4).
+"""Timezone-aware schedule logic for the Top Insights brief (v0 checklist 2.4).
 
-The weekly brief should generate automatically **Monday 06:00 in the company
+The Top Insights brief should generate automatically **Monday 06:00 in the company
 owner's timezone**. The scheduler historically fired the whole pipeline every
 ``PIPELINE_INTERVAL_HOURS`` (~6h) regardless of day/time/timezone, so a company
 in Sydney and a company in Los Angeles got identical, wall-clock-blind cadences.
@@ -131,7 +131,7 @@ def resolve_timezone(notification_settings: dict | None) -> ZoneInfo:
 
 
 def resolve_schedule(notification_settings: dict | None) -> tuple[int, int, int]:
-    """Resolve ``(weekday, hour, minute)`` for the weekly brief from a company's
+    """Resolve ``(weekday, hour, minute)`` for the Top Insights brief from a company's
     ``notification_settings`` JSONB, falling back to the Monday-06:00 defaults.
 
     Users pick the brief's day + time on the Comms & Brief settings page, which
@@ -318,7 +318,7 @@ def next_fire_time(
     return after_utc + timedelta(days=_SEARCH_DAYS)
 
 
-def should_run_weekly_brief(
+def should_run_brief(
     now: datetime,
     tz: ZoneInfo,
     last_run: datetime | None,
@@ -398,7 +398,7 @@ def generation_start_time(
     return fire - lead
 
 
-def should_generate_weekly_brief(
+def should_generate_brief(
     now: datetime,
     tz: ZoneInfo,
     last_generation: datetime | None,
@@ -413,7 +413,7 @@ def should_generate_weekly_brief(
 ) -> bool:
     """Pure decision: should this company's brief START GENERATING now?
 
-    The mirror of :func:`should_run_weekly_brief`, shifted ``lead`` earlier:
+    The mirror of :func:`should_run_brief`, shifted ``lead`` earlier:
     generation is due when ``now`` is within ``window`` after (fire − ``lead``)
     and generation hasn't already run for this cycle. Generating early gives the
     brief time to synthesize so delivery can happen exactly at the configured

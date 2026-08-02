@@ -20,11 +20,16 @@
 // BOUNDED RE-MINT: the grant TTL is short, so a long-lived viewing
 // session can outlive its grant — the next asset GET then 401s. On such a
 // failure the caller invokes `notifyAssetError()`, which re-mints the grant
-// EXACTLY ONCE and forces a fresh iframe load (via a bumped `reloadKey`). If the
-// asset still fails after that single re-mint (e.g. the grant was revoked
+// EXACTLY ONCE and forces a fresh iframe load (via a bumped `reloadSignal`). If
+// the asset still fails after that single re-mint (e.g. the grant was revoked
 // mid-session — the workspace flipped the prototype private, or ownership
 // changed), the hook surfaces an error and does NOT retry again. RETRY CAP = 1.
 // No infinite mint↔401 loop.
+//
+// `reloadSignal` is this hook's SOLE, consolidated reload signal: it is bumped
+// only after a mint CONFIRMS success — either the explicit re-mint path above,
+// or a checkpoint-advance mint for the same bundle url (the in-place-overwrite
+// iterate case). No caller forces a reload independently of a confirmed mint.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { designAgentApi } from "../../lib/api"
 
@@ -60,11 +65,14 @@ export type ViewGrantState = {
   error: string | null
   /** True while a mint (initial or re-mint) is in flight. */
   pending: boolean
-  /** Bumped on a successful (re)mint so the caller can force a fresh iframe load
-   *  after a re-mint (use it in the iframe React `key` or as a cache-bust nonce).
-   *  Starts at 0 for the first grant — the caller leaves the clean first load
-   *  untouched and only reacts to increments. */
-  reloadKey: number
+  /** This hook's SOLE, consolidated reload signal. Bumped only after a mint
+   *  CONFIRMS success for either: (a) an explicit 401-triggered re-mint (the
+   *  pre-existing contract), or (b) a checkpoint advance for the SAME bundle
+   *  url (the in-place-overwrite iterate case) — nothing else forces a reload
+   *  independently of a confirmed mint. Use it in the iframe React `key` or as
+   *  a cache-bust nonce. Starts at 0 for the first grant — the caller leaves
+   *  the clean first load untouched and only reacts to increments. */
+  reloadSignal: number
   /** Called by the viewer when an asset/iframe load 401s (grant missing/expired).
    *  Re-mints ONCE (bounded by VIEW_GRANT_REMINT_CAP); a second failure surfaces
    *  an error instead of re-minting again. No-op once the cap is hit. */
@@ -185,7 +193,7 @@ export function useViewGrant(
   const [grantedBundleUrl, setGrantedBundleUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
-  const [reloadKey, setReloadKey] = useState(0)
+  const [reloadSignal, setReloadSignal] = useState(0)
   // True while the bundle is briefly 404ing through the proxy, so the caller can
   // cover the iframe with a neutral loading state instead of the raw 404 body.
   const [notReady, setNotReady] = useState(false)
@@ -193,56 +201,104 @@ export function useViewGrant(
   // Count of re-mints already performed for the CURRENT bundle (reset whenever a
   // fresh bundle url arrives — a new build / checkpoint gets a fresh budget).
   const remintAttemptsRef = useRef(0)
-  // Guards against overlapping mints (StrictMode double-invoke, rapid calls).
-  const mintingRef = useRef(false)
-  // The pending readiness-retry timer + a guard against overlapping retry loops
-  // (mirrors mintingRef). Cleared on unmount and whenever the bundle url changes.
+  // The pending readiness-retry timer + a guard against overlapping retry loops.
+  // Cleared on unmount and whenever the bundle url changes.
   const readyRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readyRetryingRef = useRef(false)
 
+  // Tracks the {url, checkpointId} pair the CURRENTLY GRANTED bundle was last
+  // SUCCESSFULLY minted against, so a later successful mint can tell whether the
+  // checkpoint genuinely advanced for the SAME url (→ this hook's own reload
+  // signal fires) vs this being the very first mint for a fresh url (→ it must
+  // NOT fire; the caller's viewer key already includes bundleUrl, so no forced
+  // reload is needed for a first paint).
+  const mintedForRef = useRef<{ url: string; checkpointId: number | null } | null>(null)
+  // Increments on every SUCCESSFUL mint, regardless of which caller triggered it.
+  // Lets a caller that had to WAIT on someone else's in-flight mint tell whether
+  // that mint actually satisfied its own need (a success happened while it
+  // waited) vs. it must retry for real now that the mutex is free.
+  const mintGenerationRef = useRef(0)
+  // Holds the CURRENTLY RUNNING mint's own promise (null when idle) so a
+  // colliding caller can await the SAME in-flight attempt rather than a boolean
+  // guard that tells it nothing about when it's safe to re-check.
+  const inFlightRef = useRef<Promise<boolean> | null>(null)
+
   const mint = useCallback(
-    async (url: string, isRemint: boolean, forceReload = true) => {
-      if (mintingRef.current) return
-      mintingRef.current = true
-      setPending(true)
-      try {
-        // Option A: mint via the app-origin /_da-bundle/ view-grant path derived
-        // from the bundle URL (…/bundle/<asset>[?v=] → …/view-grant), so the grant
-        // cookie is first-party to the serving (app) origin — not the API origin.
-        await designAgentApi.viewGrant(url.replace(/\/bundle\/.*$/, "/view-grant"))
-        setError(null)
-        // Expose the bundle url only AFTER the grant cookie is set, so the iframe
-        // asset GETs carry it on the very first request.
-        setGrantedBundleUrl(url)
-        // Bump the reload key on a re-mint so the caller can force a fresh load of
-        // the now-re-authorized iframe. The initial mint leaves it at 0 (clean
-        // first load — no cache-bust needed). A PROACTIVE refresh (forceReload =
-        // false) renews the cookie silently and leaves the key untouched so it does
-        // NOT interrupt an active viewing session with an iframe reload.
-        if (isRemint && forceReload) setReloadKey((k) => k + 1)
-      } catch {
-        // Mint failed (network / 401 / 404 / 429). For the initial mint and a
-        // reactive recovery re-mint (forceReload = true), withhold the bundle url
-        // and surface an error — we don't yet have (or have lost) a usable grant,
-        // so loading the iframe would only 401 on assets.
-        //
-        // A PROACTIVE silent renewal (forceReload = false) is different: it runs
-        // on a timer while a still-valid grant is already exposed, refreshing the
-        // cookie BEFORE it can expire. A transient failure there must NOT tear
-        // down a healthy viewer — the current grant is almost certainly still
-        // valid, and a real lapse is independently caught by the preflight /
-        // visibility recovery. So a failed proactive renewal is swallowed; the
-        // next interval (or a genuine 401) handles it.
-        if (forceReload) {
-          setGrantedBundleUrl(null)
-          setError("Couldn't load the prototype. Please refresh and try again.")
+    async (url: string, isRemint: boolean, forceReload = true): Promise<boolean> => {
+      // COALESCE, DON'T DROP (Race B): a mint already running means this call
+      // cannot start its own network request right now. Wait for the one already
+      // in flight, then decide: if a mint SUCCEEDED while we waited (the
+      // generation counter advanced), our own need is already satisfied — return
+      // false (no network attempt of OUR OWN happened). If it did NOT succeed
+      // (failed, or was a proactive silent renewal that swallowed its own
+      // failure), the mutex is free again — retry for real via a normal
+      // recursive call, which will now take the non-colliding branch below.
+      if (inFlightRef.current) {
+        const generationBeforeWait = mintGenerationRef.current
+        await inFlightRef.current
+        if (mintGenerationRef.current > generationBeforeWait) return false
+        return mint(url, isRemint, forceReload)
+      }
+
+      const run = (async (): Promise<boolean> => {
+        setPending(true)
+        try {
+          // Option A: mint via the app-origin /_da-bundle/ view-grant path derived
+          // from the bundle URL (…/bundle/<asset>[?v=] → …/view-grant), so the grant
+          // cookie is first-party to the serving (app) origin — not the API origin.
+          await designAgentApi.viewGrant(url.replace(/\/bundle\/.*$/, "/view-grant"))
+          setError(null)
+          // Expose the bundle url only AFTER the grant cookie is set, so the iframe
+          // asset GETs carry it on the very first request.
+          setGrantedBundleUrl(url)
+          mintGenerationRef.current += 1
+          // ONE consolidated reload signal, bumped when EITHER: (a) this is the
+          // pre-existing explicit-re-mint contract (unchanged from the prior
+          // re-mint fix — an isRemint call with forceReload true), OR (b) this mint
+          // just advanced past a DIFFERENT checkpoint for the SAME bundle url — the
+          // in-place-overwrite iterate case. (b) only fires here, AFTER
+          // designAgentApi.viewGrant has resolved successfully — nothing else in
+          // this hook or its callers forces a reload independently of a confirmed
+          // mint anymore.
+          const prior = mintedForRef.current
+          const isCheckpointAdvance =
+            prior !== null && prior.url === url && prior.checkpointId !== checkpointId
+          mintedForRef.current = { url, checkpointId }
+          if ((isRemint && forceReload) || isCheckpointAdvance) {
+            setReloadSignal((n) => n + 1)
+          }
+          return true
+        } catch {
+          // Mint failed (network / 401 / 404 / 429). For the initial mint and a
+          // reactive recovery re-mint (forceReload = true), withhold the bundle url
+          // and surface an error — we don't yet have (or have lost) a usable grant,
+          // so loading the iframe would only 401 on assets.
+          //
+          // A PROACTIVE silent renewal (forceReload = false) is different: it runs
+          // on a timer while a still-valid grant is already exposed, refreshing the
+          // cookie BEFORE it can expire. A transient failure there must NOT tear
+          // down a healthy viewer — the current grant is almost certainly still
+          // valid, and a real lapse is independently caught by the preflight /
+          // visibility recovery. So a failed proactive renewal is swallowed; the
+          // next interval (or a genuine 401) handles it.
+          if (forceReload) {
+            setGrantedBundleUrl(null)
+            setError("Couldn't load the prototype. Please refresh and try again.")
+          }
+          return true // a genuine network attempt happened, even though it failed
+        } finally {
+          setPending(false)
         }
+      })()
+
+      inFlightRef.current = run
+      try {
+        return await run
       } finally {
-        setPending(false)
-        mintingRef.current = false
+        inFlightRef.current = null
       }
     },
-    [prototypeId],
+    [prototypeId, checkpointId],
   )
 
   // Initial mint (and re-mint when a fresh bundle url OR a new checkpoint
@@ -267,8 +323,13 @@ export function useViewGrant(
     if (!bundleUrl) return
     const { remint, surfaceError } = shouldRemint(remintAttemptsRef.current)
     if (remint) {
-      remintAttemptsRef.current += 1
-      void mint(bundleUrl, true)
+      // Only consume the bounded budget once mint() confirms a genuine network
+      // attempt happened for THIS call. A call that gets coalesced into an
+      // already-in-flight mint (and is subsumed by its success) resolves `false`
+      // and must NOT count against VIEW_GRANT_REMINT_CAP.
+      void mint(bundleUrl, true).then((ran) => {
+        if (ran) remintAttemptsRef.current += 1
+      })
     } else if (surfaceError) {
       setGrantedBundleUrl(null)
       setError("Couldn't load the prototype. Please refresh and try again.")
@@ -305,7 +366,7 @@ export function useViewGrant(
   //   - unauthorized (401) → the grant lapsed; hand off to the bounded re-mint.
   //   - notready (404)     → set the loading state and start a BOUNDED retry loop
   //                          that re-probes until the bundle is ready, then bumps
-  //                          reloadKey to force a fresh iframe load of it.
+  //                          reloadSignal to force a fresh iframe load of it.
   //   - ok                 → clear the loading state and any pending retry.
   // The retry is bounded (BUNDLE_READY_RETRY_CAP attempts) so it can never loop
   // forever; if the cap is hit while still 404ing, the loading state persists and
@@ -340,14 +401,14 @@ export function useViewGrant(
           attempts += 1
           void preflightBundle(grantedBundleUrl).then((s) => {
             if (s !== "notready") {
-              // Ready (or a grant lapse) — stop polling. An ok bumps reloadKey to
-              // force a fresh iframe load of the now-ready bundle; a 401 hands off
-              // to the bounded re-mint (which forces its own reload).
+              // Ready (or a grant lapse) — stop polling. An ok bumps reloadSignal
+              // to force a fresh iframe load of the now-ready bundle; a 401 hands
+              // off to the bounded re-mint (which forces its own reload).
               readyRetryingRef.current = false
               readyRetryTimerRef.current = null
               setNotReady(false)
               if (s === "unauthorized") notifyAssetError()
-              else setReloadKey((k) => k + 1)
+              else setReloadSignal((k) => k + 1)
               return
             }
             if (attempts >= BUNDLE_READY_RETRY_CAP) {
@@ -421,12 +482,12 @@ export function useViewGrant(
   // (no visibility/focus event ever fires), so they never reach the 401 at all.
   // It re-mints unconditionally (cheap, bounded by the interval) rather than
   // waiting for a preflight to fail; the bounded post-mint preflight still guards
-  // against a revoked grant. mintingRef inside mint() coalesces any overlap.
+  // against a revoked grant. inFlightRef inside mint() coalesces any overlap.
   useEffect(() => {
     if (!grantedBundleUrl || !bundleUrl) return
     const id = setInterval(() => {
-      // Renew the cookie silently — no reloadKey bump, so the live iframe is not
-      // reloaded out from under the user (forceReload = false).
+      // Renew the cookie silently — no reloadSignal bump, so the live iframe is
+      // not reloaded out from under the user (forceReload = false).
       void mint(bundleUrl, true, false)
     }, GRANT_REFRESH_INTERVAL_MS)
     return () => clearInterval(id)
@@ -442,8 +503,8 @@ export function useViewGrant(
   // a (re)mint, e.g. on first load / post-completion — now drives the SAME bounded
   // readiness retry + loading state instead of being dropped, closing the
   // transient-404 flash with NO new per-load latency (the preflight already ran).
-  // Keyed on the granted url + reloadKey so it re-runs after a re-mint bumps the
-  // key; the re-mint / retry cycles are each bounded, so there is no loop.
+  // Keyed on the granted url + reloadSignal so it re-runs after a re-mint bumps
+  // the signal; the re-mint / retry cycles are each bounded, so there is no loop.
   useEffect(() => {
     if (!grantedBundleUrl) return
     let active = true
@@ -453,13 +514,13 @@ export function useViewGrant(
     return () => {
       active = false
     }
-  }, [grantedBundleUrl, reloadKey, handleReadiness])
+  }, [grantedBundleUrl, reloadSignal, handleReadiness])
 
   return {
     grantedBundleUrl,
     error,
     pending,
-    reloadKey,
+    reloadSignal,
     notifyAssetError,
     retryAfterError,
     notReady,

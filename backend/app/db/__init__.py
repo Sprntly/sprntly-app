@@ -8,7 +8,7 @@ to work because every function is re-exported here.
 Submodule layout:
   client.py       — sqlite3 conn() context manager + utc_now timestamp
   schema.py       — CREATE TABLE DDL + idempotent ALTERs in init_db()
-  briefs.py       — weekly briefs (is_current row per dataset)
+  briefs.py       — Top Insights briefs (is_current row per dataset)
   prds.py         — PRDs (generating → ready, variant-scoped)
   evidences.py    — evidence pages (same shape, different lifecycle)
   asks.py         — ask_log (append-only) + cached_asks
@@ -79,6 +79,39 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Competitive-intelligence runs (state + captured records + rendered reports)
+from app.db.competitive_intel_runs import (
+    claim_competitive_intel_run,
+    complete_competitive_intel_run,
+    latest_competitive_intel_run,
+    save_competitive_intel_run,
+)
+
+# Public-feedback runs (captured record sets + rendered reports)
+from app.db.public_feedback_runs import (
+    latest_public_feedback_run,
+    save_public_feedback_run,
+)
+
+# Reports (captured skill-generated HTML report documents)
+from app.db.reports import (
+    find_report_by_share_token,
+    get_report,
+    list_reports_for_conversation,
+    save_report,
+    set_report_share_config,
+)
+
+# Deep company-research runs (onboarding kick + chat ask)
+from app.db.company_research_runs import (
+    company_research_run_in_flight,
+    complete_company_research_run,
+    fail_company_research_run,
+    fail_orphan_company_research_runs,
+    latest_company_research_run,
+    start_company_research_run,
+)
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,
@@ -95,6 +128,16 @@ from app.db.datasets import (
     insert_dataset,
     list_dataset_slugs,
     list_datasets,
+)
+
+# Custom skills (workspace-scoped, user-uploaded — PRD 1854)
+from app.db.custom_skills import (
+    DuplicateSkillSlug,
+    delete_custom_skill,
+    get_custom_skill,
+    get_custom_skill_by_id,
+    insert_custom_skill,
+    list_custom_skills,
 )
 
 # Connections (OAuth)
@@ -137,9 +180,11 @@ from app.db.knowledge import (
 from app.db.pipeline_runs import (
     complete_run,
     create_run,
+    fail_orphan_running_runs,
     fail_run,
     get_latest_run,
     list_runs,
+    supersede_running_runs,
     update_run_stage,
 )
 
@@ -214,6 +259,19 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # reports (captured HTML report documents)
+    "find_report_by_share_token",
+    "get_report",
+    "list_reports_for_conversation",
+    "save_report",
+    "set_report_share_config",
+    # deep company-research runs
+    "company_research_run_in_flight",
+    "complete_company_research_run",
+    "fail_company_research_run",
+    "fail_orphan_company_research_runs",
+    "latest_company_research_run",
+    "start_company_research_run",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",
@@ -226,6 +284,13 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # custom skills
+    "DuplicateSkillSlug",
+    "delete_custom_skill",
+    "get_custom_skill",
+    "get_custom_skill_by_id",
+    "insert_custom_skill",
+    "list_custom_skills",
     # input sources
     "delete_input_source",
     "list_input_sources",

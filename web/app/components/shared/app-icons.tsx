@@ -149,6 +149,16 @@ export function IconLinkInsert({ size = 18 }: { size?: number }) {
   )
 }
 
+export function IconClock({ size = 14, title }: { size?: number; title?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden={title ? undefined : true}>
+      {title ? <title>{title}</title> : null}
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 15.5 14" />
+    </svg>
+  )
+}
+
 export function IconUndo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>

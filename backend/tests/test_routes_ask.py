@@ -341,6 +341,138 @@ def test_get_ask_foreign_job_returns_404(tenant_client, isolated_settings, fake_
     assert resp.status_code == 404
 
 
+# ---- routed skill, readable WHILE the answer is still generating ------------
+# The router picks a skill in the first second or two, but that choice used to
+# reach the client only inside `response`, which complete_ask_job writes at the
+# END of the run — so the chat could not name what it was waiting for until the
+# wait was over. `ask_jobs.routed_skill` is written at routing time and surfaced
+# from `generating` onwards.
+
+
+def test_get_ask_surfaces_routed_skill_while_generating(
+    tenant_client, isolated_settings
+):
+    """The whole point: a still-generating job names its skill."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question="run a competitive review"
+    )
+    set_ask_job_route(
+        ask_id, "competitive-intelligence-review", "Competitive intelligence"
+    )
+
+    body = t.client.get(f"/v1/ask/{ask_id}").json()
+    assert body["status"] == "generating"
+    assert body["routed_skill"] == "competitive-intelligence-review"
+    assert body["routed_skill_action"] == "Competitive intelligence"
+    # ...and nothing else has been decided yet — the answer body is still empty.
+    assert body["answer"] == ""
+
+
+def test_get_ask_routed_skill_is_null_when_nothing_was_routed(
+    tenant_client, isolated_settings
+):
+    """A direct answer / out-of-scope refusal routes no skill. The fields must
+    be null — the UI renders no chip rather than inventing a fallback label."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question="what happened last week?"
+    )
+    body = t.client.get(f"/v1/ask/{ask_id}").json()
+    assert body["routed_skill"] is None
+    assert body["routed_skill_action"] is None
+
+
+def test_set_ask_job_route_writes_nothing_for_a_skill_less_decision(
+    tenant_client, isolated_settings
+):
+    """qa_agent still calls the hook on the direct path (skill_id=None); the
+    writer must treat that as "record nothing", not as a row to stamp."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    set_ask_job_route(ask_id, None, "")
+    row = db.get_ask_job(ask_id)
+    assert row["routed_skill"] is None
+    assert row["routed_skill_action"] is None
+
+
+def test_routed_skill_write_does_not_touch_a_cancelled_job(
+    tenant_client, isolated_settings
+):
+    """Guarded on status == 'generating', like the heartbeat: a route write
+    landing after the user's Stop must not resurrect or annotate the row."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    assert db.cancel_ask_job(ask_id) == "cancelled"
+    set_ask_job_route(ask_id, "prd-author", "PRD")
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"
+    assert row["routed_skill"] is None
+
+
+def test_foreign_generating_job_with_a_routed_skill_still_404s(
+    tenant_client, isolated_settings
+):
+    """The new field must not become a new disclosure channel: another
+    company's ask is 404 (not 403), and the skill never crosses the boundary."""
+    from app.db.asks import set_ask_job_route
+
+    a = tenant_client.make(slug="company-a")
+    ask_id = db.start_ask_job(
+        company_id=a.company_id, dataset="company-a", question="A's private question?"
+    )
+    set_ask_job_route(ask_id, "competitive-intelligence-review", "Competitive intelligence")
+
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.get(f"/v1/ask/{ask_id}")
+    assert resp.status_code == 404
+    assert "competitive-intelligence-review" not in resp.text
+
+
+def test_worker_records_the_routed_skill_before_the_answer_lands(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """End to end through the worker: by the time qa_agent is inside the answer
+    call, the job row already carries the skill."""
+    import app.qa_agent as qa_agent_mod
+
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question="write user stories for checkout"
+    )
+    seen: dict = {}
+
+    def _fake_single_shot(decision, *a, **k):  # noqa: ARG001
+        # Read the row from INSIDE the answer step — mid-run, by construction.
+        seen["row"] = db.get_ask_job(ask_id)
+        return {"answer": "stories", "key_points": [], "citations": [],
+                "confidence": 0.9, "unanswered": ""}
+
+    monkeypatch.setattr(qa_agent_mod, "_answer_single_shot", _fake_single_shot)
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question="write user stories for checkout",
+        dataset="acme",
+    ))
+
+    assert seen["row"]["status"] == "generating"
+    assert seen["row"]["routed_skill"] == "user-stories"
+    # It survives completion, so a client that only polls after the fact sees it.
+    assert db.get_ask_job(ask_id)["routed_skill"] == "user-stories"
+    assert t.client.get(f"/v1/ask/{ask_id}").json()["routed_skill"] == "user-stories"
+
+
 # ---- POST /v1/ask/extract-file ----------------------------------------------
 # Parses a binary chat attachment (pptx/pdf/docx/…) to markdown so the composer
 # can inline it as [Attached files] context — the fix for pptx attachments

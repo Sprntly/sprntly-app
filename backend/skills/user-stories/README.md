@@ -86,7 +86,10 @@ When the gate says LARGE, the map is rendered as a **"Story map" tab beside
 retired `story-mapping`): gray backbone cards from Part A §4 activities in
 narrative order → the same tickets placed under each activity → the
 **walking skeleton as Release 1** (green band, crosses the whole journey) →
-release slices aligned to §8 rollout phases (each slice end-to-end coherent;
+release slices aligned to the synthesized rollout phases — the PRD carries no
+rollout section (retired in prd-author v4.4), so the skill derives the phases
+from the requirements + Part B dependency order, inheriting Part B's release
+plan verbatim when one exists (each slice end-to-end coherent;
 slices map to sprints on push) → gaps/edges as dashed notes feeding back to
 the PRD, never silent tickets. The map organizes the ticket set; it never
 invents tickets.

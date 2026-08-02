@@ -10,7 +10,7 @@
 // new workspace had no brief yet (nothing overwrote the merged `briefV2`).
 //
 // The fix: on a genuine company change, the hook calls resetBrief() before the
-// async load, so the weekly brief screen clears immediately and then fills with
+// async load, so the Top Insights brief screen clears immediately and then fills with
 // the new workspace's brief (or its empty/generating state). These tests drive
 // the real hook + real ContentProvider and assert that behavior.
 import * as React from "react"

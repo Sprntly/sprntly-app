@@ -2,11 +2,11 @@
 
 POST /v1/synthesis/seed   — extract the company's corpus docs into the KG
                             (pilot bridge: docs → Signals/Themes).
-POST /v1/synthesis/brief  — generate the KG-driven weekly brief; saved under
+POST /v1/synthesis/brief  — generate the KG-driven Top Insights brief; saved under
                             the company's dataset slug so the existing Brief
                             screen renders it.
 
-Both tenant-scoped (/seed via require_workspace, /brief via the Weekly-Brief
+Both tenant-scoped (/seed via require_workspace, /brief via the Top-Insights
 module gate); the company's slug doubles as the dataset slug (aligned at
 onboarding).
 """
@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.corpus import load_corpus
-from app.entitlements import require_weekly_brief_module
+from app.entitlements import require_top_insights_module
 from app.db.client import require_client
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade, TenantViolationError
@@ -55,7 +55,11 @@ def seed_from_corpus(company: WorkspaceContext = Depends(require_workspace)):
     for doc in corpus.docs:
         try:
             r = extract_document(
-                facade, company.company_id, doc_name=doc.name, text=doc.text
+                facade, company.company_id, doc_name=doc.name, text=doc.text,
+                # Haiku relevance + category triage ahead of every corpus doc
+                # — this is a raw, uncategorized upload with no
+                # prior knowledge of its content.
+                triage=True,
             )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
@@ -67,10 +71,10 @@ def seed_from_corpus(company: WorkspaceContext = Depends(require_workspace)):
 
 
 @router.post("/brief")
-# On-demand brief generation → Weekly Brief module gate. /seed (KG ingestion)
+# On-demand brief generation → Top Insights module gate. /seed (KG ingestion)
 # stays ungated by owner decision — the KG also grounds PRDs and chat.
-def generate_brief(company: CompanyContext = Depends(require_weekly_brief_module)):
-    """Generate the KG-driven weekly brief (replaces the legacy corpus brief).
+def generate_brief(company: CompanyContext = Depends(require_top_insights_module)):
+    """Generate the KG-driven Top Insights brief (replaces the legacy corpus brief).
 
     Incrementally seeds the KG first (only new/changed corpus docs — unchanged
     ones are skipped cheaply by content hash) so a last-minute upload still makes

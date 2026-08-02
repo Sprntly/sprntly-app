@@ -22,6 +22,11 @@ from app.skills.catalog import routable_manifest
 # (question, expected skill id). Mix of regex-covered and LLM-only skills.
 EVALS: list[tuple[str, str]] = [
     ("Write a PRD for in-app onboarding checklists", "prd-author"),
+    # Broadened PRD phrasings — "Give me a prd for …" was a real user miss
+    # under the old generate/create/write/draft-only verb list.
+    ("Give me a prd for the Machine Purchase Order project", "prd-author"),
+    ("We need a PRD for offline exports", "prd-author"),
+    ("Put together a quick prd for usage-based pricing", "prd-author"),
     ("Generate user stories for the checkout flow", "user-stories"),
     ("Prioritize these features with RICE: SSO, export, dark mode", "prioritize"),
     ("Re-rank our backlog by WSJF", "prioritize"),
@@ -57,6 +62,58 @@ def test_expected_skills_are_routable():
     routable = {s["id"] for s in routable_manifest()}
     bad = sorted({exp for _, exp in EVALS} - routable)
     assert bad == [], f"eval labels not routable/installed: {bad}"
+
+
+# Apurva's canonical command list (2026-07-23) — mirrored in the web test
+# (web/app/components/shared/__tests__/BriefChat.prdCommand.test.ts). Every
+# phrasing must HIT the regex tier on the backend router too.
+_CANONICAL_PRD_COMMANDS = [
+    "generate a PRD for",
+    "make a PRD for",
+    "make me a PRD for",
+    "create a PRD for",
+    "write a PRD for",
+    "draft a PRD for",
+    "build a PRD for",
+    "put together a PRD for",
+    "have it make a PRD for",
+    "generate a product requirements document for",
+    "create a product requirements document for",
+    "write a product requirements document for",
+    "draft a product requirements document for",
+    "make a product requirements document for",
+    "write a product brief for",
+    "create a product brief for",
+    "generate a product brief for",
+    "draft a product brief for",
+    "make a product brief for",
+    "generate a product brief based on",
+    "write a product spec for",
+    "create a product spec for",
+    "generate a product spec for",
+    "draft a product spec for",
+    "make a product spec for",
+    "write a product specification for",
+    "create a product specification for",
+    "generate a product specification for",
+    "spec this out for",
+    "spec it out for",
+]
+
+
+@pytest.mark.parametrize("question", [
+    "Give me a prd for the Machine Purchase Order project",
+    "We need a PRD for offline exports",
+    "Put together a quick prd for usage-based pricing",
+    "can you build a prd for the referral program",
+] + [f"{p} the checkout revamp" for p in _CANONICAL_PRD_COMMANDS])
+def test_regex_catches_broadened_prd_phrasings(question):
+    """These must HIT the regex tier (not merely defer to the LLM router) —
+    the fast-path is what guarantees the phrasing routes even when the LLM
+    router is down or times out."""
+    m = detect_intent(question)
+    assert m is not None and m.skill_id == "prd-author"
+    assert m.confidence >= 0.75
 
 
 @pytest.mark.parametrize("question,expected", EVALS)

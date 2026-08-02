@@ -6,11 +6,16 @@
 // for the three deleted per-step suites.
 //
 // Covers: name* + scope* are required (error, no persistence, no navigation);
-// strategy and roadmap keep their SEPARATE upload endpoints and columns even
-// though the spec draws them as one block; sizing + "anything else" sit behind
-// the "Add more" disclosure and persist to the pre-existing
-// companies.sizing_methodology / additional_context columns; a valid Continue
-// writes all of it plus onboarding_step 7 and routes to /onboarding/invite.
+// strategy and roadmap are ONE field that persists to team_strategy and uploads
+// through roadmapDocApi; sizing + "anything else" sit behind the "Add more"
+// disclosure; a valid Continue writes all of it plus onboarding_step 7 and
+// routes to /onboarding/metrics.
+//
+// WHERE it writes is load-bearing: the name and the five typed blocks live on
+// the default `workspaces` row (20260722120000), so they go through the
+// onboarding workspace endpoint. Sent as a companies patch they land on the
+// columns that migration left dormant, read back as their old values, and the
+// whole step silently loses everything the user typed.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -23,8 +28,11 @@ const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
+const saveWorkspaceFieldsMock = vi.fn()
 const companyDocUploadMock = vi.fn()
 const roadmapUploadMock = vi.fn()
+const importFileMock = vi.fn()
+const applyImportedMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -33,19 +41,26 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
+  saveWorkspaceOwnedFields: (...a: unknown[]) => saveWorkspaceFieldsMock(...a),
+}))
+vi.mock("../../../../lib/onboarding/applyImportedContext", () => ({
+  applyImportedContext: (...a: unknown[]) => applyImportedMock(...a),
 }))
 vi.mock("../../../../lib/api", () => ({
   companyDocsApi: { upload: (...a: unknown[]) => companyDocUploadMock(...a) },
   roadmapDocApi: { upload: (...a: unknown[]) => roadmapUploadMock(...a) },
+  llmContextApi: { importFile: (...a: unknown[]) => importFileMock(...a) },
 }))
 
 import { WorkspaceStep } from "../WorkspaceStep"
+import { markContextFileUploaded } from "../../../../lib/onboarding/contextUploadMarker"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 function mount(workspace = makeWorkspace({ onboarding_step: 6 })) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
+  saveWorkspaceFieldsMock.mockResolvedValue(undefined)
   companyDocUploadMock.mockResolvedValue({ ok: true })
   roadmapUploadMock.mockResolvedValue({ ok: true })
   return render(React.createElement(WorkspaceStep))
@@ -68,6 +83,10 @@ function openAddMore() {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  // The "already uploaded a .md" marker is real localStorage, and it is never
+  // cleared in app code — so it has to be reset between tests or an upload in
+  // one suppresses the banner in every test after it.
+  localStorage.clear()
 })
 
 describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)", () => {
@@ -92,10 +111,9 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
         ".req",
       ),
     ).not.toBeNull()
-    // Strategy and roadmap survive as SEPARATE blocks (different columns and
-    // upload endpoints), even though the spec draws one.
+    // Strategy and roadmap are ONE block.
     expect(document.querySelector('[data-field="team-strategy"]')).not.toBeNull()
-    expect(document.querySelector('[data-field="team-roadmap"]')).not.toBeNull()
+    expect(document.querySelector('[data-field="team-roadmap"]')).toBeNull()
     // Sizing + anything-else are collapsed.
     expect(document.querySelector('[data-field="sizingMethodology"]')).toBeNull()
     expect(screen.getByText(/Add more/)).not.toBeNull()
@@ -118,7 +136,7 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue persists every merged field and routes to invite", async () => {
+  it("a valid Continue persists every merged field and routes to product", async () => {
     mount()
     fireEvent.change(nameInput(), { target: { value: "Nutrition & Sleep" } })
     fireEvent.change(scopeInput(), {
@@ -139,18 +157,71 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
     })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_name: "Nutrition & Sleep",
+    // The name + the five typed blocks live on the `workspaces` row, so they go
+    // through the endpoint that owns it. A companies patch would write the
+    // columns 20260722120000 left dormant and lose the lot on the next fetch.
+    expect(saveWorkspaceFieldsMock).toHaveBeenCalledWith("Nutrition & Sleep", {
       team_scope: "Owns food logging and sleep tracking end to end.",
       team_strategy: null,
+      // Retired from onboarding — the merged field absorbed it on seed.
       team_roadmap: null,
-      // Reuses the column Settings → Process already owns — NOT a new one.
       sizing_methodology: "Fibonacci points, sized by the whole squad.",
       additional_context: "We call the pairing flow 'sleep sync' internally.",
+    })
+    // Only the resume marker is company-owned.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       onboarding_step: 7,
     })
+  })
+
+  it("merges an existing roadmap column into the one strategy field and saves it there", async () => {
+    mount(
+      makeWorkspace({
+        onboarding_step: 5,
+        team_name: "Nutrition & Sleep",
+        team_scope: "Owns food logging and sleep tracking end to end.",
+        team_strategy: "Win the daily-habit loop this half.",
+        team_roadmap: "Q3: sleep sync. Q4: calorie deficit v2.",
+      }),
+    )
+    const typed = await waitFor(() => {
+      const el = document.querySelector(
+        '[data-field="team-strategy"] textarea',
+      ) as HTMLTextAreaElement
+      expect(el).not.toBeNull()
+      return el
+    })
+    expect(typed.value).toBe(
+      "Win the daily-habit loop this half.\n\nQ3: sleep sync. Q4: calorie deficit v2.",
+    )
+
+    await act(async () => {
+      continueBtn().click()
+    })
+    await waitFor(() => {
+      expect(saveWorkspaceFieldsMock).toHaveBeenCalled()
+    })
+    const payload = saveWorkspaceFieldsMock.mock.calls[0][1] as Record<string, unknown>
+    expect(payload.team_strategy).toBe(
+      "Win the daily-habit loop this half.\n\nQ3: sleep sync. Q4: calorie deficit v2.",
+    )
+    expect(payload.team_roadmap).toBeNull()
+  })
+
+  it("routes the merged strategy/roadmap upload through the roadmap-doc endpoint", async () => {
+    mount()
+    const input = document.querySelector(
+      '[data-field="team-strategy"] input[type=file]',
+    ) as HTMLInputElement
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "roadmap.pdf", { type: "application/pdf" })] },
+    })
+    await waitFor(() => {
+      expect(roadmapUploadMock).toHaveBeenCalled()
+    })
+    expect(companyDocUploadMock).not.toHaveBeenCalled()
   })
 
   it("routes the sizing attachment through the sizing_doc doc type", async () => {
@@ -168,9 +239,152 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     expect(companyDocUploadMock.mock.calls[0][1]).toBe("sizing_doc")
   })
 
-  it("Back routes to the connectors step", () => {
+  it("Back routes to the product step", () => {
     mount()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
+  })
+
+  // The .md banner on this step must behave EXACTLY like the dedicated step-2
+  // import: apply every extractable field across the flow (via
+  // applyImportedContext) AND kick the background LLM pass — not the old
+  // degraded path that filled 3 local fields and never ran Reader 2.
+  function bannerInput() {
+    return document.querySelector(
+      'input[aria-label="AI context export"]',
+    ) as HTMLInputElement
+  }
+
+  it("the .md banner runs the FULL import: applies fields flow-wide AND kicks the background LLM pass", async () => {
+    const startImportMock = vi.fn()
+    const setWorkspaceMock = vi.fn()
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 5 }),
+        setWorkspace: setWorkspaceMock,
+        startContextImport: startImportMock,
+      }),
+    )
+    importFileMock.mockResolvedValue({
+      ok: true,
+      fields: { team_scope: "Owns food logging", strategy: "Win H2", notes: "Glossary" },
+      unmapped: {},
+      format_version: "1",
+      note: null,
+      job_id: 42,
+    })
+    applyImportedMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: 5, team_scope: "Owns food logging" }),
+    )
+    render(React.createElement(WorkspaceStep))
+
+    await act(async () => {
+      fireEvent.change(bannerInput(), {
+        target: { files: [new File(["# ctx"], "ctx.md", { type: "text/markdown" })] },
+      })
+    })
+
+    await waitFor(() => expect(importFileMock).toHaveBeenCalled())
+    // Reader 2 is kicked with the returned job id — the whole point of parity.
+    expect(startImportMock).toHaveBeenCalledWith(42, "ws-1")
+    // Every field is applied flow-wide, not just this step's locals.
+    expect(applyImportedMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "ws-1" }),
+      expect.objectContaining({ team_scope: "Owns food logging" }),
+    )
+    expect(setWorkspaceMock).toHaveBeenCalled()
+  })
+
+  it("kicks the LLM pass on an upload that carries no fields (the normal path)", async () => {
+    const startImportMock = vi.fn()
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 5 }),
+        startContextImport: startImportMock,
+      }),
+    )
+    // ok:false is what every upload returns now — the LLM pass is the only
+    // reader and hasn't run yet — and the job_id is how its fields arrive.
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: null,
+      note: null,
+      job_id: 7,
+    })
+    render(React.createElement(WorkspaceStep))
+
+    await act(async () => {
+      fireEvent.change(bannerInput(), {
+        target: { files: [new File(["tables"], "ctx.md", { type: "text/markdown" })] },
+      })
+    })
+
+    // The background pass still runs — the old code showed a hard failure here.
+    await waitFor(() => expect(startImportMock).toHaveBeenCalledWith(7, "ws-1"))
+    // No immediate apply (nothing to apply yet); it arrives via the poll.
+    expect(applyImportedMock).not.toHaveBeenCalled()
+    expect(screen.getByText(/we'll fill in what we find/)).not.toBeNull()
+  })
+
+  // The banner is a SECOND chance, so it is only for people who didn't take the
+  // first one. Showing it to someone who already handed their .md over on step 2
+  // asks for the same file twice and reads as the flow forgetting.
+  it("still offers the .md upload to someone who skipped the import step", () => {
+    mount()
+    expect(bannerInput()).not.toBeNull()
+  })
+
+  it("does NOT offer the .md upload once the workspace has already imported one", () => {
+    markContextFileUploaded("ws-1")
+    mount()
+    expect(bannerInput()).toBeNull()
+    expect(screen.queryByText(/Upload \.md/)).toBeNull()
+  })
+
+  it("does NOT offer it while this session's extraction is still running", () => {
+    // The marker covers a reload; the in-memory state covers the session where
+    // localStorage never took the write.
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 6 }),
+        contextImport: "running",
+      }),
+    )
+    render(React.createElement(WorkspaceStep))
+    expect(bannerInput()).toBeNull()
+  })
+
+  it("keeps the banner up through an upload made HERE, then drops it on remount", async () => {
+    const { unmount } = mount()
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: null,
+      note: null,
+      job_id: 9,
+      filed: true,
+    })
+
+    await act(async () => {
+      fireEvent.change(bannerInput(), {
+        target: { files: [new File(["# ctx"], "ctx.md", { type: "text/markdown" })] },
+      })
+    })
+
+    // Still there, with its notice — yanking the banner mid-step would take the
+    // explanation of what just happened with it.
+    expect(bannerInput()).not.toBeNull()
+    expect(screen.getByText(/we'll fill in what we find/)).not.toBeNull()
+
+    // ...but the file is now on record, so coming back doesn't ask again.
+    unmount()
+    mount()
+    expect(bannerInput()).toBeNull()
   })
 })

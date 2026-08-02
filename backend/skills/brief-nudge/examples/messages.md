@@ -16,7 +16,7 @@
 ## Day 0 — Announcement (sent when the brief is ready)
 
 ### Slack
-**Headline:** Your weekly brief is ready — **$60M** in upside is on the table.
+**Headline:** Your Top Insights brief is ready — **$60M** in upside is on the table.
 **Intro:** I scouted every signal across your tools this week. The three plays that move the most:
 - **Competitive** — a rival's new search cost 3 deals — **$1.6M** renewals protected.
 - **Expansion** — 42 accounts have outgrown their plan — **$8.4M** unclaimed.
@@ -25,9 +25,9 @@
 **[ Open this week's brief → ]**  ·  `→ app.sprntly.com/w/acme/brief/jun-23`
 
 ### Email
-- **Subject:** Your weekly brief: ~$60M in upside is on the table
+- **Subject:** Your Top Insights brief: ~$60M in upside is on the table
 - **Preheader:** Three plays worth your attention — and the one to start with.
-- **Eyebrow:** Weekly brief · week of Jun 23
+- **Eyebrow:** Top Insights · week of Jun 23
 - **Title:** ~$60M in revenue is within reach this week
 - **Intro:** I scouted every signal across your tools. Five opportunities are ranked in your brief — here are the three that move the most.
 - **What we're seeing:** Competitive **$1.6M** · Expansion **$8.4M** · Revenue leak **$2.2M**
@@ -47,7 +47,7 @@
 **[ Open it now → ]**
 
 ### Email
-- **Subject:** ~$60M is still unclaimed in your weekly brief
+- **Subject:** ~$60M is still unclaimed in your Top Insights brief
 - **Preheader:** The two biggest plays are sitting untouched.
 - **Title:** $60M is still on the table — your brief is unopened
 - **Intro:** A quick nudge: this week's brief hasn't been opened, and the upside doesn't wait. These two plays move the most — and both are already drafted, ready for your review.
@@ -88,7 +88,7 @@
 ### Email
 - **Subject:** Final reminder — your $60M brief closes Friday
 - **Preheader:** Last one — we'll pause reminders after today.
-- **Eyebrow:** Weekly brief · final reminder
+- **Eyebrow:** Top Insights · final reminder
 - **Title:** Last call — $60M rolls off Friday
 - **Pause note (in body):** This is the final reminder for this brief — we'll pause after today.
 - **Intro:** This is the final reminder for this brief. Friday's brief replaces it, so this is your last prompt on these specific plays — and the upside only gets harder to claim the longer it waits. Here's the one to act on first; it's drafted and ready.

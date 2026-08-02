@@ -29,9 +29,11 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
+import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
 
@@ -372,6 +374,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectGithub()
   } else if (providerId === "jira") {
     await connectorsApi.disconnectJira()
+  } else if (providerId === "confluence") {
+    await connectorsApi.disconnectConfluence()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
@@ -386,6 +390,10 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectAsana()
   } else if (providerId === "superset") {
     await connectorsApi.disconnectSuperset()
+  } else if (providerId === "uploads") {
+    // Drops the connection row only — the uploaded documents are kept, same
+    // as every other connector leaves its ingested data in place.
+    await connectorsApi.disconnectUploads()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -485,14 +493,34 @@ export function ConfigureConnectorDrawer({
       />
     )
   } else if (providerId === "slack") {
+    // The delivery target is PER-USER config — on the company's shared
+    // connection (a member viewing the workspace install, no row of their
+    // own) there is nothing personal to configure, so the delivery picker
+    // is replaced by a hint. The pull-channel selection and sync are
+    // COMPANY-wide and render either way.
+    const isSharedCompanyConnection = Boolean(
+      connection?.config?.company_connection,
+    )
     slot = (
       <>
-        <SlackChannelPicker
-          savedTargetType={
-            connection?.config?.target_type as "channel" | "dm" | undefined
-          }
-          savedChannelId={connection?.config?.channel_id as string | undefined}
-          savedChannelName={connection?.config?.channel_name as string | undefined}
+        {isSharedCompanyConnection ? (
+          <p className="conn-slack-hint">
+            This is your workspace&apos;s shared Slack connection. To get the
+            brief delivered to your own Slack, connect Slack from
+            Settings → Notifications.
+          </p>
+        ) : (
+          <SlackChannelPicker
+            savedTargetType={
+              connection?.config?.target_type as "channel" | "dm" | undefined
+            }
+            savedChannelId={connection?.config?.channel_id as string | undefined}
+            savedChannelName={connection?.config?.channel_name as string | undefined}
+            onSaved={onDisconnected /* reuse the reload callback */}
+          />
+        )}
+        <SlackSyncChannelsPicker
+          savedChannelIds={connection?.config?.sync_channel_ids}
           onSaved={onDisconnected /* reuse the reload callback */}
         />
         <SlackSyncButton
@@ -500,6 +528,13 @@ export function ConfigureConnectorDrawer({
           onSynced={onDisconnected /* reuse the reload callback */}
         />
       </>
+    )
+  } else if (providerId === "confluence") {
+    slot = (
+      <ConfluenceSpacesPicker
+        savedSpaceIds={connection?.config?.sync_space_ids}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
     )
   } else if (providerId === "github") {
     slot = <GithubInstallsSlot onChanged={onDisconnected} />

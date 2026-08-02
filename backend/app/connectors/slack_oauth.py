@@ -12,7 +12,7 @@ Flow:
 
 Message delivery:
     - post_message(channel, text) posts markdown to a Slack channel
-    - post_brief(channel, brief_payload) formats and posts a weekly brief
+    - post_brief(channel, brief_payload) formats and posts a Top Insights brief
 
 Slack v2 specifics worth knowing:
     - The exchange response separates bot creds from user creds:
@@ -268,11 +268,11 @@ def app_home_view() -> dict[str, Any]:
             {"type": "header", "text": {"type": "plain_text", "text": "Sprntly", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn", "text":
                 "*Your AI product manager.* Sprntly turns your tools and conversations "
-                "into weekly briefs, PRDs, and prototypes."}},
+                "into Top Insights briefs, PRDs, and prototypes."}},
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text":
                 "*What this connection does*\n"
-                "• Posts your weekly brief and updates into the channel you choose\n"
+                "• Posts your Top Insights brief and updates into the channel you choose\n"
                 "• Reads messages from channels you add Sprntly to, to surface "
                 "product signals — never channels you haven't invited it to"}},
             {"type": "section", "text": {"type": "mrkdwn", "text":
@@ -513,7 +513,7 @@ def post_to_target(
     text: str,
     blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Post a notification (weekly brief / nudge) to the user's chosen target.
+    """Post a notification (Top Insights brief / nudge) to the user's chosen target.
 
     The target lives on the connection's `config`:
       - target_type == "dm"      → DM the installing user (open_dm on their
@@ -739,9 +739,124 @@ def join_channel(bot_access_token: str, channel_id: str) -> bool:
     return True
 
 
+# ───── File upload (reports that don't fit in a message) ─────
+
+SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
+SLACK_FILES_COMPLETE_UPLOAD_URL = "https://slack.com/api/files.completeUploadExternal"
+
+FILE_UPLOAD_SCOPE = "files:write"
+
+
+def has_file_upload_scope(scopes: str | None) -> bool:
+    """True when the stored install granted `files:write`.
+
+    Checked BEFORE attempting an upload so a workspace that installed Sprntly
+    before file delivery existed gets a useful message instead of a silent
+    failure — adding a scope forces a reinstall, which is the user's decision,
+    not something we can do for them. `upload_file` also handles the
+    `missing_scope` rejection, because the stored scope string can be stale.
+    """
+    granted = {s.strip() for s in (scopes or "").replace(",", " ").split() if s.strip()}
+    return FILE_UPLOAD_SCOPE in granted
+
+
+def _form_post(access_token: str, url: str, data: dict[str, str]) -> tuple[bool, dict[str, Any]]:
+    """Form-encoded Slack Web API call → (ok, parsed). Never raises."""
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            data=data,
+            timeout=20,
+        )
+    except requests.RequestException:
+        logger.warning("Slack call to %s failed to send", url, exc_info=True)
+        return False, {}
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    return (resp.ok and bool(parsed.get("ok"))), parsed
+
+
+def upload_file(
+    bot_access_token: str,
+    *,
+    channel: str,
+    filename: str,
+    content: str | bytes,
+    title: str | None = None,
+    thread_ts: str | None = None,
+    initial_comment: str | None = None,
+) -> bool:
+    """Upload a file to a channel/DM via Slack's external-upload flow.
+
+    Three steps, which is what `files.upload` used to do in one before Slack
+    deprecated it:
+      1. `files.getUploadURLExternal` — reserve an upload URL + file id,
+      2. POST the bytes to that URL (not a Slack API host),
+      3. `files.completeUploadExternal` — share the file into `channel`.
+
+    Used to deliver a full HTML report into Slack, where there is no iframe to
+    render it and message text would be a wall of CSS.
+
+    Returns True on success and False on ANY failure — a missing `files:write`
+    scope, a Slack rejection, or a network error. This runs inside a
+    fire-and-forget background task delivering a report that took minutes to
+    produce, so the caller's job is to post a text fallback, not to handle an
+    exception. Every failure is logged with Slack's own error code.
+    """
+    data = content.encode("utf-8") if isinstance(content, str) else content
+    ok, parsed = _form_post(
+        bot_access_token, SLACK_FILES_GET_UPLOAD_URL,
+        {"filename": filename, "length": str(len(data))},
+    )
+    if not ok:
+        logger.warning(
+            "Slack files.getUploadURLExternal failed: err=%s (file=%s)",
+            parsed.get("error"), filename,
+        )
+        return False
+    upload_url = parsed.get("upload_url") or ""
+    file_id = parsed.get("file_id") or ""
+    if not (upload_url and file_id):
+        logger.warning("Slack upload URL response missing upload_url/file_id")
+        return False
+
+    try:
+        up = requests.post(
+            upload_url, files={"file": (filename, data)}, timeout=60,
+        )
+    except requests.RequestException:
+        logger.warning("Slack file byte upload failed to send", exc_info=True)
+        return False
+    if not up.ok:
+        logger.warning("Slack file byte upload rejected: http=%s", up.status_code)
+        return False
+
+    body: dict[str, str] = {
+        "files": json.dumps([{"id": file_id, "title": title or filename}]),
+        "channel_id": channel,
+    }
+    if thread_ts:
+        body["thread_ts"] = thread_ts
+    if initial_comment:
+        body["initial_comment"] = initial_comment
+    ok, parsed = _form_post(
+        bot_access_token, SLACK_FILES_COMPLETE_UPLOAD_URL, body,
+    )
+    if not ok:
+        logger.warning(
+            "Slack files.completeUploadExternal failed: err=%s (file=%s)",
+            parsed.get("error"), filename,
+        )
+    return ok
+
+
 def format_brief_message(brief_payload: dict[str, Any]) -> str:
-    """Format a weekly brief payload into Slack mrkdwn."""
-    headline = brief_payload.get("summary_headline", "Weekly Brief")
+    """Format a Top Insights brief payload into Slack mrkdwn."""
+    headline = brief_payload.get("summary_headline", "Top Insights")
     week = brief_payload.get("week_label", "")
     insights = brief_payload.get("insights", [])
 

@@ -1107,7 +1107,13 @@ export function PostGenerationResultView({
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
   // Only appends when the nonce has advanced (keeps the initial load url clean +
   // SSR output stable when no iterate has run). Preserves any existing query.
-  const reloadBundleUrl = viewerSrc(bundleUrl, bundleReloadNonce)
+  // Cache-bust on EITHER trigger: bundleReloadNonce (the caller-owned manual
+  // "Refresh preview" affordance) OR bundleGrantReloadKey (useViewGrant's own
+  // consolidated reloadSignal — bumped only after a CONFIRMED successful mint
+  // for the current checkpoint). Summing two independent, monotonically
+  // non-decreasing counters is sufficient: the composite value only needs to
+  // CHANGE whenever either source changes, it carries no meaning of its own.
+  const reloadBundleUrl = viewerSrc(bundleUrl, bundleReloadNonce + bundleGrantReloadKey)
   // P6-16 (UX-6): the primary View affordance is ALWAYS rendered (never a hidden
   // / dead link — the #6 bug). It is gated only on a built bundle existing:
   // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
@@ -1640,7 +1646,7 @@ export function PostGenerationResult({
       bundleGrantError={grant.error}
       onBundleAssetError={grant.notifyAssetError}
       onBundleLoad={grant.notifyBundleLoaded}
-      bundleGrantReloadKey={grant.reloadKey}
+      bundleGrantReloadKey={grant.reloadSignal}
       bundleNotReady={grant.notReady}
       onStateChange={(state) => {
         setIsComplete(state.isComplete)

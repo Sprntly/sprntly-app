@@ -1,13 +1,17 @@
-"""Slack connector is PER-USER, not company-shared.
+"""Slack DELIVERY is per-user; Slack VOICE-OF-CUSTOMER is company-level.
 
 Every other connector (github / clickup / hubspot / figma) is company-scoped
-and shared by all members. Slack is the exception: each user installs their
-own bot, picks their own channel, and gets their own notifications. The bug
-these tests lock down: with a single company-shared Slack row, member B could
-read member A's Slack token + channels, post as A's bot, and disconnect A.
+and shared by all members. Slack splits by role. Delivery stays per-user:
+each user installs their own bot, picks their own channel/DM, and gets their
+own notifications — member B can never read member A's delivery config, post
+as A's bot, or disconnect A. The voice-of-customer side (pull channels →
+corpus/KG) is company-level (2026-07-30): one workspace install serves the
+company, members see the COMPANY connection (sanitized) when they have no
+row of their own, and admins manage one shared pull-channel selection.
 
 Coverage:
-  - cross-user denial: member B cannot read/disconnect member A's Slack
+  - cross-user denial: member B cannot act as / disconnect member A's Slack
+  - members see the company connection SANITIZED (no delivery config leak)
   - each user resolves THEIR OWN Slack on channels / config / test
   - callback persists the user_id carried in the signed state
   - legacy NULL-user rows are excluded from per-user reads (→ reconnect)
@@ -252,33 +256,110 @@ def test_list_excludes_legacy_null_user_rows(slack_env):
 # ─────────────────────────── routes: cross-user denial ───────────────────────────
 
 
-def test_member_b_cannot_read_member_a_slack(slack_env, monkeypatch):
+def test_member_b_sees_company_slack_sanitized_never_a_delivery_config(
+    slack_env, monkeypatch
+):
+    """B (no own install) sees the COMPANY connection on the connectors
+    list — sanitized — and can list channel names through it, but never
+    reads A's delivery config and cannot act as A's bot."""
+    from app import db
+
     ctx = _two_user_company(monkeypatch)
-    # Only A connects Slack.
+    # Only A connects Slack, and A has personal delivery config saved.
     seed_connection(company_id=ctx.company_id, user_id=ctx.user_a,
                     provider="slack", token_blob={"access_token": "xoxb-A"},
                     label="A-team")
+    db.patch_slack_connection_config(
+        ctx.company_id, ctx.user_a,
+        {"target_type": "channel", "channel_id": "C-A",
+         "channel_name": "a-private-target",
+         "sync_channel_ids": ["C7"], "sync_channel_names": {"C7": "voc"}},
+    )
 
-    # B asks for channels — must 404 (B has no Slack), never see A's.
-    r = ctx.client_b.get("/v1/connectors/slack/channels")
-    assert r.status_code == 404
-
-    # B's connectors listing must NOT surface A's Slack at all.
+    # B's connectors listing surfaces the company Slack — flagged shared,
+    # pull selection visible, A's delivery target STRIPPED.
     listed_b = ctx.client_b.get("/v1/connectors").json()
-    assert not any(c["provider"] == "slack" for c in listed_b["connections"])
-    # A's listing shows A's own Slack.
-    listed_a = ctx.client_a.get("/v1/connectors").json()
-    assert any(c["provider"] == "slack" for c in listed_a["connections"])
+    slack_b = next(
+        c for c in listed_b["connections"] if c["provider"] == "slack"
+    )
+    assert slack_b["config"]["company_connection"] is True
+    assert slack_b["config"]["sync_channel_ids"] == ["C7"]
+    assert "channel_id" not in slack_b["config"]
+    assert "channel_name" not in slack_b["config"]
+    assert "target_type" not in slack_b["config"]
 
-    # A asks for channels — resolves A's own token.
+    # A's own listing shows A's own row, delivery config intact.
+    listed_a = ctx.client_a.get("/v1/connectors").json()
+    slack_a = next(
+        c for c in listed_a["connections"] if c["provider"] == "slack"
+    )
+    assert slack_a["config"].get("channel_id") == "C-A"
+    assert "company_connection" not in slack_a["config"]
+
+    # B can list channel NAMES via the company fallback (needed to view the
+    # shared pull selection) — the same workspace A installed.
     with patch(
         "app.routes.connectors.slack_oauth.list_channels",
-        return_value=[{"id": "C1", "name": "a-only", "is_private": False,
+        return_value=[{"id": "C1", "name": "general", "is_private": False,
                        "is_member": True, "is_archived": False}],
     ) as mock_list:
-        r = ctx.client_a.get("/v1/connectors/slack/channels")
+        r = ctx.client_b.get("/v1/connectors/slack/channels")
     assert r.status_code == 200
     mock_list.assert_called_once_with("xoxb-A")
+
+    # But B still cannot ACT on A's connection: no delivery-config writes,
+    # no DMs through A's bot.
+    r = ctx.client_b.post("/v1/connectors/slack/config",
+                          json={"channel_id": "C-B", "channel_name": "b"})
+    assert r.status_code == 404
+    r = ctx.client_b.post("/v1/connectors/slack/dm", json={"text": "hi"})
+    assert r.status_code == 404
+
+
+def test_sync_channels_admin_gate_blocks_members(slack_env, monkeypatch):
+    """The pull-channel selection is COMPANY-wide config — a non-admin
+    member may not change it, even though any member may connect their own
+    Slack for delivery."""
+    ctx = _two_user_company(monkeypatch)
+    seed_connection(company_id=ctx.company_id, user_id=ctx.user_a,
+                    provider="slack", token_blob={"access_token": "xoxb-A"})
+
+    r = ctx.client_b.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "C1", "name": "general"}]},
+    )
+    assert r.status_code == 403
+    assert "admin" in r.json()["detail"].lower()
+
+
+def test_admin_saves_sync_channels_onto_company_row(slack_env, monkeypatch):
+    """An admin without their own install still manages the company
+    selection — the save lands on the COMPANY's Slack row (the member's
+    install), because voice-of-customer pulling is one-per-company."""
+    from app import db
+    from app.connectors import slack_oauth
+
+    ctx = _two_user_company(monkeypatch)
+    # Only B (a regular member) installed Slack. A is the owner/admin.
+    seed_connection(company_id=ctx.company_id, user_id=ctx.user_b,
+                    provider="slack", token_blob={"access_token": "xoxb-B"})
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda tok, channel_id: join_calls.append((tok, channel_id)) or True)
+
+    r = ctx.client_a.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "C9", "name": "customer-voice"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["sync_channel_ids"] == ["C9"]
+
+    # Persisted on B's row — the company's one install — and the join used
+    # that row's bot token.
+    row_b = db.get_slack_connection(ctx.company_id, ctx.user_b)
+    assert json.loads(row_b["config_json"])["sync_channel_ids"] == ["C9"]
+    assert join_calls == [("xoxb-B", "C9")]
 
 
 def test_member_b_disconnect_does_not_kill_member_a_slack(slack_env, monkeypatch):

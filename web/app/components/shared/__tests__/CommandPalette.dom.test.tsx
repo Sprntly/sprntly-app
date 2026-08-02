@@ -71,6 +71,7 @@ vi.mock("../../../lib/api", () => ({
             query: "",
             reply: "",
             pinned: false,
+            prd_id: 88,
             created_at: "2026-07-01",
             updated_at: "2026-07-01",
           },
@@ -137,7 +138,7 @@ describe("CommandPalette", () => {
     expect(input()).not.toBeNull()
     expect(screen.getByRole("listbox")).not.toBeNull()
     // Pages group shows the app's surfaces with their URLs.
-    expect(screen.getByText("Weekly brief")).not.toBeNull()
+    expect(screen.getByText("Top Insights")).not.toBeNull()
     expect(screen.getByText("/brief")).not.toBeNull()
     expect(screen.getByText("New chat")).not.toBeNull()
   })
@@ -172,7 +173,9 @@ describe("CommandPalette", () => {
     const row = (await findRowByTitle("Pricing experiments")).closest("button")!
     fireEvent.click(row)
     const handoff = JSON.parse(localStorage.getItem("sprntly_resume_conv")!)
-    expect(handoff).toEqual({ dbId: 7, title: "Pricing experiments", fallbackTurns: [] })
+    // The PRD binding (prd_id) must ride along so the resumed tab reopens its
+    // content panel and shows the "View PRD" button.
+    expect(handoff).toEqual({ dbId: 7, title: "Pricing experiments", fallbackTurns: [], prdId: 88 })
     expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
@@ -187,7 +190,7 @@ describe("CommandPalette", () => {
 
   it("navigates with ArrowDown + Enter", async () => {
     await openPalette()
-    // Empty query: flat list starts [New chat, Weekly brief, …].
+    // Empty query: flat list starts [New chat, Top Insights, …].
     fireEvent.keyDown(input(), { key: "ArrowDown" })
     fireEvent.keyDown(input(), { key: "Enter" })
     expect(goToMock).toHaveBeenCalledWith("brief")

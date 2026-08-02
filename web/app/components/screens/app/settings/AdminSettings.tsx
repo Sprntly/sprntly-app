@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { adminApi, ApiError, apiErrorMessage, type LlmKeyStatus } from "../../../../lib/api"
 import { SettingsSection, SettingsMessage } from "./SettingsLayout"
+import { UsageSettings } from "./UsageSettings"
 import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 
 /**
@@ -30,6 +31,28 @@ export type AdminSettingsViewProps = {
   onSave: (e: React.FormEvent) => void
   onRemove: () => void
   onTest: () => void
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  )
 }
 
 export function AdminSettingsView({
@@ -72,33 +95,25 @@ export function AdminSettingsView({
         <p className="settings-placeholder">Loading…</p>
       ) : (
         <form onSubmit={onSave}>
-          {configured && status?.masked && (
-            <p className="settings-row-sub" style={{ marginBottom: 8 }}>
-              Current key: <code>{status.masked}</code>
-            </p>
-          )}
-          <div className="field">
-            <label className="field-label">
-              {configured ? "Replace key" : "API key"}
-            </label>
-            <input
-              type="password"
-              className="input"
-              value={keyInput}
-              onChange={(e) => onKeyInputChange(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="sk-ant-…"
-            />
-          </div>
-          {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
-          {message && <SettingsMessage kind="success">{message}</SettingsMessage>}
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="submit" className="btn btn-primary" disabled={!canSave}>
-              {saving ? "Saving…" : configured ? "Replace key" : "Save key"}
-            </button>
-            {configured && (
-              <>
+          {/* The stored key gets its own full-width row: the key on the left,
+              the actions that operate ON it on the right. Keeping Test/Remove
+              here rather than next to the input separates "act on the existing
+              key" from "supply a new one". */}
+          {configured && (
+            <div className="akey-current">
+              <div className="akey-current-main">
+                <span className="akey-current-label">Current key</span>
+                {status?.masked ? (
+                  <code className="akey-current-value">{status.masked}</code>
+                ) : (
+                  // configured but undecryptable (e.g. TOKEN_ENCRYPTION_KEY
+                  // rotated) — no preview to show, but Remove must stay usable.
+                  <span className="akey-current-value akey-current-muted">
+                    Stored — preview unavailable
+                  </span>
+                )}
+              </div>
+              <div className="akey-current-actions">
                 <button
                   type="button"
                   className="btn"
@@ -109,15 +124,49 @@ export function AdminSettingsView({
                 </button>
                 <button
                   type="button"
-                  className="btn"
+                  className="btn akey-icon-btn"
                   onClick={onRemove}
                   disabled={removing}
+                  // Icon-only, so the name has to come from the accessible
+                  // name — screen readers and the native tooltip both read it.
+                  aria-label="Remove key"
+                  title="Remove key"
+                  aria-busy={removing}
                 >
-                  {removing ? "Removing…" : "Remove key"}
+                  <TrashIcon />
                 </button>
-              </>
-            )}
+              </div>
+            </div>
+          )}
+
+          <div className="field">
+            <label className="field-label" htmlFor="anthropic-api-key">
+              {configured ? "Replace key" : "API key"}
+            </label>
+            {/* Input and its submit share one row — the button acts on the
+                field beside it, so they belong together. */}
+            <div className="akey-input-row">
+              <input
+                id="anthropic-api-key"
+                type="password"
+                className="input"
+                value={keyInput}
+                onChange={(e) => onKeyInputChange(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="sk-ant-…"
+              />
+              <button
+                type="submit"
+                className="btn btn-primary akey-submit"
+                disabled={!canSave}
+              >
+                {saving ? "Saving…" : configured ? "Replace key" : "Save key"}
+              </button>
+            </div>
           </div>
+          {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
+          {message && <SettingsMessage kind="success">{message}</SettingsMessage>}
         </form>
       )}
     </SettingsSection>
@@ -230,20 +279,27 @@ export function AdminSettings() {
   }, [])
 
   return (
-    <AdminSettingsView
-      status={status}
-      restricted={restricted}
-      loading={loading}
-      keyInput={keyInput}
-      saving={saving}
-      removing={removing}
-      testing={testing}
-      error={error}
-      message={message}
-      onKeyInputChange={setKeyInput}
-      onSave={onSave}
-      onRemove={onRemove}
-      onTest={onTest}
-    />
+    <>
+      <AdminSettingsView
+        status={status}
+        restricted={restricted}
+        loading={loading}
+        keyInput={keyInput}
+        saving={saving}
+        removing={removing}
+        testing={testing}
+        error={error}
+        message={message}
+        onKeyInputChange={setKeyInput}
+        onSave={onSave}
+        onRemove={onRemove}
+        onTest={onTest}
+      />
+      {/* Usage lives in this pane, directly under the key it is reporting on:
+          "here is the key we run on" then "here is what we ran on it". It is
+          skipped entirely when restricted — UsageSettings would otherwise 403
+          on its own and render a second copy of the same message. */}
+      {!restricted && <UsageSettings keyConfigured={status?.configured ?? false} />}
+    </>
   )
 }

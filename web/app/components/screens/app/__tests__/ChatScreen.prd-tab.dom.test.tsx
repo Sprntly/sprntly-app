@@ -40,6 +40,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: {
       current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
@@ -113,20 +114,28 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
-import { ContentProvider } from "../../../../context/ContentContext"
+import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 import { conversationsApi } from "../../../../lib/api"
 
 // Harness: openPrdTab as a button (the real handoff entry point any surface uses)
-// + a probe that surfaces the current content-panel tab, so tests can observe the
-// panel opening without mounting the heavy ContentPanel/PrdPanelContent tree.
+// + probes that surface the current content-panel tab and the insight the shared
+// content is scoped to, so tests can observe the panel opening (and what it would
+// render) without mounting the heavy ContentPanel/PrdPanelContent tree.
 function Harness({ request }: { request: PrdTabRequest }) {
   const { openPrdTab, contentPanelTab } = useNavigation()
+  const { content } = useContent()
+  const detail = content.detail?.meta
   return React.createElement(
     React.Fragment,
     null,
     React.createElement("button", { onClick: () => openPrdTab(request) }, "open-prd"),
     React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "none"),
+    React.createElement(
+      "div",
+      { "data-testid": "detail-probe" },
+      detail ? `${detail.briefId}:${detail.insightIndex}` : "none",
+    ),
     React.createElement(ChatScreen),
   )
 }
@@ -144,6 +153,7 @@ function renderWith(request: PrdTabRequest) {
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
 const briefSection = () => document.querySelector("section.briefx")
 const panelProbe = () => screen.getByTestId("panel-probe").textContent
+const detailProbe = () => screen.getByTestId("detail-probe").textContent
 
 async function clickOpenPrd() {
   await act(async () => { fireEvent.click(screen.getByText("open-prd")) })
@@ -352,6 +362,71 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
   })
 })
 
+// ── Evidence opens the same way a PRD does ───────────────────────────────────
+// A Top Insights card's "View Evidence" used to slide the panel in OVER the
+// brief. It now takes the identical route as "View PRD" — openPrdTab, a new chat
+// tab, the panel over it — differing only in which tab it lands on and in
+// starting no PRD work. These tests lock the landing, the absence of generation,
+// and the refocus behaviour (an evidence tab must neither close its panel nor be
+// hijacked by a PRD that merely exists for the same insight).
+describe("ChatScreen — evidence opens as a new chat tab with the panel on Evidence", () => {
+  const EVIDENCE: PrdTabRequest = {
+    title: "Evidence · First-handoff completion is dropping",
+    insightBody: "Completion fell to 41% at three sites.",
+    source: {
+      kind: "evidence",
+      meta: { briefId: 7, insightIndex: 0 },
+      detail: { meta: { briefId: 7, insightIndex: 0 } } as never,
+    },
+  }
+
+  it("test_evidence_tab_lands_on_evidence: spawns the tab, opens the panel on Evidence, and generates NO PRD", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    await waitFor(() => expect(tabBar().getByText(EVIDENCE.title)).toBeTruthy())
+    expect(briefSection()).toBeNull()
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+    // The whole point: evidence is not a PRD request.
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("scopes the shared content to the clicked finding, so the Evidence tab loads THAT insight", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    await waitFor(() => expect(detailProbe()).toBe("7:0"))
+  })
+
+  it("opens on its insight: the finding body rides along into the tab's opening card", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    const card = await screen.findByTestId("chat-insight-msg")
+    expect(within(card).getByText(/Completion fell to 41%/)).toBeTruthy()
+  })
+
+  it("test_evidence_tab_survives_refocus: switching away and back reopens Evidence, not a PRD that exists for the same insight", async () => {
+    // The insight HAS a PRD in the DB. That must not hijack an evidence tab —
+    // the tab was opened for the finding, and only a PRD landed IN THIS TAB
+    // outranks it.
+    mockPrototypeMap.entries = new Map([
+      [0, { insight_index: 0, prd_id: 42, prd_title: "Measurement Stack", prototype: null }],
+    ])
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+
+    await act(async () => { fireEvent.click(tabBar().getByText("Top Insights")) })
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+
+    await act(async () => { fireEvent.click(tabBar().getByText(EVIDENCE.title)) })
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+    expect(detailProbe()).toBe("7:0")
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+})
+
 describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
   const READY: PrdTabRequest = {
     title: "PRD · Ready doc",
@@ -359,10 +434,10 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
   }
 
   async function sendInThread(text: string) {
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
   }
 
@@ -381,13 +456,55 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
     // New plain chat tab, no PRD attached.
     await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
     await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => { fireEvent.change(textarea, { target: { value: "What changed last week?" } }) })
-    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
     const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number } | undefined
     expect(opts?.prd_id).toBeUndefined()
+  })
+})
+
+// A HEADER open (brief insight / ideation / backlog) has NO in-chat command turn:
+// the insight card IS the tab's opening agent message and must stay at the TOP,
+// even after the user starts chatting on it. (Contrast the in-chat command flow,
+// where the card renders inline BELOW the command turn — covered in
+// ChatScreen.import-command.dom.test.tsx.)
+describe("ChatScreen — a brief-insight-opened PRD keeps its card at the top", () => {
+  async function sendInThread(text: string) {
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+  }
+
+  it("renders the insight card ABOVE the user's first message (no prdInFlow)", async () => {
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+      insightBody: "Users churn early. Fix onboarding.",
+    })
+    await clickOpenPrd()
+    // Header open: the insight card is the opening message (no command turn).
+    const card = await screen.findByTestId("chat-insight-msg")
+
+    // The user chats on the PRD — a real turn is appended to the thread.
+    await sendInThread("Can you tighten the goals section?")
+    const bubble = await waitFor(() => {
+      const el = Array.from(document.querySelectorAll(".bc-user-bubble"))
+        .find((n) => n.textContent?.includes("Can you tighten the goals section?"))
+      expect(el).toBeTruthy()
+      return el as Element
+    })
+
+    // The insight card stays PINNED ABOVE the user's message (header behaviour is
+    // unchanged): card precedes bubble in document order.
+    expect(card.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // And it's still the FIRST .bc-turn in the thread.
+    const firstTurn = document.querySelector(".bc-thread .bc-turn")
+    expect(firstTurn?.getAttribute("data-testid")).toBe("chat-insight-msg")
   })
 })

@@ -147,7 +147,7 @@ describe("FirstBrief (container) — first brief", () => {
       "Analyzing your sources",
     )
     expect(container.querySelector(".gen-stage.pending")?.textContent).toContain(
-      "Composing your first Weekly Brief",
+      "Composing your first Top Insights brief",
     )
 
     // Continue is the disabled brief handoff; footer narrates generation.
@@ -209,7 +209,7 @@ describe("FirstBrief (container) — first brief", () => {
     expect(screen.getByText("network down")).not.toBeNull()
     // Ready handoff tile still renders (metadata only, no brief content).
     expect(container.querySelector(".gen-ready")?.textContent).toContain(
-      "Your Weekly Brief is waiting",
+      "Your Top Insights are waiting",
     )
     // And it tells the user about the recurring Monday-6am brief cadence.
     const cadence = container.querySelector(".gen-ready .brief-cadence")?.textContent ?? ""

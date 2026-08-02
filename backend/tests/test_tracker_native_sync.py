@@ -544,7 +544,11 @@ def test_save_fields_custom_fields_validate_and_merge(isolated_settings, quiet_k
         "customfield_2": "a note",
     }
 
-    # null clears ONE field's override, keeping the sibling.
+    # null clears ONE field, keeping the sibling — and the cleared field stays
+    # in the map as an explicit null rather than being dropped. The key has to
+    # survive: it is the only thing distinguishing "the user cleared this" from
+    # "the user never set this", and the sync engine pushes a clear out to the
+    # tracker only when it can see the difference.
     routes.save_fields(key, routes.FieldsIn(
         custom_fields={"customfield_1": None},
     ), _ctx())
@@ -552,7 +556,7 @@ def test_save_fields_custom_fields_validate_and_merge(isolated_settings, quiet_k
         require_client().table("ticket_edits").select("custom_fields")
         .eq("company_id", CID).eq("ticket_key", key).execute().data[0]
     )
-    assert row["custom_fields"] == {"customfield_2": "a note"}
+    assert row["custom_fields"] == {"customfield_1": None, "customfield_2": "a note"}
 
     # Unknown field id → 422; read-only field → 422; bad value → 422.
     for bad in (
@@ -591,43 +595,155 @@ def test_save_fields_issue_type_validates(isolated_settings, quiet_kicks):
 # ── Child issues → REAL Jira sub-tasks ───────────────────────────────────────
 
 
-def test_push_jira_subtasks_is_idempotent_and_sets_parent(isolated_settings, monkeypatch):
+def _jira_subtask_harness(monkeypatch):
+    """Record create/delete/transition calls against a fake Jira; the mapping
+    rows go through the real jira_issue_map so the prune reads what the pushes
+    actually wrote."""
     from app.stories import push as push_mod
 
-    created: list[dict] = []
+    calls = {"created": [], "deleted": [], "transitioned": []}
 
     def _fake_create(tok, cloud, **kw):
-        created.append(kw)
-        return {"key": f"KAN-{100 + len(created)}", "id": "x", "url": None}
+        calls["created"].append(kw)
+        return {"key": f"KAN-{100 + len(calls['created'])}", "id": "x", "url": None}
+
+    def _fake_delete(tok, cloud, key, **kw):
+        calls["deleted"].append(key)
+        return True
+
+    def _fake_transition(tok, cloud, key, status):
+        calls["transitioned"].append((key, status))
+        return True
 
     monkeypatch.setattr(push_mod.jira_oauth, "create_issue", _fake_create)
+    monkeypatch.setattr(push_mod.jira_oauth, "delete_issue", _fake_delete)
+    monkeypatch.setattr(push_mod.jira_oauth, "transition_issue", _fake_transition)
+    return push_mod, calls
 
-    push_mod.push_jira_subtasks(
-        CID, "KAN", "KAN-7", "tid1",
-        ["[P] Write migration", "Wire the route", "  "],
+
+def _sync_subs(push_mod, labels):
+    push_mod.sync_jira_subtasks(
+        CID, "KAN", "KAN-7", "tid1", labels,
         access_token="tok", cloud_id="cloud", subtask_type="Sub-task",
     )
-    assert [c["summary"] for c in created] == ["Write migration", "Wire the route"]
-    assert all(c["issue_type"] == "Sub-task" for c in created)
-    assert all(c["extra_fields"] == {"parent": {"key": "KAN-7"}} for c in created)
 
-    # Second push: both children already mapped → nothing created.
-    push_jira_count = len(created)
-    push_mod.push_jira_subtasks(
-        CID, "KAN", "KAN-7", "tid1",
-        ["[P] Write migration", "Wire the route"],
-        access_token="tok", cloud_id="cloud", subtask_type="Sub-task",
-    )
-    assert len(created) == push_jira_count
 
-    # A NEW child (edited list) creates only the missing one.
-    push_mod.push_jira_subtasks(
-        CID, "KAN", "KAN-7", "tid1",
-        ["Wire the route", "Ship the docs"],
-        access_token="tok", cloud_id="cloud", subtask_type="Sub-task",
-    )
-    assert [c["summary"] for c in created][-1] == "Ship the docs"
-    assert len(created) == 3
+def test_sync_jira_subtasks_is_idempotent_and_sets_parent(isolated_settings, monkeypatch):
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    _sync_subs(push_mod, ["[P] Write migration", "Wire the route", "  "])
+    assert [c["summary"] for c in calls["created"]] == ["Write migration", "Wire the route"]
+    assert all(c["issue_type"] == "Sub-task" for c in calls["created"])
+    assert all(c["extra_fields"] == {"parent": {"key": "KAN-7"}} for c in calls["created"])
+
+    # Second pass, same list: both children already mapped → no writes at all.
+    _sync_subs(push_mod, ["[P] Write migration", "Wire the route"])
+    assert len(calls["created"]) == 2
+    assert calls["deleted"] == []
+
+
+def test_sync_jira_subtasks_deletes_a_child_removed_in_sprntly(
+    isolated_settings, monkeypatch
+):
+    """The bug this exists to kill: the child-issue push was add-only, so a
+    child removed in Sprntly stayed a live Jira sub-task forever."""
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    _sync_subs(push_mod, ["Write migration", "Wire the route"])
+    created_keys = {c["summary"]: f"KAN-{101 + i}"
+                    for i, c in enumerate(calls["created"])}
+
+    _sync_subs(push_mod, ["Wire the route"])
+    assert calls["deleted"] == [created_keys["Write migration"]]
+    assert len(calls["created"]) == 2  # nothing re-created
+
+    # And the mapping row is gone, so a later pass doesn't retry the delete.
+    from app.db.jira_sync import list_jira_subtask_keys
+
+    assert list(list_jira_subtask_keys(CID, "KAN", "tid1").values()) == [
+        created_keys["Wire the route"]
+    ]
+
+
+def test_sync_jira_subtasks_treats_a_rename_as_remove_plus_add(
+    isolated_settings, monkeypatch
+):
+    """The label IS the child issue, so a rename must replace the sub-task —
+    not leave the old one behind next to a new duplicate."""
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    _sync_subs(push_mod, ["Wire the route"])
+    old_key = "KAN-101"
+
+    _sync_subs(push_mod, ["Wire the /v2 route"])
+    assert [c["summary"] for c in calls["created"]] == ["Wire the route", "Wire the /v2 route"]
+    assert calls["deleted"] == [old_key]
+
+
+def test_sync_jira_subtasks_removes_the_last_child(isolated_settings, monkeypatch):
+    """Emptying the list must still reach Jira. The sync pass used to guard the
+    whole call behind `if story.subtasks:`, so removing the LAST child issue
+    was the one removal that could never propagate."""
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    _sync_subs(push_mod, ["Wire the route"])
+    _sync_subs(push_mod, [])
+    assert calls["deleted"] == ["KAN-101"]
+
+
+def test_sync_jira_subtasks_closes_when_delete_is_forbidden(
+    isolated_settings, monkeypatch
+):
+    """Jira's "Delete Issues" permission is absent from a default scheme, so
+    the common case is a refused delete — the child still has to leave the
+    board, which means closing it under the project's OWN done-status name."""
+    from app.connectors.tracker_errors import TrackerDeleteForbiddenError
+
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    def _refuse(tok, cloud, key, **kw):
+        raise TrackerDeleteForbiddenError("nope")
+
+    monkeypatch.setattr(push_mod.jira_oauth, "delete_issue", _refuse)
+    monkeypatch.setattr(push_mod, "_done_status_name", lambda *a: "Shipped")
+
+    _sync_subs(push_mod, ["Wire the route"])
+    _sync_subs(push_mod, [])
+
+    assert calls["transitioned"] == [("KAN-101", "Shipped")]
+    # Closed counts as removed: the mapping goes, so the next pass doesn't
+    # retry a delete that is permanently refused.
+    from app.db.jira_sync import list_jira_subtask_keys
+
+    assert list_jira_subtask_keys(CID, "KAN", "tid1") == {}
+
+
+def test_sync_jira_subtasks_keeps_mapping_when_neither_delete_nor_close_works(
+    isolated_settings, monkeypatch
+):
+    """Nothing landed, so nothing is forgotten — the next pass retries."""
+    from app.connectors.tracker_errors import TrackerDeleteForbiddenError
+
+    push_mod, calls = _jira_subtask_harness(monkeypatch)
+
+    def _refuse(tok, cloud, key, **kw):
+        raise TrackerDeleteForbiddenError("nope")
+
+    monkeypatch.setattr(push_mod.jira_oauth, "delete_issue", _refuse)
+    monkeypatch.setattr(push_mod, "_done_status_name", lambda *a: None)
+
+    _sync_subs(push_mod, ["Wire the route"])
+    _sync_subs(push_mod, [])
+
+    from app.db.jira_sync import list_jira_subtask_keys
+
+    assert list_jira_subtask_keys(CID, "KAN", "tid1") == {"tid1#sub#" + _hash("Wire the route"): "KAN-101"}
+
+
+def _hash(label: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
 
 
 def test_subtask_type_gates_description_section(isolated_settings, monkeypatch):

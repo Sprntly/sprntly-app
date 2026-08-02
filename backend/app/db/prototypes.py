@@ -123,15 +123,20 @@ def start_prototype(
     figma_file_key: str | None = None,
     website_url: str | None = None,
     github_installation_id: int | None = None,
-    screenshot_key: str | None = None,
     created_by_user_id: str | None = None,
 ) -> int:
     """Insert a generating row, return its id. State transition: prototype_created.
 
-    Scenario inputs (figma_file_key, website_url, github_installation_id,
-    screenshot_key) are stored as snapshots of what was available at generate
-    time. Scenario LABELS (A/B/C/0) are computed at read time via
-    infer_scenario(...); never persisted.
+    Scenario inputs (figma_file_key, website_url, github_installation_id) are
+    stored as snapshots of what was available at generate time. Scenario
+    LABELS (A/B/C/0) are computed at read time via infer_scenario(...); never
+    persisted.
+
+    Does NOT accept a screenshot key: the legacy `prototypes.screenshot_key`
+    column stays untouched by any new row (multi-screenshot design source
+    ticket) — the caller persists N staged upload keys via
+    `db.prototype_screenshots.insert_screenshots` right after this call
+    returns, when the request carried any.
 
     Keyword-only args (the `*`) prevent positional confusion between `prd_id`,
     `workspace_id`, and `template_version` — cheap discipline given that a
@@ -155,12 +160,6 @@ def start_prototype(
         # rotating this token, giving one permanent /p/<slug>/<token> URL.
         "share_token": str(uuid.uuid4()),
     }
-    # Write screenshot_key only when supplied — the optional-column convention
-    # (mirrors db/prototype_comments.insert_comment): a keyless insert's payload
-    # carries exactly the prior column set, so environments whose schema predates
-    # the column keep working and the null stays an honest "no screenshot" signal.
-    if screenshot_key is not None:
-        payload["screenshot_key"] = screenshot_key
     # created_by_user_id (the generating user, for the prototype-ready
     # notification) follows the same optional-column convention: written only
     # when the caller supplied an identity, so schemas that predate the column
@@ -308,12 +307,20 @@ def find_prototype_by_prd(
     — a different helper for a different purpose, kept separate). Filtered to
     the caller's workspace, newest by id. `statuses=None` means no status
     filter at all (matches ANY status, including 'failed'/'invalidated') —
-    this backs the three read-only /by-prd lookups:
+    this backs two of the three read-only /by-prd lookups:
 
-      statuses=["ready"]              -> GET /by-prd/{prd_id}        (ready only)
-      statuses=["ready", "generating"] -> GET /by-prd/{prd_id}/active (resume lookup)
-      statuses=None                    -> GET /by-prd/{prd_id}/latest (any status,
-                                           incl. 'failed' — backs the error+retry surface)
+      statuses=["ready"] -> GET /by-prd/{prd_id}        (ready only)
+      statuses=None       -> GET /by-prd/{prd_id}/latest (any status, incl.
+                              'failed' — backs the error+retry surface)
+
+    GET /by-prd/{prd_id}/active (the resume lookup) does NOT use this
+    function — it needs to look PAST a newer row that matches a SQL-level
+    status filter but fails an additional Python-side validity check (a
+    'failed' row with no bundle_url isn't a real resumable prototype), and
+    this function's hard `.limit(1)` can't do that: if the single row it
+    fetches turns out to be invalid, there is no second row to fall back to,
+    even when a genuinely valid older row exists. See `find_prototypes_by_prd`
+    (plural) and `get_active_by_prd`'s own docstring for the fix.
     """
     c = require_client()
     q = (
@@ -326,6 +333,40 @@ def find_prototype_by_prd(
         q = q.in_("status", statuses)
     resp = q.order("id", desc=True).limit(1).execute()
     return resp.data[0] if resp.data else None
+
+
+def find_prototypes_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+    statuses: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` prototypes for a PRD matching `statuses`, newest
+    (highest id) first — the multi-candidate sibling of `find_prototype_by_prd`.
+
+    Exists for callers that must apply an ADDITIONAL Python-side validity
+    check on top of the SQL status filter and need to look past a candidate
+    that fails it. `find_prototype_by_prd`'s `.limit(1)` cannot do this: a
+    newer row that matches `statuses` at the SQL level but is later rejected
+    in Python (e.g. get_active_by_prd's 'failed row with no bundle_url isn't
+    resumable' check) would shadow a genuinely valid OLDER row underneath it,
+    since the query never even fetches that older row to consider it. This
+    function fetches a bounded WINDOW of candidates instead of just the top
+    one, so the caller can walk them newest-first and pick the first one that
+    passes its own check.
+    """
+    c = require_client()
+    q = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+    )
+    if statuses is not None:
+        q = q.in_("status", statuses)
+    resp = q.order("id", desc=True).limit(limit).execute()
+    return resp.data or []
 
 
 def create_checkpoint(

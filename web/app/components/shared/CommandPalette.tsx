@@ -229,6 +229,7 @@ export function CommandPalette({
                 dbId: action.dbId,
                 title: action.title,
                 fallbackTurns: [],
+                prdId: action.prdId ?? null,
               }),
             )
           } catch {

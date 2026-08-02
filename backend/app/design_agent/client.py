@@ -16,6 +16,7 @@ from anthropic import Anthropic
 from fastapi import HTTPException
 
 from app.config import settings
+from app.llm_metering import install_metering
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +25,19 @@ _fallback_warned = False
 
 
 @lru_cache(maxsize=16)
-def _client_for_key(api_key: str) -> Anthropic:
+def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     """Cached Design Agent client keyed by the API key (no explicit timeout —
     long tool loops rely on the SDK's default). `max_retries=0`: mirrors
     `app.llm._client_for_key`'s identical precedent — `agent_loop`'s own
     retry loop (runner.py) is the single source of truth for retry-on-
     transient-failure, so the SDK's opaque default (`max_retries=2`, no
-    callback hook) must not silently double-retry underneath it."""
-    return Anthropic(api_key=api_key, max_retries=0)
+    callback hook) must not silently double-retry underneath it.
+
+    Instrumented for usage metering before caching (see app.llm_metering), so
+    prototype generation/iteration lands in `llm_usage_events` on the same
+    footing as every other surface. `key_mode` records whose key is billed."""
+    client = Anthropic(api_key=api_key, max_retries=0)
+    return install_metering(client, key_mode)
 
 
 def _platform_key() -> str | None:
@@ -64,9 +70,9 @@ def get_design_agent_client() -> Anthropic:
     has no key and platform fallback isn't allowed, it raises. Raises
     HTTPException(500) at request time when no key is available at all.
     """
-    from app.llm_keys import resolve_llm_api_key
+    from app.llm_keys import resolve_llm_api_key_with_mode
 
-    key = resolve_llm_api_key(_platform_key())
+    key, key_mode = resolve_llm_api_key_with_mode(_platform_key())
     if not key:
         raise HTTPException(
             status_code=500,
@@ -77,7 +83,7 @@ def get_design_agent_client() -> Anthropic:
                 "in Settings → Admin."
             ),
         )
-    return _client_for_key(key)
+    return _client_for_key(key, key_mode)
 
 
 def reset_design_agent_client() -> None:
