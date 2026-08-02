@@ -96,6 +96,7 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
+from app.deps.ownership import require_owned_dataset
 from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
 from app.prompt_history import clamp_turn_text
 from app.skill_router import is_competitive_report_request
@@ -213,6 +214,48 @@ def _require_admin_for_org_connector(
             "Only admins can manage org-wide connectors. "
             "Ask your workspace admin to connect this integration.",
         )
+
+
+def _gate_dataset(dataset: str, company_id: str) -> str:
+    """Shape-validate + tenant-gate a CLIENT-SUPPLIED dataset slug, returning
+    the normalized slug to use downstream.
+
+    Every connector→corpus sync route takes its target dataset from the request
+    body. `require_company` proves who the caller is and
+    `_require_admin_for_org_connector` proves they're an admin OF THEIR OWN
+    company — neither has ever looked at that slug. Since the backend holds the
+    service-role key (RLS bypassed), nothing below the route re-checks it
+    either: `corpus.load_corpus` is a slug→directory reader by design, and
+    `google_drive_sync` only asserts `dataset_exists` (existence, not
+    ownership — which doubles as a slug-enumeration oracle). So the guard has to
+    live here, and it has to run before the slug reaches any of three sinks:
+    the `settings.data_path / slug` write (fixed filenames, so a hit OVERWRITES
+    the victim's file), `_seed_corpus_after_sync` (which would glob another
+    tenant's whole corpus into THIS company's kg_signal rows), and
+    `upsert_input_source` (which flips rows on another tenant's dataset).
+
+    Two checks, in this order:
+
+      * Shape (422). Reusing `datasets.validate_slug` rather than a second
+        regex — a slug is `[a-z0-9][a-z0-9_-]{1,62}`, which also covers the
+        multi-workspace `{company}--{workspace}` form. This is what stops
+        `../../escaped` being joined onto DATA_DIR; the ownership check alone
+        would reject it, but shape-first means a traversal string never reaches
+        a path join at all. Format before tenancy matches routes/datasets.py.
+      * Ownership (404, never 403 — `require_owned_dataset`), so a foreign
+        tenant can't tell "exists but not yours" from "doesn't exist". Company
+        slugs are low-entropy (`acme`), so existence disclosure alone would be
+        enough to enumerate tenants.
+
+    Company-level, not workspace-level: these routes run on `require_company`
+    and the connections they sync are themselves company-scoped, so
+    `workspace_id` is deliberately left off (see the commit body).
+    """
+    try:
+        slug = datasets_service.validate_slug(dataset)
+    except datasets_service.InvalidSlug as e:
+        raise HTTPException(422, str(e)) from e
+    return require_owned_dataset(slug, company_id)
 
 
 def _visible_connection_rows(company: CompanyContext) -> list[dict]:
@@ -626,18 +669,61 @@ def google_drive_callback(code: str, state: str):
     return _build_post_oauth_redirect(payload, google_oauth.GOOGLE_DRIVE_PROVIDER)
 
 
+def _drive_config_dataset(company_id: str) -> str | None:
+    """The dataset slug stored on this company's Drive connection config, if any.
+
+    Written at OAuth time from `?dataset=` on /google-drive/authorize (and
+    start-oauth), which is not ownership-checked either. `sync_google_drive`,
+    `_auto_enable_drive_input_source` and `_seed_corpus_after_sync` all fall
+    back to it when the request body omits a dataset, so it is a second,
+    equally client-controlled route into the same sinks — which is why the Drive
+    routes gate the EFFECTIVE slug (body value, else this) rather than just the
+    body value."""
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not row or not row.get("config_json"):
+        return None
+    try:
+        cfg = json.loads(row["config_json"])
+    except (TypeError, ValueError):
+        return None
+    slug = cfg.get("dataset")
+    return str(slug) if slug else None
+
+
+def _gate_effective_drive_dataset(
+    dataset: str | None, company_id: str
+) -> str | None:
+    """Tenant-gate the slug a Drive sync will ACTUALLY act on, and return the
+    value to pass downstream (None when the request named none).
+
+    `dataset` is optional on both Drive routes, and when it's absent
+    `sync_google_drive` / `_auto_enable_drive_input_source` fall back to the
+    slug on the connection config. Gating only the body value would therefore
+    leave that stored slug — written from an unchecked `?dataset=` at OAuth
+    time — as a live bypass into the same sinks, so whichever one will be used
+    is the one that gets checked.
+
+    Returns the NORMALIZED body slug when one was supplied, so the string that
+    was verified is the string that reaches the `data_path / slug` join. When
+    the body named nothing it returns None rather than the stored slug: the
+    existing fallbacks stay exactly as they were (notably
+    `_seed_corpus_after_sync`, which falls back to the company's own slug and
+    not to the config value), now that the value they resolve to has been
+    verified. A request naming nothing anywhere is unchanged — every fallback
+    already lands on the caller's own company.
+    """
+    if dataset:
+        return _gate_dataset(dataset, company_id)
+    stored = _drive_config_dataset(company_id)
+    if stored:
+        _gate_dataset(stored, company_id)
+    return None
+
+
 def _auto_enable_drive_input_source(company_id: str, dataset: str | None) -> None:
     """Flip the dataset's google_drive input source on after a sync. Falls back
     to the dataset stored in the connection config when not passed explicitly."""
-    dataset_slug = dataset
-    if not dataset_slug:
-        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-        if row and row.get("config_json"):
-            try:
-                cfg = json.loads(row["config_json"])
-                dataset_slug = cfg.get("dataset")
-            except (TypeError, ValueError):
-                pass
+    dataset_slug = dataset or _drive_config_dataset(company_id)
     if dataset_slug:
         try:
             db.upsert_input_source(
@@ -697,6 +783,9 @@ def google_drive_save_files(
     app can only read those specific files. We persist them in the connection
     config under config["files"], then run a sync so the picked files land in
     the corpus immediately."""
+    # Tenant gate first — `dataset` is optional here, so what gets checked is
+    # the EFFECTIVE slug (body value, else the one stored on the connection).
+    dataset = _gate_effective_drive_dataset(body.dataset, company.company_id)
     _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
@@ -708,14 +797,14 @@ def google_drive_save_files(
         normalize_picked_files(picked)
         result = sync_google_drive(
             company_id=company.company_id,
-            dataset=body.dataset,
+            dataset=dataset,
             files=picked,
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
 
-    _auto_enable_drive_input_source(company.company_id, body.dataset)
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _auto_enable_drive_input_source(company.company_id, dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
@@ -724,18 +813,21 @@ def google_drive_sync(
     body: GoogleDriveSyncIn | None = None,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     payload = body or GoogleDriveSyncIn()
+    # Tenant gate first — see google_drive_save_files: the effective slug is the
+    # body value, else the one stored on the connection at OAuth time.
+    dataset = _gate_effective_drive_dataset(payload.dataset, company.company_id)
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     try:
         result = sync_google_drive(
             company_id=company.company_id,
-            dataset=payload.dataset,
+            dataset=dataset,
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
 
-    _auto_enable_drive_input_source(company.company_id, payload.dataset)
-    _seed_corpus_after_sync(company.company_id, payload.dataset)
+    _auto_enable_drive_input_source(company.company_id, dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
@@ -973,13 +1065,15 @@ def figma_sync_to_corpus(
     body: FigmaSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     """Sync Figma file structure and design tokens into the corpus.
 
     Fetches file tree + published styles and writes a markdown summary
     into DATA_DIR/{dataset}/figma_design_context.md. Company-scoped: uses
-    the caller's company's Figma connection only.
+    the caller's company's Figma connection only, and writes only into a
+    dataset the caller's company owns.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     token = _figma_access_token(company.company_id)
 
     # Fetch file structure + styles
@@ -1015,20 +1109,20 @@ def figma_sync_to_corpus(
             lines.append(entry)
 
     md_text = "\n".join(lines) + "\n"
-    target = settings.data_path / body.dataset / "figma_design_context.md"
+    target = settings.data_path / dataset / "figma_design_context.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(md_text, encoding="utf-8")
 
     # Auto-enable figma input source
     try:
         db.upsert_input_source(
-            body.dataset, "figma", enabled=True,
+            dataset, "figma", enabled=True,
             config={"file_key": body.file_key, "last_sync_at": db.utc_now()},
         )
     except Exception:
         logger.warning("Failed to auto-enable figma input source", exc_info=True)
 
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return {"ok": True, "chars": len(md_text), "path": str(target)}
 
 
@@ -1483,14 +1577,16 @@ def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     """Sync tracked GitHub PRs into the corpus as a markdown file.
 
     Reads open PRs from the github_pull_requests table and writes
     a summary into DATA_DIR/{dataset}/github_active_prs.md.
 
-    Company-scoped: only the caller's company's PRs are read. A supplied
-    installation_id must belong to the caller's company (else 404)."""
+    Company-scoped: only the caller's company's PRs are read, a supplied
+    installation_id must belong to the caller's company (else 404), and the
+    target dataset must be one the caller's company owns (else 404)."""
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     if body.installation_id is not None and not db.get_github_installation_for_company(
         body.installation_id, company.company_id
     ):
@@ -1523,14 +1619,14 @@ def github_sync_to_corpus(
             lines.append("")
 
     md_text = "\n".join(lines) + "\n"
-    target = settings.data_path / body.dataset / "github_active_prs.md"
+    target = settings.data_path / dataset / "github_active_prs.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(md_text, encoding="utf-8")
 
     # Auto-enable github input source
     try:
         db.upsert_input_source(
-            body.dataset, "github", enabled=True,
+            dataset, "github", enabled=True,
             config={"last_sync_at": db.utc_now()},
         )
     except Exception:
@@ -2047,17 +2143,19 @@ def hubspot_sync(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
 
     Fetches data from HubSpot API, converts to markdown, and writes
     into DATA_DIR/{dataset}/ so it enters the knowledge base. Company-scoped:
-    uses the caller's company's HubSpot connection only.
+    uses the caller's company's HubSpot connection only, and writes only into
+    a dataset the caller's company owns.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset, company_id=company.company_id)
+        result = sync_hubspot(dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -2068,12 +2166,13 @@ def hubspot_sync_to_corpus(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset, company_id=company.company_id)
+        result = sync_hubspot(dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -3057,18 +3156,23 @@ def slack_sync_to_corpus(
     whoever clicks Sync, the sync uses the company's Slack connection and
     its shared pull-channel selection (see slack_company.py) — the same
     corpus every member reads. Also runs on the scheduled connector refresh.
+
+    Slack is a `_PERSONAL_PROVIDERS` connector, so there is deliberately no
+    admin gate here — any member can sync. That makes the dataset gate below
+    the ONLY thing between an ordinary member and another tenant's corpus.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
     from app.connectors.slack_sync import SlackSyncError, sync_slack
 
     try:
         result = sync_slack(
-            body.dataset,
+            dataset,
             company_id=company.company_id,
             history_days=body.history_days,
         )
     except SlackSyncError as e:
         raise HTTPException(400, str(e)) from e
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
