@@ -19,7 +19,12 @@ export type ArtifactShareResolveOutcome =
       owning_company_name: string
       sharer_name: string
     }
-  | { outcome: "blocked"; reason: "different_company" | "domain_mismatch" }
+  // "domain_mismatch" is retired as a /resolve reason (revision 2026-08-02):
+  // it now only ever originates from the sign-up form's client-side gate
+  // (validateShareDomainEmail), which never calls /resolve at all — a
+  // zero-membership caller is always "different_company" here regardless of
+  // domain (see the backend's resolve_share_access docstring).
+  | { outcome: "blocked"; reason: "different_company" }
 
 export type ArtifactShareJoinResult = {
   sharer_name: string
@@ -58,6 +63,16 @@ export const artifactShareApi = {
       `/v1/artifact-share/${encodeURIComponent(token)}/join`,
       {},
     ),
+  /** One-shot, signup-time-only: grants COMPANY (never workspace)
+   *  membership on a matching email domain. Always 200 — a null
+   *  `joined_company_id` means no-op (no match / already a member / bad
+   *  token), never an error. See postLoginPath()'s guest branch, the only
+   *  caller. */
+  autoJoinCompany: (token: string) =>
+    api.post<{ joined_company_id: string | null }>(
+      `/v1/artifact-share/${encodeURIComponent(token)}/auto-join-company`,
+      {},
+    ),
   content: (token: string) =>
     api.get<ArtifactShareContentResponse>(
       `/v1/artifact-share/${encodeURIComponent(token)}/content`,
@@ -72,6 +87,23 @@ export async function resolveArtifactShare(
 ): Promise<ArtifactShareResolveOutcome | undefined> {
   try {
     return await artifactShareApi.resolve(token)
+  } catch {
+    return undefined
+  }
+}
+
+/** `autoJoinCompany` wrapped to fail closed-to-undefined on any error
+ *  (network/4xx/5xx) rather than throw — same best-effort pattern as
+ *  resolveArtifactShare. postLoginPath()'s guest branch calls this ONCE,
+ *  right after email verification, before resolving the share; a failure
+ *  here just means the following /resolve call sees no new membership and
+ *  falls through to its normal blocked handling, never a stuck screen. */
+export async function tryAutoJoinCompanyOnDomainMatch(
+  token: string,
+): Promise<string | null | undefined> {
+  try {
+    const result = await artifactShareApi.autoJoinCompany(token)
+    return result.joined_company_id
   } catch {
     return undefined
   }

@@ -217,13 +217,23 @@ export async function postLoginPath(): Promise<string> {
     // new company for someone who only meant to view/join an existing one.
     const pendingToken = user.user_metadata?.pending_share_token
     if (typeof pendingToken === "string" && pendingToken) {
-      const { resolveArtifactShare } = await import("../artifactShareApi")
+      const { resolveArtifactShare, tryAutoJoinCompanyOnDomainMatch } = await import(
+        "../artifactShareApi"
+      )
+      // One-shot, best-effort: right after email verification succeeds,
+      // grant COMPANY (never workspace) membership when the verified email
+      // domain matches the share's owning company. No-op if the caller
+      // already has a company, the domain doesn't match, or the token is
+      // bad — the /resolve call right below is the real gate either way, and
+      // its existing same_company branch picks up a successful auto-join
+      // naturally on this very next call.
+      await tryAutoJoinCompanyOnDomainMatch(pendingToken)
       const outcome = await resolveArtifactShare(pendingToken)
       if (outcome?.outcome === "guest_view") {
         return `/?prd=${outcome.artifact_id}&share=${pendingToken}`
       }
       if (outcome?.outcome === "blocked") {
-        return `/not-authorized?share=${pendingToken}`
+        return `/not-authorized?share=${pendingToken}&reason=${outcome.reason}`
       }
       // outcome undefined (network/other error, or a stale/malformed token
       // server-side has no row for) — fail OPEN to onboarding, never to a
@@ -280,6 +290,67 @@ async function hasCompleteSignupProfile(userId: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * Where NotAuthorizedScreen's "Continue to your workspace" action should
+ * send the currently signed-in user — their own account's real home, NEVER
+ * a re-resolution of the share token that just blocked them (so this can
+ * never loop back to /not-authorized: unlike postLoginPath()'s guest
+ * branch, this never looks at pending_share_token at all).
+ *
+ * "Has a real workspace" mirrors the backend's own require_workspace /
+ * _resolve_workspace invariant exactly (backend/app/auth.py): an owner/admin
+ * company role implicitly administers every workspace in their company (no
+ * workspace_members row needed), while a plain member/viewer needs a real
+ * workspace_members row or every workspace-scoped read 403s. This is
+ * deliberately NOT the same check postLoginPath() uses elsewhere
+ * (fetchWorkspaceForUser only checks company membership) — a company member
+ * with zero workspace_members rows would otherwise be sent to "/" and hit a
+ * wall of 403s.
+ *
+ *  - has one → "/" (their home; safe, no loop).
+ *  - has a company but no workspace → their OWN company's onboarding step
+ *    (the exact path shape postLoginPath()'s existing-company branch uses —
+ *    never a fresh "create a company" flow, they already have one).
+ *  - has no company at all → the same zero-company onboarding entry
+ *    postLoginPath()'s guest branch uses for a brand-new user.
+ */
+export async function notAuthorizedContinuePath(): Promise<string> {
+  const supabase = getSupabase()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return "/sign-in"
+
+  const { data: membership } = await supabase
+    .from("company_members")
+    .select("role")
+    .eq("user_id", user.id)
+    .limit(1)
+    .maybeSingle()
+
+  if (!membership) {
+    if (!(await hasCompleteSignupProfile(user.id))) return "/onboarding/your-name"
+    return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
+  }
+
+  const role = String((membership as { role?: unknown }).role ?? "")
+  if (role === "owner" || role === "admin") return "/"
+
+  const { data: workspaceMember } = await supabase
+    .from("workspace_members")
+    .select("id")
+    .eq("user_id", user.id)
+    .limit(1)
+    .maybeSingle()
+  if (workspaceMember) return "/"
+
+  // A company member with no workspace_members row yet — continue THEIR
+  // company's own onboarding at its real step.
+  const workspace = await fetchWorkspaceForUser(user.id)
+  if (workspace) return `/onboarding/${slugForStep(workspace.onboarding_step)}`
+  return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
 }
 
 /** Outcome of the sign-in invite-accept attempt:

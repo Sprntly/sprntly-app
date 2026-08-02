@@ -102,21 +102,6 @@ describe("ArtifactShareGate", () => {
     expect(screen.queryByTestId("real-app-tree")).toBeNull()
   })
 
-  it("blocks a domain-mismatch resolve the same way", async () => {
-    authMock.value = { kind: "authed" }
-    resolveMock.mockResolvedValue({ outcome: "blocked", reason: "domain_mismatch" })
-    render(
-      <ArtifactShareGate token="tok">
-        <AppTreeSpy />
-      </ArtifactShareGate>,
-    )
-    await waitFor(() => {
-      expect(screen.getByTestId("not-authorized").getAttribute("data-reason")).toBe(
-        "domain_mismatch",
-      )
-    })
-  })
-
   it("test_artifact_share_gate_renders_guest_viewer_for_same_company_different_workspace — AC8", async () => {
     authMock.value = { kind: "authed" }
     resolveMock.mockResolvedValue({

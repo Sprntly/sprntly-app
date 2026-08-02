@@ -7,8 +7,36 @@ import {
   normalizeEmail,
   passwordStrength,
   validatePassword,
+  validateShareDomainEmail,
   validateWorkEmail,
 } from "../auth-validation"
+
+describe("validateShareDomainEmail — domain-gated share signup (revision 2026-08-02)", () => {
+  it("test_validate_share_domain_email_null_requirement_always_passes", () => {
+    expect(validateShareDomainEmail("anyone@wherever.com", null)).toBeNull()
+    expect(validateShareDomainEmail("anyone@wherever.com", undefined)).toBeNull()
+    expect(validateShareDomainEmail("anyone@wherever.com", "")).toBeNull()
+  })
+
+  it("test_validate_share_domain_email_matching_domain_passes", () => {
+    expect(validateShareDomainEmail("sarah@acme.com", "acme.com")).toBeNull()
+  })
+
+  it("test_validate_share_domain_email_matching_domain_is_case_insensitive", () => {
+    expect(validateShareDomainEmail("Sarah@ACME.com", "acme.com")).toBeNull()
+    expect(validateShareDomainEmail("sarah@acme.com", "ACME.COM")).toBeNull()
+  })
+
+  it("test_validate_share_domain_email_mismatched_domain_returns_inline_error", () => {
+    const err = validateShareDomainEmail("sarah@other.com", "acme.com")
+    expect(err).not.toBeNull()
+    expect(err).toMatch(/acme\.com/)
+  })
+
+  it("test_validate_share_domain_email_malformed_email_returns_error_not_crash", () => {
+    expect(validateShareDomainEmail("not-an-email", "acme.com")).not.toBeNull()
+  })
+})
 
 describe("password rules", () => {
   it("accepts a password with NO symbol", () => {

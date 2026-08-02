@@ -128,3 +128,60 @@ describe("/sign-up — share context", () => {
     expect(call.pendingShareToken).toBeUndefined()
   })
 })
+
+describe("/sign-up — domain-gated share signup (revision 2026-08-02)", () => {
+  it("test_sign_up_blocks_a_mismatched_domain_email_before_any_signup_attempt", async () => {
+    searchParamsMock.share = "tok-1"
+    getMetadataMock.mockResolvedValue({
+      artifact_type: "prd",
+      title: "Q3 Retention PRD",
+      sharer_name: "Priya Shah",
+      owning_company_name: "Acme Co",
+      required_email_domain: "acme.com",
+    })
+    render(<SignUpPage />)
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sign-up-domain-hint"]')).not.toBeNull()
+    })
+
+    fireEvent.change(screen.getByLabelText(/email/i), {
+      target: { value: "sarah@other-company.com" },
+    })
+    fireEvent.change(screen.getByLabelText(/^password$/i), {
+      target: { value: "Abcdef1!ghij" },
+    })
+    fireEvent.change(screen.getByLabelText(/confirm password/i), {
+      target: { value: "Abcdef1!ghij" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /create account/i }))
+
+    // Inline error, still on step 1 — no advance to step 2, no signup call,
+    // no duplicate-email check even attempted. The domain hint (field-hint,
+    // always visible) ALSO mentions acme.com, so scope to the actual error
+    // element rather than a generic text match.
+    await waitFor(() => {
+      expect(document.querySelector(".auth-error")?.textContent).toMatch(/acme\.com/)
+    })
+    expect(screen.queryByText(/2 of 2/i)).toBeNull()
+    expect(signUpWithPasswordMock).not.toHaveBeenCalled()
+  })
+
+  it("test_sign_up_allows_a_matching_domain_email_through_to_step_2", async () => {
+    searchParamsMock.share = "tok-1"
+    getMetadataMock.mockResolvedValue({
+      artifact_type: "prd",
+      title: "Q3 Retention PRD",
+      sharer_name: "Priya Shah",
+      owning_company_name: "Acme Co",
+      required_email_domain: "acme.com",
+    })
+    render(<SignUpPage />)
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sign-up-domain-hint"]')).not.toBeNull()
+    })
+    await fillStep1()
+    expect(screen.getByText(/2 of 2/i)).not.toBeNull()
+  })
+})

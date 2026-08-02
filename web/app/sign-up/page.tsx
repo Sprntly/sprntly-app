@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
-import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { validatePassword, validateShareDomainEmail, validateWorkEmail } from "../lib/auth-validation"
 import { signupApi } from "../lib/api"
 import { publicPath } from "../lib/public-path"
 import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
@@ -91,6 +91,16 @@ function SignUpForm() {
     const emailErr = validateWorkEmail(email)
     if (emailErr) {
       setError(emailErr)
+      return
+    }
+    // Domain-gated share signup: block BEFORE any signup attempt (including
+    // the duplicate-email check below) on a mismatched domain — no Supabase
+    // signUp() call is ever made for a doomed signup. A pure client-side
+    // check; the real backstop stays server-side (see
+    // validateShareDomainEmail's docstring).
+    const domainErr = validateShareDomainEmail(email, shareContext?.requiredDomain)
+    if (domainErr) {
+      setError(domainErr)
       return
     }
     const pwErr = validatePassword(password)

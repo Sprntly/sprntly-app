@@ -9,11 +9,22 @@ Trust levels:
                nothing else.
   - resolve  — AUTHED (require_session only, NOT require_company): decides
                the routing outcome for a caller who may have ZERO company
-               memberships yet (a domain-matched fresh signup mid-flow).
-  - join     — AUTHED (require_session only): mutates — grants full Member
-               role (fresh signup) or a workspace-only grant (same-company-
-               different-workspace caller). Re-runs the FULL resolve check
-               server-side; a client-side /resolve call is never trusted.
+               memberships yet. A zero-membership caller is ALWAYS blocked
+               here (see resolve_share_access's docstring) — company
+               membership is granted only at signup time.
+  - auto-join-company — AUTHED (require_session only): mutates — the ONE
+               place a fresh signup gains COMPANY membership (never
+               workspace) through this primitive, on a matching email
+               domain. One-shot, best-effort, called exactly once by
+               postLoginPath()'s guest branch right after email
+               verification, BEFORE the next /resolve call.
+  - join     — AUTHED (require_session only): mutates — grants a WORKSPACE-
+               only membership. Re-runs the FULL resolve check server-side;
+               a client-side /resolve call is never trusted. By the time
+               resolve_share_access can return guest_view, the caller
+               already holds a real company membership (either pre-existing
+               same-company, or freshly granted by auto-join-company above)
+               — /join never grants company membership itself.
   - content  — AUTHED (require_session only): read-only guest access to the
                shared PRD's rendered content, scoped by COMPANY (not
                workspace) — the cross-workspace-same-company allowance this
@@ -30,13 +41,13 @@ proven to exist by the caller having reached this far.
 from __future__ import annotations
 
 import logging
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import WorkspaceContext, require_session, require_workspace, session_email
 from app.db.artifact_shares import (
+    auto_join_company_on_domain_match,
     get_share_by_token,
     mint_share,
     owning_company_domain,
@@ -44,7 +55,6 @@ from app.db.artifact_shares import (
     require_shared_prd,
     resolve_share_access,
 )
-from app.db.client import require_client
 from app.db.companies import display_name_for_company_id, profile_name_for_user
 from app.db.prds import get_prd_rendered
 from app.deps.ownership import require_owned_prd
@@ -152,52 +162,64 @@ def resolve(token: str, session: dict = Depends(require_session)) -> dict:
     }
 
 
+# ─── auto-join-company (mutating, signup-time only) ──────────────────────
+
+
+@router.post("/{token}/auto-join-company")
+def auto_join_company(token: str, session: dict = Depends(require_session)) -> dict:
+    """One-shot, signup-time-only mechanism: grants COMPANY membership
+    (never workspace) when the caller's verified email domain matches the
+    share's owning company. Called exactly once by postLoginPath()'s guest
+    branch, right after email verification succeeds, BEFORE the next
+    /resolve call — which then finds the caller already a company member
+    and returns guest_view via resolve_share_access's same_company branch.
+
+    No-op-success (never 403/404) on a no-match / already-a-member /
+    not-found token — always 200 with a nullable `joined_company_id`. This
+    is a best-effort convenience grant, not a security boundary; the real
+    block is /resolve, /join, and /content re-running resolve_share_access
+    server-side, which never trusts this endpoint's outcome. A uniform
+    200-always response also avoids status-code-based enumeration of the
+    token's validity, matching this router's non-disclosure convention.
+    """
+    user_id, user_email = _session_identity(session)
+    company_id = auto_join_company_on_domain_match(
+        token=token, user_id=user_id, user_email=user_email
+    )
+    return {"joined_company_id": company_id}
+
+
 # ─── join (mutating) ──────────────────────────────────────────────────────
 
 
-def _grant_membership(*, share: dict, user_id: str, same_company: bool) -> str:
-    """Grant the membership /join promises. Mirrors
-    `app.db.team.accept_invite_for_user`'s company_members insert shape +
-    workspace grant (copied, not reimplemented from scratch) and its
-    invalidate_user call sites (app/db/team.py's update_member_role /
-    delete_member) — memberships_for_user is cached 30s, so skipping this
-    would let a freshly-joined user 403 on their very next request for up to
-    30s. Returns the workspace_id the caller was granted into."""
+def _grant_workspace_membership(*, share: dict, user_id: str) -> str:
+    """Grant the WORKSPACE membership /join promises. Company membership is
+    NEVER granted here: by the time resolve_share_access can return
+    guest_view, the caller already holds a real `company_members` row
+    matching this share's owning company (either they were already a member,
+    or auto_join_company_on_domain_match granted it at signup time) — see
+    resolve_share_access's docstring. /join's only remaining job is the
+    workspace grant.
+
+    Mirrors `app.db.team.accept_invite_for_user`'s workspace-grant shape
+    (copied, not reimplemented from scratch) and its invalidate_user call
+    sites (app/db/team.py's update_member_role / delete_member) —
+    memberships_for_user is cached 30s, so skipping this would let a
+    freshly-joined user 403 on their very next request for up to 30s.
+    Returns the workspace_id the caller was granted into."""
     from app.db.authcache import invalidate_user
-    from app.db.workspaces import ensure_default_workspace, upsert_workspace_member
+    from app.db.workspaces import upsert_workspace_member
 
-    if same_company:
-        # Already a member of the owning company — grant the OWNING
-        # workspace only (no company_members insert; they already have one).
-        upsert_workspace_member(share["owner_workspace_id"], user_id, "member")
-        invalidate_user(user_id)
-        return share["owner_workspace_id"]
-
-    # Fresh domain-matched signup: full Member role (locked, not
-    # configurable) + the owning company's default workspace.
-    client = require_client()
-    try:
-        client.table("company_members").insert(
-            {
-                "id": uuid.uuid4().hex,
-                "company_id": share["owner_company_id"],
-                "user_id": user_id,
-                "role": "member",
-            }
-        ).execute()
-    except Exception:  # noqa: BLE001 — already a member (idempotent double-click)
-        pass
-    default_ws = ensure_default_workspace(share["owner_company_id"])
-    upsert_workspace_member(default_ws["id"], user_id, "member")
+    upsert_workspace_member(share["owner_workspace_id"], user_id, "member")
     invalidate_user(user_id)
-    return default_ws["id"]
+    return share["owner_workspace_id"]
 
 
 @router.post("/{token}/join")
 def join(token: str, session: dict = Depends(require_session)) -> dict:
-    """Grant access + record attribution. Re-runs the FULL resolve check
-    server-side — a client that already called /resolve is never trusted;
-    only a fresh `guest_view` outcome, computed here, may mutate."""
+    """Grant workspace access + record attribution. Re-runs the FULL resolve
+    check server-side — a client that already called /resolve is never
+    trusted; only a fresh `guest_view` outcome, computed here, may mutate."""
     user_id, user_email = _session_identity(session)
     result = resolve_share_access(token=token, user_id=user_id, user_email=user_email)
     if result["outcome"] == "not_found":
@@ -211,9 +233,7 @@ def join(token: str, session: dict = Depends(require_session)) -> dict:
         raise HTTPException(status_code=403, detail="not authorized to join")
 
     share = result["share"]
-    workspace_id = _grant_membership(
-        share=share, user_id=user_id, same_company=result["same_company"]
-    )
+    workspace_id = _grant_workspace_membership(share=share, user_id=user_id)
     record_join(
         share_id=share["id"],
         joined_user_id=user_id,

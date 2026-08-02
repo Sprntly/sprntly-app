@@ -167,7 +167,9 @@ def test_resolve_route_different_company_blocked(isolated_settings, monkeypatch)
     assert r.json() == {"outcome": "blocked", "reason": "different_company"}
 
 
-def test_resolve_route_domain_matched_zero_company_guest_view(isolated_settings, monkeypatch):
+def test_resolve_route_zero_company_matching_domain_now_blocked(isolated_settings, monkeypatch):
+    """Revision 2026-08-02: a zero-membership caller is ALWAYS blocked, even
+    with a matching email domain — see resolve_share_access's docstring."""
     creator_id = "creator-" + uuid.uuid4().hex[:8]
     company_id = seed_company(user_id=creator_id, slug="acme8")
     from app.db.client import require_client
@@ -191,7 +193,7 @@ def test_resolve_route_domain_matched_zero_company_guest_view(isolated_settings,
     r = client.get(f"/v1/artifact-share/{share['token']}/resolve")
 
     assert r.status_code == 200
-    assert r.json()["outcome"] == "guest_view"
+    assert r.json() == {"outcome": "blocked", "reason": "different_company"}
 
 
 def test_resolve_route_domain_mismatched_zero_company_blocked(isolated_settings, monkeypatch):
@@ -218,7 +220,7 @@ def test_resolve_route_domain_mismatched_zero_company_blocked(isolated_settings,
     r = client.get(f"/v1/artifact-share/{share['token']}/resolve")
 
     assert r.status_code == 200
-    assert r.json() == {"outcome": "blocked", "reason": "domain_mismatch"}
+    assert r.json() == {"outcome": "blocked", "reason": "different_company"}
 
 
 def test_resolve_route_invalid_token_returns_404(isolated_settings, monkeypatch):
@@ -227,6 +229,73 @@ def test_resolve_route_invalid_token_returns_404(isolated_settings, monkeypatch)
     r = client.get(f"/v1/artifact-share/{uuid.uuid4()}/resolve")
 
     assert r.status_code == 404
+
+
+# ── auto-join-company (AC-revision: signup-time company grant) ───────────
+
+
+def test_auto_join_company_route_grants_on_matching_domain(isolated_settings, monkeypatch):
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme-route1")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme-route1.com"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme-route1.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r = client.post(f"/v1/artifact-share/{share['token']}/auto-join-company")
+
+    assert r.status_code == 200
+    assert r.json() == {"joined_company_id": company_id}
+
+
+def test_auto_join_company_route_200_no_op_on_mismatched_domain(isolated_settings, monkeypatch):
+    """No-op-success, never an error status — mirrors this router's
+    non-disclosure convention (never signal via status code whether the
+    token/domain was valid)."""
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme-route2")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme-route2.com"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@other.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r = client.post(f"/v1/artifact-share/{share['token']}/auto-join-company")
+
+    assert r.status_code == 200
+    assert r.json() == {"joined_company_id": None}
+
+
+def test_auto_join_company_route_200_no_op_on_invalid_token(isolated_settings, monkeypatch):
+    client = _bare_client(monkeypatch, "whoever-" + uuid.uuid4().hex[:8])
+
+    r = client.post(f"/v1/artifact-share/{uuid.uuid4()}/auto-join-company")
+
+    assert r.status_code == 200
+    assert r.json() == {"joined_company_id": None}
 
 
 def test_blocked_response_never_contains_artifact_title(isolated_settings, monkeypatch):
@@ -305,7 +374,15 @@ def test_join_denies_blocked_outcome_with_no_writes(isolated_settings, monkeypat
     assert ctx.user_id not in [m["user_id"] for m in ws_members]
 
 
-def test_join_fresh_signup_creates_company_and_workspace_membership(isolated_settings, monkeypatch):
+def test_join_denies_a_truly_fresh_zero_membership_caller_directly(isolated_settings, monkeypatch):
+    """Revision 2026-08-02: /join never grants company membership itself —
+    a genuinely fresh (zero-membership) caller who hits /join WITHOUT ever
+    going through auto-join-company first is blocked, same as any other
+    zero-membership caller, no writes. This is the direct replacement for
+    the pre-revision test of the same name that expected a 200 + full
+    Member grant — that flow is retired; auto-join-company is now the ONLY
+    path to a fresh signup's company membership (see resolve_share_access's
+    and _grant_workspace_membership's docstrings)."""
     creator_id = "creator-" + uuid.uuid4().hex[:8]
     company_id = seed_company(user_id=creator_id, slug="acme11")
     from app.db.client import require_client
@@ -327,16 +404,79 @@ def test_join_fresh_signup_creates_company_and_workspace_membership(isolated_set
 
     r = client.post(f"/v1/artifact-share/{share['token']}/join")
 
-    assert r.status_code == 200
-    body = r.json()
-    assert body["workspace_id"]
+    assert r.status_code == 403
+    assert (
+        require_client().table("company_members").select("*")
+        .eq("user_id", fresh_user).execute().data == []
+    )
+    assert (
+        require_client().table("artifact_share_joins").select("*")
+        .eq("joined_user_id", fresh_user).execute().data == []
+    )
 
+
+def test_auto_join_then_join_end_to_end_grants_company_then_workspace_only(
+    isolated_settings, monkeypatch
+):
+    """The full new signup flow, chained exactly as postLoginPath()'s guest
+    branch does it: auto-join-company (grants COMPANY only) THEN /join
+    (grants WORKSPACE only) — proving resolve_share_access's same_company
+    branch really does fire naturally on the second call, end to end
+    through the real routes, not just the db-helper unit test."""
+    creator_id = "creator-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=creator_id, slug="acme11b")
+    from app.db.client import require_client
+
+    require_client().table("profiles").insert(
+        {"id": creator_id, "email": "creator@acme11b.com"}
+    ).execute()
+    from app.db.artifact_shares import mint_share
+    from app.db.workspaces import ensure_default_workspace
+
+    default_ws = ensure_default_workspace(company_id)
+    share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=creator_id,
+    )
+    fresh_user = "fresh-" + uuid.uuid4().hex[:8]
+    require_client().table("profiles").insert(
+        {"id": fresh_user, "email": "joiner@acme11b.com"}
+    ).execute()
+    client = _bare_client(monkeypatch, fresh_user)
+
+    r_auto = client.post(f"/v1/artifact-share/{share['token']}/auto-join-company")
+    assert r_auto.status_code == 200
+    assert r_auto.json()["joined_company_id"] == company_id
+
+    # Company membership is real now — but NOT workspace membership yet.
     members = (
         require_client().table("company_members").select("*")
         .eq("company_id", company_id).eq("user_id", fresh_user).execute().data
     )
     assert len(members) == 1
     assert members[0]["role"] == "member"
+    assert (
+        require_client().table("workspace_members").select("*")
+        .eq("user_id", fresh_user).execute().data == []
+    )
+
+    # /resolve now sees the freshly-granted company membership and returns
+    # guest_view via the same_company branch — no separate code path.
+    r_resolve = client.get(f"/v1/artifact-share/{share['token']}/resolve")
+    assert r_resolve.status_code == 200
+    assert r_resolve.json()["outcome"] == "guest_view"
+
+    r_join = client.post(f"/v1/artifact-share/{share['token']}/join")
+    assert r_join.status_code == 200
+    body = r_join.json()
+    assert body["workspace_id"] == default_ws["id"]
+
+    # Company membership is untouched by /join (still exactly one row).
+    members_after = (
+        require_client().table("company_members").select("*")
+        .eq("company_id", company_id).eq("user_id", fresh_user).execute().data
+    )
+    assert len(members_after) == 1
 
     ws_members = (
         require_client().table("workspace_members").select("*")
@@ -344,7 +484,7 @@ def test_join_fresh_signup_creates_company_and_workspace_membership(isolated_set
     )
     assert len(ws_members) == 1
     assert ws_members[0]["role"] == "member"
-    assert ws_members[0]["workspace_id"] == body["workspace_id"]
+    assert ws_members[0]["workspace_id"] == default_ws["id"]
 
     joins = (
         require_client().table("artifact_share_joins").select("*")
@@ -416,6 +556,11 @@ def test_join_idempotent_on_repeat_call(isolated_settings, monkeypatch):
     ).execute()
     client = _bare_client(monkeypatch, fresh_user)
 
+    # /join no longer grants company membership itself (revision 2026-08-02)
+    # — the real flow always runs auto-join-company first, exactly as
+    # postLoginPath()'s guest branch does.
+    assert client.post(f"/v1/artifact-share/{share['token']}/auto-join-company").status_code == 200
+
     r1 = client.post(f"/v1/artifact-share/{share['token']}/join")
     r2 = client.post(f"/v1/artifact-share/{share['token']}/join")
 
@@ -436,15 +581,20 @@ def test_join_invalidates_membership_cache(isolated_settings, monkeypatch):
     creator_id = "creator-" + uuid.uuid4().hex[:8]
     company_id = seed_company(user_id=creator_id, slug="acme13")
     from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
 
     require_client().table("profiles").insert(
         {"id": creator_id, "email": "creator@acme13.com"}
     ).execute()
     from app.db.artifact_shares import mint_share
 
+    # A REAL workspace: /join now always grants INTO share["owner_workspace_id"]
+    # directly (never a freshly-created default) — must be a genuine row or
+    # the workspace_members FK rejects it.
+    default_ws = ensure_default_workspace(company_id)
     share = mint_share(
         artifact_type="prd", artifact_id=1, owner_company_id=company_id,
-        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=creator_id,
     )
     fresh_user = "fresh-" + uuid.uuid4().hex[:8]
     require_client().table("profiles").insert(
@@ -470,6 +620,9 @@ def test_join_invalidates_membership_cache(isolated_settings, monkeypatch):
     monkeypatch.setattr(authcache_mod, "invalidate_user", _spy)
 
     client = _bare_client(monkeypatch, fresh_user)
+    # Company membership first (the real flow's auto-join-company step) —
+    # /join itself only grants workspace membership now.
+    assert client.post(f"/v1/artifact-share/{share['token']}/auto-join-company").status_code == 200
     r = client.post(f"/v1/artifact-share/{share['token']}/join")
 
     assert r.status_code == 200
@@ -481,15 +634,17 @@ def test_join_records_attribution_row(isolated_settings, monkeypatch):
     creator_id = "creator-" + uuid.uuid4().hex[:8]
     company_id = seed_company(user_id=creator_id, slug="acme14")
     from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
 
     require_client().table("profiles").insert(
         {"id": creator_id, "email": "creator@acme14.com", "first_name": "Cre", "last_name": "Ator"}
     ).execute()
     from app.db.artifact_shares import mint_share
 
+    default_ws = ensure_default_workspace(company_id)
     share = mint_share(
         artifact_type="prd", artifact_id=1, owner_company_id=company_id,
-        owner_workspace_id="ws-1", created_by_user_id=creator_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=creator_id,
     )
     fresh_user = "fresh-" + uuid.uuid4().hex[:8]
     require_client().table("profiles").insert(
@@ -497,6 +652,7 @@ def test_join_records_attribution_row(isolated_settings, monkeypatch):
     ).execute()
     client = _bare_client(monkeypatch, fresh_user)
 
+    assert client.post(f"/v1/artifact-share/{share['token']}/auto-join-company").status_code == 200
     r = client.post(f"/v1/artifact-share/{share['token']}/join")
 
     assert r.status_code == 200
