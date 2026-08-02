@@ -230,7 +230,7 @@ def test_resolve_route_invalid_token_returns_404(isolated_settings, monkeypatch)
 
 
 def test_blocked_response_never_contains_artifact_title(isolated_settings, monkeypatch):
-    """AC16 non-disclosure guard, mutation-proofed per PI13: a DISPOSABLE
+    """AC16 non-disclosure guard, mutation-proofed: a disposable
     (test-local only, never committed to product code) leaky reconstruction
     of the blocked-response body is proven to fail this file's own
     assertions (RED) before the real route (which never does this) is
