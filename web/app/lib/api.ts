@@ -1864,6 +1864,25 @@ export const connectorsApi = {
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
 
+  // ---- Gong (Access Key + Secret; Basic auth, not OAuth) ------------------
+  /** `apiBaseUrl` is optional — Gong tells each customer to read their own
+   *  API base URL off their Gong API page; omitted means the common host. */
+  connectGongWithCredentials: (
+    accessKey: string,
+    accessKeySecret: string,
+    apiBaseUrl?: string,
+  ) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/gong/credentials`,
+      {
+        access_key: accessKey,
+        access_key_secret: accessKeySecret,
+        ...(apiBaseUrl ? { api_base_url: apiBaseUrl } : {}),
+      },
+    ),
+  disconnectGong: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/gong`),
+
   // ---- Superset (self-hosted; instance URL + service-account login) --------
   connectSupersetWithCredentials: (
     baseUrl: string, username: string, password: string,

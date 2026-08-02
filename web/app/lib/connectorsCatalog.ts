@@ -73,7 +73,11 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // Fireflies has no official SVG mark we could bundle, so it keeps the
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
-      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
+      // Dual-typed meetings + customer-voice: Gong's distilled call briefs
+      // are first-party VoC evidence (KG puller). No self-serve OAuth —
+      // connects with a workspace Access Key + Secret (Basic auth), so it
+      // uses the credentials form like Superset.
+      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, authType: "credentials", types: ["meetings", "customer-voice"] },
       // Dual-typed communication + customer-voice — the same item also sits
       // in the Communications category (see SLACK_ITEM above).
       SLACK_ITEM,

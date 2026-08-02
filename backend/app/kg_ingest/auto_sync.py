@@ -122,9 +122,15 @@ def _run_sync(company_id: str, provider: str) -> None:
         # so a day-old connection doesn't 401 on every sync.
         token_json = _maybe_refresh_token(company_id, provider, token_json)
         facade = GraphFacade()
+        # The connection's own stamp drives incremental pulls (see
+        # runner.INCREMENTAL_PULLERS) — a scheduled cycle then fetches just
+        # the delta instead of re-requesting the whole default window.
+        last_sync_at = row.get("last_sync_at")
         try:
             result = sync_provider(
-                facade, company_id, provider, token=token_for(provider, token_json)
+                facade, company_id, provider,
+                token=token_for(provider, token_json),
+                last_sync_at=last_sync_at,
             )
         except Exception as exc:  # noqa: BLE001 — narrow to auth, else re-raise
             # Reactive fallback: a token that slipped past the freshness check
@@ -138,7 +144,9 @@ def _run_sync(company_id: str, provider: str) -> None:
             if refreshed.get("access_token") in (None, token_json.get("access_token")):
                 raise  # refresh produced nothing new → graceful reconnect handling
             result = sync_provider(
-                facade, company_id, provider, token=token_for(provider, refreshed)
+                facade, company_id, provider,
+                token=token_for(provider, refreshed),
+                last_sync_at=last_sync_at,
             )
         err = "; ".join(result.get("errors") or []) or None
         db.update_connection_sync(

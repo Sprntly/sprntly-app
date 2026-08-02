@@ -384,6 +384,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectSlack()
   } else if (providerId === "fireflies") {
     await connectorsApi.disconnectFireflies()
+  } else if (providerId === "gong") {
+    await connectorsApi.disconnectGong()
   } else if (providerId === "sprinklr") {
     await connectorsApi.disconnectSprinklr()
   } else if (providerId === "asana") {

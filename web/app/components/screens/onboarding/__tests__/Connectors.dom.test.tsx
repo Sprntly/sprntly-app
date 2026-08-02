@@ -301,13 +301,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     // dropped from the catalog, so it never appears however far you walk.
     expect(container.querySelector('.conn-step[data-conn="monitoring"]')).toBeNull()
     // Advance to Voice of Customer & Support (a category renders only once
-    // reached, and its grid only while open): Sprinklr (oauth) + Fireflies
-    // (api-key) show, but not Zendesk/Gong (coming soon).
+    // reached, and its grid only while open): Sprinklr (oauth), Fireflies
+    // (api-key) and Gong (Access Key + Secret) show, but not Zendesk
+    // (coming soon).
     fireEvent.click(footerContinue(container))
     expect(screen.getByText("Sprinklr")).not.toBeNull()
     expect(screen.getByText("Fireflies")).not.toBeNull()
+    expect(screen.getByText("Gong")).not.toBeNull()
     expect(screen.queryByText("Zendesk")).toBeNull()
-    expect(screen.queryByText("Gong")).toBeNull()
     // Advance to CRM: HubSpot (oauth) shows, the coming-soons don't.
     fireEvent.click(footerContinue(container))
     expect(screen.getByText("HubSpot")).not.toBeNull()

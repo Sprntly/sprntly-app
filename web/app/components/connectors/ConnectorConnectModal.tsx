@@ -125,8 +125,12 @@ export function ConnectorConnectModalView({
 
   const isConnected = connection != null
   const canSubmitApiKey = apiKey.trim().length > 0 && !isSubmittingApiKey
+  // Gong is SaaS (no instance URL): its credentials form is just the
+  // Access Key (→ username slot) + Secret (→ password slot). Self-hosted
+  // tools (Superset) additionally need the base URL.
+  const isKeyPairCredentials = item.id === "gong"
   const canSubmitCredentials =
-    credentials.baseUrl.trim().length > 0 &&
+    (isKeyPairCredentials || credentials.baseUrl.trim().length > 0) &&
     credentials.username.trim().length > 0 &&
     credentials.password.length > 0 &&
     !isSubmittingCredentials
@@ -237,57 +241,123 @@ export function ConnectorConnectModalView({
               ) : null}
             </>
           ) : authType === "credentials" ? (
-            /* ─── Pre-connect credentials form (self-hosted tools) ─── */
+            /* ─── Pre-connect credentials form ─── */
             <>
-              <p className="conn-modal-blurb">
-                {item.name} is self-hosted — enter your instance URL and a
-                service-account login (ideally a dedicated read-only user
-                created just for Sprntly).
-              </p>
-              <label className="field-label" htmlFor="conn-modal-cred-url">
-                Instance URL
-              </label>
-              <input
-                id="conn-modal-cred-url"
-                type="url"
-                className="input"
-                value={credentials.baseUrl}
-                onChange={(e) =>
-                  onCredentialsChange({ ...credentials, baseUrl: e.target.value })
-                }
-                placeholder={`https://your-${item.name.toLowerCase()}.example.com`}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <label className="field-label" htmlFor="conn-modal-cred-user">
-                Username
-              </label>
-              <input
-                id="conn-modal-cred-user"
-                type="text"
-                className="input"
-                value={credentials.username}
-                onChange={(e) =>
-                  onCredentialsChange({ ...credentials, username: e.target.value })
-                }
-                placeholder="Service-account username"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <label className="field-label" htmlFor="conn-modal-cred-pass">
-                Password
-              </label>
-              <input
-                id="conn-modal-cred-pass"
-                type="password"
-                className="input"
-                value={credentials.password}
-                onChange={(e) =>
-                  onCredentialsChange({ ...credentials, password: e.target.value })
-                }
-                placeholder="Service-account password"
-                autoComplete="new-password"
-              />
+              {isKeyPairCredentials ? (
+                /* Key-pair SaaS (Gong): Access Key + Secret, no URL. The
+                   key/secret ride the username/password slots so the
+                   controlled CredentialsValues shape stays unchanged. */
+                <>
+                  <p className="conn-modal-blurb">
+                    Connect {item.name} with an API Access Key. A {item.name}{" "}
+                    <strong>administrator</strong> creates one under Admin
+                    center → Settings → Ecosystem → API → “Get API Key”;
+                    Sprntly uses it to read call briefs and key points as
+                    customer evidence.
+                  </p>
+                  <label className="field-label" htmlFor="conn-modal-cred-user">
+                    Access key
+                  </label>
+                  <input
+                    id="conn-modal-cred-user"
+                    type="text"
+                    className="input"
+                    value={credentials.username}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, username: e.target.value })
+                    }
+                    placeholder="Access key"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <label className="field-label" htmlFor="conn-modal-cred-pass">
+                    Access key secret
+                  </label>
+                  <input
+                    id="conn-modal-cred-pass"
+                    type="password"
+                    className="input"
+                    value={credentials.password}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, password: e.target.value })
+                    }
+                    placeholder="Access key secret"
+                    autoComplete="new-password"
+                  />
+                  <label className="field-label" htmlFor="conn-modal-cred-url">
+                    API base URL <span className="field-optional">(optional)</span>
+                  </label>
+                  <input
+                    id="conn-modal-cred-url"
+                    type="url"
+                    className="input"
+                    value={credentials.baseUrl}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, baseUrl: e.target.value })
+                    }
+                    placeholder="https://api.gong.io/v2"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <p className="conn-modal-hint">
+                    Leave blank unless your {item.name} API page shows a
+                    different base URL (some accounts are region-specific).
+                  </p>
+                </>
+              ) : (
+                /* Self-hosted tools (Superset): URL + service-account login. */
+                <>
+                  <p className="conn-modal-blurb">
+                    {item.name} is self-hosted — enter your instance URL and a
+                    service-account login (ideally a dedicated read-only user
+                    created just for Sprntly).
+                  </p>
+                  <label className="field-label" htmlFor="conn-modal-cred-url">
+                    Instance URL
+                  </label>
+                  <input
+                    id="conn-modal-cred-url"
+                    type="url"
+                    className="input"
+                    value={credentials.baseUrl}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, baseUrl: e.target.value })
+                    }
+                    placeholder={`https://your-${item.name.toLowerCase()}.example.com`}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <label className="field-label" htmlFor="conn-modal-cred-user">
+                    Username
+                  </label>
+                  <input
+                    id="conn-modal-cred-user"
+                    type="text"
+                    className="input"
+                    value={credentials.username}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, username: e.target.value })
+                    }
+                    placeholder="Service-account username"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <label className="field-label" htmlFor="conn-modal-cred-pass">
+                    Password
+                  </label>
+                  <input
+                    id="conn-modal-cred-pass"
+                    type="password"
+                    className="input"
+                    value={credentials.password}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, password: e.target.value })
+                    }
+                    placeholder="Service-account password"
+                    autoComplete="new-password"
+                  />
+                </>
+              )}
               {credentialsError ? (
                 <p className="conn-modal-error" role="alert">
                   {credentialsError}
@@ -578,6 +648,16 @@ export function ConnectorConnectModal({
           credentials.baseUrl.trim(),
           credentials.username.trim(),
           credentials.password,
+        )
+        onConnected()
+      } else if (providerId === "gong") {
+        // Key-pair form: Access Key rides the username slot, Secret the
+        // password slot, and the OPTIONAL per-tenant API base URL rides
+        // baseUrl (see the View's key-pair credentials branch).
+        await connectorsApi.connectGongWithCredentials(
+          credentials.username.trim(),
+          credentials.password.trim(),
+          credentials.baseUrl.trim() || undefined,
         )
         onConnected()
       } else {

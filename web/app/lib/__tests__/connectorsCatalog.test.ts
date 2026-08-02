@@ -127,6 +127,16 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
+  it("Gong is dual-typed meetings + customer-voice and connects with a key pair", () => {
+    const gong = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "gong",
+    )!
+    expect(gong.types).toEqual(["meetings", "customer-voice"])
+    // No self-serve OAuth at Gong — workspace Access Key + Secret.
+    expect(gong.oauth).toBe(false)
+    expect(gong.authType).toBe("credentials")
+  })
+
   it("Slack appears in both Voice and Communications as the SAME item (multi-type dual placement)", () => {
     const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
     const comms = CONNECTOR_CATALOG.find((c) => c.key === "comms")!
@@ -197,7 +207,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
 })
 
 describe("CONNECTOR_IDS_CONNECTABLE", () => {
-  it("contains all OAuth providers PLUS API-key (Fireflies), credentials (Superset) and upload (Uploaded documents) ones", () => {
+  it("contains all OAuth providers PLUS API-key (Fireflies), credentials (Superset, Gong) and upload (Uploaded documents) ones", () => {
     expect([...CONNECTOR_IDS_CONNECTABLE].sort()).toEqual(
       [
         "asana",
@@ -206,6 +216,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "figma",
         "fireflies",
         "github",
+        "gong",
         "google_drive",
         "hubspot",
         "jira",
@@ -272,6 +283,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "figma",
         "fireflies",
         "github",
+        "gong",
         "google_drive",
         "hubspot",
         "jira",
@@ -290,9 +302,10 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
     expect(byTitle("Analytics")).toEqual(["superset"])
-    // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
+    // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too;
+    // Gong is credentials-wired now (Access Key + Secret).
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "slack",
+      "sprinklr", "fireflies", "gong", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])

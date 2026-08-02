@@ -23,7 +23,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Callable, Iterable
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Iterable, Optional
 
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import extract_document
@@ -33,6 +34,7 @@ from app.kg_ingest.pullers import (
     confluence,
     fireflies,
     github,
+    gong,
     hubspot,
     jira,
     sprinklr,
@@ -51,6 +53,7 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "jira":      (jira.pull,      "access_token", "project_mgmt (issues: bugs/stories/tasks/epics with native type + status + priority)"),
     "hubspot":   (hubspot.pull,   "access_token", "revenue + support + customer_voice (deals: blockers/feature gaps; tickets: support pain/churn risk; notes/emails: voice-of-customer; owners: attribution; line items: revenue detail)"),
     "fireflies": (fireflies.pull, "api_key",      "customer_voice / communication (meeting transcripts)"),
+    "gong":      (gong.pull,      "gong_credential", "customer_voice (sales & customer-success call recordings — Gong's distilled call briefs, key points, highlights: first-party voice-of-customer evidence from real customer conversations)"),
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
     "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),
@@ -106,6 +109,49 @@ def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
         yield batch
 
 
+# ── Incremental sync ─────────────────────────────────────────────────────────
+#
+# Some pullers cap how many records they fetch per sync (an API-cost bound).
+# With a FIXED lookback window that cap becomes a coverage ceiling: a company
+# with more calls in the window than the cap gets the same head re-fetched
+# every cycle and never reaches the tail. For providers listed here the sync
+# instead asks for "what landed since the last successful sync", so each cycle
+# handles a small delta and the cap stops bounding coverage.
+#
+# Only providers whose pull() accepts a `since` kwarg belong here.
+INCREMENTAL_PULLERS: frozenset[str] = frozenset({"gong"})
+
+#: Incremental pulls re-ask for a little BEFORE the last sync. Providers
+#: process recordings asynchronously (a Gong call brief can land hours after
+#: the call itself), so a strict `since = last_sync_at` would permanently skip
+#: anything that finished processing after its window had closed. The overlap
+#: is free: re-fetched records hit the ledger and are dropped before any model
+#: call.
+_INCREMENTAL_OVERLAP = timedelta(days=2)
+
+
+def incremental_since(last_sync_at: str | datetime | None) -> Optional[datetime]:
+    """The `since` bound for an incremental pull, or None for a full window.
+
+    None/unparseable last_sync_at ⇒ None ("never synced, or we can't tell" →
+    the puller's own default lookback), so a bad timestamp degrades to MORE
+    data, never less.
+    """
+    if not last_sync_at:
+        return None
+    if isinstance(last_sync_at, datetime):
+        stamp = last_sync_at
+    else:
+        try:
+            stamp = datetime.fromisoformat(str(last_sync_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            logger.warning("ingest: unparseable last_sync_at %r", last_sync_at)
+            return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp - _INCREMENTAL_OVERLAP
+
+
 def token_for(provider: str, token_json: dict) -> str:
     """Pull the right credential field out of the decrypted token payload."""
     key = PULLERS[provider][1]
@@ -122,14 +168,32 @@ def sync_provider(
     *,
     token: str,
     records: list[RawRecord] | None = None,
+    last_sync_at: str | datetime | None = None,
 ) -> dict:
-    """Pull + extract one provider into the KG. Returns counts + errors."""
+    """Pull + extract one provider into the KG. Returns counts + errors.
+
+    `last_sync_at` (the connection's stamp) turns the pull INCREMENTAL for
+    providers in INCREMENTAL_PULLERS — they fetch only what landed since
+    then, minus a safety overlap. Everyone else pulls their default window
+    exactly as before.
+    """
     if provider not in PULLERS:
         raise ValueError(f"No puller for provider {provider!r}")
     puller, _, hint = PULLERS[provider]
 
     if records is None:
-        records = list(puller(token))
+        since = (
+            incremental_since(last_sync_at)
+            if provider in INCREMENTAL_PULLERS
+            else None
+        )
+        if since is not None:
+            logger.info(
+                "ingest: %s incremental pull since %s", provider, since.isoformat()
+            )
+            records = list(puller(token, since=since))
+        else:
+            records = list(puller(token))
 
     # Ledger gate: drop records whose exact rendering was already extracted
     # for this enterprise, BEFORE any model call. A changed record renders

@@ -162,6 +162,35 @@ describe("connectorsApi Slack methods", () => {
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({ channels: [] })
   })
 
+  it("connectGongWithCredentials POSTs the key pair to /gong/credentials", async () => {
+    await connectorsApi.connectGongWithCredentials("AK", "SECRET")
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/gong/credentials`)
+    expect(lastCall!.init?.method).toBe("POST")
+    // No base URL sent when the user leaves it blank — the backend falls
+    // back to the common Gong host.
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      access_key: "AK",
+      access_key_secret: "SECRET",
+    })
+  })
+
+  it("connectGongWithCredentials includes api_base_url for region-specific tenants", async () => {
+    await connectorsApi.connectGongWithCredentials(
+      "AK", "SECRET", "https://us-12345.api.gong.io",
+    )
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      access_key: "AK",
+      access_key_secret: "SECRET",
+      api_base_url: "https://us-12345.api.gong.io",
+    })
+  })
+
+  it("disconnectGong DELETEs /gong", async () => {
+    await connectorsApi.disconnectGong()
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/gong`)
+    expect(lastCall!.init?.method).toBe("DELETE")
+  })
+
   it("setSlackConfig (dm) POSTs only target_type, no channel fields", async () => {
     await connectorsApi.setSlackConfig({ targetType: "dm" })
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({ target_type: "dm" })
