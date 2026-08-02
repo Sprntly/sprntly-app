@@ -319,11 +319,14 @@ export type IterateComposerProps = {
   /** When supplied, Submit delegates the iterate run to the host's shared runner
    *  (useIterateRun.runIterate) instead of posting inline. Only honoured together
    *  with skipCostConfirm. When absent the composer keeps its own POST + onIterated
-   *  notify (back-compat for the launcher / public callers). */
+   *  notify (back-compat for the launcher / public callers). Resolves `true` when
+   *  the runner actually started a run, `false` when it was rejected (e.g. a
+   *  second submit while one is already in flight) — Submit awaits this and only
+   *  clears the local prompt / apply target when it resolves `true`. */
   runIterateExternal?: (
     instruction: string,
     appliedCommentId?: number | null,
-  ) => void | Promise<void>
+  ) => Promise<boolean>
   /** When the host runner is running, Submit is disabled (the activity stream is
    *  the progress surface). */
   externalBusy?: boolean
@@ -441,10 +444,16 @@ export function IterateComposer({
     if (skipCostConfirm && runIterateExternal) {
       const instruction = prompt
       const linkedComment = appliedCommentId
-      setPrompt("")
-      setAppliedCommentId(null)
-      onClearApply?.()
-      void runIterateExternal(instruction, linkedComment)
+      // Await the shared runner's outcome before clearing anything: a
+      // rejected submit (a run is already in flight) must leave the prompt +
+      // apply target exactly as the user left them, so they can retry once
+      // the current change finishes.
+      const started = await runIterateExternal(instruction, linkedComment)
+      if (started) {
+        setPrompt("")
+        setAppliedCommentId(null)
+        onClearApply?.()
+      }
       return
     }
     if (skipCostConfirm) {
