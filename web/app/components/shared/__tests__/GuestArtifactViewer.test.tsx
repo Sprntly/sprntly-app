@@ -7,7 +7,7 @@
 // exactly once per mount.
 import * as React from "react"
 import { cleanup, render, waitFor } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -47,11 +47,13 @@ const apiCallsMock = vi.hoisted(() => ({
   prdGet: vi.fn(),
   evidenceGet: vi.fn(),
   storiesGetJob: vi.fn(),
+  conversationsByPrd: vi.fn(),
 }))
 vi.mock("../../../lib/api", () => ({
   prdApi: { get: apiCallsMock.prdGet },
   evidenceApi: { get: apiCallsMock.evidenceGet },
   storiesApi: { getJob: apiCallsMock.storiesGetJob },
+  conversationsApi: { byPrd: apiCallsMock.conversationsByPrd },
 }))
 
 const contentApiMock = vi.fn()
@@ -76,6 +78,13 @@ const CONTENT_RESPONSE = {
   evidence: null,
   tickets: { stories: [{ title: "Ticket one", body: "b", acceptance_criteria: [], priority: null, route: null }] },
 }
+
+beforeEach(() => {
+  // No conversation history by default — most of this suite covers the PRD
+  // content fetch, not the history read; the history-specific test below
+  // overrides this.
+  apiCallsMock.conversationsByPrd.mockResolvedValue({ conversation: null, turns: [] })
+})
 
 afterEach(() => {
   cleanup()
@@ -156,5 +165,47 @@ describe("GuestArtifactViewer", () => {
     await waitFor(() => {
       expect(contentApiMock).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it("fetches read-only conversation history for this PRD via the company-scoped byPrd API", async () => {
+    contentApiMock.mockResolvedValue(CONTENT_RESPONSE)
+    render(
+      <GuestArtifactViewer
+        token="tok-1"
+        artifactId={482}
+        sharerName="Priya Shah"
+        owningCompanyName="Acme Co"
+      />,
+    )
+    await waitFor(() => {
+      expect(apiCallsMock.conversationsByPrd).toHaveBeenCalledTimes(1)
+    })
+    expect(apiCallsMock.conversationsByPrd).toHaveBeenCalledWith(482)
+  })
+
+  it("renders past turns read-only when history exists, with the composer still locked", async () => {
+    contentApiMock.mockResolvedValue(CONTENT_RESPONSE)
+    apiCallsMock.conversationsByPrd.mockResolvedValue({
+      conversation: { id: 9 },
+      turns: [
+        { id: 1, conversation_id: 9, role: "user", content: "What's the timeline?", created_at: "2026-07-01T00:00:00Z" },
+        { id: 2, conversation_id: 9, role: "assistant", content: "Targeting Q3.", created_at: "2026-07-01T00:01:00Z" },
+      ],
+    })
+    const { getByTestId, getByText } = render(
+      <GuestArtifactViewer
+        token="tok-1"
+        artifactId={482}
+        sharerName="Priya Shah"
+        owningCompanyName="Acme Co"
+      />,
+    )
+    await waitFor(() => {
+      expect(getByTestId("guest-history-turns")).toBeTruthy()
+    })
+    expect(getByText("What's the timeline?")).toBeTruthy()
+    expect(getByText("Targeting Q3.")).toBeTruthy()
+    const composer = getByTestId("guest-viewer-main").querySelector("textarea")
+    expect(composer?.disabled).toBe(true)
   })
 })

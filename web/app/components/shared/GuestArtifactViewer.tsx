@@ -19,6 +19,7 @@ import { GuestSessionProvider, type GuestSession } from "../../context/GuestSess
 import { artifactShareApi } from "../../lib/artifactShareApi"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { markdownToEvidenceState } from "../../lib/evidence-adapter"
+import { conversationsApi, type ConversationTurn } from "../../lib/api"
 import { IconLock } from "@tabler/icons-react"
 import { GuestRail } from "./GuestRail"
 import { ContentPanel } from "./ContentPanel"
@@ -49,6 +50,26 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
   // was redundant and actively harmful — removed.
   const fetchedRef = useRef(false)
   const [joinModalOpen, setJoinModalOpen] = useState(false)
+
+  // Read-only chat history for THIS PRD, company-scoped (require_company,
+  // not require_workspace) — the one real chat surface an auto-joined
+  // company member can actually reach, since sending a new message
+  // (backend/app/routes/ask.py) and browsing the general conversation list
+  // (GET /v1/conversations) are both require_workspace-gated and stay
+  // structurally out of reach until a real workspace join happens. `null`
+  // (not an empty array) distinguishes "still loading" from "checked, no
+  // conversation exists yet" so the composer's placeholder doesn't flash.
+  const [historyTurns, setHistoryTurns] = useState<ConversationTurn[] | null>(null)
+  const historyFetchedRef = useRef(false)
+
+  useEffect(() => {
+    if (historyFetchedRef.current) return
+    historyFetchedRef.current = true
+    conversationsApi
+      .byPrd(artifactId)
+      .then((res) => setHistoryTurns(res.turns))
+      .catch(() => setHistoryTurns([])) // best-effort — an empty history reads the same as "none yet"
+  }, [artifactId])
 
   useEffect(() => {
     if (fetchedRef.current) return
@@ -99,15 +120,30 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
           onJoin={() => setJoinModalOpen(true)}
         />
         <main className="main" data-testid="guest-viewer-main">
-          <div className="home-landing-eyeline">
-            <div className="od-center-inner od-center-inner--home">
-              <div className="chat-greeting">
-                <h1 className="chat-greeting-title">
-                  Shared with <em>you</em>.
-                </h1>
+          {historyTurns && historyTurns.length > 0 ? (
+            <div
+              className="od-center-inner od-center-inner--home"
+              style={{ display: "flex", flexDirection: "column", height: "100%" }}
+            >
+              <div className="chat-greeting" style={{ paddingBottom: 8 }}>
                 <p className="chat-greeting-sub">
-                  {sharerName} shared this from {owningCompanyName}.
+                  Past chat about this document, read-only — join the workspace to reply.
                 </p>
+              </div>
+              <div
+                data-testid="guest-history-turns"
+                style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "8px 0" }}
+              >
+                {historyTurns.map((turn) => (
+                  <div key={turn.id} style={{ maxWidth: 640 }}>
+                    <div className="chat-greeting-sub" style={{ fontWeight: 600, marginBottom: 2 }}>
+                      {turn.role === "user" ? sharerName : "Sprntly"}
+                    </div>
+                    <div className="prd-body" style={{ fontSize: 14 }}>
+                      {turn.content}
+                    </div>
+                  </div>
+                ))}
               </div>
               <div className="home-landing-composer">
                 <div
@@ -117,7 +153,7 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
                 >
                   <textarea
                     className="chat-home-composer-input"
-                    placeholder="Join the workspace to chat about this document"
+                    placeholder="Join the workspace to reply"
                     rows={1}
                     disabled
                     readOnly
@@ -137,7 +173,47 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
                 </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="home-landing-eyeline">
+              <div className="od-center-inner od-center-inner--home">
+                <div className="chat-greeting">
+                  <h1 className="chat-greeting-title">
+                    Shared with <em>you</em>.
+                  </h1>
+                  <p className="chat-greeting-sub">
+                    {sharerName} shared this from {owningCompanyName}.
+                  </p>
+                </div>
+                <div className="home-landing-composer">
+                  <div
+                    className="chat-home-composer"
+                    aria-disabled="true"
+                    style={{ opacity: 0.55, cursor: "not-allowed" }}
+                  >
+                    <textarea
+                      className="chat-home-composer-input"
+                      placeholder="Join the workspace to chat about this document"
+                      rows={1}
+                      disabled
+                      readOnly
+                      style={{ cursor: "not-allowed" }}
+                    />
+                    <div className="chat-home-composer-footer">
+                      <div className="chat-home-composer-actions" />
+                      <button
+                        type="button"
+                        className="chat-home-composer-send"
+                        aria-label="Chat is locked — join the workspace to send messages"
+                        disabled
+                      >
+                        <IconLock size={14} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       </div>
       <ContentPanel />
