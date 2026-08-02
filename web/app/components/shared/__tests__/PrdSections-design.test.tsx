@@ -200,11 +200,15 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     // this region via a `ref`/`onInput` pair appended AFTER those attributes — an
     // orthogonal addition that does not conflict with the P7 generate-trigger
     // relocation, so the invariant permits trailing attributes after the core set.
+    // A guest-viewer read-only guard also gates `contentEditable` itself (still
+    // `true` for every existing caller) with a boolean expression instead of the
+    // bare shorthand — the invariant permits that value shape while still locking
+    // the attribute order/set and rejecting an actual reorder or removal.
     // PrdScreen needs an app-router-backed NavigationProvider to render in this node
     // env, so the invariant is asserted on the on-disk source (NEVER `git show
     // <rev>` — CI shallow clones lack historical objects).
     expect(PRD_SCREEN_SRC).toMatch(
-      /<div\s+className="prd-body"\s+contentEditable\s+spellCheck=\{false\}\s+suppressContentEditableWarning\b/,
+      /<div\s+className="prd-body"\s+contentEditable(?:=\{[^}]+\})?\s+spellCheck=\{false\}\s+suppressContentEditableWarning\b/,
     )
     // The PrdSections mount still lives INSIDE that editable region; the
     // prdMetaLine prop was removed (PRD content no longer threaded to the canvas).
