@@ -193,12 +193,20 @@ def _normalize_date(raw: Any) -> Optional[str]:
 
 def sync_company(
     company_id: str, *, limit: int = _SYNC_LIMIT, since: Optional[datetime] = None
-) -> int:
+) -> Optional[int]:
     """Refresh the index for one company from its connected source.
 
-    Returns the number of calls written. Idempotent: rows upsert on
-    (company_id, provider, external_id), so re-running refreshes rather than
-    duplicating. Safe to call on a schedule or lazily before a read.
+    Returns the number of calls written, or **None** when there is no connected
+    source to sync from. That distinction is not decoration: returning 0 for
+    both would let `ensure_fresh` read "no source" as "synced, found nothing",
+    stamp the index usable, and answer *"No calls. Your transcript source is
+    connected and I checked it"* to a company that has no transcript source at
+    all — the same confidently-wrong shape this whole layer exists to prevent,
+    smuggled in through a return value.
+
+    Idempotent: rows upsert on (company_id, provider, external_id), so
+    re-running refreshes rather than duplicating. Safe to call on a schedule or
+    lazily before a read.
 
     ``since`` makes this an INCREMENTAL top-up — only calls after that instant
     are fetched. `ensure_fresh` passes it with a deliberate overlap so a
@@ -222,7 +230,7 @@ def sync_company(
         # Deliberately NOT stamped: "no source connected" is not a sync outcome,
         # and writing a row here would make a company that never connected
         # Fireflies look like one whose sync found nothing.
-        return 0
+        return None
 
     try:
         return _sync_from_source(
@@ -466,6 +474,22 @@ def _has_source(company_id: str) -> bool:
         return True
 
 
+# Per-company refresh locks, so several call questions arriving together
+# produce one sync rather than one each. Same shape as auto_sync's
+# _corpus_seed_locks.
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def _refresh_lock(company_id: str) -> threading.Lock:
+    with _refresh_locks_guard:
+        lock = _refresh_locks.get(company_id)
+        if lock is None:
+            lock = threading.Lock()
+            _refresh_locks[company_id] = lock
+        return lock
+
+
 def ensure_fresh(
     company_id: str,
     *,
@@ -496,8 +520,18 @@ def ensure_fresh(
 
     def _refresh() -> None:
         try:
-            sync_company(company_id, since=since)
-            outcome["ok"] = True
+            # Serialized per company: a burst of call questions in one session
+            # would otherwise fire a sync each, all fetching the same page. The
+            # queued caller re-reads state below and usually finds it already
+            # fresh.
+            with _refresh_lock(company_id):
+                written = sync_company(company_id, since=since)
+            if written is None:
+                # No connected source — NOT a successful empty sync. See
+                # sync_company's return contract.
+                outcome["no_source"] = True
+            else:
+                outcome["ok"] = True
         except Exception as exc:  # noqa: BLE001 — already stamped by sync_company
             outcome["error"] = str(exc)[:200]
 
@@ -507,6 +541,11 @@ def ensure_fresh(
     worker.start()
     worker.join(timeout_s)
 
+    if outcome.get("no_source"):
+        # The source vanished between `_has_source` and the sync (disconnected
+        # mid-question, or `_has_source` failed open on a lookup error). Report
+        # it as disconnected rather than as an empty index.
+        return Freshness(connected=False)
     if outcome.get("ok"):
         return Freshness(connected=True, as_of=datetime.now(timezone.utc))
 
@@ -671,12 +710,11 @@ def answer_listing(
         # it — or worse, answer from the KG's distilled summaries and imply
         # coverage we don't have. Only reachable when `fresh.usable`, i.e. a
         # sync really did complete.
-        scope = " in that window" if since else ""
+        where = "in that window" if since else "recorded at all"
         return {
             "answer": (
-                f"No calls{scope}. Your transcript source is connected and I "
-                f"checked it — there simply aren't any recorded calls for that "
-                f"period." + fresh.as_of_note()
+                f"No calls {where}. Your transcript source is connected and I "
+                f"checked it — there simply aren't any." + fresh.as_of_note()
             ),
             "key_points": [], "citations": [], "confidence": 1.0,
             "unanswered": "", "_skill": None, "_skill_source": "call-index",

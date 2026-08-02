@@ -781,10 +781,75 @@ def test_no_connected_source_is_not_stamped_as_a_sync_outcome(monkeypatch):
     import app.call_digest as cd
     monkeypatch.setattr(cd, "_load_api_key", lambda *_a: None)
 
-    assert ci.sync_company("ent-A") == 0
+    assert ci.sync_company("ent-A") is None   # None, not 0 — see the contract
     assert written == []
 
 
 class _FakeClient:
     def __init__(self): self.rows: list = []
     def table(self, _name): return _FakeTable(self.rows)
+
+
+def test_a_vanished_source_reads_as_disconnected_not_as_an_empty_index(monkeypatch):
+    """The hole this closes: `sync_company` used to return 0 both for "synced,
+    found nothing" and "there is no source", so a company whose connection
+    lookup failed open would sync nothing, be stamped usable, and be told
+    "No calls. Your transcript source is connected and I checked it" — with no
+    transcript source at all.
+
+    `sync_company` now returns None for that case and `ensure_fresh` reports it
+    as disconnected.
+    """
+    monkeypatch.setattr(ci, "_sync_state", lambda cid: None)
+    monkeypatch.setattr(ci, "_has_source", lambda cid: True)   # fails open
+    monkeypatch.setattr(ci, "sync_company", lambda *a, **k: None)
+
+    fresh = ci.ensure_fresh("ent-A")
+    assert not fresh.connected
+    assert not fresh.usable
+
+
+def test_sync_company_returns_none_when_no_source_is_connected(monkeypatch):
+    """The return contract the guard above depends on: None, never 0."""
+    import app.call_digest as cd
+    monkeypatch.setattr(cd, "_load_api_key", lambda *_a: None)
+    assert ci.sync_company("ent-A") is None
+
+
+def test_concurrent_call_questions_produce_one_sync(monkeypatch):
+    """A burst of call questions in one session must not fire a sync each, all
+    fetching the same page."""
+    import threading as th
+
+    monkeypatch.setattr(ci, "_sync_state", lambda cid: None)
+    monkeypatch.setattr(ci, "_has_source", lambda cid: True)
+    syncs = []
+    gate = th.Event()
+
+    def _slow_sync(company_id, **_k):
+        syncs.append(company_id)
+        gate.wait(0.5)          # hold the lock while the others pile up
+        return 1
+
+    monkeypatch.setattr(ci, "sync_company", _slow_sync)
+
+    threads = [
+        th.Thread(target=lambda: ci.ensure_fresh("ent-A", timeout_s=0.05))
+        for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(2)
+    gate.set()
+
+    assert len(syncs) == 1, f"expected one sync, got {len(syncs)}"
+
+
+def test_listing_with_no_window_reads_naturally(monkeypatch):
+    """"No calls recorded at all" — not "no calls for that period" when the
+    question named no period."""
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: [])
+    out = ci.answer_listing("ent-A", "which calls have we had", fresh=_fresh())
+    assert "recorded at all" in out["answer"]
+    assert "that period" not in out["answer"]

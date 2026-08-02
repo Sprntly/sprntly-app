@@ -472,6 +472,10 @@ def _run_call_index_sync(company_id: str) -> None:
 
     try:
         written = call_index.sync_company(company_id)
+        if written is None:
+            logger.info("call-index: no transcript source for %s — nothing to do",
+                        company_id)
+            return
         logger.info("call-index refresh done: %s calls=%s", company_id, written)
     except Exception:  # noqa: BLE001 — fully isolated; already stamped
         logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
