@@ -241,6 +241,34 @@ export async function postLoginPath(): Promise<string> {
       // server-side by resolve/join regardless of how the user got here.
     }
 
+    // Bare-link ("full parity") guest account state — the token-less
+    // sibling of the pendingToken branch above, same rationale: a user who
+    // signed up via a bare `?prd=` visit (no share row) carries the PRD's
+    // opaque public_id in user_metadata (never the raw sequential id) so it
+    // survives the verify-email hop on any device. `access=guest` on the
+    // redirect target is what lets AuthGate keep routing THIS guest's own
+    // future visits/refreshes through the guest pipeline without affecting
+    // a real member's ordinary bare `?prd=` navigation (see AuthGate.tsx's
+    // prdOnlyGuestMode). The redirect itself carries the public_id, NOT
+    // outcome.artifact_id (the real int) — reflecting the int here would
+    // reintroduce, on this guest's very first landing URL, exactly the
+    // blind-enumeration exposure this scope exists to close.
+    const pendingPrdPublicId = user.user_metadata?.pending_prd_public_id
+    if (typeof pendingPrdPublicId === "string" && pendingPrdPublicId) {
+      const { resolvePrdAccess, tryAutoJoinCompanyOnDomainMatchForPrd } = await import(
+        "../prdAccessApi"
+      )
+      await tryAutoJoinCompanyOnDomainMatchForPrd(pendingPrdPublicId)
+      const outcome = await resolvePrdAccess(pendingPrdPublicId)
+      if (outcome?.outcome === "guest_view") {
+        return `/?prd=${encodeURIComponent(pendingPrdPublicId)}&access=guest`
+      }
+      if (outcome?.outcome === "blocked") {
+        return `/not-authorized?reason=${outcome.reason}`
+      }
+      // fail OPEN to onboarding — same rationale as the pendingToken branch.
+    }
+
     // Pre-onboarding profile gate: a brand-new user whose profile is missing
     // a first name OR the company-vs-personal account type goes to the
     // unnumbered `your-name` gate first. Google sign-ups always miss the

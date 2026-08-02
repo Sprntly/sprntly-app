@@ -65,12 +65,20 @@ export function GuestRail() {
       // rendering EntryGateScreen — the "shared with you" card, correct for
       // a first-time visitor but not what a deliberate sign-out should show.
       // Route to the real sign-in screen instead, same as EntryGateScreen's
-      // own "Sign in" button — carrying the share token through when one
-      // exists (GuestRail is only ever mounted inside a resolved share
-      // session, but guestSession is defensively allowed to be null so this
-      // still degrades to a bare /sign-in rather than throwing).
-      const shareQuery = guestSession ? `?share=${encodeURIComponent(guestSession.token)}` : ""
-      router.replace(`/sign-in${shareQuery}`)
+      // own "Sign in" button — carrying the share token (or, for a bare-link
+      // session with no token, the PRD's public_id — NEVER artifactId, which
+      // is the raw sequential id this whole scope exists to stop exposing)
+      // through. Not strictly load-bearing for correctness — postLoginPath()
+      // re-resolves pending_share_token/pending_prd_public_id from
+      // user_metadata on the NEXT sign-in regardless of this URL's query
+      // string — but kept for symmetry/contextual UI, and degrades to a
+      // bare /sign-in when guestSession is unexpectedly null.
+      const query = guestSession?.token
+        ? `?share=${encodeURIComponent(guestSession.token)}`
+        : guestSession?.publicId
+          ? `?prd=${encodeURIComponent(guestSession.publicId)}`
+          : ""
+      router.replace(`/sign-in${query}`)
     } finally {
       signingOutRef.current = false
       setSigningOut(false)

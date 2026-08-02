@@ -282,3 +282,17 @@ def require_shared_prd(prd_id: int, owner_company_id: str) -> dict:
     if owner is None or owner != owner_company_id:
         raise HTTPException(status_code=404, detail="PRD not found")
     return prd
+
+
+def find_prd_evidence(prd_row: dict) -> dict | None:
+    """Mirrors GET /v1/prd/{id}/evidence's own lookup: chat-task evidence is
+    keyed (brief_id, theme_id); every other PRD source has no evidence doc,
+    so this returns None rather than a list (matching the underlying
+    per-PRD evidence model — at most one doc, not a collection). Shared by
+    both artifact_share.py's and prd_access.py's `/content` routes."""
+    from app.db.evidences import find_existing_evidence_for_theme
+
+    theme_id = prd_row.get("theme_id") or ""
+    if prd_row.get("source") != "chat" or not str(theme_id).startswith("chat:"):
+        return None
+    return find_existing_evidence_for_theme(prd_row["brief_id"], theme_id)

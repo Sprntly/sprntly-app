@@ -19,6 +19,11 @@ vi.mock("../../../lib/artifactShareApi", () => ({
   artifactShareApi: { getMetadata: (...a: unknown[]) => getMetadataMock(...a) },
 }))
 
+const getPrdMetadataMock = vi.fn()
+vi.mock("../../../lib/prdAccessApi", () => ({
+  prdAccessApi: { getMetadata: (...a: unknown[]) => getPrdMetadataMock(...a) },
+}))
+
 import { EntryGateScreen } from "../EntryGateScreen"
 
 afterEach(() => {
@@ -75,5 +80,33 @@ describe("EntryGateScreen", () => {
       expect(document.querySelector(".verify-icon--danger")).not.toBeNull()
     })
     expect(document.body.textContent).not.toMatch(/Q3 Retention PRD/)
+  })
+
+  describe("bare-link (prdId, no token) mode", () => {
+    it("fetches via prdAccessApi (never artifactShareApi) and shows no sharer name, routing with ?prd=", async () => {
+      getPrdMetadataMock.mockResolvedValue({
+        title: "Q3 Retention PRD",
+        owning_company_name: "Acme Co",
+        required_email_domain: "acme.com",
+      })
+      render(<EntryGateScreen publicId="042494cd-22c0-4c20-9967-cc761d192ae0" />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/was shared with you/)).not.toBeNull()
+      })
+      expect(getPrdMetadataMock).toHaveBeenCalledWith("042494cd-22c0-4c20-9967-cc761d192ae0")
+      expect(getMetadataMock).not.toHaveBeenCalled()
+      expect(screen.getByTestId("entry-gate-domain-hint")).not.toBeNull()
+
+      fireEvent.click(screen.getByRole("button", { name: /create account/i }))
+      expect(routerMock.push).toHaveBeenCalledWith(
+        "/sign-up?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+      )
+
+      fireEvent.click(screen.getByRole("button", { name: /sign in/i }))
+      expect(routerMock.push).toHaveBeenCalledWith(
+        "/sign-in?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+      )
+    })
   })
 })

@@ -25,13 +25,20 @@ vi.mock("../../../lib/artifactShareApi", () => ({
   artifactShareApi: { join: (...a: unknown[]) => joinMock(...a) },
 }))
 
+const prdJoinMock = vi.fn()
+vi.mock("../../../lib/prdAccessApi", () => ({
+  prdAccessApi: { join: (...a: unknown[]) => prdJoinMock(...a) },
+}))
+
 import { JoinConfirmModal } from "../JoinConfirmModal"
 
 const defaultProps = {
   open: true,
   token: "tok-1",
+  publicId: null,
   artifactId: 482,
   sharerName: "Priya Shah",
+  owningCompanyName: "Acme Co",
   onClose: vi.fn(),
 }
 
@@ -117,5 +124,32 @@ describe("JoinConfirmModal", () => {
   it("renders nothing when closed", () => {
     render(<JoinConfirmModal {...defaultProps} open={false} />)
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("bare-link session (no token) calls prdAccessApi.join(publicId) and shows generic toast copy", async () => {
+    prdJoinMock.mockResolvedValue({ owning_company_name: "Acme Co", workspace_id: "ws-1" })
+    render(
+      <JoinConfirmModal
+        {...defaultProps}
+        token={null}
+        publicId="042494cd-22c0-4c20-9967-cc761d192ae0"
+        sharerName={null}
+      />,
+    )
+    expect(screen.getByText("Join Acme Co's workspace?")).toBeTruthy()
+
+    fireEvent.click(screen.getByRole("button", { name: /join workspace/i }))
+
+    await waitFor(() => {
+      expect(prdJoinMock).toHaveBeenCalledTimes(1)
+    })
+    expect(prdJoinMock).toHaveBeenCalledWith("042494cd-22c0-4c20-9967-cc761d192ae0")
+    expect(joinMock).not.toHaveBeenCalled()
+    expect(showToastMock.mock.calls[0].join(" ")).toContain("full access to this workspace")
+    // Reload still uses the real internal artifactId (int) — accepted as a
+    // legacy `?prd=` form by useArtifactUrlSync; the address bar upgrades to
+    // the public_id automatically once the drawer→URL reflect effect sees
+    // the freshly-loaded PRD. See JoinConfirmModal's own module comment.
+    expect(assignSpy).toHaveBeenCalledWith("/?prd=482")
   })
 })

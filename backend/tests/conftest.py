@@ -175,7 +175,12 @@ CREATE TABLE prds (
     -- 20260731090000: originating-chat-question linkage (mirrors reports'
     -- question/ask_id) — NULL on every path except the chat-task command.
     question         TEXT,
-    ask_id           INTEGER
+    ask_id           INTEGER,
+    -- Mirrors 20260802120000_prds_public_id.sql. Real Postgres backfills +
+    -- defaults this via gen_random_uuid(), which sqlite has no equivalent
+    -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
+    -- stamp a real uuid4 explicitly via an UPDATE after seeding.
+    public_id        TEXT
 );
 
 CREATE TABLE evidences (

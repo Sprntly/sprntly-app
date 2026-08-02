@@ -63,6 +63,11 @@ export type SignUpInput = {
    *  can resolve it on ANY device/session, even if verification completes
    *  somewhere other than where sign-up started. */
   pendingShareToken?: string
+  /** A bare-link PRD's opaque public_id, when the sign-up originated from a
+   *  `?prd=` visit with NO share token (2026-08-02 "full parity" bare-link
+   *  scope) — the token-less sibling of pendingShareToken, same persistence
+   *  rationale. Never the raw sequential prd id. */
+  pendingPrdPublicId?: string
 }
 
 /** Best-effort IANA timezone of the current browser (e.g. "America/New_York").
@@ -247,6 +252,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             ...(input.accountType ? { account_type: input.accountType } : {}),
             ...(timezone ? { timezone } : {}),
             ...(input.pendingShareToken ? { pending_share_token: input.pendingShareToken } : {}),
+            ...(input.pendingPrdPublicId
+              ? { pending_prd_public_id: input.pendingPrdPublicId }
+              : {}),
           },
         },
       })

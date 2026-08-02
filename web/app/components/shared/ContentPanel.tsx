@@ -527,7 +527,7 @@ export function ContentPanel() {
               <ShareContextStrip
                 kind="drawer"
                 title={content.prd?.title ?? "Shared document"}
-                sharerName={guestSession.sharerName}
+                sharerName={guestSession.sharerName ?? guestSession.owningCompanyName}
               />
             </div>
           </div>

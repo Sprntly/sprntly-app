@@ -18,6 +18,8 @@ const fetchWorkspaceMock = vi.fn()
 const acceptInviteMock = vi.fn()
 const resolveArtifactShareMock = vi.fn()
 const tryAutoJoinCompanyMock = vi.fn()
+const resolvePrdAccessMock = vi.fn()
+const tryAutoJoinCompanyForPrdMock = vi.fn()
 
 // postLoginPath calls the module-local getSupabase(), so we can't intercept it
 // by mocking the re-export. Instead satisfy getSupabasePublicConfig() with env
@@ -56,6 +58,13 @@ vi.mock("../../teamApi", () => ({
 vi.mock("../../artifactShareApi", () => ({
   resolveArtifactShare: (...a: unknown[]) => resolveArtifactShareMock(...a),
   tryAutoJoinCompanyOnDomainMatch: (...a: unknown[]) => tryAutoJoinCompanyMock(...a),
+}))
+
+// Bare-link ("full parity") sibling — lazily imported by postLoginPath's
+// pending_prd_public_id branch, same pattern as artifactShareApi above.
+vi.mock("../../prdAccessApi", () => ({
+  resolvePrdAccess: (...a: unknown[]) => resolvePrdAccessMock(...a),
+  tryAutoJoinCompanyOnDomainMatchForPrd: (...a: unknown[]) => tryAutoJoinCompanyForPrdMock(...a),
 }))
 
 import { postLoginPath } from "../client"
@@ -274,5 +283,97 @@ describe("postLoginPath — guest account state (pending share token)", () => {
     })
     expect(await postLoginPath()).toBe(FIRST_STEP)
     expect(tryAutoJoinCompanyMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("postLoginPath — bare-link guest account state (pending_prd_public_id, no token)", () => {
+  it("routes a new user with an EMPTY first_name to the your-name gate (unchanged when no pending_prd_public_id)", async () => {
+    newConfirmedUser()
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "", account_type: "company" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe("/onboarding/your-name")
+    expect(resolvePrdAccessMock).not.toHaveBeenCalled()
+  })
+
+  it("routes to the PRD via public_id (never the real int) on a guest_view outcome, auto-joining company FIRST", async () => {
+    newConfirmedUser({ pending_prd_public_id: "042494cd-22c0-4c20-9967-cc761d192ae0" })
+    resolvePrdAccessMock.mockResolvedValue({
+      outcome: "guest_view",
+      artifact_type: "prd",
+      artifact_id: 42, // the real internal id — must NEVER appear in the redirect
+      owning_company_name: "Acme",
+    })
+    expect(await postLoginPath()).toBe(
+      "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0&access=guest",
+    )
+    expect(resolvePrdAccessMock).toHaveBeenCalledWith(
+      "042494cd-22c0-4c20-9967-cc761d192ae0",
+    )
+    // Mutation-proof: the one-shot auto-join call actually fires, and fires
+    // BEFORE /resolve — same ordering guarantee as the token-keyed sibling.
+    expect(tryAutoJoinCompanyForPrdMock).toHaveBeenCalledWith(
+      "042494cd-22c0-4c20-9967-cc761d192ae0",
+    )
+    const autoJoinOrder = tryAutoJoinCompanyForPrdMock.mock.invocationCallOrder[0]
+    const resolveOrder = resolvePrdAccessMock.mock.invocationCallOrder[0]
+    expect(autoJoinOrder).toBeLessThan(resolveOrder)
+  })
+
+  it("routes to /not-authorized (with the reason, no prd/public_id disclosed) on a blocked resolve outcome", async () => {
+    newConfirmedUser({ pending_prd_public_id: "042494cd-22c0-4c20-9967-cc761d192ae0" })
+    resolvePrdAccessMock.mockResolvedValue({
+      outcome: "blocked",
+      reason: "different_company",
+    })
+    expect(await postLoginPath()).toBe("/not-authorized?reason=different_company")
+  })
+
+  it("falls open to onboarding when resolve fails (network/other error)", async () => {
+    newConfirmedUser({ pending_prd_public_id: "042494cd-22c0-4c20-9967-cc761d192ae0" })
+    resolvePrdAccessMock.mockResolvedValue(undefined)
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+  })
+
+  it("skips the bare-link check entirely when the user already has a workspace", async () => {
+    existingMemberUser({}, { pending_prd_public_id: "042494cd-22c0-4c20-9967-cc761d192ae0" })
+    acceptInviteMock.mockRejectedValue(new ApiError(404, { detail: "no invite" }))
+    expect(await postLoginPath()).toBe("/")
+    expect(resolvePrdAccessMock).not.toHaveBeenCalled()
+  })
+
+  it("ignores a non-string pending_prd_public_id, falling through to onboarding", async () => {
+    newConfirmedUser({ pending_prd_public_id: 12345 })
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(resolvePrdAccessMock).not.toHaveBeenCalled()
+  })
+
+  it("ignores an empty-string pending_prd_public_id, falling through to onboarding", async () => {
+    newConfirmedUser({ pending_prd_public_id: "" })
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(resolvePrdAccessMock).not.toHaveBeenCalled()
+  })
+
+  it("never calls the bare-link auto-join mechanism when there's no pending public_id to begin with", async () => {
+    newConfirmedUser()
+    profileMaybeSingleMock.mockResolvedValue({
+      data: { first_name: "Ada", account_type: "personal" },
+      error: null,
+    })
+    expect(await postLoginPath()).toBe(FIRST_STEP)
+    expect(tryAutoJoinCompanyForPrdMock).not.toHaveBeenCalled()
   })
 })

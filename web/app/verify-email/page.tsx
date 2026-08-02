@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
 import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
+import { prdAccessApi } from "../lib/prdAccessApi"
 import { AuthShell } from "../components/auth/AuthShell"
 import { VerifyEmailView } from "../components/auth/VerifyEmailView"
 
@@ -22,7 +23,12 @@ function VerifyEmailContent() {
   const searchParams = useSearchParams()
   const emailParam = searchParams.get("email") ?? ""
   const shareToken = searchParams.get("share")
+  const prdParam = searchParams.get("prd")
+  const prdPublicId = !shareToken && prdParam ? prdParam : null
   const [shareMeta, setShareMeta] = useState<ArtifactShareMetadata | null>(null)
+  const [prdMeta, setPrdMeta] = useState<{ title: string; owning_company_name: string } | null>(
+    null,
+  )
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -48,6 +54,22 @@ function VerifyEmailContent() {
       cancelled = true
     }
   }, [shareToken])
+
+  useEffect(() => {
+    if (!prdPublicId) return
+    let cancelled = false
+    prdAccessApi
+      .getMetadata(prdPublicId)
+      .then((meta) => {
+        if (!cancelled) setPrdMeta(meta)
+      })
+      .catch(() => {
+        /* no strip */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [prdPublicId])
 
   useEffect(() => {
     if (auth.kind === "authed" && auth.isEmailVerified()) {
@@ -116,7 +138,9 @@ function VerifyEmailContent() {
       shareContext={
         shareMeta
           ? { title: shareMeta.title || "a document", sharerName: shareMeta.sharer_name }
-          : undefined
+          : prdMeta
+            ? { title: prdMeta.title || "a document", sharerName: prdMeta.owning_company_name }
+            : undefined
       }
     />
   )

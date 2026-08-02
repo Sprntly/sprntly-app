@@ -9,14 +9,17 @@
 // for a zero-company guest, and the authed-fetch 403/404 chain
 // (ChatScreen/loadPrdById, ContentPanel's evidence/tickets effects) a guest
 // can never pass. GuestArtifactViewer reads the shared artifact's content
-// exactly once via artifactShareApi.content(token) and populates its own
-// ContentContext directly — it never calls prdApi.get, loadPrdById,
-// evidenceApi.get, loadEvidenceByInsight, or storiesApi.getJob.
+// exactly once via artifactShareApi.content(token) — or prdAccessApi.content
+// (artifactId) for a bare-link, token-less guest (2026-08-02 "full parity"
+// scope) — and populates its own ContentContext directly — it never calls
+// prdApi.get, loadPrdById, evidenceApi.get, loadEvidenceByInsight, or
+// storiesApi.getJob.
 import { useEffect, useRef, useState } from "react"
 import { NavigationProvider, useNavigation } from "../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../context/ContentContext"
 import { GuestSessionProvider, type GuestSession } from "../../context/GuestSessionContext"
 import { artifactShareApi } from "../../lib/artifactShareApi"
+import { prdAccessApi } from "../../lib/prdAccessApi"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { markdownToEvidenceState } from "../../lib/evidence-adapter"
 import { conversationsApi, type ConversationTurn } from "../../lib/api"
@@ -28,13 +31,29 @@ import { JoinWorkspaceBanner } from "./JoinWorkspaceBanner"
 import { JoinConfirmModal } from "./JoinConfirmModal"
 
 export type GuestArtifactViewerProps = {
-  token: string
+  /** Null for a bare-link (token-less) guest session — see prdAccessApi. */
+  token: string | null
+  /** The PRD's real internal id — used for content.prd.prd_id and the
+   *  (unrelated, already-int-keyed) conversation-history lookup. NEVER put
+   *  in a URL directly; see `publicId` for the external-facing identifier. */
   artifactId: number
-  sharerName: string
+  /** The PRD's opaque, unguessable external identifier — what a bare-link
+   *  (token-less) session's own content/join API calls key on. Null in
+   *  token mode (the share token is the external identifier there). */
+  publicId: string | null
+  /** Null when there's no share row to attribute a "shared by" to (bare-link
+   *  sessions). */
+  sharerName: string | null
   owningCompanyName: string
 }
 
-function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompanyName }: GuestArtifactViewerProps) {
+function GuestArtifactViewerInner({
+  token,
+  artifactId,
+  publicId,
+  sharerName,
+  owningCompanyName,
+}: GuestArtifactViewerProps) {
   const { setContent } = useContent()
   const { openContentPanel } = useNavigation()
   // Ref (not state) so React 18 dev double-invoke of effects still fetches
@@ -74,8 +93,8 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
   useEffect(() => {
     if (fetchedRef.current) return
     fetchedRef.current = true
-    artifactShareApi
-      .content(token)
+    const fetcher = token ? artifactShareApi.content(token) : prdAccessApi.content(publicId!)
+    fetcher
       .then((res) => {
         const prdReady = res.prd.status === "ready" && !!res.prd.payload_md
         if (!prdReady) return // best-effort: leave the empty pane up
@@ -86,6 +105,7 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
           prd: {
             ...markdownToPrdState(res.prd.payload_md),
             prd_id: res.prd.id,
+            public_id: res.prd.public_id,
             figma_file_key: undefined,
             llmPart: res.prd.llm_part,
             briefId: res.prd.brief_id,
@@ -109,7 +129,7 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
         // Best-effort — the empty pane stays up rather than an error toast; a
         // guest whose content read fails simply sees "Shared with you".
       })
-  }, [token, setContent, openContentPanel])
+  }, [token, artifactId, publicId, setContent, openContentPanel])
 
   return (
     <div className="app">
@@ -137,7 +157,7 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
                 {historyTurns.map((turn) => (
                   <div key={turn.id} style={{ maxWidth: 640 }}>
                     <div className="chat-greeting-sub" style={{ fontWeight: 600, marginBottom: 2 }}>
-                      {turn.role === "user" ? sharerName : "Sprntly"}
+                      {turn.role === "user" ? sharerName ?? "You" : "Sprntly"}
                     </div>
                     <div className="prd-body" style={{ fontSize: 14 }}>
                       {turn.content}
@@ -181,7 +201,9 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
                     Shared with <em>you</em>.
                   </h1>
                   <p className="chat-greeting-sub">
-                    {sharerName} shared this from {owningCompanyName}.
+                    {sharerName
+                      ? `${sharerName} shared this from ${owningCompanyName}.`
+                      : `Shared from ${owningCompanyName}.`}
                   </p>
                 </div>
                 <div className="home-landing-composer">
@@ -221,8 +243,10 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
       <JoinConfirmModal
         open={joinModalOpen}
         token={token}
+        publicId={publicId}
         artifactId={artifactId}
         sharerName={sharerName}
+        owningCompanyName={owningCompanyName}
         onClose={() => setJoinModalOpen(false)}
       />
     </div>
@@ -232,6 +256,7 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
 export function GuestArtifactViewer(props: GuestArtifactViewerProps) {
   const guestSession: GuestSession = {
     token: props.token,
+    publicId: props.publicId,
     sharerName: props.sharerName,
     owningCompanyName: props.owningCompanyName,
     artifactId: props.artifactId,

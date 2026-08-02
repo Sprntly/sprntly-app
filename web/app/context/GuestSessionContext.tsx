@@ -14,9 +14,17 @@
 import { createContext, useContext, type ReactNode } from "react"
 
 export type GuestSession = {
-  /** The artifact-share token this session was resolved from. */
-  token: string
-  sharerName: string
+  /** The artifact-share token this session was resolved from, or null for a
+   *  bare `?prd=` link resolved with no token (company-domain match only —
+   *  see prd_access.py). */
+  token: string | null
+  /** The PRD's opaque, unguessable external identifier — set only in
+   *  token-less (bare-link) mode; null in token mode (the share token is the
+   *  external identifier there). Never the raw sequential prd id. */
+  publicId: string | null
+  /** Null for a token-less session — there is no share row's sharer to
+   *  attribute a bare-link view to. */
+  sharerName: string | null
   owningCompanyName: string
   artifactId: number
 }

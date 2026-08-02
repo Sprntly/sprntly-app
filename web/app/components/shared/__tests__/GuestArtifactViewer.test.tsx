@@ -61,6 +61,11 @@ vi.mock("../../../lib/artifactShareApi", () => ({
   artifactShareApi: { content: (...a: unknown[]) => contentApiMock(...a) },
 }))
 
+const prdAccessContentMock = vi.fn()
+vi.mock("../../../lib/prdAccessApi", () => ({
+  prdAccessApi: { content: (...a: unknown[]) => prdAccessContentMock(...a) },
+}))
+
 import { GuestArtifactViewer } from "../GuestArtifactViewer"
 
 const CONTENT_RESPONSE = {
@@ -100,6 +105,7 @@ describe("GuestArtifactViewer", () => {
       render(
         <GuestArtifactViewer
           token="tok-1"
+          publicId={null}
           artifactId={482}
           sharerName="Priya Shah"
           owningCompanyName="Acme Co"
@@ -113,6 +119,7 @@ describe("GuestArtifactViewer", () => {
     render(
       <GuestArtifactViewer
         token="tok-1"
+        publicId={null}
         artifactId={482}
         sharerName="Priya Shah"
         owningCompanyName="Acme Co"
@@ -133,6 +140,7 @@ describe("GuestArtifactViewer", () => {
     render(
       <GuestArtifactViewer
         token="tok-1"
+        publicId={null}
         artifactId={482}
         sharerName="Priya Shah"
         owningCompanyName="Acme Co"
@@ -156,6 +164,7 @@ describe("GuestArtifactViewer", () => {
       render(
         <GuestArtifactViewer
           token="tok-1"
+          publicId={null}
           artifactId={482}
           sharerName="Priya Shah"
           owningCompanyName="Acme Co"
@@ -172,6 +181,7 @@ describe("GuestArtifactViewer", () => {
     render(
       <GuestArtifactViewer
         token="tok-1"
+        publicId={null}
         artifactId={482}
         sharerName="Priya Shah"
         owningCompanyName="Acme Co"
@@ -195,6 +205,7 @@ describe("GuestArtifactViewer", () => {
     const { getByTestId, getByText } = render(
       <GuestArtifactViewer
         token="tok-1"
+        publicId={null}
         artifactId={482}
         sharerName="Priya Shah"
         owningCompanyName="Acme Co"
@@ -207,5 +218,27 @@ describe("GuestArtifactViewer", () => {
     expect(getByText("Targeting Q3.")).toBeTruthy()
     const composer = getByTestId("guest-viewer-main").querySelector("textarea")
     expect(composer?.disabled).toBe(true)
+  })
+
+  describe("bare-link (publicId, no token) mode", () => {
+    it("fetches content via prdAccessApi.content(publicId) — never artifactShareApi — and never discloses a sharer name", async () => {
+      prdAccessContentMock.mockResolvedValue(CONTENT_RESPONSE)
+      render(
+        <GuestArtifactViewer
+          token={null}
+          publicId="042494cd-22c0-4c20-9967-cc761d192ae0"
+          artifactId={482}
+          sharerName={null}
+          owningCompanyName="Acme Co"
+        />,
+      )
+      await waitFor(() => {
+        expect(prdAccessContentMock).toHaveBeenCalledTimes(1)
+      })
+      expect(prdAccessContentMock).toHaveBeenCalledWith(
+        "042494cd-22c0-4c20-9967-cc761d192ae0",
+      )
+      expect(contentApiMock).not.toHaveBeenCalled()
+    })
   })
 })

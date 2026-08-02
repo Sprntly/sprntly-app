@@ -714,6 +714,10 @@ export type PrdStartResponse = {
 
 export type PrdRecord = {
   id: number
+  /** Opaque, unguessable external identifier — returned by the GET routes'
+   *  `select("*")` (prds.public_id). What `useArtifactUrlSync` puts in the
+   *  `?prd=` URL going forward, instead of the sequential `id`. */
+  public_id?: string
   brief_id: number
   insight_index: number
   generated_at: string
@@ -2101,6 +2105,12 @@ export const prdApi = {
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Resolve a PRD's opaque public_id (the `?prd=` URL's canonical form) to
+   *  its real internal id — same ownership check `get(id)` already enforces.
+   *  The one call `useArtifactUrlSync` needs to open a `?prd={public_id}`
+   *  deep-link with the existing, unchanged internal open path. */
+  resolveIdByPublicId: (publicId: string) =>
+    api.get<{ id: number }>(`/v1/prd/by-public-id/${encodeURIComponent(publicId)}`),
   /** Fetch the latest ready PRD for a dataset/company slug. 404 if none. */
   latest: (dataset: string) => api.get<PrdRecord>(`/v1/prd/latest?dataset=${encodeURIComponent(dataset)}`),
   /** Old name retained for compatibility. */

@@ -1,30 +1,41 @@
 "use client"
 
-// The pre-auth landing for a `?share=` visit: fetches the public metadata
-// (title/sharer/company/domain-hint — possession of the token is the only
-// gate, per artifact_share.py's metadata route) and offers "Create account" /
-// "Sign in", both carrying the token through. No form field exists on this
-// screen at all, so the domain hint (AC2: shown BEFORE any form field is
-// rendered/filled) is satisfied trivially — there's nothing to fill here yet.
+// The pre-auth landing for a `?share=` visit, OR a bare `?prd={public_id}`
+// visit (AuthGate's prdOnlyGuestMode — "full parity" bare-link scope,
+// 2026-08-02): fetches the public metadata (title/company/domain-hint —
+// possession of the token, or just the prd's public_id for a bare link, is
+// the only gate) and offers "Create account" / "Sign in", both carrying the
+// same token/public_id through. No form field exists on this screen at all,
+// so the domain hint (AC2: shown BEFORE any form field is rendered/filled)
+// is satisfied trivially — there's nothing to fill here yet.
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AuthShell } from "./AuthShell"
 import { NotAuthorizedScreen } from "./NotAuthorizedScreen"
 import { artifactShareApi, type ArtifactShareMetadata } from "../../lib/artifactShareApi"
+import { prdAccessApi, type PrdAccessMetadata } from "../../lib/prdAccessApi"
+
+type Metadata = ArtifactShareMetadata | PrdAccessMetadata
 
 type State =
   | { kind: "loading" }
-  | { kind: "ready"; meta: ArtifactShareMetadata }
+  | { kind: "ready"; meta: Metadata }
   | { kind: "invalid" }
 
-export function EntryGateScreen({ token }: { token: string }) {
+type EntryGateScreenProps =
+  | { token: string; publicId?: undefined }
+  | { token?: undefined; publicId: string }
+
+export function EntryGateScreen({ token, publicId }: EntryGateScreenProps) {
   const router = useRouter()
   const [state, setState] = useState<State>({ kind: "loading" })
 
   useEffect(() => {
     let cancelled = false
-    artifactShareApi
-      .getMetadata(token)
+    const fetcher = token
+      ? artifactShareApi.getMetadata(token)
+      : prdAccessApi.getMetadata(publicId!)
+    fetcher
       .then((meta) => {
         if (!cancelled) setState({ kind: "ready", meta })
       })
@@ -34,7 +45,7 @@ export function EntryGateScreen({ token }: { token: string }) {
     return () => {
       cancelled = true
     }
-  }, [token])
+  }, [token, publicId])
 
   if (state.kind === "loading") {
     return (
@@ -49,12 +60,23 @@ export function EntryGateScreen({ token }: { token: string }) {
   }
 
   const { meta } = state
-  const shareQuery = `?share=${encodeURIComponent(token)}`
+  const sharerName = "sharer_name" in meta ? meta.sharer_name : null
+  const linkQuery = token
+    ? `?share=${encodeURIComponent(token)}`
+    : `?prd=${encodeURIComponent(publicId!)}`
 
   return (
     <AuthShell tag="Shared with you">
       <div className="auth-h">
-        {meta.sharer_name} shared <em>{meta.title || "a document"}</em> with you.
+        {sharerName ? (
+          <>
+            {sharerName} shared <em>{meta.title || "a document"}</em> with you.
+          </>
+        ) : (
+          <>
+            <em>{meta.title || "A document"}</em> was shared with you.
+          </>
+        )}
       </div>
       <div className="auth-sub">From {meta.owning_company_name}.</div>
       {meta.required_email_domain && (
@@ -66,7 +88,7 @@ export function EntryGateScreen({ token }: { token: string }) {
         type="button"
         className="btn btn-brand btn-block"
         style={{ marginTop: 14 }}
-        onClick={() => router.push(`/sign-up${shareQuery}`)}
+        onClick={() => router.push(`/sign-up${linkQuery}`)}
       >
         Create account
       </button>
@@ -74,7 +96,7 @@ export function EntryGateScreen({ token }: { token: string }) {
         type="button"
         className="btn btn-ghost btn-block"
         style={{ marginTop: 8 }}
-        onClick={() => router.push(`/sign-in${shareQuery}`)}
+        onClick={() => router.push(`/sign-in${linkQuery}`)}
       >
         Sign in
       </button>

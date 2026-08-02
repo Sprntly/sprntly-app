@@ -48,6 +48,7 @@ from pydantic import BaseModel
 from app.auth import WorkspaceContext, require_session, require_workspace, session_email
 from app.db.artifact_shares import (
     auto_join_company_on_domain_match,
+    find_prd_evidence,
     get_share_by_token,
     mint_share,
     owning_company_domain,
@@ -250,19 +251,6 @@ def join(token: str, session: dict = Depends(require_session)) -> dict:
 # ─── content (read-only, company-scoped) ─────────────────────────────────
 
 
-def _prd_evidence(prd_row: dict) -> dict | None:
-    """Mirrors GET /v1/prd/{id}/evidence's own lookup: chat-task evidence is
-    keyed (brief_id, theme_id); every other PRD source has no evidence doc,
-    so this returns None rather than a list (matching the underlying
-    per-PRD evidence model — at most one doc, not a collection)."""
-    from app.db.evidences import find_existing_evidence_for_theme
-
-    theme_id = prd_row.get("theme_id") or ""
-    if prd_row.get("source") != "chat" or not str(theme_id).startswith("chat:"):
-        return None
-    return find_existing_evidence_for_theme(prd_row["brief_id"], theme_id)
-
-
 @router.get("/{token}/content")
 def content(token: str, session: dict = Depends(require_session)) -> dict:
     """Guest read of the shared PRD's rendered content + evidence + tickets,
@@ -287,6 +275,6 @@ def content(token: str, session: dict = Depends(require_session)) -> dict:
     rendered = get_prd_rendered(prd["id"]) or prd
     return {
         "prd": rendered,
-        "evidence": _prd_evidence(rendered),
+        "evidence": find_prd_evidence(rendered),
         "tickets": get_tickets(share["owner_company_id"], prd["id"]),
     }

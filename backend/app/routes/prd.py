@@ -51,6 +51,7 @@ from app.db.prds import (
     latest_prd_for_dataset,
     list_prd_generations,
     list_prd_versions,
+    resolve_prd_id_by_public_id,
     restore_prd_version,
     save_prd_version,
     update_prd_content,
@@ -638,6 +639,26 @@ def get(
     if not row:
         raise HTTPException(404, "PRD not found")
     return row
+
+
+@router.get("/by-public-id/{public_id}")
+def get_id_by_public_id(
+    public_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Resolve a PRD's opaque `public_id` (the only identifier
+    `useArtifactUrlSync.ts` puts in the URL) to its real internal `id`, for
+    the caller's OWN internal navigation — e.g. opening a `?prd={public_id}`
+    deep-link. Same ownership check GET /{prd_id} already enforces; a
+    foreign-tenant or malformed public_id 404s identically to a foreign
+    integer id, so this grants no new access, only a different identifier
+    shape. Returns `{"id": <int>}` — callers hand that straight to the same
+    `openPrdTab`/`GET /{prd_id}` path every other PRD-open already uses."""
+    resolved_id = resolve_prd_id_by_public_id(public_id)
+    if resolved_id is None:
+        raise HTTPException(404, "PRD not found")
+    require_owned_prd(resolved_id, company.company_id, company.workspace_id)
+    return {"id": resolved_id}
 
 
 @router.get("/{prd_id}/stream")

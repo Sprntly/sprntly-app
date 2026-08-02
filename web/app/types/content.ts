@@ -586,6 +586,14 @@ export interface PrdContent {
 export interface PrdState extends PrdContent {
   /** DB id of the loaded PRD (`PrdRecord.id`). Always present once a PRD is loaded. */
   prd_id: number
+  /** Opaque, unguessable external identifier (`PrdRecord.public_id`) —
+   *  what `useArtifactUrlSync` reflects onto the `?prd=` URL instead of the
+   *  sequential `prd_id`, so a copied/bookmarked link never discloses a
+   *  blind-enumerable id. Optional: absent on any PrdState built before this
+   *  field existed (none currently — every load path sets it — kept
+   *  optional so a future load path that forgets it fails soft, not a type
+   *  error blocking an unrelated build). */
+  public_id?: string
   /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
   figma_file_key?: string | null
   /** Part B — the implementation-spec markdown (`PrdRecord.llm_part`). Rendered

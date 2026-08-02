@@ -24,16 +24,42 @@ function AuthGateInner({ children }: { children: React.ReactNode }) {
   // ArtifactShareGate — including the anonymous/unconfigured case, which
   // would otherwise redirect to /sign-in before EntryGateScreen ever renders.
   const shareToken = searchParams.get("share")
+  const prdParam = searchParams.get("prd")
+  // Set ONLY by postLoginPath()'s pending_prd_id branch on the exact URL it
+  // redirects a domain-matched bare-link guest to — never present on an
+  // ordinary in-app `?prd=` link (NavigationContext's own URL sync doesn't
+  // add it). This is what lets that guest's OWN session keep resolving
+  // through the guest pipeline on a page refresh/revisit, without a plain
+  // `?prd=` visit from an already-authed REAL member ever being redirected
+  // away from their normal working app (see prdOnlyGuestMode below).
+  const guestAccess = searchParams.get("access") === "guest"
+  // A bare `?prd=` link (no `share=` token) goes through the SAME guest
+  // pipeline ArtifactShareGate already provides for share tokens, but ONLY
+  // for a visitor with no existing normal path to protect: someone not yet
+  // signed in at all, or a signed-in guest whose OWN session was routed
+  // here via the `access=guest` marker. An already-authed REAL member's
+  // everyday bare `?prd=` navigation (the app's own primary deep-link
+  // shape, used constantly by the sidebar/tickets/chat) never carries that
+  // marker, so it falls through unchanged to `children` below — this branch
+  // must never intercept it, or every normal PRD open in the app would
+  // start round-tripping through a guest-resolve check.
+  const prdOnlyGuestMode =
+    !shareToken && !!prdParam && (auth.kind !== "authed" || guestAccess)
 
   useEffect(() => {
     if (shareToken) return
+    if (prdOnlyGuestMode) return
     if (auth.kind === "anonymous" || auth.kind === "unconfigured") {
       router.replace("/sign-in")
     }
-  }, [auth.kind, router, shareToken])
+  }, [auth.kind, router, shareToken, prdOnlyGuestMode])
 
   if (shareToken) {
     return <ArtifactShareGate token={shareToken}>{children}</ArtifactShareGate>
+  }
+
+  if (prdOnlyGuestMode) {
+    return <ArtifactShareGate publicId={prdParam!}>{children}</ArtifactShareGate>
   }
 
   if (auth.kind !== "authed") {

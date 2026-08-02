@@ -18,6 +18,9 @@ vi.mock("../../../lib/api", () => ({
   evidenceApi: {
     get: vi.fn(),
   },
+  prdApi: {
+    resolveIdByPublicId: vi.fn(),
+  },
 }))
 
 let searchString = ""
@@ -30,7 +33,7 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(searchString),
 }))
 
-import { evidenceApi } from "../../../lib/api"
+import { evidenceApi, prdApi } from "../../../lib/api"
 import { NavigationProvider, useNavigation } from "../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../context/ContentContext"
 import { useArtifactUrlSync } from "../useArtifactUrlSync"
@@ -76,6 +79,7 @@ beforeEach(() => {
   pushSpy.mockClear()
   replaceSpy.mockClear()
   vi.mocked(evidenceApi.get).mockReset()
+  vi.mocked(prdApi.resolveIdByPublicId).mockReset()
 })
 afterEach(() => {
   cleanup()
@@ -112,6 +116,41 @@ describe("useArtifactUrlSync — URL → drawer", () => {
     await act(async () => {
       renderHarness()
     })
+    await Promise.resolve()
+    expect(screen.getByTestId("pending-prd-tab").textContent).toBe("null")
+  })
+
+  it("resolves a public_id (uuid) ?prd= via prdApi.resolveIdByPublicId and opens the resolved real id", async () => {
+    vi.mocked(prdApi.resolveIdByPublicId).mockResolvedValue({ id: 515 })
+    searchString = "prd=042494cd-22c0-4c20-9967-cc761d192ae0"
+    await act(async () => {
+      renderHarness()
+    })
+    await waitFor(() =>
+      expect(prdApi.resolveIdByPublicId).toHaveBeenCalledWith(
+        "042494cd-22c0-4c20-9967-cc761d192ae0",
+      ),
+    )
+    await waitFor(() => {
+      const pending = JSON.parse(screen.getByTestId("pending-prd-tab").textContent || "null")
+      expect(pending?.source?.kind).toBe("load")
+      // openPrdTab is called with the RESOLVED real int — loadPrdById/
+      // ChatScreen never see the public_id itself.
+      expect(pending?.source?.prdId).toBe(515)
+    })
+  })
+
+  it("a foreign-tenant/unknown public_id ?prd= 404s quietly — no content, no crash", async () => {
+    vi.mocked(prdApi.resolveIdByPublicId).mockRejectedValue(new Error("Not found"))
+    searchString = "prd=00000000-0000-0000-0000-000000000000"
+    await act(async () => {
+      renderHarness()
+    })
+    await waitFor(() =>
+      expect(prdApi.resolveIdByPublicId).toHaveBeenCalledWith(
+        "00000000-0000-0000-0000-000000000000",
+      ),
+    )
     await Promise.resolve()
     expect(screen.getByTestId("pending-prd-tab").textContent).toBe("null")
   })
@@ -167,7 +206,7 @@ describe("useArtifactUrlSync — URL → drawer", () => {
 })
 
 describe("useArtifactUrlSync — drawer → URL", () => {
-  it("reflects the open PRD tab's id onto the URL", async () => {
+  it("reflects the open PRD tab's id onto the URL (legacy fallback — no public_id on this PrdState)", async () => {
     await act(async () => {
       renderHarness()
     })
@@ -177,6 +216,30 @@ describe("useArtifactUrlSync — drawer → URL", () => {
     })
     await waitFor(() => {
       expect(replaceSpy).toHaveBeenCalledWith("/backlog?prd=99", { scroll: false })
+    })
+  })
+
+  it("reflects the PRD's public_id onto the URL, not the raw sequential prd_id, when present", async () => {
+    await act(async () => {
+      renderHarness()
+    })
+    await act(async () => {
+      harness().setContent({
+        prd: {
+          prd_id: 99,
+          public_id: "042494cd-22c0-4c20-9967-cc761d192ae0",
+          title: "t",
+          metaLine: "",
+          sections: [],
+        },
+      })
+      harness().nav.openContentPanel("prd")
+    })
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        "/backlog?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+        { scroll: false },
+      )
     })
   })
 

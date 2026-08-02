@@ -83,6 +83,7 @@ const prd: PrdState = {
 
 const GUEST_SESSION = {
   token: "tok-1",
+  publicId: null,
   sharerName: "Priya Shah",
   owningCompanyName: "Acme Co",
   artifactId: 482,

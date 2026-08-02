@@ -199,7 +199,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   const openGeneration = useCallback(async (genId: number) => {
     try {
       const rec = await prdApi.get(genId)
-      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index, source: rec.source } })
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, public_id: rec.public_id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index, source: rec.source } })
       setShowVersions(false)
     } catch {
       showToast("Couldn't open version", "Failed to load that generation.")

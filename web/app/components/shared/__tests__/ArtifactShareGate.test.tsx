@@ -24,9 +24,14 @@ vi.mock("../../../lib/artifactShareApi", () => ({
   artifactShareApi: { resolve: (...a: unknown[]) => resolveMock(...a) },
 }))
 
+const prdResolveMock = vi.fn()
+vi.mock("../../../lib/prdAccessApi", () => ({
+  prdAccessApi: { resolve: (...a: unknown[]) => prdResolveMock(...a) },
+}))
+
 vi.mock("../../auth/EntryGateScreen", () => ({
-  EntryGateScreen: ({ token }: { token: string }) => (
-    <div data-testid="entry-gate" data-token={token} />
+  EntryGateScreen: ({ token, publicId }: { token?: string; publicId?: string }) => (
+    <div data-testid="entry-gate" data-token={token} data-public-id={publicId} />
   ),
 }))
 
@@ -158,5 +163,62 @@ describe("ArtifactShareGate", () => {
       )
     })
     expect(screen.queryByTestId("real-app-tree")).toBeNull()
+  })
+
+  describe("bare-link (prdId, no token) mode", () => {
+    it("renders EntryGateScreen keyed by prdId for an anonymous visitor", () => {
+      authMock.value = { kind: "anonymous" }
+      render(
+        <ArtifactShareGate publicId="042494cd-22c0-4c20-9967-cc761d192ae0">
+          <AppTreeSpy />
+        </ArtifactShareGate>,
+      )
+      const gate = screen.getByTestId("entry-gate")
+      expect(gate.getAttribute("data-public-id")).toBe("042494cd-22c0-4c20-9967-cc761d192ae0")
+      expect(gate.getAttribute("data-token")).toBeNull()
+      expect(screen.queryByTestId("real-app-tree")).toBeNull()
+    })
+
+    it("calls prdAccessApi.resolve (never artifactShareApi.resolve) and renders the guest viewer with a null token", async () => {
+      authMock.value = { kind: "authed" }
+      prdResolveMock.mockResolvedValue({
+        outcome: "guest_view",
+        artifact_type: "prd",
+        artifact_id: 1881,
+        owning_company_name: "Acme Co",
+      })
+      render(
+        <ArtifactShareGate publicId="042494cd-22c0-4c20-9967-cc761d192ae0">
+          <AppTreeSpy />
+        </ArtifactShareGate>,
+      )
+      await waitFor(() => {
+        expect(screen.getByTestId("guest-viewer")).not.toBeNull()
+      })
+      expect(prdResolveMock).toHaveBeenCalledWith("042494cd-22c0-4c20-9967-cc761d192ae0")
+      expect(resolveMock).not.toHaveBeenCalled()
+      const props = JSON.parse(screen.getByTestId("guest-viewer").getAttribute("data-props")!)
+      expect(props.token).toBeNull()
+      expect(props.sharerName).toBeNull()
+      expect(props.artifactId).toBe(1881)
+      expect(props.publicId).toBe("042494cd-22c0-4c20-9967-cc761d192ae0")
+      expect(screen.queryByTestId("real-app-tree")).toBeNull()
+    })
+
+    it("blocks a different-company caller without mounting the app tree", async () => {
+      authMock.value = { kind: "authed" }
+      prdResolveMock.mockResolvedValue({ outcome: "blocked", reason: "different_company" })
+      render(
+        <ArtifactShareGate publicId="042494cd-22c0-4c20-9967-cc761d192ae0">
+          <AppTreeSpy />
+        </ArtifactShareGate>,
+      )
+      await waitFor(() => {
+        expect(screen.getByTestId("not-authorized").getAttribute("data-reason")).toBe(
+          "different_company",
+        )
+      })
+      expect(screen.queryByTestId("real-app-tree")).toBeNull()
+    })
   })
 })
