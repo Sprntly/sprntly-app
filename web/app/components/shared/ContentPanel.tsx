@@ -34,11 +34,12 @@ import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
 import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
-  IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar,
+  IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar, IconLink,
 } from "@tabler/icons-react"
 import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
 import { buildCombinedHtml } from "../../lib/combinedExport"
 import { documentsApi } from "../../lib/api"
+import { artifactShareApi } from "../../lib/artifactShareApi"
 import { saveBlob } from "../../lib/saveBlob"
 import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
 
@@ -148,6 +149,19 @@ function ShareMenu({
     }
   }
 
+  const handleCopyLink = async () => {
+    if (!prd) return
+    setOpen(false)
+    try {
+      const { token } = await artifactShareApi.mint("prd", prd.prd_id)
+      const url = `${window.location.origin}/?prd=${prd.prd_id}&share=${token}`
+      await navigator.clipboard.writeText(url)
+      onToast("Share link copied", "Anyone with the link can view this PRD.")
+    } catch {
+      onToast("Copy link failed", "Could not create a share link. Please try again.")
+    }
+  }
+
   return (
     <div style={{ position: "relative" }} ref={ref}>
       <button
@@ -164,6 +178,13 @@ function ShareMenu({
       </button>
       {open && enabled && (
         <div className="share-menu share-menu--down open" role="menu">
+          <div className="share-menu-item" role="menuitem" onClick={handleCopyLink}>
+            <div className="share-menu-item-icon"><IconLink size={14} /></div>
+            <div>
+              <div style={{ fontWeight: 600 }}>Copy share link</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Invite a teammate to view this PRD</div>
+            </div>
+          </div>
           <div className="share-menu-item" role="menuitem" onClick={handlePdf}>
             <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
             <div>

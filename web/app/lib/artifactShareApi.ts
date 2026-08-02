@@ -40,6 +40,13 @@ export type ArtifactShareContentResponse = {
 }
 
 export const artifactShareApi = {
+  /** Mint a fresh share token for an artifact (e.g. a PRD) the caller can see.
+   *  Authed workspace route — no admin-only restriction. */
+  mint: (artifactType: string, artifactId: number) =>
+    api.post<{ token: string }>("/v1/artifact-share", {
+      artifact_type: artifactType,
+      artifact_id: artifactId,
+    }),
   getMetadata: (token: string) =>
     api.get<ArtifactShareMetadata>(`/v1/artifact-share/${encodeURIComponent(token)}`),
   resolve: (token: string) =>
