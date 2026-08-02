@@ -420,10 +420,8 @@ class Settings(BaseSettings):
     # check of recent extraction output per skill_id against the expected
     # shape each vendored connector-extraction skill declares in its own
     # references/expected-signal-shape.md. Read-only + sampled by design —
-    # never runs on a live ingestion or request path. OFF by default like the
-    # other opt-in scheduler jobs; flip on once there's enough real
-    # hubspot/jira/clickup extraction volume for a sample to be meaningful.
-    extraction_eval_enabled: bool = False
+    # never runs on a live ingestion or request path. Runs unconditionally on
+    # its own cadence.
     extraction_eval_interval_hours: int = 24
     # How many of an enterprise+skill's most recent signals one eval pass
     # samples.

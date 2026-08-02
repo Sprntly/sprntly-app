@@ -1,7 +1,7 @@
-"""Tests for the extraction-eval scheduler job: registration (opt-in via
-EXTRACTION_EVAL_ENABLED, mirroring the drip-email job's wiring test) and the
-job function itself (`_run_extraction_eval_cycle`) — fully isolated, never
-crashes the scheduler."""
+"""Tests for the extraction-eval scheduler job: unconditional registration
+(mirroring the orphan-ask-job sweep and Jira GDPR job, which also run
+unconditionally) and the job function itself (`_run_extraction_eval_cycle`)
+— fully isolated, never crashes the scheduler."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -23,11 +23,10 @@ class _FakeScheduler:
         pass
 
 
-def _run_start_scheduler(monkeypatch, *, eval_enabled):
+def _run_start_scheduler(monkeypatch):
     from app import scheduler as sched_mod
     monkeypatch.setattr(sched_mod.settings, "scheduler_enabled", True)
     monkeypatch.setattr(sched_mod.settings, "pipeline_interval_hours", 6)
-    monkeypatch.setattr(sched_mod.settings, "extraction_eval_enabled", eval_enabled)
     monkeypatch.setattr(sched_mod.settings, "extraction_eval_interval_hours", 24)
     fake = _FakeScheduler()
     monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda: fake)
@@ -36,19 +35,12 @@ def _run_start_scheduler(monkeypatch, *, eval_enabled):
     return fake
 
 
-def test_start_scheduler_registers_extraction_eval_job_when_enabled(monkeypatch):
-    fake = _run_start_scheduler(monkeypatch, eval_enabled=True)
+def test_start_scheduler_always_registers_extraction_eval_job(monkeypatch):
+    fake = _run_start_scheduler(monkeypatch)
     ids = sorted(j["id"] for j in fake.jobs)
     assert "extraction_eval" in ids
     assert "brief_tick" in ids
     assert fake.started is True
-
-
-def test_start_scheduler_omits_extraction_eval_job_when_disabled(monkeypatch):
-    fake = _run_start_scheduler(monkeypatch, eval_enabled=False)
-    ids = sorted(j["id"] for j in fake.jobs)
-    assert "extraction_eval" not in ids
-    assert "brief_tick" in ids
 
 
 def test_run_extraction_eval_cycle_delegates_to_run_scheduled_eval_cycle():

@@ -20,9 +20,9 @@ silently-passing regex match against free-form prose"). Keep it in sync by
 hand when a skill's contract changes.
 
 Never called from a live ingestion or request path — see
-``app.scheduler``'s opt-in ``extraction_eval`` job, the only caller in this
-codebase, and ``run_scheduled_eval_cycle``'s docstring for the "why async /
-why sampled" rationale.
+``app.scheduler``'s unconditionally-scheduled ``extraction_eval`` job, the
+only caller in this codebase, and ``run_scheduled_eval_cycle``'s docstring
+for the "why async / why sampled" rationale.
 """
 from __future__ import annotations
 
@@ -218,12 +218,13 @@ def run_scheduled_eval_cycle(*, sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
     output and logging any structural mismatch.
 
     Intended to be invoked ONLY from a scheduled job (see app.scheduler's
-    opt-in ``extraction_eval`` job) — never from a live request or
-    ingestion path, and never per-signal: each (company, skill) pair reads
-    a bounded, recent sample, so a large tenant base stays cheap and this
-    can never add latency to a sync or an agent response. Per-(company,
-    skill) isolated: one raise is logged and skipped so the rest of the
-    cycle still runs, mirroring app.scheduler's other per-company sweeps."""
+    unconditionally-scheduled ``extraction_eval`` job) — never from a live
+    request or ingestion path, and never per-signal: each (company, skill)
+    pair reads a bounded, recent sample, so a large tenant base stays cheap
+    and this can never add latency to a sync or an agent response.
+    Per-(company, skill) isolated: one raise is logged and skipped so the
+    rest of the cycle still runs, mirroring app.scheduler's other
+    per-company sweeps."""
     from app.db.companies import list_companies
     from app.kg_ingest.runner import PROVIDER_SKILLS
 
