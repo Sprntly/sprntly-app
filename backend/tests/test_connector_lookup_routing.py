@@ -76,6 +76,43 @@ def test_naming_a_tool_as_a_SUBJECT_is_not_a_lookup():
         assert is_connector_lookup(question) is None, question
 
 
+def test_a_tool_named_as_a_possessed_artifact_is_not_a_lookup():
+    """"The Stripe integration" is a thing we build, not a source we open.
+
+    Reported 2026-08-02: "should we prioritise the stripe integration or the
+    notion one?" matched `stripe`, and since Stripe has no live adapter the user
+    got "Stripe isn't a Sprntly connector yet" — a dead end for a prioritisation
+    question, with the skill that answers it never reached. Customers who BUILD
+    integrations ask this shape constantly.
+    """
+    for question in [
+        "should we prioritise the stripe integration or the notion one?",
+        "what growth loops does our figma plugin unlock",
+        "what are the riskiest assumptions behind the slack integration",
+        "run a pre-mortem on the asana connector launch",
+        "how should we scope the google drive integration",
+        "is the notion extension worth building this quarter",
+        "which of our integrations drive the most retention",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
+def test_artifact_veto_does_not_swallow_ordinary_lookups():
+    """The veto is narrow on purpose. A real read that merely uses one of these
+    nouns' NEIGHBOURS — channel, doc, repo, app, api — must still intercept, or
+    the fix would cost more lookups than the bug costs skills."""
+    for question, expected in [
+        ("check the slack channel for the pricing decision", "slack"),
+        ("what changed in the github repo this week", "github"),
+        ("read the notion doc on onboarding", "notion"),
+        ("what does the stripe api say about failed charges", "stripe"),
+        ("open the confluence page about retention", "confluence"),
+    ]:
+        hints = is_connector_lookup(question)
+        assert hints is not None, question
+        assert expected in hints, question
+
+
 def test_write_commands_are_vetoed():
     """We can read. A command to write must fall through to normal routing rather
     than a read path implying it posted something."""

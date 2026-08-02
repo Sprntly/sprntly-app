@@ -939,9 +939,43 @@ _CONNECTOR_MENTION_VETO = re.compile(
 )
 
 
+# The OTHER way a tool name is a subject: as a possessed artifact — "the Stripe
+# integration", "our Figma plugin", "the Google Drive connector". The tool named
+# there is the thing being BUILT or evaluated, not a source to open, so these are
+# ordinary product questions and belong to the skill router.
+#
+# The veto above only covers competitive/comparison framing (dff83902), which
+# leaves this whole family exposed: "should we prioritise the stripe integration
+# or the notion one" matched `stripe`, and because only 8 of the 22 recognised
+# providers have a live adapter, the user's PRIORITISATION question was answered
+# "Stripe isn't a Sprntly connector yet" — a dead end, with the skill that does
+# answer it never reached. Reported 2026-08-02. Customers who BUILD integrations
+# ask this shape constantly, so it is their core subject matter that was losing
+# skill routing.
+#
+# Whole-message, matching the veto above rather than dropping only the offending
+# provider, and that is deliberate: the elliptical second half ("...or the notion
+# ONE") carries no artifact noun of its own, so a per-provider rule would veto
+# `stripe`, keep `notion`, and dead-end anyway. The cost is that a genuine read
+# sharing a sentence with an artifact mention ("check slack for what was said
+# about the stripe integration") falls through to the generic path — a softer
+# failure than today's confident "not connectable", and the same trade the
+# comparison veto already makes.
+#
+# Nouns kept deliberately narrow: `integration|connector|plugin|extension|add-on`
+# are unambiguously "a thing we built or might build". `app`, `api`, `bot` and
+# `sdk` are NOT included — "the slack app" and "the stripe api" are read as often
+# as they are built, and vetoing those would cost real lookups.
+_CONNECTOR_ARTIFACT_VETO = re.compile(
+    r"\b(?:our|the|a|an|this|that|their|your)\s+[\w-]+(?:\s+[\w-]+)?\s+"
+    r"(?:integrations?|connectors?|plugins?|extensions?|add-?ons?)\b",
+    re.I,
+)
+
+
 def _named_connector_providers(text: str) -> set[str]:
     """Provider keys explicitly named in one message."""
-    if _CONNECTOR_MENTION_VETO.search(text):
+    if _CONNECTOR_MENTION_VETO.search(text) or _CONNECTOR_ARTIFACT_VETO.search(text):
         return set()
     found: set[str] = set()
     for provider, pattern in _CONNECTOR_STRONG_NAMES.items():
