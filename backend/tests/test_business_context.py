@@ -605,7 +605,9 @@ def test_put_then_get_stamps_user_and_persists(company_client):
     assert r.json()["version"] == 1
 
     got = company_client.get("/v1/company/business-context").json()
-    # every KNOWN leaf the human submitted is re-stamped src="user"
+    # first-ever PUT (no stored doc yet): every non-empty leaf the human
+    # submitted is stamped src="user" (the no-stored-doc row of the leaf
+    # semantics table)
     assert got["identity"]["legal_name"]["src"] == "user"
     assert got["business_model"]["who_pays"]["src"] == "user"
     # unknown leaves stay gap-fillable
@@ -618,6 +620,336 @@ def test_put_bumps_version(company_client):
     company_client.put("/v1/company/business-context", json=body.model_dump())
     r2 = company_client.put("/v1/company/business-context", json=body.model_dump())
     assert r2.json()["version"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# PUT diff-based stamping — regression, provenance semantics, edge cases,
+# route contract (routes/business_context.py).
+# --------------------------------------------------------------------------- #
+
+# ── Regression — each demonstrated RED on origin/main before the fix ──────────
+def test_put_stamps_a_previously_blank_leaf_as_user(company_client):
+    """A leaf stored blank (`{value: None, src: "unknown"}`), filled in and
+    submitted — the old guard gated on `is_known` (src != "unknown"), so a
+    blank leaf could never be promoted to src="user"."""
+    from app.business_context import save_business_context
+
+    save_business_context("co-test", BusinessContext())  # explicit blank stored doc
+
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    assert got["identity"]["legal_name"]["value"] == "Acme"
+    assert got["identity"]["legal_name"]["src"] == "user"
+
+
+def test_put_stamps_users_segments_primary_segment(company_client):
+    """users_segments.primary_segment is a top-level scalar on a layer whose
+    only reachable leaves used to be its list ITEMS — the layer itself was
+    never iterated."""
+    body = BusinessContext()
+    body.users_segments.primary_segment = Meta(value="C-store operators", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    assert got["users_segments"]["primary_segment"]["src"] == "user"
+
+
+def test_refresh_does_not_overwrite_a_leaf_the_user_filled_from_blank(
+    company_client, isolated_settings, monkeypatch
+):
+    """The live-proven bug: a human fills a previously-blank leaf, then a
+    refresh runs. If the PUT failed to stamp the leaf src="user" (defect 1),
+    `_overlay_user` treats it as still-a-gap and overwrites it with the
+    first-party seed (here, a KPI tree north-star metric that DIFFERS from
+    what the human typed) — the exact data loss this ticket exists to kill."""
+    from unittest.mock import patch
+
+    from app.kpi_tree import KpiTree, NorthStar, save_kpi_tree
+    from app.research import business_context_agent as agent
+
+    body = BusinessContext()
+    body.goals_strategy.north_star = Meta(value="Grow paying teams to 500", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    save_kpi_tree("co-test", KpiTree(north_star=NorthStar(metric="Weekly active teams")))
+
+    with patch.object(agent, "call_with_web_search", side_effect=lambda **kw: "{}"), \
+         patch("app.research.business_context_projection.project_business_context",
+               return_value={}):
+        agent.run_business_context(object(), "co-test")
+
+    got = company_client.get("/v1/company/business-context").json()
+    ns = got["goals_strategy"]["north_star"]
+    assert ns["value"] == "Grow paying teams to 500"
+    assert ns["src"] == "user"
+
+
+# ── Provenance semantics ───────────────────────────────────────────────────
+def test_put_preserves_stored_provenance_on_an_unchanged_leaf(company_client):
+    """Mutation-proof target (PI13): client-supplied provenance is never
+    trusted for an unchanged leaf — the saved leaf is the STORED Meta
+    verbatim, even when the request body carries a different src."""
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.identity.one_liner = Meta(
+        value="runs the loyalty program", src="web", conf="med",
+        evidence="homepage hero",
+    )
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.identity.one_liner = Meta(value="runs the loyalty program", src="user", conf="high")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    one = got["identity"]["one_liner"]
+    assert one["src"] == "web"
+    assert one["conf"] == "med"
+    assert one["evidence"] == "homepage hero"
+
+
+def test_put_drops_stale_evidence_on_a_changed_leaf(company_client):
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.market_competition.category = Meta(
+        value="frozen beverage dispensing", src="web", conf="med",
+        evidence="category page text",
+    )
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.market_competition.category = Meta(value="beverage equipment leasing", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    cat = got["market_competition"]["category"]
+    assert cat["value"] == "beverage equipment leasing"
+    assert cat["src"] == "user"
+    assert cat["evidence"] is None
+
+
+def test_put_forces_high_confidence_on_a_changed_leaf(company_client):
+    from datetime import date
+
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.business_model.who_pays = Meta(value="store operators", src="web", conf="low")
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.business_model.who_pays = Meta(value="franchise owners", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    who = got["business_model"]["who_pays"]
+    assert who["conf"] == "high"
+    assert who["as_of"] == date.today().isoformat()
+
+
+def test_put_resets_a_cleared_leaf_to_unknown(company_client):
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.identity.sub_vertical = Meta(
+        value="c-store frozen beverage", src="user", conf="high", as_of="2026-05-01",
+    )
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.identity.sub_vertical = Meta(value="", src="user")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    sv = got["identity"]["sub_vertical"]
+    assert sv == {"value": None, "src": "unknown", "conf": None, "as_of": None, "evidence": None}
+
+
+def test_put_stamps_changed_segment_leaf_and_leaves_unchanged_sibling(company_client):
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.users_segments.segments = [
+        Segment(
+            name=Meta(value="C-store operators", src="web", conf="med", evidence="x"),
+            jtbd=Meta(value="grow margin per square foot", src="web", conf="med", evidence="y"),
+        ),
+    ]
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.users_segments.segments = [
+        Segment(
+            name=Meta(value="C-store operators", src="unknown"),
+            jtbd=Meta(value="reduce spoilage costs", src="unknown"),
+        ),
+    ]
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    seg = got["users_segments"]["segments"][0]
+    assert seg["jtbd"]["value"] == "reduce spoilage costs"
+    assert seg["jtbd"]["src"] == "user"
+    assert seg["name"]["src"] == "web"
+    assert seg["name"]["evidence"] == "x"
+
+
+def test_put_stamps_changed_vocabulary_term_leaf(company_client):
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.vocabulary.terms = [
+        VocabTerm(
+            term=Meta(value="operator", src="user", conf="high"),
+            their_meaning=Meta(value="the paying store", src="user", conf="high"),
+        ),
+    ]
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.vocabulary.terms = [
+        VocabTerm(
+            term=Meta(value="operator", src="unknown"),
+            their_meaning=Meta(value="the site that hosts the dispenser", src="unknown"),
+        ),
+    ]
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    term = got["vocabulary"]["terms"][0]
+    assert term["their_meaning"]["value"] == "the site that hosts the dispenser"
+    assert term["their_meaning"]["src"] == "user"
+
+
+def test_put_never_stamps_doc_meta(company_client):
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="unknown")
+    body.business_model.who_pays = Meta(value="IT admins", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    assert got["meta"]["created"]["src"] != "user"
+    assert got["meta"]["overall_confidence"]["src"] != "user"
+
+
+# ── Edge cases ──────────────────────────────────────────────────────────────
+def test_put_with_no_stored_doc_stamps_every_non_empty_leaf(company_client):
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="unknown")
+    body.identity.website = Meta(value="", src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    assert got["identity"]["legal_name"]["src"] == "user"
+    assert got["identity"]["website"]["src"] == "unknown"
+
+
+def test_put_stamps_a_segment_appended_beyond_the_stored_list(company_client):
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.users_segments.segments = [
+        Segment(name=Meta(value="C-store operators", src="web", conf="med", evidence="x")),
+    ]
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.users_segments.segments = [
+        Segment(name=Meta(value="C-store operators", src="unknown")),
+        Segment(name=Meta(value="Field sales reps", src="unknown")),
+    ]
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    segs = got["users_segments"]["segments"]
+    assert segs[1]["name"]["value"] == "Field sales reps"
+    assert segs[1]["name"]["src"] == "user"
+
+
+def test_put_treats_an_unchanged_list_valued_leaf_as_unchanged(company_client):
+    """Guards the comma-split round-trip: a list-valued leaf resubmitted
+    identical must not be treated as a change."""
+    from app.business_context import save_business_context
+
+    stored = BusinessContext()
+    stored.identity.markets_served = Meta(
+        value=["US", "EU"], src="web", conf="med", evidence="z",
+    )
+    save_business_context("co-test", stored)
+
+    body = BusinessContext()
+    body.identity.markets_served = Meta(value=["US", "EU"], src="unknown")
+    r = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 200
+
+    got = company_client.get("/v1/company/business-context").json()
+    m = got["identity"]["markets_served"]
+    assert m["src"] == "web"
+    assert m["evidence"] == "z"
+
+
+def test_put_is_idempotent_on_provenance(company_client):
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="unknown")
+
+    r1 = company_client.put("/v1/company/business-context", json=body.model_dump())
+    got1 = company_client.get("/v1/company/business-context").json()
+
+    r2 = company_client.put("/v1/company/business-context", json=body.model_dump())
+    got2 = company_client.get("/v1/company/business-context").json()
+
+    assert got1["identity"]["legal_name"]["src"] == got2["identity"]["legal_name"]["src"]
+    assert got1["identity"]["legal_name"]["as_of"] == got2["identity"]["legal_name"]["as_of"]
+    assert r1.json()["version"] != r2.json()["version"]
+
+
+# ── Route contract ──────────────────────────────────────────────────────────
+def test_put_returns_ok_and_bumps_version(company_client):
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="user", conf="high")
+    r1 = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r1.status_code == 200
+    assert r1.json()["ok"] is True
+    v1 = r1.json()["version"]
+
+    r2 = company_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r2.json()["version"] == v1 + 1
+
+
+def test_put_still_admin_gated(isolated_settings, monkeypatch, unauth_client):
+    """401 unauthenticated. (403-for-non-admin is pinned in
+    test_org_config_access_boundary_fix.py, which also proves _require_admin
+    still runs before the new stored-doc read.)"""
+    body = BusinessContext()
+    body.identity.legal_name = Meta(value="Acme", src="user", conf="high")
+    r = unauth_client.put("/v1/company/business-context", json=body.model_dump())
+    assert r.status_code == 401
+
+    import app.main as main_mod
+
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"], role="member")
+    member = TestClient(main_mod.app)
+    member.headers["Authorization"] = f"Bearer {_mint_supabase_token()}"
+    r2 = member.put("/v1/company/business-context", json=body.model_dump())
+    assert r2.status_code == 403
 
 
 def test_refresh_route_runs_agent(company_client, monkeypatch):

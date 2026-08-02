@@ -1,9 +1,10 @@
 """Business Context routes — the company's structured "lens".
 
 GET  /v1/company/business-context               — current doc (404 if unset) [member]
-PUT  /v1/company/business-context                — validate + save; every known leaf
-                                                    the human sends is stamped src="user"
-                                                    (so the agent never overwrites it) [admin]
+PUT  /v1/company/business-context                — validate + save; only the leaves
+                                                    this request actually CHANGED are
+                                                    stamped src="user" (so the agent
+                                                    never overwrites them) [admin]
 POST /v1/company/business-context/refresh        — kick off an async refresh [admin]
 GET  /v1/company/business-context/refresh-status — poll the refresh job [member]
 
@@ -64,27 +65,55 @@ def _run_inline_for_tests() -> bool:
     return "pytest" in sys.modules
 
 
-def _stamp_user_edits(doc: BusinessContext) -> BusinessContext:
-    """A human is asserting these values via the editor → every KNOWN leaf is
-    src='user' (the authoritative provenance the agent must never overwrite).
-    Unknown leaves are left as-is so they stay gap-fillable by the agent."""
+def _stamp_user_edits(
+    doc: BusinessContext, previous: BusinessContext | None
+) -> BusinessContext:
+    """Stamp src='user' on the leaves this request actually CHANGED. A leaf the
+    human left alone keeps whatever provenance is stored (the agent may still
+    refine its own earlier guesses); a leaf the human cleared returns to an
+    explicit unknown so the agent can fill the gap again. Client-supplied
+    provenance is never trusted — it is recomputed here from the diff."""
     today = date.today().isoformat()
 
-    def stamp_layer(layer) -> None:
+    def is_empty(value) -> bool:
+        # Same value-emptiness rule as Meta.is_known; deliberately WITHOUT its
+        # src != "unknown" clause, which made a previously-blank field
+        # unstampable and therefore permanently overwritable by the agent.
+        return value in (None, "", [], {})
+
+    def stamp_layer(layer, prev_layer) -> None:
         for attr, m in vars(layer).items():
-            if isinstance(m, Meta) and m.is_known and not m.is_user_authoritative:
+            if not isinstance(m, Meta):
+                continue  # skips the segments / terms LISTS on their layers
+            prev = getattr(prev_layer, attr, None) if prev_layer is not None else None
+            if not isinstance(prev, Meta):
+                prev = None
+            if is_empty(m.value):
+                setattr(layer, attr, Meta())
+            elif prev is not None and prev.value == m.value:
+                setattr(layer, attr, prev)
+            else:
                 setattr(layer, attr, Meta(
-                    value=m.value, src="user", conf=m.conf or "high",
-                    as_of=today, evidence=m.evidence,
+                    value=m.value, src="user", conf="high",
+                    as_of=today, evidence=None,
                 ))
 
-    for layer_name in ("identity", "business_model", "product_value",
-                       "market_competition", "goals_strategy"):
-        stamp_layer(getattr(doc, layer_name))
-    for seg in doc.users_segments.segments:
-        stamp_layer(seg)
-    for term in doc.vocabulary.terms:
-        stamp_layer(term)
+    for layer_name in ("identity", "business_model", "users_segments",
+                       "product_value", "market_competition", "goals_strategy",
+                       "vocabulary"):
+        stamp_layer(
+            getattr(doc, layer_name),
+            getattr(previous, layer_name) if previous is not None else None,
+        )
+
+    prev_segs = previous.users_segments.segments if previous is not None else []
+    for i, seg in enumerate(doc.users_segments.segments):
+        stamp_layer(seg, prev_segs[i] if i < len(prev_segs) else None)
+
+    prev_terms = previous.vocabulary.terms if previous is not None else []
+    for i, term in enumerate(doc.vocabulary.terms):
+        stamp_layer(term, prev_terms[i] if i < len(prev_terms) else None)
+
     return doc
 
 
@@ -103,7 +132,10 @@ def put_business_context(
     doc: BusinessContext, company: CompanyContext = Depends(require_company)
 ):
     _require_admin(company)
-    saved = save_business_context(company.company_id, _stamp_user_edits(doc))
+    previous = load_business_context(company.company_id)
+    saved = save_business_context(
+        company.company_id, _stamp_user_edits(doc, previous)
+    )
     return {"ok": True, "version": saved.version}
 
 
