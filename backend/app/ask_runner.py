@@ -25,6 +25,8 @@ from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
+    connected_sources_line,
+    today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
     ASK_USER_TEMPLATE_WITH_KG,
     PREDEFINED_ASK_PROMPTS,
@@ -182,7 +184,7 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
         feature=Feature.ASK, operation="warm"
     ):
         return call_json(
-            system=ASK_SYSTEM,
+            system=ASK_SYSTEM + today_line() + connected_sources_line(company_id),
             user=user,
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
@@ -268,7 +270,8 @@ def compose_ask_answer(
         from app.prompts import ASK_SYSTEM_PRD_ADDENDUM
 
         bundle = None
-        system = ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM
+        system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
+                  + connected_sources_line(enterprise_id))
         user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
@@ -280,12 +283,14 @@ def compose_ask_answer(
         if bundle:
             from app.graph.retrieval import render_context_section
 
-            system = ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM
+            system = (ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM + today_line()
+                      + connected_sources_line(enterprise_id))
             user = ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context=render_context_section(bundle), question=question
             )
         else:
-            system = ASK_SYSTEM
+            system = (ASK_SYSTEM + today_line()
+                      + connected_sources_line(enterprise_id))
             user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Optional
 
+from app import call_index
 from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
@@ -44,6 +45,8 @@ from app.prompts import (
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_PRD_ADDENDUM,
     OUT_OF_SCOPE_MESSAGE,
+    connected_sources_line,
+    today_line,
 )
 from app.skill_router import (
     SkillMatch,
@@ -684,6 +687,8 @@ def _answer_single_shot(
     facts = company_facts_block(enterprise_id)
     system = (
         ASK_SYSTEM
+        + today_line()
+        + connected_sources_line(enterprise_id)
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         # skill_spec is not None ⇔ the method text is a company upload, not a
@@ -769,6 +774,8 @@ def _answer_with_script(
     prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
     system = (
         ASK_SYSTEM
+        + today_line()
+        + connected_sources_line(enterprise_id)
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + f"\n\n## METHOD (skill: {skill_id})\n{spec.method}\n\n"
         f"You have a tool, `{tool.name}`, that runs the skill's deterministic "
@@ -927,6 +934,78 @@ def answer(
     only, same contract as `on_delta`; see `emit_phase`."""
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
+
+    # The call index's freshness check, memoized for this answer. Computed
+    # LAZILY and at most once: the interceptions below are each behind a cheap
+    # regex gate, and a question that matches none of them must not pay for a
+    # DB read — let alone a sync — on its way to the generic path.
+    _fresh_memo: list = []
+
+    def _index_fresh():
+        if not _fresh_memo:
+            _fresh_memo.append(call_index.ensure_fresh(enterprise_id))
+        return _fresh_memo[0]
+
+    # Call INDEX first: a listing question ("give me the 5 latest transcripts",
+    # "which calls did we have last week") wants the LIST, and the index already
+    # holds it. Answering from Postgres costs a query; letting it reach the
+    # digest below costs ~168s and ~$0.23 for a model to re-derive a list we
+    # have in a table — and a phrasing the digest regex misses falls through to
+    # the KG, which answers from distilled summaries and reports that raw
+    # transcripts are unavailable. Placed ahead of the digest, and deliberately
+    # narrower: any summarize/recap verb means the caller wants the analysis and
+    # keeps the full path. See app/call_index.py for the measurements.
+    if not pinned_skill and call_index.is_listing_request(question):
+        try:
+            listed = call_index.answer_listing(
+                enterprise_id, question, fresh=_index_fresh()
+            )
+            if listed is not None:
+                return listed
+        except Exception:  # noqa: BLE001 — never let the index break the answer
+            logger.exception("call-index listing failed for %s", enterprise_id)
+
+    # SINGLE named call: "summarize the Mayer Brown call". The index holds that
+    # call's external_id, so this fetches ONE transcript instead of every call in
+    # the window. Before the index this question fell through to the KG and
+    # answered "you'd need to connect the recording or transcript directly (e.g.
+    # via Fireflies)" — while Fireflies was connected and working. A wrong answer
+    # that blames the user's setup is worse than a slow one, so this sits ahead
+    # of the digest. Falls through when the reference resolves to nothing.
+    if not pinned_skill and call_index.is_single_call_request(question, history):
+        try:
+            single = call_index.answer_single_call(
+                enterprise_id, question, history=history, fresh=_index_fresh()
+            )
+            if single is not None:
+                return single
+        except Exception:  # noqa: BLE001 — never let the index break the answer
+            logger.exception("call-index single-call failed for %s", enterprise_id)
+
+    # INDEX-DRIVEN routing: the question names a window and this company
+    # actually has calls in it. Ask the data rather than the vocabulary — the
+    # set of words meaning "call" is unbounded, and every miss answered from the
+    # wrong source. Two reported failures ("top 3 product requests from last
+    # week", and the same with "customer conversations") carried no digest verb,
+    # fell to the generic path, were answered off an uploaded simulated CSV from
+    # January, and then asserted no source covered the period — while the index
+    # held real calls from that week.
+    #
+    # `windowed_call_question` resolves freshness itself, AFTER its own cheap
+    # regex/window gates, so a question with no explicit window never triggers a
+    # sync on its way past.
+    if not pinned_skill:
+        try:
+            window = call_index.windowed_call_question(enterprise_id, question)
+        except Exception:  # noqa: BLE001 — routing must never break the answer
+            window = None
+        if window is not None:
+            from app import call_digest
+
+            return call_digest.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
+
     # On-demand call digest: "summarize the customer calls from last week" needs a
     # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
     # The generic router would misroute it (e.g. → interview-synthesis) and answer

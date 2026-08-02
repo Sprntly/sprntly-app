@@ -444,3 +444,53 @@ def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
         logger.exception("roadmap-ingest: failed to start thread for %s (ws=%s)",
                          company_id, workspace_id)
         return False
+
+
+# ── Call index refresh ──────────────────────────────────────────────────────
+#
+# The call index (app/call_index.py) holds cheap metadata for every call in a
+# connected transcript source, so a listing question is a DB read instead of a
+# 168-second corpus pass. It is only worth anything if it is POPULATED, and an
+# index nobody fills fails in the quietest possible way: every interception in
+# qa_agent returns None, the question degrades to the old expensive path, and
+# nothing anywhere reports a problem.
+#
+# So it gets the same two triggers every other connector has — the moment it
+# connects, and every scheduler cycle thereafter — plus a third the others do
+# not need: `call_index.ensure_fresh` tops it up inline on the read path when a
+# call may have landed since the last cycle. This is the same gap Fortune's
+# d30ca7ee closed for Slack ("sync the moment it's connected, not six hours
+# later"), with the read-path top-up added because a 6-hour-old call list is
+# not merely incomplete — `answer_listing` states a COUNT, so it is WRONG.
+
+def _run_call_index_sync(company_id: str) -> None:
+    """Blocking call-index refresh — runs inside the daemon thread. Fully
+    isolated: `call_index.sync_company` already stamps its own failure on
+    `call_index_sync` (which is what makes the failure visible to the read
+    path), so this only has to keep it out of the caller's flow."""
+    from app import call_index
+
+    try:
+        written = call_index.sync_company(company_id)
+        logger.info("call-index refresh done: %s calls=%s", company_id, written)
+    except Exception:  # noqa: BLE001 — fully isolated; already stamped
+        logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
+
+
+def kickoff_call_index_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh this company's call index.
+
+    Called from the Fireflies connect route and from the scheduled connector
+    refresh. Returns False when nothing was started. Never blocks; never raises
+    into the caller's flow."""
+    try:
+        t = threading.Thread(
+            target=_run_call_index_sync, args=(company_id,),
+            name="call-index-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break connect
+        logger.exception("call-index: failed to start refresh thread for %s",
+                         company_id)
+        return False
