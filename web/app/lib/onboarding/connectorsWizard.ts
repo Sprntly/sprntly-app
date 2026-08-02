@@ -30,6 +30,12 @@ export const REQUIRED_CATEGORY_KEY = "analytics"
 export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
   "analytics",
   "voice",
+  // Research is a wizard category as well as a Settings one (product decision
+  // 2026-08-02): a PM arrives with existing research long before they can
+  // connect a repository, and it's real brief evidence, so we ask for it during
+  // onboarding. It survives wizardCategories' empty-category drop via the
+  // catalog's `keepWhenEmpty` flag — see connectableCatalog.
+  "research",
   "crm",
   "pm",
   "monitoring",

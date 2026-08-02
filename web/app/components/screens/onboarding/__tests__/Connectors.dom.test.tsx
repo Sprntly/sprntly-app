@@ -308,6 +308,15 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Fireflies")).not.toBeNull()
     expect(screen.queryByText("Zendesk")).toBeNull()
     expect(screen.queryByText("Gong")).toBeNull()
+    // Advance to Research. It has NO visible connector at all (Marvin is
+    // coming-soon) yet the category still renders — its upload strip is what
+    // onboarding is asking for, so `keepWhenEmpty` keeps the shelf alive.
+    fireEvent.click(footerContinue(container))
+    const research = container.querySelector('.conn-step[data-conn="research"]')
+    expect(research).not.toBeNull()
+    expect(screen.queryByText("Marvin")).toBeNull()
+    expect(research!.querySelectorAll(".conn").length).toBe(0)
+    expect(research!.querySelector(".conn-upload")).not.toBeNull()
     // Advance to CRM: HubSpot (oauth) shows, the coming-soons don't.
     fireEvent.click(footerContinue(container))
     expect(screen.getByText("HubSpot")).not.toBeNull()
@@ -383,7 +392,9 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
 
   it("opens the connect modal for a connectable card", () => {
     const { container } = mountLoaded()
-    // Advance to the CRM category, where HubSpot (oauth) lives.
+    // Advance to the CRM category, where HubSpot (oauth) lives — Analytics →
+    // Voice → Research → CRM.
+    fireEvent.click(footerContinue(container))
     fireEvent.click(footerContinue(container))
     fireEvent.click(footerContinue(container))
     fireEvent.click(screen.getByText("HubSpot").closest(".conn") as HTMLElement)

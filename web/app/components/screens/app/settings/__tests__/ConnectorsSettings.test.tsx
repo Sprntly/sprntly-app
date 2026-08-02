@@ -298,9 +298,10 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders only the OPEN category's rows, not all 43 catalog rows", () => {
+  it("renders only the OPEN category's rows, not all 44 catalog rows", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43) // v6 catalog + Uploaded documents + Slack's second (voice) placement
+    // v6 catalog + Uploaded documents + Slack's second (voice) placement + Marvin
+    expect(total).toBe(44)
     for (const cat of CONNECTOR_CATALOG) {
       // The `uploads` provider is never rendered as a connector row — it's
       // surfaced as the document-source list instead.
@@ -565,6 +566,20 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     ).toBe(keptCategories.filter((c) => c.allowsManualUpload !== false).length)
     // Categories with no wired connectors (e.g. Monitoring) are dropped.
     expect(one).not.toContain("powers On-Call Agent")
+  })
+
+  it("keeps the Research panel — no connector rows, but its upload strip is live", () => {
+    const keptCategories = connectableCatalog()
+    const research = keptCategories.find((c) => c.key === "research")
+    // Marvin is coming-soon, so the shelf survives only on `keepWhenEmpty`. It
+    // has to: the dropzone is the entire feature until Marvin is wired.
+    expect(research).toBeTruthy()
+    const html = render({ categories: keptCategories, selectedCategoryKey: "research" })
+    expect(countRows(html)).toBe(0)
+    expect(html).not.toContain("Marvin")
+    expect(html).toContain('class="set-conn-upload"')
+    // The rail still offers it as a tab, so the user can get to that dropzone.
+    expect(render({ categories: keptCategories })).toContain("Research")
   })
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {

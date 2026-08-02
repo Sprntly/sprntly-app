@@ -14,6 +14,9 @@ import {
 const EXPECTED_CATEGORIES = [
   "Analytics",
   "Voice of Customer & Support",
+  // Research sits beside Voice (2026-08-02): both carry what users told us —
+  // Voice unsolicited, Research deliberately gathered.
+  "Research",
   "Customer Relationship (CRM)",
   "Project Management",
   "Monitoring & Reliability",
@@ -27,19 +30,19 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 10 categories, in v6 order (Uploaded documents merged into Company documentation; revenue appended)", () => {
+  it("has exactly the 11 categories, in v6 order (Research added; Uploaded documents merged into Company documentation; revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("totals 44 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43)
-    // 42 distinct connectors — the extra row is dual-typed Slack's second
+    expect(total).toBe(44)
+    // 43 distinct connectors — the extra row is dual-typed Slack's second
     // placement, not a second connector.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(42)
+    expect(distinct.size).toBe(43)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -136,6 +139,17 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(voiceSlack).toBeDefined()
     expect(voiceSlack).toBe(commsSlack)
     expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
+  })
+
+  it("Research: Marvin (coming soon) — the shelf's live feature is its upload strip", () => {
+    expect(items("Research")).toEqual(["Marvin"])
+    const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
+    expect(research.items[0].types).toEqual(["research"])
+    // Not wired yet, so the card renders "Coming soon"…
+    expect(isConnectableConnector(research.items[0])).toBe(false)
+    // …which is exactly why the category must not opt out of manual upload.
+    expect(research.allowsManualUpload).not.toBe(false)
+    expect(research.keepWhenEmpty).toBe(true)
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -248,6 +262,9 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Analytics",
       "Voice of Customer & Support",
+      // Research has no wired connector at all, but survives on keepWhenEmpty
+      // because its upload strip is the feature — see the test below.
+      "Research",
       "Customer Relationship (CRM)",
       "Project Management",
       "Design",
@@ -301,6 +318,27 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     // Merged category keeps only its WIRED rows (Notion isn't wired yet):
     // Uploaded documents (upload) + Google Docs (google_drive OAuth).
     expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
+  })
+
+  it("keeps a keepWhenEmpty category (Research) with zero items instead of dropping it", () => {
+    const research = connectableCatalog().find((c) => c.key === "research")
+    // Present, empty, and still carrying the upload strip metadata — the whole
+    // point of the flag: coming-soon Marvin is hidden, the dropzone survives.
+    expect(research).toBeTruthy()
+    expect(research!.items).toEqual([])
+    expect(research!.uploadAccept).toBeTruthy()
+    expect(research!.allowsManualUpload).not.toBe(false)
+    // The flag is narrow: Monitoring is equally unwired and still gets dropped.
+    expect(
+      connectableCatalog().find((c) => c.key === "monitoring"),
+    ).toBeUndefined()
+  })
+
+  it("shows Marvin on the Research shelf once it has a live connection", () => {
+    const research = connectableCatalog(new Set(["marvin"])).find(
+      (c) => c.key === "research",
+    )!
+    expect(research.items.map((i) => i.id)).toEqual(["marvin"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

@@ -13,10 +13,12 @@ import type { ConnectorCategoryRow, ConnectorItemRow, ConnectorType } from "../t
 import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 // Category order follows the v6 onboarding screenshot spec (2026-07-17):
-// Analytics → Voice → CRM → Project Management → Monitoring → Design →
-// Codebase → Communications, with the settings-only extras (docs, revenue)
-// appended. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
-// (lib/onboarding/connectorsWizard.ts).
+// Analytics → Voice → Research → CRM → Project Management → Monitoring →
+// Design → Codebase → Communications, with the settings-only extras (docs,
+// revenue) appended. Research was added 2026-08-02 and sits next to Voice
+// because both carry what users told us — Voice unsolicited, Research
+// deliberately gathered. The onboarding wizard shows only
+// ONBOARDING_CONNECTOR_CATEGORIES (lib/onboarding/connectorsWizard.ts).
 
 // Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
 // communication tool (brief delivery target) AND a customer-voice source —
@@ -77,6 +79,29 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // Dual-typed communication + customer-voice — the same item also sits
       // in the Communications category (see SLACK_ITEM above).
       SLACK_ITEM,
+    ],
+  },
+  {
+    // User research — what the team deliberately went out and learned, as
+    // opposed to the unsolicited signal on the Voice shelf above. Today the
+    // shelf is carried entirely by its upload strip: Marvin is the only
+    // connector and it is still coming-soon, so `keepWhenEmpty` is what stops
+    // connectableCatalog() dropping the category (and with it the only way to
+    // hand us a research readout). Evidence-bearing — deliberately absent from
+    // NON_EVIDENCE_CATEGORIES, and mirrored by the backend's
+    // EVIDENCE_UPLOAD_CATEGORIES["research"] so an uploaded transcript is
+    // extracted as customer_voice with a research source hint rather than as a
+    // plain company document.
+    key: "research",
+    title: "Research",
+    keepWhenEmpty: true,
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      // Catalog-plumbing only — no OAuth/API-key backend yet, so this renders
+      // disabled with the "Coming soon" tooltip. Brand-color letter glyph;
+      // there is no bundled SVG mark for Marvin.
+      { id: "marvin", name: "Marvin", logo: "M", logoText: "M", logoColor: "#6C5CE7", oauth: false, types: ["research"] },
     ],
   },
   {
@@ -261,6 +286,10 @@ export function isConnectableConnector(item: ConnectorItemRow): boolean {
  * Providers in `alsoKeepIds` — e.g. any with a live connection — are never
  * hidden even if not yet OAuth/API-key wired; a category kept alive by such a
  * provider is therefore retained too.
+ *
+ * A category flagged `keepWhenEmpty` survives with zero connectors: Research's
+ * feature IS its upload strip, so dropping the shelf for having no wired
+ * connector would remove the only way to give us research at all.
  */
 export function connectableCatalog(
   alsoKeepIds: ReadonlySet<string> = new Set(),
@@ -270,7 +299,7 @@ export function connectableCatalog(
     items: cat.items.filter(
       (i) => isConnectableConnector(i) || alsoKeepIds.has(i.id),
     ),
-  })).filter((cat) => cat.items.length > 0)
+  })).filter((cat) => cat.items.length > 0 || cat.keepWhenEmpty === true)
 }
 
 // ── Information-gathering connectors ─────────────────────────────────────────
@@ -294,8 +323,11 @@ export function connectableCatalog(
 //   docs   Notion / Google Docs — internal documentation; context that shapes
 //                           a brief, not customer/product evidence on its own.
 //
-// Everything else (analytics, voice = support/calls/feedback, crm, monitoring,
-// revenue) is a data source and feeds the brief. Defined as a deny-list
+// Everything else (analytics, voice = support/calls/feedback, research, crm,
+// monitoring, revenue) is a data source and feeds the brief. Research is
+// deliberately NOT listed above: a study readout or interview transcript is
+// gathered evidence about real users, so an uploaded research file alone can
+// open the brief's data-source gate. Defined as a deny-list
 // of category keys rather than an allow-list so a new evidence category added
 // to CONNECTOR_CATALOG counts automatically. Note this is CATEGORY-based, so
 // Intercom (category `voice`, though its type is `communication`) correctly
@@ -384,6 +416,7 @@ export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
   code: "Code",
   monitoring: "Monitoring",
   design: "Design",
+  research: "Research",
 }
 
 const ALL_ITEMS: ConnectorItemRow[] = CONNECTOR_CATALOG.flatMap((c) => c.items)

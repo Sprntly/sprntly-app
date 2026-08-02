@@ -13,6 +13,8 @@ from app.connectors.catalog import (
     CONNECTOR_TYPES,
     CUSTOMER_VOICE,
     DOCUMENTS,
+    EVIDENCE_UPLOAD_CATEGORIES,
+    RESEARCH,
     TASK_MANAGEMENT,
     has_type,
     is_evidence_provider,
@@ -78,6 +80,35 @@ def test_providers_with_type_and_has_type():
     assert "slack" not in trackers
     assert has_type("clickup", TASK_MANAGEMENT)
     assert not has_type("slack", TASK_MANAGEMENT)
+
+
+def test_marvin_is_research_typed_and_evidence():
+    """Marvin anchors the Research category (2026-08-02). Research is
+    deliberately gathered evidence about users — unlike `documents`, an
+    interview readout is not merely internal context, so a research source can
+    open the brief's data-source gate on its own."""
+    assert types_for("marvin") == [RESEARCH]
+    assert has_type("marvin", RESEARCH)
+    assert providers_with_type(RESEARCH) == ["marvin"]
+    assert is_evidence_provider("marvin") is True
+    # The contrast that makes the rule legible: a wiki is NOT evidence.
+    assert is_evidence_provider("confluence") is False
+
+
+def test_research_uploads_are_evidence_bearing():
+    """The Research shelf's upload strip is its live path (Marvin is still
+    coming-soon), so a hand-uploaded transcript must be extracted like connector
+    data, not like a plain company document. There is no `research` member of
+    SIGNAL_SOURCE_TYPES, so it maps to the closest KG type and the hint carries
+    the real context — the same shape monitoring/crm use."""
+    from app.graph.types import SIGNAL_SOURCE_TYPES
+
+    source_type, hint = EVIDENCE_UPLOAD_CATEGORIES["research"]
+    assert source_type == "customer_voice"
+    assert "research" in hint
+    # Every default here must satisfy the signals CHECK constraint.
+    for st, _ in EVIDENCE_UPLOAD_CATEGORIES.values():
+        assert st in SIGNAL_SOURCE_TYPES
 
 
 def test_every_type_value_is_kebab_case():
