@@ -186,6 +186,18 @@ it and align. Palette tokens (locked): ink `#1c1e21`, panel `#f7f7f5`, green
 high `#b57a21`/`#fbf1de`, chip `#f1f1ef`; Spectral (serif titles) + Inter
 (body) + IBM Plex Mono (keys).
 
+> **Who this section is for.** Everything below specifies the surface Sprntly
+> RENDERS — the Tickets view, built in the app from structured ticket data.
+> It is a spec for that view, never an instruction to emit markup. When this
+> skill answers **in chat** (the no-PRD path: the reader asked for tickets on
+> a report or an insight, so there is no ticket surface to open), the answer
+> is **plain markdown** — headings, bold, tables, lists. Do not emit `<div>`,
+> `<button>`, `style="…"`, or any hex color: a chat answer is drawn by a
+> markdown renderer, so markup arrives as literal tag text and a drawn button
+> does nothing when clicked. Say what the tickets are, and say that running
+> `prd-author` first is what puts them on the real Tickets surface with the
+> push and regenerate actions attached.
+
 - **Scope boundary:** the skill's output starts at the "Tickets from …" header
   block. The surrounding page chrome — the Evidence / PRD / Tickets tab bar,
   artifact title, Save / Share / close — belongs to the Sprntly page, not to

@@ -4,6 +4,7 @@ import { isValidElement, type ReactNode } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
+import { stripAnswerHtmlChrome } from "../../lib/answerHtmlChrome"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { reportKindLabel, reportTitleFromHtml } from "../../lib/reportKind"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
@@ -193,8 +194,15 @@ export function AskReplyBody({
       <div
         className={`ai-bar-reply-answer${isStreaming ? " ai-bar-reply-answer--streaming" : ""}`}
       >
+        {/* A markdown answer that carries raw HTML has that HTML PRINTED as
+            tag text here — react-markdown runs without rehype-raw, by design.
+            The chrome a skill's delivery format describes (an action row of
+            "Push to Jira" / "Regenerate" buttons, colored pills) belongs to
+            the surface the app renders, not to a chat turn, so it is removed
+            rather than escaped. Applied to `visible`, so a partial tag never
+            flashes as source while the answer streams. */}
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={askMarkdownComponents}>
-          {visible}
+          {stripAnswerHtmlChrome(visible)}
         </ReactMarkdown>
       </div>
       {/* A Jira change the agent proposed. Held back until the answer has

@@ -117,7 +117,9 @@ PRD_VARIANT = "v3"
 #      questions outside product/PM/engineering/design)
 #  4 — Draft-a-PRD chip aligned to prd-author v4.7 (no more "rollout plan" —
 #      Rollout is retired from the house PRD format)
-ASK_CACHE_VERSION = 4
+#  5 — ASK_SYSTEM gained the markdown-only render contract (no raw HTML, and
+#      no redrawing a skill's UI chrome as tags)
+ASK_CACHE_VERSION = 5
 
 
 # The deterministic prompts wired into the home + ondemand starter cards in
@@ -383,6 +385,17 @@ discussed. Sparingly — not whole sentences.
 helps").
 - For a short factual answer (definition, lookup, yes/no), skip the headings \
 and charts entirely — 1–3 short paragraphs is fine.
+- **Markdown only — never raw HTML.** A markdown renderer draws this answer: \
+`<div>`, `<button>`, `<span>`, `style="…"` and friends are NOT drawn, they \
+are printed as literal tag text the reader has to look at. The one exception \
+is the `chart` fenced block above, which is not HTML.
+- **Never draw a skill's UI chrome.** A skill's method may describe the \
+surface Sprntly RENDERS from that skill's output — action rows ("Push to \
+Jira", "Regenerate"), colored pills and chips, tabs, hex tokens, detail \
+rails. That surface is built by the app from its own data, on its own page; \
+your job is the answer, not the interface. Describe what you produced in \
+markdown (headings, bold, tables, lists) and name where it opens — never \
+reproduce a button, and never emit a color or a tag to imitate one.
 
 Embed every chart as a fenced code block with language `chart` (no other \
 language) and a JSON body that strictly matches this schema:
