@@ -14,6 +14,7 @@ import {
   type ReportKindOption,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
+import { evidenceOpenScopePatch } from "../../../lib/panelPrdScope"
 import { prototypePath } from "../../../lib/routes"
 import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
@@ -485,7 +486,11 @@ export function ArtifactsScreen() {
       }
       if (a.type === "evidence") {
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ evidence: null, evidenceGenerating: true })
+        // Retires whatever PRD was cached from a previous artifact — this
+        // fetch cannot attribute the evidence document to it, so no
+        // PRD-acting control (Share, header, prototype CTA) may stay armed
+        // on it. See lib/panelPrdScope.ts.
+        setContent({ evidence: null, evidenceGenerating: true, ...evidenceOpenScopePatch() })
         openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
