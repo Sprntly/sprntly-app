@@ -513,6 +513,155 @@ def test_cir_runs_when_pinned(monkeypatch):
     assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
 
 
+# ── on_route: the routed skill is announced AT ROUTING TIME ──────────────────
+# The decision exists seconds into a run that can last minutes. The hook fires
+# the moment it resolves so the caller can persist it where a waiting client can
+# read it — not at completion, which is where `_skill` in the payload lands.
+
+
+def test_on_route_fires_with_the_skill_before_the_answer_call(monkeypatch):
+    """Ordering is the feature. `_skill` in the payload lands at completion;
+    this has to land before the expensive call starts."""
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: events.append(("llm", k.get("purpose"))) or _answer_out(),
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="write user stories for checkout",
+        dataset="acme", on_route=lambda s, a: events.append(("route", s, a)),
+    )
+    assert events[0] == ("route", "user-stories", "Generate user stories")
+    assert events[1] == ("llm", "skill_answer"), "the answer call comes after"
+    assert len([e for e in events if e[0] == "route"]) == 1, "fires exactly once"
+    # The pair matches what the finished payload carries, so the mid-run label
+    # and the final one can never disagree.
+    assert (events[0][1], events[0][2]) == (out["_skill"], out["_skill_action"])
+
+
+def test_on_route_reports_none_when_no_skill_is_routed(monkeypatch):
+    """The direct path routes nothing. The hook still fires (so the caller knows
+    routing is done) but carries None — the writer treats that as 'record
+    nothing', which is what keeps the column null."""
+    events: list[tuple] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "generic", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what happened last week", dataset="acme",
+              on_route=lambda s, a: events.append((s, a)))
+    assert events == [(None, "")]
+
+
+def test_on_route_reports_none_for_an_out_of_scope_question(monkeypatch):
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
+    )
+    out = qa.answer(enterprise_id="ent", question="what's the weather in tokyo?",
+                    dataset="acme", on_route=lambda s, a: events.append((s, a)))
+    assert out["answer"] == qa.OUT_OF_SCOPE_MESSAGE
+    assert events == [(None, "")]
+
+
+def test_on_route_reports_a_pinned_skill(monkeypatch):
+    """A pinned follow-up skips the router but the skill IS resolved, so the
+    waiting surface can still name it."""
+    events: list[tuple] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", on_route=lambda s, a: events.append((s, a)))
+    assert events == [("roadmap", "roadmap")]
+
+
+def test_on_route_does_not_fire_for_a_pre_routing_interceptor(monkeypatch):
+    """call_digest answers without consulting the router at all. Reporting a
+    skill it never chose would be the invented signal this hook exists to
+    avoid — so nothing is announced and the column stays null."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"answer": "digest",
+                                                   "_skill_source": "call-digest"})
+    events: list[tuple] = []
+    qa.answer(enterprise_id="ent", dataset="acme",
+              question="summarize the customer calls from last week",
+              on_route=lambda s, a: events.append((s, a)))
+    assert events == []
+
+
+def test_on_route_failure_never_breaks_the_answer(monkeypatch):
+    """The hook writes to the DB. A blip there must cost display metadata, not
+    the answer the user is paying for."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    def _boom(_skill, _action):
+        raise RuntimeError("supabase blip")
+
+    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
+                    dataset="acme", on_route=_boom)
+    assert out["answer"] == "ok"
+
+
+# ── on_phase: naming the leg that is actually running ────────────────────────
+# Every label is authored beside the call it describes; these tests pin that
+# the labels appear in execution order and only on paths that really do the
+# work they name.
+
+
+def test_phases_name_retrieval_then_writing_in_order(monkeypatch):
+    phases: list[str] = []
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1]})
+    import app.graph.retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "LIVE CONTEXT")
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme",
+              on_phase=phases.append)
+
+    assert phases == ["Searching your connected sources…", "Writing the answer…"]
+
+
+def test_no_retrieval_phase_when_retrieval_is_skipped(monkeypatch):
+    """A PRD-grounded ask deliberately skips KG retrieval, so it must not claim
+    to be searching sources — the label would describe work that never ran."""
+    phases: list[str] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", prd_id=7, on_phase=phases.append)
+
+    assert phases == ["Writing the answer…"]
+
+
+def test_phase_sink_failure_never_breaks_the_answer(monkeypatch):
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    def _boom(_label):
+        raise RuntimeError("stream closed")
+
+    out = qa.answer(enterprise_id="ent", question="write a PRD for billing",
+                    dataset="acme", on_phase=_boom)
+    assert out["answer"] == "ok"
+
+
+def test_answer_without_hooks_behaves_exactly_as_before(monkeypatch):
+    """Both hooks are optional; every existing caller omits them."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
+                    dataset="acme")
+    assert out["_skill"] == "user-stories"
+
+
 # ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
 
 def test_answer_prd_id_grounds_skill_answer(monkeypatch):

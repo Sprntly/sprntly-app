@@ -279,6 +279,11 @@ CREATE TABLE ask_jobs (
     pinned_skill    TEXT,
     -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
     prd_id          INTEGER,
+    -- The skill the router picked, written the moment it resolves rather than
+    -- at completion, so the waiting surface can name the running skill (mirrors
+    -- 20260802120000_ask_jobs_routed_skill.sql). NULL = no skill was routed.
+    routed_skill        TEXT,
+    routed_skill_action TEXT,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,

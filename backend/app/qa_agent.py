@@ -71,6 +71,27 @@ def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
         raise AskCancelled()
 
 
+def emit_phase(on_phase: Optional[Callable[[str], None]], label: str) -> None:
+    """Announce which LEG of a long answer is now running, for the chat's
+    waiting surface. A no-op when no sink is wired (tests, direct callers).
+
+    The rule, borrowed verbatim from the web side's `generationPhases.ts`: a
+    label describes work the pipeline REALLY does, and it is authored next to
+    the call that does it. A leg whose boundaries are fuzzy emits nothing —
+    an invented phase is worse than silence, because the whole point of the
+    surface is to stop claiming progress we have no signal for.
+
+    Best-effort: the sink is display transport (an SSE publish), so a failure
+    there must never take the answer down with it.
+    """
+    if on_phase is None:
+        return
+    try:
+        on_phase(label)
+    except Exception:  # noqa: BLE001 — display only, never break the answer
+        logger.debug("phase publish failed for %r", label, exc_info=True)
+
+
 ROUTER_MODEL = "claude-haiku-4-5"
 ANSWER_MODEL = "claude-sonnet-4-6"
 HEAVY_MODEL = "claude-opus-4-7"
@@ -340,7 +361,7 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
 
 def _answer_single_shot(
     decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
-    on_delta=None, skill_spec=None,
+    on_delta=None, skill_spec=None, on_phase=None,
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
     grounded on the KG when the tenant's graph has relevant signal — or, for a
@@ -368,6 +389,12 @@ def _answer_single_shot(
         # prefix stays cache-friendly; history + the question stay uncached.
         kg_block, kg_used = "", False
     else:
+        # Retrieval is a real leg: an embeddings HTTP call plus the pgvector
+        # queries behind _retrieve_kg_bundle, ~0.5-1s serial before any answer
+        # token can exist. Announced here, immediately before the call that
+        # does it — never earlier, and never on the PRD-grounded branch above,
+        # which deliberately skips retrieval entirely.
+        emit_phase(on_phase, "Searching your connected sources…")
         kg_block, kg_used = _kg_grounding(enterprise_id, question)
     system = (
         ASK_SYSTEM
@@ -379,6 +406,11 @@ def _answer_single_shot(
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
     )
+    # The generation itself starts here — the dominant cost of this path, and
+    # the gap before the first streamed token lands. Everything the answer is
+    # built from has been assembled by now, so the label is true at the moment
+    # it is published.
+    emit_phase(on_phase, "Writing the answer…")
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="qa",
@@ -564,6 +596,8 @@ def answer(
     is_cancelled: Optional[Callable[[], bool]] = None,
     prd_id: Optional[int] = None,
     on_delta: Optional[Callable[[str], None]] = None,
+    on_route: Optional[Callable[[Optional[str], str], None]] = None,
+    on_phase: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
     routing (used when a confirm-gate follow-up has already chosen the skill).
@@ -584,7 +618,23 @@ def answer(
     routing and answer steps; if it returns True the pipeline raises
     `AskCancelled` and stops BEFORE the expensive answer LLM call, so a user
     Stop that lands early actually saves that cost. Callers that don't support
-    cancellation (tests, the direct path) omit it and behave as before."""
+    cancellation (tests, the direct path) omit it and behave as before.
+
+    `on_route(skill_id, action)` fires ONCE, the instant the routing decision
+    resolves — seconds into a run that may last minutes — so the caller can
+    record it somewhere the waiting client can read it (the Ask worker writes
+    `ask_jobs.routed_skill`, surfaced by GET /v1/ask/{id} while the job is
+    still `generating`). It carries the same pair the finished payload's
+    `_skill` / `_skill_action` carry, so the mid-run label matches the final
+    one. It does NOT fire for the interceptor paths above (call digest, VoC,
+    DS analysis, ticket update, tracker/connector lookup): those answer without
+    consulting the router at all, and reporting a skill they never chose would
+    be exactly the invented signal this hook exists to avoid.
+
+    `on_phase(label)`, when supplied, receives a short label each time a new LEG
+    of the answer begins (retrieval, generation, and — inside the staged
+    competitive-intelligence sweep — capture and synthesis). Advisory display
+    only, same contract as `on_delta`; see `emit_phase`."""
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
     # On-demand call digest: "summarize the customer calls from last week" needs a
@@ -710,6 +760,17 @@ def answer(
     else:
         decision = route(question, enterprise_id=enterprise_id, history=history)
 
+    # The choice is made — publish it NOW, not when the answer lands. This is
+    # the whole point of the hook: on a competitive review the next step runs
+    # for minutes, and until this line the client had no way to learn what was
+    # running. `decision.skill_id` is None on the direct and out-of-scope paths,
+    # and the callback is contracted to record nothing in that case.
+    if on_route is not None:
+        try:
+            on_route(decision.skill_id, decision.action)
+        except Exception:  # noqa: BLE001 — display metadata, never break the answer
+            logger.exception("on_route hook failed for skill=%s", decision.skill_id)
+
     # Routing (a cheap haiku call) is done; the answer/script call below is the
     # expensive one. This is the highest-value checkpoint: a Stop within the
     # first second or two lands here and skips the sonnet/opus generation.
@@ -759,7 +820,7 @@ def answer(
         if custom_spec is not None:
             payload = _answer_single_shot(
                 decision, enterprise_id, question, history, prd_context=prd_context,
-                on_delta=on_delta, skill_spec=custom_spec,
+                on_delta=on_delta, skill_spec=custom_spec, on_phase=on_phase,
             )
             return _maybe_verify(payload, enterprise_id)
 
@@ -813,6 +874,9 @@ def answer(
             # each module boundary is a cancellation checkpoint, so a Stop
             # actually stops the spending (company_research parity).
             is_cancelled=is_cancelled,
+            # The sweep is the longest wait in the product; its own legs
+            # (capture, then synthesis) publish from inside that module.
+            on_phase=on_phase,
         )
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
@@ -843,6 +907,6 @@ def answer(
     else:
         payload = _answer_single_shot(
             decision, enterprise_id, question, history, prd_context=prd_context,
-            on_delta=on_delta,
+            on_delta=on_delta, on_phase=on_phase,
         )
     return _maybe_verify(payload, enterprise_id)

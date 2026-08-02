@@ -266,6 +266,39 @@ def complete_ask_job(ask_id: int, payload: dict) -> None:
     }).eq("id", ask_id).eq("status", "generating").execute()
 
 
+def set_ask_job_route(
+    ask_id: int, skill_id: str | None, action: str | None = None
+) -> None:
+    """Record the skill the router picked, WHILE the job is still generating.
+
+    The routed skill used to reach the client only inside `response`, which
+    `complete_ask_job` writes at the very end of the run — so the chat's waiting
+    surface could not name the skill it was waiting for until the wait was over.
+    The Ask worker calls this the moment `qa_agent.route()` resolves, and
+    `GET /v1/ask/{id}` surfaces the columns from `generating` onwards.
+
+    Guarded on `status == 'generating'`, like touch_ask_job: a route write must
+    never touch a row the user already cancelled or a worker already finished.
+    A no-skill decision (direct answer, out-of-scope refusal, or one of the
+    pre-routing interceptors) writes NOTHING — the columns stay NULL, which is
+    the signal the UI uses to render no chip rather than invent a default.
+
+    Best-effort by contract: this is display metadata, so any DB error is logged
+    and swallowed rather than failing an answer that is otherwise fine.
+    """
+    if not skill_id:
+        return
+    try:
+        c = require_client()
+        c.table("ask_jobs").update({
+            "routed_skill": skill_id,
+            "routed_skill_action": action or None,
+            "updated_at": _now(),
+        }).eq("id", ask_id).eq("status", "generating").execute()
+    except Exception:  # noqa: BLE001 — display metadata must never fail the ask
+        logger.warning("routed-skill write failed for ask_id=%s", ask_id, exc_info=True)
+
+
 def touch_ask_job(ask_id: int) -> bool:
     """Heartbeat: bump `updated_at` so the orphan sweep can tell a LIVE long
     answer from a dead worker's abandoned row.
