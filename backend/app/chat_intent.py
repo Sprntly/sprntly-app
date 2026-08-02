@@ -122,8 +122,12 @@ conversation has been converging on a feature, idea, or problem. \
 task: a SELF-CONTAINED brief for the document author, composed from the \
 whole conversation: the topic plus EVERY requirement, constraint, and detail \
 the user gave, kept verbatim where possible — never summarize away \
-specifics, never invent new ones, never a bare pronoun. null only when the \
-thread offers no topic at all.
+specifics, never invent new ones, never a bare pronoun. If the thread offers \
+no topic at all, return null AND choose `answer` rather than generate_prd — a \
+document about nothing helps no one, so an unresolved topic means you have not \
+identified a generation request. Do NOT choose generate_prd for a question \
+ABOUT an existing PRD ("what does the prd say", "is there a prd for X", \
+"review the prd") — that is `answer`.
 
 - edit_prd — the user wants the EXISTING PRD changed: "make it shorter", \
 "add a rollout section", "change the success metric to weekly retention", \
@@ -288,6 +292,20 @@ def resolve_chat_intent(
             # An edit with no instruction can't be applied; the ask path at
             # least answers the message.
             envelope.update(intent="answer", source="no_instruction")
+        if envelope["intent"] == "generate_prd" and not envelope["task"]:
+            # Same rule as the two above, which `generate_prd` was missing: an
+            # action needs its object resolved before it fires. `edit_prd` has
+            # always required both a target PRD and an instruction, while
+            # `generate_prd` required nothing — so a topicless message could
+            # author a document about nothing, and the frontend would run it
+            # (ChatScreen dispatches on the intent alone).
+            #
+            # This is the cheap half of the false-positive fix. It cannot catch
+            # a confident misread that DOES resolve a topic ("write this up as
+            # a doc" → a real task); that needs a higher action floor than
+            # `answer`'s, and the floor is not worth moving until the router
+            # evals can actually run and say where to put it.
+            envelope.update(intent="answer", source="no_task")
         return envelope
     except Exception:  # noqa: BLE001 — dispatch must never break the send
         logger.exception("chat intent resolve failed; falling back to answer")
