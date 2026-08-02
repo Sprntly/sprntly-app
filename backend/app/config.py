@@ -32,11 +32,17 @@ class Settings(BaseSettings):
     design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
     # Process-wide cap on concurrent in-flight Anthropic streams; calls beyond
-    # this QUEUE instead of piling on. The default is conservative for a small
-    # box; raise it (env LLM_MAX_CONCURRENCY) on hosts with RAM headroom —
-    # measured: 6 concurrent streams used ~80 MB on the 3.8 GB prod box. Values
-    # <= 0 fall back to the default (never 0, which would deadlock).
-    llm_max_concurrency: int = 3
+    # this QUEUE instead of piling on. Raised from 3 to 6 once a real caller
+    # (competitive_intel's per-competitor capture fan-out) started dispatching
+    # several of its own calls concurrently — measured: 6 concurrent streams
+    # used ~80 MB on the 3.8 GB prod box, so 6 is not a new, untested number.
+    # This gate is shared by EVERY interactive LLM call in the app. Raise
+    # further (env LLM_MAX_CONCURRENCY) on hosts with more RAM headroom. Values
+    # <= 0 fall back to the default (never 0, which would deadlock). MUST stay
+    # in sync with app.llm._DEFAULT_MAX_CONCURRENCY, which this value shadows
+    # whenever the env var is unset (this field's own default always wins over
+    # that module constant — see app.llm._resolve_max_concurrency).
+    llm_max_concurrency: int = 6
     # How many of those slots BACKGROUND (warm / pre-generation) calls may hold
     # at once. Bounds warm parallelism while leaving (capacity - bg_cap) slots
     # interactive callers can always reach, so a user's click is never queued

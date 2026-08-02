@@ -35,13 +35,19 @@ company profile, no competitor set, web search down, synthesis error) return a
 plain chat message instead. Web content is UNTRUSTED input — data to record,
 never instructions.
 
-Cost/duration: a Scan is roughly one web-search call per competitor plus one
-for us (~5-10 min); a Review is the staged module sequence per competitor
-(~10-20 min) and is bounded by the same config budget the weekly deep-dive
-uses. Both run on sonnet.
+Cost/duration: a Scan runs one web-search call per competitor plus one for
+us, ALL DISPATCHED CONCURRENTLY (asyncio.gather + asyncio.to_thread, per
+`_capture_scan`) since none of these calls reads another's output — this
+brought the baseline/first-ever case down from the old strict-sequential
+~5-10 min to roughly one call's own latency; a Review is the staged module
+sequence per competitor, which stays sequential WITHIN a competitor (a real
+intra-competitor dependency — see `_capture_staged`) and is bounded by the
+same config budget the weekly deep-dive uses (~10-20 min). Both run on
+sonnet.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -685,8 +691,9 @@ class CaptureResult:
 
 def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
              prior_state: dict, depth: str | None = None,
-             is_cancelled: Callable[[], bool] | None = None) -> CaptureResult:
-    """Run the staged capture over the competitor set plus one "us" pass.
+             is_cancelled: Callable[[], bool] | None = None,
+             on_phase: Callable[[str], None] | None = None) -> CaptureResult:
+    """Run the capture over the competitor set plus one "us" pass.
 
     Returns a `CaptureResult`; see that class for how the three zero-record
     outcomes differ and why they must not be merged. `truncated` is True when
@@ -696,6 +703,20 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     Raises RuntimeError only when EVERY pass failed AND nothing was captured —
     that is web search being unavailable, and the caller says so plainly instead
     of reporting from memory.
+
+    Dispatch strategy differs by depth, because only one of them has an actual
+    dependency between calls:
+
+      * SCAN depth (the baseline/broad-question case, and the case that was
+        taking ~10 minutes) — the "us" pass and every competitor's pass are
+        independent: no call reads another call's output. `_capture_scan`
+        dispatches all of them CONCURRENTLY.
+      * STAGED/REVIEW depth — a single competitor's own module sequence has a
+        real intra-competitor dependency (`_observed_digest`: each stage is
+        told what that SAME competitor's earlier stages already logged, so it
+        doesn't re-log it), so `_capture_staged` keeps that sequence strictly
+        sequential. Parallelizing ACROSS competitors under Review mode is a
+        reasonable follow-up but is out of scope here.
     """
     from app.graph.config_layers import resolve_config
     from app.research.competitor import (
@@ -720,6 +741,33 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         + _clip(json.dumps(prior_state, ensure_ascii=False), 3000)
     ) if prior_state else ""
 
+    if stages:
+        return _capture_staged(
+            enterprise_id, scope=scope, names=names, mode=mode, stages=stages,
+            today=today, prior_note=prior_note,
+            per_pass_searches=per_pass_searches, search_budget=search_budget,
+            is_cancelled=is_cancelled,
+        )
+    return _capture_scan(
+        enterprise_id, scope=scope, names=names, mode=mode, today=today,
+        prior_note=prior_note, per_pass_searches=per_pass_searches,
+        search_budget=search_budget, is_cancelled=is_cancelled,
+        on_phase=on_phase,
+    )
+
+
+def _capture_staged(enterprise_id: str, *, scope: str, names: list[str],
+                    mode: str, stages: list[str], today: str,
+                    prior_note: str, per_pass_searches: int,
+                    search_budget: int,
+                    is_cancelled: Callable[[], bool] | None) -> CaptureResult:
+    """REVIEW/staged-depth capture — unchanged, strictly sequential.
+
+    Kept separate from `_capture_scan` specifically so this sequencing is
+    never touched by the SCAN-depth concurrency work: each competitor's own
+    module sequence has a real dependency (`_observed_digest`, below) that a
+    concurrent restructure would break.
+    """
     records: list[dict] = []
     unobserved: list[str] = []
     capped: list[str] = []
@@ -799,25 +847,18 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
         attempts += 1
         before = len(records)
         try:
-            if stages:
-                # REVIEW: the v2 module sequence, exactly as the weekly deep-dive
-                # runs it — one call per module, capped running digest carried
-                # forward so stages don't re-log the same observation.
-                for module in stages:
-                    _check_cancelled(is_cancelled)
-                    carried = _observed_digest(records[before:])
-                    prior = (f"\n\n--- already observed for {name} "
-                             f"(do not repeat) ---\n{carried}") if carried else ""
-                    _run(name, _STAGE_FOCUS,
-                         f"{scope}\n\nCompetitor under review: {name}. Today is "
-                         f"{today}. Run this stage now.{prior_note}{prior}",
-                         module)
-            else:
-                # SCAN: one pass over the launch window, pricing and sentiment.
-                _run(name, _SCAN_FOCUS,
+            # REVIEW: the v2 module sequence, exactly as the weekly deep-dive
+            # runs it — one call per module, capped running digest carried
+            # forward so stages don't re-log the same observation.
+            for module in stages:
+                _check_cancelled(is_cancelled)
+                carried = _observed_digest(records[before:])
+                prior = (f"\n\n--- already observed for {name} "
+                         f"(do not repeat) ---\n{carried}") if carried else ""
+                _run(name, _STAGE_FOCUS,
                      f"{scope}\n\nCompetitor under review: {name}. Today is "
-                     f"{today}. Report what changed in roughly the last 90 days."
-                     + prior_note, None)
+                     f"{today}. Run this stage now.{prior_note}{prior}",
+                     module)
         except AskCancelled:
             # Per-competitor isolation must NOT swallow a Stop: AskCancelled is
             # an Exception, so without this the cancellation was caught here,
@@ -847,6 +888,235 @@ def _capture(enterprise_id: str, *, scope: str, names: list[str], mode: str,
     # record check matters: a partial Review can leave failures == attempts (the
     # "us" pass died, then one late module died) while real records exist, and
     # those must never be thrown away.
+    if attempts and failures == attempts and not records:
+        raise RuntimeError("every competitive-intelligence capture pass failed")
+    if dropped:
+        logger.warning(
+            "competitive-intel: dropped %d record(s) over the %d-record run cap "
+            "(mode=%s, competitors=%s, fully-dropped=%s) — the report is built "
+            "from the first %d",
+            dropped, _TOTAL_RECORD_CAP, mode, names, capped, _TOTAL_RECORD_CAP,
+        )
+    result = CaptureResult(
+        records=records, unobserved=unobserved, capped=capped,
+        skipped=skipped, truncated=truncated,
+    )
+    _log_capture(enterprise_id, result, calls, mode, dropped)
+    return result
+
+
+# ── SCAN-depth capture — concurrent dispatch ─────────────────────────────────
+#
+# The baseline (first-ever) and repeat-Scan cases are the ones a live
+# evaluator actually hits, and none of these calls has a real dependency on
+# another: the "us" pass and every competitor's pass each stand alone (no call
+# reads another call's output), so execution order/concurrency never changes
+# WHAT gets asked or what comes back — only wall-clock time. Dispatching them
+# concurrently is a pure latency win with no content tradeoff.
+
+@dataclass
+class _ScanPassOutcome:
+    """One SCAN capture task's own isolated result.
+
+    Concurrent tasks must never mutate shared bookkeeping while other tasks
+    are still in flight (the race the old sequential `_run()` closure's
+    `nonlocal records`/`calls`/`dropped` mutation would have risked under
+    concurrency) — each task instead returns its own result here, and
+    `_capture_scan` merges every outcome back together, in a FIXED order,
+    only after all of them have completed.
+    """
+
+    name: str
+    records: list[dict]
+    truncated: bool
+    failed: bool
+
+
+def _capture_scan_task(*, enterprise_id: str, name: str, focus: str,
+                       user: str, max_searches: int) -> _ScanPassOutcome:
+    """Run ONE SCAN-depth capture pass in isolation.
+
+    Called via `asyncio.to_thread` so several of these run concurrently on
+    separate worker threads (mirrors `app.llm`'s own documented convention:
+    every heavy caller runs its blocking Anthropic call on a worker thread so
+    the LLM concurrency gate's threading semaphore blocks that thread, never
+    the event loop). Never touches anything outside its own return value —
+    that isolation is what makes the concurrent dispatch race-free.
+    """
+    try:
+        got, cut = _capture_pass(
+            enterprise_id=enterprise_id, system_focus=focus, user=user,
+            max_searches=max_searches, skill_module=None,
+        )
+    except AskCancelled:
+        raise  # not a pass failure — see _capture_scan's cancellation note
+    except Exception:  # noqa: BLE001 — isolate; the other passes still matter
+        logger.exception("competitive-intel: capture failed for %s", name)
+        return _ScanPassOutcome(name=name, records=[], truncated=False,
+                                failed=True)
+    records = [r for r in got if isinstance(r, dict)]
+    for r in records:
+        r.setdefault("competitor", name)
+    return _ScanPassOutcome(name=name, records=records, truncated=cut,
+                            failed=False)
+
+
+async def _capture_scan_gather(
+    specs: list[dict],
+) -> list[_ScanPassOutcome]:
+    """Fan out every SCAN pass concurrently and await them all."""
+    return await asyncio.gather(*[
+        asyncio.to_thread(_capture_scan_task, **spec) for spec in specs
+    ])
+
+
+def _run_capture_scan_gather(specs: list[dict]) -> list[_ScanPassOutcome]:
+    """Run `_capture_scan_gather` to completion from a synchronous caller.
+
+    `_capture` is always reached from a worker thread with NO running event
+    loop — `ask_job_runner.run_ask_job` dispatches the entire
+    `qa_agent.answer(...)` pipeline via `await asyncio.to_thread(_run_sync,
+    ...)` (see ask_job_runner.py), and the test suite calls `_capture`
+    directly from a plain sync test function. `asyncio.run` is the same
+    pattern `brief_runner.warm_synthesis_drilldowns` already uses for the
+    identical no-running-loop worker-thread case.
+    """
+    return asyncio.run(_capture_scan_gather(specs))
+
+
+def _scan_dispatch_plan(names: list[str],
+                        search_budget: int) -> tuple[list[str], list[str]]:
+    """(dispatch, skipped) — the search-budget skip decision, precomputed in
+    ONE pass over the whole competitor list before anything dispatches.
+
+    SCAN depth costs exactly one web-search call per pass (no per-competitor
+    module loop), and the "us" pass always dispatches and always counts as 1,
+    so the cost of every pass is knowable ahead of time — it never depends on
+    whether an earlier call in the batch actually succeeded. That is what
+    makes precomputing this decision correct: under concurrent dispatch there
+    is no "calls so far" to check incrementally the way the old sequential
+    loop did, because every dispatched call starts before any of them finish.
+    """
+    trimmed = names[:_MAX_COMPETITORS]
+    dispatch: list[str] = []
+    skipped: list[str] = []
+    budget_used = 1  # the "us" pass — always dispatched, never budget-gated
+    for name in trimmed:
+        if budget_used + 1 > search_budget:
+            skipped.append(name)
+            continue
+        dispatch.append(name)
+        budget_used += 1
+    return dispatch, skipped
+
+
+def _capture_scan(enterprise_id: str, *, scope: str, names: list[str],
+                  mode: str, today: str, prior_note: str,
+                  per_pass_searches: int, search_budget: int,
+                  is_cancelled: Callable[[], bool] | None,
+                  on_phase: Callable[[str], None] | None) -> CaptureResult:
+    """SCAN-depth capture: the "us" pass plus every named competitor's pass
+    dispatch CONCURRENTLY via `asyncio.gather` + `asyncio.to_thread`, rather
+    than the old strict sequential loop — this is the leg that made a
+    brand-new company's first competitive-intelligence question take up to
+    ~10 minutes end to end.
+
+    Every task returns its own isolated result (`_ScanPassOutcome`); they are
+    merged back together here, in a FIXED, deterministic order — "us" first,
+    then competitors in their ORIGINAL `names` order, never completion order
+    — so `_TOTAL_RECORD_CAP` truncation and the capped/unobserved/skipped
+    classification stay perfectly reproducible across runs regardless of
+    which worker happens to finish first (`asyncio.gather` already returns
+    results in input order, so this merge loop just has to iterate `outcomes`
+    in the order they were dispatched).
+
+    Cancellation is checked ONCE, before the whole batch dispatches, not
+    between competitors — there is no "between" once every call fires at
+    once. This is a real, deliberate behavior change from the old sequential
+    checkpoint (which could still save the cost of any not-yet-started
+    competitor): a Stop can no longer save the cost of an already-dispatched
+    call, only the cost of the whole batch if it lands before dispatch. The
+    checkpoint is not silently dropped — it moved to the one place left where
+    it can still save something.
+    """
+    _check_cancelled(is_cancelled)
+
+    # Precompute the search-budget skip decision upfront (item 3 of the
+    # restructure) rather than checking it incrementally as each sequential
+    # call used to finish.
+    dispatch_names, skipped = _scan_dispatch_plan(names, search_budget)
+    for name in skipped:
+        # NEVER CHECKED — a different claim from "checked, nothing found",
+        # and the report must not blur them.
+        logger.info("competitive-intel: web-search budget reached before %s", name)
+
+    specs: list[dict] = [{
+        "enterprise_id": enterprise_id, "name": "us", "focus": _US_FOCUS,
+        "user": f"{scope}. Today is {today}. Establish our own position now."
+                + prior_note,
+        "max_searches": per_pass_searches,
+    }]
+    for name in dispatch_names:
+        specs.append({
+            "enterprise_id": enterprise_id, "name": name, "focus": _SCAN_FOCUS,
+            "user": f"{scope}\n\nCompetitor under review: {name}. Today is "
+                    f"{today}. Report what changed in roughly the last 90 days."
+                    + prior_note,
+            "max_searches": per_pass_searches,
+        })
+
+    outcomes = _run_capture_scan_gather(specs)
+
+    # Bundle item 6: a per-competitor progress update as each pass finishes,
+    # rather than one static label for the whole capture stage. Fired here
+    # (after the batch completes) rather than from inside each worker thread,
+    # so it stays in the same fixed, deterministic order as everything else in
+    # this function — the label always names competitors in `names` order,
+    # never actual completion order.
+    for outcome in outcomes:
+        if outcome.name != "us" and not outcome.failed:
+            emit_phase(on_phase, f"Researched {outcome.name}…")
+
+    # Merge deterministically: `outcomes` is already in the fixed dispatch
+    # order (us, then dispatch_names in their original list order) because
+    # asyncio.gather preserves input order regardless of completion order.
+    records: list[dict] = []
+    unobserved: list[str] = []
+    capped: list[str] = []
+    truncated = False
+    calls = 0
+    failures = 0
+    dropped = 0
+    dropped_by_name: dict[str, int] = {}
+    for outcome in outcomes:
+        if outcome.failed:
+            failures += 1
+        else:
+            calls += 1
+            truncated = truncated or outcome.truncated
+        before = len(records)
+        for r in outcome.records:
+            # Per-pass caps alone don't bound the run — see _capture_staged's
+            # identical comment. Counted PER COMPETITOR so "we found nothing"
+            # and "we found things and then ran out of room" stay separate
+            # claims.
+            if len(records) >= _TOTAL_RECORD_CAP:
+                dropped += 1
+                dropped_by_name[outcome.name] = (
+                    dropped_by_name.get(outcome.name, 0) + 1
+                )
+                continue
+            records.append(r)
+        if len(records) > before:
+            continue
+        # Cap-affected companies are NOT silence — we have evidence for them,
+        # we just had nowhere to put it (see CaptureResult's docstring).
+        if dropped_by_name.get(outcome.name):
+            capped.append(outcome.name)
+        else:
+            unobserved.append(outcome.name)
+
+    attempts = len(outcomes)
     if attempts and failures == attempts and not records:
         raise RuntimeError("every competitive-intelligence capture pass failed")
     if dropped:
@@ -895,14 +1165,18 @@ def answer(*, enterprise_id: str, question: str,
     a helpful plain message instead.
 
     `on_phase`, when supplied, is called as each leg of the sweep begins. This
-    is the longest wait in the product — a Scan is roughly one web-search call
-    per competitor (~5-10 min) and a staged Review runs the module sequence per
-    competitor (~10-20 min) — and until now none of it published anything, so a
-    four-minute wait emitted the same signal as a four-second one. Only the
-    three legs with hard boundaries speak: query mode, capture, and synthesis.
-    The per-competitor passes INSIDE `_capture` stay silent, because their
-    boundaries move with the mode and a label that is right for a Scan is wrong
-    for a staged Review.
+    is the longest wait in the product — a Scan now dispatches its web-search
+    calls concurrently (well under the old ~5-10 min sequential cost) and a
+    staged Review still runs the module sequence per competitor sequentially
+    (~10-20 min) — and until now none of it published anything, so a
+    four-minute wait emitted the same signal as a four-second one. The three
+    legs with hard boundaries speak (query mode, capture, and synthesis), and
+    SCAN-depth capture additionally publishes one update per competitor AS
+    EACH ONE'S concurrent pass finishes (`_capture_scan`), since that is now a
+    real, individually-observable boundary. The per-competitor passes inside a
+    STAGED/REVIEW `_capture` stay silent, because their boundaries move with
+    the module sequence and a label that is right for a Scan is wrong for a
+    staged Review.
     """
     from app.research.market import company_profile
 
@@ -989,7 +1263,7 @@ def answer(*, enterprise_id: str, question: str,
         capture = _capture(
             enterprise_id, scope=scope, names=names, mode=mode,
             prior_state=prior_state if isinstance(prior_state, dict) else {},
-            depth=depth, is_cancelled=is_cancelled,
+            depth=depth, is_cancelled=is_cancelled, on_phase=on_phase,
         )
         records = capture.records
     except AskCancelled:

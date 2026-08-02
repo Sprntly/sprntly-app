@@ -54,11 +54,18 @@ DEEP_MODEL = "claude-opus-4-7"
 # worker thread (see callers rerouted through `asyncio.to_thread`) so the loop
 # is never blocked here.
 #
-# Default 3: a conservative steady state (a couple of interactive calls plus a
-# warm) for an unsized box. Hosts with RAM headroom should raise it via
+# Default 6: raised from the original conservative 3 once a real caller started
+# dispatching several of its own calls concurrently (competitive_intel's
+# per-competitor capture fan-out) and would otherwise have queued behind this
+# gate, giving back most of the win concurrency was meant to buy. This is not a
+# new, untested number — it is exactly the "6 concurrent streams ~80 MB extra"
+# figure the comment above already measured and documented as safe on the prod
+# box. This gate is process-wide and shared by EVERY interactive LLM call in
+# the app, not just competitive_intel, so raising it affects every caller that
+# reaches this chokepoint. Hosts with RAM headroom can raise it further via
 # LLM_MAX_CONCURRENCY (and LLM_BG_CAP, to let warming use the extra slots).
 # Values <= 0 / unset fall back to the default (never 0, which would deadlock).
-_DEFAULT_MAX_CONCURRENCY = 3
+_DEFAULT_MAX_CONCURRENCY = 6
 # How long a call may wait for a slot before we emit a (single) saturation log,
 # so sustained contention is observable without spamming every queued call.
 _SLOT_WAIT_LOG_THRESHOLD_S = 5.0
