@@ -112,44 +112,63 @@ describe("Back-compat: no designSource arg", () => {
 // ─── Screenshot selection ─────────────────────────────────────────────────────
 
 describe("Screenshot source selection", () => {
-  it("test_build_generate_params_carries_screenshot_source_and_key — designSource=screenshot + screenshotKey → design_source=screenshot, screenshot_key threaded", () => {
+  it("test_build_generate_params_carries_screenshot_source_and_keys — designSource=screenshot + screenshotKeys → design_source=screenshot, screenshot_keys threaded in order, no singular screenshot_key", () => {
     const params = buildGenerateParams({
       ...BASE,
       figmaFileKey: null,
       designSource: "screenshot",
-      screenshotKey: "da-upload/ws1/abc123.png",
+      screenshotKeys: ["k1", "k2"],
     })
     expect(params.design_source).toBe("screenshot")
-    expect(params.screenshot_key).toBe("da-upload/ws1/abc123.png")
+    expect(params.screenshot_keys).toEqual(["k1", "k2"])
+    expect("screenshot_key" in params).toBe(false)
     // The other single-source inputs stay clean.
     expect(params.figma_file_key).toBeNull()
     expect(params.github_repo).toBeNull()
   })
 
-  it("test_build_generate_params_other_sources_omit_screenshot_key — figma/github/website/back-compat bodies carry NO screenshot_key property at all", () => {
+  it("test_build_generate_params_empty_screenshot_keys_array_omits_field — screenshotKeys: [] → NO screenshot_keys property", () => {
+    const params = buildGenerateParams({
+      ...BASE,
+      designSource: "screenshot",
+      screenshotKeys: [],
+    })
+    expect(params.design_source).toBe("screenshot")
+    expect("screenshot_keys" in params).toBe(false)
+  })
+
+  it("test_build_generate_params_null_screenshot_keys_omits_field — screenshotKeys: null → NO screenshot_keys property (the UI gates Generate on 1+ staged keys; the builder stays clean regardless)", () => {
+    const params = buildGenerateParams({
+      ...BASE,
+      designSource: "screenshot",
+      screenshotKeys: null,
+    })
+    expect(params.design_source).toBe("screenshot")
+    expect("screenshot_keys" in params).toBe(false)
+  })
+
+  it("test_build_generate_params_other_sources_omit_screenshot_keys — figma/github/website/back-compat bodies carry NO screenshot_keys property at all", () => {
     const bodies = [
       buildGenerateParams({ ...BASE, figmaFileKey: "abc", designSource: "figma" }),
       buildGenerateParams({ ...BASE, githubRepo: "org/repo", designSource: "github" }),
       buildGenerateParams({ ...BASE, designSource: "website" }),
       // Back-compat: no designSource at all (the drawer's own generate path).
       buildGenerateParams({ ...BASE }),
+      // Defensive: even if a caller threaded screenshotKeys for a non-screenshot
+      // source, the builder itself must not leak the field.
+      buildGenerateParams({
+        ...BASE,
+        designSource: "figma",
+        figmaFileKey: "abc",
+        screenshotKeys: ["leaked-key"],
+      }),
     ]
     for (const body of bodies) {
-      // Byte-identical to the pre-screenshot wire shape: the key must be
+      // Byte-identical to the pre-screenshot wire shape: the field must be
       // ABSENT (not present with a null/undefined value) so these sources
       // serialize exactly as they did before the widening.
-      expect("screenshot_key" in body).toBe(false)
+      expect("screenshot_keys" in body).toBe(false)
     }
-  })
-
-  it("screenshot source with a null key omits the field too (the UI gates Generate on a staged key; the builder stays clean regardless)", () => {
-    const params = buildGenerateParams({
-      ...BASE,
-      designSource: "screenshot",
-      screenshotKey: null,
-    })
-    expect(params.design_source).toBe("screenshot")
-    expect("screenshot_key" in params).toBe(false)
   })
 })
 
