@@ -265,9 +265,18 @@ export function ContentPanel() {
   // rendered against partial content in plenty of places (tests, and any surface
   // that sets only the slices it cares about); a missing slice means "no reports
   // in scope", never a crash in the shared panel.
-  const reports = content.threadReports ?? []
-  const reportsLoading = content.threadReportsStatus === "loading"
-  const reportsError = content.threadReportsStatus === "error"
+  //
+  // Scoped to the conversation the fetch was FOR: the panel is global and the
+  // list lives in shared content, so on the commit where the chat switches threads
+  // the rows still describe the PREVIOUS one (the fetcher is AppShell's effect,
+  // and React runs it AFTER the chat screen's). A list that doesn't belong reads
+  // as still LOADING, never as this thread's answer and never as an empty thread —
+  // "no reports in this chat" said about another chat's reports is the wrong claim
+  // in both directions.
+  const reportsBelong = (content.threadReportsConversationId ?? null) === (content.conversationId ?? null)
+  const reports = reportsBelong ? (content.threadReports ?? []) : []
+  const reportsLoading = !reportsBelong || content.threadReportsStatus === "loading"
+  const reportsError = reportsBelong && content.threadReportsStatus === "error"
 
   // THE RULE: a tab exists only when this thread actually has that artifact.
   //
@@ -297,8 +306,10 @@ export function ContentPanel() {
     reports.length === 0 &&
     !reportsError &&
     // A standalone report (opened from Artifacts with no chat behind it) has no
-    // thread list at all — the open document IS the reason the tab belongs.
-    content.reportFocusId == null
+    // thread list at all — the open document IS the reason the tab belongs. Keyed
+    // on the explicit flag, not on "a focus id exists": a focus id that merely
+    // outlived its thread used to keep a Reports tab on chats that have none.
+    !content.reportFocusStandalone
 
   const hidden: Record<(typeof TABS)[number]["id"], boolean> = {
     evidence: evidenceHidden,

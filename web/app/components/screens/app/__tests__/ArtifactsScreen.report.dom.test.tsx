@@ -137,7 +137,14 @@ describe("ArtifactsScreen — a report with no chat to open", () => {
     await renderAndClickReport(UNATTACHED_ROW)
 
     expect(openReportTab).not.toHaveBeenCalled()
-    expect(setContent).toHaveBeenCalledWith({ conversationId: null, reportFocusId: 5 })
+    // `reportFocusStandalone` is what tells the Reports tab to trust a pointer
+    // with no conversation behind it. It is stated here rather than inferred
+    // from the null conversation id, because a brand-new chat tab has a null
+    // conversation id too — inferring it there opened THIS document inside an
+    // unrelated empty chat.
+    expect(setContent).toHaveBeenCalledWith({
+      conversationId: null, reportFocusId: 5, reportFocusStandalone: true,
+    })
     expect(openContentPanel).toHaveBeenCalledWith("reports")
   })
 
@@ -148,7 +155,9 @@ describe("ArtifactsScreen — a report with no chat to open", () => {
 
     expect(openReportTab).not.toHaveBeenCalled()
     expect(localStorage.getItem("sprntly_resume_conv")).toBeNull()
-    expect(setContent).toHaveBeenCalledWith({ conversationId: null, reportFocusId: 6 })
+    expect(setContent).toHaveBeenCalledWith({
+      conversationId: null, reportFocusId: 6, reportFocusStandalone: true,
+    })
     expect(openContentPanel).toHaveBeenCalledWith("reports")
   })
 

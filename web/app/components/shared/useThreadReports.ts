@@ -53,7 +53,11 @@ export function useThreadReportsSync() {
     if (conversationId == null) {
       // No thread → nothing to list. Clear, so a previous thread's reports can
       // never show against this one.
-      setContent({ threadReports: [], threadReportsStatus: "idle" })
+      setContent({
+        threadReports: [],
+        threadReportsStatus: "idle",
+        threadReportsConversationId: null,
+      })
       return
     }
     let cancelled = false
@@ -63,10 +67,30 @@ export function useThreadReportsSync() {
     // Status stays "ready" in that case: the list is real, just possibly a beat
     // stale — flipping to "loading" would hide the tab we already know belongs.
     const cached = cache.get(conversationId)
+    // Every write stamps the conversation the rows describe. This effect lives in
+    // AppShell (the PARENT), and React flushes child effects first, so on the
+    // commit where ChatScreen switches tabs the content still holds the PREVIOUS
+    // thread's rows. Readers compare the stamp against the active conversation
+    // and treat a mismatch as "not landed yet" rather than as this thread's
+    // answer — without it, a new chat auto-opened the panel on the old thread's
+    // report.
     setContent(
       cached
-        ? { threadReports: cached, threadReportsStatus: "ready" }
-        : { threadReportsStatus: "loading" },
+        ? {
+            threadReports: cached,
+            threadReportsStatus: "ready",
+            threadReportsConversationId: conversationId,
+          }
+        : {
+            // Nothing known for this thread yet: blank the rows as well as the
+            // status, so `threadReports` and its stamp NEVER disagree. Leaving
+            // the previous thread's rows behind a "loading" flag meant any reader
+            // that didn't check the status (the tab strip's "View report" button)
+            // was still reading them.
+            threadReports: [],
+            threadReportsStatus: "loading",
+            threadReportsConversationId: conversationId,
+          },
     )
 
     const load = (isRetry: boolean): Promise<void> =>
@@ -74,7 +98,11 @@ export function useThreadReportsSync() {
         .then((rows) => {
           if (cancelled) return
           cache.set(conversationId, rows)
-          setContent({ threadReports: rows, threadReportsStatus: "ready" })
+          setContent({
+            threadReports: rows,
+            threadReportsStatus: "ready",
+            threadReportsConversationId: conversationId,
+          })
           if (!isRetry && rows.length === 0 && onReportsTab) {
             retry = setTimeout(() => { void load(true) }, RETRY_MS)
           }
