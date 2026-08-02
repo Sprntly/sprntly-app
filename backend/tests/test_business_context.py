@@ -1,6 +1,7 @@
 """Tests for the Business Context entity, agent, KG projection, and routes."""
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -276,6 +277,124 @@ def test_missing_display_name_raises(isolated_settings, monkeypatch):
     _patch_agent_io(monkeypatch, agent, company={**_COMPANY, "display_name": ""})
     with pytest.raises(ValueError, match="display_name"):
         agent.run_business_context(object(), "ent-X")
+
+
+# --------------------------------------------------------------------------- #
+# Regression: companies.sub_vertical — the live 500 traced through staging
+# logs (postgrest 42703 "column companies.sub_vertical does not exist").
+# _company_row() is called UNCONDITIONALLY as the first step of
+# run_business_context(), so this exercises its real, unmocked `.select(...)`
+# against a companies table shaped like the schema (mirroring the new
+# migration's sub_vertical column + its already-real siblings).
+#
+# This deliberately does NOT use tests/_fake_supabase.py's FakeSupabaseClient:
+# that fake's `_Query.execute()` always issues `SELECT * FROM {table}` — the
+# `.select(cols)` argument is captured into `self._cols` but never read again
+# — so it structurally cannot reproduce a "named column missing from an
+# explicit select list" bug like this one, no matter what the seeded schema
+# contains. That's part of why the existing tests in this file (which either
+# monkeypatch `_company_row` via `_patch_agent_io`, or route through that same
+# shared fake) never caught the real schema mismatch. This test uses a small
+# standalone sqlite table instead, so a genuinely missing column raises
+# `sqlite3.OperationalError: no such column`, the same shape of failure
+# PostgREST raised in staging.
+# --------------------------------------------------------------------------- #
+def _sqlite_companies_client(schema_sql: str, row: dict):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(schema_sql)
+    cols = ", ".join(row.keys())
+    placeholders = ", ".join("?" for _ in row)
+    conn.execute(
+        f"insert into companies ({cols}) values ({placeholders})", list(row.values())
+    )
+    conn.commit()
+
+    class FakeQ:
+        def __init__(self):
+            self._cols = "*"
+            self._eq: tuple[str, object] | None = None
+
+        def select(self, cols):
+            self._cols = cols
+            return self
+
+        def eq(self, col, val):
+            self._eq = (col, val)
+            return self
+
+        def execute(self):
+            where = f" WHERE {self._eq[0]} = ?" if self._eq else ""
+            args = [self._eq[1]] if self._eq else []
+            cur = conn.execute(f"SELECT {self._cols} FROM companies{where}", args)
+            return SimpleNamespace(data=[dict(r) for r in cur.fetchall()])
+
+    q = FakeQ()
+    return type("C", (), {"table": lambda s, n: q})()
+
+
+_POST_MIGRATION_COMPANIES_SCHEMA = """
+    create table companies (
+        id                   text primary key,
+        display_name         text,
+        industry              text,
+        sub_vertical          text,
+        stage                 text,
+        product_description   text,
+        business_type         text,
+        team_size             integer,
+        okrs                  text,
+        biggest_risk          text,
+        dead_ends             text,
+        competitors           text
+    );
+"""
+
+
+def test_company_row_selects_sub_vertical_without_erroring(monkeypatch):
+    """Post-migration shape: the exact select _company_row() issues succeeds
+    and sub_vertical comes back null (gracefully handled downstream via
+    row.get("sub_vertical") — falsy-checked before use)."""
+    from app.research import business_context_agent as agent
+
+    client = _sqlite_companies_client(
+        _POST_MIGRATION_COMPANIES_SCHEMA,
+        {"id": "ent-Z", "display_name": "Zeta", "industry": "B2B SaaS",
+         "sub_vertical": None, "stage": None, "product_description": None,
+         "business_type": None, "team_size": None, "okrs": None,
+         "biggest_risk": None, "dead_ends": None, "competitors": None},
+    )
+    monkeypatch.setattr(agent, "require_client", lambda: client)
+
+    row = agent._company_row("ent-Z")
+
+    assert row["display_name"] == "Zeta"
+    assert row.get("sub_vertical") is None
+
+
+def test_company_row_reproduces_the_pre_migration_500(monkeypatch):
+    """Sanity check for the test above: a companies table WITHOUT
+    sub_vertical (the pre-migration shape, matching every column
+    information_schema confirmed as real EXCEPT sub_vertical) makes the exact
+    same `agent._company_row()` call raise — proving the passing test above
+    is actually exercising the reported bug's code path, not vacuously
+    passing regardless of schema."""
+    pre_migration_schema = _POST_MIGRATION_COMPANIES_SCHEMA.replace(
+        "sub_vertical          text,\n        ", ""
+    )
+    assert "sub_vertical" not in pre_migration_schema
+
+    from app.research import business_context_agent as agent
+
+    row = {"id": "ent-Y", "display_name": "Yeta", "industry": None,
+           "stage": None, "product_description": None, "business_type": None,
+           "team_size": None, "okrs": None, "biggest_risk": None,
+           "dead_ends": None, "competitors": None}
+    client = _sqlite_companies_client(pre_migration_schema, row)
+    monkeypatch.setattr(agent, "require_client", lambda: client)
+
+    with pytest.raises(sqlite3.OperationalError, match="sub_vertical"):
+        agent._company_row("ent-Y")
 
 
 # --------------------------------------------------------------------------- #
