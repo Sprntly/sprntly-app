@@ -41,6 +41,7 @@ import { documentsApi } from "../../lib/api"
 import { artifactShareApi } from "../../lib/artifactShareApi"
 import { saveBlob } from "../../lib/saveBlob"
 import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
+import { prdInScopeFor } from "../../lib/panelPrdScope"
 
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
 // bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
@@ -382,6 +383,10 @@ export function ContentPanel() {
     ? shownTab
     : (visibleTabs[0]?.id ?? "prd")
 
+  // The PRD a control on THIS render may act on — never `content.prd` directly.
+  // See lib/panelPrdScope.ts for why a raw-slot read is insufficient.
+  const actionablePrd = prdInScopeFor(content, activeTab)
+
   // Persist that fallback into navigation state so re-opens land on a real tab.
   useEffect(() => {
     if (evidenceHidden && contentPanelTab === "evidence" && activeTab !== "evidence") {
@@ -569,7 +574,7 @@ export function ContentPanel() {
             <span className="cpanel-main-name">
               {activeTab === "reports"
                 ? "Reports"
-                : content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}
+                : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
             </span>
           <div className="cpanel-head-actions">
             {/* The header Share menu exports the Evidence + PRD pair, so it has no
@@ -578,7 +583,7 @@ export function ContentPanel() {
                 a guest has no edit/export entitlement (AC15). */}
             {activeTab !== "reports" && (
               <ShareMenu
-                prd={content.prd}
+                prd={actionablePrd}
                 evidence={content.evidence}
                 onToast={showToast}
                 disabledReason={guestSession ? "Sign in to a full workspace to share" : undefined}
@@ -650,20 +655,24 @@ function EvidenceBottomBar() {
 // Tickets tab always has a PRD in scope, so the button is never disabled here.
 function TicketsBottomBar() {
   const { content } = useContent()
-  const prdId = content.prd?.prd_id ?? null
+  // TicketsBottomBar only ever renders under activeTab === "tickets" (see
+  // ContentPanel's conditional render below), so the literal tab is correct,
+  // not an assumption.
+  const scopedPrd = prdInScopeFor(content, "tickets")
+  const prdId = scopedPrd?.prd_id ?? null
   return (
     <div className="cpanel-bottom-bar">
       <GeneratePrototypeCTA
         prdId={prdId}
-        figmaFileKey={content.prd?.figma_file_key ?? null}
-        prdTitle={content.prd?.title}
+        figmaFileKey={scopedPrd?.figma_file_key ?? null}
+        prdTitle={scopedPrd?.title}
         // The PRD's own :::design platform_hint (already parsed into the
         // sections in scope here) seeds the generate panel's platform
         // default; the toggle still overrides. Optional-chained: a PRD
         // hydrated without parsed sections (e.g. a bare record) simply
         // yields no hint.
         platformHint={
-          content.prd?.sections?.find(
+          scopedPrd?.sections?.find(
             (s): s is PrdDesignBlock => s.type === "prd-design",
           )?.platformHint ?? null
         }
