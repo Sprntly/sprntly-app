@@ -1,6 +1,7 @@
 """Tests for the Business Context entity, agent, KG projection, and routes."""
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -279,6 +280,124 @@ def test_missing_display_name_raises(isolated_settings, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Regression: companies.sub_vertical — the live 500 traced through staging
+# logs (postgrest 42703 "column companies.sub_vertical does not exist").
+# _company_row() is called UNCONDITIONALLY as the first step of
+# run_business_context(), so this exercises its real, unmocked `.select(...)`
+# against a companies table shaped like the schema (mirroring the new
+# migration's sub_vertical column + its already-real siblings).
+#
+# This deliberately does NOT use tests/_fake_supabase.py's FakeSupabaseClient:
+# that fake's `_Query.execute()` always issues `SELECT * FROM {table}` — the
+# `.select(cols)` argument is captured into `self._cols` but never read again
+# — so it structurally cannot reproduce a "named column missing from an
+# explicit select list" bug like this one, no matter what the seeded schema
+# contains. That's part of why the existing tests in this file (which either
+# monkeypatch `_company_row` via `_patch_agent_io`, or route through that same
+# shared fake) never caught the real schema mismatch. This test uses a small
+# standalone sqlite table instead, so a genuinely missing column raises
+# `sqlite3.OperationalError: no such column`, the same shape of failure
+# PostgREST raised in staging.
+# --------------------------------------------------------------------------- #
+def _sqlite_companies_client(schema_sql: str, row: dict):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(schema_sql)
+    cols = ", ".join(row.keys())
+    placeholders = ", ".join("?" for _ in row)
+    conn.execute(
+        f"insert into companies ({cols}) values ({placeholders})", list(row.values())
+    )
+    conn.commit()
+
+    class FakeQ:
+        def __init__(self):
+            self._cols = "*"
+            self._eq: tuple[str, object] | None = None
+
+        def select(self, cols):
+            self._cols = cols
+            return self
+
+        def eq(self, col, val):
+            self._eq = (col, val)
+            return self
+
+        def execute(self):
+            where = f" WHERE {self._eq[0]} = ?" if self._eq else ""
+            args = [self._eq[1]] if self._eq else []
+            cur = conn.execute(f"SELECT {self._cols} FROM companies{where}", args)
+            return SimpleNamespace(data=[dict(r) for r in cur.fetchall()])
+
+    q = FakeQ()
+    return type("C", (), {"table": lambda s, n: q})()
+
+
+_POST_MIGRATION_COMPANIES_SCHEMA = """
+    create table companies (
+        id                   text primary key,
+        display_name         text,
+        industry              text,
+        sub_vertical          text,
+        stage                 text,
+        product_description   text,
+        business_type         text,
+        team_size             integer,
+        okrs                  text,
+        biggest_risk          text,
+        dead_ends             text,
+        competitors           text
+    );
+"""
+
+
+def test_company_row_selects_sub_vertical_without_erroring(monkeypatch):
+    """Post-migration shape: the exact select _company_row() issues succeeds
+    and sub_vertical comes back null (gracefully handled downstream via
+    row.get("sub_vertical") — falsy-checked before use)."""
+    from app.research import business_context_agent as agent
+
+    client = _sqlite_companies_client(
+        _POST_MIGRATION_COMPANIES_SCHEMA,
+        {"id": "ent-Z", "display_name": "Zeta", "industry": "B2B SaaS",
+         "sub_vertical": None, "stage": None, "product_description": None,
+         "business_type": None, "team_size": None, "okrs": None,
+         "biggest_risk": None, "dead_ends": None, "competitors": None},
+    )
+    monkeypatch.setattr(agent, "require_client", lambda: client)
+
+    row = agent._company_row("ent-Z")
+
+    assert row["display_name"] == "Zeta"
+    assert row.get("sub_vertical") is None
+
+
+def test_company_row_reproduces_the_pre_migration_500(monkeypatch):
+    """Sanity check for the test above: a companies table WITHOUT
+    sub_vertical (the pre-migration shape, matching every column
+    information_schema confirmed as real EXCEPT sub_vertical) makes the exact
+    same `agent._company_row()` call raise — proving the passing test above
+    is actually exercising the reported bug's code path, not vacuously
+    passing regardless of schema."""
+    pre_migration_schema = _POST_MIGRATION_COMPANIES_SCHEMA.replace(
+        "sub_vertical          text,\n        ", ""
+    )
+    assert "sub_vertical" not in pre_migration_schema
+
+    from app.research import business_context_agent as agent
+
+    row = {"id": "ent-Y", "display_name": "Yeta", "industry": None,
+           "stage": None, "product_description": None, "business_type": None,
+           "team_size": None, "okrs": None, "biggest_risk": None,
+           "dead_ends": None, "competitors": None}
+    client = _sqlite_companies_client(pre_migration_schema, row)
+    monkeypatch.setattr(agent, "require_client", lambda: client)
+
+    with pytest.raises(sqlite3.OperationalError, match="sub_vertical"):
+        agent._company_row("ent-Y")
+
+
+# --------------------------------------------------------------------------- #
 # 10–11. KG projection: segment entities + signals, idempotent
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -455,19 +574,101 @@ def test_put_bumps_version(company_client):
 
 
 def test_refresh_route_runs_agent(company_client, monkeypatch):
-    import app.routes.business_context as routes
+    """The route is async now (fires the refresh via
+    app.business_context_refresh_runner), but under pytest it still awaits
+    the job inline (see refresh_business_context's "pytest" in sys.modules
+    branch) so the response already reflects the terminal state — no polling
+    needed in a test."""
+    import app.business_context_refresh_runner as runner
 
     def fake_run(facade, company_id):
         assert company_id == "co-test"
         return {"version": 3, "fields_filled": ["identity.one_liner"],
                 "overall_confidence": "med", "confidence": {}, "projection": {}}
 
-    monkeypatch.setattr(routes, "run_business_context", fake_run)
+    monkeypatch.setattr(runner, "run_business_context", fake_run)
     r = company_client.post("/v1/company/business-context/refresh")
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True and body["version"] == 3
-    assert body["overall_confidence"] == "med"
+    assert body["ok"] is True and body["status"] == "done"
+    assert body["error"] is None
+
+    status = company_client.get("/v1/company/business-context/refresh-status")
+    assert status.status_code == 200
+    assert status.json() == {"status": "done", "error": None}
+
+
+def test_refresh_route_returns_fast_and_signals_generating_outside_pytest(
+    company_client, monkeypatch,
+):
+    """Outside the pytest inline shortcut, the route must not await the job —
+    it fires a background task and returns 'generating' immediately.
+    `_run_inline_for_tests` is a dedicated seam for exactly this — patching it
+    (rather than the real `sys.modules` registry) exercises the true
+    fire-and-forget branch safely."""
+    import app.routes.business_context as routes
+
+    started = []
+
+    async def fake_job(company_id):
+        started.append(company_id)
+
+    monkeypatch.setattr(routes, "run_business_context_refresh_job", fake_job)
+    monkeypatch.setattr(routes, "_run_inline_for_tests", lambda: False)
+
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "status": "generating"}
+    # The background task is fire-and-forget and scheduled on the SAME loop
+    # the TestClient's portal drives; by the time the sync post() call returns
+    # the ASGI cycle (including the scheduled task) has already run.
+    assert started == ["co-test"]
+
+
+def test_refresh_route_is_a_noop_when_already_generating(company_client):
+    """A second trigger while one is already live for this tenant does not
+    start a new job — mirrors company_research_runs' "already researching"
+    branch. No LLM call is made (there's nothing patched in to make one, so a
+    real attempt would raise/hang)."""
+    from app.db import start_business_context_refresh
+
+    assert start_business_context_refresh("co-test") is True  # first wins
+
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "generating"
+    assert body.get("already_running") is True
+
+
+def test_refresh_status_defaults_to_idle(company_client):
+    r = company_client.get("/v1/company/business-context/refresh-status")
+    assert r.status_code == 200
+    assert r.json() == {"status": "idle", "error": None}
+
+
+def test_refresh_route_surfaces_a_pipeline_error_via_the_status_endpoint(
+    company_client, monkeypatch,
+):
+    """No change to run_business_context()'s own logic: a domain error it
+    raises (e.g. missing display_name) is caught by the runner's fail-open
+    handler and surfaced through the poll endpoint's `error` field, not as an
+    HTTP status on the (now async, already-returned) POST."""
+    import app.business_context_refresh_runner as runner
+
+    def fake_run(facade, company_id):
+        raise ValueError("Company has no display_name — finish onboarding first")
+
+    monkeypatch.setattr(runner, "run_business_context", fake_run)
+    r = company_client.post("/v1/company/business-context/refresh")
+    assert r.status_code == 200
+    assert r.json()["status"] == "error"
+
+    status = company_client.get("/v1/company/business-context/refresh-status").json()
+    assert status["status"] == "error"
+    assert "display_name" in status["error"]
 
 
 def test_routes_require_company():

@@ -1205,6 +1205,14 @@ export type BusinessContextDoc = {
   version: number
 }
 
+/** `GET /v1/company/business-context/refresh-status` — polled after
+ *  `refresh()` kicks off the async job. status stays 'idle' for a company
+ *  that has never triggered a refresh. */
+export type BusinessContextRefreshStatus = {
+  status: "idle" | "generating" | "done" | "error"
+  error: string | null
+}
+
 export const businessContextApi = {
   /**
    * GET the current business-context doc (any member). Returns `null` when
@@ -1226,10 +1234,23 @@ export const businessContextApi = {
       "/v1/company/business-context",
       doc,
     ),
-  /** POST refresh — re-runs the Business Context agent (admin-only). */
+  /** POST refresh (admin-only) — kicks off the Business Context agent as a
+   *  background job and returns immediately (`status: "generating"`, or
+   *  `"done"`/`"error"` under the test harness's synchronous inline path).
+   *  `already_running: true` means a refresh was already live for this
+   *  tenant and this call was a no-op, not a new run. Poll
+   *  `refreshStatus()` (see lib/runBusinessContextRefresh.ts) for
+   *  completion — the doc itself only updates once status leaves
+   *  'generating'. */
   refresh: () =>
-    api.post<{ ok: true; [k: string]: unknown }>(
-      "/v1/company/business-context/refresh",
+    api.post<
+      BusinessContextRefreshStatus & { ok: true; already_running?: boolean }
+    >("/v1/company/business-context/refresh"),
+  /** GET refresh-status (any member) — the current async refresh job's
+   *  state for this tenant. */
+  refreshStatus: () =>
+    api.get<BusinessContextRefreshStatus>(
+      "/v1/company/business-context/refresh-status",
     ),
 }
 

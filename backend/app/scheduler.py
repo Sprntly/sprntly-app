@@ -568,7 +568,11 @@ def _run_orphan_ask_job_sweep() -> None:
     task silently — same shared-Supabase age-gating rationale, see
     db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
     abandoned the same way (a stale 'running' row there also wedges the
-    double-trigger guard, so healing it is what lets a retry through)."""
+    double-trigger guard, so healing it is what lets a retry through), and
+    business-context refreshes abandoned in 'generating' (companies.
+    business_context_refresh_status) the same way — a stale row there would
+    otherwise wedge the "Save Company Shape" trigger's start-guard until this
+    sweep or a restart heals it."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -597,6 +601,18 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned company-research run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan company-research sweep failed")
+    try:
+        from app.db.business_context_refresh import (
+            fail_orphan_business_context_refreshes,
+        )
+
+        n = fail_orphan_business_context_refreshes()
+        if n:
+            logger.info(
+                "Failed %d abandoned business-context refresh(es) stuck in "
+                "generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan business-context refresh sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
