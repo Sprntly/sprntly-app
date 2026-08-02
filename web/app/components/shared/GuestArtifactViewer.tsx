@@ -38,18 +38,24 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
   const { openContentPanel } = useNavigation()
   // Ref (not state) so React 18 dev double-invoke of effects still fetches
   // exactly once per real mount (AC10) — a state-driven guard would still let
-  // both invocations start the request before either commits its flip.
+  // both invocations start the request before either commits its flip. This
+  // ref is also the ONLY guard now: StrictMode's dev-only synthetic
+  // mount→cleanup→remount cycle runs cleanup WITHOUT a real unmount, on the
+  // SAME instance — a `cancelled` flag set by that synthetic cleanup used to
+  // discard the one real in-flight fetch's result permanently (fetchedRef
+  // correctly prevented a replacement fetch from ever starting, so the
+  // cancelled result was never replaced). Since fetchedRef already guarantees
+  // exactly one fetch per real mount, a separate cancelled-on-cleanup check
+  // was redundant and actively harmful — removed.
   const fetchedRef = useRef(false)
   const [joinModalOpen, setJoinModalOpen] = useState(false)
 
   useEffect(() => {
     if (fetchedRef.current) return
     fetchedRef.current = true
-    let cancelled = false
     artifactShareApi
       .content(token)
       .then((res) => {
-        if (cancelled) return
         const prdReady = res.prd.status === "ready" && !!res.prd.payload_md
         if (!prdReady) return // best-effort: leave the empty pane up
         const evidenceReady =
@@ -82,9 +88,6 @@ function GuestArtifactViewerInner({ token, artifactId, sharerName, owningCompany
         // Best-effort — the empty pane stays up rather than an error toast; a
         // guest whose content read fails simply sees "Shared with you".
       })
-    return () => {
-      cancelled = true
-    }
   }, [token, setContent, openContentPanel])
 
   return (
