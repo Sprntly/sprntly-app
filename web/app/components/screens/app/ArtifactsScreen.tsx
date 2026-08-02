@@ -463,6 +463,13 @@ export function ArtifactsScreen() {
   // it in — the click never sits silent while the network round-trip runs.
   const openArtifact = useCallback(async (a: ArtifactItem) => {
     try {
+      // Opening anything that ISN'T a report retires the standalone-report
+      // pointer. It is the panel's reason to keep showing a Reports tab, so left
+      // set it followed the reader onto the next artifact — a Reports tab over an
+      // evidence document, still pointing at the report they had finished with.
+      if (a.type !== "report") {
+        setContent({ reportFocusId: null, reportFocusStandalone: false })
+      }
       if (a.type === "prd") {
         // ChatScreen consumes the request: spawns the chat tab, loads the PRD
         // by id (with its own loading state), and slides the panel open.
@@ -522,7 +529,16 @@ export function ArtifactsScreen() {
         // panel opens immediately and the tab fetches the document by id, so the
         // click is never silent while it comes over the wire.
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ conversationId: null, reportFocusId: a.open.report_id })
+        // `reportFocusStandalone` is what tells the Reports tab to trust this
+        // pointer despite there being no conversation to check it against. It used
+        // to infer that from `conversationId == null` — but a brand-new chat tab
+        // also has a null conversation id, so a stale pointer read as standalone
+        // and opened the previous thread's document inside an empty chat.
+        setContent({
+          conversationId: null,
+          reportFocusId: a.open.report_id,
+          reportFocusStandalone: true,
+        })
         openContentPanel("reports")
         return
       }

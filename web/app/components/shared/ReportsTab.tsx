@@ -55,12 +55,20 @@ export function ReportsTab({
   const focusId = content.reportFocusId
   // A focus set for a DIFFERENT thread is ignored: the panel is global, so a
   // leftover id could otherwise open one thread's report inside another's.
-  // A standalone report (no conversation) has no list to check against.
+  //
+  // The standalone case — a report from Artifacts whose chat is gone — has no
+  // list to check against, and is now identified by its own flag rather than by
+  // `conversationId == null`. That inference was the bug: a brand-new chat tab
+  // ALSO has a null conversation id (a tab has none until its first ask
+  // persists), so a focus left over from the thread before it read as
+  // "standalone, trust it" and rendered that thread's whole document inside an
+  // empty new chat.
   const focusBelongs =
     focusId != null &&
-    (conversationId == null ||
-      content.threadReportsStatus !== "ready" ||
-      reports.some((r) => r.id === focusId))
+    (content.reportFocusStandalone === true ||
+      (conversationId != null &&
+        (content.threadReportsStatus !== "ready" ||
+          reports.some((r) => r.id === focusId))))
   // A thread with a SINGLE report IS that report: it opens straight into the
   // document, with no list behind it and so no way back to one (see the crumb
   // below). A one-item list is a click that tells the reader nothing.
@@ -71,6 +79,11 @@ export function ReportsTab({
   // can never bleed across threads. Guarded on an ACTUAL change rather than just
   // running on mount: the tab is mounted by the very hand-off that focuses a
   // report, so a mount-time reset would clear the selection it was opened for.
+  //
+  // `docLoading` is cleared too. It used not to be, and the fetch below used to be
+  // keyed on `selectedId` alone — which a thread switch does not necessarily
+  // change — so the reset could leave the detail on a "Loading…" title over a
+  // blank body, for a request that was never going to be re-issued.
   const prevConversationRef = useRef(conversationId)
   useEffect(() => {
     if (prevConversationRef.current === conversationId) return
@@ -78,12 +91,22 @@ export function ReportsTab({
     setPicked(null)
     setDoc(null)
     setDocError(false)
+    setDocLoading(false)
   }, [conversationId])
 
   // Fetch the selected document. The listing carries no `html` (N reports would
   // be N full documents), so this is where the body comes from.
+  //
+  // Keyed on the THREAD as well as the report, so the reset above is always
+  // followed by a real load rather than by whatever the previous thread left
+  // behind. `settledKey` records which key the doc/error state actually describes:
+  // this effect runs after render, so on the first commit of a new selection
+  // `docLoading` is still false, and an empty state derived from that alone would
+  // flash before every open.
+  const fetchKey = selectedId == null ? null : `${conversationId ?? "standalone"}:${selectedId}`
+  const [settledKey, setSettledKey] = useState<string | null>(null)
   useEffect(() => {
-    if (selectedId == null) { setDoc(null); return }
+    if (selectedId == null || fetchKey == null) { setDoc(null); return }
     let cancelled = false
     setDoc(null)
     setDocError(false)
@@ -91,9 +114,16 @@ export function ReportsTab({
     reportsApi.get(selectedId)
       .then((r) => { if (!cancelled) setDoc(r) })
       .catch(() => { if (!cancelled) setDocError(true) })
-      .finally(() => { if (!cancelled) setDocLoading(false) })
+      .finally(() => {
+        if (cancelled) return
+        setDocLoading(false)
+        setSettledKey(fetchKey)
+      })
     return () => { cancelled = true }
-  }, [selectedId])
+    // `selectedId` is derived from `fetchKey`; listing both would just re-run the
+    // same load twice on a thread change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchKey])
 
   // Back to the list. Clears BOTH the local pick and the external pointer —
   // leaving the pointer set would re-open this report on the very next render.
@@ -101,13 +131,26 @@ export function ReportsTab({
   // never strand a standalone report's tab.
   const handleBack = useCallback(() => {
     setPicked(null)
-    setContent({ reportFocusId: null })
+    // Both halves of the pointer go together — a standalone flag outliving the id
+    // it qualifies would keep an empty Reports tab on the panel.
+    setContent({ reportFocusId: null, reportFocusStandalone: false })
   }, [setContent])
 
   // ── Detail: one report, in place ──────────────────────────────────────────
   if (selectedId != null) {
     const summary = reports.find((r) => r.id === selectedId) ?? null
     const title = doc?.title || summary?.title || "Report"
+    // The eyebrow names the KIND of report. With neither document nor summary
+    // there is no kind to name, and reportKindLabel(null) answers "Report" — which
+    // this line then suffixed into the uppercased "REPORT REPORT" that sat over a
+    // blank body. No kind → say "Report" once.
+    const kind = doc?.skill ?? summary?.skill ?? null
+    const eyebrow = kind ? `${reportKindLabel(kind)} report` : "Report"
+    // The load for THIS selection has settled and produced neither a document nor
+    // an error: the pointer names a report this tab cannot show (deleted, or a
+    // pointer that outlived its thread). Say so, instead of the titled, empty
+    // document frame that used to sit under a doubled "REPORT REPORT" eyebrow.
+    const unavailable = settledKey === fetchKey && !docLoading && !doc && !docError
     return (
       <div className="tkv2-list-wrap reports-panel" data-testid="reports-detail">
         <div style={{
@@ -151,7 +194,7 @@ export function ReportsTab({
             fontSize: 10, fontWeight: 700, textTransform: "uppercase",
             letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)", marginBottom: 3,
           }}>
-            {reportKindLabel(doc?.skill ?? summary?.skill)} report
+            {eyebrow}
           </div>
           <div data-testid="reports-detail-title" style={{ fontSize: 17, fontWeight: 700 }}>
             {docLoading && !doc ? "Loading…" : title}
@@ -162,6 +205,17 @@ export function ReportsTab({
         {docError && (
           <div className="tkt-push-status tkt-push-status--err" data-testid="reports-detail-error">
             Couldn&apos;t load this report — go back and open it again to retry.
+          </div>
+        )}
+        {unavailable && (
+          <div data-testid="reports-detail-empty">
+            <EmptyPane
+              title="This report isn't available"
+              hint={reports.length > 1
+                ? "It may have been deleted. Go back to all reports and open another one."
+                : "It may have been deleted. Ask for a new report in this chat and it lands in this tab."}
+              placeholders={2}
+            />
           </div>
         )}
         {doc && <HtmlReportView html={doc.html} title={title} fitPanel />}

@@ -694,10 +694,32 @@ export interface AppContentState {
    *  once — selecting the report and clearing this — so the user lands on what
    *  they clicked instead of a list they must search. */
   reportFocusId: number | null
+  /** True when `reportFocusId` points at a report that has NO thread behind it —
+   *  the Artifacts row for a report whose chat was deleted, which reads in the
+   *  panel without a list under it.
+   *
+   *  Stated rather than inferred from `conversationId == null`, because a
+   *  brand-new chat tab also has a null conversation id (a tab has none until its
+   *  first ask persists). Reading that null as "standalone" is what used to
+   *  render the PREVIOUS thread's document inside an empty new chat. */
+  reportFocusStandalone: boolean
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */
   threadReports: ReportSummary[]
+  /** The conversation `threadReports` was fetched FOR.
+   *
+   *  The list lives in shared content but the panel is global, so "which thread
+   *  do these rows describe" cannot be inferred from the fact that they exist.
+   *  React flushes ChatScreen's (child) effects before AppShell's (parent) ones,
+   *  so on the commit where the active tab changes, the list is still the
+   *  PREVIOUS thread's — which is how a brand-new chat came to auto-open the
+   *  panel on another thread's report.
+   *
+   *  Every reader compares this against `conversationId` and treats a mismatch as
+   *  "this thread's list hasn't landed yet", never as "this thread has none".
+   *  Null = no thread in scope. */
+  threadReportsConversationId: number | null
   /** Lifecycle of `threadReports`, because an empty list means different things:
    *   idle    — no thread in scope (nothing was ever asked for)
    *   loading — in flight; empty is "not yet", not "none"

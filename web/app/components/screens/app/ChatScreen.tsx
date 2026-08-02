@@ -26,7 +26,7 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -43,6 +43,11 @@ import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
+
+/** "This thread has no reports we can vouch for" — one shared instance so the
+ *  scoped-reports memo below returns a STABLE reference, and the callbacks and
+ *  memos that depend on it don't re-run on every render of a report-less chat. */
+const NO_REPORTS: ReportSummary[] = []
 
 type ThreadTurn = {
   id: string
@@ -2051,14 +2056,44 @@ export function ChatScreen() {
   // tab GAINS its id — a brand-new chat has none until its first ask persists,
   // and keying on activeTabId alone would leave the panel on a stale thread.
   const activeConvId = tabs.find((t) => t.id === activeTabId)?.dbConvId ?? null
+  const prevConvForFocusRef = useRef(activeConvId)
   useEffect(() => {
-    setContent({ conversationId: activeConvId })
+    // A genuine thread change retires the report POINTER along with the thread.
+    // `content.reportFocusId` is written from four places (a report card in the
+    // thread, the Artifacts hand-off, the tab strip's reopen button, an Artifacts
+    // row) and used to be cleared from exactly one — ReportsTab's "All reports"
+    // button, which only exists on a thread with more than one report. So it
+    // outlived the thread that set it, and the panel opened the document it named
+    // over whatever chat you had moved to.
+    //
+    // Guarded on an actual change rather than running on mount, because the
+    // Artifacts → report hand-off sets the focus a beat AFTER the tab it belongs
+    // to gains its conversation id.
+    const changed = prevConvForFocusRef.current !== activeConvId
+    prevConvForFocusRef.current = activeConvId
+    setContent(changed
+      ? { conversationId: activeConvId, reportFocusId: null, reportFocusStandalone: false }
+      : { conversationId: activeConvId })
   }, [activeConvId, setContent])
 
   // This thread's captured reports, newest first — fetched once by
   // useThreadReportsSync (AppShell). Defaulted for the surfaces/tests that render
   // ChatScreen against partial content.
-  const threadReports = content.threadReports ?? []
+  //
+  // SCOPED to the conversation the fetch was actually for. That hook runs in
+  // AppShell — our PARENT — and React flushes a child's effects before its
+  // parent's, so on the commit where the active tab changes, content still holds
+  // the OLD thread's rows. Everything downstream (the auto-open below, the tab
+  // strip's reopen button, a report card resolving its own document) has to read
+  // that as "this thread's list hasn't landed yet", never as this thread's
+  // answer — reading it as an answer is what auto-opened a brand-new chat's panel
+  // on the previous thread's report.
+  const threadReports = useMemo(
+    () => (content.threadReportsConversationId === activeConvId
+      ? (content.threadReports ?? NO_REPORTS)
+      : NO_REPORTS),
+    [content.threadReports, content.threadReportsConversationId, activeConvId],
+  )
 
   // Open the report a CHAT TURN is about, from its title.
   //
@@ -2087,7 +2122,7 @@ export function ChatScreen() {
         const have = norm(r.title)
         return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
       })
-    if (match) setContent({ reportFocusId: match.id })
+    if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
     openContentPanel("reports")
   }, [threadReports, setContent, openContentPanel])
 
@@ -3522,6 +3557,20 @@ export function ChatScreen() {
   const autoRestoredTabsRef = useRef<Set<string>>(new Set())
   const prevTabForPanelRef = useRef(activeTabId)
 
+  // Tabs whose Reports panel has already been opened for them ON THIS VISIT.
+  // Shared by the Artifacts hand-off and the auto-open further down, so that
+  // between them they open a thread's reports exactly once — and a panel the user
+  // then CLOSES stays closed instead of being reopened by the other path.
+  //
+  // The claim is retired when you LEAVE the tab (below), which is what makes
+  // coming back to a report thread bring its panel back. That mirrors the PRD
+  // branch of the reconcile, which re-opens a PRD tab's document on every
+  // refocus: a thread's artifact is what the thread is about, so returning to it
+  // should show it. Scoping the claim to the visit is the whole difference
+  // between "a manual close sticks while you're here" and "a manual close hides
+  // this thread's report forever".
+  const reportsAutoOpenedRef = useRef<Set<string>>(new Set())
+
   // A chat re-opened from history whose conversation carries a PRD: open its
   // panel once the resumed tab is actually active. Deferred through state rather
   // than called inline because checkResume sets the active tab in the same pass —
@@ -3534,6 +3583,13 @@ export function ChatScreen() {
   }, [resumePanelTabId, activeTabId, handleOpenPrd])
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
+    // Leaving a tab retires its Reports auto-open claim, so refocusing it later
+    // opens its report again (see reportsAutoOpenedRef). Done here, before the
+    // early returns below, because it must happen on EVERY switch — including
+    // the ones this reconcile then declines to act on.
+    if (switchedTab && prevTabForPanelRef.current) {
+      reportsAutoOpenedRef.current.delete(prevTabForPanelRef.current)
+    }
     prevTabForPanelRef.current = activeTabId
     // `pendingReportFocus` suppresses the reconcile for the same reason
     // `prdPanelPending` does: a report opened from Artifacts resumes its thread,
@@ -3586,17 +3642,11 @@ export function ChatScreen() {
   // different thread — if the resume fails, nothing opens rather than the wrong
   // thing. Declared after the reconcile above so that, on the commit where both
   // run, this open is the last word.
-  // Tabs whose Reports panel has already been opened for them once. Shared by
-  // the hand-off below and the auto-open further down, so that between them they
-  // open a thread's reports exactly once — and a panel the user then CLOSES
-  // stays closed instead of being reopened by the other path.
-  const reportsAutoOpenedRef = useRef<Set<string>>(new Set())
-
   useEffect(() => {
     if (!pendingReportFocus) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab || tab.dbConvId !== pendingReportFocus.conversationId) return
-    setContent({ reportFocusId: pendingReportFocus.reportId })
+    setContent({ reportFocusId: pendingReportFocus.reportId, reportFocusStandalone: false })
     setPendingReportFocus(null)
     // Claim the tab: this IS its one auto-open, so closing the panel here must
     // not hand straight over to the auto-open effect below.
@@ -3615,22 +3665,34 @@ export function ChatScreen() {
   //
   // A PRD in the thread takes precedence and is left as the active tab — it's
   // the document the chat is about, and Reports is one click away in the tab bar
-  // (that ordering is the explicit ask). Fires at most once per tab, so a manual
-  // close is never undone, and never over an already-open panel.
+  // (that ordering is the explicit ask). Fires at most once per VISIT to a tab, so
+  // a manual close is never undone while you are on it, and never over an
+  // already-open panel — but coming back to the thread does show its report
+  // again, the same as refocusing a PRD tab does.
+  //
+  // The list has to be THIS thread's, not merely loaded. `threadReports` is
+  // already scoped to the active tab's conversation (see its memo above), and the
+  // dbConvId check below states the other half: a tab with no conversation id yet
+  // is a brand-new chat that cannot have reports, whatever the shared content
+  // happens to be holding at this instant. Both together are what stopped a fresh
+  // tab from sliding the previous thread's report in over an empty conversation.
   useEffect(() => {
     if (!activeTabId || isBriefTab || pendingReportFocus) return
     if (reportsAutoOpenedRef.current.has(activeTabId)) return
     // Only act on a KNOWN list — "not loaded yet" must not read as "no reports".
     if (content.threadReportsStatus !== "ready" || threadReports.length === 0) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    if (tab?.prd || tab?.prdGenerating || tab?.prdId != null) return
+    if (!tab || tab.dbConvId == null) return
+    if (content.threadReportsConversationId !== tab.dbConvId) return
+    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
     if (contentPanelTab) return // something is already open — don't hijack it
     reportsAutoOpenedRef.current.add(activeTabId)
-    setContent({ reportFocusId: threadReports[0].id })
+    setContent({ reportFocusId: threadReports[0].id, reportFocusStandalone: false })
     openContentPanel("reports")
   }, [
     activeTabId, isBriefTab, pendingReportFocus, contentPanelTab,
-    threadReports, content.threadReportsStatus, setContent, openContentPanel,
+    threadReports, content.threadReportsStatus, content.threadReportsConversationId,
+    setContent, openContentPanel,
   ])
 
   // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
@@ -4238,7 +4300,7 @@ export function ChatScreen() {
         onClick: () => {
           // Reopening lands on the newest report rather than a list — same as the
           // auto-open. The list is behind "All reports" when there's more than one.
-          setContent({ reportFocusId: newestReport.id })
+          setContent({ reportFocusId: newestReport.id, reportFocusStandalone: false })
           openContentPanel("reports")
         },
       }
