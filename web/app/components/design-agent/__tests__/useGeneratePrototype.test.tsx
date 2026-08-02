@@ -27,8 +27,9 @@ vi.mock("next/navigation", () => ({
 }))
 
 const showToast = vi.fn()
+const goTo = vi.fn()
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ showToast }),
+  useNavigation: () => ({ showToast, goTo }),
 }))
 
 const refresh = vi.fn(async () => {})
@@ -86,6 +87,7 @@ beforeEach(() => {
   getProto.mockReset()
   push.mockClear()
   showToast.mockClear()
+  goTo.mockClear()
   updateWorkspace.mockClear()
   refresh.mockClear()
 })
@@ -528,7 +530,14 @@ describe("useGeneratePrototype — handleGenDone timedOut branch (non-notify-mod
 })
 
 describe("useGeneratePrototype — notify-when-ready", () => {
-  it("default path dispatches exactly one da:generating event and no da:notify-generation", async () => {
+  // Regression pin: on unfixed code this fallback (used by every host that
+  // does not supply its own onNotifyWhenReady override — i.e. every surface
+  // except PrototypeRoute, which has its own equivalent handler) neither
+  // dispatched da:notify-generation nor navigated, so the shell's
+  // useGenerationNotify never resumed polling once the user actually left
+  // the surface, and the user visibly stayed put instead of landing on Top
+  // Insights. Mirrors PrototypeRoute's own handleNotifyWhenReady contract.
+  it("test_handle_notify_when_ready_default_dispatches_notify_generation_and_navigates_to_brief — fallback dispatches da:generating + da:notify-generation with prdId and navigates to Top Insights", async () => {
     const generatingEvents: CustomEvent[] = []
     const notifyGenerationEvents: CustomEvent[] = []
     const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
@@ -558,18 +567,57 @@ describe("useGeneratePrototype — notify-when-ready", () => {
 
     expect(generatingEvents.length).toBe(1)
     expect(generatingEvents[0].detail).toEqual({ prototypeId: 42 })
-    expect(notifyGenerationEvents.length).toBe(0)
+
+    expect(notifyGenerationEvents.length).toBe(1)
+    expect(notifyGenerationEvents[0].detail).toEqual({ prototypeId: 42, prdId: 14 })
+
     expect(showToast).toHaveBeenCalledWith(
       "Prototype is processing",
       "We'll let you know when it's ready.",
     )
     expect(latest.loadingScreenProps.open).toBe(false)
+    expect(goTo).toHaveBeenCalledWith("brief")
 
     window.removeEventListener("da:generating", onGenerating)
     window.removeEventListener("da:notify-generation", onNotifyGeneration)
   })
 
-  it("an onNotifyWhenReady override replaces the default side effects", async () => {
+  it("test_handle_notify_when_ready_default_no_proto_id_skips_events_but_still_navigates — no in-flight prototype id yet: no da:generating/da:notify-generation dispatch, but the overlay still closes and still navigates", async () => {
+    const generatingEvents: CustomEvent[] = []
+    const notifyGenerationEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    const onNotifyGeneration = (e: Event) => notifyGenerationEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+    window.addEventListener("da:notify-generation", onNotifyGeneration)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={45}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      // Deliberately no onKickoff — genProtoId stays null.
+    })
+
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+
+    expect(generatingEvents.length).toBe(0)
+    expect(notifyGenerationEvents.length).toBe(0)
+    expect(goTo).toHaveBeenCalledWith("brief")
+
+    window.removeEventListener("da:generating", onGenerating)
+    window.removeEventListener("da:notify-generation", onNotifyGeneration)
+  })
+
+  it("an onNotifyWhenReady override replaces the default side effects entirely — PrototypeRoute's own handler is unaffected by this fallback's navigation", async () => {
     const onNotifyWhenReady = vi.fn()
     let latest!: UseGeneratePrototypeResult
     render(
@@ -582,6 +630,11 @@ describe("useGeneratePrototype — notify-when-ready", () => {
     await act(async () => {})
 
     await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(50)
+    })
+
+    await act(async () => {
       latest.loadingScreenProps.onNotifyWhenReady()
     })
 
@@ -590,6 +643,10 @@ describe("useGeneratePrototype — notify-when-ready", () => {
       "Prototype is processing",
       "We'll let you know when it's ready.",
     )
+    // The hook's own default side effects (goTo/push) never fire — the
+    // override fully owns navigation, matching PrototypeRoute's contract.
+    expect(goTo).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
   })
 })
 
