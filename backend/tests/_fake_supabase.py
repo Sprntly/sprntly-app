@@ -85,6 +85,8 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
+    "company_research_runs": {"stages", "records"},
+    "llm_context_jobs":     {"result"},
     "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
     "products":             {"surfaces", "personas", "monetization"},
     "workspace_invites":    {"workspace_ids"},
@@ -103,8 +105,10 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
+    "conversation_turns":  {"attachments"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
+    "pipeline_runs":          {"stages"},   # per-stage results JSONB
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.
@@ -117,6 +121,7 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "workspaces":           {"is_default"},
     "products":             {"is_primary"},
     "ideation_items":       {"shortlisted"},
+    "kg_signal":            {"evidence_eligible"},
 }
 
 
@@ -230,6 +235,13 @@ class _Query:
     def lt(self, col: str, val: Any) -> "_Query":
         """`col < ?` — used by the map-cache expiry sweep."""
         self._raw_where.append(f"{col} < ?")
+        self._raw_args.append(val)
+        return self
+
+    def gt(self, col: str, val: Any) -> "_Query":
+        """`col > ?` — used by the company-research in-flight guard (a
+        'running' row YOUNGER than the orphan cutoff)."""
+        self._raw_where.append(f"{col} > ?")
         self._raw_args.append(val)
         return self
 
@@ -408,7 +420,27 @@ class _Query:
         raise RuntimeError(f"Unknown query kind: {self._kind}")
 
 
+class _FakeRpc:
+    """A `.execute()`-able stand-in for a supabase-py RPC call."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=self._rows, count=len(self._rows))
+
+
 class FakeSupabaseClient:
     """Quacks like supabase-py's Client for our usage."""
     def table(self, name: str) -> _Query:
         return _Query(name)
+
+    # Postgres functions (e.g. `llm_usage_summary`) have no SQLite equivalent,
+    # so RPCs return whatever a test registers here. Records the args so a test
+    # can assert the workspace filter and date range that were requested.
+    rpc_returns: dict[str, list[dict]] = {}
+    rpc_calls: list[tuple[str, dict]] = []
+
+    def rpc(self, fn: str, params: dict | None = None) -> _FakeRpc:
+        FakeSupabaseClient.rpc_calls.append((fn, dict(params or {})))
+        return _FakeRpc(FakeSupabaseClient.rpc_returns.get(fn, []))

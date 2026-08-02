@@ -29,6 +29,7 @@ import requests
 from fastapi import HTTPException
 
 from app.config import settings
+from app.connectors.tracker_errors import TrackerDeleteForbiddenError
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +338,121 @@ def _write(method: str, path: str, access_token: str, body: dict[str, Any] | Non
     return resp.json() or {}
 
 
+def _delete(access_token: str, path: str, what: str) -> bool:
+    """Shared DELETE against the ClickUp v2 API, with the same status contract
+    the other trackers' deletes use:
+
+      200/204  gone                  -> True
+      404/410  ALREADY gone          -> True (absence is what the caller wanted)
+      403      refused on perms      -> TrackerDeleteForbiddenError (close instead)
+      401      bad token             -> ClickUpAuthExpiredError (reconnect)
+      other                          -> HTTPException(502)
+
+    Unlike `_write`, this does NOT fold 403 into the reconnect error: a ClickUp
+    guest or a member on a restricted Space can be refused a delete while the
+    token stays perfectly valid, and it also does not parse a body — ClickUp's
+    delete endpoints answer with an empty payload that `resp.json()` chokes on.
+    """
+    resp = requests.delete(
+        f"{CLICKUP_API}{path}",
+        headers={"Authorization": access_token},
+        timeout=_WRITE_TIMEOUT,
+    )
+    if resp.status_code in (404, 410):
+        logger.info("ClickUp %s: already gone (%s)", what, resp.status_code)
+        return True
+    if resp.status_code == 403:
+        logger.info("ClickUp %s refused on permissions", what)
+        raise TrackerDeleteForbiddenError(
+            "ClickUp refused the delete — the connected account lacks "
+            "permission on this task"
+        )
+    if resp.status_code == 401:
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
+    if not resp.ok:
+        logger.warning(
+            "ClickUp %s failed: %s %s", what, resp.status_code, resp.text[:200]
+        )
+        raise HTTPException(502, f"ClickUp {what} failed")
+    return True
+
+
+def delete_task(access_token: str, task_id: str) -> bool:
+    """Delete one task (`DELETE /task/{id}`). Returns True when it is gone,
+    including when it already was. Deleting a parent takes its subtasks with
+    it. ClickUp keeps deleted tasks in the workspace trash for 30 days, so this
+    is recoverable by the customer — unlike the Jira equivalent."""
+    return _delete(access_token, f"/task/{task_id}", "delete_task")
+
+
+def delete_task_comment(access_token: str, comment_id: str) -> bool:
+    """Delete one comment (`DELETE /comment/{id}`). Returns True when it is
+    gone, including when it already was.
+
+    Keyed by COMMENT id alone — ClickUp's comment endpoints are not nested
+    under the task — which is exactly the id add_task_comment returned and
+    `ticket_comments.tracker_comment_id` stored.
+    """
+    return _delete(access_token, f"/comment/{comment_id}", "delete_task_comment")
+
+
+def normalize_checklists(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """A raw task payload's checklists as `[{id, name, items: [{id, name}]}]`.
+
+    The read half of child-issue reconcile: Sprntly renders a ticket's child
+    issues as a "Child issues" checklist (ClickUp's v2 API has no sub-issue
+    type), so REMOVING one means deleting a checklist item — which needs its
+    id, and ids only come back on a task read.
+    """
+    out: list[dict[str, Any]] = []
+    for cl in data.get("checklists") or []:
+        if not isinstance(cl, dict) or not cl.get("id"):
+            continue
+        out.append({
+            "id": str(cl["id"]),
+            "name": cl.get("name") or "",
+            "items": [
+                {"id": str(it["id"]), "name": it.get("name") or ""}
+                for it in cl.get("items") or []
+                if isinstance(it, dict) and it.get("id")
+            ],
+        })
+    return out
+
+
+def get_task_checklists(access_token: str, task_id: str) -> list[dict[str, Any]]:
+    """This task's checklists, fetched fresh — for the push path, which has no
+    task read of its own. The two-way sync pass does NOT use this: get_task
+    already returns `checklists`, so reconciling there costs no extra call.
+
+    Best-effort: returns [] on any failure, so a reconcile degrades to
+    "change nothing" rather than failing a push.
+    """
+    try:
+        return normalize_checklists(_get(access_token, f"/task/{task_id}") or {})
+    except Exception:  # noqa: BLE001 — a read failure must not fail a push
+        logger.warning("ClickUp get_task_checklists failed for %s", task_id)
+        return []
+
+
+def delete_checklist_item(access_token: str, checklist_id: str, item_id: str) -> bool:
+    """Delete one checklist item (`DELETE /checklist/{cid}/checklist_item/{id}`)
+    — removing a single child issue. True when gone, including already gone."""
+    return _delete(
+        access_token, f"/checklist/{checklist_id}/checklist_item/{item_id}",
+        "delete_checklist_item",
+    )
+
+
+def delete_checklist(access_token: str, checklist_id: str) -> bool:
+    """Delete a whole checklist (`DELETE /checklist/{id}`) — how a ticket's
+    LAST child issue is removed, since ClickUp leaves an empty checklist
+    behind. True when gone, including already gone."""
+    return _delete(access_token, f"/checklist/{checklist_id}", "delete_checklist")
+
+
 def create_checklist(access_token: str, task_id: str, name: str) -> str | None:
     """Create a checklist on a task (used for a ticket's child issues). Returns
     the checklist id."""
@@ -398,6 +514,17 @@ def set_custom_field(
            {"value": value})
 
 
+def clear_custom_field(access_token: str, task_id: str, field_id: str) -> bool:
+    """Remove a custom field's value from a task
+    (`DELETE /task/{id}/field/{field_id}`) — the counterpart to
+    set_custom_field, and the only way to express "unset" in ClickUp: the set
+    endpoint has no null value, so clearing a field in Sprntly used to simply
+    stop being pushed and the stale value stayed on the customer's task."""
+    return _delete(
+        access_token, f"/task/{task_id}/field/{field_id}", "clear_custom_field"
+    )
+
+
 def get_task(access_token: str, task_id: str) -> dict[str, Any]:
     """Fetch a task's current state from ClickUp and normalize the fields the
     two-way sync reconciles: workflow state (status, first assignee's display
@@ -446,6 +573,10 @@ def get_task(access_token: str, task_id: str) -> dict[str, Any]:
         # Raw custom-field values ([{id, type, value, type_config}, ...]);
         # decoding to normalized shapes is tracker_meta's job.
         "custom_fields": data.get("custom_fields") or [],
+        # Checklists ([{id, name, items:[{id, name}]}]) — the ticket's child
+        # issues live here. Carried on the normal task read so the sync pass
+        # can reconcile removals without a second API call.
+        "checklists": normalize_checklists(data),
         # Built-in task properties (tracker_meta's `builtin:` fields).
         "start_date": data.get("start_date"),
         "due_date": data.get("due_date"),
@@ -460,10 +591,27 @@ def get_task(access_token: str, task_id: str) -> dict[str, Any]:
 def add_task_tag(access_token: str, task_id: str, tag_name: str) -> None:
     """Attach one workspace tag to a task (`POST /task/{id}/tag/{name}` —
     creates the tag when new). ClickUp models tag REMOVAL as a separate
-    endpoint per tag; Sprntly-side tag edits are add-only by design."""
+    endpoint per tag — see remove_task_tag."""
     from urllib.parse import quote
 
     _write("POST", f"/task/{task_id}/tag/{quote(tag_name, safe='')}", access_token)
+
+
+def remove_task_tag(access_token: str, task_id: str, tag_name: str) -> bool:
+    """Detach one tag from a task (`DELETE /task/{id}/tag/{name}`). Returns
+    True when the tag is off the task, including when it already was.
+
+    The counterpart to add_task_tag: ClickUp has no set-the-whole-tag-list
+    write (the task PUT ignores `tags`), so a tag list reconcile is add + this,
+    one call per changed tag. Detaching a tag never deletes it from the
+    workspace — other tasks keep it.
+    """
+    from urllib.parse import quote
+
+    return _delete(
+        access_token, f"/task/{task_id}/tag/{quote(tag_name, safe='')}",
+        "remove_task_tag",
+    )
 
 
 def add_task_comment(access_token: str, task_id: str, text: str) -> str | None:

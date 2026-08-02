@@ -40,6 +40,94 @@ def test_kickoff_starts_thread_for_ingestable_provider(monkeypatch):
     assert started["daemon"] is True
 
 
+def test_kickoff_google_drive_starts_drive_thread(monkeypatch):
+    """google_drive has no token puller but kickoff_sync special-cases it —
+    the thread targets the connection-config drive sync, not _run_sync."""
+    started = {}
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            started["target"] = target
+            started["args"] = args
+            started["daemon"] = daemon
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(auto_sync.threading, "Thread", FakeThread)
+    assert auto_sync.kickoff_sync("co-9", "google_drive") is True
+    assert started["started"] is True
+    assert started["target"] is auto_sync._run_drive_sync
+    assert started["args"] == ("co-9",)
+    assert started["daemon"] is True
+
+
+_DRIVE_ROW_CONFIGURED = {
+    "config_json": '{"dataset": "acme", "files": [{"id": "file0001aa"}]}'
+}
+
+
+def test_run_drive_sync_calls_full_sync(monkeypatch):
+    calls = {}
+
+    def fake_sync(*, company_id):
+        calls["company_id"] = company_id
+
+        class R:
+            synced = ["a"]
+            kg_queued = ["a"]
+
+        return R()
+
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_DRIVE_ROW_CONFIGURED))
+    monkeypatch.setattr(gds, "sync_google_drive", fake_sync)
+    auto_sync._run_drive_sync("co-9")
+    assert calls["company_id"] == "co-9"
+
+
+def test_run_drive_sync_stamps_error_on_failure(monkeypatch):
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_DRIVE_ROW_CONFIGURED))
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("drive down")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update({"provider": prov, **kw}),
+    )
+    auto_sync._run_drive_sync("co-9")  # must not raise
+    assert stamped["provider"] == "google_drive"
+    assert "drive down" in stamped["last_sync_error"]
+
+
+def test_run_drive_sync_quiet_noop_when_unconfigured(monkeypatch):
+    """A connected-but-unconfigured Drive row (no dataset / nothing picked)
+    is skipped silently — no sync attempt, and crucially NO last_sync_error
+    stamp for Settings to scare the user with every scheduler cycle."""
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"config_json": "{}"})
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not sync")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update(kw),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert stamped == {}
+
+
 def test_run_sync_stamps_success(monkeypatch):
     monkeypatch.setattr(auto_sync.db, "get_connection",
                         lambda cid, prov: {"token_json_encrypted": "enc"})
@@ -314,6 +402,76 @@ def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):
     r = client.get("/v1/connectors/github/callback?code=abc&state=signed")
     assert r.status_code in (302, 307)
     assert calls == [("co-G", "github")]
+
+
+def _stub_slack_callback(conn_route, monkeypatch):
+    """Mock everything the Slack callback touches except the kickoff, so a test
+    can drive /v1/connectors/slack/callback end-to-end offline."""
+    monkeypatch.setattr(conn_route.slack_oauth, "verify_oauth_state",
+                        lambda state: {"company_id": "co-S", "user_id": "u-1",
+                                       "return_to": None})
+    monkeypatch.setattr(conn_route.slack_oauth, "exchange_code_for_token",
+                        lambda code: {"ok": True, "access_token": "xoxb-x",
+                                      "bot_user_id": "B1", "scope": "channels:read",
+                                      "team": {"id": "T1", "name": "Meridian"}})
+    monkeypatch.setattr(conn_route.slack_oauth, "fetch_auth_test",
+                        lambda tok: {"user": "sprntly"})
+    monkeypatch.setattr(conn_route.slack_oauth, "token_payload_to_store",
+                        lambda tj: "{}")
+    monkeypatch.setattr(conn_route, "encrypt_token_json", lambda payload: "enc")
+    monkeypatch.setattr(conn_route.db, "upsert_slack_connection",
+                        lambda **kw: {"id": "c1"})
+
+
+def test_slack_callback_kicks_off_company_corpus_sync(isolated_settings, monkeypatch):
+    """Connecting Slack must populate the KG now, not on the next 6-hourly
+    scheduler pass.
+
+    Slack has no kg_ingest puller, so the callback's kickoff is the
+    company-level corpus sync (sync_slack → corpus → seed), called with the
+    company_id off the signed state — never a per-user variant, matching
+    scheduler._refresh_all_company_connectors and the manual Sync route.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync",
+                        lambda cid: calls.append(cid))
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
+    assert calls == ["co-S"]
+
+
+def test_slack_callback_still_redirects_when_kickoff_raises(isolated_settings,
+                                                            monkeypatch):
+    """A kickoff failure must never break the OAuth redirect.
+
+    The connection row is already committed by the time the kickoff runs, so a
+    raise here would 500 a connect that actually succeeded — the user would see
+    an error page with Slack connected behind it. kickoff_slack_corpus_sync
+    swallows its own errors, but its lazy slack_company import sits outside that
+    guard, so the callback guards the call itself.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    def _boom(_cid):
+        raise RuntimeError("slack_company import blew up")
+
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync", _boom)
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
 
 
 # ---------- status endpoint ----------

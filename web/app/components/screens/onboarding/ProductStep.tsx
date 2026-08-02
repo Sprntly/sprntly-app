@@ -18,6 +18,7 @@ import {
 import {
   MONETIZATION_OPTIONS,
   SURFACE_OPTIONS,
+  stepForSlug,
 } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { Check } from "../../auth/icons"
@@ -40,7 +41,8 @@ export function parseCompetitors(raw: string): string[] {
 }
 
 /**
- * Onboarding step 02 — "Your product" (v6 screenshot spec 2026-07-17).
+ * Onboarding step 05 — "Your product" (v6 screenshot spec 2026-07-17,
+ * reordered 2026-07-22; swapped ahead of `workspace` 2026-07-28).
  *
  * Product name* and surfaces* are mandatory; website, monetization (single
  * dropdown), and the "tell us about your users" prose are optional, with
@@ -67,16 +69,20 @@ export function ProductStep() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Seed from the saved workspace/product (draft takes priority).
+  // Seed from the saved workspace/product, filling only fields still empty — so
+  // the context import that lands ~30-60s after upload (while the user is on the
+  // connectors step) pops its values in the moment it arrives, without ever
+  // overwriting anything typed here or restored from a draft. Runs on every
+  // `workspace` change, which is what lets the late import take effect at all —
+  // the old `if (draft) return` full-reset only seeded once and missed it.
   useEffect(() => {
     if (!workspace) return
-    if (draft) return
-    setProductName(workspace.product?.name ?? workspace.display_name)
-    setProductUrl(workspace.product?.website ?? "")
-    setSurfaces(workspace.product?.surfaces ?? [])
-    setMonetization(workspace.product?.monetization?.[0] ?? "")
-    setUsersDescription(workspace.product?.users_description ?? "")
-    setCompetitors((workspace.competitors ?? []).join(", "))
+    setProductName((v) => v || workspace.product?.name || workspace.display_name || "")
+    setProductUrl((v) => v || workspace.product?.website || "")
+    setSurfaces((v) => (v.length ? v : workspace.product?.surfaces ?? []))
+    setMonetization((v) => v || workspace.product?.monetization?.[0] || "")
+    setUsersDescription((v) => v || workspace.product?.users_description || "")
+    setCompetitors((v) => v || (workspace.competitors ?? []).join(", "))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -140,7 +146,7 @@ export function ProductStep() {
       })
       const updated = await updateWorkspace(workspace.id, {
         competitors: parseCompetitors(competitors),
-        onboarding_step: 3,
+        onboarding_step: stepForSlug("workspace") ?? 6,
       })
       setWorkspace({ ...updated, product })
       clearDraft(DRAFT_KEY)
@@ -153,14 +159,14 @@ export function ProductStep() {
   }
 
   async function save() {
-    if (await persist()) router.push("/onboarding/metrics")
+    if (await persist()) router.push("/onboarding/workspace")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
     <OnboardingChrome
-      step={2}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -169,7 +175,7 @@ export function ProductStep() {
       }
       subtitle="Name, where it lives, and how it makes money. Product position and competitors live in Settings."
       footerMeta="Product"
-      onBack={() => router.push("/onboarding/company")}
+      onBack={() => router.push("/onboarding/api-key")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}

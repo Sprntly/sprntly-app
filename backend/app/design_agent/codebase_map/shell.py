@@ -338,7 +338,7 @@ def _parse_repeated_custom_component_nav(body: str) -> list[NavItem]:
     """Strategy C: a repeated custom JSX component carrying a string-literal label.
 
     Some shells render their primary nav as one custom component repeated per item
-    with a label prop — ``<RailItem icon={…} label="Weekly brief" />`` ×N — using
+    with a label prop — ``<RailItem icon={…} label="Top Insights" />`` ×N — using
     NEITHER a nav-config array (Strategy A) NOR inline ``<Link>``/``<a>`` elements
     (Strategy B). This recovers those labels.
 

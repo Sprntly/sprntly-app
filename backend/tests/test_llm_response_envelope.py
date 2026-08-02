@@ -4,7 +4,7 @@ Some models (observed on the non-streamed Opus path) wrap the ENTIRE structured
 object under a single "response" key — cued by the submit_response tool name —
 even though the tool's input_schema is flat. call_json now unwraps that envelope
 so callers read their real fields. This silently emptied every regenerated
-weekly brief (insights read off the top level → []).
+Top Insights brief (insights read off the top level → []).
 """
 from __future__ import annotations
 

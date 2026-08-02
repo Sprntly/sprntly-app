@@ -63,7 +63,7 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
         body_text=(
             "Hi {name},\n\n"
             "Welcome to Sprntly! You're one step away from turning {company}'s "
-            "product signals into a weekly brief.\n\n"
+            "product signals into a Top Insights brief.\n\n"
             "To get the most out of Sprntly, connect your first data source "
             "(Slack, Linear, Zendesk, or Amplitude) so we can start building "
             "your knowledge graph.\n\n"
@@ -100,10 +100,12 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
 
 def _from_address() -> str:
     """The From: header for drip emails. Overridable via DRIP_FROM_EMAIL;
-    defaults to a sane onboarding sender. Resolved at call time so test
-    config reloads apply."""
+    defaults to the onboarding sender on the Resend-verified mail.sprntly.ai
+    domain — the API key is scoped to that domain, so a bare-sprntly.ai
+    sender is rejected with a 403. Resolved at call time so test config
+    reloads apply."""
     return getattr(config_mod.settings, "drip_from_email", "") or (
-        "Sprntly <onboarding@sprntly.ai>"
+        "Sprntly <onboarding@mail.sprntly.ai>"
     )
 
 
@@ -195,7 +197,7 @@ def render_step(step: DripStep, *, company: str, name: str) -> tuple[str, str]:
 
 
 # Branded shell tokens — mirrors supabase/templates/*.html and the
-# weekly-brief email (app/synthesis/email_delivery.py): paper background,
+# top-insights email (app/synthesis/email_delivery.py): paper background,
 # white card, serif headline, green CTA.
 _SERIF = "'Spectral',Georgia,'Times New Roman',serif"
 _SANS = "'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"

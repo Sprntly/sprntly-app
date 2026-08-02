@@ -311,28 +311,69 @@ TRANSCRIPTS_SUB = "transcripts"
 TRANSCRIPTS_ROLE = "transcript_viewer"
 TRANSCRIPTS_TOKEN_TTL_HOURS = 12
 
+# TEMPORARY, and committed to the repo — so treat it as PUBLIC. It exists so the
+# viewer works on any box with no env configuration at all, after argon2-hash
+# wrangling made the surface unopenable in prod.
+#
+# Two consequences, both deliberate:
+#   1. Anyone who can read this repo can read EVERY tenant's chat transcripts.
+#      Rotating means a commit + deploy, not an env edit.
+#   2. It always works, EVEN where TRANSCRIPTS_ACCESS_CODE(_HASH) is also set —
+#      configuring a real credential does not turn this off. That is the whole
+#      point right now (prod's hash is what broke), but it means the surface can
+#      no longer fail closed: it is live everywhere this code is deployed.
+#
+# To go back to a real credential: set TRANSCRIPTS_ACCESS_CODE (plaintext, no
+# argon2 needed) or TRANSCRIPTS_ACCESS_CODE_HASH, then blank this constant —
+# emptying it restores the fail-closed, invisible-when-unconfigured posture.
+TRANSCRIPTS_DEFAULT_CODE = "sprntly-transcripts-2026"
+
 
 def transcripts_surface_enabled() -> bool:
-    """True iff the access-code hash is set. Unset ⇒ every /v1/transcripts
-    route — login included — 404s (fail closed, invisible), matching the
-    staff surface's posture."""
-    return bool((settings.transcripts_access_code_hash or "").strip())
+    """True iff SOME access code exists — the hardcoded default, a plaintext
+    env code, or an argon2id hash. All three unset ⇒ every /v1/transcripts
+    route, login included, 404s (fail closed, invisible), matching the staff
+    surface's posture.
+
+    NOTE: while TRANSCRIPTS_DEFAULT_CODE is non-empty this is always True.
+    """
+    return bool(
+        TRANSCRIPTS_DEFAULT_CODE
+        or (settings.transcripts_access_code or "").strip()
+        or (settings.transcripts_access_code_hash or "").strip()
+    )
 
 
 def verify_transcripts_code(code: str) -> bool:
-    """Check the shared transcript access code. Never raises."""
-    if not transcripts_surface_enabled():
-        return False
-    from argon2 import PasswordHasher
+    """Check the shared transcript access code. Never raises.
 
-    try:
-        return bool(
-            PasswordHasher().verify(
-                settings.transcripts_access_code_hash.strip(), code or ""
-            )
-        )
-    except Exception:  # noqa: BLE001 — wrong code / malformed hash ⇒ False
-        return False
+    ANY configured credential is accepted, checked cheapest-first: the
+    hardcoded default, then the plaintext env code, then the argon2id hash.
+    Plaintext compares are constant-time (hmac.compare_digest) so a wrong code
+    can't be narrowed character-by-character from response timing.
+    """
+    import hmac
+
+    candidate = (code or "").encode()
+
+    if TRANSCRIPTS_DEFAULT_CODE and hmac.compare_digest(
+        candidate, TRANSCRIPTS_DEFAULT_CODE.encode()
+    ):
+        return True
+
+    plain = (settings.transcripts_access_code or "").strip()
+    if plain and hmac.compare_digest(candidate, plain.encode()):
+        return True
+
+    hashed = (settings.transcripts_access_code_hash or "").strip()
+    if hashed:
+        from argon2 import PasswordHasher
+
+        try:
+            return bool(PasswordHasher().verify(hashed, code or ""))
+        except Exception:  # noqa: BLE001 — wrong code / malformed hash ⇒ False
+            return False
+    return False
 
 
 def make_transcripts_token() -> str:

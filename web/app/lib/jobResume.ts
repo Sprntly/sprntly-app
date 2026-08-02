@@ -15,7 +15,16 @@
 // scoped per brief insight (briefId:insightIndex); multi-agent likewise. The id
 // is cleared when the job completes or errors.
 
-export type JobKind = "prd" | "evidence" | "multi-agent" | "ask" | "website-analysis"
+export type JobKind =
+  | "prd"
+  | "evidence"
+  | "multi-agent"
+  | "ask"
+  | "website-analysis"
+  // The background LLM extraction over an uploaded onboarding context file —
+  // kicked on the import-context step, still running while the user is on
+  // connectors, so a reload in between must re-attach rather than orphan it.
+  | "llm-context-import"
 
 const PREFIX = "sprntly_pending_job"
 

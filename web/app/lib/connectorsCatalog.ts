@@ -17,6 +17,27 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 // Codebase → Communications, with the settings-only extras (docs, revenue)
 // appended. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
 // (lib/onboarding/connectorsWizard.ts).
+
+// Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
+// communication tool (brief delivery target) AND a customer-voice source —
+// the corpus sync pulls the channels the user selects. Multi-type connectors
+// render a card in EVERY category they belong to (same id, same underlying
+// connection — connect from either shelf and both show Connected), so this
+// one item object is shared by the `voice` and `comms` categories below.
+// Mirrors backend/app/connectors/catalog.py.
+const SLACK_ITEM: ConnectorItemRow = {
+  // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
+  // (Slack Marketplace requires OAuth install, not a pasted bot token).
+  id: "slack",
+  name: "Slack",
+  logo: "S",
+  logoText: "S",
+  logoColor: "#4A154B",
+  logoSvg: "/connectors/slack.svg",
+  oauth: true,
+  types: ["communication", "customer-voice"],
+}
+
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "analytics",
@@ -53,6 +74,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
       { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
+      // Dual-typed communication + customer-voice — the same item also sits
+      // in the Communications category (see SLACK_ITEM above).
+      SLACK_ITEM,
     ],
   },
   {
@@ -135,25 +159,40 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     // transcript has no channel/permission model. See `allowsManualUpload`.
     allowsManualUpload: false,
     items: [
-      // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
-      // (Slack Marketplace requires OAuth install, not a pasted bot token).
-      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSvg: "/connectors/slack.svg", oauth: true, types: ["communication"] },
+      // Dual-typed — the same item also sits under Voice of Customer &
+      // Support above (see SLACK_ITEM).
+      SLACK_ITEM,
       { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false, types: ["communication"] },
     ],
   },
   {
-    // Notion and Google Docs are documentation tools, not project trackers —
-    // settings-only (not an onboarding wizard category since v6).
+    // "Company documentation": the user's OWN uploaded documents (a first-class
+    // `uploads` connector — named, described corpora they hand us) merged with
+    // the external documentation tools (Notion, Google Docs), so all company
+    // docs live under one heading.
+    //
+    // Evidence is preserved per-PROVIDER, not per-category: this category stays
+    // in NON_EVIDENCE_CATEGORIES (Notion / Google Docs are context, not
+    // customer/product evidence on their own), while the `uploads` provider is
+    // an explicit evidence exception (see EVIDENCE_PROVIDER_EXCEPTIONS) —
+    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS. Settings-only (not an
+    // onboarding wizard category since v6).
     key: "docs",
-    title: "Business documentation",
+    title: "Company documentation",
+    // One upload path only: the named-source picker ("Add a document source",
+    // rendered for this category in ConnectorsSettings), NOT the generic
+    // per-category strip.
+    allowsManualUpload: false,
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
+      { id: "uploads",      name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
       { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
+      { id: "confluence",   name: "Confluence", logo: "C", logoText: "C", logoColor: "#172B4D", logoSvg: "/connectors/confluence.svg", oauth: true, types: ["documents"] },
     ],
   },
   {
@@ -169,6 +208,13 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     ],
   },
 ]
+
+/** Auth models that are connectable without an OAuth redirect. */
+const CONNECTOR_NON_OAUTH_AUTH_TYPES: ReadonlySet<string> = new Set([
+  "apikey",
+  "credentials",
+  "upload",
+])
 
 /**
  * Convenience set of connector IDs that have a real OAuth backend.
@@ -191,18 +237,17 @@ export const CONNECTOR_IDS_WITH_OAUTH = new Set<string>(
  */
 export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
   CONNECTOR_CATALOG.flatMap((c) => c.items)
-    .filter((i) => i.oauth || i.authType === "apikey" || i.authType === "credentials")
+    .filter((i) => i.oauth || CONNECTOR_NON_OAUTH_AUTH_TYPES.has(i.authType ?? ""))
     .map((i) => i.id),
 )
 
 /** True iff this connector has a working integration the user can actually
- *  use today (OAuth, API key, or a credentials form). Everything else is
- *  "Coming soon". */
+ *  use today (OAuth, API key, a credentials form, or a document upload).
+ *  Everything else is "Coming soon". */
 export function isConnectableConnector(item: ConnectorItemRow): boolean {
   return (
     Boolean(item.oauth)
-    || item.authType === "apikey"
-    || item.authType === "credentials"
+    || CONNECTOR_NON_OAUTH_AUTH_TYPES.has(item.authType ?? "")
   )
 }
 
@@ -235,9 +280,13 @@ export function connectableCatalog(
 // don't do that, so they can't satisfy the brief on their own and don't count
 // as a data source:
 //
-//   comms  Slack / Teams  — a DELIVERY target (where the brief gets posted),
+//   comms  MS Teams       — a DELIVERY target (where the brief gets posted),
 //                           not a source of findings. (Email is a delivery
-//                           destination too, not a connector at all.)
+//                           destination too, not a connector at all.) Slack
+//                           ALSO sits in this category but DOES count: it is
+//                           dual-typed communication + customer-voice and
+//                           listed in the evidence-bearing `voice` category,
+//                           which is what feeds EVIDENCE_PROVIDER_IDS.
 //   pm     Jira / ClickUp / Asana — where work is TRACKED once decided; the
 //                           brief's output flows to them, not from them.
 //   code   GitHub         — what was BUILT, not what users need.
@@ -259,12 +308,25 @@ export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
   "docs",
 ])
 
-/** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES). */
-const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set(
-  CONNECTOR_CATALOG
+/**
+ * Providers that feed the brief with evidence REGARDLESS of their category's
+ * classification — mirrors the backend's `_EVIDENCE_PROVIDER_EXCEPTIONS`.
+ * `uploads` lives in the merged (non-evidence) "Company documentation" category
+ * alongside Notion / Google Docs, but a deliberately named-and-described corpus
+ * of the user's OWN documents IS evidence, so it must still count as a data
+ * source. (Intercom is likewise an exception on the backend, but its `voice`
+ * category is already evidence-bearing here, so it needs no entry.)
+ */
+const EVIDENCE_PROVIDER_EXCEPTIONS: ReadonlySet<string> = new Set(["uploads"])
+
+/** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES),
+ *  plus the per-provider exceptions above. */
+const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  ...CONNECTOR_CATALOG
     .filter((cat) => !NON_EVIDENCE_CATEGORIES.has(cat.key))
     .flatMap((cat) => cat.items.map((i) => i.id)),
-)
+  ...EVIDENCE_PROVIDER_EXCEPTIONS,
+])
 
 /** True iff `id` is a connector that feeds the brief with evidence. Unknown ids
  *  return false — an id we don't recognize can't be shown to gather anything. */
@@ -287,9 +349,10 @@ export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
  * evidence-bearing connector (see NON_EVIDENCE_CATEGORIES). This is the gate for
  * whether onboarding kicks the first brief: a real data source (analytics,
  * customer support/calls/feedback, CRM, revenue, monitoring) must be
- * connected before we generate. Slack/Teams/Email, Jira & PM tools, GitHub,
- * Figma, and docs tools (Notion / Google Docs) do NOT count. Onboarding info
- * alone never produces a brief.
+ * connected before we generate. Teams/Email, Jira & PM tools, GitHub,
+ * Figma, and docs tools (Notion / Google Docs) do NOT count — but Slack DOES
+ * (dual-typed communication + customer-voice since 2026-07-30; its synced
+ * channels are evidence). Onboarding info alone never produces a brief.
  */
 export function hasDataSourceConnection(
   connections: readonly { provider: string; status: string }[],
@@ -301,10 +364,12 @@ export function hasDataSourceConnection(
 
 // ── Connector types ──────────────────────────────────────────────────────────
 //
-// Every catalog item carries its type (what the tool IS), the mirror of the
+// Every catalog item carries its types (what the tool IS), the mirror of the
 // backend authority (backend/app/connectors/catalog.py). Features read these
-// instead of hardcoding provider ids. ONE type per connector for now (product
-// decision) — the list shape is future-proofing for multi-type.
+// instead of hardcoding provider ids. Multi-type is allowed per-entry with
+// product sign-off (2026-07-30) — Slack is the first (communication +
+// customer-voice); a multi-type connector's card renders in every category
+// it belongs to.
 
 /** Human labels for the type chips shown on connector cards. */
 export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
@@ -328,9 +393,16 @@ export function connectorTypes(id: string): ConnectorType[] {
   return ALL_ITEMS.find((i) => i.id === id)?.types ?? []
 }
 
-/** Every catalog connector carrying `type` (e.g. all task-management tools). */
+/** Every catalog connector carrying `type` (e.g. all task-management tools).
+ *  Deduped by id — a multi-type connector is listed in several categories
+ *  but is still ONE connector. */
 export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
-  return ALL_ITEMS.filter((i) => (i.types ?? []).includes(type))
+  const seen = new Set<string>()
+  return ALL_ITEMS.filter((i) => {
+    if (!(i.types ?? []).includes(type) || seen.has(i.id)) return false
+    seen.add(i.id)
+    return true
+  })
 }
 
 /**

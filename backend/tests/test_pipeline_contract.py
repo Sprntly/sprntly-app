@@ -159,20 +159,61 @@ def test_live_prd_template_is_lean_markdown(repo_root):
 # visual system, Part B as the derived Implementation Spec.
 
 def test_prd_skill_part_a_template_is_html_visual_system(repo_root):
-    """prd-author v4.2 Part A is a single-file, editable HTML page in the
-    normative visual system, in the v4.1 section order (Context → Problem →
-    Evidence → Users → Goal → Hypothesis → Requirements → User input needed →
-    Appendix) — not lean markdown. Guard the shape + section order so it can't
-    regress."""
+    """prd-author v4.7 Part A is a single-file, editable HTML page in the
+    normative visual system, in the v4.4 section order (Context → Problem →
+    Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix,
+    which holds only User input needed) — not lean markdown. Guard the shape +
+    section order so it can't regress."""
     html = _skill_prd_template_part_a(repo_root)
     assert "<!DOCTYPE html>" in html
     assert 'contenteditable="true"' in html  # obviously editable
-    # v4.1 normative section order, top to bottom.
+    # v4.4 normative section order, top to bottom. Risks sits in the body
+    # (between Requirements and the Appendix); "User input needed" is the
+    # Appendix's only content.
     order = ["Context", "Problem", "Evidence", "Users", "Goal", "Hypothesis",
-             "Requirements", "User input needed", "Appendix"]
+             "Requirements", "Risks", "Appendix", "User input needed"]
     positions = [html.find(f">{label}") for label in order]
     assert all(p != -1 for p in positions), f"missing section: {order}, {positions}"
-    assert positions == sorted(positions), "sections out of v4.1 order"
+    assert positions == sorted(positions), "sections out of v4.4 order"
+
+
+def test_prd_skill_part_a_template_has_no_retired_sections(repo_root):
+    """v4.4 retired Non-goals, Alignment, Rollout, and Done-when from the house
+    format (the Appendix holds only "User input needed"). Guard the template so
+    they can't creep back in."""
+    html = _skill_prd_template_part_a(repo_root)
+    for retired in (">Non-goals", ">Alignment", ">Rollout", ">Done-when"):
+        assert retired not in html, f"retired section {retired!r} back in template"
+
+
+def test_starter_chips_do_not_ask_for_retired_prd_sections():
+    """The Ask starter chips are canned user prompts (mirrored in
+    web/app/types/content.ts). A chip that asks for a "rollout plan" or
+    "non-goals" steers generation back toward sections v4.4 retired from the
+    house PRD format — keep the canned copy aligned with the live skill."""
+    from app.prompts import PREDEFINED_ASK_PROMPTS
+
+    for prompt in PREDEFINED_ASK_PROMPTS:
+        low = prompt.lower()
+        for retired in ("rollout", "non-goal", "done-when", "done when"):
+            assert retired not in low, (
+                f"starter chip asks for retired PRD section {retired!r}: {prompt}"
+            )
+
+
+def test_prd_skill_part_a_template_style_block_is_empty(repo_root):
+    """The v4.7 output contract: the template ships an EMPTY `<style>` (comment
+    only, zero CSS rules) and the canonical stylesheet lives in assets/prd.css,
+    injected server-side at finalize (app.html_style). A rule inside the
+    template's `<style>` means the contract split regressed."""
+    html = _skill_prd_template_part_a(repo_root)
+    m = re.search(r"<style>(.*?)</style>", html, re.DOTALL)
+    assert m, "template has no <style> block"
+    assert "{" not in m.group(1), "template <style> must stay empty (CSS lives in assets/prd.css)"
+    css = (
+        repo_root / "skills" / "prd-author" / "assets" / "prd.css"
+    ).read_text(encoding="utf-8")
+    assert ":root" in css and ".page" in css  # canonical stylesheet present
 
 
 def test_prd_skill_has_no_scope_assumption_boilerplate(repo_root):
@@ -201,6 +242,22 @@ def test_prd_skill_part_b_template_is_derived_impl_spec(repo_root):
     assert "## B0. Derivation" in md
     assert "## B3. Requirements (EARS, traced to Part A IDs)" in md
     assert "traces to a Part A" in md  # the hard derivation rule
+
+
+def test_prd_skill_part_b_template_carries_the_release_plan(repo_root):
+    """B7 closes with a release plan (Release 1 = walking skeleton) — the
+    rollout phases retired from the human PRD (prd-author v4.4) live HERE, in
+    the machine-readable half, where user-stories inherits them verbatim as
+    story-map release slices. The Part B generation prompt must steer to the
+    same contract."""
+    md = _skill_prd_template_part_b(repo_root)
+    assert "Release plan" in md
+    assert "Release 1 — walking skeleton" in md
+
+    from app.prd_runner import _SYSTEM_B
+
+    assert "release plan" in _SYSTEM_B
+    assert "walking" in _SYSTEM_B
 
 
 # NOTE: the evidence-runner end-to-end `:::block` persistence test was removed

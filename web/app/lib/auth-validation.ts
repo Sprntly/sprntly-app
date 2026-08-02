@@ -95,6 +95,15 @@ export function validateWorkEmail(email: string): string | null {
 
 export type PasswordStrength = "weak" | "fair" | "good" | "strong"
 
+/** How strong a password is, for the meter under the field. Distinct from
+ *  validatePassword: this never blocks anything, it only advises.
+ *
+ *  Length scores TWICE (12+, then 16+) so a long passphrase can fill the bar
+ *  with no punctuation at all. With a single length point, a symbol was the
+ *  only way to reach the top — so a user who had just been told a symbol was
+ *  optional still watched the meter stop short without one, which reads as the
+ *  old rule still being enforced somewhere. It also happens to be true: length
+ *  buys more real strength than a punctuation mark does. */
 export function passwordStrength(password: string): PasswordStrength {
   if (password.length < 8) return "weak"
   let score = 0
@@ -102,17 +111,29 @@ export function passwordStrength(password: string): PasswordStrength {
   if (/[0-9]/.test(password)) score++
   if (/[^A-Za-z0-9]/.test(password)) score++
   if (password.length >= 12) score++
+  if (password.length >= 16) score++
   if (score <= 1) return "weak"
   if (score === 2) return "fair"
   if (score === 3) return "good"
   return "strong"
 }
 
+/** Rules a password MUST satisfy to be accepted. Returns null when it passes,
+ *  else the message shown under the field.
+ *
+ *  A symbol is NOT required. It was, and the requirement was dropped: it is the
+ *  rule people most often fail on the way in, it pushes them toward the
+ *  `Passw0rd!` shape that composition rules reliably produce, and length does
+ *  far more for strength than punctuation does. A symbol still COUNTS toward
+ *  the strength meter (see passwordStrength) — encouraged, not demanded.
+ *
+ *  Nothing enforces a symbol server-side either: Supabase's
+ *  `password_requirements` is empty (supabase/config.toml), so this is the only
+ *  gate and removing it here genuinely removes it. */
 export function validatePassword(password: string): string | null {
   if (password.length < 8) return "Password must be at least 8 characters."
   if (!/[A-Z]/.test(password)) return "Include at least one uppercase letter."
   if (!/[0-9]/.test(password)) return "Include at least one number."
-  if (!/[^A-Za-z0-9]/.test(password)) return "Include at least one symbol."
   return null
 }
 
@@ -187,7 +208,7 @@ export function describeSignInError(error: unknown): {
     return {
       kind: "unconfirmed",
       message:
-        "Please confirm your email first — check your inbox for the verification link.",
+        "Please confirm your email first — check your inbox for the verification code.",
       countsAsFailedAttempt: false,
     }
   }

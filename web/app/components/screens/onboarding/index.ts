@@ -5,6 +5,9 @@ export { YourName } from "./YourName"
 // completes onboarding. The api-key step is OPTIONAL/skippable (also editable
 // in Settings → Admin).
 export { CompanyStep } from "./CompanyStep"
+// Step 2 (client feedback 2026-07-22): bring your existing AI-assistant context
+// in instead of retyping it. Optional — "Fill it in manually" walks past it.
+export { ImportContextStep } from "./ImportContextStep"
 export { ProductStep } from "./ProductStep"
 export { MetricsStep } from "./MetricsStep"
 export { ApiKey } from "./ApiKey"

@@ -76,7 +76,8 @@ import {
   StaffAdminScreen,
   MODULES,
   agentsEnabled,
-  weeklyBriefEnabled,
+  topInsightsEnabled,
+  chatIntentEnvelopeEnabled,
   keyModeLabel,
 } from "../StaffAdminScreen"
 
@@ -88,7 +89,7 @@ const ACME = {
   seat_limit: 5,
   prototype_enabled: true,
   use_platform_key: true,
-  feature_flags: { agents: false, weekly_brief: true },
+  feature_flags: { agents: false, top_insights: true },
   llm_key_configured: false,
   member_count: 2,
   pending_invite_count: 1,
@@ -217,7 +218,7 @@ describe("StaffAdminScreen organizations", () => {
     expect(screen.getByText("Platform key")).toBeTruthy()
     // Only enabled modules are summarized — the three-module scheme in order
     // (agents is explicitly off; Prototype comes from prototype_enabled).
-    expect(screen.getByText("Prototype, Weekly Brief")).toBeTruthy()
+    expect(screen.getByText("Prototype, Top Insights")).toBeTruthy()
     expect(screen.queryByText(/Agents/)).toBeNull()
   })
 
@@ -229,16 +230,16 @@ describe("StaffAdminScreen organizations", () => {
       id: "co-2",
       display_name: "Legacy Corp",
       prototype_enabled: false,
-      feature_flags: { weekly_brief: true, on_demand_analysis: true },
+      feature_flags: { top_insights: true, on_demand_analysis: true },
     }
     listCompanies.mockResolvedValue({ companies: [legacy] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
 
-    expect(screen.getByText("Agents, Weekly Brief")).toBeTruthy()
+    expect(screen.getByText("Agents, Top Insights")).toBeTruthy()
   })
 
-  it("offers exactly the three modules — Agents, Prototype, Weekly Brief — in the editor", async () => {
+  it("offers exactly the four modules — Agents, Prototype, Top Insights, Chat Intent Envelope — in the editor", async () => {
     listCompanies.mockResolvedValue({ companies: [ACME] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
@@ -249,10 +250,13 @@ describe("StaffAdminScreen organizations", () => {
     const labels = Array.from(modules.querySelectorAll("label")).map(
       (l) => l.textContent ?? "",
     )
-    expect(labels).toHaveLength(3)
+    expect(labels).toHaveLength(4)
     expect(labels[0]).toBe("Agents")
     expect(labels[1]).toMatch(/^Prototype/)
-    expect(labels[2]).toBe("Weekly Brief")
+    expect(labels[2]).toBe("Top Insights")
+    // Action-envelope chat dispatch: DEFAULT ON (missing key = on, like
+    // Agents/Brief); the checkbox is the per-company kill switch.
+    expect(labels[3]).toBe("Chat Intent Envelope (beta)")
     // The retired modules leave no dead UI behind.
     expect(screen.queryByText("On-call Agent")).toBeNull()
     expect(screen.queryByText("Claude Code Handoff")).toBeNull()
@@ -282,7 +286,7 @@ describe("StaffAdminScreen organizations", () => {
         seat_limit: 5,
         prototype_enabled: false,
         use_platform_key: true,
-        feature_flags: expect.objectContaining({ weekly_brief: true }),
+        feature_flags: expect.objectContaining({ top_insights: true }),
       }),
     )
     const patch = updateCompany.mock.calls[0][1] as {
@@ -316,13 +320,13 @@ describe("StaffAdminScreen organizations", () => {
     // …and the editor now agrees.
     const agents = screen.getByLabelText("Agents") as HTMLInputElement
     expect(agents.checked).toBe(true)
-    // weekly_brief is missing too ⇒ ON per backend grandfathering.
-    const brief = screen.getByLabelText("Weekly Brief") as HTMLInputElement
+    // top_insights is missing too ⇒ ON per backend grandfathering.
+    const brief = screen.getByLabelText("Top Insights") as HTMLInputElement
     expect(brief.checked).toBe(true)
   })
 
   it("keeps an explicit agents:false unchecked in the editor", async () => {
-    // ACME stores agents:false, weekly_brief:true explicitly.
+    // ACME stores agents:false, top_insights:true explicitly.
     listCompanies.mockResolvedValue({ companies: [ACME] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
@@ -333,26 +337,26 @@ describe("StaffAdminScreen organizations", () => {
       false,
     )
     expect(
-      (screen.getByLabelText("Weekly Brief") as HTMLInputElement).checked,
+      (screen.getByLabelText("Top Insights") as HTMLInputElement).checked,
     ).toBe(true)
   })
 
-  it("shows a missing weekly_brief key as ON — chip and editor alike", async () => {
+  it("shows a missing top_insights key as ON — chip and editor alike", async () => {
     const grandfathered = {
       ...ACME,
       id: "co-3",
       display_name: "Old Corp",
-      // Explicit agents, but no weekly_brief key at all.
+      // Explicit agents, but no top_insights key at all.
       feature_flags: { agents: true },
     }
     listCompanies.mockResolvedValue({ companies: [grandfathered] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
 
-    expect(screen.getByText("Agents, Prototype, Weekly Brief")).toBeTruthy()
+    expect(screen.getByText("Agents, Prototype, Top Insights")).toBeTruthy()
     fireEvent.click(screen.getByText("Edit"))
     expect(
-      (screen.getByLabelText("Weekly Brief") as HTMLInputElement).checked,
+      (screen.getByLabelText("Top Insights") as HTMLInputElement).checked,
     ).toBe(true)
   })
 
@@ -373,7 +377,7 @@ describe("StaffAdminScreen organizations", () => {
       fireEvent.click(screen.getByText("Save changes"))
     })
 
-    // Prefill is display-level only — no `agents`/`weekly_brief` keys get
+    // Prefill is display-level only — no `agents`/`top_insights` keys get
     // injected into an untouched dict.
     const patch = updateCompany.mock.calls[0][1] as {
       feature_flags: Record<string, boolean>
@@ -455,7 +459,7 @@ describe("StaffAdminScreen invites", () => {
         seat_limit: null,
         prototype_enabled: true,
         use_platform_key: false,
-        feature_flags: { agents: true, weekly_brief: true },
+        feature_flags: { agents: true, top_insights: true },
       }),
     )
     expect(screen.getByText(/Invite sent to admin@customer.com/)).toBeTruthy()
@@ -466,8 +470,12 @@ describe("StaffAdminScreen invites", () => {
 })
 
 describe("MODULES + agentsEnabled", () => {
-  it("keeps exactly the two flag-backed modules (Prototype is column-backed)", () => {
-    expect(MODULES.map((m) => m.key)).toEqual(["agents", "weekly_brief"])
+  it("keeps exactly the flag-backed modules (Prototype is column-backed)", () => {
+    expect(MODULES.map((m) => m.key)).toEqual([
+      "agents",
+      "top_insights",
+      "chat_intent_envelope",
+    ])
   })
 
   it("prefers an explicit agents key over the legacy fallback", () => {
@@ -490,15 +498,22 @@ describe("MODULES + agentsEnabled", () => {
     expect(agentsEnabled({ engineer_agent: true, research_agent: true })).toBe(true)
     expect(agentsEnabled({ claude_code_handoff: false })).toBe(true)
   })
+
+  it("chat intent envelope is DEFAULT ON; explicit false is the kill switch", () => {
+    expect(chatIntentEnvelopeEnabled({})).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ agents: true })).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ chat_intent_envelope: true })).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ chat_intent_envelope: false })).toBe(false)
+  })
 })
 
-describe("weeklyBriefEnabled", () => {
+describe("topInsightsEnabled", () => {
   it("honors an explicit key and defaults a missing key to ON", () => {
-    expect(weeklyBriefEnabled({ weekly_brief: true })).toBe(true)
-    expect(weeklyBriefEnabled({ weekly_brief: false })).toBe(false)
+    expect(topInsightsEnabled({ top_insights: true })).toBe(true)
+    expect(topInsightsEnabled({ top_insights: false })).toBe(false)
     // Missing key = grandfathered ON (backend app/entitlements.py parity).
-    expect(weeklyBriefEnabled({})).toBe(true)
-    expect(weeklyBriefEnabled({ agents: false })).toBe(true)
+    expect(topInsightsEnabled({})).toBe(true)
+    expect(topInsightsEnabled({ agents: false })).toBe(true)
   })
 })
 

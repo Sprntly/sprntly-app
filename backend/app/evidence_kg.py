@@ -3,7 +3,7 @@
 The legacy path (app.evidence_runner) builds the evidence doc by handing the
 brief insight + the whole corpus to one Claude call — corpus-only, KG-blind,
 no provenance, no decision-log. This module repoints evidence at the
-knowledge graph so the doc becomes the PROVENANCE TRAIL for a weekly-brief
+knowledge graph so the doc becomes the PROVENANCE TRAIL for a top-insights
 insight: the actual data-source signals + KG reasoning that produced it.
 
 THE LINKAGE (written by synthesis.agent.run_synthesis):
@@ -42,7 +42,7 @@ from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
-from app.graph.types import Entity, Signal
+from app.graph.types import Entity, Signal, signal_is_retired
 from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import (
@@ -141,7 +141,7 @@ def gather_evidence_trail(
         if source_id in seen:
             continue
         sig = signals_by_id.get(source_id)
-        if sig is None or sig.properties.get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         seen.add(sig.id)
         trail.append(_signal_to_trail_item(sig, edge_type))
@@ -381,6 +381,10 @@ async def generate_task_evidence(
     *,
     template_version: int | None = None,
     variant: str = "v1",
+    question: str | None = None,
+    conversation_id: int | None = None,
+    company_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Generate the Evidence artifact for a chat-task PRD, IF the KG backs it.
 
@@ -390,7 +394,17 @@ async def generate_task_evidence(
     (brief_id, theme_id) — re-issuing the same task reuses the existing doc —
     then render the doc from the retrieved trail. Best-effort throughout; a
     failure marks the row failed and never disturbs the PRD generation running
-    in parallel."""
+    in parallel.
+
+    `question`/`conversation_id` carry the originating chat-task linkage
+    (mirrors the sibling PRD's `start_prd(question=...)` +
+    `bind_conversation_to_prd`) — `question` is stamped on the new row,
+    `conversation_id` (+ `company_id`/`user_id`, needed to scope the bind)
+    links the commanding chat via `conversations.evidence_id`. All optional:
+    callers with no chat context (none currently — this path is chat-task-only)
+    simply leave the doc's linkage NULL.
+    """
+    from app.db.conversations import bind_conversation_to_evidence
     from app.db.evidences import find_existing_evidence_for_theme, start_evidence
     from app.graph.retrieval import task_evidence_trail
 
@@ -426,7 +440,15 @@ async def generate_task_evidence(
             template_version=template_version,
             variant=variant,
             theme_id=theme_id,
+            question=question,
         )
+        # Link the commanding chat to this Evidence doc NOW (mirrors the PRD's
+        # bind_conversation_to_prd, called right after start_prd in routes/prd.py) —
+        # best-effort, never blocks/fails the generation below.
+        if conversation_id is not None and company_id:
+            bind_conversation_to_evidence(
+                conversation_id, evidence_id, company_id, user_id
+            )
         await asyncio.to_thread(
             _run_sync_task, evidence_id, insight, trail["signals"],
             enterprise_id, trail.get("kg_refs") or [],

@@ -42,7 +42,12 @@ import {
 // (see agentsEnabled) — stored data is never rewritten.
 export const MODULES: { key: string; label: string }[] = [
   { key: "agents", label: "Agents" },
-  { key: "weekly_brief", label: "Weekly Brief" },
+  { key: "top_insights", label: "Top Insights" },
+  // Action-envelope chat dispatch (backend intent routing instead of the
+  // client regex ladder). DEFAULT ON since 2026-07-26 — a missing key counts
+  // as ON (see chatIntentEnvelopeEnabled), so this checkbox is a per-company
+  // kill switch.
+  { key: "chat_intent_envelope", label: "Chat Intent Envelope (beta)" },
 ]
 
 /** Whether the Agents module is on, mirroring backend
@@ -59,25 +64,41 @@ export function agentsEnabled(flags: Record<string, boolean>): boolean {
   return true
 }
 
-/** Whether the Weekly Brief module is on — a missing key counts as ON
+/** Whether the Top Insights module is on — a missing key counts as ON
  *  (grandfathering), mirroring backend app/entitlements.py
- *  weekly_brief_enabled. Display-level only — never written back. */
-export function weeklyBriefEnabled(flags: Record<string, boolean>): boolean {
+ *  top_insights_enabled. `weekly_brief` is the pre-rename spelling of the
+ *  same module: consulted only when the modern key is absent, so an explicit
+ *  modern key always wins. Display-level only — never written back. */
+export function topInsightsEnabled(flags: Record<string, boolean>): boolean {
+  if ("top_insights" in flags) return !!flags.top_insights
   if ("weekly_brief" in flags) return !!flags.weekly_brief
+  return true
+}
+
+/** Whether action-envelope chat dispatch is on — DEFAULT ON (2026-07-26): a
+ *  missing key counts as ON, matching DEFAULT_FEATURE_FLAGS and the app-side
+ *  gate (parseFeatureFlags fills the default). Only an explicit false — the
+ *  staff kill switch — turns it off. Display-level only — never written
+ *  back. */
+export function chatIntentEnvelopeEnabled(
+  flags: Record<string, boolean>,
+): boolean {
+  if ("chat_intent_envelope" in flags) return !!flags.chat_intent_envelope
   return true
 }
 
 // Effective-state resolvers per flag-backed module. Both the org-row chips
 // and the editor checkboxes go through these so a grandfathered row (missing
 // / legacy-only keys) shows the SAME state everywhere. Toggling a checkbox
-// still writes an explicit `agents` / `weekly_brief` boolean; untouched
+// still writes an explicit `agents` / `top_insights` boolean; untouched
 // flags dicts are sent back unchanged.
 const MODULE_RESOLVERS: Record<
   string,
   (flags: Record<string, boolean>) => boolean
 > = {
   agents: agentsEnabled,
-  weekly_brief: weeklyBriefEnabled,
+  top_insights: topInsightsEnabled,
+  chat_intent_envelope: chatIntentEnvelopeEnabled,
 }
 
 export function keyModeLabel(c: {
@@ -98,7 +119,7 @@ function enabledModules(company: {
   const on: string[] = []
   if (agentsEnabled(flags)) on.push("Agents")
   if (company.prototype_enabled) on.push("Prototype")
-  if (weeklyBriefEnabled(flags)) on.push("Weekly Brief")
+  if (topInsightsEnabled(flags)) on.push("Top Insights")
   if (!on.length) return "No modules enabled"
   return on.join(", ")
 }
@@ -194,9 +215,9 @@ function EntitlementFields({
         </span>
       </label>
 
-      {/* Exactly three modules, in this order: Agents, Prototype, Weekly
-          Brief. Prototype sits in the middle but writes prototype_enabled
-          (the column), not featureFlags. */}
+      {/* Module order: Agents, Prototype, Weekly Brief, then rollout flags.
+          Prototype sits second but writes prototype_enabled (the column),
+          not featureFlags. */}
       <fieldset className="sadm-modules">
         <legend>Modules</legend>
         {flagCheckbox(MODULES[0], state, onChange)}
@@ -213,7 +234,7 @@ function EntitlementFields({
             <span className="sadm-field-hint"> — design agent</span>
           </span>
         </label>
-        {flagCheckbox(MODULES[1], state, onChange)}
+        {MODULES.slice(1).map((m) => flagCheckbox(m, state, onChange))}
       </fieldset>
     </div>
   )
@@ -343,14 +364,14 @@ function CompanyRow({
 
 const EMPTY_INVITE_FORM: EntitlementFormState = {
   seatLimit: "",
-  // Prototype is a default-ON module like agents/weekly_brief (backed by the
+  // Prototype is a default-ON module like agents/top_insights (backed by the
   // companies.prototype_enabled column default) — the toggle is an opt-out.
   prototypeEnabled: true,
   usePlatformKey: false,
   // Both flag-backed modules default ON for new invites.
   featureFlags: {
     agents: true,
-    weekly_brief: true,
+    top_insights: true,
   },
 }
 

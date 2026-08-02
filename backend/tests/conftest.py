@@ -171,7 +171,11 @@ CREATE TABLE prds (
     -- PRD generated from an ideation item; source='brief' + theme_id NULL for a
     -- brief-insight PRD.
     source           TEXT NOT NULL DEFAULT 'brief',
-    theme_id         TEXT
+    theme_id         TEXT,
+    -- 20260731090000: originating-chat-question linkage (mirrors reports'
+    -- question/ask_id) — NULL on every path except the chat-task command.
+    question         TEXT,
+    ask_id           INTEGER
 );
 
 CREATE TABLE evidences (
@@ -187,7 +191,10 @@ CREATE TABLE evidences (
     variant          TEXT NOT NULL DEFAULT 'v1',
     -- 20260719120000: chat-task evidence keys by (brief_id, theme_id)
     -- ('chat:<hash>'); brief-insight docs keep NULL.
-    theme_id         TEXT
+    theme_id         TEXT,
+    -- 20260731090000: originating-chat-question linkage (mirrors prds above).
+    question         TEXT,
+    ask_id           INTEGER
 );
 
 -- Test-harness only (NOT a migration): the real prd_patches migration ships
@@ -272,6 +279,11 @@ CREATE TABLE ask_jobs (
     pinned_skill    TEXT,
     -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
     prd_id          INTEGER,
+    -- The skill the router picked, written the moment it resolves rather than
+    -- at completion, so the waiting surface can name the running skill (mirrors
+    -- 20260802120000_ask_jobs_routed_skill.sql). NULL = no skill was routed.
+    routed_skill        TEXT,
+    routed_skill_action TEXT,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -295,6 +307,52 @@ CREATE TABLE website_analysis_jobs (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
+
+-- Deep company-research runs (mirrors
+-- 20260730134500_company_research_runs.sql). One row per staged web-research
+-- sweep over the company's OWN public footprint; status walks running →
+-- completed / completed_partial (or failed). `records` holds the captured fact
+-- records. No client polls this — the row IS the handle on an
+-- abandonment-proof background run. The partial unique index is the ATOMIC
+-- one-live-run-per-company guard (SQLite supports partial indexes, so the
+-- insert-conflict path is exercised by the tests exactly as in Postgres).
+CREATE TABLE company_research_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    url          TEXT,
+    trigger      TEXT NOT NULL
+                 CHECK (trigger IN ('onboarding', 'chat')),
+    status       TEXT NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running', 'completed',
+                                   'completed_partial', 'failed')),
+    stages       TEXT NOT NULL DEFAULT '{}',
+    records      TEXT,
+    summary      TEXT,
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+CREATE INDEX company_research_runs_company_idx
+    ON company_research_runs (company_id, created_at DESC);
+CREATE UNIQUE INDEX company_research_runs_one_live_idx
+    ON company_research_runs (company_id) WHERE status = 'running';
+
+-- Fire-and-forget LLM-context extraction jobs (mirrors
+-- 20260723130000_llm_context_jobs.sql). The onboarding import step reads the
+-- uploaded Markdown with an LLM pass here — the only reader since the v3
+-- prompt — which handles context documents of any shape. Status walks
+-- generating → ready (or error); `result` holds the same
+-- {ok, fields, unmapped, format_version, note} dict the POST returns.
+CREATE TABLE llm_context_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    status      TEXT NOT NULL DEFAULT 'generating',
+    result      TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX llm_context_jobs_company_idx ON llm_context_jobs (company_id, id DESC);
 
 -- Multi-agent generated docs (mirrors 20260613100000_multi_agent_docs.sql).
 -- No company_id column: tenant ownership is bound via brief_id -> brief ->
@@ -682,6 +740,10 @@ CREATE TABLE kg_signal (
     confidence     REAL NOT NULL DEFAULT 1.0,
     weight         REAL NOT NULL DEFAULT 1.0,
     provenance     TEXT NOT NULL DEFAULT '{}',
+    skill_id       TEXT,
+    origin         TEXT,
+    channel        TEXT,
+    evidence_eligible INTEGER,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -762,6 +824,24 @@ CREATE TABLE ideation_items (
 );
 CREATE INDEX ideation_items_rank_idx ON ideation_items (enterprise_id, rank);
 
+-- Pipeline run audit rows (mirrors 20260605120000_pipeline_tables.sql).
+-- Durable record of regenerate / scheduled pipeline runs; phase-2 fix uses it
+-- to surface runs interrupted by a service restart.
+CREATE TABLE pipeline_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset       TEXT NOT NULL,
+    "trigger"     TEXT NOT NULL DEFAULT 'scheduled',
+    status        TEXT NOT NULL DEFAULT 'running'
+                  CHECK (status IN ('running', 'completed', 'failed')),
+    stages        TEXT NOT NULL DEFAULT '{}',
+    -- ISO-8601 with 'T' (not sqlite's space-separated datetime('now')) so
+    -- lexical .lt() comparisons against isoformat() cutoffs behave like
+    -- Postgres timestamptz comparisons do.
+    started_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+    completed_at  TEXT,
+    error         TEXT
+);
+
 -- Per-theme brief de-dup fingerprint (mirrors 20260616130000_brief_finding_state.sql).
 -- One row per theme ever surfaced in a brief; carries the convergence state at
 -- last surface so the next run can tell whether the issue changed.
@@ -776,9 +856,13 @@ CREATE TABLE brief_finding_state (
     fp_revenue_at_stake REAL NOT NULL DEFAULT 0,
     fp_breadth          INTEGER NOT NULL DEFAULT 0,
     fp_latest_signal_at TEXT,
-    -- Phase 2 user-action (mirrors 20260616140000_brief_finding_state_action.sql).
+    -- Phase 2 user-action (mirrors 20260616140000_brief_finding_state_action.sql
+    -- + 20260727100000_brief_ledger_defer_rotation.sql).
     action              TEXT NOT NULL DEFAULT 'surfaced'
-                        CHECK (action IN ('surfaced', 'prd_created', 'dismissed', 'done')),
+                        CHECK (action IN ('surfaced', 'prd_created', 'dismissed', 'deferred', 'done')),
+    times_shown         INTEGER NOT NULL DEFAULT 0,
+    deferred_until      TEXT,
+    last_state          TEXT CHECK (last_state IS NULL OR last_state IN ('new', 'updated')),
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (enterprise_id, theme_id)
@@ -810,6 +894,10 @@ CREATE TABLE ticket_edits (
     custom_fields       TEXT,
     -- Mirrors supabase/migrations/20260712170000_ticket_edits_issue_type.sql
     issue_type          TEXT,
+    -- Mirrors 20260731120000_ticket_edits_lifecycle.sql: 'active' | 'excluded'
+    -- | 'deleted'. Non-active tickets are never pushed and are removed from
+    -- the tracker if they were.
+    lifecycle           TEXT NOT NULL DEFAULT 'active',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );
@@ -912,7 +1000,7 @@ CREATE TABLE tracker_meta (
 
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
 -- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
--- the original file (base64) + extracted text the weekly brief reads + the
+-- the original file (base64) + extracted text the Top Insights brief reads + the
 -- roadmapdoc artifact renders. bigint identity / timestamptz are INTEGER / TEXT
 -- under SQLite, matching the other seeded tables.
 CREATE TABLE roadmap_doc (
@@ -978,6 +1066,90 @@ CREATE TABLE company_document (
 CREATE INDEX company_document_company_idx ON company_document (company_id);
 CREATE INDEX company_document_company_type_idx
     ON company_document (company_id, doc_type);
+
+-- Uploaded document sources (mirrors 20260723120000_document_sources.sql,
+-- SQLite-ized). A NAMED bundle of user-uploaded files (+ an optional
+-- description of what they are) surfaced as the `uploads` connector; the
+-- uploads puller reads these rows and yields RawRecords into the KG. uuid /
+-- timestamptz are TEXT here, matching the other seeded tables.
+CREATE TABLE document_source (
+    id           TEXT PRIMARY KEY,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    workspace_id TEXT,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX document_source_company_idx ON document_source (company_id);
+
+CREATE TABLE document_source_file (
+    id             TEXT PRIMARY KEY,
+    source_id      TEXT NOT NULL REFERENCES document_source (id) ON DELETE CASCADE,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    size_bytes     INTEGER NOT NULL DEFAULT 0,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
+CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
+
+-- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
+-- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
+-- share one library; workspace_id records the uploading workspace only):
+-- `method` is the parsed SKILL.md text injected at invocation time;
+-- modules/refs are JSON-encoded TEXT maps. No company/workspace FKs, matching
+-- the workspaces-table note: route tests fabricate tenant ids that have no
+-- parent rows.
+CREATE TABLE custom_skills (
+    id            TEXT PRIMARY KEY,
+    company_id    TEXT NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    slug          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    modules       TEXT NOT NULL DEFAULT '{}',
+    refs          TEXT NOT NULL DEFAULT '{}',
+    content_hash  TEXT NOT NULL,
+    storage_key   TEXT,
+    uploader_id   TEXT NOT NULL,
+    uploader_name TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, slug)
+);
+CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+
+-- Captured HTML report documents (mirrors 20260730120000_reports.sql,
+-- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
+-- library; workspace_id records the generating workspace and may be NULL).
+-- conversation_id / prd_id are the report's ATTACHMENT — the chat room and PRD
+-- the run happened in, NULL when the ask carried neither. No FKs, matching the
+-- workspaces-table note: route tests fabricate tenant ids with no parent rows.
+-- share_* mirror 20260730130000_reports_share.sql: opt-in public access by
+-- token, DEFAULT PRIVATE (nothing is reachable by link until explicitly shared).
+CREATE TABLE reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    skill           TEXT NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    html            TEXT NOT NULL DEFAULT '',
+    question        TEXT NOT NULL DEFAULT '',
+    ask_id          INTEGER,
+    conversation_id INTEGER,
+    prd_id          INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    share_mode      TEXT NOT NULL DEFAULT 'private',
+    share_token     TEXT,
+    share_passcode_hash TEXT,
+    shared_at       TEXT
+);
+CREATE INDEX reports_company_idx ON reports (company_id, id DESC);
+CREATE UNIQUE INDEX reports_share_token_uniq ON reports (share_token)
+    WHERE share_token IS NOT NULL;
 
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
@@ -1057,20 +1229,51 @@ CREATE TABLE conversations (
     reply       TEXT NOT NULL DEFAULT '',
     pinned      INTEGER NOT NULL DEFAULT 0,
     prd_id      INTEGER,
+    -- 20260731090000: Evidence half of the conversation<->artifact binding
+    -- (mirrors prd_id above).
+    evidence_id INTEGER,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
 CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
+CREATE INDEX conversations_evidence_idx ON conversations (evidence_id);
 
 CREATE TABLE conversation_turns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
     role            TEXT NOT NULL DEFAULT 'user',
     content         TEXT NOT NULL DEFAULT '',
+    -- Extracted attachment texts [{name, content}] persisted with the turn
+    -- (20260723170000_conversation_turn_attachments.sql).
+    attachments     TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
+
+-- Unified per-call LLM usage ledger (20260725120000_llm_usage_events.sql).
+-- The `llm_usage_summary` rollup is a Postgres function with no SQLite
+-- equivalent; tests exercise the read path via FakeSupabaseClient.rpc_returns.
+CREATE TABLE llm_usage_events (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id                  TEXT NOT NULL,
+    user_id                     TEXT,
+    feature                     TEXT NOT NULL,
+    operation                   TEXT,
+    provider                    TEXT NOT NULL DEFAULT 'anthropic',
+    model                       TEXT,
+    key_mode                    TEXT NOT NULL DEFAULT 'unknown',
+    input_tokens                INTEGER NOT NULL DEFAULT 0,
+    output_tokens               INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+    est_cost_usd                REAL,
+    latency_ms                  INTEGER,
+    status                      TEXT NOT NULL DEFAULT 'succeeded',
+    error_class                 TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
 """
 
 
@@ -1166,6 +1369,7 @@ def _no_background_connector_sync(request, monkeypatch):
     if request.module.__name__.rsplit(".", 1)[-1] in (
         "test_connector_auto_sync",
         "test_corpus_seed_kickoff",
+        "test_roadmap_kg_ingest",
     ):
         yield
         return
@@ -1180,6 +1384,27 @@ def _no_background_connector_sync(request, monkeypatch):
         auto_sync = importlib.import_module("app.kg_ingest.auto_sync")
         monkeypatch.setattr(auto_sync, "kickoff_sync", _noop_sync, raising=False)
         monkeypatch.setattr(auto_sync, "kickoff_corpus_seed", _noop_seed, raising=False)
+        # Same rationale for the roadmap ingest kickoff (POST
+        # /v1/company/roadmap-doc): its daemon thread would run a real LLM
+        # extraction against the mid-reset in-memory DB.
+        monkeypatch.setattr(auto_sync, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
+        # And for Slack's corpus kickoff, now that the OAuth callback fires it
+        # on connect (not just the 6-hourly scheduler): its thread runs
+        # sync_slack against the LIVE slack.com API and stamps the connection
+        # row, so every test that drives /v1/connectors/slack/callback would
+        # otherwise inherit exactly the two hazards above.
+        monkeypatch.setattr(auto_sync, "kickoff_slack_corpus_sync", _noop_sync,
+                            raising=False)
+    except Exception:
+        pass
+    try:
+        # app.routes.company is NOT in _RELOAD_ORDER, so its `from auto_sync
+        # import kickoff_roadmap_ingest` binding is fixed at first import and the
+        # source patch above can't reach it — patch the route's own reference too.
+        company_route = importlib.import_module("app.routes.company")
+        monkeypatch.setattr(company_route, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
     except Exception:
         pass
     try:
@@ -1263,16 +1488,25 @@ def _no_real_browser_in_preview_capture(monkeypatch):
     Tests that genuinely exercise capture override this: the screenshot unit tests
     re-patch this same seam to inject a fake Playwright graph, and completion-path
     success tests mock the route's `capture_bundle_screenshot` to return fake bytes.
-    Both run after this autouse fixture, so their patch wins for that test."""
-    try:
-        import app.design_agent.screenshot as _screenshot
+    Both run after this autouse fixture, so their patch wins for that test.
 
-        def _no_playwright():
-            raise ImportError("playwright disabled in tests")
+    The report-PDF renderer (app/report_pdf.py) has the same lazy seam and is
+    stubbed here too, so a report download test degrades to None (→ 503) instead
+    of launching Chromium."""
 
-        monkeypatch.setattr(_screenshot, "_resolve_async_playwright", _no_playwright, raising=False)
-    except Exception:
-        pass
+    def _no_playwright():
+        raise ImportError("playwright disabled in tests")
+
+    for mod_name in ("app.design_agent.screenshot", "app.report_pdf"):
+        try:
+            import importlib
+
+            mod = importlib.import_module(mod_name)
+            monkeypatch.setattr(
+                mod, "_resolve_async_playwright", _no_playwright, raising=False
+            )
+        except Exception:
+            pass
     yield
 
 

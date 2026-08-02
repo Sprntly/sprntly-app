@@ -140,9 +140,13 @@ class Settings(BaseSettings):
     staff_admin_id: str = ""
     staff_admin_password_hash: str = ""
     # Internal transcript viewer (/v1/transcripts + the obscure review page) —
-    # a single shared access code (argon2id hash), SEPARATE from the staff
-    # credential so read-only transcript access doesn't also grant entitlement
-    # edits. Unset ⇒ the whole surface, login included, 404s (fail closed).
+    # a single shared access code, SEPARATE from the staff credential so
+    # read-only transcript access doesn't also grant entitlement edits. Either
+    # form works: the plaintext code (no argon2 tooling needed to set it) or the
+    # argon2id hash. Both unset ⇒ auth falls back to app.auth's hardcoded
+    # TRANSCRIPTS_DEFAULT_CODE, which is currently non-empty, so the surface is
+    # NOT fail-closed right now — see the comment on that constant.
+    transcripts_access_code: str = ""
     transcripts_access_code_hash: str = ""
     # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
@@ -187,6 +191,16 @@ class Settings(BaseSettings):
     jira_client_id: str = ""
     jira_client_secret: str = ""
     jira_oauth_redirect_uri: str = ""
+
+    # Confluence connector (Atlassian OAuth 2.0 3LO with ROTATING refresh
+    # tokens). A SEPARATE console app from Jira, not a shared one: an
+    # Atlassian 3LO integration carries exactly one callback URL, and one app
+    # declaring both products' scopes would ask a Jira-only customer to grant
+    # Confluence reads. Deliberately no fallback to the jira_* values — a
+    # silent misconfiguration there 400s on the consent screen with no clue why.
+    confluence_client_id: str = ""
+    confluence_client_secret: str = ""
+    confluence_oauth_redirect_uri: str = ""
 
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
@@ -312,7 +326,7 @@ class Settings(BaseSettings):
     # app/design_agent/provider_alert.py. Empty ⇒ alert is a clean no-op (logged).
     design_agent_alert_email: str = ""
 
-    # Which engine produces the weekly brief.
+    # Which engine produces the Top Insights brief (formerly "weekly brief").
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
     #   "legacy"              — placeholder corpus→single-Claude-call pipeline,
@@ -324,13 +338,16 @@ class Settings(BaseSettings):
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
-    # Weekly-brief scheduler (v0 checklist 2.4): the brief fires Monday 09:00 in
-    # each company's configured timezone (companies.notification_settings.timezone,
-    # default UTC). The scheduler ticks every WEEKLY_BRIEF_TICK_MINUTES and, for
-    # each company, asks app.brief_schedule.should_run_weekly_brief whether the
-    # local Monday-09:00 firing window is open. Must be comfortably smaller than
-    # brief_schedule.DUE_WINDOW (1h) so a window is never skipped between ticks;
-    # 15 min gives ~4 chances to catch each window even if a tick runs late.
+    # Top-Insights brief scheduler (v0 checklist 2.4): the brief fires Monday
+    # 09:00 in each company's configured timezone
+    # (companies.notification_settings.timezone, default UTC). The scheduler
+    # ticks every BRIEF_TICK_MINUTES and, for each company, asks
+    # app.brief_schedule.should_run_brief whether the local Monday-09:00 firing
+    # window is open. Must be comfortably smaller than brief_schedule.DUE_WINDOW
+    # (1h) so a window is never skipped between ticks; 15 min gives ~4 chances
+    # to catch each window even if a tick runs late.
+    # NOTE: the setting kept its historical WEEKLY_BRIEF_TICK_MINUTES env name so
+    # existing staging/prod .env files keep working (they are hand-managed).
     weekly_brief_tick_minutes: int = 15
     # Ticket tracker sync: every tick, two-way sync each PRD whose tickets were
     # pushed to ClickUp/Jira (prd_ticket_sync rows with auto_sync=true). 15 min
@@ -352,7 +369,8 @@ class Settings(BaseSettings):
     # historical steps.
     drip_emails_enabled: bool = False
     resend_api_key: str = ""
-    # From: header for drip emails. Empty → "Sprntly <onboarding@sprntly.ai>".
+    # From: header for drip emails. Empty → "Sprntly
+    # <onboarding@mail.sprntly.ai>" (verified sending domain).
     drip_from_email: str = ""
     # Comma-separated day offsets, e.g. "1,3,7". Empty → DEFAULT_CADENCE.
     # Per-company overrides in companies.notification_settings["drip"] win over
@@ -397,6 +415,20 @@ class Settings(BaseSettings):
     # From: header for invite reminder emails. Empty → brief_email_from (the
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
+
+    # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
+    # check of recent extraction output per skill_id against the expected
+    # shape each vendored connector-extraction skill declares in its own
+    # references/expected-signal-shape.md. Read-only + sampled by design —
+    # never runs on a live ingestion or request path. OFF by default like the
+    # other opt-in scheduler jobs; flip on once there's enough real
+    # hubspot/jira/clickup extraction volume for a sample to be meaningful.
+    extraction_eval_enabled: bool = False
+    extraction_eval_interval_hours: int = 24
+    # How many of an enterprise+skill's most recent signals one eval pass
+    # samples.
+    extraction_eval_sample_size: int = 25
+
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)

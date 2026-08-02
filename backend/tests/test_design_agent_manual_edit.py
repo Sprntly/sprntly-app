@@ -75,7 +75,7 @@ def test_manual_edit_system_renders_shadcn_inventory():
 
 def test_template_version_is_current():
     # Now 9 — the mobile-capability platform directives (template-invalidating).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 9
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 10
 
 
 def test_manual_edit_system_prompt_prefers_tailwind_class_swap():

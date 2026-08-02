@@ -323,6 +323,67 @@ describe("NotificationsSettings — brief frequency", () => {
   })
 })
 
+describe("NotificationsSettings — workspace Top Insights filter", () => {
+  /** An insight-type chip button by its visible label. */
+  function insightChip(label: string): HTMLButtonElement {
+    const btn = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    ).find((b) => (b.textContent ?? "").includes(label))
+    if (!btn) throw new Error(`insight chip "${label}" not found`)
+    return btn as HTMLButtonElement
+  }
+
+  it("loads a saved brief_insight_types selection as pressed chips", () => {
+    mountWith({ brief_insight_types: ["competitor_moves", "build_priorities"] })
+    expect(insightChip("Competitor & market moves").getAttribute("aria-pressed")).toBe("true")
+    expect(insightChip("What to build next").getAttribute("aria-pressed")).toBe("true")
+    expect(insightChip("Top Customer Problem").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("persists the workspace selection under brief_insight_types, merging existing keys", async () => {
+    mountWith({ email_recipients: ["a@co.com"] })
+    // Empty by default — pick one type to arm Save.
+    await act(async () => {
+      fireEvent.click(insightChip("Competitor & market moves"))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }))
+    })
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
+    const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
+    const ns = patch.notification_settings as Notif
+    expect(ns.brief_insight_types).toEqual(["competitor_moves"])
+    // The free-text override is gone from the pane; the key is left untouched
+    // rather than written as null, so an older stored note isn't destroyed.
+    expect("brief_insight_note" in ns).toBe(false)
+    // Untouched sibling key survives the merge.
+    expect(ns.email_recipients).toEqual(["a@co.com"])
+  })
+
+  it("offers only the insight types that have a skill behind them, in the specified order, with no note field", () => {
+    mountWith({})
+    const labels = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    ).map((b) => (b.textContent ?? "").trim())
+    // Same labels and order as the onboarding step — both read SELECTABLE_INSIGHT_TYPES.
+    expect(labels).toEqual([
+      "Top Customer Problem",
+      "Competitor & market moves",
+      "What to build next",
+    ])
+    expect(document.querySelector("#comms-insight-note")).toBeNull()
+  })
+
+  it("ignores stored slugs that are no longer offered, along with unknown ones", () => {
+    // `wins` is a real slug the pane no longer offers; the other is garbage.
+    // Neither may render a phantom chip nor survive into the next save.
+    mountWith({ brief_insight_types: ["wins", "not_a_real_type", "competitor_moves"] })
+    const chips = document.querySelectorAll('[data-field="insight-types"] button')
+    expect(chips.length).toBe(3)
+    expect(insightChip("Competitor & market moves").getAttribute("aria-pressed")).toBe("true")
+  })
+})
+
 describe("NotificationsSettings — copy", () => {
   it("renders the Top Product Insights heading and cadence subtitle", () => {
     mountWith({})

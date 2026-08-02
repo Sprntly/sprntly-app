@@ -83,7 +83,7 @@ def deliver_brief(enterprise_id: str, brief: dict) -> dict:
     """Push a brief to ALL of a company's configured destinations — per-user
     Slack + email — logging any real failure. Best-effort; never raises.
 
-    This is the FULL weekly brief message. Two callers:
+    This is the FULL Top Insights brief message. Two callers:
       - the weekly scheduler (app.scheduler): exactly AT the company's
         configured day/time — the brief was already generated GENERATION_LEAD
         earlier with delivery suppressed, so the push lands on time, never
@@ -166,7 +166,7 @@ def ready_ping_slack_blocks() -> tuple[str, list[dict]]:
 
 def deliver_brief_ready_ping(enterprise_id: str) -> dict:
     """Push the short "Hey, your brief is generated." ping (Slack + email) after
-    a USER-TRIGGERED regenerate — NOT the full weekly brief message, which stays
+    a USER-TRIGGERED regenerate — NOT the full Top Insights brief message, which stays
     reserved for the scheduled delivery. Same recipients/config gates as
     deliver_brief; best-effort, never raises."""
     from app.synthesis.email_delivery import deliver_brief_ping_to_email

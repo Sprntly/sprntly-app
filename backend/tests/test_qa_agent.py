@@ -111,6 +111,86 @@ def test_route_skill_match_wins_over_scope_flag(monkeypatch):
     assert d.skill_id == "retention-churn" and d.source == "llm"
 
 
+# ── router determinism + schema shape ────────────────────────────────────────
+
+def test_route_pins_temperature_to_zero(monkeypatch):
+    """Routing is multiple-choice classification, so it must not sample.
+
+    Passing no temperature left the call at the Anthropic API default of 1.0
+    (`app/llm.py::_build_base_kwargs` only sets the key when it is not None), so
+    the same question could route to a different skill run to run. A regex or
+    slash fast-path never reaches the LLM router, so this uses a question with
+    no regex rule.
+    """
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: captured.append(k) or _route_out("retention-churn", 0.9, "churn"),
+    )
+    d = qa.route("why do users drop off after week two?", enterprise_id="ent")
+    assert d.source == "llm", "test needs a question that reaches the LLM router"
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == 0
+
+
+def test_route_temperature_reaches_the_anthropic_call(monkeypatch):
+    """The kwarg is not merely accepted by `llm_call` — it survives the gateway.
+
+    `conftest` patches `app.llm.call_json`, but the gateway imported that name
+    into its own namespace, so this patches `app.graph.gateway.call_json` (the
+    same reason `test_ask_skill_routing._patch_gateway_call_json` exists). That
+    makes the REAL `llm_call` run, proving temperature is threaded end to end
+    rather than swallowed by the gateway signature.
+    """
+    import app.graph.gateway as gateway_mod
+
+    captured: list[dict] = []
+
+    def _fake_call_json(**kwargs):
+        captured.append(kwargs)
+        return {"reason": "churn", "skill_id": "retention-churn",
+                "confidence": 0.9, "in_scope": True}
+
+    monkeypatch.setattr(gateway_mod, "call_json", _fake_call_json, raising=True)
+
+    d = qa.route("why do users drop off after week two?", enterprise_id="ent")
+    assert d.skill_id == "retention-churn" and d.source == "llm"
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == 0
+    # ...and it is the router's own schema that was sent.
+    assert list(captured[0]["schema"]["properties"])[0] == "reason"
+
+
+def test_route_schema_generates_reason_before_the_label():
+    """Forced-tool JSON is emitted in schema order, so `reason` must come first.
+
+    With `skill_id` first the label was already committed before the model wrote
+    its justification, making that text post-hoc rationalisation. Anthropic's
+    ticket-routing guide: "always include your classification reasoning before
+    your actual intent output". `additionalProperties: False` pins the contract
+    to exactly these four fields.
+    """
+    props = list(qa._ROUTE_SCHEMA["properties"])
+    assert props[0] == "reason", f"reason must be generated first, got {props}"
+    assert set(props) == {"reason", "skill_id", "confidence", "in_scope"}
+    assert qa._ROUTE_SCHEMA["additionalProperties"] is False
+    # Every property stays required — the reorder must not drop the contract.
+    assert set(qa._ROUTE_SCHEMA["required"]) == set(props)
+
+
+def test_out_of_scope_message_judges_topic_not_data():
+    """The canned refusal must judge TOPIC, never data volume. The old 'I
+    don't have grounded data on that topic, so I won't guess' sentence taught
+    the ANSWER model to emit the refusal for in-scope questions on a
+    workspace with nothing connected ('how would dark mode look in my
+    product?' — ask job 383, 2026-07-26). The message stays topical-only, and
+    ASK_SYSTEM carries an explicit no-data carve-out instead."""
+    from app.prompts import ASK_SYSTEM
+
+    assert "grounded data" not in qa.OUT_OF_SCOPE_MESSAGE
+    assert "must NEVER get that canned reply" in ASK_SYSTEM
+
+
 def test_answer_out_of_scope_returns_canned(monkeypatch):
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
@@ -125,6 +205,33 @@ def test_answer_out_of_scope_returns_canned(monkeypatch):
     assert out["type"] == "out_of_scope"
     assert out["key_points"] == [] and out["citations"] == []
     assert out["_skill_source"] == "scope_gate"
+
+
+def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
+    # A follow-up whose subject lives in the previous turn ("...about it?") reads
+    # as topic-less on its own, which is what the router mistook for
+    # out-of-domain. It must answer in context instead of getting the refusal.
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "no topic", in_scope=False)
+    )
+    seen = {}
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, **k: seen.update(q=q) or {"answer": "Here you go.", "citations": []},
+    )
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    out = qa.answer(
+        enterprise_id="ent",
+        question="can you get me all the details about it?",
+        dataset="acme",
+        history=history,
+    )
+    assert out["answer"] != qa.OUT_OF_SCOPE_MESSAGE
+    # ...and the prior turns rode along, so "it" is resolvable.
+    assert "onboarding flow" in seen["q"]
 
 
 def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
@@ -166,7 +273,7 @@ def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
 
 
 def test_answer_prd_author_stays_on_sonnet(monkeypatch):
-    # The deep reasoning happens upstream in the KG + weekly brief; the PRD
+    # The deep reasoning happens upstream in the KG + Top Insights brief; the PRD
     # composes off that material and answers on the default (sonnet) model.
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
@@ -234,7 +341,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="": {
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -406,6 +513,155 @@ def test_cir_runs_when_pinned(monkeypatch):
     assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
 
 
+# ── on_route: the routed skill is announced AT ROUTING TIME ──────────────────
+# The decision exists seconds into a run that can last minutes. The hook fires
+# the moment it resolves so the caller can persist it where a waiting client can
+# read it — not at completion, which is where `_skill` in the payload lands.
+
+
+def test_on_route_fires_with_the_skill_before_the_answer_call(monkeypatch):
+    """Ordering is the feature. `_skill` in the payload lands at completion;
+    this has to land before the expensive call starts."""
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: events.append(("llm", k.get("purpose"))) or _answer_out(),
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="write user stories for checkout",
+        dataset="acme", on_route=lambda s, a: events.append(("route", s, a)),
+    )
+    assert events[0] == ("route", "user-stories", "Generate user stories")
+    assert events[1] == ("llm", "skill_answer"), "the answer call comes after"
+    assert len([e for e in events if e[0] == "route"]) == 1, "fires exactly once"
+    # The pair matches what the finished payload carries, so the mid-run label
+    # and the final one can never disagree.
+    assert (events[0][1], events[0][2]) == (out["_skill"], out["_skill_action"])
+
+
+def test_on_route_reports_none_when_no_skill_is_routed(monkeypatch):
+    """The direct path routes nothing. The hook still fires (so the caller knows
+    routing is done) but carries None — the writer treats that as 'record
+    nothing', which is what keeps the column null."""
+    events: list[tuple] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "generic", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what happened last week", dataset="acme",
+              on_route=lambda s, a: events.append((s, a)))
+    assert events == [(None, "")]
+
+
+def test_on_route_reports_none_for_an_out_of_scope_question(monkeypatch):
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
+    )
+    out = qa.answer(enterprise_id="ent", question="what's the weather in tokyo?",
+                    dataset="acme", on_route=lambda s, a: events.append((s, a)))
+    assert out["answer"] == qa.OUT_OF_SCOPE_MESSAGE
+    assert events == [(None, "")]
+
+
+def test_on_route_reports_a_pinned_skill(monkeypatch):
+    """A pinned follow-up skips the router but the skill IS resolved, so the
+    waiting surface can still name it."""
+    events: list[tuple] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", on_route=lambda s, a: events.append((s, a)))
+    assert events == [("roadmap", "roadmap")]
+
+
+def test_on_route_does_not_fire_for_a_pre_routing_interceptor(monkeypatch):
+    """call_digest answers without consulting the router at all. Reporting a
+    skill it never chose would be the invented signal this hook exists to
+    avoid — so nothing is announced and the column stays null."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"answer": "digest",
+                                                   "_skill_source": "call-digest"})
+    events: list[tuple] = []
+    qa.answer(enterprise_id="ent", dataset="acme",
+              question="summarize the customer calls from last week",
+              on_route=lambda s, a: events.append((s, a)))
+    assert events == []
+
+
+def test_on_route_failure_never_breaks_the_answer(monkeypatch):
+    """The hook writes to the DB. A blip there must cost display metadata, not
+    the answer the user is paying for."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    def _boom(_skill, _action):
+        raise RuntimeError("supabase blip")
+
+    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
+                    dataset="acme", on_route=_boom)
+    assert out["answer"] == "ok"
+
+
+# ── on_phase: naming the leg that is actually running ────────────────────────
+# Every label is authored beside the call it describes; these tests pin that
+# the labels appear in execution order and only on paths that really do the
+# work they name.
+
+
+def test_phases_name_retrieval_then_writing_in_order(monkeypatch):
+    phases: list[str] = []
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1]})
+    import app.graph.retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "LIVE CONTEXT")
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme",
+              on_phase=phases.append)
+
+    assert phases == ["Searching your connected sources…", "Writing the answer…"]
+
+
+def test_no_retrieval_phase_when_retrieval_is_skipped(monkeypatch):
+    """A PRD-grounded ask deliberately skips KG retrieval, so it must not claim
+    to be searching sources — the label would describe work that never ran."""
+    phases: list[str] = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", prd_id=7, on_phase=phases.append)
+
+    assert phases == ["Writing the answer…"]
+
+
+def test_phase_sink_failure_never_breaks_the_answer(monkeypatch):
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    def _boom(_label):
+        raise RuntimeError("stream closed")
+
+    out = qa.answer(enterprise_id="ent", question="write a PRD for billing",
+                    dataset="acme", on_phase=_boom)
+    assert out["answer"] == "ok"
+
+
+def test_answer_without_hooks_behaves_exactly_as_before(monkeypatch):
+    """Both hooks are optional; every existing caller omits them."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
+                    dataset="acme")
+    assert out["_skill"] == "user-stories"
+
+
 # ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
 
 def test_answer_prd_id_grounds_skill_answer(monkeypatch):
@@ -491,7 +747,7 @@ def test_answer_prd_id_grounds_direct_answer(monkeypatch):
     )
     seen = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context=""):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
         seen.update(question=q, prd_context=prd_context)
         return {"answer": "generic", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -517,7 +773,7 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="": {
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
             "answer": "plain", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },

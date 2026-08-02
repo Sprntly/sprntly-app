@@ -79,6 +79,22 @@ describe("RoadmapDocScreen (roadmapdoc artifact view)", () => {
     expect(screen.getByText(/No roadmap uploaded yet/i)).not.toBeNull()
   })
 
+  it("points the empty state at the real Settings upload block", async () => {
+    // The old copy said "onboarding (Workspace step) or Settings" while no
+    // Settings upload existed. It does now (Process & Planning → Roadmap
+    // document), so the pointer must name it and link there.
+    getMock.mockResolvedValue(null)
+
+    await act(async () => {
+      render(React.createElement(RoadmapDocScreen))
+    })
+
+    expect(screen.getByText(/Settings → Process & Planning/i)).not.toBeNull()
+    const link = document.querySelector('a[href="/settings?section=process"]')
+    expect(link).not.toBeNull()
+    expect(link?.textContent).toMatch(/Process & Planning/i)
+  })
+
   it("shows an error state when the fetch fails", async () => {
     getMock.mockRejectedValue(new Error("API 500"))
 

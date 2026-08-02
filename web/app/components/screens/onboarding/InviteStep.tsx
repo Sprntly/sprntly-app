@@ -253,7 +253,7 @@ export function InviteStep() {
 
   return (
     <OnboardingChrome
-      step={7}
+      step={8}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -274,7 +274,7 @@ export function InviteStep() {
           </button>
         </>
       }
-      onBack={() => router.push("/onboarding/workspace")}
+      onBack={() => router.push("/onboarding/metrics")}
       onContinue={() => void go(ONBOARDING_STEP_COUNT, "/onboarding/review")}
       continueLabel="Next"
       continueDisabled={saving}

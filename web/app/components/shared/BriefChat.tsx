@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
 import { briefApi, type AskResponse } from "../../lib/api"
 import { loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
@@ -20,7 +21,7 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
+import { IconClock, IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../design-agent/GenerateModal"
@@ -80,15 +81,81 @@ function nowTime(): string {
 // letting the ask agent answer with markdown.
 export const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break|convert|turn|split)\b.*\btickets?\b/i.test(q)
+// PRD noun phrasings — "prd", "product requirements doc(ument)", bare
+// "requirements doc(ument)". One source string so the command rule, the task
+// extractor, and ChatScreen's LLM-fallback gate (mentionsPrd) agree on what
+// counts as naming a PRD.
+const PRD_NOUN_SRC =
+  "(?:prds?|product\\s+requirements?\\s+doc(?:ument)?s?|requirements?\\s+doc(?:ument)?s?|product\\s+briefs?|product\\s+spec(?:ification)?s?)"
+const PRD_NOUN_RE = new RegExp(`\\b${PRD_NOUN_SRC}\\b`, "i")
+// Verbs that read as "produce a PRD" when they appear BEFORE the noun.
+// import/convert/upload cover the doc-import phrasings ("import this document
+// as a PRD"); give/need/want cover ask-shapes ("give me a prd for X" was a
+// real user miss under the old generate/create/write/draft-only list).
+const PRD_VERB_SRC =
+  "(?:generate|create|write|draft|make|build|prepare|produce|compose|develop|author|import|convert|upload|give|need|want|put\\s+together|come\\s+up\\s+with|spin\\s+up|whip\\s+up)"
+const PRD_COMMAND_RE = new RegExp(`\\b${PRD_VERB_SRC}\\b.*\\b${PRD_NOUN_SRC}\\b`, "i")
+// Noun-first command: the message STARTS with the artifact + a topic ("PRD for
+// checkout flow", "a PRD on dark mode"). Indefinite articles only — "THE prd
+// for dark mode…" points at an EXISTING PRD ("the PRD for dark mode is missing
+// metrics"), and mid-sentence mentions are statements, not commands. Both fall
+// to ChatScreen's LLM fallback tier instead.
+const PRD_NOUN_FIRST_RE = new RegExp(
+  `^\\s*(?:(?:a|an|new|quick|full|draft)\\s+)*${PRD_NOUN_SRC}\\b\\s*[:,–—-]*\\s*(?:for|about|on|covering|regarding)\\b`,
+  "i",
+)
+// Information questions about PRDs ("what is a PRD?", "how do I write a PRD?",
+// "should we have a PRD for this?") are questions for the ask agent, never
+// commands — even when they contain a command verb. The aux-verb alternative
+// deliberately requires a NON-"you" subject so polite commands ("can you draft
+// a PRD for checkout") still route as commands.
+const PRD_QUESTION_RE =
+  /^\s*(?:what|whats|what's|why|where|when|who|whose|how)\b|^\s*(?:do|does|did|should|shall|is|are|was|were|can|could|would|will)\s+(?:we|i|the|this|that|it|there|a|an|our|my)\b/i
+
+/** True when the message names a PRD-ish artifact at all — the gate for
+ *  ChatScreen's LLM fallback tier (novel command phrasings the regexes here
+ *  can't anticipate). Cheap and broad on purpose: matching this only means
+ *  "worth asking the classifier", never "is a command". */
+export const mentionsPrd = (q: string) => PRD_NOUN_RE.test(q)
+
+// Edit-phrased messages aimed at an EXISTING PRD ("make this PRD shorter",
+// "add a rollout section to the PRD"). ChatScreen consults this ONLY on a PRD
+// tab with no attachment — there, the message routes to the scoped chat-edit
+// endpoint (the PRD actually changes) instead of the ask agent's text-only
+// answer. Guards, in order: tickets phrasings win; the message must NAME the
+// PRD (a bare "shorten it" stays a grounded ask — precision over recall, since
+// a false positive mutates the artifact); information questions ("does the PRD
+// cover X?") are never edits; an INDEFINITE article before the noun ("make a
+// prd for dark mode") is a CREATION ask, not an edit — that falls through to
+// isPrdCommand and opens a new PRD as before.
+const PRD_EDIT_VERB_RE =
+  /\b(make|shorten|condense|tighten|trim|simplify|expand|lengthen|rewrite|reword|rephrase|revise|update|change|edit|add|remove|delete|drop|rename|fix|adjust|tweak|improve|polish|clarify|reorder|strengthen|soften)\b/i
+const PRD_INDEFINITE_RE = new RegExp(
+  `\\b(?:a|an|another|new)\\s+(?:\\w+\\s+){0,2}?${PRD_NOUN_SRC}\\b`,
+  "i",
+)
+export const isPrdEditCommand = (q: string) =>
+  !isTicketsCommand(q) &&
+  PRD_NOUN_RE.test(q) &&
+  !PRD_QUESTION_RE.test(q) &&
+  PRD_EDIT_VERB_RE.test(q) &&
+  !PRD_INDEFINITE_RE.test(q)
+
 // A "generate a PRD" phrasing is a COMMAND (open the PRD tab), not a question
 // for the ask agent. Exported so ChatScreen intercepts it with the SAME rule —
 // otherwise the ask agent answers it with a raw prd-author HTML dump.
-// import/convert/upload cover the doc-import phrasings ("import this document
-// as a PRD"); a query that is a tickets command is never a PRD command, so
-// "convert this PRD into tickets" routes to tickets in every dispatcher
-// regardless of check order.
+// A query that is a tickets command is never a PRD command, so "convert this
+// PRD into tickets" routes to tickets in every dispatcher regardless of check
+// order.
+// "spec this/it out (for X)" names no PRD noun but is the same command — the
+// deictic pronoun means "what we've been discussing", which the generic-command
+// conversation seeding already handles when no topic follows.
+const PRD_SPEC_OUT_RE = /\bspec\s+(?:this|that|it)\s+out\b/i
 export const isPrdCommand = (q: string) =>
-  /\b(generate|create|write|draft|make|import|convert|upload)\b.*\bprd\b/i.test(q) && !isTicketsCommand(q)
+  !isTicketsCommand(q) &&
+  !PRD_QUESTION_RE.test(q) &&
+  (PRD_SPEC_OUT_RE.test(q) ||
+    (PRD_NOUN_RE.test(q) && (PRD_COMMAND_RE.test(q) || PRD_NOUN_FIRST_RE.test(q))))
 
 // Courtesy / filler tails that don't name a task ("generate a PRD please").
 const PRD_TASK_TAIL = /\b(please|now|thanks|thank you|asap|for me|for us)\b/gi
@@ -121,16 +188,34 @@ function cleanPrdTask(raw: string): string | null {
  *  top-insight behavior. Two shapes: the task AFTER "prd" ("generate a PRD for
  *  dark mode on mobile") or BETWEEN the verb and "prd" ("draft a dark-mode
  *  PRD"). Exported so ChatScreen and the brief composer split on the SAME rule. */
+const PRD_TASK_AFTER_RE = new RegExp(
+  `\\b${PRD_NOUN_SRC}\\b[\\s:,-]*(?:(?:for|about|on|around|covering|regarding|of|to|based\\s+on)\\b[\\s:,-]*)?(.+)$`,
+  "i",
+)
+// "spec this out for X" — the task follows the verb phrase, not a noun.
+const PRD_TASK_SPEC_OUT_RE =
+  /\bspec\s+(?:this|that|it)\s+out\b[\s:,-]*(?:(?:for|about|on|covering|regarding|based\s+on)\b[\s:,-]*)?(.+)$/i
+// Only authoring/ask verbs here — import/convert/upload phrasings name a
+// document, not a task ("import this document as a PRD").
+const PRD_TASK_BETWEEN_RE = new RegExp(
+  `\\b(?:generate|create|write|draft|make|build|prepare|produce|compose|develop|author|give|need|want|put\\s+together|come\\s+up\\s+with|spin\\s+up|whip\\s+up)\\b\\s+(.*?)\\s*\\b${PRD_NOUN_SRC}\\b`,
+  "i",
+)
+
 export function prdCommandTask(q: string): string | null {
   if (!isPrdCommand(q)) return null
-  const after = /\bprd\b[\s:,-]*(?:(?:for|about|on|around|covering|regarding|of|to)\b[\s:,-]*)?(.+)$/i.exec(q)
+  const specOut = PRD_TASK_SPEC_OUT_RE.exec(q)
+  if (specOut) {
+    // Bare "spec this out" (no topic after) extracts nothing → null → the
+    // caller seeds from the conversation, which is what the deictic means.
+    return cleanPrdTask(specOut[1])
+  }
+  const after = PRD_TASK_AFTER_RE.exec(q)
   if (after) {
     const task = cleanPrdTask(after[1])
     if (task) return task
   }
-  // Only authoring verbs here — import/convert/upload phrasings name a document,
-  // not a task ("import this document as a PRD").
-  const between = /\b(?:generate|create|write|draft|make)\b\s+(.*?)\s*\bprd\b/i.exec(q)
+  const between = PRD_TASK_BETWEEN_RE.exec(q)
   if (between) {
     const task = cleanPrdTask(between[1])
     if (task) return task
@@ -249,13 +334,15 @@ function BriefFindingCard({
   busy,
   generating,
   dismissed,
+  deferred,
   showActions,
   onAsk,
   onGenerateAll,
   onViewPrd,
+  onViewEvidence,
   onDismiss,
+  onDefer,
   onRestore,
-  onPreview,
   insightState,
   mapLoading,
 }: {
@@ -263,6 +350,9 @@ function BriefFindingCard({
   busy: boolean
   generating: boolean
   dismissed: boolean
+  // "Not now": same grey-out treatment as dismissed, distinct hint — the
+  // finding comes back next cycle instead of staying out.
+  deferred: boolean
   // True while the brief-prototype map is still fetching — the PRD CTA shows a
   // neutral "Loading…" until we know whether this insight already has a PRD.
   mapLoading: boolean
@@ -273,9 +363,10 @@ function BriefFindingCard({
   onAsk: () => void
   onGenerateAll: () => void
   onViewPrd: () => void
+  onViewEvidence: () => void
   onDismiss: () => void
+  onDefer: () => void
   onRestore: () => void
-  onPreview: () => void
   insightState?: {
     hasPrd: boolean
     prdId: number | null
@@ -285,7 +376,7 @@ function BriefFindingCard({
   } | null
 }) {
   const accent = finding.actionAccent
-  // Weekly-brief skill design: the card accent is the finding type's canonical
+  // Top-insights skill design: the card accent is the finding type's canonical
   // hex (derived from type, set as a CSS var the pill / left bar / PRD button
   // read), and the category pill shows the type name only (no P0/P1).
   const accentStyle = { ["--card-accent"]: finding.skillAccent } as React.CSSProperties
@@ -294,15 +385,18 @@ function BriefFindingCard({
   // Greys the card out in place — keeps the finding present (not deleted) and
   // hides the heavy detail/viz, exposing a "click to restore" affordance.
   // Clicking the card body (or the restore button) un-greys it.
-  if (dismissed) {
+  if (dismissed || deferred) {
+    const hint = deferred && !dismissed
+      ? "Not now — back next cycle · click to restore"
+      : "Dismissed · click to restore"
     return (
       <article
         className={`fc fc--${accent} fc--dismissed`}
         style={accentStyle}
         role="button"
         tabIndex={0}
-        title="Dismissed · click to restore"
-        aria-label={`Dismissed finding: ${finding.title}. Click to restore.`}
+        title={hint}
+        aria-label={`${deferred && !dismissed ? "Deferred" : "Dismissed"} finding: ${finding.title}. Click to restore.`}
         onClick={onRestore}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -326,7 +420,7 @@ function BriefFindingCard({
             <IconUndo size={13} />
           </button>
         </div>
-        <span className="fc-dismissed-hint">Dismissed · click to restore</span>
+        <span className="fc-dismissed-hint">{hint}</span>
       </article>
     )
   }
@@ -339,9 +433,19 @@ function BriefFindingCard({
           <span className="fc-dot" aria-hidden />
           {finding.skillLabel}
         </span>
+        {/* Ledger freshness: an updated finding is back because it changed —
+            the chip says so, and the body's first beat states the change. */}
+        {finding.skillState === "updated" ? (
+          <span className="fc-pill fc-pill--updated" title="Back because it materially changed since it last surfaced">
+            Updated
+          </span>
+        ) : null}
         <div className="fc-top-right">
           <button type="button" className="fc-iconbtn" title="Ask about this finding" aria-label="Ask about this finding" onClick={onAsk}>
             <IconSparkle size={13} />
+          </button>
+          <button type="button" className="fc-iconbtn" title="Not now — bring this back next cycle" aria-label="Defer finding" onClick={onDefer}>
+            <IconClock size={13} />
           </button>
           <button type="button" className="fc-iconbtn" title="Dismiss" aria-label="Dismiss finding" onClick={onDismiss}>
             <IconClose size={13} />
@@ -362,7 +466,7 @@ function BriefFindingCard({
             </div>
           ) : null}
 
-          {/* "From" source-chip row — the weekly-brief skill's honest provenance
+          {/* "From" source-chip row — the top-insights skill's honest provenance
               row (assets/brief-template.html). Replaces the legacy mini-chart +
               KPI stat columns: the skill puts numbers in the title/body, and a
               quiet source row under it (never implies convergence that didn't
@@ -377,16 +481,32 @@ function BriefFindingCard({
           ) : null}
 
           {/* Action buttons — hidden entirely when the brief has no real data
-              behind it (insufficient-evidence / empty case): a Generate PRD /
-              prototype affordance makes no sense without findings to act on. */}
+              behind it (insufficient-evidence / empty case): evidence / PRD
+              affordances make no sense without findings to act on.
+
+              Top-insights skill CTA posture ("the skill reports; the PM
+              decides", SKILL.md step 8): the PRIMARY action is the evidence —
+              the reader investigates the basis for the claim first. The PRD
+              sits in the ghost slot: "Generate PRD" until one exists, then
+              "View PRD". The prototype no longer appears on cards — it stays
+              reachable from the PRD flow. */}
           {showActions ? (
           <div className="fc-actions">
+            <button
+              type="button"
+              className="fc-btn-prd fc-btn-prd--skill"
+              onClick={onViewEvidence}
+              title="See what this finding rests on — the signals, quotes, and datapoints behind it"
+            >
+              <IconFileText size={14} />
+              View Evidence
+            </button>
             {(() => {
               const cta = prdCtaState(insightState, generating, mapLoading)
               return (
                 <button
                   type="button"
-                  className="fc-btn-prd fc-btn-prd--skill"
+                  className="fc-btn-secondary"
                   onClick={cta.isView ? onViewPrd : onGenerateAll}
                   // View is a cheap read — allowed while another job is busy;
                   // Generate is gated on `busy` as before. While the map is still
@@ -398,23 +518,11 @@ function BriefFindingCard({
                       : "Generates the full system: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
                   }
                 >
-                  <IconFileText size={14} />
+                  <IconTerminalPrompt size={13} />
                   {cta.label}
                 </button>
               )
             })()}
-            {/* View-only prototype affordance. The weekly brief no longer
-                offers GENERATE prototype on finding cards — prototypes are
-                generated from the PRD flow. A prototype that already exists
-                (built earlier, e.g. from the PRD chat) stays reachable here as
-                "View prototype": prototypeReady is only true once one is
-                actually built and saved. */}
-            {insightState?.prototypeReady ? (
-              <button type="button" className="fc-btn-secondary" onClick={onPreview}>
-                <IconTerminalPrompt size={13} />
-                View prototype
-              </button>
-            ) : null}
           </div>
           ) : null}
         </div>
@@ -442,7 +550,7 @@ function BriefGeneratingState() {
     <div className="bc-generating" role="status" aria-live="polite">
       <span className="bc-generating-spinner" aria-hidden />
       <div className="bc-generating-copy">
-        <p className="bc-generating-title">Generating your Weekly brief…</p>
+        <p className="bc-generating-title">Generating your Top Insights…</p>
         <p className="bc-generating-sub">
           Analyzing your sources — this usually takes a minute.
         </p>
@@ -473,10 +581,11 @@ function BriefRefreshingBanner() {
 // connector (see hasEvidenceConnector). This is a dead end the user cannot
 // resolve by waiting — the brief will never generate — so unlike the greeting's
 // soft "add more sources" line it explains the causal chain and hands over a
-// single primary action. Delivery-only connectors (Slack) and work trackers
-// (Jira) don't clear this state, which is exactly the confusion the copy names:
-// a user who connected Slack has "connected something" and needs to be told why
-// the brief is still empty.
+// single primary action. Work trackers (Jira) and code hosts (GitHub) don't
+// clear this state, which is exactly the confusion the copy names: a user who
+// connected Jira has "connected something" and needs to be told why the brief
+// is still empty. (Slack DOES clear it since 2026-07-30 — it is dual-typed
+// communication + customer-voice and its synced channels are evidence.)
 function BriefNoConnectorState({ onConnect }: { onConnect: () => void }) {
   return (
     <div className="bc-empty" role="region" aria-labelledby="bc-empty-title">
@@ -515,7 +624,7 @@ function BriefNoConnectorState({ onConnect }: { onConnect: () => void }) {
         Connect a source
       </button>
       <p className="bc-empty-foot">
-        Already connected Slack or Jira? Those deliver and track the work —
+        Already connected Jira or GitHub? Those track and ship the work —
         Top Insights still needs a source that brings evidence in.
       </p>
     </div>
@@ -527,6 +636,11 @@ export function BriefChat() {
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
+  const { workspace } = useWorkspace()
+  // Action-envelope dispatch (staged rollout, staff-panel flag) — see
+  // ChatScreen.submitAsk for the full story. On the brief tab the envelope
+  // replaces the isPrdCommand/isPrototypeCommand/isTicketsCommand triage.
+  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
   // Keep the pipeline-status poll mounted (other surfaces rely on its side
   // effects); the brief header no longer reads its result directly.
   usePipelineStatus(activeCompany)
@@ -536,6 +650,11 @@ export function BriefChat() {
   const [busy, setBusy] = useState(false)
   const [cardBusyKey, setCardBusyKey] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+  // "Not now" (defer) — same grey-out mechanics as dismiss, separate meaning:
+  // the server ledger suppresses the theme until its deferral expires, then it
+  // returns at full rank. Kept in its own set/storage key so the two actions
+  // stay distinguishable in the UI and in the ledger.
+  const [deferredKeys, setDeferredKeys] = useState<Set<string>>(new Set())
   const busyRef = useRef(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -653,9 +772,20 @@ export function BriefChat() {
     } catch {
       /* ignore corrupt storage */
     }
+    let restoredDeferred = new Set<string>()
+    try {
+      const rawD = localStorage.getItem(`${dismissKey}:deferred`)
+      if (rawD) {
+        const parsedD = JSON.parse(rawD)
+        if (Array.isArray(parsedD)) restoredDeferred = new Set(parsedD.filter((k) => typeof k === "string"))
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
     skipDismissPersistRef.current = true
     dismissKeyRef.current = dismissKey
     setDismissed(restored)
+    setDeferredKeys(restoredDeferred)
   }, [dismissKey])
 
   // ── Persist dismissed set (skip the write a fresh restore triggers) ────────
@@ -668,10 +798,11 @@ export function BriefChat() {
     }
     try {
       localStorage.setItem(key, JSON.stringify([...dismissed]))
+      localStorage.setItem(`${key}:deferred`, JSON.stringify([...deferredKeys]))
     } catch {
       /* best effort */
     }
-  }, [dismissed])
+  }, [dismissed, deferredKeys])
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }))
@@ -702,7 +833,7 @@ export function BriefChat() {
   }, [])
 
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
-  const prdFlow = useCallback(async (query?: string) => {
+  const prdFlow = useCallback(async (query?: string, taskOverride?: string | null) => {
     // PRD generation is a COMMAND, not a conversation. It opens the PRD as its
     // OWN chat tab (with the Evidence / PRD / Tickets panel over it), never as a
     // bottom chat message. Resolve the brief's top insight, then hand off via
@@ -712,7 +843,9 @@ export function BriefChat() {
       // the PRD from the user's own words: the backend synthesizes the insight
       // (find-or-create keyed on the task text) and returns a generating prd_id
       // that opens in the standard PRD tab via the resume path.
-      const task = query ? prdCommandTask(query) : null
+      // The envelope's task (synthesized from the conversation) wins over the
+      // regex extractor, which only sees the message's own words.
+      const task = taskOverride ?? (query ? prdCommandTask(query) : null)
       if (task) {
         const { prdApi } = await import("../../lib/api")
         const start = await prdApi.generateFromTask(task)
@@ -730,7 +863,7 @@ export function BriefChat() {
         return
       }
       openPrdTab({
-        title: "PRD · Weekly brief",
+        title: "PRD · Top Insights",
         source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
       })
     } catch (e) {
@@ -781,9 +914,22 @@ export function BriefChat() {
     scrollToEnd()
   }, [content.prd, router, scrollToEnd])
 
+  // "View evidence" chip on an agent turn in the brief thread. Same destination
+  // as the card CTA — a chat tab with the Evidence panel over it — so evidence
+  // never slides in over Top Insights from either affordance. This path has no
+  // finding in hand, so it uses whichever one is currently in scope; with none
+  // (nothing opened yet) the panel opens in place, as before.
   const evidenceFlow = useCallback(() => {
-    openContentPanel("evidence")
-  }, [openContentPanel])
+    const detail = content.detail
+    if (!detail?.meta) {
+      openContentPanel("evidence")
+      return
+    }
+    openPrdTab({
+      title: `Evidence · ${detail.title || "Brief finding"}`,
+      source: { kind: "evidence", meta: detail.meta, detail },
+    })
+  }, [content.detail, openContentPanel, openPrdTab])
 
   const multiAgentFlow = useCallback(async () => {
     const aId = uid()
@@ -875,21 +1021,59 @@ export function BriefChat() {
       // Hand it to the host ChatScreen, which opens a fresh chat tab seeded with
       // the query (one new tab per chat started here). PRD / prototype / tickets
       // are COMMANDS that drive the right rail in place, so they stay on the brief.
-      const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
-      if (!isCommand) {
-        setPendingChatHandoff({ query: q })
+      const legacyDispatch = () => {
+        const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
+        if (!isCommand) {
+          setPendingChatHandoff({ query: q })
+          return
+        }
+        // A PRD command opens its work in the right rail (no chat turn), so don't
+        // echo it as a chat message either — it's a command, not a conversation.
+        if (!isPrdCommand(q)) appendUser(q)
+        void runGate(() => {
+          if (isPrdCommand(q)) return prdFlow(q)
+          if (isPrototypeCommand(q)) return prototypeFlow()
+          return ticketsFlow()
+        })
+      }
+      if (!envelopeDispatchEnabled) {
+        legacyDispatch()
         return
       }
-      // A PRD command opens its work in the right rail (no chat turn), so don't
-      // echo it as a chat message either — it's a command, not a conversation.
-      if (!isPrdCommand(q)) appendUser(q)
-      void runGate(() => {
-        if (isPrdCommand(q)) return prdFlow(q)
-        if (isPrototypeCommand(q)) return prototypeFlow()
-        return ticketsFlow()
-      })
+      // Action-envelope dispatch: the backend decides, grounded on the open
+      // PRD (the brief tab threads no conversation, so no conversation_id).
+      // Fail-open: any failure → the legacy regex triage above.
+      void (async () => {
+        const envelope = await import("../../lib/api")
+          .then(({ chatIntentApi }) =>
+            chatIntentApi.resolve(q, { prdId: content.prd?.prd_id ?? null }),
+          )
+          .catch(() => null)
+        if (!envelope) {
+          legacyDispatch()
+          return
+        }
+        switch (envelope.intent) {
+          case "generate_prd":
+            void runGate(() => prdFlow(q, envelope.task))
+            return
+          case "generate_prototype":
+            appendUser(q)
+            void runGate(() => prototypeFlow())
+            return
+          case "generate_tickets":
+            appendUser(q)
+            void runGate(() => ticketsFlow())
+            return
+          default:
+            // answer / edit_prd: the brief rail has no edit flow — hand the
+            // message to a real chat tab, whose grounded ask (and its own
+            // envelope pass) can act on it.
+            setPendingChatHandoff({ query: q })
+        }
+      })()
     },
-    [appendUser, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
+    [appendUser, content.prd, envelopeDispatchEnabled, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
   )
 
   const onAction = useCallback(
@@ -1005,8 +1189,38 @@ export function BriefChat() {
     [content.briefDetails, activeCompany, openContentPanel, setContent, showToast, refetchPrototypeMap],
   )
 
+  // Primary card CTA (top-insights skill posture): open the evidence behind this
+  // finding — as its OWN chat tab, the way "View PRD" already opens one, rather
+  // than sliding the panel over Top Insights itself. openPrdTab routes to `/` and
+  // ChatScreen spawns the tab, then slides the same Evidence / PRD / Tickets panel
+  // in over it, landed on Evidence. The card's DetailState rides along: it scopes
+  // ContentPanel's Evidence tab to this insight, which then loads (or generates,
+  // deduped server-side) that insight's evidence and streams it in.
+  const cardViewEvidence = useCallback(
+    (finding: Finding) => {
+      const key = finding.detailKey
+      const detail = key ? content.briefDetails?.[key] : null
+      const meta = detail?.meta
+      // No meta (legacy brief shape) — there's no insight to scope a tab to, so
+      // fall back to opening the panel in place; the tab shows its own
+      // empty/generate state rather than the button dead-ending.
+      if (!meta) {
+        openContentPanel("evidence")
+        return
+      }
+      openPrdTab({
+        title: `Evidence · ${finding.title || "Brief finding"}`,
+        insightBody: finding.body,
+        source: { kind: "evidence", meta, detail: detail ?? null },
+      })
+    },
+    [content.briefDetails, openContentPanel, openPrdTab],
+  )
+
   // Dismiss greys the card out in place (it stays in the list); restore un-greys
-  // it. Toggling the dismissed set drives both — and the persist effect writes it.
+  // it. Toggling the dismissed set drives both — and the persist effect writes
+  // it. The server ledger is updated fire-and-forget: dismissed = "not
+  // interested", stays out unless the issue materially worsens.
   const cardDismiss = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
@@ -1016,43 +1230,34 @@ export function BriefChat() {
       next.add(key)
       return next
     })
-  }, [])
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.dismiss(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
+
+  // "Not now" (defer) — interested, wrong moment. Greys the card like dismiss;
+  // the server ledger suppresses it until the deferral expires, then it
+  // re-enters the next brief at full rank even if unchanged.
+  const cardDefer = useCallback((finding: Finding) => {
+    const key = finding.detailKey
+    if (!key) return
+    setDeferredKeys((s) => {
+      if (s.has(key)) return s
+      const next = new Set(s)
+      next.add(key)
+      return next
+    })
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.defer(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
 
   // Prototype-preview click — context-aware routing:
   //   case 1: ready prototype → open it
   //   case 2: PRD exists, no prototype → open generate modal
   //   case 3: no PRD → PRD-first flow
-  const cardPreview = useCallback(
-    (finding: Finding) => {
-      const key = finding.detailKey
-      const detail = key ? content.briefDetails?.[key] : null
-      const meta = detail?.meta
-      if (!meta) {
-        // case 3: no detail meta — fall back to PRD-first flow
-        void runGate(() => prototypeFlow())
-        return
-      }
-      const state = prototypeStateForInsight(entriesByInsight, meta.insightIndex)
-      if (state.hasPrd && state.prototypeReady && state.prdId != null) {
-        // case 1: prototype ready → open it in the in-tab canvas at
-        // /prototype?prd=<id>, matching the PRD-drawer preview card's nav
-        // (ApproveModal / DesignAgentLauncher use router.push(prototypePath(prdId))).
-        // goTo("prototype") alone navigates the screen WITHOUT the ?prd= param, so
-        // PrototypeRoute has no PRD to resolve and the editor never loads.
-        // prototypePrdId: the PRD the prototype is actually attached to (may be
-        // an older PRD than the insight's newest after a PRD regeneration).
-        router.push(prototypePath(state.prototypePrdId ?? state.prdId))
-      } else if (state.hasPrd && !state.prototypeReady && state.prdId != null) {
-        // case 2: PRD exists but no prototype → open generate modal
-        setGenPrdId(state.prdId)
-        gen.openGenerateModal()
-      } else {
-        // case 3: no PRD → PRD-first flow
-        void runGate(() => cardGeneratePrd(finding))
-      }
-    },
-    [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd, gen.openGenerateModal],
-  )
+  // (The old per-card prototype-preview routing lived here as `cardPreview`.
+  // The top-insights CTA posture removed the prototype affordance from cards —
+  // prototypes stay reachable from the PRD flow — so the card no longer wires
+  // it; handleChatPrototype still owns the chat surface's prototype flow.)
 
   // "View PRD" — open the insight's EXISTING PRD at /prd?prd=<id> (mirrors the
   // "View prototype" router.push(prototypePath(prdId)) nav). Safety fallback to
@@ -1105,7 +1310,17 @@ export function BriefChat() {
       next.delete(key)
       return next
     })
-  }, [])
+    setDeferredKeys((s) => {
+      if (!s.has(key)) return s
+      const next = new Set(s)
+      next.delete(key)
+      return next
+    })
+    // Undo returns the theme to the normal lifecycle server-side too, so the
+    // next run doesn't suppress a card the reader visibly brought back.
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.restore(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
 
   // ── Composer handlers ─────────────────────────────────────────────────────
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1137,6 +1352,21 @@ export function BriefChat() {
     if (!v2) return []
     return [v2.hero, ...v2.supporting].filter(Boolean) as Finding[]
   }, [v2])
+  // Per-user Top Insights filter: show the findings whose insight types
+  // intersect this member's Settings selection (content.insightTypeFilter,
+  // loaded by AppShell). Empty selection — or a selection that matches none of
+  // this week's findings — surfaces all of them (never a blank surface). Only
+  // the RENDERED set is filtered; the canonical brief, its indices, and every
+  // Generate-PRD/prototype CTA stay bound to the top-3 the backend persisted.
+  const visibleFindings: Finding[] = useMemo(() => {
+    const filter = content.insightTypeFilter ?? []
+    if (filter.length === 0) return findings
+    const wanted = new Set(filter)
+    const matched = findings.filter((f) =>
+      (f.insightTypes ?? []).some((t) => wanted.has(t)),
+    )
+    return matched.length > 0 ? matched : findings
+  }, [findings, content.insightTypeFilter])
   // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
   // finding is never removed — only collapsed until restored.
 
@@ -1150,7 +1380,7 @@ export function BriefChat() {
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
-  // "Monday brief · 7:01 AM" line in the agent head, from the brief's
+  // "Top Insights · 7:01 AM" line in the agent head, from the brief's
   // generated_at. Hidden when there's no brief (or no timestamp on it).
   const briefTimeLabel = useMemo(() => {
     if (!v2?.generatedAt) return null
@@ -1178,7 +1408,7 @@ export function BriefChat() {
     && !hasEvidenceConnector(content.connectedConnectorIds)
 
   return (
-    <section className="briefx" aria-label="Weekly brief">
+    <section className="briefx" aria-label="Top Insights">
         <div className="bc-scroll">
           <div className="bc-thread">
             {/* PM coworker brief message — greeting + stacked finding cards */}
@@ -1193,7 +1423,7 @@ export function BriefChat() {
                   Product Coworker
                 </span>
                 {briefTimeLabel ? (
-                  <span className="bc-agent-status">Monday brief · {briefTimeLabel}</span>
+                  <span className="bc-agent-status">Top Insights · {briefTimeLabel}</span>
                 ) : null}
               </div>
               <div className="bc-agent-body">
@@ -1209,9 +1439,9 @@ export function BriefChat() {
                     the old separate persistent-intro + greeting that double-led
                     with "Good day {name}". */}
                 <p className="bc-greeting">{greeting}</p>
-                {findings.length > 0 ? (
+                {visibleFindings.length > 0 ? (
                   <div className="fc-stack">
-                    {findings.map((f) => {
+                    {visibleFindings.map((f) => {
                       const key = f.detailKey
                       const meta = key ? content.briefDetails?.[key]?.meta : undefined
                       const insightState = meta != null
@@ -1224,13 +1454,15 @@ export function BriefChat() {
                           busy={busy}
                           generating={cardBusyKey === f.detailKey}
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
+                          deferred={!!f.detailKey && deferredKeys.has(f.detailKey)}
                           showActions={hasRealData}
                           onAsk={() => cardAsk(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
+                          onViewEvidence={() => cardViewEvidence(f)}
                           onDismiss={() => cardDismiss(f)}
+                          onDefer={() => cardDefer(f)}
                           onRestore={() => cardRestore(f)}
-                          onPreview={() => cardPreview(f)}
                           insightState={insightState}
                           mapLoading={prototypeMapLoading}
                         />
@@ -1242,6 +1474,14 @@ export function BriefChat() {
                   <div className="fc-sources">
                     <span className="fc-sources-label">Sources this week</span>
                     <span>{v2.sourcesLine}</span>
+                  </div>
+                ) : null}
+                {/* Ledger transparency: what was held back this cycle and why —
+                    "what am I not seeing" always has an answer. Counts only;
+                    anything worth acting on is a card above. */}
+                {v2?.heldBackLine ? (
+                  <div className="fc-sources fc-heldback">
+                    <span>{v2.heldBackLine}</span>
                   </div>
                 ) : null}
                 </>
@@ -1270,7 +1510,7 @@ export function BriefChat() {
 
         {/* The brief's own chat box (composer/dock) was removed: chatting now
             happens in each PRD's own chat tab, which carries the chat box. The
-            weekly brief is a read surface — greeting + finding cards whose
+            Top Insights brief is a read surface — greeting + finding cards whose
             action buttons (Generate PRD / View prototype) drive the work. */}
       {gen.generateModalProps.open && genPrdId != null && (
         <GenerateModal {...gen.generateModalProps} />

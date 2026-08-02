@@ -2,7 +2,7 @@
 //
 // ChatScreen brief-tab DOM tests.
 //
-// The Weekly Brief is the pinned, non-closable FIRST tab of the unified
+// The Top Insights brief is the pinned, non-closable FIRST tab of the unified
 // home surface (ChatScreen). It is synthesized in the render — never stored in
 // the `tabs` state/localStorage — and is the DEFAULT active tab on first load.
 // Selecting it renders <BriefChat/> in place of the chat landing/thread; the "+"
@@ -49,6 +49,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: { create: vi.fn(), addTurn: vi.fn() },
@@ -163,7 +164,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // BriefChat's greeting renders ("Good day … here's this week's brief" or the
     // no-sources variant), and the chat landing's "Welcome back" must be absent.
     expect(screen.queryByText(/Welcome back/i)).toBeNull()
-    // BriefChat's root <section class="briefx" aria-label="Weekly brief"> is on
+    // BriefChat's root <section class="briefx" aria-label="Top Insights"> is on
     // screen (scoped by class, not by accessible name).
     expect(briefSection()).not.toBeNull()
   })
@@ -240,7 +241,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // One "New chat" chip is present and we're on the landing composer.
     expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
 
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "what is our churn" } })
@@ -386,7 +387,7 @@ describe("ChatScreen — brief tab gaps (B5–B8)", () => {
     expect(screen.getByText("persisted question")).toBeTruthy()
     expect(briefSection()).toBeNull()
 
-    // Route lands on /brief (sidebar "Weekly brief" → goTo("brief")). The
+    // Route lands on /brief (sidebar "Top Insights" → goTo("brief")). The
     // currentScreen effect must switch the surface to the pinned brief tab.
     act(() => {
       pathname = "/brief"

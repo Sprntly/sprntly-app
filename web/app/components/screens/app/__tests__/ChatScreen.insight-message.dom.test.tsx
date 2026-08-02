@@ -38,6 +38,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: {
@@ -295,7 +296,7 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
-  it("shows a neutral 'Loading…' (not 'Generate PRD') while the map is still loading", async () => {
+  it("shows a neutral 'Loading PRD…' (not 'Generate PRD') while the map is still loading", async () => {
     // Map still in flight → we don't yet know if a PRD exists. The CTA must not
     // flash "Generate PRD" (it would flip to "View PRD" the instant the map lands).
     mapState.loading = true
@@ -306,7 +307,7 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
 
     await act(async () => { renderRestored() })
 
-    const btn = within(insightMsg()).getByRole("button", { name: "Loading…" })
+    const btn = within(insightMsg()).getByRole("button", { name: "Loading PRD…" })
     expect(btn).toBeTruthy()
     expect((btn as HTMLButtonElement).disabled).toBe(true)
     // Never the premature "Generate PRD" (nor a wrong "View PRD") mid-load.

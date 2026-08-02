@@ -48,22 +48,28 @@ from app.routes import (
     ask,
     brief,
     business_context as business_context_routes,
+    chat,
     company,
     connectors,
     conversations,
+    custom_skills as custom_skills_routes,
     datasets as datasets_routes,
     design_agent,
     design_agent_bundle,
     design_agent_comments,
+    documents,
     feedback,
     ideation,
     ingest,
     internal_mcp,
+    jira_write,
     metrics,
     mcp_tokens,
     multi_agent,
     onboarding,
     oncall,
+    reports,
+    reports_public,
     research,
     staff_admin,
     stories,
@@ -71,6 +77,7 @@ from app.routes import (
     team,
     tickets,
     transcripts,
+    usage as usage_routes,
     workspaces as workspaces_routes,
     evidence,
     health,
@@ -169,6 +176,34 @@ async def lifespan(app: FastAPI):
             "Failed %d orphan generating Ask job(s)",
             job_ask_orphans,
         )
+    # Same for pipeline_runs (the regenerate / regenerate-all durable run rows):
+    # a restart mid-run leaves the row 'running' forever with no owner. Age-
+    # gated for the same shared-Supabase reason as ask_jobs above; the
+    # scheduler's heal job repeats this every 5m, and a user retry supersedes
+    # the stale row immediately (routes/brief._start_durable_run).
+    try:
+        run_orphans = db.fail_orphan_running_runs()
+        if run_orphans:
+            logger.info(
+                "Failed %d orphan running pipeline run(s) (restart interrupt)",
+                run_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan pipeline-run sweep failed at startup")
+    # Same for company_research_runs (the deep web-research sweep): a restart
+    # mid-run leaves the row 'running' forever, which would also wedge the
+    # in-flight guard so the company could never be researched again. Age-gated
+    # for the same shared-Supabase reason; repeated by the scheduler every 5m.
+    try:
+        research_orphans = db.fail_orphan_company_research_runs()
+        if research_orphans:
+            logger.info(
+                "Failed %d orphan running company-research run(s) "
+                "(restart interrupt)",
+                research_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan company-research sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
@@ -241,6 +276,28 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Slack report runs still in flight at SHUTDOWN: the user was acknowledged
+    # ("~5-10 minutes") and the run is about to die with the process, so tell
+    # them to ask again rather than leaving the thread silent forever.
+    #
+    # This runs on SHUTDOWN, not startup, and that is the whole point: the
+    # markers live in-process, so by the time a fresh process boots its registry
+    # is empty by construction and a startup sweep could never fire. Here the
+    # event loop is still alive and the bot token is still readable, so the
+    # notice actually goes out. Runs BEFORE the Design Agent drain (which can
+    # take ~200s) so the message lands promptly.
+    try:
+        from app.routes.connectors import sweep_interrupted_slack_reports
+
+        swept = await asyncio.to_thread(sweep_interrupted_slack_reports)
+        if swept:
+            logger.info(
+                "Notified %d interrupted Slack report run(s) at shutdown",
+                len(swept),
+            )
+    except Exception:  # noqa: BLE001 — shutdown must never break on bookkeeping
+        logger.exception("Interrupted Slack report sweep failed at shutdown")
+
     # ── Tier 0: graceful drain of in-flight Design Agent generation ────
     # On a deploy/restart SIGTERM, stop admitting new /generate work, then wait
     # for any in-flight generation to finish (up to a tunable deadline) so the
@@ -283,6 +340,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # RESPONSE headers JS is allowed to read cross-origin. Without this the
+    # browser hides Content-Disposition from fetch(), so the report PDF download
+    # cannot recover the server's filename and every file saves as the generic
+    # fallback. `allow_headers` above governs REQUEST headers and does not help.
+    expose_headers=["Content-Disposition"],
 )
 
 # Bind the acting company for per-request Claude-key resolution/enforcement.
@@ -297,11 +359,21 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
+app.include_router(reports.router)
+# Renders a client-assembled document (PRD, Evidence, or the two combined) to PDF
+# through the same Chromium renderer the report download uses — see
+# routes/documents.py for why the HTML comes from the client.
+app.include_router(documents.router)
+# No-auth share viewer for reports (`/r/<token>`). Registered separately from
+# reports.router so the unauthenticated surface stays visible in this list.
+app.include_router(reports_public.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
+app.include_router(chat.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)
+app.include_router(jira_write.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 # Bundle proxy (Option B) registered BEFORE design_agent.router (plan fix-item #2)
@@ -328,10 +400,12 @@ app.include_router(business_context_routes.router)
 app.include_router(onboarding.router)
 app.include_router(tickets.router)
 app.include_router(conversations.router)
+app.include_router(custom_skills_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(workspaces_routes.router)
 app.include_router(admin.router)
+app.include_router(usage_routes.router)
 app.include_router(staff_admin.router)
 app.include_router(staff_admin.claim_router)
 app.include_router(transcripts.router)

@@ -20,11 +20,15 @@ const TIER: Record<PasswordStrength, string> = {
   strong: "on3",
 }
 
+// Advice, not rules. A symbol is no longer required, so no hint asks for one as
+// though it were — and "strong" no longer claims to be where requirements are
+// met, because they are already met well before it. Length leads throughout:
+// it is both the biggest real factor and the easiest thing to act on.
 const HINT: Record<PasswordStrength, string> = {
-  weak: "Weak — add length, a number and a symbol",
-  fair: "Fair — add a number or symbol",
-  good: "Good — almost there",
-  strong: "Strong — meets all requirements ✓",
+  weak: "Weak — aim for 12+ characters",
+  fair: "Fair — longer, or mix in a number or symbol",
+  good: "Good — a few more characters makes it strong",
+  strong: "Strong ✓",
 }
 
 export function PasswordStrengthBar({ password }: { password: string }) {

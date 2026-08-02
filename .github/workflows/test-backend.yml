@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'  # MUST match the EC2 runtime (prod+staging venvs are 3.11) — newer CI Pythons accept syntax (e.g. PEP 701 f-strings) that breaks the deploy; see backend/tests/test_runtime_compat.py
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 
@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'  # MUST match the EC2 runtime (prod+staging venvs are 3.11) — newer CI Pythons accept syntax (e.g. PEP 701 f-strings) that breaks the deploy; see backend/tests/test_runtime_compat.py
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 

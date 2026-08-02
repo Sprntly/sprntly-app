@@ -902,10 +902,9 @@ export function PrototypeRoute() {
   // "Notify me when ready" — dismiss the full-screen loading overlay, show a
   // processing toast, signal the shell's PrototypeGeneratingCard (da:generating),
   // hand off the completion poll to the shell owner (da:notify-generation), and
-  // navigate away so the user can keep working. Guarded: no-op when no in-flight
-  // prototype id exists yet (the generate POST hasn't returned). On navigate, prefer
-  // history.back(); fall back to the bare prototype path when there is no history
-  // entry to return to (fresh tab / direct open).
+  // navigate straight to Top Insights so the user can keep working. Guarded:
+  // no-op when no in-flight prototype id exists yet (the generate POST
+  // hasn't returned).
   const handleNotifyWhenReady = useCallback(() => {
     if (genProtoId == null) return
     showToast("Prototype is processing", "We'll let you know when it's ready.")
@@ -913,12 +912,8 @@ export function PrototypeRoute() {
     if (prdId != null) {
       window.dispatchEvent(new CustomEvent("da:notify-generation", { detail: { prototypeId: genProtoId, prdId } }))
     }
-    if (window.history.length > 1) {
-      router.back()
-    } else {
-      router.push(prototypePath(prdId!))
-    }
-  }, [showToast, genProtoId, prdId, router])
+    goTo("brief")
+  }, [showToast, genProtoId, prdId, goTo])
 
   // Mounted unconditionally, BEFORE the early-return chain below — this is
   // the entire point. This route's own GenerationLoadingScreen instance sits
@@ -931,7 +926,7 @@ export function PrototypeRoute() {
   useDesignAgentLiveTerminal(genProtoId, handleLiveTerminal)
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
-  // user to the weekly brief, where a PRD opens in the right-rail card and offers
+  // user to the Top Insights brief, where a PRD opens in the right-rail card and offers
   // "Generate Prototype". EXCEPT when a resolved prototype exists — a pid-only
   // deep link (the prototype-ready notification) selects a ready prototype with
   // no `?prd=` in the URL, so the ready branch below must win over this one.

@@ -57,7 +57,14 @@ from __future__ import annotations
 # patterns, safe-area insets, keyboard-aware inputs, scroll-based content) so
 # mobile-flagged runs stop producing desktop-shaped layouts. Changes the
 # scaffold user prompt for mobile/both runs → template-invalidating.
-DESIGN_AGENT_TEMPLATE_VERSION = 9
+# v10 (external-entry-point placeholder): a codebase run whose locate call
+# flagged the PRD's entry point as external (an email/SMS/partner UI/etc — see
+# ExternalEntryPointSignal) and that carries no reference screenshot now
+# appends DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE to the scaffold user
+# turn, asking for one generic best-effort placeholder screen ahead of the
+# real flow instead of dead-ending. Changes the assembled prompt text for that
+# class of run → template-invalidating.
+DESIGN_AGENT_TEMPLATE_VERSION = 10
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -314,6 +321,39 @@ in the screenshot but are not in the PRD.
 """
 
 
+# ─── External-entry-point placeholder directive ───────────────────────────
+# Appended to the scaffold user turn when codebase-locate's SAME LLM call
+# detected that the PRD's entry point genuinely originates OUTSIDE the
+# connected codebase (an email, an SMS, a third-party partner UI, or any other
+# external surface — see ExternalEntryPointSignal in codebase_map/locate.py)
+# and no reference screenshot was provided for this run. A real screenshot
+# always wins: the caller only passes external_surface_hint when
+# has_screenshot is False (render_scaffold_user's elif below is a second,
+# redundant guard so this function stays safe even if a future caller passes
+# both). Generalized by construction — {surface_description} is free text the
+# locate call wrote describing WHAT the external surface is, never a fixed
+# category, so this template never special-cases any one channel (email
+# included). LLM-facing: property-tested for length, required content, and the
+# explicit precedence/best-effort framing.
+DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE = """\
+EXTERNAL ENTRY POINT — GENERIC PLACEHOLDER SCREEN REQUIRED:
+The PRD's flow begins on a surface OUTSIDE this connected codebase: {surface_description}.
+No source for that surface exists in this repo and no reference screenshot was provided,
+so build ONE ADDITIONAL SCREEN as a generic, best-effort stand-in for it before the rest
+of the flow:
+- Make the placeholder CLEARLY generic — a plausible, on-brand representation of the KIND
+  of surface described (an inbox-shaped layout for an email/message, a phone-shaped
+  message thread for an SMS, a simple external-site-shaped page for a third-party portal,
+  etc.) — NOT an attempt at pixel-perfect specificity. A small caption naming it as a
+  placeholder for a step outside this app is welcome.
+- Give it exactly ONE way to continue: a single, obvious action (e.g. "Open" / "Continue"
+  / "Confirm") that navigates into the real screens the PRD describes, so the flow is
+  clickable start to finish.
+- Spend minimal effort here — this is one lightweight scene-setting screen, not the
+  prototype's focus. The rest of the PRD's real screens still get your full attention.
+"""
+
+
 # ─── Target-platform directive ────────────────────────────────────────────
 # The actionable form-factor instruction injected into the scaffold user turn.
 # Keyed on the normalised (lowercased) target platform; anything unrecognised
@@ -377,6 +417,7 @@ def render_scaffold_user(
     figma_frames: str,
     codebase_repo: str | None = None,
     has_screenshot: bool = False,
+    external_surface_hint: str | None = None,
 ) -> str:
     """Render the scaffold user template with the supplied context.
 
@@ -396,6 +437,15 @@ def render_scaffold_user(
     to the user message (this function stays pure-text; a directive that talks
     about an image that is not attached would mislead the agent). When False
     (the default) the output is byte-identical to the pre-screenshot render.
+
+    `external_surface_hint` appends DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE
+    (filled with this text) — set it ONLY when codebase-locate's own read of the
+    PRD flagged the entry point as external (see ExternalEntryPointSignal) AND
+    no chosen screen exists to seed the recreate branch. A real screenshot always
+    WINS over this heuristic: `has_screenshot` takes precedence — when both are
+    truthy, only the screenshot directive renders, so this function itself is
+    safe even if a caller passes both. None/blank (the default) leaves the
+    output byte-identical to the pre-amendment render.
     """
     repo = (codebase_repo or "").strip()
     codebase_block = (
@@ -410,6 +460,14 @@ def render_scaffold_user(
     )
     if has_screenshot:
         rendered = f"{rendered}\n{DESIGN_AGENT_SCREENSHOT_DIRECTIVE}"
+    elif external_surface_hint and external_surface_hint.strip():
+        # A real screenshot always wins — this branch only reaches when
+        # has_screenshot is False, so the placeholder directive never renders
+        # alongside the screenshot directive.
+        directive = DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE.format(
+            surface_description=external_surface_hint.strip()
+        )
+        rendered = f"{rendered}\n{directive}"
     return rendered
 
 
@@ -946,7 +1004,12 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
     }
   ],
   "is_multi_node": false,
-  "read_cues": []
+  "read_cues": [],
+  "external_entry_point": {
+    "detected": false,
+    "surface_description": "",
+    "confidence": 0
+  }
 }
 
 Rules:
@@ -984,6 +1047,37 @@ headings, button text — list those cues here, and re-rank the screen candidate
 toward the surface the screenshot depicts. This is a text/route-cue read, NOT a \
 visual pixel-match against the screenshot. When no screenshot is attached, omit \
 "read_cues" or return an empty list.
+- "external_entry_point" reports whether the PRD's OWN description implies its \
+starting trigger genuinely originates OUTSIDE this connected application entirely — \
+not merely a screen you failed to find, but a surface that could never exist in this \
+codebase because it is a DIFFERENT SYSTEM: an email the user receives, an SMS/text \
+message, a push notification, a third-party partner's website or app, a Slack or \
+chat message, a physical event (a scanned QR code, a phone call), or any other \
+channel outside this application. This must generalize to ANY such surface — do NOT \
+treat "email" as a special case; the same judgement applies whether the PRD says \
+"the user gets an email", "the user receives a text", "the user opens the partner \
+portal", or describes some other external channel entirely.
+  - Set "detected": true ONLY when the PRD's OWN wording places the trigger on such an \
+outside surface — look for language like "receives an email", "gets a text message", \
+"clicks a link sent to them", "opens the partner's app", "scans a code" — not merely \
+because no good in-app candidate exists. A PRD that is simply vague, or that describes \
+an in-app feature you cannot confidently place, is NOT external — leave "detected": \
+false and let the ordinary candidate ranking (including "no-host-decline" above) \
+speak for that case instead.
+  - When "detected" is true, "surface_description" is a short, plain-language, one- \
+sentence description of WHAT that external surface is (e.g. "a confirmation email \
+sent to the customer", "an SMS the user receives on their phone", "the partner's \
+booking website") — free text, not a fixed category, so it can describe any external \
+surface the PRD implies. Keep it under 200 characters. Leave it empty when "detected" \
+is false.
+  - "confidence" (within this object) is 0-100: how certain you are that the trigger is \
+genuinely external, independent of any candidate's own confidence field. Calibrate \
+honestly — this is a SEPARATE signal from a candidate's "confidence" and from \
+"classification_confidence"; do not inflate it to seem more certain than you are. Leave \
+it 0 when "detected" is false.
+  - This signal must NEVER prevent you from also returning your best in-app \
+candidate(s) when one exists — the two are independent. Only when there truly is no \
+usable in-app candidate does the caller act on this signal at all.
 
 Classification — for each candidate, also label the KIND of placement the PRD implies:
 - "classification" is one of three values: "modify-existing" (the PRD changes or \

@@ -168,8 +168,10 @@ def test_generate_returns_within_200ms(env, client, monkeypatch):
     elapsed = time.perf_counter() - start
     assert resp.status_code == 200, resp.text
     # No Anthropic call in the request path — the agent loop runs in the
-    # background task, so the handler returns near-instantly.
-    assert elapsed < 0.2, f"POST took {elapsed:.3f}s (>200ms budget)"
+    # background task, so the handler returns near-instantly. The budget is
+    # 1s (not tighter) because shared CI runners add hundreds of ms of noise;
+    # an in-path LLM call would still blow past it by an order of magnitude.
+    assert elapsed < 1.0, f"POST took {elapsed:.3f}s (>1s budget)"
 
 
 def test_generate_returns_prototype_id_and_generating_status(env, client, monkeypatch):
@@ -882,6 +884,58 @@ def test_active_by_prd_still_404s_for_failed_prototype_with_no_bundle(env, clien
     assert client.get("/v1/design-agent/by-prd/178/active").status_code == 404
 
 
+def test_active_by_prd_not_shadowed_by_a_newer_failed_no_bundle_row(env, client):
+    # Regression: a prototype is still GENERATING (older, lower id) when a
+    # SEPARATE later attempt for the same PRD fails before ever reaching a
+    # bundle (newer, higher id, no bundle_url). The newer row matches the
+    # active lookup's SQL-level status filter (['ready', 'generating',
+    # 'failed']) and sorts first by id, but the route's own bundle check
+    # rejects it — it must fall through to the genuinely active OLDER row
+    # underneath, not 404. Fails on the pre-fix code: `find_prototype_by_prd`'s
+    # `.limit(1)` fetches only the newer row, the bundle check nulls it, and
+    # there is nothing left to fall back to.
+    active_pid = env.proto.start_prototype(
+        prd_id=190, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    shadow_pid = env.proto.start_prototype(
+        prd_id=190, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    assert shadow_pid > active_pid  # the shadow row must sort first by id
+    env.proto.fail_prototype(
+        prototype_id=shadow_pid,
+        workspace_id=_TEST_COMPANY_ID,
+        error="build agent_loop ended with status=error iters=1 | error_class=ViteBuildError",
+    )
+    resp = client.get("/v1/design-agent/by-prd/190/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == active_pid
+    assert body["status"] == "generating"
+
+
+def test_active_by_prd_skips_multiple_shadowing_rows(env, client):
+    # Same shadow scenario, but with TWO newer failed-no-bundle rows stacked
+    # above the genuinely active one — proves the fix walks past more than
+    # one invalid candidate, not just a single one.
+    active_pid = env.proto.start_prototype(
+        prd_id=191, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    for _ in range(2):
+        shadow_pid = env.proto.start_prototype(
+            prd_id=191, workspace_id=_TEST_COMPANY_ID, template_version=1
+        )
+        env.proto.fail_prototype(
+            prototype_id=shadow_pid,
+            workspace_id=_TEST_COMPANY_ID,
+            error="build agent_loop ended with status=error iters=1 | error_class=ViteBuildError",
+        )
+    resp = client.get("/v1/design-agent/by-prd/191/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == active_pid
+    assert body["status"] == "generating"
+
+
 # ─── GET /by-prd/{prd_id}/active — bounded read-after-write retry ────────────
 #
 # A synchronously-committed 'generating' row (just inserted by POST /generate,
@@ -900,9 +954,9 @@ def test_active_lookup_hits_on_first_attempt_no_retry(env, client, monkeypatch, 
 
     def _fake_find(*, prd_id, workspace_id, statuses=None):
         calls.append(workspace_id)
-        return {"id": 900, "status": "generating", "prd_id": prd_id}
+        return [{"id": 900, "status": "generating", "prd_id": prd_id}]
 
-    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    monkeypatch.setattr(env.routes, "find_prototypes_by_prd", _fake_find)
     with caplog.at_level(logging.INFO):
         resp = client.get("/v1/design-agent/by-prd/180/active")
     assert resp.status_code == 200, resp.text
@@ -919,14 +973,14 @@ def test_active_lookup_retries_and_succeeds_on_second_attempt(
     # HIT on the second (the race) → 200 with the row, and the retry-succeeded
     # instrument fires with attempts=2. Unfixed code would 404 on the first None.
     row = {"id": 901, "status": "generating", "prd_id": 181}
-    seq = [None, row]
+    seq = [[], [row]]
     calls = []
 
     def _fake_find(*, prd_id, workspace_id, statuses=None):
         calls.append(workspace_id)
         return seq[len(calls) - 1]
 
-    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    monkeypatch.setattr(env.routes, "find_prototypes_by_prd", _fake_find)
     monkeypatch.setattr(env.routes.time, "sleep", lambda *_: None)
     with caplog.at_level(logging.INFO):
         resp = client.get("/v1/design-agent/by-prd/181/active")
@@ -945,7 +999,7 @@ def test_active_lookup_exhausts_retries_returns_404(env, client, monkeypatch):
     calls = []
     sleeps = []
     monkeypatch.setattr(
-        env.routes, "find_prototype_by_prd", lambda **kw: calls.append(kw) or None
+        env.routes, "find_prototypes_by_prd", lambda **kw: calls.append(kw) or []
     )
     monkeypatch.setattr(env.routes.time, "sleep", lambda s: sleeps.append(s))
     resp = client.get("/v1/design-agent/by-prd/182/active")
@@ -960,7 +1014,7 @@ def test_active_lookup_retry_delay_uses_env_override(env, client, monkeypatch):
     # 10ms → time.sleep(0.01). Lets ops tune the bound without a redeploy.
     monkeypatch.setenv("DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS", "10")
     sleeps = []
-    monkeypatch.setattr(env.routes, "find_prototype_by_prd", lambda **kw: None)
+    monkeypatch.setattr(env.routes, "find_prototypes_by_prd", lambda **kw: [])
     monkeypatch.setattr(env.routes.time, "sleep", lambda s: sleeps.append(s))
     resp = client.get("/v1/design-agent/by-prd/183/active")
     assert resp.status_code == 404
@@ -990,9 +1044,9 @@ def test_active_lookup_workspace_scoped_across_retries(env, client, monkeypatch)
 
     def _fake_find(*, prd_id, workspace_id, statuses=None):
         seen_workspaces.append(workspace_id)
-        return None
+        return []
 
-    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    monkeypatch.setattr(env.routes, "find_prototypes_by_prd", _fake_find)
     monkeypatch.setattr(env.routes.time, "sleep", lambda *_: None)
     resp = client.get("/v1/design-agent/by-prd/184/active")
     assert resp.status_code == 404

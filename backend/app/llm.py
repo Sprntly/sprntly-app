@@ -19,12 +19,13 @@ from anthropic import Anthropic
 from fastapi import HTTPException
 
 from app.config import settings
+from app.llm_metering import install_metering
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 # Deep-reasoning tier. Reserved for the handful of calls that are genuinely
-# open-ended AND infrequent AND high-stakes — the weekly-brief composition and
+# open-ended AND infrequent AND high-stakes — the top-insights composition and
 # the onboarding business-context inference (each runs ~once per brief / per
 # company and seeds everything downstream). Everything else — structured
 # extraction, ranking, PRD templating, the per-message/loop paths — stays on
@@ -177,10 +178,18 @@ def strip_code_fence(text: str) -> str:
 
 
 @lru_cache(maxsize=16)
-def _client_for_key(api_key: str) -> Anthropic:
+def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     """Cached Anthropic client keyed by the API key. max_retries=0: the SDK's own
-    retry layer is disabled so ours is the single source of truth."""
-    return Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    retry layer is disabled so ours is the single source of truth.
+
+    The client is instrumented for usage metering before being cached, so every
+    call through it lands in `llm_usage_events` without any call site opting in
+    (see app.llm_metering). `key_mode` records whose key is billed; it is part
+    of the cache key only for correctness-by-construction — it is a function of
+    `api_key`, so it never actually splits the cache.
+    """
+    client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    return install_metering(client, key_mode)
 
 
 def get_client() -> Anthropic:
@@ -188,12 +197,12 @@ def get_client() -> Anthropic:
     # key when configured, the platform key only when allowed (unbound / still
     # onboarding / contracted `use_platform_key`), else raise. Embeddings go
     # through OpenAI and never call this factory.
-    from app.llm_keys import resolve_llm_api_key
+    from app.llm_keys import resolve_llm_api_key_with_mode
 
-    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    key, key_mode = resolve_llm_api_key_with_mode(settings.anthropic_api_key or None)
     if not key:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-    return _client_for_key(key)
+    return _client_for_key(key, key_mode)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -211,7 +220,7 @@ def _attempt_delay(attempt: int) -> float:
 
 def _create_with_retries(
     client: Anthropic, *, stream: bool = False, background: bool = False,
-    on_delta=None, **kwargs
+    on_delta=None, on_json_delta=None, **kwargs
 ):
     """`messages.create` with exponential backoff on transient failures.
 
@@ -229,6 +238,13 @@ def _create_with_retries(
     the stream, so on_delta may re-emit from the beginning; the caller treats
     the persisted final result as authoritative and uses on_delta only for
     progressive display. Callback exceptions are swallowed.
+
+    `on_json_delta(partial_json)` — the tool-use counterpart of `on_delta`:
+    when given AND streaming, each `input_json` PARTIAL-JSON fragment of the
+    forced tool's input is forwarded as it arrives (a caller-side extractor —
+    e.g. app.ask_stream — turns those into display text). Same restart caveat
+    as on_delta; between attempts a callback exposing `reset()` is rewound so
+    its incremental parse restarts with the re-emitted stream.
 
     The whole call (including its retries) holds ONE process-wide concurrency
     slot (`_llm_gate`) for its full duration, so the box never runs more
@@ -255,13 +271,30 @@ def _create_with_retries(
         last: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
+                # A retry restarts the stream from zero — rewind a stateful
+                # incremental extractor so it re-parses the fresh emission
+                # instead of gluing two attempts together.
+                if attempt and on_json_delta is not None:
+                    reset = getattr(on_json_delta, "reset", None)
+                    if callable(reset):
+                        reset()
                 if stream:
                     with client.messages.stream(**kwargs) as s:
                         # Drain the stream so deltas are consumed, then return
                         # the assembled final message (same shape as create).
                         # With on_delta, forward each text delta as it lands
                         # (progressive display) before assembling the final.
-                        if on_delta is not None:
+                        if on_json_delta is not None:
+                            # Tool-use streaming: the payload arrives as
+                            # `input_json` partial fragments, not text events.
+                            for _event in s:
+                                if getattr(_event, "type", None) != "input_json":
+                                    continue
+                                try:
+                                    on_json_delta(getattr(_event, "partial_json", "") or "")
+                                except Exception:  # noqa: BLE001 — display only
+                                    logger.exception("on_json_delta callback failed (continuing)")
+                        elif on_delta is not None:
                             for _text in s.text_stream:
                                 try:
                                     on_delta(_text)
@@ -361,7 +394,7 @@ def _unwrap_response_envelope(out, schema):
     structured object under a single ``response`` key — cued by the tool name
     ``submit_response`` — even though the tool's ``input_schema`` is flat. Callers
     then read their real fields (e.g. ``insights``) off the top level and get
-    nothing. This was silently emptying every regenerated weekly brief.
+    nothing. This was silently emptying every regenerated Top Insights brief.
 
     Safe + narrow: only unwraps when the result is EXACTLY ``{"response": <dict>}``
     AND the requested schema does not itself declare a top-level ``response``
@@ -390,6 +423,7 @@ def call_json(
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
+    on_json_delta=None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -397,6 +431,10 @@ def call_json(
     — the SDK validates the structured input and returns a real dict, which
     eliminates the JSON-string-escaping failures that happen when an LLM
     hand-writes JSON containing markdown tables, quoted text, etc.
+
+    `on_json_delta(partial_json)` — optional; with `stream=True` and a schema,
+    forwards each partial-JSON fragment of the tool input as it streams (see
+    _create_with_retries). Ignored on the schema-less text-parse path.
 
     If `schema` is None, falls back to parsing the model's text response as
     JSON (used by endpoints whose payload is simple enough to round-trip
@@ -430,6 +468,7 @@ def call_json(
             client,
             stream=stream,
             background=background,
+            on_json_delta=on_json_delta,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
@@ -597,6 +636,14 @@ def call_with_web_search(
     "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
     prompt stays as the agent-specific layer after it. The web-search path has
     no cacheable-prefix mechanism, so the method rides the system prompt here.
+
+    The request STREAMS on the long read timeout: a search-heavy call (the
+    server runs up to `max_searches` web searches before composing the answer)
+    routinely outlives the default non-streaming read timeout — the
+    public-feedback capture pass hit exactly that httpx.ReadTimeout on staging.
+    Streaming is the SDK's required pattern for slow/large requests; the
+    accumulated final Message keeps `_capture_meta` and content extraction
+    unchanged.
     """
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
@@ -610,6 +657,7 @@ def call_with_web_search(
         system = f"{method}\n{system}"
     msg = _create_with_retries(
         get_client(),
+        stream=True,
         model=model,
         max_tokens=max_tokens,
         system=system,
@@ -619,6 +667,7 @@ def call_with_web_search(
             "name": "web_search",
             "max_uses": max_searches,
         }],
+        timeout=LONG_REQUEST_TIMEOUT_S,
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()

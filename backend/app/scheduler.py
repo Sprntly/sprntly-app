@@ -2,8 +2,8 @@
 
 Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
 
-  weekly_brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
-                       company, drives the two-phase weekly brief:
+  brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
+                       company, drives the two-phase Top Insights brief:
                        GENERATION starts GENERATION_LEAD (3h) before the
                        company's configured local day/time so synthesis has
                        time to finish; DELIVERY (Slack + email) happens exactly
@@ -36,13 +36,13 @@ from app.brief_schedule import (
     resolve_frequency,
     resolve_schedule,
     resolve_user_timezone,
-    should_generate_weekly_brief,
-    should_run_weekly_brief,
+    should_generate_brief,
+    should_run_brief,
 )
 from app.config import settings
 from app.db.companies import list_companies
-from app.entitlements import weekly_brief_enabled
-from app.kg_ingest.auto_sync import kickoff_sync
+from app.entitlements import top_insights_enabled
+from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -130,14 +130,33 @@ def _refresh_all_company_connectors() -> None:
                 company_id,
             )
             continue
+        slack_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
             provider = (conn.get("provider") or "").strip()
-            # Only fire for providers with a registered KG puller. Others
-            # (figma / slack / google_drive) have their own corpus paths,
-            # are per-user, or aren't wired for periodic refresh.
-            if not provider or provider not in PULLERS:
+            # Slack: company-level corpus sync (voice of customer) — one
+            # kick per company per cycle, however many members installed
+            # the bot. Pulls the shared channel selection into corpus + KG.
+            if provider == "slack":
+                if slack_kicked:
+                    continue
+                slack_kicked = True
+                try:
+                    kickoff_slack_corpus_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: slack kickoff raised for %s",
+                        company_id,
+                    )
+                continue
+            # Fire for providers with a registered KG puller, plus google_drive
+            # (connection-config sync — kickoff_sync special-cases it, so
+            # picked Drive files that change get re-pulled into corpus + KG).
+            # Others (figma) have their own corpus paths or aren't wired
+            # for periodic refresh.
+            if not provider or (provider not in PULLERS
+                                and provider != "google_drive"):
                 continue
             try:
                 kickoff_sync(company_id, provider)
@@ -177,14 +196,14 @@ async def _run_synthesis_for_all_companies() -> None:
 
     for company in companies:
         slug = company.get("slug") or company.get("id")
-        # Weekly Brief module gate (staff panel): the synthesis cycle GENERATES
+        # Top Insights module gate (staff panel): the synthesis cycle GENERATES
         # briefs (run_synthesis save_brief()s + mid-week delivery), so a company
-        # with weekly_brief explicitly off is skipped. KG ingestion is NOT
+        # with top_insights explicitly off is skipped. KG ingestion is NOT
         # affected — connector sync/seeding run elsewhere (owner decision:
         # the KG also grounds PRDs and chat).
-        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+        if not top_insights_enabled(company.get("feature_flags") or {}):
             logger.info(
-                "Scheduler: weekly_brief module off for %s — skipping synthesis",
+                "Scheduler: top_insights module off for %s — skipping synthesis",
                 slug,
             )
             continue
@@ -230,8 +249,8 @@ def _resolve_company_schedule(company: dict) -> tuple[object, dict]:
     }
 
 
-async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
-    """Drive the two-phase weekly brief for every company (v0 checklist 2.4).
+async def _run_brief_tick(now: datetime | None = None) -> None:
+    """Drive the two-phase Top Insights brief for every company (v0 checklist 2.4).
 
     Ticks every WEEKLY_BRIEF_TICK_MINUTES. For each company it resolves the
     timezone + configured day/time (Comms & Brief settings, defaults Monday
@@ -257,7 +276,7 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
     try:
         companies = list_companies()
     except Exception as exc:  # noqa: BLE001
-        logger.error("Weekly brief tick: failed to list companies: %s", exc)
+        logger.error("Top Insights tick: failed to list companies: %s", exc)
         return
 
     if not companies:
@@ -268,12 +287,12 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         slug = company.get("slug") or company_id
         if not slug:
             continue
-        # Weekly Brief module gate (staff panel): explicitly-off companies get
+        # Top Insights module gate (staff panel): explicitly-off companies get
         # neither generation nor Slack/email delivery from the weekly tick.
         # Missing key / empty flags ⇒ ON (grandfathering — app.entitlements).
-        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+        if not top_insights_enabled(company.get("feature_flags") or {}):
             logger.info(
-                "Weekly brief tick: weekly_brief module off for %s — skipping",
+                "Brief tick: top_insights module off for %s — skipping",
                 slug,
             )
             continue
@@ -287,26 +306,26 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         for ledger_key, ws_slug in _company_workspace_slugs(company_id, slug):
             # Phase 1 — GENERATION, GENERATION_LEAD before the fire time.
             last_gen = _last_brief_generation.get(ledger_key)
-            if should_generate_weekly_brief(now, tz, last_gen, **schedule):
+            if should_generate_brief(now, tz, last_gen, **schedule):
                 # The delivery instant this generation is for: the fire time
                 # whose lead window we are inside (still up to GENERATION_LEAD
                 # away).
                 fire_utc = previous_fire_time(now + GENERATION_LEAD, tz, **schedule)
                 logger.info(
-                    "Weekly brief tick: company=%s (dataset=%s, tz=%s) generation due — "
+                    "Top Insights tick: company=%s (dataset=%s, tz=%s) generation due — "
                     "generating for delivery at %s",
                     company_id, ws_slug, tz.key, fire_utc.isoformat(),
                 )
                 try:
-                    await _generate_weekly_brief_for_company(ws_slug)
+                    await _generate_brief_for_company(ws_slug)
                     if company_id:
                         _last_brief_generation[ledger_key] = now.astimezone(timezone.utc)
                         _schedule_exact_delivery(
                             company_id, ws_slug, fire_utc, ledger_key=ledger_key
                         )
-                    logger.info("Weekly brief tick: brief for %s → generated", ws_slug)
+                    logger.info("Top Insights tick: brief for %s → generated", ws_slug)
                 except Exception as exc:  # noqa: BLE001 — per-workspace isolation
-                    logger.error("Weekly brief tick: brief failed for %s: %s", ws_slug, exc)
+                    logger.error("Top Insights tick: brief failed for %s: %s", ws_slug, exc)
 
             # Phase 2 — DELIVERY catch-up fallback, at/after the fire time only.
             # The normal path is the exact-time one-shot job registered above;
@@ -316,31 +335,31 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
                 continue
             if _delivery_job_pending(ledger_key):
                 continue
-            if not should_run_weekly_brief(
+            if not should_run_brief(
                 now, tz, _last_brief_delivery.get(ledger_key), **schedule
             ):
                 continue
             logger.info(
-                "Weekly brief tick: company=%s (dataset=%s) delivery fallback — "
+                "Top Insights tick: company=%s (dataset=%s) delivery fallback — "
                 "catch-up generate + deliver", company_id, ws_slug,
             )
             try:
-                await _generate_weekly_brief_for_company(ws_slug)
+                await _generate_brief_for_company(ws_slug)
             except Exception as exc:  # noqa: BLE001 — deliver the prior brief anyway
                 logger.error(
-                    "Weekly brief tick: catch-up generation failed for %s: %s",
+                    "Top Insights tick: catch-up generation failed for %s: %s",
                     ws_slug, exc,
                 )
             try:
-                if await _deliver_weekly_brief_for_company(company_id, ws_slug):
+                if await _deliver_brief_for_company(company_id, ws_slug):
                     _last_brief_delivery[ledger_key] = now.astimezone(timezone.utc)
             except Exception as exc:  # noqa: BLE001 — per-workspace isolation
                 logger.error(
-                    "Weekly brief tick: delivery failed for %s: %s", ws_slug, exc)
+                    "Top Insights tick: delivery failed for %s: %s", ws_slug, exc)
 
 
-async def _generate_weekly_brief_for_company(slug: str) -> None:
-    """Generate one company's weekly brief off the event loop (LLM + Supabase
+async def _generate_brief_for_company(slug: str) -> None:
+    """Generate one company's Top Insights brief off the event loop (LLM + Supabase
     are blocking) WITHOUT delivering it — the scheduled push happens exactly at
     the configured fire time (see _schedule_exact_delivery / the tick's delivery
     fallback), never at generation time. Synthesis is the only path since the
@@ -355,18 +374,32 @@ async def _generate_weekly_brief_for_company(slug: str) -> None:
     warm_synthesis_drilldowns(slug)
 
 
-async def _deliver_weekly_brief_for_company(company_id: str, slug: str) -> bool:
+async def _deliver_brief_for_company(company_id: str, slug: str) -> bool:
     """Deliver the company's CURRENT brief (Slack + email) off the event loop.
     Returns True when a delivery attempt was made (deliver_brief is itself
     best-effort per channel/recipient and never raises), False when there is no
-    brief to deliver yet."""
+    brief to deliver yet.
+
+    Evidence gate: the tick's catch-up fallback reaches here even when
+    generation was refused (NoBriefDataSourceError is swallowed per-workspace),
+    so a leftover brief row from before the generation gate would still be
+    pushed weekly to a company with no evidence source. Apply the same rule
+    delivery-side: no evidence-bearing data source → nothing is announced.
+    has_brief_data_source fails open, so an infra hiccup never mutes delivery."""
+    from app.brief_gate import has_brief_data_source
     from app.db.briefs import get_current_brief
     from app.synthesis.delivery import deliver_brief
 
     brief = await asyncio.to_thread(get_current_brief, slug)
     if not brief:
         logger.warning(
-            "Weekly brief delivery: no current brief for %s — skipping", slug)
+            "Top Insights delivery: no current brief for %s — skipping", slug)
+        return False
+    if not await asyncio.to_thread(has_brief_data_source, company_id, slug):
+        logger.info(
+            "Top Insights delivery: no evidence-bearing data source for %s "
+            "(slug=%s) — suppressing delivery of existing brief", company_id,
+            slug)
         return False
     await asyncio.to_thread(deliver_brief, company_id, brief)
     return True
@@ -376,7 +409,7 @@ def _delivery_job_id(key: str) -> str:
     """`key` is the per-workspace ledger key (workspace id, or company id when
     the workspaces lookup degraded) — one one-shot job per workspace, so one
     workspace's re-generation can't replace a sibling's pending delivery."""
-    return f"weekly_brief_delivery_{key}"
+    return f"brief_delivery_{key}"
 
 
 def _delivery_job_pending(key: str) -> bool:
@@ -408,7 +441,7 @@ def _schedule_exact_delivery(
             trigger=DateTrigger(run_date=fire_utc),
             args=[company_id, slug, fire_utc, key],
             id=_delivery_job_id(key),
-            name=f"Weekly brief delivery for {slug} at {fire_utc.isoformat()}",
+            name=f"Top Insights delivery for {slug} at {fire_utc.isoformat()}",
             replace_existing=True,
             # A busy event loop must delay the send (still exactly-once), not
             # drop it; anything later than this is the tick fallback's job.
@@ -416,7 +449,7 @@ def _schedule_exact_delivery(
         )
     except Exception:  # noqa: BLE001 — the tick fallback still delivers
         logger.exception(
-            "Weekly brief: failed to schedule exact delivery for %s", slug)
+            "Top Insights: failed to schedule exact delivery for %s", slug)
 
 
 async def _run_exact_delivery(
@@ -425,14 +458,14 @@ async def _run_exact_delivery(
     """One-shot job body: push the current brief at the exact fire instant and
     record the cycle in the delivery ledger so the tick fallback stands down."""
     try:
-        delivered = await _deliver_weekly_brief_for_company(company_id, slug)
+        delivered = await _deliver_brief_for_company(company_id, slug)
     except Exception:  # noqa: BLE001 — leave the ledger unset; fallback retries
-        logger.exception("Weekly brief: exact-time delivery failed for %s", slug)
+        logger.exception("Top Insights: exact-time delivery failed for %s", slug)
         return
     if delivered:
         _last_brief_delivery[ledger_key or company_id] = datetime.now(timezone.utc)
         logger.info(
-            "Weekly brief: delivered for %s at scheduled time %s",
+            "Top Insights: delivered for %s at scheduled time %s",
             slug, fire_utc.isoformat(),
         )
 
@@ -530,7 +563,12 @@ async def _run_ticket_sync_cycle() -> None:
 def _run_orphan_ask_job_sweep() -> None:
     """Fail `ask_jobs` rows abandoned in `generating` by a dead worker, so the
     chat UI stops polling a job nothing will ever finish. Fully isolated — a
-    failure here never affects other jobs."""
+    failure here never affects other jobs. Also sweeps `pipeline_runs` rows
+    abandoned in 'running' (a deploy restart mid-regenerate kills the owning
+    task silently — same shared-Supabase age-gating rationale, see
+    db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
+    abandoned the same way (a stale 'running' row there also wedges the
+    double-trigger guard, so healing it is what lets a retry through)."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -539,6 +577,26 @@ def _run_orphan_ask_job_sweep() -> None:
             logger.info("Failed %d abandoned Ask job(s) stuck in generating", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan Ask job sweep failed")
+    try:
+        from app.db.pipeline_runs import fail_orphan_running_runs
+
+        n = fail_orphan_running_runs()
+        if n:
+            logger.info(
+                "Failed %d abandoned pipeline run(s) stuck in running", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan pipeline-run sweep failed")
+    try:
+        from app.db.company_research_runs import (
+            fail_orphan_company_research_runs,
+        )
+
+        n = fail_orphan_company_research_runs()
+        if n:
+            logger.info(
+                "Failed %d abandoned company-research run(s) stuck in running", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan company-research sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -556,6 +614,31 @@ def _run_jira_personal_data_report() -> None:
         logger.exception("jira personal-data report cycle failed")
 
 
+def _run_extraction_eval_cycle() -> None:
+    """Extraction evals (app/graph/evals.py): sample recent extraction
+    output per skill_id, across every company, and check it against the
+    expected shape its producing skill declares. Read-only, sampled, and
+    off the request/ingestion path by construction — this job is the only
+    caller of `run_scheduled_eval_cycle` in this codebase. Fully isolated —
+    a failure here never affects other jobs; per-(company, skill) failures
+    are already isolated inside `run_scheduled_eval_cycle` itself."""
+    try:
+        from app.config import settings
+        from app.graph.evals import run_scheduled_eval_cycle
+
+        totals = run_scheduled_eval_cycle(
+            sample_size=settings.extraction_eval_sample_size
+        )
+        logger.info(
+            "extraction-eval cycle done: companies=%s skills=%s sampled=%s "
+            "findings=%s",
+            totals.get("companies"), totals.get("skills"),
+            totals.get("sampled"), totals.get("findings"),
+        )
+    except Exception:  # noqa: BLE001 — eval job must never crash the scheduler
+        logger.exception("extraction-eval cycle failed")
+
+
 def start_scheduler() -> None:
     """Initialize and start the APScheduler. Call from FastAPI lifespan."""
     global _scheduler
@@ -568,18 +651,18 @@ def start_scheduler() -> None:
     tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
     _scheduler = AsyncIOScheduler()
-    # Weekly brief: tick frequently; per company, START GENERATION when the
+    # Top Insights: tick frequently; per company, START GENERATION when the
     # (configured fire time − GENERATION_LEAD) window opens and DELIVER exactly
     # at the fire time via a one-shot DateTrigger (plus a post-fire catch-up
     # fallback in the tick). The day/time/tz decisions are the pure
     # app.brief_schedule functions, so the cadence here just has to be finer
     # than the firing window — it does NOT set the send time.
     _scheduler.add_job(
-        _run_weekly_brief_tick,
+        _run_brief_tick,
         trigger=IntervalTrigger(minutes=tick_minutes),
-        id="weekly_brief_tick",
+        id="brief_tick",
         name=(
-            f"Weekly brief — generate {GENERATION_LEAD} before each company's "
+            f"Top Insights — generate {GENERATION_LEAD} before each company's "
             f"configured time, deliver at it (tick every {tick_minutes}m)"
         ),
         replace_existing=True,
@@ -688,6 +771,20 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
 
+    # Extraction evals: sampled structural check of recent extraction output
+    # against each vendored connector-extraction skill's declared shape
+    # contract. Opt-in via EXTRACTION_EVAL_ENABLED; read-only + sampled, own
+    # cadence decoupled from the connector refresh interval above.
+    if settings.extraction_eval_enabled:
+        eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+        _scheduler.add_job(
+            _run_extraction_eval_cycle,
+            trigger=IntervalTrigger(hours=eval_hours),
+            id="extraction_eval",
+            name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
+            replace_existing=True,
+        )
+
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and
     # erase accounts Atlassian flags as closed. Atlassian's cycle period is 7
@@ -714,7 +811,7 @@ def start_scheduler() -> None:
 
     _scheduler.start()
     logger.info(
-        "Scheduler started: weekly brief tick every %dm "
+        "Scheduler started: Top Insights brief tick every %dm "
         "(generate 3h ahead, deliver at each company's configured time) "
         "+ connector refresh every %dh%s%s",
         tick_minutes, interval_hours,

@@ -252,12 +252,15 @@ sender_name = "Sprntly"
 subject = "{{ .Data.inviter_first_name }} has invited you to Sprntly to collaborate"
 content_path = "./supabase/templates/invite.html"
 
+# Confirmation and recovery are 6-digit codes ({{ .Token }}), not links — the
+# subject leads with the code so it's readable from the inbox list / lock
+# screen without opening the mail.
 [auth.email.template.confirmation]
-subject = "Confirm your Sprntly email"
+subject = "{{ .Token }} is your Sprntly verification code"
 content_path = "./supabase/templates/confirmation.html"
 
 [auth.email.template.recovery]
-subject = "Reset your Sprntly password"
+subject = "{{ .Token }} is your Sprntly password reset code"
 content_path = "./supabase/templates/recovery.html"
 
 [auth.email.template.magic_link]

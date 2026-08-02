@@ -35,6 +35,7 @@ from app.db import (
 )
 from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
+from app.db.conversations import bind_conversation_to_prd
 from app.db.evidences import find_existing_evidence_for_theme
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
@@ -55,6 +56,7 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
+from app.prd_command import classify_prd_command
 from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
     generate_prd_and_warm,
@@ -186,7 +188,7 @@ async def generate_from_ideation(
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off PRD generation for an IDEATION item (a theme ranked ≥ 4 that
-    never made the weekly brief's top-3).
+    never made the Top Insights brief's top-3).
 
     Ideation themes aren't in brief.insights, so we synthesize an insight from
     the ideation row ({theme_id, title, summary}) — the same shape the KG
@@ -288,9 +290,33 @@ def _chat_task_title(task: str) -> str:
     return (title[:1].upper() + title[1:]) if title else "Chat PRD"
 
 
+class TaskSourceDoc(BaseModel):
+    """A document the user attached earlier in the chat thread — extracted
+    text, forwarded so the PRD grounds on it (the reported bug: a doc attached
+    two messages before "generate a PRD" was silently forgotten)."""
+    name: str = Field(..., min_length=1, max_length=300)
+    content: str = Field(..., min_length=1, max_length=60_000)
+
+
+# Total budget across all attached docs — mirrors the ask path's 100k clamp.
+_TASK_SOURCE_DOCS_TOTAL_MAX = 150_000
+
+
 class TaskGenerateIn(BaseModel):
     task: str = Field(..., min_length=3, max_length=4000)
     force: bool = False
+    source_docs: list[TaskSourceDoc] | None = Field(default=None, max_length=8)
+    # The chat conversation this command came from, when there is one. Bound to
+    # the PRD server-side so navigating away mid-generation can't orphan the
+    # chat from its document. Optional — older clients omit it.
+    conversation_id: int | None = None
+
+
+def _render_source_docs(docs: list[TaskSourceDoc]) -> str:
+    """Join attached docs into one markdown block (newest-last order preserved),
+    clamped to the total budget so a pile of large docs can't blow the prompt."""
+    joined = "\n\n".join(f"--- {d.name} ---\n{d.content.strip()}" for d in docs)
+    return joined[:_TASK_SOURCE_DOCS_TOTAL_MAX]
 
 
 @router.post("/generate-from-task")
@@ -330,6 +356,13 @@ async def generate_from_task(
     if not body.force:
         existing = find_existing_prd_for_theme(brief_id, theme_id, variant=PRD_VARIANT)
         if existing:
+            # Re-issuing the command resolves the SAME PRD — the new chat still
+            # needs to point at it, or reopening that chat shows no PRD at all.
+            if body.conversation_id is not None:
+                bind_conversation_to_prd(
+                    body.conversation_id, existing["id"],
+                    company.company_id, company.user_id,
+                )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
@@ -356,8 +389,26 @@ async def generate_from_task(
         variant=PRD_VARIANT,
         source="chat",
         theme_id=theme_id,
+        # The originating-question linkage (mirrors db/reports.py's `question`):
+        # this is the ONE PRD-generation path with a genuine user-typed question
+        # behind it — brief/ideation/import PRDs have no chat question, so they
+        # leave this NULL. No ask_id: this command runs outside the ask_jobs
+        # pipeline (no ask row exists to reference).
+        question=task_text,
     )
     # No _record_prd_action: there is no real theme to advance in the lifecycle.
+
+    # Link the commanding chat to this PRD NOW — before the (multi-second)
+    # generation runs and before the client could navigate away.
+    if body.conversation_id is not None:
+        bind_conversation_to_prd(
+            body.conversation_id, prd_id, company.company_id, company.user_id
+        )
+
+    # Documents attached earlier in the chat thread ride along as authoritative
+    # source material (extra_source_md) — layered on top of the normal KG/task
+    # grounding, unlike the import path which replaces grounding entirely.
+    extra_source_md = _render_source_docs(body.source_docs) if body.source_docs else None
 
     task = asyncio.create_task(
         generate_prd_and_warm(
@@ -365,6 +416,7 @@ async def generate_from_task(
             author=company.user_name,
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
+            extra_source_md=extra_source_md,
         )
     )
     _inflight_tasks.add(task)
@@ -372,10 +424,15 @@ async def generate_from_task(
 
     # In parallel: the Evidence artifact, generated from semantic KG retrieval
     # over the task — skipped inside (no row) when the KG has no backing signals.
+    # Same originating question/conversation linkage as the PRD above.
     ev_task = asyncio.create_task(
         generate_task_evidence(
             brief_id, insight, theme_id,
             template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+            question=task_text,
+            conversation_id=body.conversation_id,
+            company_id=company.company_id,
+            user_id=company.user_id,
         )
     )
     _inflight_tasks.add(ev_task)
@@ -387,6 +444,50 @@ async def generate_from_task(
         "title": title,
         "variant": PRD_VARIANT,
     }
+
+
+class ClarifyTaskIn(BaseModel):
+    task: str = Field(..., min_length=3, max_length=4000)
+    source_docs: list[TaskSourceDoc] | None = Field(default=None, max_length=8)
+
+
+@router.post("/clarify-task")
+def clarify_task(
+    body: ClarifyTaskIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Sufficiency gate before chat-task PRD generation (clarify-first, issue d).
+
+    Runs on EVERY chat-PRD command — detailed-looking prompts included; length
+    is not sufficiency — over the task text + any documents attached earlier in
+    the thread. Returns either sufficient=true (the client generates
+    immediately) or 3–5 targeted questions the chat asks first, whose answers
+    the client folds into the task. Fail-open: any gate failure returns
+    sufficient=true, so this endpoint can never block generation.
+    """
+    from app.prd_clarify import clarify_prd_task
+
+    docs_md = _render_source_docs(body.source_docs) if body.source_docs else None
+    return clarify_prd_task(company.company_id, body.task.strip(), docs_md)
+
+
+class ClassifyCommandIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
+
+
+@router.post("/classify-command")
+def classify_command(
+    body: ClassifyCommandIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """LLM fallback for the chat command decision (tier 2 of the client's
+    slash→regex→LLM ladder): does this message ask us to CREATE a PRD, and for
+    what task? Called by ChatScreen only when the message names a PRD but the
+    regex tier (BriefChat.isPrdCommand) didn't match — novel phrasings.
+    Fail-open: any classifier error returns not-a-command, and the client
+    falls through to the ask agent exactly as before this endpoint existed."""
+    # enterprise_id == company_id (same identity the generate routes bind).
+    return classify_prd_command(company.company_id, body.text)
 
 
 @router.get("/{prd_id}/evidence")
@@ -424,6 +525,11 @@ _MAX_IMPORT_BYTES = 25 * 1024 * 1024  # 25 MB
 async def import_prd(
     file: UploadFile = File(...),
     dataset: str = Form(...),
+    # The chat conversation this import was commanded from, when there is one.
+    # Bound to the new PRD here (server-side) so leaving the page mid-import can
+    # never orphan the chat from the document it produced. Optional: other
+    # callers (and older clients) simply omit it.
+    conversation_id: int | None = Form(None),
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
@@ -473,6 +579,13 @@ async def import_prd(
         variant=PRD_VARIANT,
         source="upload",
     )
+
+    # Link the commanding chat to this PRD NOW — before the (multi-second)
+    # generation runs and before the client could navigate away.
+    if conversation_id is not None:
+        bind_conversation_to_prd(
+            conversation_id, prd_id, company.company_id, company.user_id
+        )
 
     task = asyncio.create_task(
         generate_prd_and_warm(
@@ -783,6 +896,67 @@ def answer_input_question(
     return {
         "prd": get_prd_rendered(prd_id),
         "question": answered,
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
+
+
+class ChatEditIn(BaseModel):
+    instruction: str = Field(..., min_length=3, max_length=4000)
+
+
+@router.post("/{prd_id}/chat-edit")
+def chat_edit(
+    prd_id: int,
+    body: ChatEditIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Apply a free-form chat edit instruction to the PRD ("make this PRD
+    shorter", "add a rollout section").
+
+    The chat-driven counterpart of answer_input_question: the SAME scoped
+    editor discipline (app.prd_questions.apply_chat_edit — targeted rewrite of
+    only the affected sections, never a full prd-author re-run), the SAME
+    undoable version-snapshot persistence, and the same response shape minus
+    the question — so the chat can confirm which sections changed and the
+    panel can refresh live. Before this endpoint, an edit-phrased chat message
+    on a PRD tab was answered in text only and the document never changed
+    (issue b of the chat→PRD bug set).
+    """
+    from app.prd_questions import apply_chat_edit
+
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    # Edit the RAW payload_md (the pure PRD HTML) — same discipline as the
+    # input-answer editor: design-agent 'applied' patches are folded on read by
+    # get_prd_rendered, so editing the raw doc keeps them folding once.
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "PRD has no content to edit yet")
+
+    try:
+        edit = apply_chat_edit(
+            prd_html, body.instruction, enterprise_id=company.company_id
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Could not apply the edit: {exc}")
+
+    if edit["sections_changed"]:
+        # Snapshot the pre-edit content so the change is undoable (mirrors
+        # PUT /{id} and the input-answer path).
+        try:
+            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+        except Exception:
+            logger.warning(
+                "auto-version snapshot failed for prd_id=%s before chat edit "
+                "(undo point not captured)", prd_id, exc_info=True,
+            )
+        update_prd_content(prd_id, row.get("title", ""), edit["html"])
+    # No sections changed → the editor judged the instruction wasn't an edit;
+    # leave the stored document untouched (no snapshot, no write).
+
+    return {
+        "prd": get_prd_rendered(prd_id),
         "sections_changed": edit["sections_changed"],
         "summary": edit["summary"],
     }

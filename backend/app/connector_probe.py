@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from app.connectors import (
     asana_oauth,
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     fireflies_apikey,
     github_app,
@@ -36,6 +37,7 @@ from app.connectors import (
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
+    uploads,
 )
 from app.connectors.tokens import (
     TokenEncryptionError,
@@ -175,6 +177,84 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
                 "email": raw_user.get("emailAddress"),
                 "name": raw_user.get("displayName"),
             }
+    elif provider == confluence_oauth.CONFLUENCE_PROVIDER:
+        # Same shape as the Jira branch above — Atlassian 3LO, ~1h access
+        # tokens, ROTATING refresh tokens, so a refresh must be persisted or
+        # the stored one is stranded. One extra obligation Jira doesn't have:
+        # company_id must survive the refresh, because it is the credential
+        # the kg_ingest puller receives (see token_payload_to_store).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = confluence_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    confluence_oauth.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    confluence_oauth.CONFLUENCE_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Confluence probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        cloud_id = (json.loads(row.get("config_json") or "{}")).get(
+            confluence_oauth.CONFIG_CLOUD_ID
+        ) or confluence_oauth.first_cloud_id(access_token)
+        # Probe with the call the CONNECTOR actually depends on, not a cheap
+        # identity endpoint. Confluence has two scope families: the v1
+        # current-user route answers on a CLASSIC scope, while everything this
+        # connector reads is v2 and needs GRANULAR ones. An identity-only probe
+        # therefore reports a healthy connection whose every sync 401s with
+        # "scope does not match" — which is exactly the state a token minted
+        # before the granular scopes were added is in. Listing one space costs
+        # the same round trip and proves the thing that matters.
+        if cloud_id:
+            try:
+                confluence_oauth.list_spaces(
+                    access_token, cloud_id, limit=1, max_pages=1
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence rejected the token: {e}", reason="rejected"
+                ) from e
+        raw_user = (
+            confluence_oauth.fetch_current_user(access_token, cloud_id)
+            if cloud_id else {}
+        )
+        # Normalize Confluence's field names onto the keys _label_from_user
+        # expects (it answers with publicName when the org hides emails).
+        if raw_user:
+            user_obj = {
+                "email": raw_user.get("email"),
+                "name": raw_user.get("displayName") or raw_user.get("publicName"),
+            }
+        elif cloud_id:
+            # The scope check above passed, so the connection IS healthy even
+            # though the identity lookup came back empty (an org can refuse
+            # read:confluence-user while content reads work). Fall back to the
+            # site name so this doesn't read as a rejected credential.
+            user_obj = {
+                "name": confluence_oauth.site_name_for_cloud(access_token, cloud_id)
+            }
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
         # Canonical token-validity check: team.info returns {id, name, domain},
@@ -266,6 +346,22 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
             )
         except superset_auth.SupersetAuthError:
             user_obj = {}  # soft rejection → "reconnect required" below
+    elif provider == uploads.UPLOADS_PROVIDER:
+        # Nothing to validate against a third party — the "credential" is the
+        # company's own document corpus. Healthy exactly while at least one
+        # named source still exists; deleting the last one reads as
+        # "disconnected", which is the truthful state for this connector.
+        from app.document_sources import list_document_sources
+
+        company_id = token_json.get(uploads.CREDENTIAL_KEY) or row.get("company_id") or ""
+        sources = list_document_sources(company_id)
+        if sources:
+            files = sum(s.file_count for s in sources)
+            user_obj = {
+                "name": f"{len(sources)} source"
+                        f"{'' if len(sources) == 1 else 's'} · "
+                        f"{files} file{'' if files == 1 else 's'}",
+            }
     else:
         raise ProbeError(
             f"Probe not supported for provider {provider!r}", reason="unsupported"

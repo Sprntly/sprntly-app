@@ -2,7 +2,8 @@
  * @vitest-environment jsdom
  *
  * Screenshot-as-context: the FOURTH design-source option in the GenerateModal.
- * Pill render/select, upload + preview, disabled-gating, error handling, and
+ * Pill render/select, the sequential multi-slot strip (Option B — up to 10
+ * screenshots, one upload at a time), disabled-gating, error handling, and
  * preference isolation — the DOM half of the screenshot-source flow (the
  * request-threading half is asserted at the buildGenerateParams level in
  * GenerateModal.design-source.test.tsx, per that file's node-env header).
@@ -42,6 +43,7 @@ const STUB_BYTES = "stub-downscaled-bytes"
 const STUB_DATA_URL = `data:image/png;base64,${btoa(STUB_BYTES)}`
 const KEY_1 = "da-upload/ws1/first.png"
 const KEY_2 = "da-upload/ws1/second.png"
+const KEY_3 = "da-upload/ws1/third.png"
 
 function screenshotProps(overrides: Record<string, unknown> = {}) {
   return {
@@ -90,6 +92,20 @@ function generateBtn(container: HTMLElement) {
   )!
 }
 
+function addBtn(container: HTMLElement) {
+  return q(container, "screenshot-strip-add") as HTMLButtonElement | null
+}
+
+function removeBtn(container: HTMLElement, n: number) {
+  return container.querySelector<HTMLButtonElement>(
+    `[aria-label="Remove screenshot ${n}"]`,
+  )
+}
+
+function tiles(container: HTMLElement) {
+  return container.querySelectorAll('[aria-label^="Remove screenshot"]')
+}
+
 function uploadSpy() {
   return vi.spyOn(designAgentApi, "uploadScreenshot")
 }
@@ -131,7 +147,6 @@ describe("the Screenshot source pill", () => {
       ),
     )
     expect(q(container, "screenshot-file-input")).toBeTruthy()
-    expect(q(container, "screenshot-pick")).toBeTruthy()
 
     // The extended test seam initializes screenshot mode directly.
     const { container: c2 } = render(
@@ -142,10 +157,163 @@ describe("the Screenshot source pill", () => {
   })
 })
 
+// ── AC1 — appends, never replaces (regression) ───────────────────────────────
+
+describe("multi-slot upload sequencing", () => {
+  it("test_screenshot_source_second_pick_appends_not_replaces — two sequential successful picks leave 2 tiles, not 1", async () => {
+    uploadSpy()
+      .mockResolvedValueOnce({ screenshot_key: KEY_1, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_2, media_type: "image/png" })
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+
+    attachFile(container, pngFile("first.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+
+    attachFile(container, pngFile("second.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(2))
+
+    // Both tiles present, correctly numbered — not a replace.
+    expect(removeBtn(container, 1)).toBeTruthy()
+    expect(removeBtn(container, 2)).toBeTruthy()
+  })
+
+  it("test_screenshot_source_failed_pick_does_not_consume_a_slot — an oversize file leaves the strip at its pre-pick count, error line shown", async () => {
+    uploadSpy().mockResolvedValue({ screenshot_key: KEY_1, media_type: "image/png" })
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+
+    attachFile(container, pngFile("first.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+
+    const oversize = pngFile("too-big.png")
+    Object.defineProperty(oversize, "size", { value: 6 * 1024 * 1024 })
+    attachFile(container, oversize)
+
+    await waitFor(() => expect(q(container, "screenshot-error")).toBeTruthy())
+    expect(q(container, "screenshot-error")!.textContent).toBe(
+      "That screenshot is over 5 MB — attach a smaller one.",
+    )
+    // Strip unchanged at its pre-pick count — the failed pick consumed no slot.
+    expect(tiles(container).length).toBe(1)
+  })
+
+  it("test_screenshot_source_remove_reindexes_remaining_tiles — AC3; 3 attached, remove the 2nd, remaining 2 tiles are labelled 1 and 2 (not 1/3)", async () => {
+    uploadSpy()
+      .mockResolvedValueOnce({ screenshot_key: KEY_1, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_2, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_3, media_type: "image/png" })
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+
+    attachFile(container, pngFile("a.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+    attachFile(container, pngFile("b.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(2))
+    attachFile(container, pngFile("c.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(3))
+
+    act(() => {
+      removeBtn(container, 2)!.click()
+    })
+
+    await waitFor(() => expect(tiles(container).length).toBe(2))
+    expect(removeBtn(container, 1)).toBeTruthy()
+    expect(removeBtn(container, 2)).toBeTruthy()
+    expect(removeBtn(container, 3)).toBeNull()
+  })
+
+  it("test_screenshot_source_generate_disabled_until_one_screenshot_succeeds — AC7; Generate stays disabled at 0 attached, enables at 1", async () => {
+    uploadSpy().mockResolvedValue({ screenshot_key: KEY_1, media_type: "image/png" })
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+    expect(generateBtn(container).disabled).toBe(true)
+
+    attachFile(container, pngFile())
+    await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
+  })
+
+  it("test_screenshot_source_ten_successful_picks_hides_add_button — AC4; 10 sequential successful picks hide the add control", async () => {
+    const spy = uploadSpy()
+    for (let i = 1; i <= 10; i++) {
+      spy.mockResolvedValueOnce({
+        screenshot_key: `da-upload/ws1/n${i}.png`,
+        media_type: "image/png",
+      })
+    }
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+
+    for (let i = 1; i <= 10; i++) {
+      expect(addBtn(container)).toBeTruthy()
+      attachFile(container, pngFile(`shot-${i}.png`))
+      // eslint-disable-next-line no-loop-func
+      await waitFor(() => expect(tiles(container).length).toBe(i))
+    }
+    expect(addBtn(container)).toBeNull()
+  })
+
+  it("test_screenshot_source_closing_modal_clears_strip — AC13; 2 attached, close, re-open → 0 attached", async () => {
+    uploadSpy()
+      .mockResolvedValueOnce({ screenshot_key: KEY_1, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_2, media_type: "image/png" })
+    const props = screenshotProps()
+    const { container, rerender } = render(React.createElement(GenerateModal, props))
+
+    attachFile(container, pngFile("a.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+    attachFile(container, pngFile("b.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(2))
+
+    // Close (the modal's own close-handler state reset fires off `open`).
+    rerender(React.createElement(GenerateModal, { ...props, open: false }))
+    // Re-open.
+    rerender(React.createElement(GenerateModal, { ...props, open: true }))
+
+    await waitFor(() => expect(tiles(container).length).toBe(0))
+  })
+
+  it("test_screenshot_source_generate_click_sends_screenshot_keys_array_in_order — AC8; 3 successful picks in order A, B, C → the submitted body carries screenshot_keys: [A, B, C] in that exact order", async () => {
+    uploadSpy()
+      .mockResolvedValueOnce({ screenshot_key: KEY_1, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_2, media_type: "image/png" })
+      .mockResolvedValueOnce({ screenshot_key: KEY_3, media_type: "image/png" })
+    const { container } = render(
+      React.createElement(GenerateModal, screenshotProps()),
+    )
+
+    attachFile(container, pngFile("a.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+    attachFile(container, pngFile("b.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(2))
+    attachFile(container, pngFile("c.png"))
+    await waitFor(() => expect(tiles(container).length).toBe(3))
+
+    await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
+    act(() => {
+      generateBtn(container).click()
+    })
+    await waitFor(() =>
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
+    )
+    const { params } = vi.mocked(runGenerateFlow).mock.calls[0][0]
+    expect(params.design_source).toBe("screenshot")
+    expect(params.screenshot_keys).toEqual([KEY_1, KEY_2, KEY_3])
+    // Single-source cleanliness on the wire.
+    expect(params.figma_file_key).toBeNull()
+    expect(params.github_repo).toBeNull()
+  })
+})
+
 // ── AC2 — upload flow + gating ───────────────────────────────────────────────
 
 describe("upload flow", () => {
-  it("test_upload_called_with_downscaled_blob_and_preview_shown — uploads the DOWNSCALED bytes (not the raw file) and shows the preview thumbnail", async () => {
+  it("test_upload_called_with_downscaled_blob_and_shown_as_a_tile — uploads the DOWNSCALED bytes (not the raw file) and renders it as a strip tile", async () => {
     const spy = uploadSpy().mockResolvedValue({
       screenshot_key: KEY_1,
       media_type: "image/png",
@@ -165,50 +333,17 @@ describe("upload flow", () => {
     expect(sent.type).toBe("image/png")
     expect(sent.size).toBe(STUB_BYTES.length)
 
-    // Preview thumbnail shows the downscaled data URL.
-    await waitFor(() => expect(q(container, "screenshot-preview")).toBeTruthy())
-    expect(
-      (q(container, "screenshot-preview") as HTMLImageElement).getAttribute(
-        "src",
-      ),
-    ).toBe(STUB_DATA_URL)
-  })
-
-  it("test_generate_disabled_until_upload_resolves — Generate is disabled in screenshot mode until the upload succeeds", async () => {
-    let resolveUpload!: (v: {
-      screenshot_key: string
-      media_type: string
-    }) => void
-    const pending = new Promise<{ screenshot_key: string; media_type: string }>(
-      (resolve) => {
-        resolveUpload = resolve
-      },
-    )
-    const spy = uploadSpy().mockReturnValue(pending)
-    const { container } = render(
-      React.createElement(GenerateModal, screenshotProps()),
-    )
-
-    // No file picked yet → disabled.
-    expect(generateBtn(container).disabled).toBe(true)
-
-    attachFile(container, pngFile())
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1))
-    // Upload in flight → still disabled.
-    expect(generateBtn(container).disabled).toBe(true)
-
-    await act(async () => {
-      resolveUpload({ screenshot_key: KEY_1, media_type: "image/png" })
-      await pending
-    })
-    await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
+    // Tile 1 shows the downscaled data URL.
+    await waitFor(() => expect(tiles(container).length).toBe(1))
+    const img = container.querySelector("img") as HTMLImageElement
+    expect(img.getAttribute("src")).toBe(STUB_DATA_URL)
   })
 })
 
-// ── AC4 — error handling ─────────────────────────────────────────────────────
+// ── AC2 — error handling ─────────────────────────────────────────────────────
 
 describe("server rejections + network failure", () => {
-  it("test_413_and_422_surface_server_message_and_repick — both codes render the server message verbatim, generate stays disabled, and a re-pick recovers", async () => {
+  it("test_413_and_422_surface_server_message_and_repick — both codes render the server message verbatim, generate stays disabled at 0, and a re-pick recovers", async () => {
     const cases = [
       { status: 413, detail: "File too large (max 8 MB)." },
       { status: 422, detail: "Unsupported file type (PNG, JPEG, or WebP required)." },
@@ -225,14 +360,12 @@ describe("server rejections + network failure", () => {
       await waitFor(() => expect(q(container, "screenshot-error")).toBeTruthy())
       // The server's user-readable message, verbatim.
       expect(q(container, "screenshot-error")!.textContent).toBe(detail)
-      // Re-pickable state: no preview, picker enabled, generate disabled.
-      expect(q(container, "screenshot-preview")).toBeNull()
-      expect(
-        (q(container, "screenshot-pick") as HTMLButtonElement).disabled,
-      ).toBe(false)
+      // Re-pickable state: no tile added, add control enabled, generate disabled.
+      expect(tiles(container).length).toBe(0)
+      expect((addBtn(container) as HTMLButtonElement).disabled).toBe(false)
       expect(generateBtn(container).disabled).toBe(true)
 
-      // Re-pick succeeds → error clears, key staged, generate enabled.
+      // Re-pick succeeds → error clears, tile added, generate enabled.
       spy.mockResolvedValueOnce({
         screenshot_key: KEY_1,
         media_type: "image/png",
@@ -240,14 +373,14 @@ describe("server rejections + network failure", () => {
       attachFile(container, pngFile("second-try.png"))
       await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
       expect(q(container, "screenshot-error")).toBeNull()
-      expect(q(container, "screenshot-preview")).toBeTruthy()
+      expect(tiles(container).length).toBe(1)
 
       unmount()
       vi.restoreAllMocks()
     }
   })
 
-  it("test_network_failure_resets_picker — a fetch reject returns the picker to the pre-upload state, re-pickable, generate disabled", async () => {
+  it("test_network_failure_resets_picker — a fetch reject leaves the strip at 0, re-pickable, generate disabled", async () => {
     uploadSpy().mockRejectedValueOnce(new TypeError("Failed to fetch"))
     const { container } = render(
       React.createElement(GenerateModal, screenshotProps()),
@@ -255,13 +388,10 @@ describe("server rejections + network failure", () => {
 
     attachFile(container, pngFile())
     await waitFor(() => expect(q(container, "screenshot-error")).toBeTruthy())
-    // Pre-upload state: no preview, no staged key (generate disabled), the
-    // picker is enabled again.
-    expect(q(container, "screenshot-preview")).toBeNull()
+    // Pre-upload state: no tile added (generate disabled), add control enabled.
+    expect(tiles(container).length).toBe(0)
     expect(generateBtn(container).disabled).toBe(true)
-    expect(
-      (q(container, "screenshot-pick") as HTMLButtonElement).disabled,
-    ).toBe(false)
+    expect((addBtn(container) as HTMLButtonElement).disabled).toBe(false)
   })
 })
 
@@ -307,37 +437,5 @@ describe("preference isolation", () => {
     expect(onSavePreference).toHaveBeenCalledWith(
       expect.objectContaining({ design_source: "website" }),
     )
-  })
-})
-
-// ── edge — re-pick replaces the pending key ──────────────────────────────────
-
-describe("re-pick", () => {
-  it("test_repick_replaces_pending_key — the second pick's key wins in the submitted generate body", async () => {
-    uploadSpy()
-      .mockResolvedValueOnce({ screenshot_key: KEY_1, media_type: "image/png" })
-      .mockResolvedValueOnce({ screenshot_key: KEY_2, media_type: "image/png" })
-    const { container } = render(
-      React.createElement(GenerateModal, screenshotProps()),
-    )
-
-    attachFile(container, pngFile("first.png"))
-    await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
-    attachFile(container, pngFile("second.png"))
-    await waitFor(() => expect(generateBtn(container).disabled).toBe(false))
-
-    act(() => {
-      generateBtn(container).click()
-    })
-    await waitFor(() =>
-      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
-    )
-    // REAL buildGenerateParams ran — assert the actual submitted body.
-    const { params } = vi.mocked(runGenerateFlow).mock.calls[0][0]
-    expect(params.design_source).toBe("screenshot")
-    expect(params.screenshot_key).toBe(KEY_2)
-    // Single-source cleanliness on the wire.
-    expect(params.figma_file_key).toBeNull()
-    expect(params.github_repo).toBeNull()
   })
 })

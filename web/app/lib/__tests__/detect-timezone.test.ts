@@ -3,7 +3,7 @@ import { detectBrowserTimezone } from "../auth"
 
 /** detectBrowserTimezone reads the browser's IANA zone (Intl) and feeds it into
  *  signUp options.data → handle_new_user → profiles.timezone, which drives the
- *  weekly brief's Monday-06:00-local send time. It must degrade to undefined
+ *  Top Insights brief's Monday-06:00-local send time. It must degrade to undefined
  *  (→ backend UTC fallback) rather than throw when the runtime can't report one. */
 describe("detectBrowserTimezone", () => {
   afterEach(() => {

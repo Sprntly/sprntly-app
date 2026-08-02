@@ -93,6 +93,47 @@ def test_load_corpus_only_underscore_files_returns_empty(isolated_settings):
     assert c.dataset == "answers"
 
 
+# ── slug-shape backstop ───────────────────────────────────────────────────
+# load_corpus does no OWNERSHIP check by design (its callers own the tenant
+# boundary), but it is the widest `data_path / <string>` join in the codebase,
+# so a non-slug-shaped argument must not reach the filesystem at all.
+
+
+@pytest.mark.parametrize(
+    "bad_slug",
+    ["../../escaped", "../sibling", "a/b", "", "  ", "x" * 64],
+    ids=["traversal", "parent", "subpath", "empty", "blank", "too-long"],
+)
+def test_load_corpus_refuses_non_slug_shaped_dataset(isolated_settings, bad_slug):
+    corpus_mod = isolated_settings["corpus"]
+    c = corpus_mod.load_corpus(bad_slug)
+    assert c.docs == ()
+
+
+def test_load_corpus_does_not_read_outside_data_dir(isolated_settings, tmp_path):
+    """The concrete traversal: a readable .md one level above DATA_DIR must not
+    end up in a corpus (and from there, verbatim in an LLM prompt)."""
+    corpus_mod = isolated_settings["corpus"]
+    data_dir = isolated_settings["data_dir"]
+
+    outside = data_dir.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secrets.md").write_text("another tenant's notes")
+
+    c = corpus_mod.load_corpus("../outside")
+    assert c.docs == ()
+
+
+def test_load_corpus_normalizes_slug_case(isolated_settings):
+    """validate_slug lowercases, so an upper-cased slug resolves to the same
+    directory rather than silently missing it."""
+    corpus_mod = isolated_settings["corpus"]
+    data_dir = isolated_settings["data_dir"]
+    _build_dataset(data_dir, "demo", {"a.md": "yes"})
+    c = corpus_mod.load_corpus("DEMO")
+    assert [d.name for d in c.docs] == ["a"]
+
+
 def test_corpus_total_chars_sums_doc_lengths(isolated_settings):
     corpus_mod = isolated_settings["corpus"]
     data_dir = isolated_settings["data_dir"]

@@ -3,10 +3,10 @@
 import { Suspense } from "react"
 import { ChatScreen } from "../../components/screens/app/ChatScreen"
 
-// The Weekly Brief is the pinned first TAB of the unified home surface
+// The Top Insights brief is the pinned first TAB of the unified home surface
 // (ChatScreen). `/brief` renders the SAME unified surface as `/`; ChatScreen
 // detects the brief screen (via NavigationContext.currentScreen) and activates
-// the pinned brief tab, so the sidebar "Weekly brief" item lands here coherently
+// the pinned brief tab, so the sidebar "Top Insights" item lands here coherently
 // whether the surface is freshly mounted or already on screen. The old
 // standalone BriefScreen has been removed — the brief tab inside ChatScreen
 // (which renders <BriefChat/>) is the sole brief surface.

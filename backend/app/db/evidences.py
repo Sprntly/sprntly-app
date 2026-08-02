@@ -14,11 +14,20 @@ def start_evidence(
     template_version: int | None = None,
     variant: str = "v1",
     theme_id: str | None = None,
+    question: str | None = None,
+    ask_id: int | None = None,
 ) -> int:
     """`theme_id` marks a non-insight evidence doc (the chat-task PRD path:
     'chat:<hash>' — mirrors prds.theme_id) so it dedupes/loads by
     (brief_id, theme_id) instead of colliding with the insight-indexed docs.
-    Brief-insight docs keep theme_id NULL."""
+    Brief-insight docs keep theme_id NULL.
+
+    `question`/`ask_id` are the originating-chat-question linkage (mirrors
+    prds.start_prd / db/reports.py) — set only on the chat-task path, which
+    carries the user's typed task as `question`. NULL everywhere else. The
+    originating CONVERSATION is tracked via `conversations.evidence_id`
+    (db/conversations.bind_conversation_to_evidence), not duplicated here.
+    """
     c = require_client()
     resp = c.table("evidences").insert({
         "brief_id": brief_id,
@@ -29,6 +38,8 @@ def start_evidence(
         "template_version": template_version,
         "variant": variant,
         "theme_id": theme_id,
+        "question": question,
+        "ask_id": ask_id,
     }).execute()
     return resp.data[0]["id"]
 

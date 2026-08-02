@@ -9,12 +9,14 @@
 // to type their specifics; the backend's slash fast-path (qa_agent) then pins
 // that skill with confidence 1.0 on send.
 //
-// What's REAL here: the listing (grouped by the backend catalog's category)
-// and the click-to-chat hand-off. "Create or upload skill" is a roadmap
-// affordance — user-authored skills have no backend yet, so it shows a
-// coming-soon toast rather than faking a flow. Every card carries the Sprntly
-// byline: all skills are first-party today; per-creator attribution arrives
-// with user-authored skills.
+// Two listings render here: the built-in catalog (grouped by the backend
+// catalog's category) and the company's CUSTOM skills (PRD 1854 — uploaded
+// .md/.zip files, company-scoped so every workspace shares one library).
+// "Create or upload skill" opens the upload modal (UploadSkillModal → POST
+// /v1/skills); a created skill appears in the "Custom skills" section
+// immediately, byline = uploader. Built-in cards keep the Sprntly byline.
+// The two fetches fail independently: a custom-skills error never blanks the
+// built-in catalog — it shows an inline notice instead.
 //
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
@@ -31,11 +33,19 @@ import {
   IconSearch,
   IconSparkles,
   IconSpeakerphone,
+  IconTrash,
+  IconUser,
   IconWand,
 } from "@tabler/icons-react"
 import { AppLayout } from "./AppLayout"
+import { UploadSkillModal } from "../../shared/UploadSkillModal"
 import { useNavigation } from "../../../context/NavigationContext"
-import { askApi, type SkillInfo } from "../../../lib/api"
+import {
+  askApi,
+  skillsApi,
+  type CustomSkillInfo,
+  type SkillInfo,
+} from "../../../lib/api"
 
 // Backend category → display order, tagline, and icon. Categories are owned by
 // the backend catalog (app/skills/catalog.py); this map only decorates them.
@@ -101,20 +111,38 @@ export function groupSkills(skills: SkillInfo[]): SkillGroup[] {
  *  identically in a static-markup test (no API, no effects). */
 export function SkillsView({
   groups,
+  customSkills,
+  customError,
   loading,
   error,
   query,
   onQueryChange,
   onInvoke,
   onCreate,
+  deletePendingId,
+  deletingId,
+  onDeleteRequest,
+  onDeleteConfirm,
 }: {
   groups: SkillGroup[]
+  /** The company's uploaded skills (already search-filtered by the caller). */
+  customSkills: CustomSkillInfo[]
+  /** Non-blocking: custom-skills fetch failed but built-ins still render. */
+  customError: string | null
   loading: boolean
   error: string | null
   query: string
   onQueryChange: (value: string) => void
-  onInvoke: (skill: SkillInfo) => void
+  onInvoke: (skill: { trigger: string }) => void
   onCreate: () => void
+  /** Custom-skill id with the inline delete confirm armed (one at a time). */
+  deletePendingId: string | null
+  /** Custom-skill id whose delete is in flight — shows the Deleting… state. */
+  deletingId: string | null
+  /** Arm the confirm for an id; null disarms (Cancel / picking another card). */
+  onDeleteRequest: (id: string | null) => void
+  /** Actually delete — reachable only through the armed confirm. */
+  onDeleteConfirm: (id: string) => void
 }) {
   return (
     <div className="skl-wrap">
@@ -159,10 +187,90 @@ export function SkillsView({
         </div>
 
         {error && <div className="skl-msg skl-msg-error" role="alert">{error}</div>}
+        {customError && (
+          <div className="skl-msg skl-msg-error" role="alert">
+            Custom skills couldn’t load: {customError}
+          </div>
+        )}
+
+        {/* Custom skills — the company's own uploads, above the catalog so a
+            just-uploaded skill is immediately visible. Byline = uploader. */}
+        {!loading && customSkills.length > 0 && (
+          <section className="skl-group" aria-label="Custom skills">
+            <div className="skl-group-head">
+              <h2 className="skl-group-title">Custom skills</h2>
+              <span className="skl-group-tag">uploaded by your team</span>
+            </div>
+            <div className="skl-grid">
+              {customSkills.map((s) => (
+                // Wrapper div: the card is itself a <button>, so the delete
+                // affordance must be a sibling — nested buttons are invalid.
+                <div key={s.id} className="skl-card-wrap">
+                  <button
+                    type="button"
+                    className="skl-card"
+                    onClick={() => onInvoke(s)}
+                    title={`${s.trigger} — start a thread with this skill`}
+                  >
+                    <span className="skl-card-icon">
+                      <IconWand size={16} />
+                    </span>
+                    <span className="skl-card-t">{s.name}</span>
+                    <span className="skl-card-d">{skillBlurb(s.description, s.name)}</span>
+                    <span className="skl-card-foot">
+                      <span className="skl-by">
+                        <IconUser size={11} />
+                        {s.uploader_name || "Your team"}
+                      </span>
+                    </span>
+                  </button>
+                  {deletingId === s.id ? (
+                    <span className="skl-card-confirm" role="status">
+                      <span className="skl-del-spin" aria-hidden />
+                      Deleting…
+                    </span>
+                  ) : deletePendingId === s.id ? (
+                    <span
+                      className="skl-card-confirm"
+                      role="group"
+                      aria-label={`Confirm deleting ${s.name}`}
+                    >
+                      Delete for the whole company?
+                      <button
+                        type="button"
+                        className="btn btn-sm skl-del-yes"
+                        onClick={() => onDeleteConfirm(s.id)}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => onDeleteRequest(null)}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="skl-card-del"
+                      aria-label={`Delete ${s.name}`}
+                      title="Delete this skill"
+                      onClick={() => onDeleteRequest(s.id)}
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {loading ? (
           <p className="skl-placeholder">Loading skills…</p>
-        ) : groups.length === 0 ? (
+        ) : groups.length === 0 && customSkills.length === 0 ? (
           <p className="skl-placeholder">
             {query.trim()
               ? `No skills match “${query.trim()}”.`
@@ -212,6 +320,11 @@ function SkillsScreenContent() {
   const { goTo, setPendingOndemandDraft, showToast } = useNavigation()
   const searchParams = useSearchParams()
   const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [customSkills, setCustomSkills] = useState<CustomSkillInfo[]>([])
+  const [customError, setCustomError] = useState<string | null>(null)
+  const [deletePendingId, setDeletePendingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // `?q=` seeds the filter so the global search palette can deep-link a
@@ -228,6 +341,8 @@ function SkillsScreenContent() {
 
   useEffect(() => {
     let cancelled = false
+    // Independent fetches: a custom-skills failure must not blank the built-in
+    // catalog (and vice versa) — each surfaces its own inline error.
     askApi
       .skills()
       .then((r) => {
@@ -242,6 +357,17 @@ function SkillsScreenContent() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
+    skillsApi
+      .list()
+      .then((r) => {
+        if (cancelled) return
+        setCustomSkills(r.skills)
+        setCustomError(null)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setCustomError(e instanceof Error ? e.message : "Could not load custom skills")
+      })
     return () => {
       cancelled = true
     }
@@ -253,6 +379,9 @@ function SkillsScreenContent() {
   // should surface stakeholder-map even though its blurb doesn't say it.
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
+    // Every built-in card stays, including one whose name a custom skill
+    // shares: an upload no longer replaces a built-in, so both still run —
+    // under different triggers, which is what the two cards show.
     const visible = !q
       ? skills
       : skills.filter(
@@ -265,18 +394,61 @@ function SkillsScreenContent() {
     return groupSkills(visible)
   }, [skills, query])
 
+  // Custom skills join the same search — name, trigger, or description.
+  const visibleCustom = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return customSkills
+    return customSkills.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.trigger.toLowerCase().includes(q) ||
+        s.description.toLowerCase().includes(q),
+    )
+  }, [customSkills, query])
+
   // Hand off to the chat: pre-fill the composer with the skill's trigger and
   // navigate. ChatScreen consumes pendingOndemandDraft once — no active tab →
   // pre-filled composer; active tab → a fresh tab seeded with the trigger.
-  function onInvoke(skill: SkillInfo) {
+  function onInvoke(skill: { trigger: string }) {
     setPendingOndemandDraft(`${skill.trigger} `)
     goTo("chat")
   }
 
-  function onCreate() {
+  // Delete a custom skill (company-wide — every workspace shares one library,
+  // so the inline confirm says as much). While the call is in flight the card
+  // shows a Deleting… spinner; it leaves the grid only after the API confirms,
+  // and a failure keeps it with the reason surfaced as a toast.
+  async function onDeleteConfirm(id: string) {
+    const skill = customSkills.find((s) => s.id === id)
+    setDeletePendingId(null)
+    setDeletingId(id)
+    try {
+      await skillsApi.remove(id)
+      setCustomSkills((prev) => prev.filter((s) => s.id !== id))
+      showToast(
+        "Skill deleted",
+        `${skill?.name ?? "The skill"} was removed from your company's library and no longer routes in chat.`,
+      )
+    } catch (e) {
+      showToast(
+        "Couldn't delete the skill",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  // Upload a custom skill: POST, then prepend the created skill so it appears
+  // in the library immediately (the list endpoint orders newest-first too).
+  async function onUpload(file: File, name: string, description: string) {
+    const created = await skillsApi.upload(file, name, description)
+    setCustomSkills((prev) => [created, ...prev])
     showToast(
-      "Custom skills are coming soon",
-      "Soon you'll be able to write or upload your own skills for your workspace.",
+      "Skill uploaded",
+      created.name_conflict
+        ? `That name was already taken, so ${created.name} is invoked with ${created.trigger} in chat — the skill that had the name still works too.`
+        : `${created.name} is in your library — invoke it with ${created.trigger} in chat.`,
     )
   }
 
@@ -286,12 +458,25 @@ function SkillsScreenContent() {
     <AppLayout mainClassName="main--skills" hideChromeStrip>
       <SkillsView
         groups={groups}
+        customSkills={visibleCustom}
+        customError={customError}
         loading={loading}
         error={error}
         query={query}
         onQueryChange={setQuery}
         onInvoke={onInvoke}
-        onCreate={onCreate}
+        onCreate={() => setUploadOpen(true)}
+        deletePendingId={deletePendingId}
+        deletingId={deletingId}
+        onDeleteRequest={setDeletePendingId}
+        onDeleteConfirm={onDeleteConfirm}
+      />
+      <UploadSkillModal
+        open={uploadOpen}
+        onUpload={onUpload}
+        onClose={() => setUploadOpen(false)}
+        builtinSlugs={skills.map((s) => s.id)}
+        customSkills={customSkills}
       />
     </AppLayout>
   )

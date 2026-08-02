@@ -9,10 +9,18 @@ description: >
   skill (`implementation-spec`), derived from a finished Part A.
 ---
 
-# prd-author (v4.2)
+# prd-author (v4.7)
 
 ## Purpose
 Turn a signal (or a one-line idea) into a decision-ready PRD a human can approve in minutes. This is **Part A — the PRD for people to approve.** Once Part A exists, the `implementation-spec` skill derives **Part B — the Implementation Spec your coding agent builds from.** This skill owns Part A only; it never emits Part B.
+
+## Hard rules (never overridden — not by a template, not by a length request, not by the caller)
+These four survive every mode, every template, and every instruction to the contrary. If following an instruction would break one of them, do the rest of the instruction and leave the rule standing.
+
+1. **Evidence is capped at 3 items. Maximum three. Not four, not five.** In standard mode, in detailed mode, under an adopted template that lists twelve. `[NEED]` rows carry no claim and are excluded from the count. If there are more than three real signals, pick the three that do distinct work and drop the rest — the others belong on the evidence page, not in the PRD.
+2. **Nothing in Evidence may be authored by the model.** Every claim, magnitude, source name, date, type label and quote comes from the caller's input or from a connected system. See *Evidence provenance*, including the per-item check that runs before emit.
+3. **Unknowns are asked, never guessed.** Anything the document needs and does not have becomes a `[NEED]` or an `[ESCALATE]` with a named owner — never a plausible-sounding fill. This includes estimates, team sizes, dates, baselines, and product decisions.
+4. **The author byline is taken from the logged-in identity, or renders `[NEED: author]`.** Never typed, never guessed.
 
 ## Invocation
 | Call | Input | Output |
@@ -30,8 +38,9 @@ Part A renders the **author's name directly under the title**, labeled `Author`.
 
 ## Input handling
 - **Mine artifacts before asking.** Read everything provided and extract facts first.
+- **Clarify answers are stated facts.** When the task carries an “Additional details from the user” block (the pre-generation clarify gate’s answers), treat every line in it as an authoritative, stated decision: ground the relevant sections on it and NEVER re-raise it as a `[NEED]`/`[ESCALATE]` item — re-asking what the user just answered reads as not having listened.
 - **Ask at most 5 clarifying questions**, ranked by leverage. Anything unresolved goes to **User input needed**, not into a guess.
-- **Company template adaptation:** if a company PRD template is present, map content into *their* section structure — but keep the v4 visual system unless the company supplies its own brand tokens. Template adaptation copies structure, not judgment.
+- **Company template adaptation:** if a company PRD template is present, map content into *their* section structure — see **Template adoption** below. Template adaptation copies structure, not judgment.
 
 ## Groundedness (internal — never printed)
 - **Zero invented numbers.** Every figure traces to a provided source; missing data gets `[NEED: …]`.
@@ -39,20 +48,96 @@ Part A renders the **author's name directly under the title**, labeled `Author`.
 - **Unresolvable product decisions route to `[ESCALATE]`** — never silently decided.
 - Do NOT print a "How this PRD was generated" section.
 
-## Structure (in order — v4.1 order is normative)
-The spine reads: what world is this (Context) → what's wrong (Problem) → how we know (Evidence) → who it happens to (Users) → what we'll measure (Goal) → what we believe (Hypothesis) → what we build (Requirements).
+## Evidence provenance (hard rule — v4.3)
+**Evidence is reported, never authored.** Every part of an evidence item — the claim, its magnitude, the source name, the date or period, the type label, and the wording of any quote — must come from one of exactly two places:
+1. **User input** — the task prompt, an attached evidence brief, a pasted transcript, a research doc, an uploaded file, or the clarify-gate answers.
+2. **The system** — a signal, dataset, ticket export, review corpus or record set retrieved from a connected source; the project's knowledge base or knowledge graph; a document the caller has attached to the project or the conversation.
 
-1. **Title** — descriptive only.
+**The check that runs before emit (internal, never printed).** For each evidence item, name the specific artifact it came from — "the attached research doc, line about Q2 tickets", "the telemetry table the caller pasted", "clarify-gate answer 2". Not the *type* of artifact; the actual one, in this conversation. **If you cannot name it, the item was authored, and it does not ship.** Replace it with a `[NEED]` or drop it. Run this on every item every time — a claim that feels obviously true is exactly the one that gets waved through, and the section is capped at three, so there is no volume pressure that justifies keeping a doubtful one.
+
+If a fact is not in one of those two places, it does not enter the Evidence section in any form. Specifically:
+- **Never invent a source.** "Support ticket export", "billing data", "competitive scan" are valid only if the caller supplied them. A plausible-sounding source name is a fabrication, and a fabricated source is worse than a missing one because it survives review.
+- **Never invent a date or period.** No figure carries a timeframe that was not stated.
+- **Never construct a quote.** A quote renders only when the exact wording was supplied. If the substance of what a user said is known but the wording is not, render it as a paraphrased finding with its source — not in quotation marks, not in the quote style.
+- **Never restate a supplied number as a different one.** No rounding, rescaling, unit conversion, or extrapolation from sample to population. Report it as given.
+- **An assumption is not evidence.** Assumptions belong in Hypothesis, Appendix → Risks, the riskiest-assumption box, an `[ASSUMPTION]` marker, or a tagged step inside a projected-impact chain. They never appear as an evidence item — the Evidence section is the one place a reader stops checking and starts believing.
+- **Do not pad the section.** A PRD with two real signals shows two real signals plus `[NEED]` items for the gaps. Thin evidence is a finding about the state of the work, not a formatting problem to solve.
+- **Inference is allowed only where the arithmetic is visible in the source.** Reading a supplied figure ("31% of tickets carry this tag, so it is the largest contact driver") is fine when the comparison sits in the same supplied data. Anything beyond that is an assumption and moves out of Evidence.
+
+**Illustrative mode (no real inputs).** When the skill is run as a demo, a template fill, or a worked example with no supplied signals, the page renders a visible label directly under the byline — `Illustrative example — evidence is fictional, not sourced` — and every evidence item's type label is prefixed `EXAMPLE`. The label reuses existing tokens, so no stylesheet change is needed: emit it inside the byline block as `<span class="tag esc">Illustrative example</span>` followed by the plain text `evidence is fictional, not sourced`. There is no silent illustrative mode: a document that looks sourced must be sourced. Run in this mode only when the caller has asked for an example; a real request with thin inputs gets `[NEED]` items, not fiction.
+
+## Structure (in order — normative for the house format; a supplied template overrides section names and order, never the judgment rules — see Template adoption)
+The spine reads: what world is this (Context) → what's wrong (Problem) → how we know (Evidence) → who it happens to (Users) → what we'll measure (Goal) → what we believe (Hypothesis) → what we build (Requirements) → what could go wrong (Risks). Open items sit in the Appendix, below the argument.
+
+1. **Title — short, and reasoned rather than assembled.** Before writing it, ask what the smallest phrase is that tells a reader what changes. Name the change, not the essay about the change. Target **4–8 words**; no colon-and-subtitle constructions, no restating the problem, no company name unless two products would otherwise be confused. Test: it has to sit in a roadmap row and still mean something. A long title is almost always the Problem section leaking upward.
 2. **Author byline** — logged-in user's name, directly under the title.
-3. **Context — must pass the cold-reader test.** A reader with zero prior knowledge of the company must come away able to judge the rest of the document. Cover, in one tight paragraph: what the product is and who it serves; how the affected workflow works TODAY, step by step; and a definition of any term of art the document relies on (rendered with a dotted underline). Still no padding — enrichment means the missing facts a stranger needs, not more words.
-4. **Problem** — business + user pain; no smuggled solution.
-5. **Evidence — rich, linked, and source-agnostic.** Any signal type qualifies: data analysis, user quotes, customer complaints/support tickets, competitive analysis, churn/exit interviews, session recordings, workflow analysis, surveys, sales-call notes, experiment results — the list is open. Each item carries a **type label** on its meta line naming what kind of evidence it is, and a strong Evidence section mixes types rather than leaning on one. **User quotes are verbatim** — word for word, rendered in italic serif with quotation marks; never paraphrase something into a quote. Beyond the type label, each signal carries: the claim with its magnitude in bold, the source, and the date/period. The Evidence section header is a plain label — it carries **no link** (no "View evidence page" link, no per-item links). `[NEED]` entries note that the item appears on the evidence page when the signal lands.
+3. **Context — reason it out, then write the delta.** Do not fill this section from a formula. Before writing, answer two questions explicitly: *a VP is about to read the rest of this document — what must they already hold in their head for it to land?* and *what do they already know that I must not spend a single word on?* Context is the gap between those two answers, and nothing else.
+
+   The reader works at the company. Assume they know what the company does, what the product is, and the everyday vocabulary of the business. Assume they know this area exists but do not follow its details — they are one or two levels away. What they almost never hold is the specific mechanic: how the affected step behaves TODAY, and what this document is about to change about it. Name the product itself only where the context breaks without it. Define any term of art the document coins or leans on (dotted underline).
+
+   Target ~70 words. A paragraph explaining the company is the failure mode this rule exists to prevent; a paragraph the VP could have written themselves is the other one.
+4. **Problem — crisp, user-framed, self-contained.** Open on the user's situation in concrete terms: what they do, what they get, what it costs them. One number sizing it. Then, in a single trailing clause, what it costs the business. A reader who read nothing else must understand the problem from this section alone — and it must survive being lifted out and pasted into a doc on its own. No smuggled solution; no throat-clearing; ~60 words.
+5. **Evidence — rich, linked, and source-agnostic.** Any signal type qualifies: data analysis, user quotes, customer complaints/support tickets, competitive analysis, churn/exit interviews, session recordings, workflow analysis, surveys, sales-call notes, experiment results — the list is open. Each item carries a **type label** on its meta line naming what kind of evidence it is, and a strong Evidence section mixes types rather than leaning on one. **User quotes are verbatim** — word for word, rendered in italic serif with quotation marks; never paraphrase something into a quote. Beyond the type label, each signal carries: the claim with its magnitude in bold, the source, and the date/period. The Evidence section header is a plain label — it carries **no link** (no "View evidence page" link, no per-item links). `[NEED]` entries note that the item appears on the evidence page when the signal lands. Every element of every item is bound by the **Evidence provenance** rule above — reported from user input or the system, never authored here. **Hard cap: 3 items. In every mode, under every template, at any length — never 4.** Detailed mode does not raise it; a supplied template does not raise it. `[NEED]` rows carry no claim and do not count against the cap. Under a cap, keep the items that do distinct work — one that sizes the problem, one that shows the failure in the user's own words, one that corroborates from an independent source — and drop the rest rather than compressing all of them.
 6. **Users** — two maximum (one is allowed). Users come BEFORE Goal: the reader should know who this happens to before being told what we'll measure about it.
 7. **Goal** — ONE primary metric with formula + baseline + **projected impact** (assumption chain + confidence, or a visibly blank slot — the blank is a designed element, see visual spec). Guardrails listed separately, never collapsed into the primary.
-8. **Hypothesis** — one tight paragraph directly before Requirements.
+8. **Hypothesis — one plain-English sentence, causal chain visible.** Use the shape *If we do X, then Y will happen, which moves Z* (or *By doing X we believe Y, driving Z*). Name the change, the behavior it produces, and the outcome that follows. Strip restatement of the problem, hedging, and any explanation the reader already has from Context. Directly before Requirements; ~55 words.
 9. **Requirements** — table by default: `# | Requirement | Description | Type`, Type ∈ Happy path / Edge case / Failure (never "Core"). Long mode adds Priority / Signal/Source / Acceptance. Prose only on request. These Type tags are load-bearing: `implementation-spec` inherits them (Happy path → happy-path EARS; Edge case → mandatory edge branch; Failure → mandatory failure branch).
-10. **User input needed** — ≤5 items, tagged `[ESCALATE]`/`[NEED]`, each with an owner; self-clearing; section disappears when empty.
-11. **Appendix** — renders with Part A, not a separate file: Non-goals · Risks incl. **exactly one named riskiest assumption with a 3-line pre-mortem** · Alignment · Rollout · Done-when.
+10. **Risks — in the body (v4.4 — moved up out of the appendix).** Sits between Requirements and the Appendix: the reader sees what we're building, then what could break it. Named risks in one paragraph, then **exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem** inside it.
+11. **Appendix** — renders with Part A, not a separate file. Contains **User input needed** and nothing else: ≤5 items, tagged `[ESCALATE]`/`[NEED]`, each with an owner; self-clearing; the appendix disappears entirely when empty. *Retired in v4.4: Non-goals, Alignment, Rollout, Done-when — do not reintroduce them, in either length mode.*
+
+## Template adoption (v4.5)
+When the caller supplies a template — a blank company PRD form, a filled PRD to match, an exported doc, or a named house format — **adopt it.** The supplied template governs the shape of the document; this skill governs whether the content in it is true.
+
+**Step 1 — build the correspondence map (internal, never printed).** Read the template before writing anything and work out, section by section, *what are they calling what?* Every house concept — problem, evidence, users, goal, hypothesis, requirements, risks, open items — either has a home in their structure under a different name, or has no home at all. Write the mapping out for yourself first; do not start filling sections and discover the collisions late. Typical correspondences: their "Overview" or "TL;DR" may carry the problem; "User Stories" may be carrying requirements; "Potential Challenges" is usually risks; "Success Metrics" is usually the goal, often split across several buckets.
+
+**Step 2 — adopt their form of expression, not just their headings.** This is the part that is easy to get wrong. If the template expresses behavior as **user stories**, write user stories — not a requirements table with stories bolted above it. If it expresses them as a **bulleted functional list with inline priorities**, write that list in that idiom. If it expresses them as **narrative prose**, write prose. If the template has no requirements section at all and puts behavior inside the UX walkthrough, that is where the behavior goes. The house requirements table is a house convention; it does not travel into a template that does not use tables. Match their level of formality, their sentence shape, and their labelling.
+
+**Step 3 — keep house rigor inside their form.** Adopt their vocabulary and their format; keep our reasoning and our standard of evidence. Whatever form requirements take, the **Happy path / Edge case / Failure coverage must still be there** — as failure stories, as edge bullets, as prose that names what happens when the thing breaks — because `implementation-spec` depends on that coverage existing, however it is worded. The same holds for one primary metric, exactly one riskiest assumption, and provenance on every claim.
+
+**Also adopted:**
+- Sub-structure inside a section (e.g. Goals split into Business / User / Non-Goals).
+- Field conventions the template establishes: priority labels, phase names, estimate formats, metric groupings.
+- **Retired house sections return if the template asks for them.** Non-goals, Alignment, Rollout, and Done-when are retired from the house format only; a template that calls for them gets them.
+
+**Do not adopt (this skill wins):**
+- **The visual system.** Keep the v4 tokens, page canvas, and components unless the caller supplies brand tokens. A template supplies structure, not styling.
+- **Every judgment rule.** Evidence provenance, zero invented numbers, verbatim quotes, one primary metric, exactly one riskiest assumption with its pre-mortem, `[NEED]`/`[ESCALATE]` markers, the author byline, illustrative-mode labelling. None of these are negotiable by template.
+- **The 3-item evidence cap.** A template whose evidence or research section expects eight entries still gets three. Adopt the section's name and placement; do not adopt its capacity.
+
+**Conflict resolution:**
+- **Template section, no grounded material →** render the section with `[NEED: …]` and an owner. Never delete a section the caller asked for; never fill it with invention.
+- **Required house element, no slot in the template →** this applies to the judgment elements only (evidence, the riskiest assumption + pre-mortem, `[NEED]`/`[ESCALATE]` items, the byline) — never to house *formatting* preferences, which are simply dropped. Place the element at the nearest logical point rather than losing it: evidence near the top with its type labels intact; the riskiest assumption wherever the template holds risk (often "Potential Challenges"); open items appended at the end if nothing fits. Add a one-line note saying the section was added, so the reader knows it is not part of their template.
+- **Template asks for something the evidence cannot support →** the section renders, and says what is missing.
+
+**Estimate sections are the fabrication trap.** Templates routinely ask for project estimate, team size and composition, phase durations, launch dates, and headcount. These are the single most common place a generated PRD invents something that looks authoritative — "Small: 1–2 weeks", "1–2 people" — and they are decisions owned by engineering and delivery, not facts derivable from a problem statement. **Never author them.** Unless the caller supplied the number, render `[NEED: estimate — owner: Eng lead]` in the slot. The same applies to any named dates, headcount, or cost.
+
+**Length under a template:** budgets apply, with a per-section floor. Standard mode under an adopted template is **~750 words, or ~70 words per adopted section, whichever is greater** — a twelve-section corporate template cannot be filled at 60 words a section without every section becoming a caption. The floor buys coverage, not depth: it is not licence to expand the sections that would have existed anyway. Only an explicit request for detail moves to the detailed budget.
+
+## Length modes (v4.4)
+Two lengths. **Standard is the default and is what ships unless the caller explicitly asks for more.**
+
+| Mode | Budget (excluding the Requirements table) | Trigger |
+|---|---|---|
+| **Standard** | ~750 words | default — no request needed |
+| **Detailed** | ~1,100–1,500 words (1.5–2×) | ONLY on explicit request: "detailed PRD", "long version", "expand this", "more detail" |
+
+The Requirements table is outside both budgets and scales with scope — a 25-requirement product does not get a shorter Context to compensate.
+
+Standard-length section budget: Context ~70 · Problem ~60 · Evidence ~130 · Users ~60 · Goal ~70 · Hypothesis ~55 · Risks ~150 · User input needed ~90.
+
+**Never infer detailed mode.** A rich input pile, a large codebase, a long evidence brief, or a complex product are not requests. Volume of input has no bearing on length of output; the caller asks, or it stays standard.
+
+**What the extra words buy in detailed mode — more material, never more adjectives:**
+- Evidence does NOT grow — the 3-item cap is hard and applies in detailed mode exactly as in standard.
+- Requirements table switches to long mode: adds `Priority | Signal/Source | Acceptance` columns, giving every requirement a visible signal link.
+- Risks: each named risk gains a mitigation or the detection signal that would catch it early.
+- Goal: guardrails carry explicit thresholds rather than bare names.
+- Context: may add the workflow step-by-step — still no company explainer, the informed-insider test holds in both modes.
+- Users: unchanged at two maximum. More length never buys more personas.
+
+**Detailed mode never resurrects a retired section.** Non-goals, Alignment, Rollout, and Done-when stay out at any length.
+
+**If there is no more grounded material, the PRD stays standard length and says so.** Detailed mode is a request for more substance, not more prose; padding a thin evidence base to hit a word count is the same failure as inventing a source. Respond with the standard document and a one-line note that the inputs did not support a longer one.
 
 ## Visual specification (normative)
 Every Part A renders as a single-file HTML editable page using these tokens. All PRDs generated by this skill must align to this system.
@@ -63,7 +148,7 @@ Every Part A renders as a single-file HTML editable page using these tokens. All
 
 **Components:**
 - *Byline:* mono, small, `AUTHOR` label in accent green, sits tight under the title.
-- *Section eyebrows:* 10.5px uppercase, letterspaced, accent green, thin top rule (first section unruled). Section order per the v4.1 structure: Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, User input needed, Appendix.
+- *Section eyebrows:* 10.5px uppercase, letterspaced, accent green, thin top rule (first section unruled). Section order per the v4.4 structure: Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, Risks, then Appendix.
 - *Terms of art* in Context: dotted underline (`border-bottom: 1.5px dotted`).
 - *Evidence section:* the eyebrow row is a plain `EVIDENCE` label — no link. Items sit on dash-ruled rows — claim (magnitudes bold) over a mono meta line: `TYPE-LABEL — source · date`, where the type label is a small tinted chip naming the evidence kind (DATA ANALYSIS, USER QUOTE, CUSTOMER COMPLAINTS, COMPETITIVE ANALYSIS, …). No per-item links. Verbatim quotes render in italic Spectral inside quotation marks.
 - *Goal block:* white panel; rows keyed `PRIMARY METRIC / PROJECTED IMPACT / GUARDRAILS` in mono; formula in mono; confidence rendered as a tinted tag (`medium` = edge tint, `low` = fail tint). **Blank projected impact renders as a dotted underline slot** with a muted italic note (e.g. "blank — fills after pilot") — never omitted, never faked.
@@ -71,7 +156,8 @@ Every Part A renders as a single-file HTML editable page using these tokens. All
 - *Hypothesis:* 3px green left rule, no background fill.
 - *Requirements table:* white, hairline rules, uppercase column heads; Type as a color-coded pill (happy/edge/fail tints).
 - *User input needed:* checkbox squares + `[ESCALATE]` (fail tint) / `[NEED]` (edge tint) mono tags + owner in secondary color.
-- *Appendix:* heavy 2px top rule, `APPENDIX` label, note "Renders with Part A — not a separate file"; **riskiest assumption** in a white box with a red-brown left rule, the 3-line pre-mortem inside it in italic.
+- *Risks (body section):* standard eyebrow; **riskiest assumption** in a white box with a red-brown left rule, the 3-line pre-mortem inside it in italic. The box styles (`.riskiest`, `.rk`, `.pre`) are unscoped in `prd.css` and render identically outside the appendix.
+- *Appendix:* heavy 2px top rule, `APPENDIX` label, note "Renders with Part A — not a separate file"; holds User input needed only, its heading as an `<h3>` (scoped `.appendix h3`), not an eyebrow.
 **Accessibility/quality floor:** responsive to mobile, type labels never color-only (pill text carries the meaning), print-clean.
 
 ## Output contract (what to emit)
@@ -85,6 +171,14 @@ Emit ONE HTML document — a `<meta charset>`, the empty `<style></style>` eleme
 | One-line idea | Part A produced; ≤5 questions; every gap `[NEED]` |
 | Logged-in identity unavailable | Byline renders `[NEED: author]` |
 | Signal not yet in Sprntly | Plain attribution + "appears on the evidence page when the signal lands" — never a fabricated URL |
+| No evidence supplied (idea only) | Evidence section renders `[NEED]` items only — never authored to look full |
+| Partial evidence (some claims unsourced) | Sourced items render; unsourced claims drop to `[NEED]` or move to Risks as assumptions |
+| Demo / worked example, no real inputs | Illustrative label under the byline + `EXAMPLE` prefix on every evidence type label |
+| Detailed length requested, material supports it | Detailed budget; evidence to 6; requirements long-mode columns |
+| Detailed length requested, material does NOT support it | Standard document + one-line note that inputs did not support a longer one — never padded |
+| Caller supplies a PRD template | Adopt its sections, order, and field conventions; keep v4 visuals and every judgment rule |
+| Template section with no grounded material | Section renders carrying `[NEED: …]` + owner — never deleted, never invented |
+| Template asks for estimate / team size / dates | `[NEED: … — owner: Eng lead]` unless the caller supplied the number |
 
 ## When NOT to use
 Discovery ("should we build anything?") → `evidence-brief` / `continuous-discovery`. Deriving the machine-readable Implementation Spec from a finished PRD → `implementation-spec`. Reviewing an existing PRD → `prd-critique`. Prioritizing candidates → `prioritize`.
@@ -93,13 +187,21 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 - [ ] Part A only; no Implementation Spec content emitted (that is the `implementation-spec` skill).
 - [ ] Author byline present, sourced from the logged-in user (or `[NEED: author]`) — never invented.
 - [ ] Part A matches the visual specification exactly (tokens, components, blank-impact slot, pills, tags, appendix box).
-- [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → User input needed → Appendix.
-- [ ] Context passes the cold-reader test: product + audience, today's workflow, terms of art defined.
-- [ ] Every evidence item carries a type label, source, and date; the Evidence header carries the single link to the PRD’s Sprntly evidence page — never fabricated; quotes verbatim; types varied where the signals allow.
-- [ ] Problem frames business + user; no smuggled solution.
+- [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix (User input needed).
+- [ ] Context passes the informed-insider test: no company or product explainer, just the mechanic as it works today + terms of art. ~70 words.
+- [ ] Every evidence item carries a type label, source, and date — never fabricated; quotes verbatim; types varied where the signals allow. The Evidence header carries NO link (matches item 5).
+- [ ] Pre-emit provenance check run per evidence item: the specific supplying artifact was nameable for each one, or the item did not ship.
+- [ ] Provenance: every claim, magnitude, source, date, and quote traces to supplied input or a system record; no assumption is sitting in Evidence; no source name was invented; illustrative runs are labeled as such.
+- [ ] Problem opens on the user, carries one sizing number, closes on business cost; stands alone if lifted out; no smuggled solution.
+- [ ] Hypothesis is one plain-English sentence in if-X-then-Y-which-moves-Z form, with no restatement of the problem.
 - [ ] Goal: one primary metric w/ formula + baseline; projected impact filled with chain + confidence, or rendered as the designed blank; guardrails separate.
 - [ ] Requirements table default with Happy path / Edge case / Failure types (so `implementation-spec` inherits the branches); ≤5 user inputs, tagged, owned.
-- [ ] Appendix renders with Part A; exactly one riskiest assumption + 3-line pre-mortem.
+- [ ] Evidence is 3 items or fewer — hard cap, every mode, every template; types varied; `[NEED]` rows excluded from the cap.
+- [ ] Length mode correct: standard ~750 words ex-requirements unless detailed was explicitly requested; detailed never inferred from input volume; nothing padded to reach a budget.
+- [ ] Risks in the body between Requirements and Appendix; exactly one riskiest assumption + 3-line pre-mortem in its box.
+- [ ] Appendix holds User input needed only; no Non-goals, Alignment, Rollout, or Done-when at any length.
+- [ ] If a template was supplied: correspondence map reasoned first; their section names, order, AND form of expression followed (stories stay stories, prose stays prose, no house table imported); happy/edge/failure coverage survives in whatever form they use; v4 visuals and all judgment rules intact; no estimate, team size, or date authored.
+- [ ] Title is 4–8 words and names the change, not the problem.
 - [ ] Raw HTML emitted, no code fence, no commentary; nothing fabricated; every gap labeled.
 
 ## Known gaps / limitations

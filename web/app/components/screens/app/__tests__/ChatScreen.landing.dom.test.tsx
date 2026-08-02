@@ -45,6 +45,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: { create: vi.fn(), addTurn: vi.fn() },
@@ -105,7 +106,7 @@ import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
 // The curated home chip (under the composer) that fires an ask when clicked.
-const FEEDBACK_CHIP = "Give me feedback on last week's customer conversations"
+const FEEDBACK_CHIP = "Give me summary on last week's customer conversations"
 
 function renderScreen() {
   return render(

@@ -196,7 +196,7 @@ export function SourcesScreen() {
         <div>
           <h1 className="main-title">Sources</h1>
           <p className="main-sub">
-            Files Sprntly uses to write your weekly brief for{" "}
+            Files Sprntly uses to write your Top Insights brief for{" "}
             <strong>{companyName}</strong>.
           </p>
         </div>
@@ -229,7 +229,7 @@ export function SourcesScreen() {
       ) : files.length === 0 ? (
         <EmptyPane
           title="No sources yet"
-          hint="Add files to start generating your weekly brief."
+          hint="Add files to start generating your Top Insights brief."
         />
       ) : (
         <ul className="src-list">

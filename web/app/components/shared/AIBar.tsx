@@ -251,7 +251,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
-        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
+        setAskError("No brief insights available yet. Generate a Top Insights brief first.")
         return
       }
       // Use the first (top-ranked) insight
@@ -303,7 +303,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
-        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
+        setAskError("No brief insights available yet. Generate a Top Insights brief first.")
         return
       }
       const result = await runMultiAgentGeneration(brief.id, 0, "aggressive")

@@ -9,10 +9,13 @@ declares what a tool is, the engine declares what we can do with it). The
 web's connectorsCatalog.ts mirrors this map for display; this module is the
 backend's authority.
 
-Cardinality (product decision, 2026-07): every connector carries EXACTLY ONE
-type for now. The shape stays list-valued so allowing multi-type connectors
-later is a data change, not a schema/API change — do not add a second type to
-any entry without product sign-off.
+Cardinality (product decision, 2026-07-30): connectors may carry MULTIPLE
+types when the tool genuinely is more than one thing — Slack is both a
+communication tool and a customer-voice source (customer/community channels
+are synced into the corpus). Multi-type entries still need product sign-off
+per entry; every provider carries at least one type. The web renders a
+multi-type connector's card in EVERY category it belongs to (one connection,
+several shelves) — see connectorsCatalog.ts.
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ CODE = "code"
 MONITORING = "monitoring"
 DESIGN = "design"
 
-#: provider → its type (a one-element list; see cardinality note above).
+#: provider → its types (see cardinality note above).
 #: Covers every provider the backend has an auth module or puller for, plus
 #: catalog-only ("coming soon") providers so the web can read one map. A
 #: provider absent here has no types (empty list).
@@ -40,12 +43,25 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "linear": [TASK_MANAGEMENT],
     "asana": [TASK_MANAGEMENT],
     # Communication
-    "slack": [COMMUNICATION],
+    # Slack is dual-typed (product decision 2026-07-30): a communication tool
+    # (brief delivery target) AND a customer-voice source — the corpus sync
+    # pulls the channels the user selects (see slack_sync.py), so customer/
+    # community channels are real evidence. The customer-voice type is what
+    # makes is_evidence_provider("slack") True.
+    "slack": [COMMUNICATION, CUSTOMER_VOICE],
     "msteams": [COMMUNICATION],
     "intercom": [COMMUNICATION],
     # Documentation
     "google_drive": [DOCUMENTS],
     "notion": [DOCUMENTS],
+    # A team wiki: specs, decision records, runbooks, handbooks. Typed
+    # `documents` like Notion/Drive and NOT an evidence exception — a page
+    # asserting a customer problem is the author's claim about it, not
+    # measured proof, so Confluence alone must not open the brief gate.
+    "confluence": [DOCUMENTS],
+    # The user's OWN documents, uploaded into a named source. A documentation
+    # tool by type, but an evidence source by intent — see the exceptions below.
+    "uploads": [DOCUMENTS],
     # Customer voice / meetings
     "zendesk": [CUSTOMER_VOICE],
     "sprinklr": [CUSTOMER_VOICE],
@@ -81,7 +97,7 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 
 # ── Evidence-bearing providers (the brief data-source rule) ──────────────────
 #
-# The weekly brief is synthesized from connectors that BRING IN evidence about
+# The Top Insights brief is synthesized from connectors that BRING IN evidence about
 # the product and its customers. Five kinds of tool don't do that, so they can
 # never satisfy brief generation on their own (mirrors NON_EVIDENCE_CATEGORIES
 # in web/app/lib/connectorsCatalog.ts — the two lists must agree):
@@ -90,12 +106,16 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 #                    decided; the brief's output flows to them, not from them.
 #   code             GitHub — what was BUILT, not what users need.
 #   design           Figma / Framer — design surfaces, not customer signal.
-#   communication    Slack / Teams — DELIVERY targets for the brief.
+#   communication    MS Teams — a DELIVERY target for the brief. (Slack is
+#                    dual-typed communication + customer-voice, so it counts
+#                    as evidence via its customer-voice type — the corpus
+#                    sync pulls user-selected channels.)
 #   documents        Notion / Google Docs — internal documentation; context
 #                    that shapes a brief, not customer/product evidence.
 #
 # Everything else (analytics, customer-voice, meetings, crm, revenue,
-# monitoring) is evidence and can drive a brief.
+# monitoring) is evidence and can drive a brief. A multi-type provider is
+# evidence iff ANY of its types is evidence-bearing.
 NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
     {TASK_MANAGEMENT, CODE, DESIGN, COMMUNICATION, DOCUMENTS}
 )
@@ -103,8 +123,12 @@ NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
 #: Providers whose TYPE is non-evidence but which still count as a data
 #: source. Intercom's type is `communication`, but as a customer-support inbox
 #: it carries voice-of-customer evidence (the web catalog files it under the
-#: `voice` category for the same reason).
-_EVIDENCE_PROVIDER_EXCEPTIONS: frozenset[str] = frozenset({"intercom"})
+#: `voice` category for the same reason). `uploads` is typed `documents` like
+#: Notion/Drive, but it is the user DELIBERATELY handing us a named, described
+#: corpus of their own business documents — research, support exports, strategy
+#: — rather than a whole workspace of internal docs, so it does count (the web
+#: catalog gives it its own evidence-bearing `uploads` category to match).
+_EVIDENCE_PROVIDER_EXCEPTIONS: frozenset[str] = frozenset({"intercom", "uploads"})
 
 
 def is_evidence_provider(provider: str | None) -> bool:
@@ -132,3 +156,39 @@ def has_type(provider: str | None, connector_type: str) -> bool:
 def providers_with_type(connector_type: str) -> list[str]:
     """Every provider carrying `connector_type`, catalog order."""
     return [p for p, ts in CONNECTOR_TYPES.items() if connector_type in ts]
+
+
+# ── Evidence-bearing UPLOAD categories (connector-category uploads) ──────────
+#
+# Files uploaded into a connector CATEGORY's upload strip (Settings →
+# Connectors; the category key rides in the file_categories.json sidecar, see
+# app.datasets) declare "I have this kind of data" — they are processed like
+# that category's connector data, not like plain company documentation:
+# extraction gets the category's source hint, signals default to the category's
+# KG source_type, and provenance carries origin="connector" (channel="upload").
+# Categories absent here (docs/pm/code/design/comms — the web catalog's
+# NON_EVIDENCE_CATEGORIES, which this map must stay the complement of) keep the
+# plain-upload path: origin="upload", no hint, LLM-classified source_type.
+#
+# Each entry: category key → (default KG source_type, extractor source hint).
+# The default source_type must be in graph.types.SIGNAL_SOURCE_TYPES (DB CHECK
+# constraint). monitoring/crm have no exact KG source_type; they default to the
+# closest evidence type and the hint tells the extractor the real context.
+EVIDENCE_UPLOAD_CATEGORIES: dict[str, tuple[str, str]] = {
+    "voice": ("customer_voice",
+              "customer_voice (user-uploaded customer voice/support documents: "
+              "call transcripts, support ticket exports, survey verbatims, "
+              "interview notes)"),
+    "analytics": ("analytics",
+                  "analytics (user-uploaded product analytics exports: metrics, "
+                  "funnels, dashboards, usage reports)"),
+    "revenue": ("revenue",
+                "revenue (user-uploaded revenue/billing exports: MRR reports, "
+                "deals, churn/expansion data)"),
+    "crm": ("revenue",
+            "revenue + customer_voice (user-uploaded CRM exports: deals/"
+            "pipeline, account notes, customer emails)"),
+    "monitoring": ("analytics",
+                   "analytics (user-uploaded monitoring/reliability exports: "
+                   "incident reports, error/uptime data)"),
+}

@@ -420,8 +420,16 @@ export function usePinMarking({
     // Public surface: never post an unnamed pin comment (it would be attributed
     // "Anonymous"). Abort and surface the name-capture form; the draft is kept so
     // the viewer can submit again once a name is set. No-op on the signed-in
-    // surface (requireName defaults false there).
+    // surface (requireName defaults false there). The abort itself must be
+    // VISIBLE — the pin's own error slot (already rendered by PrototypeMarkLayer
+    // for save failures) is reused so "added but couldn't send" never happens
+    // silently again.
     if (requireName) {
+      setPins((prev) =>
+        prev.map((p) =>
+          p.n === n ? { ...p, error: "Add your name below, then send again." } : p,
+        ),
+      )
       onRequireName?.()
       return
     }

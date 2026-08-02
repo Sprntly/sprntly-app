@@ -8,6 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { HtmlReportView } from "./HtmlReportView"
+import { useCpanelPhase } from "./useCpanelPhase"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
@@ -16,10 +17,13 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketStub, type TicketSyncState, type TrackerMeta,
-  type TrackerProvider,
+  type JiraProject, type TicketLifecycle, type TicketStub,
+  type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
+import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
 import { DestinationPicker } from "./DestinationPicker"
@@ -27,28 +31,44 @@ import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
 import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
-  IconRefresh, IconChevronDown, IconPlugConnected,
+  IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar,
 } from "@tabler/icons-react"
-import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
-import { printCombined } from "../../lib/combinedExport"
+import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
+import { buildCombinedHtml } from "../../lib/combinedExport"
+import { documentsApi } from "../../lib/api"
+import { saveBlob } from "../../lib/saveBlob"
 import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
 
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
 // bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
 // isEvidenceTabHidden), so uploads show PRD → Tickets.
+//
+// Reports sits AFTER the pipeline because it isn't part of it: a report hangs off
+// the CHAT THREAD, not off the PRD, and a thread may hold several. It's hidden
+// until the thread actually has one (see reportsTabHidden below), so the pipeline
+// tabs are unchanged for every chat that never asked for a report.
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
+  { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
 ] as const
 
-const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
-const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
+// The key is versioned because the bounds below moved: widths stored under the
+// old key were dragged against a 60vw default and a 650px floor, so replaying
+// one now would mean a panel that never opens at its intended 35%.
+const CPANEL_WIDTH_KEY = "sprntly-cpanel-width-v2"
+const CPANEL_DEFAULT_VW = 0.35 // first open: 35% panel / 65% thread
 const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
+// Floor, not a comfortable width — it's what 35% comes to on a ~1200px window,
+// so the default never starts below the point the first drag would clamp to.
+const CPANEL_WIDTH_MIN = 420
 
 function clampCpanelWidth(px: number): number {
   const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
-  return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
+  // On a window narrow enough that the floor exceeds the cap, the cap wins.
+  const min = Math.min(CPANEL_WIDTH_MIN, max)
+  return Math.min(max, Math.max(min, Math.round(px)))
 }
 
 // Header Share dropdown — Download PDF of the combined Evidence + PRD (falls
@@ -100,12 +120,22 @@ function ShareMenu({
     setOpen(false)
     try {
       // Combined Evidence + PRD when both are HTML briefs (evidence fetched on
-      // demand); otherwise the v3 HTML PRD prints itself (its print stylesheet
-      // strips the editing chrome), and a markdown PRD uses the section builder.
+      // demand), else the PRD brief alone. Rendered SERVER-side, the same way a
+      // report downloads: one identical file per browser, carrying the Sprntly
+      // watermark and footer. (This used to open the browser's print dialog,
+      // which produced a different file per browser and could not be marked.)
       const ev = prd.html ? await resolveEvidence() : null
-      if (ev?.html && prd.html) printCombined(ev, prd)
-      else if (prd.html) printPrdHtml(prd)
-      else await downloadPrdPdf(prd)
+      const html = ev?.html && prd.html ? buildCombinedHtml(ev, prd) : prd.html
+      if (html) {
+        const slug = slugifyTitle(prd.title)
+        const name = ev?.html && prd.html ? `${slug}-evidence-prd` : slug
+        const res = await documentsApi.downloadPdf(html, name)
+        saveBlob(res.blob, res.filename || `${name}.pdf`)
+      } else {
+        // A markdown-only PRD has no HTML brief to render; the section builder
+        // draws one client-side (already watermarked and footered).
+        await downloadPrdPdf(prd)
+      }
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     }
@@ -161,29 +191,184 @@ export function isEvidenceTabHidden(
   )
 }
 
+/**
+ * Resolve the PRD for the insight currently in the panel, streaming the draft in
+ * as it's written. Shared by the Evidence footer's "Generate PRD" button and the
+ * PRD tab's resolve-on-click, so there is ONE implementation of "get me this
+ * insight's PRD".
+ *
+ * `POST /v1/prd/generate` is find-or-create: an insight that already has a
+ * ready (or in-flight) PRD returns that row, so this is a plain load in that
+ * case and a click can never fork a duplicate document. Only a genuinely
+ * PRD-less insight is generated.
+ *
+ * The insight comes from the open finding (`detail.meta`) or, failing that, the
+ * PRD pointer already in the panel — with neither there is nothing to resolve
+ * and `meta` is null, which callers use to disable/skip.
+ */
+function useResolvePrd() {
+  const { openContentPanel, showToast } = useNavigation()
+  const { content, setContent } = useContent()
+  const meta = content.detail?.meta ?? content.prdMeta ?? null
+  const [resolving, setResolving] = useState(false)
+  // Guards a double-click on one button; `content.prdGenerating` is what keeps
+  // the two callers from starting the same run twice.
+  const busyRef = useRef(false)
+
+  const resolve = useCallback(async () => {
+    if (!meta || busyRef.current) return
+    busyRef.current = true
+    setResolving(true)
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
+      if (result.ok) {
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    } finally {
+      busyRef.current = false
+      setResolving(false)
+    }
+  }, [meta, setContent, openContentPanel, showToast])
+
+  return { meta, resolving, resolve }
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
 
-  const evidenceHidden = isEvidenceTabHidden(content)
-  const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
+  const { mounted, phase } = useCpanelPhase(contentPanelTab != null)
 
-  // If the panel is parked on Evidence but that tab just became hidden (a
-  // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
-  const activeTab = evidenceHidden && contentPanelTab === "evidence" ? "prd" : contentPanelTab
+  // The tab to RENDER. During the exit animation `contentPanelTab` is already
+  // null, and reading it directly would blank the panel's body for the 200ms
+  // it spends sliding out — the last open tab keeps rendering instead. The ref
+  // is written from an effect (never during render), so by the time a close
+  // renders it already holds the tab the previous commit was showing.
+  const lastTabRef = useRef<(typeof TABS)[number]["id"]>("prd")
+  useEffect(() => {
+    if (contentPanelTab) lastTabRef.current = contentPanelTab
+  }, [contentPanelTab])
+  const shownTab = contentPanelTab ?? lastTabRef.current
+
+  // This thread's captured reports — fetched once per thread by
+  // useThreadReportsSync (AppShell), never here. Defaulted because the panel is
+  // rendered against partial content in plenty of places (tests, and any surface
+  // that sets only the slices it cares about); a missing slice means "no reports
+  // in scope", never a crash in the shared panel.
+  //
+  // Scoped to the conversation the fetch was FOR: the panel is global and the
+  // list lives in shared content, so on the commit where the chat switches threads
+  // the rows still describe the PREVIOUS one (the fetcher is AppShell's effect,
+  // and React runs it AFTER the chat screen's). A list that doesn't belong reads
+  // as still LOADING, never as this thread's answer and never as an empty thread —
+  // "no reports in this chat" said about another chat's reports is the wrong claim
+  // in both directions.
+  const reportsBelong = (content.threadReportsConversationId ?? null) === (content.conversationId ?? null)
+  const reports = reportsBelong ? (content.threadReports ?? []) : []
+  const reportsLoading = !reportsBelong || content.threadReportsStatus === "loading"
+  const reportsError = reportsBelong && content.threadReportsStatus === "error"
+
+  // THE RULE: a tab exists only when this thread actually has that artifact.
+  //
+  // Evidence → PRD → Tickets are one pipeline, entered by having a PRD or the
+  // insight to resolve one from. A chat whose only artifact is a report was
+  // showing all three regardless, so the panel advertised three documents that
+  // did not exist and could not be made from there.
+  //
+  // "In scope" is deliberately wider than "loaded": the PRD tab resolves an
+  // insight's PRD on click, and the Evidence tab loads a finding's brief, so a
+  // pointer to one (prdMeta / detail.meta) is as good as the document itself.
+  const pipelineInScope = !!(
+    content.prd ||
+    content.prdGenerating ||
+    content.prdMeta ||
+    content.detail?.meta ||
+    content.evidence ||
+    content.evidenceGenerating
+  )
+  const evidenceHidden = !pipelineInScope || isEvidenceTabHidden(content)
+
+  // Same rule for reports — with one addition: "no reports" has to be KNOWN, not
+  // merely unproven. An empty list from a FAILED fetch used to hide the tab, so
+  // switching to another tab made the report the user was reading disappear from
+  // the panel entirely. So the tab also survives an error.
+  const reportsHidden =
+    reports.length === 0 &&
+    !reportsError &&
+    // A standalone report (opened from Artifacts with no chat behind it) has no
+    // thread list at all — the open document IS the reason the tab belongs. Keyed
+    // on the explicit flag, not on "a focus id exists": a focus id that merely
+    // outlived its thread used to keep a Reports tab on chats that have none.
+    !content.reportFocusStandalone
+
+  const hidden: Record<(typeof TABS)[number]["id"], boolean> = {
+    evidence: evidenceHidden,
+    prd: !pipelineInScope,
+    tickets: !pipelineInScope,
+    reports: reportsHidden,
+  }
+  // The tab currently being shown is never pulled out from under the reader —
+  // whatever is in the body must stay reachable in the bar above it. Evidence is
+  // the exception: it going hidden means this PRD has no research brief AT ALL
+  // (not a timing artifact), and the redirect off it is deliberate — see the
+  // effect below.
+  const visibleTabs = TABS.filter(
+    (t) => !hidden[t.id] || (t.id === shownTab && t.id !== "evidence"),
+  )
+
+  // Clicking the PRD tab with no PRD in scope IS the request for one — parking on
+  // "No PRD draft loaded" makes the user hunt for a button to do the obvious next
+  // thing. So the click switches tabs AND resolves the insight's PRD: shows the
+  // existing document if there is one (find-or-create, see useResolvePrd), writes
+  // it if there isn't. Only on an actual click — a programmatic tab switch must
+  // never kick off a generation nobody asked for.
+  const { resolve: resolvePrd } = useResolvePrd()
+  const handleTabClick = useCallback((id: (typeof TABS)[number]["id"]) => {
+    openContentPanel(id)
+    if (id === "prd" && !content.prd && !content.prdGenerating) void resolvePrd()
+  }, [openContentPanel, content.prd, content.prdGenerating, resolvePrd])
+
+  // If the panel is parked on a tab that just became hidden (a backlog/upload PRD
+  // loaded → no Evidence; the panel sliding out off an empty Reports tab), fall
+  // back to the first tab that IS visible rather than a stranded body. Not
+  // hardcoded to "prd" any more: on a report-only thread the PRD tab is exactly
+  // the one that doesn't exist.
+  const activeTab = visibleTabs.some((t) => t.id === shownTab)
+    ? shownTab
+    : (visibleTabs[0]?.id ?? "prd")
 
   // Persist that fallback into navigation state so re-opens land on a real tab.
   useEffect(() => {
-    if (evidenceHidden && contentPanelTab === "evidence") openContentPanel("prd")
-  }, [evidenceHidden, contentPanelTab, openContentPanel])
+    if (evidenceHidden && contentPanelTab === "evidence" && activeTab !== "evidence") {
+      openContentPanel(activeTab)
+    }
+  }, [evidenceHidden, contentPanelTab, activeTab, openContentPanel])
 
-  // Tracks the live pixel width; null = use the CSS default (60vw).
+  // Tracks the live pixel width; null = use the CSS default (35vw).
   const widthRef = useRef<number | null>(null)
+  // Teardown for the drag session in flight, or null when none is. Doubles as
+  // the "already ended" guard — several events can terminate one gesture.
+  const endDragRef = useRef<(() => void) | null>(null)
 
   // On open: restore saved width, apply it, and keep it clamped on window resize.
   // On close: remove the CSS var so it resets to default.
+  //
+  // Keyed on `mounted`, not on the tab: clearing --cpanel-width the moment the
+  // tab went null would snap a user-widened panel back to the 35vw default in
+  // the first frame of the exit slide. Now the var lives exactly as long as the
+  // panel element does. (It also stops the effect re-running on every tab
+  // switch, which pointlessly removed and re-applied the same width.)
   useEffect(() => {
-    if (!contentPanelTab) return
+    if (!mounted) return
     const root = document.documentElement
 
     const saved = Number(window.localStorage.getItem(CPANEL_WIDTH_KEY))
@@ -205,45 +390,112 @@ export function ContentPanel() {
       window.removeEventListener("resize", apply)
       root.style.removeProperty("--cpanel-width")
     }
-  }, [contentPanelTab])
+  }, [mounted])
 
   // Pointer-down on the left-edge handle starts a drag session.
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    if (window.innerWidth <= 768) return
+  //
+  // Pointer events with capture, not mouse events. The panel body hosts iframes
+  // (the PRD and report frames), and an iframe's document swallows the parent's
+  // mouse events: the moment the widening panel's edge slid under the cursor,
+  // mousemove stopped arriving and the panel froze mid-drag — and because the
+  // mouseup was swallowed too, the session never ended, so the panel started
+  // tracking the cursor again after the button had already been released.
+  // Capturing the pointer pins every event of the gesture to the handle no
+  // matter what it travels over, and guarantees exactly one terminating event.
+  //
+  // Writes are coalesced onto a single animation frame. One width change
+  // re-lays out the panel AND the thread column's padding — the expensive half
+  // — while a pointermove burst can fire several times per frame, so doing that
+  // work per-event rather than per-frame is what made the drag feel heavy.
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || window.innerWidth <= 768) return
     e.preventDefault()
+    const handle = e.currentTarget
     const root = document.documentElement
     const startX = e.clientX
-    const startW = widthRef.current ?? Math.round(window.innerWidth * CPANEL_MAX_VW)
-    root.classList.add("cpanel-resizing")
+    const { pointerId } = e
+    // Seed from what's actually on screen rather than from an assumed default,
+    // so the first drag off a never-resized panel doesn't jump.
+    const startW = widthRef.current ?? Math.round(
+      handle.parentElement?.getBoundingClientRect().width
+        || window.innerWidth * CPANEL_DEFAULT_VW,
+    )
 
-    const onMove = (ev: MouseEvent) => {
+    let latestX = startX
+    let frame = 0
+    const flush = () => {
+      frame = 0
       // Dragging LEFT widens the panel (panel anchored to right edge).
-      const next = clampCpanelWidth(startW + (startX - ev.clientX))
+      const next = clampCpanelWidth(startW + (startX - latestX))
       widthRef.current = next
       root.style.setProperty("--cpanel-width", `${next}px`)
     }
-    const onUp = () => {
+
+    root.classList.add("cpanel-resizing")
+    // Not supported everywhere (and a no-op in jsdom) — the window listeners
+    // below still see captured events, since capture retargets but still
+    // bubbles, so the drag degrades to the old behaviour rather than breaking.
+    try { handle.setPointerCapture(pointerId) } catch { /* fall through */ }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      latestX = ev.clientX
+      if (!frame) frame = window.requestAnimationFrame(flush)
+    }
+    const end = () => {
+      if (endDragRef.current !== end) return
+      endDragRef.current = null
+      // Land the last move rather than dropping it a frame short of the cursor.
+      if (frame) { window.cancelAnimationFrame(frame); flush() }
       if (widthRef.current != null) {
         window.localStorage.setItem(CPANEL_WIDTH_KEY, String(widthRef.current))
       }
       root.classList.remove("cpanel-resizing")
-      window.removeEventListener("mousemove", onMove)
-      window.removeEventListener("mouseup", onUp)
+      try { handle.releasePointerCapture(pointerId) } catch { /* already gone */ }
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      // A cancelled pointer (OS gesture, alt-tab) or capture lost to a
+      // disappearing handle both end the gesture with no pointerup at all.
+      window.removeEventListener("pointercancel", onUp)
+      handle.removeEventListener("lostpointercapture", end)
     }
-    window.addEventListener("mousemove", onMove)
-    window.addEventListener("mouseup", onUp)
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      end()
+    }
+
+    endDragRef.current = end
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+    handle.addEventListener("lostpointercapture", end)
   }, [])
 
-  if (!contentPanelTab) return null
+  // A gesture can outlive the panel — close it, or navigate away, mid-drag and
+  // the window listeners would stay attached with the session still live, which
+  // is the same "resizes with no button held" failure by another route. Real
+  // browsers fire lostpointercapture when the handle leaves the DOM; this is
+  // what makes it true without depending on that.
+  useEffect(() => () => endDragRef.current?.(), [])
+
+  if (!mounted) return null
+
+  const closing = phase === "out"
 
   return (
     <>
       <div className="cpanel-overlay" onClick={closeContentPanel} />
-      <aside className="cpanel">
+      <aside
+        className={`cpanel${phase === "in" ? " cpanel--in" : ""}${closing ? " cpanel--out" : ""}`}
+        // On the way out the panel is a departing visual only — take it out of
+        // the a11y tree and the tab order so it can't be reached mid-slide.
+        inert={closing || undefined}
+        aria-hidden={closing || undefined}
+      >
         {/* Draggable left edge — grab to resize */}
         <div
           className="cpanel-resize-handle"
-          onMouseDown={handleResizeStart}
+          onPointerDown={handleResizeStart}
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize panel"
@@ -256,16 +508,28 @@ export function ContentPanel() {
                   key={t.id}
                   type="button"
                   className={`cpanel-tab${activeTab === t.id ? " cpanel-tab--active" : ""}`}
-                  onClick={() => openContentPanel(t.id)}
+                  onClick={() => handleTabClick(t.id)}
                 >
                   {t.icon} {t.label}
                 </button>
               ))}
             </div>
           </div>
-            <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
+            {/* The header names what the panel is SHOWING. On Reports that's the
+                thread's reports — not the PRD, which the tab isn't about (and
+                which a report-only thread may not even have). */}
+            <span className="cpanel-main-name">
+              {activeTab === "reports"
+                ? "Reports"
+                : content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}
+            </span>
           <div className="cpanel-head-actions">
-            <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
+            {/* The header Share menu exports the Evidence + PRD pair, so it has no
+                meaning on Reports — a report carries its OWN share/PDF actions,
+                on the open document (ReportsTab). */}
+            {activeTab !== "reports" && (
+              <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
+            )}
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>
@@ -276,6 +540,9 @@ export function ContentPanel() {
           {activeTab === "evidence" && <EvidenceTab />}
           {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
           {activeTab === "tickets" && <TicketsTab />}
+          {activeTab === "reports" && (
+            <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
         </div>
 
         {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.
@@ -294,33 +561,10 @@ export function ContentPanel() {
 // generation for the current insight, flips to the PRD tab, and lands the doc
 // there. Disabled when there's no insight meta to generate from.
 function EvidenceBottomBar() {
-  const { openContentPanel, showToast } = useNavigation()
-  const { content, setContent } = useContent()
+  const { openContentPanel } = useNavigation()
+  const { content } = useContent()
   const prd = content.prd
-  const meta = content.detail?.meta ?? content.prdMeta ?? null
-  const [generating, setGenerating] = useState(false)
-
-  const generate = useCallback(async () => {
-    if (!meta || generating) return
-    setGenerating(true)
-    // Reveal the PRD tab right away — it live-renders the draft as it streams.
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
-    openContentPanel("prd")
-    try {
-      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
-      if (result.ok) {
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
-      } else {
-        setContent({ prdGenerating: false, prdPartialHtml: null })
-        showToast("PRD generation failed", result.message)
-      }
-    } catch (e) {
-      setContent({ prdGenerating: false, prdPartialHtml: null })
-      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-    } finally {
-      setGenerating(false)
-    }
-  }, [meta, generating, setContent, openContentPanel, showToast])
+  const { meta, resolving, resolve } = useResolvePrd()
 
   return (
     <div className="cpanel-bottom-bar">
@@ -333,10 +577,10 @@ function EvidenceBottomBar() {
           type="button"
           className="btn btn-primary btn-sm cpanel-next-btn"
           data-testid="evidence-footer-prd-cta"
-          disabled={generating || !meta}
-          onClick={generate}
+          disabled={resolving || !meta}
+          onClick={resolve}
         >
-          {generating ? "Generating PRD…" : "Generate PRD"}
+          {resolving ? "Generating PRD…" : "Generate PRD"}
         </button>
       )}
     </div>
@@ -550,9 +794,11 @@ function EvidenceTab() {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane skeleton. The finished doc (poll result) replaces this.
           <div style={{ minHeight: 280 }}>
-            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="evidence-streaming"
+              title="Writing the evidence brief…"
+              sub="Rendering it below as it's written — the finished brief replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
               title="Evidence brief (generating)"
@@ -560,10 +806,11 @@ function EvidenceTab() {
             />
           </div>
         ) : isLoading ? (
-          <EmptyPane
+          <GeneratingPane
+            {...EVIDENCE_GEN}
+            testId="evidence-generating"
+            icon={<IconMicroscope size={19} />}
             title="Generating evidence…"
-            hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
-            placeholders={4}
           />
         ) : localState.kind === "error" ? (
           <>
@@ -600,11 +847,17 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
   story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
   const preview = story.user_story || story.body
+  const excluded = story.lifecycle === "excluded"
   return (
-    <button type="button" className="tkv2-card" onClick={onOpen}>
+    <button type="button" className={`tkv2-card${excluded ? " tkv2-row--excluded" : ""}`} onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
       <div className="tkv2-card-main">
-        <div className="tkv2-card-title">{story.title}</div>
+        <div className="tkv2-card-title tkv2-rtitle">
+          {story.title}
+          {/* Says WHY the row has no tracker chip — without it an excluded
+              ticket looks identical to one that simply failed to sync. */}
+          {excluded ? <span className="tkv2-exbadge" title={`Not sent to ${tool || "the PM tool"}`}>Excluded</span> : null}
+        </div>
         {preview ? (
           <div className="tkv2-story">
             {preview}
@@ -1127,9 +1380,14 @@ export function TicketsTab() {
 
   if (genState.kind === "generating") {
     return (
-      <div className="cpanel-empty" data-testid="tickets-generating">
-        <span className="prd-loader" aria-hidden />
-        <p>Breaking <em>{prdTitle}</em> into tickets…</p>
+      <div className="tkv2 tkt-list-wrap">
+        <GeneratingPane
+          {...TICKET_GEN}
+          testId="tickets-generating"
+          icon={<IconTicket size={19} />}
+          title={<>Breaking <em>{prdTitle}</em> into tickets…</>}
+          skeleton="rows"
+        />
       </div>
     )
   }
@@ -1208,6 +1466,20 @@ export function TicketsTab() {
     }
   })()
 
+  // A ticket's lifecycle changed in the detail: mirror it in this list's own
+  // copy so the change shows without a refetch. A deleted ticket LEAVES the
+  // array (the server drops it from every later read), which is also why the
+  // detail closes itself on delete — the index it was rendering is gone.
+  const applyLifecycle = (index: number, lifecycle: TicketLifecycle) => {
+    if (genState.kind !== "ready") return
+    const next =
+      lifecycle === "deleted"
+        ? genState.stories.filter((_, i) => i !== index)
+        : genState.stories.map((s, i) => (i === index ? { ...s, lifecycle } : s))
+    setGenState({ ...genState, stories: next })
+    if (lifecycle === "deleted") setSelectedIndex(null)
+  }
+
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
   if (selectedStory && prdId != null) {
@@ -1235,6 +1507,7 @@ export function TicketsTab() {
             meta: trackerMeta.meta,
             synced: selectedStory.id ? syncState?.statuses?.[selectedStory.id] : undefined,
           } : undefined}
+          onLifecycleChange={(lifecycle) => applyLifecycle(selectedIndex as number, lifecycle)}
         />
       </div>
     )
@@ -1249,8 +1522,14 @@ export function TicketsTab() {
           PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
         <h2>Tickets from <em>{prdTitle}</em></h2>
+        {/* The subline must never read as a finished count while a run is in
+            flight — that's the whole reason the old treatment went unnoticed. */}
         <div className="tkv2-sub">
-          {stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD
+          {refreshing
+            ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
+            : streaming
+              ? `Writing tickets · ${stories.length} ready so far`
+              : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
         {stories.length > 0 && (
           <div className="tkv2-hactions">
@@ -1315,20 +1594,28 @@ export function TicketsTab() {
         )}
       </div>
 
-      {/* Regeneration + sync status lines (under the header). */}
+      {/* Regeneration + sync status lines (under the header). The two
+          "still working" ones are full banners rather than 12px notes — a run
+          in flight has to be readable at a glance from the top of the panel. */}
       {streaming && (
-        <div className="tkt-push-status" data-testid="tickets-streaming">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          {stories.length === 0 && skeletonStubs.length > 0
-            ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
-            : `Generating tickets${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…`}
-        </div>
+        <GeneratingBanner
+          testId="tickets-streaming"
+          title="Generating tickets…"
+          sub={
+            stories.length === 0 && skeletonStubs.length > 0
+              ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
+              : `Showing them as they land${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}.`
+          }
+          progress={streamProgress}
+        />
       )}
       {refreshing && (
-        <div className="tkt-push-status">
-          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          The PRD changed — updating these tickets. Showing the previous set until the new one is ready.
-        </div>
+        <GeneratingBanner
+          tone="warn"
+          testId="tickets-refreshing"
+          title="Regenerating — the PRD changed"
+          sub="Updating these tickets from the edited PRD. The previous set stays below until the new one is ready."
+        />
       )}
       {!refreshing && refreshError && (
         <div className="tkt-push-status tkt-push-status--err">
@@ -1358,15 +1645,27 @@ export function TicketsTab() {
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
         <div>
-          I&apos;ve broken <em>{prdTitle}</em> into{" "}
+          {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
           {/* While streaming, count the whole planned set (landed + skeletons)
               so the number doesn't creep up batch by batch. */}
           <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD. Review, then push to your tracker.
+          prioritized from the PRD.{" "}
+          {streaming
+            ? "The rest are landing now."
+            : "Review, then push to your tracker."}
         </div>
       </div>
 
-      <div className="tkt-list">
+      {/* The stale set is still useful (and still clickable), but it must not
+          look current while its replacement is being written — label it and
+          hold it back visually. */}
+      {refreshing && (
+        <div className="gwip-stale-lbl">
+          <span className="gwip-stale-dot" aria-hidden /> Previous tickets — being replaced
+        </div>
+      )}
+
+      <div className={`tkt-list${refreshing ? " tkt-list--stale" : ""}`}>
         {stories.map((s, i) => (
           <StoryRow
             key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)}

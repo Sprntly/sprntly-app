@@ -17,6 +17,7 @@ inserts a row + mkdir, upload writes the file + converts it.
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 from dataclasses import dataclass
@@ -75,6 +76,73 @@ def dataset_path(slug: str) -> Path:
 
 def raw_path(slug: str) -> Path:
     return dataset_path(slug) / "raw"
+
+
+# Per-file category attribution --------------------------------------------
+# Manual uploads carry the connector *category* they were dropped into
+# (e.g. "business_docs", "analytics") so the UI can list each file under its
+# category instead of one global bucket. The mapping is a small JSON sidecar
+# keyed by the STORED raw basename (what list_files reports as `filename`).
+# Files with no entry are "uncategorized" (all pre-existing uploads), which the
+# UI keeps in its legacy global list.
+_CATEGORIES_FILE = "file_categories.json"
+
+
+def _categories_path(slug: str) -> Path:
+    return dataset_path(slug) / _CATEGORIES_FILE
+
+
+def read_file_categories(slug: str) -> dict[str, str]:
+    """Return the {stored_raw_basename: category} map, or {} if none/unreadable."""
+    p = _categories_path(slug)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except Exception:  # pragma: no cover — corrupt sidecar, treat as empty
+        logger.warning("Unreadable category sidecar for %s", slug, exc_info=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v}
+
+
+def set_file_categories(slug: str, filenames: list[str], category: str) -> None:
+    """Record `category` for each stored raw basename. No-op if category blank."""
+    category = (category or "").strip()
+    if not category or not filenames:
+        return
+    current = read_file_categories(slug)
+    for name in filenames:
+        current[name] = category
+    _write_file_categories(slug, current)
+
+
+def forget_file_category(slug: str, filename: str) -> None:
+    """Drop a file's category entry (called when the file is deleted)."""
+    current = read_file_categories(slug)
+    if current.pop(filename, None) is not None:
+        _write_file_categories(slug, current)
+
+
+def md_file_categories(slug: str) -> dict[str, str]:
+    """The category map keyed by CONVERTED markdown basename instead of the
+    stored raw basename — what corpus-level consumers (KG seeding) see.
+
+    Derived via md_filename(raw). Collision-suffixed siblings (`name.1.md`)
+    can't be attributed (the raw→md mapping isn't stored — same limitation as
+    list_files' md_chars lookup) and stay uncategorized, which is the safe
+    fallback: uncategorized docs get the plain-upload treatment."""
+    return {
+        md_filename(raw): category
+        for raw, category in read_file_categories(slug).items()
+    }
+
+
+def _write_file_categories(slug: str, mapping: dict[str, str]) -> None:
+    p = _categories_path(slug)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(mapping, indent=2, sort_keys=True))
 
 
 def create_dataset(slug: str, display_name: str) -> dict:
@@ -176,6 +244,62 @@ def _is_zip_junk(name: str) -> bool:
         or base == ".DS_Store"
         or not base
     )
+
+
+def expand_zip_members(
+    filename: str, data: bytes, *, per_member_max_bytes: int
+) -> tuple[list[tuple[str, bytes]], list[dict]]:
+    """Expand a .zip to (basename, bytes) pairs under the same guards as
+    `ingest_zip`: directories and macOS junk skipped, nested archives never
+    recursed, basename-only paths (no traversal), per-member and total
+    uncompressed caps, and a member-count cap.
+
+    This is the DATASET-FREE half of `ingest_zip`, for callers that store
+    members somewhere other than a dataset directory — the document-source
+    upload route, where a .zip previously landed as an unreadable stub.
+    `ingest_zip` deliberately keeps its own loop rather than delegating here:
+    its member cap counts successfully INGESTED files, and re-pointing it at a
+    cap over extracted members would quietly change behavior its tests pin.
+
+    Raises DatasetError only for an unreadable archive; every other problem is
+    a per-member error so partial success survives.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DatasetError(f"{Path(filename).name!r} is not a valid zip archive") from exc
+
+    members: list[tuple[str, bytes]] = []
+    errors: list[dict] = []
+    total_uncompressed = 0
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir() or _is_zip_junk(info.filename):
+                continue
+            base = Path(info.filename).name  # basename only → no path traversal
+            if Path(base).suffix.lower() == ".zip":
+                errors.append({"filename": base, "error": "Nested zip skipped"})
+                continue
+            if info.file_size > per_member_max_bytes:
+                errors.append({
+                    "filename": base,
+                    "error": f"Member exceeds {per_member_max_bytes // (1024*1024)}MB limit",
+                })
+                continue
+            total_uncompressed += info.file_size
+            if total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+                errors.append({"filename": base,
+                               "error": "Archive too large (uncompressed cap exceeded)"})
+                break
+            if len(members) >= _ZIP_MAX_MEMBERS:
+                errors.append({"filename": base, "error": "Too many files in archive"})
+                break
+            try:
+                members.append((base, zf.read(info)))
+            except Exception as exc:  # noqa: BLE001 — one bad member, not the archive
+                logger.exception("Zip member read failed for %s", base)
+                errors.append({"filename": base, "error": f"Could not read: {exc}"})
+    return members, errors
 
 
 def ingest_zip(

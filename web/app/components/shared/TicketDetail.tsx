@@ -2,15 +2,16 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
-  IconArrowLeft, IconChevronDown, IconCheck, IconExternalLink,
-  IconPlus, IconX,
+  IconArrowLeft, IconBan, IconChevronDown, IconCheck, IconExternalLink,
+  IconLoader2, IconPlus, IconTrash, IconX,
 } from "@tabler/icons-react"
 import { useNavigation } from "../../context/NavigationContext"
+import { ConfirmDialog } from "./ConfirmDialog"
 import {
   ticketDataApi, teamApi,
   type ClickUpTicketState, type GeneratedStory, type TicketAssignee,
-  type TeamMemberRecord, type TrackerFieldValue, type TrackerMeta,
-  type TrackerProvider, type TrackerTransition,
+  type TeamMemberRecord, type TicketLifecycle, type TrackerFieldValue,
+  type TrackerMeta, type TrackerProvider, type TrackerTransition,
 } from "../../lib/api"
 import { TrackerFieldEditor } from "./TrackerFieldEditor"
 
@@ -334,20 +335,103 @@ function InlineEditList({ items, commit, addLabel, itemLabel, renderRow }: {
   )
 }
 
+/** The destination tool's display name.
+ *
+ *  `fallback` is what an UNBOUND ticket reads as, and the two callers want
+ *  different things: the field editors describe a shape ClickUp happens to
+ *  define, while the lifecycle copy is a sentence about where a ticket is
+ *  going — and promising an unbound ticket to "ClickUp" would name a tool the
+ *  user may not even have connected. */
+function providerName(
+  provider: TrackerProvider | null | undefined, fallback = "ClickUp",
+): string {
+  if (provider === "jira") return "Jira"
+  if (provider === "asana") return "Asana"
+  if (provider === "clickup") return "ClickUp"
+  return fallback
+}
+
 /** In-panel ticket detail — the `ticket` skill's canonical detail (Jira
  *  anatomy): full-width five-section description over a two-column zone (main
  *  story column + Details rail). Structured fields drive it; legacy/thin
  *  tickets fall back to the plain description + a generated-AC flag. */
-export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracker }: {
+export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracker, onLifecycleChange }: {
   story: GeneratedStory; index: number; prdId: number; onBack: () => void
   /** Open a sibling ticket by its title (linked issues are title references). */
   onOpenLinked?: (title: string) => void
   /** Bound-tracker context — switches status/priority to the destination's
    *  real vocabulary. Omit for unbound tickets (default vocabulary). */
   tracker?: TicketTrackerCtx | null
+  /** Exclude / delete / restore this ticket. The list owner updates its own
+   *  copy (dropping a deleted ticket, marking an excluded one) — omit to hide
+   *  the controls entirely. */
+  onLifecycleChange?: (lifecycle: TicketLifecycle) => void
 }) {
   const { showToast } = useNavigation()
   const key = useMemo(() => ticketKeyFor(prdId, story), [prdId, story])
+  const [lifecycle, setLifecycle] = useState<TicketLifecycle>(story.lifecycle || "active")
+  const [lcBusy, setLcBusy] = useState(false)
+  // The state to confirm, or null for no open dialog. Holding the PENDING
+  // state (rather than a bare boolean) is what lets one dialog serve both
+  // actions while still naming the specific consequence of each.
+  const [lcConfirm, setLcConfirm] = useState<TicketLifecycle | null>(null)
+  const trackerName = providerName(tracker?.provider, "your PM tool")
+
+  /** Both non-active states DELETE the tracker copy — that is what "not in the
+   *  PM tool" has to mean — so each is confirmed with the consequence spelled
+   *  out rather than a generic "Are you sure?". Restoring needs no confirm: it
+   *  only ever adds a ticket back. */
+  const applyLifecycle = async (next: TicketLifecycle) => {
+    setLcBusy(true)
+    try {
+      await ticketDataApi.setLifecycle(key, next)
+      setLifecycle(next)
+      setLcConfirm(null)
+      onLifecycleChange?.(next)
+      if (next === "deleted") onBack()
+    } catch {
+      // Keep the dialog open on failure — closing it would read as "done".
+      showToast("Couldn't update the ticket", "Try again.")
+    } finally {
+      setLcBusy(false)
+    }
+  }
+
+  const requestLifecycle = (next: TicketLifecycle) => {
+    if (next === "active") { void applyLifecycle(next) } else { setLcConfirm(next) }
+  }
+
+  /** What the confirm says. A FUNCTION, not an object built during render:
+   *  it reads `title`, which is declared further down, and evaluating it up
+   *  here would hit the temporal dead zone.
+   *
+   *  The tracker sentence is stated only when the ticket was actually pushed —
+   *  promising to delete a Jira issue that never existed would be a lie, and
+   *  its absence tells the user something true. */
+  const confirmCopy = (next: "deleted" | "excluded") => {
+    const name = title || story.title
+    const pushed = Boolean(tracker?.synced?.url)
+    if (next === "deleted") {
+      return {
+        title: "Delete this ticket?",
+        body: pushed
+          ? `"${name}" will be removed from Sprntly, and its ${trackerName} issue will be deleted.`
+          : `"${name}" will be removed from Sprntly. It was never pushed, so nothing changes in ${trackerName}.`,
+        confirmLabel: "Delete ticket",
+        busyLabel: "Deleting…",
+        tone: "danger" as const,
+      }
+    }
+    return {
+      title: `Exclude from ${trackerName}?`,
+      body: pushed
+        ? `"${name}" stays in Sprntly and stays editable, but its ${trackerName} issue will be deleted and it won't be sent again.`
+        : `"${name}" stays in Sprntly and stays editable, but it won't be sent to ${trackerName}.`,
+      confirmLabel: `Exclude from ${trackerName}`,
+      busyLabel: "Excluding…",
+      tone: "default" as const,
+    }
+  }
 
   const [title, setTitle] = useState(story.title)
   const [status, setStatus] = useState("Backlog")
@@ -490,20 +574,15 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
     : PRIORITY_OPTIONS.map((name) => ({ name, color: null }))
 
   // Custom-field save: merge locally, send only the changed field (the
-  // backend merges too — sibling overrides survive). null clears an override.
+  // backend merges too — sibling overrides survive). A null is KEPT as an
+  // explicit null rather than deleted: it records that the user cleared the
+  // field, which is what makes the clear reach the tracker instead of reading
+  // as "no override" and leaving the old value there.
   const saveCustomField = (fieldId: string, v: TrackerFieldValue) => {
-    setCustomFields((m) => {
-      const next = { ...m }
-      if (v == null) delete next[fieldId]
-      else next[fieldId] = v
-      return next
-    })
+    setCustomFields((m) => ({ ...m, [fieldId]: v }))
     saveFields({ custom_fields: { [fieldId]: v } })
   }
-  const providerLabel =
-    tracker?.provider === "jira" ? "Jira"
-    : tracker?.provider === "asana" ? "Asana"
-    : "ClickUp"
+  const providerLabel = providerName(tracker?.provider)
 
   // Issue type (Jira-bound tickets): the destination's real non-subtask
   // types. Displayed value = local edit ?? pulled tracker type ?? "Task".
@@ -613,8 +692,23 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
   const acCount = criteria.length
   const routeAgentReady = (story.route || "").toLowerCase().includes("agent")
 
+  const lcCopy = lcConfirm && lcConfirm !== "active" ? confirmCopy(lcConfirm) : null
+
   return (
     <div className="tkv2 tkv2-detail">
+      {lcCopy ? (
+        <ConfirmDialog
+          open
+          title={lcCopy.title}
+          body={lcCopy.body}
+          confirmLabel={lcCopy.confirmLabel}
+          busyLabel={lcCopy.busyLabel}
+          tone={lcCopy.tone}
+          busy={lcBusy}
+          onConfirm={() => applyLifecycle(lcConfirm as TicketLifecycle)}
+          onCancel={() => setLcConfirm(null)}
+        />
+      ) : null}
       {/* Header strip */}
       <div className="tkv2-dtop">
         <div className="tkv2-crumb">
@@ -622,6 +716,27 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
             <IconArrowLeft size={13} /> All tickets
           </button>
           &nbsp; /&nbsp; <span className="tkv2-key" style={{ padding: "3px 9px" }}>{`T-${index + 1}`}</span>
+          {onLifecycleChange ? (
+            <span className="tkv2-lcactions">
+              {lifecycle === "excluded" ? (
+                <button type="button" className="tkv2-lcbtn" disabled={lcBusy}
+                  onClick={() => requestLifecycle("active")}>
+                  {lcBusy ? <IconLoader2 size={12} className="icon-spin" aria-hidden /> : null}
+                  {lcBusy ? "Including…" : `Include in ${trackerName}`}
+                </button>
+              ) : (
+                <button type="button" className="tkv2-lcbtn" disabled={lcBusy}
+                  onClick={() => requestLifecycle("excluded")}
+                  title={`Keep this ticket in Sprntly but remove it from ${trackerName}`}>
+                  <IconBan size={12} /> Exclude from {trackerName}
+                </button>
+              )}
+              <button type="button" className="tkv2-lcbtn tkv2-lcbtn--danger" disabled={lcBusy}
+                onClick={() => requestLifecycle("deleted")}>
+                <IconTrash size={12} /> Delete
+              </button>
+            </span>
+          ) : null}
         </div>
         {loaded ? (
           <input
@@ -640,6 +755,13 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
         <div className="tkv2-empty" style={{ margin: "18px 2px" }}>Loading ticket…</div>
       ) : (
         <>
+
+      {lifecycle === "excluded" ? (
+        <div className="tkv2-lcbanner" role="status">
+          <IconBan size={13} /> Excluded — this ticket stays in Sprntly and is
+          not sent to {trackerName}.
+        </div>
+      ) : null}
 
       <div className="tkv2-edithint">
         ✎ Click any text — title, description, acceptance criteria, child
@@ -819,7 +941,13 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
                   <TrackerFieldEditor
                     field={f}
                     providerLabel={providerLabel}
-                    value={customFields[f.id] ?? tracker.synced?.custom_fields?.[f.id]}
+                    // Key PRESENCE, not `??`: an override of null means the
+                    // user cleared this field, and `??` would fall straight
+                    // through to the tracker's stale value and redisplay what
+                    // they just removed.
+                    value={f.id in customFields
+                      ? customFields[f.id]
+                      : tracker.synced?.custom_fields?.[f.id]}
                     onSave={(v) => saveCustomField(f.id, v)}
                   />
                 </div>

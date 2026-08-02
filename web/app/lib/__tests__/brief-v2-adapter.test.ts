@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State, companyLabel, humanizeSource } from "../brief-v2-adapter"
+import {
+  briefToBriefV2State,
+  companyLabel,
+  humanizeSource,
+  orderPoolForTypes,
+  selectFindingsForTypes,
+} from "../brief-v2-adapter"
 
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
@@ -316,7 +322,7 @@ describe("briefToBriefV2State — card body (bodyFor)", () => {
   })
 })
 
-describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
+describe("briefToBriefV2State — top-insights skill taxonomy", () => {
   it("maps each card's skill type/label and derives accent from TYPE (not the card's accent)", () => {
     // _card.accent is deliberately the wrong (retention rose) hex for a
     // competitive card — the adapter must derive the ochre from the type.
@@ -369,5 +375,133 @@ describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
     expect(state.hero!.fromSources).toEqual(["Customer voice", "PM notes", "Revenue"])
     // Legacy insight with no _card → no source chips (no fabricated convergence).
     expect(state.supporting[0].fromSources).toEqual([])
+  })
+})
+
+describe("briefToBriefV2State — ledger held-back line + updated chip (phase 2B)", () => {
+  it("compresses _backlog into one figure-light line with per-reason counts", () => {
+    const brief: Brief = {
+      ...makeBrief([makeInsight({ tag: "something_broken" })]),
+      _backlog: [
+        { theme_id: "t1", theme_label: "Billing outage cluster", reason: "carried" },
+        { theme_id: "t2", theme_label: "B", reason: "carried" },
+        { theme_id: "t3", theme_label: "C", reason: "deferred", deferred_until: "2026-08-03T06:00:00Z" },
+        { theme_id: "t4", theme_label: "D", reason: "in_progress" },
+      ],
+    }
+    const line = briefToBriefV2State(brief).heldBackLine!
+    expect(line).toContain("2 unchanged since last surfaced")
+    // Local-timezone rendering of 2026-08-03T06:00Z: Aug 2 or 3.
+    expect(line).toMatch(/1 deferred \(back Aug [23]\)/)
+    expect(line).toContain("1 already in progress")
+    // Counts only — no theme labels leak into the line.
+    expect(line).not.toContain("Billing outage cluster")
+  })
+
+  it("labels sibling hold-backs distinctly from the user's own actions", () => {
+    const brief: Brief = {
+      ...makeBrief([makeInsight({ tag: "something_broken" })]),
+      _backlog: [
+        { theme_id: "t1", theme_label: "A", reason: "deferred", deferred_until: "2026-08-03T06:00:00Z" },
+        { theme_id: "t2", theme_label: "B", reason: "sibling_deferred" },
+        { theme_id: "t3", theme_label: "C", reason: "sibling_dismissed" },
+      ],
+    }
+    const line = briefToBriefV2State(brief).heldBackLine!
+    expect(line).toContain("1 held with a deferred finding on the same topic")
+    expect(line).toContain("1 held with a dismissed finding on the same topic")
+  })
+
+  it("renders no line when _backlog is absent or empty (pre-ledger briefs)", () => {
+    expect(briefToBriefV2State(makeBrief([makeInsight({ tag: "something_broken" })])).heldBackLine).toBeNull()
+    expect(
+      briefToBriefV2State({ ...makeBrief([makeInsight({ tag: "something_broken" })]), _backlog: [] }).heldBackLine,
+    ).toBeNull()
+  })
+
+  it("threads _card.state onto the finding as skillState ('updated' only)", () => {
+    const updated = makeInsight({ tag: "something_broken", _card: { type: "reliability", state: "updated" } })
+    const fresh = makeInsight({ tag: "something_better", _card: { type: "growth", state: "new" } })
+    const out = briefToBriefV2State(makeBrief([updated, fresh]))
+    const all = [out.hero!, ...out.supporting]
+    expect(all.some((f) => f.skillState === "updated")).toBe(true)
+    expect(all.filter((f) => f.skillState === "updated")).toHaveLength(1)
+  })
+})
+
+describe("orderPoolForTypes", () => {
+  // makeInsight doesn't thread insight_types (the filter tests use a leaner
+  // fixture for that); attach it after the fact so these tests still get the
+  // full card shape briefToBriefV2State-adjacent helpers expect.
+  const withTypes = (insight: Insight, types: string[]): Insight => ({
+    ...insight,
+    insight_types: types,
+  })
+
+  it("stable-partitions matches before non-matches, preserving relative order within each group", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
+    const d = withTypes(makeInsight({ tag: "something_broken", title: "D" }), ["build_priorities"])
+    const e = withTypes(makeInsight({ tag: "something_broken", title: "E" }), ["top_problems"])
+    const ordered = orderPoolForTypes([a, b, c, d, e], ["top_problems"])
+    expect(ordered.map((i) => i.title)).toEqual(["A", "C", "E", "B", "D"])
+  })
+
+  it("matches on any intersecting type, not just an exact single-type match", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), [
+      "top_problems",
+      "wins",
+    ])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
+    const ordered = orderPoolForTypes([a, b, c], ["top_problems"])
+    expect(ordered.map((i) => i.title)).toEqual(["B", "C", "A"])
+  })
+
+  it("returns the input unchanged (same order, same reference) when there is no selection", () => {
+    const insights = [
+      withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"]),
+      withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"]),
+    ]
+    expect(orderPoolForTypes(insights, [])).toBe(insights)
+  })
+
+  it("leaves order unchanged when nothing matches the selection", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["build_priorities"])
+    expect(orderPoolForTypes([a, b], ["top_problems"]).map((i) => i.title)).toEqual(["A", "B"])
+  })
+
+  it("is wired into selectFindingsForTypes: matched pool findings render in the reordered sequence", () => {
+    // Multiple selected types spread across the pool — selectFindingsForTypes
+    // routes the matched-only result through orderPoolForTypes, so the picked
+    // findings come out in the same order the reorder would produce (best-first
+    // pool order, restricted to matches).
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A", confidence: 0.9 }), [
+      "top_problems",
+    ])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B", confidence: 0.85 }), [
+      "wins",
+    ])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C", confidence: 0.8 }), [
+      "top_problems",
+    ])
+    const d = withTypes(makeInsight({ tag: "something_broken", title: "D", confidence: 0.7 }), [
+      "competitor_moves",
+    ])
+    const brief: Brief = {
+      id: 1,
+      company: "acme",
+      generated_at: "2026-07-26T00:00:00Z",
+      week_label: "w",
+      summary_headline: "H",
+      insights: [a, b, c],
+      _pool: [a, b, c, d],
+    }
+    const picked = selectFindingsForTypes(brief, ["top_problems", "wins"]).map((i) => i.title)
+    // Matches A, B, C (pool order) — D (competitor_moves) never matched, so it
+    // never enters the reordered/matched result.
+    expect(picked).toEqual(["A", "B", "C"])
   })
 })

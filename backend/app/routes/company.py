@@ -45,6 +45,7 @@ from app.kpi_tree import (
     load_kpi_tree,
     save_kpi_tree,
 )
+from app.kg_ingest.auto_sync import kickoff_roadmap_ingest
 from app.roadmap_doc import load_roadmap_doc, save_roadmap_doc
 from app.routes.team import _require_admin
 
@@ -101,7 +102,7 @@ def put_coworkers(
 
 # ── Roadmap doc — the workspace's uploaded roadmap (priorities anchor) ───────
 # Backs the onboarding strategy step's roadmap upload (design scene onbstrat) +
-# the read-only `roadmapdoc` artifact view. The stored roadmap feeds weekly-brief
+# the read-only `roadmapdoc` artifact view. The stored roadmap feeds top-insights
 # composition as a high-weight priorities signal (see app.synthesis.agent). One
 # roadmap per WORKSPACE; the latest upload wins.
 def _roadmap_payload(company_id: str, workspace_id: str | None = None) -> dict | None:
@@ -129,7 +130,7 @@ async def post_roadmap_doc(
     (multipart `file`).
 
     Reuses the shared ingest converter (the same one the dataset upload path
-    uses) to extract text, which then feeds the weekly brief as a priorities
+    uses) to extract text, which then feeds the Top Insights brief as a priorities
     anchor. Any member may set the roadmap during onboarding.
     """
     filename = file.filename or "roadmap"
@@ -148,6 +149,12 @@ async def post_roadmap_doc(
         content_type=file.content_type,
         workspace_id=company.workspace_id,
     )
+    # Push the roadmap into the knowledge graph in the background so the
+    # company's stated bets are visible to convergence / Ask / PRD evidence
+    # within seconds. Fire-and-forget: it never blocks or fails this response,
+    # and synthesis_brief.seed_incremental re-runs the same (ledger-deduped)
+    # ingest on the next brief, which is both the retry and the grandfather path.
+    kickoff_roadmap_ingest(company.company_id, company.workspace_id)
     return {
         "ok": True,
         "filename": doc.filename,

@@ -12,13 +12,19 @@ needs-more-data state instead of burning a synthesis run to reach it.
 A company HAS a data source when either:
   - an ACTIVE connection exists for an evidence-bearing provider
     (see app.connectors.catalog.is_evidence_provider), or
+    — the `uploads` connector (the user's own named document sources) is one
+    of these, so it satisfies the gate through the ORDINARY connection path
+    with no special case here, or
   - the user has uploaded source files (the corpus `raw/` dir), which have
     always been able to drive a brief on their own. The workspace-context file
     onboarding seeds automatically is excluded — onboarding info alone must
     not produce a brief.
 
-The weekly scheduler is deliberately NOT gated here: scheduled runs go through
-generate_brief_for's own refresh-gating and empty-KG handling.
+The weekly scheduler, startup pass, and pipeline don't call this module's
+check directly — they are covered by the same rule inside
+synthesis_brief.generate_brief_for, which raises NoBriefDataSourceError (below)
+after KG seeding. The endpoint-level 409s here remain so user-triggered
+surfaces refuse BEFORE burning a seed/synthesis attempt.
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ import logging
 
 from app import datasets
 from app.connectors.catalog import is_evidence_provider
+from app.synthesis.agent import EmptyKnowledgeGraphError
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,18 @@ NO_DATA_SOURCE_MESSAGE = (
 
 #: Files onboarding writes into the corpus automatically (not user uploads).
 _AUTO_SEEDED_FILENAMES = frozenset({"sprntly-workspace-context.md"})
+
+
+class NoBriefDataSourceError(EmptyKnowledgeGraphError):
+    """Brief generation refused: no evidence-bearing data source.
+
+    Raised by synthesis_brief.generate_brief_for AFTER KG seeding — so
+    non-evidence connectors (Jira/GitHub/…) still land in the KG for PRDs and
+    chat, but cannot produce a Top Insights brief on their own. Subclasses
+    EmptyKnowledgeGraphError so every existing caller (scheduler cycle, startup
+    pass, pipeline stage 5, routes) treats it as the same benign
+    "nothing to brief from" condition without new handlers.
+    """
 
 
 def _has_evidence_connection(company_id: str) -> bool:

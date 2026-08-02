@@ -89,7 +89,7 @@ def _patch_extract_and_transcribe(text: str):
 
     captured: list[str] = []
 
-    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint):
+    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint, **kw):
         captured.append(text)
         return {"signals": 1, "themes": 1, "skipped": 0}
 
@@ -165,7 +165,7 @@ def test_audio_chunk_dedup_content_hash_stable_across_chunks():
     long_text = "word " * ai._TRANSCRIPT_CHAR_BUDGET
     names: list[str] = []
 
-    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint):
+    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint, **kw):
         names.append(doc_name)
         return {"signals": 0, "themes": 0, "skipped": 0}
 

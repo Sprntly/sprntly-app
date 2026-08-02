@@ -169,3 +169,23 @@ def test_seed_filesystem_skips_dirs_with_no_corpus(isolated_settings):
     seeded = ds.seed_filesystem_datasets()
     assert seeded == 0
     assert not isolated_settings["db"].dataset_exists("empty")
+
+
+def test_md_file_categories_maps_raw_names_to_md_names(isolated_settings):
+    """The sidecar is keyed by stored RAW basename; md_file_categories re-keys
+    it by the converted markdown basename (md_filename), which is what the
+    corpus/KG-seeding layer sees. Uncategorized files simply have no entry."""
+    ds = _datasets_module(isolated_settings)
+    ds.create_dataset("acme", "Acme Corp")
+    ds.set_file_categories("acme", ["Q3 Calls.pdf", "deck.pptx"], "voice")
+    ds.set_file_categories("acme", ["mrr export.xlsx"], "revenue")
+
+    out = ds.md_file_categories("acme")
+    assert out == {
+        ds.md_filename("Q3 Calls.pdf"): "voice",
+        ds.md_filename("deck.pptx"): "voice",
+        ds.md_filename("mrr export.xlsx"): "revenue",
+    }
+    # No sidecar at all → empty map, never raises.
+    ds.create_dataset("empty2", "Empty")
+    assert ds.md_file_categories("empty2") == {}

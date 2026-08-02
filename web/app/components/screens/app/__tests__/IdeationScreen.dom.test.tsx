@@ -190,10 +190,10 @@ describe("IdeationScreen — Proposed tab", () => {
     // Breadth line counts the WHOLE trail, not just the shown head.
     expect(screen.getByText(/3 signals across 2 sources/)).toBeTruthy()
     // Why it's in Ideation at all.
-    expect(screen.getByText(/Not prioritized in the weekly brief/)).toBeTruthy()
+    expect(screen.getByText(/Not prioritized in the Top Insights brief/)).toBeTruthy()
 
     // CTA into the chat → PRD → tickets → prototype funnel.
-    expect(screen.getByText("Generate a brief")).toBeTruthy()
+    expect(screen.getByText("Generate PRD")).toBeTruthy()
   })
 
   it("shows the weekly-prioritization indicator, not the old framework dropdown", async () => {
