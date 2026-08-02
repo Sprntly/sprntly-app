@@ -540,6 +540,53 @@ def test_projection_company_root_falls_back_to_enterprise_id_label(facade, isola
     assert company[0].canonical_label == "ent-nolabel"
 
 
+def test_projection_relabels_company_root_on_refresh_once_real_name_is_known(
+    facade, isolated_settings, monkeypatch
+):
+    """A company root created via a non-business-context path first (e.g.
+    roadmap upload, which has no real name to give it) stays stuck with its
+    fallback label under the OLD ensure_company_entity semantics — no
+    subsequent business-context refresh ever fixes it. A real, successful
+    refresh must relabel the already-existing root once it learns the real
+    legal_name, and bump updated_at."""
+    from app.research import business_context_projection as proj
+    monkeypatch.setattr(proj, "embed_texts", lambda t, **k: [[0.1] * 4 for _ in t])
+
+    # Simulate the stuck state directly: a company root created elsewhere
+    # (roadmap upload) with no real name, so it fell back to the enterprise_id.
+    facade.ensure_company_entity("ent-stuck", label=None)
+    company = facade.query_entities("ent-stuck", type="company")
+    assert len(company) == 1
+    assert company[0].canonical_label == "ent-stuck"
+    before = (
+        facade._tbl("kg_entity")
+        .select("updated_at")
+        .eq("enterprise_id", "ent-stuck")
+        .eq("id", company[0].id)
+        .execute()
+        .data[0]
+    )
+
+    # A real, successful business-context refresh now runs, with a known
+    # legal_name — this is the exact call `project_business_context` makes.
+    d = _doc()  # legal_name = "Frazil"
+    proj.project_business_context(facade, "ent-stuck", d)
+
+    after_entities = facade.query_entities("ent-stuck", type="company")
+    assert len(after_entities) == 1  # still the SAME node, never duplicated
+    assert after_entities[0].id == company[0].id
+    assert after_entities[0].canonical_label == "Frazil"
+    after = (
+        facade._tbl("kg_entity")
+        .select("updated_at")
+        .eq("enterprise_id", "ent-stuck")
+        .eq("id", company[0].id)
+        .execute()
+        .data[0]
+    )
+    assert after["updated_at"] != before["updated_at"]
+
+
 # --------------------------------------------------------------------------- #
 # 12–14. Routes: GET 404 when empty, PUT stamps user, refresh via dep override
 # --------------------------------------------------------------------------- #

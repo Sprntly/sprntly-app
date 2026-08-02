@@ -48,6 +48,64 @@ def test_voice_guard_bans_every_term_on_the_deny_list():
         assert needle.lower() in guard, f"VOICE_GUARD must name banned term {term!r}"
 
 
+# The distinctive substring of VOICE_GUARD's raw-id/UUID citation rule. Any
+# wording tweak that keeps this phrase intact still passes; a real regression
+# (rule deleted or reworded past recognition) fails loudly.
+_ID_CITATION_RULE_NEEDLE = "raw internal id/uuid"
+
+
+def test_voice_guard_bans_raw_id_and_uuid_citation():
+    """A raw internal UUID in prose (e.g. 'artifact_id: 3f7a1c2e-...') isn't
+    banned JARGON vocabulary — it's an id-shaped VALUE. VOICE_GUARD needs its
+    own explicit rule against it, since the model correctly needs entity
+    properties (ids included) for grounding but must never cite the raw id
+    itself in the answer."""
+    guard = prompts.VOICE_GUARD.lower()
+    assert _ID_CITATION_RULE_NEEDLE in guard
+    # The carve-outs the rule must preserve: real named sources, and real
+    # entity labels — this rule bans the id VALUE, not referencing entities
+    # or sources at all.
+    assert "[source: revenue]" in guard
+    assert "entity label" in guard
+
+
+def test_ask_system_carries_the_id_citation_rule():
+    """ASK_SYSTEM (every Ask/decision-memo/skill-routed answer) must include
+    VOICE_GUARD's new id-citation rule specifically, not just VOICE_GUARD in
+    the abstract — this is the exact prompt the leaked artifact_id answer
+    (Ask job, decision-memo skill) was generated under."""
+    assert _ID_CITATION_RULE_NEEDLE in prompts.ASK_SYSTEM.lower()
+
+
+def test_assembled_ask_system_variants_all_carry_voice_guard():
+    """VOICE_GUARD (and its id-citation rule) must survive every real
+    system-prompt assembly, not just the bare ASK_SYSTEM constant. Mirrors the
+    exact concatenation each call site performs:
+      - ask_runner.compose_ask_answer: ASK_SYSTEM (+ PRD addendum) or
+        ASK_SYSTEM (+ KG addendum) or plain ASK_SYSTEM.
+      - qa_agent._answer_single_shot: ASK_SYSTEM + PRD? + KG? + custom-skill?
+      - qa_agent._answer_with_script: ASK_SYSTEM + PRD?
+    Addenda are appended AFTER ASK_SYSTEM (which already ends with
+    VOICE_GUARD), so the guard is never pushed out — this proves it rather
+    than assuming it from string concatenation order."""
+    variants = [
+        prompts.ASK_SYSTEM,
+        prompts.ASK_SYSTEM + prompts.ASK_SYSTEM_PRD_ADDENDUM,
+        prompts.ASK_SYSTEM + prompts.ASK_SYSTEM_KG_ADDENDUM,
+        (
+            prompts.ASK_SYSTEM
+            + prompts.ASK_SYSTEM_PRD_ADDENDUM
+            + prompts.ASK_SYSTEM_KG_ADDENDUM
+            + prompts.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM
+        ),
+        prompts.ASK_SYSTEM + prompts.ASK_SYSTEM_KG_ADDENDUM
+        + prompts.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
+    ]
+    for system in variants:
+        assert prompts.VOICE_GUARD in system
+        assert _ID_CITATION_RULE_NEEDLE in system.lower()
+
+
 def test_ask_kg_section_header_has_no_internal_jargon():
     """The Ask connected-sources block is injected verbatim into the prompt and
     is the single most echo-prone string — it must not say "knowledge graph"."""
