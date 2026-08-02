@@ -241,7 +241,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // One "New chat" chip is present and we're on the landing composer.
     expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
 
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "what is our churn" } })

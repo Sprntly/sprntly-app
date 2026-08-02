@@ -181,10 +181,10 @@ async function attachDoc(name = "Fraznet Enhancements.pptx"): Promise<File> {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -482,7 +482,8 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
     // already rendered — the send no longer vanishes into a void.
     expect(document.body.textContent).toContain("What are the riskiest requirements in this deck?")
     expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
-    expect(document.querySelector(".assistant-thinking")).toBeTruthy()
+    // Past the 400ms rung-0 gate the waiting state is on screen.
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
     // The ask itself hasn't been sent — extraction is still pending.
     expect(runAskGeneration).not.toHaveBeenCalled()
 
@@ -505,7 +506,7 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …the optimistic turn is rolled back (no stranded "thinking" ghost): no
     // in-flight thinking skeleton lingers…
-    await waitFor(() => expect(document.querySelector(".assistant-thinking")).toBeNull())
+    await waitFor(() => expect(document.querySelector(".cw")).toBeNull())
     // …and the attachment chip survives for a retry (not silently dropped).
     expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
   })
@@ -585,12 +586,12 @@ async function openPrdTabViaImport() {
   briefCurrent.mockClear()
 }
 
-// The PRD tab renders the in-tab composer (.bc-composer), not the landing one.
+// The PRD tab renders the in-tab composer (.cx), not the landing one.
 async function typeAndSendInTab(text: string) {
-  const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = document.querySelector(".bc-send") as HTMLButtonElement
+  const sendBtn = document.querySelector(".cx-send") as HTMLButtonElement
   expect(sendBtn).toBeTruthy()
   await act(async () => { fireEvent.click(sendBtn) })
 }

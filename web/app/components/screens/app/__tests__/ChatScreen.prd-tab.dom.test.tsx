@@ -434,10 +434,10 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
   }
 
   async function sendInThread(text: string) {
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
   }
 
@@ -456,10 +456,10 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
     // New plain chat tab, no PRD attached.
     await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
     await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
-    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => { fireEvent.change(textarea, { target: { value: "What changed last week?" } }) })
-    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
     const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number } | undefined
@@ -474,10 +474,10 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
 // ChatScreen.import-command.dom.test.tsx.)
 describe("ChatScreen — a brief-insight-opened PRD keeps its card at the top", () => {
   async function sendInThread(text: string) {
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(textarea).toBeTruthy()
     await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
   }
 

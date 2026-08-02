@@ -222,7 +222,7 @@ describe("ChatScreen — a plain (non-PRD) chat resumes untouched", () => {
     await act(async () => { renderScreen() })
     await waitFor(() => expect(listTurns).toHaveBeenCalledWith(42))
 
-    const composer = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const composer = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(composer, { target: { value: "and what about weekly cohorts?" } })
       fireEvent.keyDown(composer, { key: "Enter" })

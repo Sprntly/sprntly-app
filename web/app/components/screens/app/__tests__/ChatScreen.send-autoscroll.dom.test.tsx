@@ -147,7 +147,7 @@ async function typeAndSend(selector: string, text: string) {
   const textarea = document.querySelector(selector) as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const send = within(textarea.closest(".chat-home-composer, .bc-composer") as HTMLElement)
+  const send = within(textarea.closest(".cx") as HTMLElement)
     .getByLabelText("Send")
   await act(async () => { fireEvent.click(send) })
 }
@@ -168,9 +168,9 @@ function deferIntent() {
 async function openThread() {
   renderChat()
   resolveIntent.mockResolvedValue(ANSWER_ENVELOPE)
-  await typeAndSend(".chat-home-composer-input", "why are enterprise users asking for this?")
+  await typeAndSend(".cx-input", "why are enterprise users asking for this?")
   await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-  await waitFor(() => expect(document.querySelector(".bc-composer-input")).toBeTruthy())
+  await waitFor(() => expect(document.querySelector(".cx-input")).toBeTruthy())
   await waitFor(() => expect(document.body.textContent).toContain(ASK_RESULT.answer))
 }
 
@@ -214,7 +214,7 @@ describe("ChatScreen — sending from up the thread jumps to the newest message"
     expect(el.scrollTop).toBe(0)
 
     const release = deferIntent()
-    await typeAndSend(".bc-composer-input", "and what did they ask for exactly?")
+    await typeAndSend(".cx-input", "and what did they ask for exactly?")
 
     // The intent call is STILL in flight — no new turn, so nothing but the send
     // itself could have moved the viewport. The message is on screen and the
@@ -233,7 +233,7 @@ describe("ChatScreen — sending from up the thread jumps to the newest message"
     const el = scrollUpAway()
 
     deferIntent()
-    await typeAndSend(".bc-composer-input", "and what did they ask for exactly?")
+    await typeAndSend(".cx-input", "and what did they ask for exactly?")
 
     expect(scrollCalls.length).toBeGreaterThan(0)
     expect(scrollCalls.every((c) => c.behavior !== "smooth")).toBe(true)
@@ -251,7 +251,7 @@ describe("ChatScreen — sending from up the thread jumps to the newest message"
 
     runAskGeneration.mockResolvedValueOnce({ ...ASK_RESULT, answer: "SSO and audit logs." })
     const release = deferIntent()
-    await typeAndSend(".bc-composer-input", "and what did they ask for exactly?")
+    await typeAndSend(".cx-input", "and what did they ask for exactly?")
     await release(ANSWER_ENVELOPE)
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(2))
 
