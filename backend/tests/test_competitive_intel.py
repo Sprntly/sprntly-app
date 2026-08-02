@@ -459,6 +459,160 @@ def kw_skill_bound(seen) -> bool:
     )
 
 
+# ── SCAN-depth concurrent dispatch — the restructure's own regression risks ──
+
+def test_scan_merge_is_deterministic_regardless_of_completion_order(monkeypatch):
+    """The concurrency-safety property the restructure depends on:
+    `_capture_scan` merges concurrent SCAN passes back together in a FIXED
+    order (us, then competitors in their original `names` order) — never
+    completion order. Stress it by making passes finish in two DIFFERENT
+    orders (forward and reversed, via real `time.sleep` staggering across
+    real worker threads) and asserting the merged CaptureResult is
+    byte-identical either way."""
+    import time as _time
+
+    names = ["Globex", "Initech", "Umbrella"]
+    order = ["us", "Globex", "Initech", "Umbrella"]
+
+    def _delay_for(user: str, sleeps: dict[str, float]) -> float:
+        for name in order:
+            marker = (
+                "Competitor under review" not in user if name == "us"
+                else f"Competitor under review: {name}" in user
+            )
+            if marker:
+                return sleeps[name]
+        raise AssertionError(f"could not classify pass: {user[:80]!r}")
+
+    def _run(sleeps: dict[str, float]):
+        def _web(*, system, user, **kw):
+            _time.sleep(_delay_for(user, sleeps))
+            return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
+
+        _patch_web(monkeypatch, _web)
+        return ci._capture("e1", scope="s", names=names, mode=ci.MODE_SCAN,
+                           prior_state={})
+
+    forward = dict(zip(order, [0.04, 0.03, 0.02, 0.01]))   # us finishes LAST
+    reversed_order = dict(zip(order, [0.01, 0.02, 0.03, 0.04]))  # us finishes FIRST
+
+    cap_forward = _run(forward)
+    cap_reversed = _run(reversed_order)
+
+    assert cap_forward.records == cap_reversed.records
+    assert [r["competitor"] for r in cap_forward.records] == order
+    assert cap_forward.unobserved == cap_reversed.unobserved == []
+    assert cap_forward.capped == cap_reversed.capped == []
+    assert cap_forward.skipped == cap_reversed.skipped == []
+    assert cap_forward.truncated is cap_reversed.truncated is False
+
+
+def test_scan_failure_isolation_holds_under_concurrent_timing_chaos(monkeypatch):
+    """The concrete regression risk of the shared-state restructure (scope
+    item 2): a mid-batch failure in one competitor's concurrent task must not
+    corrupt or drop another competitor's records, regardless of which
+    worker thread finishes first. Staggered (not simultaneous) real sleeps so
+    the failing task is neither reliably first nor reliably last to return."""
+    import time as _time
+
+    delays = {"us": 0.02, "Globex": 0.04, "Initech": 0.01, "Umbrella": 0.03}
+
+    def _web(*, system, user, **kw):
+        if "Competitor under review: Initech" in user:
+            _time.sleep(delays["Initech"])
+            raise RuntimeError("search failed")
+        for name, d in delays.items():
+            marker = (
+                "Competitor under review" not in user if name == "us"
+                else f"Competitor under review: {name}" in user
+            )
+            if marker:
+                _time.sleep(d)
+                break
+        return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    cap = ci._capture("e1", scope="s", names=["Globex", "Initech", "Umbrella"],
+                      mode=ci.MODE_SCAN, prior_state={})
+    assert cap.unobserved == ["Initech"]
+    assert {r["competitor"] for r in cap.records} == {"us", "Globex", "Umbrella"}
+    assert all(r["competitor"] != "Initech" for r in cap.records)
+
+
+@pytest.mark.parametrize("names,budget,expected_dispatch,expected_skipped", [
+    (["A", "B", "C"], 40, ["A", "B", "C"], []),
+    (["A", "B", "C"], 2, ["A"], ["B", "C"]),
+    (["A", "B", "C"], 1, [], ["A", "B", "C"]),
+    (["A", "B", "C", "D", "E", "F"], 40, ["A", "B", "C", "D", "E"], []),
+])
+def test_scan_dispatch_plan_representative_combinations(
+    names, budget, expected_dispatch, expected_skipped,
+):
+    """`_scan_dispatch_plan` precomputes the search-budget skip decision in
+    ONE upfront pass (item 3) rather than the old incremental
+    `calls + needed > search_budget` check made as each sequential call
+    finished. The 6-name case also confirms `_MAX_COMPETITORS` (5) trims the
+    list before the budget check ever sees the 6th name."""
+    dispatch, skipped = ci._scan_dispatch_plan(names, budget)
+    assert dispatch == expected_dispatch
+    assert skipped == expected_skipped
+
+
+def test_scan_dispatch_plan_matches_the_old_incremental_check():
+    """Direct equivalence check against a reimplementation of the OLD
+    sequential incremental check (`calls` starts at 1 for the always-
+    dispatched "us" pass, incremented as each competitor is — assuming
+    success — dispatched; SCAN depth costs exactly 1 call per pass), across
+    several competitor-count/budget combinations. They agree whenever every
+    dispatched call succeeds; the one case they cannot agree on (a mid-batch
+    failure freeing up budget the old code would have reused) is an explicit,
+    ticket-documented tradeoff of deciding the whole plan before any call's
+    outcome is known — see `_scan_dispatch_plan`'s docstring."""
+    def _old_incremental(names, search_budget):
+        calls = 1  # the "us" pass, unconditional
+        dispatch, skipped = [], []
+        for name in names[:ci._MAX_COMPETITORS]:
+            if calls + 1 > search_budget:
+                skipped.append(name)
+                continue
+            dispatch.append(name)
+            calls += 1
+        return dispatch, skipped
+
+    names = ["Globex", "Initech", "Umbrella", "Wayne", "Stark", "Oscorp"]
+    for budget in (0, 1, 2, 3, 4, 5, 6, 7, 10, 40):
+        assert ci._scan_dispatch_plan(names, budget) == _old_incremental(names, budget), budget
+
+
+def test_scan_capture_emits_progress_per_competitor_not_for_us(monkeypatch):
+    """Bundle item 6: a per-competitor phase update as each SCAN pass
+    finishes, in fixed dispatch order — never fired for the "us" pass, which
+    the caller already labels separately."""
+    seen_phases: list[str] = []
+
+    def _web(*, system, user, **kw):
+        return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    ci._capture("e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
+               prior_state={}, on_phase=seen_phases.append)
+    assert seen_phases == ["Researched Globex…", "Researched Initech…"]
+
+
+def test_scan_capture_skips_progress_for_a_failed_competitor(monkeypatch):
+    seen_phases: list[str] = []
+
+    def _web(*, system, user, **kw):
+        if "Competitor under review: Initech" in user:
+            raise RuntimeError("search failed")
+        return json.dumps([{"what": "observed", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    ci._capture("e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
+               prior_state={}, on_phase=seen_phases.append)
+    assert seen_phases == ["Researched Globex…"]
+
+
 def test_review_capture_runs_the_v2_module_sequence_capped_by_config(monkeypatch):
     """Review reuses the weekly deep-dive's staged module sequence — one call
     per module, honouring `cir_modules_max` (2 here)."""
@@ -1208,8 +1362,16 @@ def test_scan_depth_is_one_pass_per_competitor(monkeypatch):
 
 
 # ── Cancellation: an abandoned run must stop spending ───────────────────────
+#
+# SCAN-depth capture dispatches "us" + every competitor CONCURRENTLY (see
+# `_capture_scan`), so there is no longer a "between competitors" checkpoint —
+# every call fires at once. The checkpoint moved to the one place left where
+# it can still save something: once, before the whole batch dispatches. This
+# is a deliberate, ticket-documented behavior change from the old sequential
+# checkpoint below (`test_cancellation_stops_between_staged_modules`, which
+# still applies unchanged to the REVIEW/staged path).
 
-def test_cancellation_stops_before_the_next_competitor(monkeypatch):
+def test_scan_cancellation_stops_the_whole_batch_before_dispatch(monkeypatch):
     from app.qa_agent import AskCancelled
 
     calls = []
@@ -1219,12 +1381,36 @@ def test_cancellation_stops_before_the_next_competitor(monkeypatch):
         return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
 
     _patch_web(monkeypatch, _web)
-    # Cancelled once the "us" pass is done.
     with pytest.raises(AskCancelled):
         ci._capture("e1", scope="s", names=["Globex", "Initech"],
                     mode=ci.MODE_SCAN, prior_state={},
-                    is_cancelled=lambda: len(calls) >= 1)
-    assert len(calls) == 1, "cancellation did not stop the sweep"
+                    is_cancelled=lambda: True)
+    assert calls == [], (
+        "a Stop that lands before dispatch must save every pass in the batch"
+    )
+
+
+def test_scan_dispatched_batch_completes_even_if_stop_lands_mid_flight(monkeypatch):
+    """Once the SCAN batch is dispatched, a Stop landing mid-flight can no
+    longer save any of it — every already-dispatched call still runs to
+    completion. This is the documented tradeoff of concurrent dispatch (a Stop
+    can no longer save the cost of an individual not-yet-started competitor),
+    not a silent regression to "Stop does nothing at all" (the pre-dispatch
+    checkpoint above still saves the whole batch when it lands in time)."""
+    calls = []
+    flag = {"cancelled": False}
+
+    def _web(*, system, user, **kw):
+        calls.append(user)
+        flag["cancelled"] = True  # flips as soon as the batch is under way
+        return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    cap = ci._capture("e1", scope="s", names=["Globex", "Initech"],
+                      mode=ci.MODE_SCAN, prior_state={},
+                      is_cancelled=lambda: flag["cancelled"])
+    assert len(calls) == 3, "an already-dispatched SCAN batch must run to completion"
+    assert {r["competitor"] for r in cap.records} == {"us", "Globex", "Initech"}
 
 
 def test_cancellation_stops_between_staged_modules(monkeypatch):
