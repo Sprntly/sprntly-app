@@ -97,7 +97,11 @@ from app.connectors.tokens import (
     encrypt_token_json,
 )
 from app.deps.ownership import require_owned_dataset
-from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
+from app.kg_ingest.auto_sync import (
+    kickoff_corpus_seed,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
 from app.prompt_history import clamp_turn_text
 from app.skill_router import is_competitive_report_request
 
@@ -2229,6 +2233,33 @@ def slack_callback(code: str, state: str):
             "bot_user_id": token_json.get("bot_user_id"),
         }),
     )
+
+    # Populate the KG immediately, like every other connector callback — but
+    # via the corpus path, not kickoff_sync. Slack has no kg_ingest PULLERS
+    # entry, so `kickoff_sync(company_id, "slack")` is a documented no-op
+    # (auto_sync.kickoff_sync); its ingest is sync_slack → corpus → seed.
+    # Until this call existed the ONLY trigger was the 6-hourly connector
+    # refresh (scheduler._refresh_all_company_connectors), so a brief asked for
+    # right after connecting Slack synthesized zero Slack signal and then
+    # silently started working an interval later.
+    #
+    # Company-level on purpose: the row is per-user, but voice-of-customer
+    # pulling resolves the company's sync row + its shared pull-channel
+    # selection (slack_company.resolve_company_slack_row), the same contract
+    # the scheduler and the manual Sync button already use.
+    #
+    # Guarded even though the callee swallows its own failures: its lazy
+    # `from app.connectors.slack_company import ...` sits outside that guard,
+    # and the connection is already committed above — a raise here would 500 a
+    # connect that in fact succeeded, stranding the user on an error page with
+    # Slack connected.
+    try:
+        kickoff_slack_corpus_sync(company_id)
+    except Exception:  # noqa: BLE001 — a sync kickoff must never fail a connect
+        logger.warning(
+            "slack: corpus-sync kickoff failed after connect for %s",
+            company_id, exc_info=True,
+        )
 
     return _build_post_oauth_redirect(payload, slack_oauth.SLACK_PROVIDER)
 

@@ -1384,6 +1384,13 @@ def _no_background_connector_sync(request, monkeypatch):
         # extraction against the mid-reset in-memory DB.
         monkeypatch.setattr(auto_sync, "kickoff_roadmap_ingest", _noop_seed,
                             raising=False)
+        # And for Slack's corpus kickoff, now that the OAuth callback fires it
+        # on connect (not just the 6-hourly scheduler): its thread runs
+        # sync_slack against the LIVE slack.com API and stamps the connection
+        # row, so every test that drives /v1/connectors/slack/callback would
+        # otherwise inherit exactly the two hazards above.
+        monkeypatch.setattr(auto_sync, "kickoff_slack_corpus_sync", _noop_sync,
+                            raising=False)
     except Exception:
         pass
     try:

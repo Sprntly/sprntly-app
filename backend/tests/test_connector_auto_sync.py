@@ -404,6 +404,76 @@ def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):
     assert calls == [("co-G", "github")]
 
 
+def _stub_slack_callback(conn_route, monkeypatch):
+    """Mock everything the Slack callback touches except the kickoff, so a test
+    can drive /v1/connectors/slack/callback end-to-end offline."""
+    monkeypatch.setattr(conn_route.slack_oauth, "verify_oauth_state",
+                        lambda state: {"company_id": "co-S", "user_id": "u-1",
+                                       "return_to": None})
+    monkeypatch.setattr(conn_route.slack_oauth, "exchange_code_for_token",
+                        lambda code: {"ok": True, "access_token": "xoxb-x",
+                                      "bot_user_id": "B1", "scope": "channels:read",
+                                      "team": {"id": "T1", "name": "Meridian"}})
+    monkeypatch.setattr(conn_route.slack_oauth, "fetch_auth_test",
+                        lambda tok: {"user": "sprntly"})
+    monkeypatch.setattr(conn_route.slack_oauth, "token_payload_to_store",
+                        lambda tj: "{}")
+    monkeypatch.setattr(conn_route, "encrypt_token_json", lambda payload: "enc")
+    monkeypatch.setattr(conn_route.db, "upsert_slack_connection",
+                        lambda **kw: {"id": "c1"})
+
+
+def test_slack_callback_kicks_off_company_corpus_sync(isolated_settings, monkeypatch):
+    """Connecting Slack must populate the KG now, not on the next 6-hourly
+    scheduler pass.
+
+    Slack has no kg_ingest puller, so the callback's kickoff is the
+    company-level corpus sync (sync_slack → corpus → seed), called with the
+    company_id off the signed state — never a per-user variant, matching
+    scheduler._refresh_all_company_connectors and the manual Sync route.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync",
+                        lambda cid: calls.append(cid))
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
+    assert calls == ["co-S"]
+
+
+def test_slack_callback_still_redirects_when_kickoff_raises(isolated_settings,
+                                                            monkeypatch):
+    """A kickoff failure must never break the OAuth redirect.
+
+    The connection row is already committed by the time the kickoff runs, so a
+    raise here would 500 a connect that actually succeeded — the user would see
+    an error page with Slack connected behind it. kickoff_slack_corpus_sync
+    swallows its own errors, but its lazy slack_company import sits outside that
+    guard, so the callback guards the call itself.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    def _boom(_cid):
+        raise RuntimeError("slack_company import blew up")
+
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync", _boom)
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
+
+
 # ---------- status endpoint ----------
 
 def test_status_endpoint_surfaces_sync_stamps(isolated_settings, monkeypatch):
