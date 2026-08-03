@@ -544,30 +544,13 @@ def post_to_target(
     )
 
 
-def fetch_conversation_history(
-    access_token: str,
-    *,
-    channel: str,
-    limit: int = 100,
-    oldest: str | None = None,
-    latest: str | None = None,
-    cursor: str | None = None,
-) -> dict[str, Any]:
-    """Read messages from a channel/DM via conversations.history.
+def _conversation_history_once(
+    access_token: str, params: dict[str, str]
+) -> tuple[bool, dict[str, Any], int]:
+    """One conversations.history GET → `(ok, parsed_body, http_status)`.
 
-    Works with either token: the bot token (xoxb) for channels/DMs the bot
-    is in, or the user token (xoxp) to read the authorizing user's own
-    conversations. `oldest`/`latest` are Slack ts bounds; `cursor` paginates.
-
-    Returns the trimmed shape {messages: [...], has_more, next_cursor}.
-    Raises HTTPException(400) on Slack-side rejection."""
-    params: dict[str, str] = {"channel": channel, "limit": str(limit)}
-    if oldest:
-        params["oldest"] = oldest
-    if latest:
-        params["latest"] = latest
-    if cursor:
-        params["cursor"] = cursor
+    Split out for the same reason as `_post_message_once`: the auto-join retry
+    needs to run the identical request twice without duplicating the parsing."""
     resp = requests.get(
         SLACK_CONVERSATIONS_HISTORY_URL,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -579,10 +562,56 @@ def fetch_conversation_history(
         parsed = resp.json() or {}
     except ValueError:
         parsed = {}
-    if not resp.ok or not parsed.get("ok"):
+    return (resp.ok and bool(parsed.get("ok")), parsed, resp.status_code)
+
+
+def fetch_conversation_history(
+    access_token: str,
+    *,
+    channel: str,
+    limit: int = 100,
+    oldest: str | None = None,
+    latest: str | None = None,
+    cursor: str | None = None,
+    auto_join: bool = False,
+) -> dict[str, Any]:
+    """Read messages from a channel/DM via conversations.history.
+
+    Works with either token: the bot token (xoxb) for channels/DMs the bot
+    is in, or the user token (xoxp) to read the authorizing user's own
+    conversations. `oldest`/`latest` are Slack ts bounds; `cursor` paginates.
+    `channel` must be a conversation ID — the reference is explicit that a
+    name is not accepted, and Slack answers a name with `channel_not_found`.
+
+    `auto_join` mirrors `post_message(..., auto_join=True)` and fixes the same
+    failure one method along: the bot was never invited to the channel, so
+    Slack rejects the read with `not_in_channel`. When set, we self-join the
+    public channel via conversations.join (`channels:join`, idempotent) and
+    retry once. Pass it only with a BOT token — conversations.join needs
+    `channels:join` on a bot token, which is what the install grants. Private
+    channels can't be self-joined, so the retry still fails and the caller gets
+    the rejection to turn into an actionable "invite the bot".
+
+    Returns the trimmed shape {messages: [...], has_more, next_cursor}.
+    Raises HTTPException(400) on Slack-side rejection."""
+    params: dict[str, str] = {"channel": channel, "limit": str(limit)}
+    if oldest:
+        params["oldest"] = oldest
+    if latest:
+        params["latest"] = latest
+    if cursor:
+        params["cursor"] = cursor
+
+    ok, parsed, status = _conversation_history_once(access_token, params)
+    if not ok and auto_join and parsed.get("error") == "not_in_channel":
+        # Bot isn't a member — self-join the public channel and read again.
+        if join_channel(access_token, channel):
+            ok, parsed, status = _conversation_history_once(access_token, params)
+
+    if not ok:
         logger.warning(
             "Slack conversations.history failed: http=%s ok=%s err=%s",
-            resp.status_code,
+            status,
             parsed.get("ok"),
             parsed.get("error"),
         )
@@ -599,12 +628,27 @@ def fetch_conversation_history(
     }
 
 
+#: search.messages ordering, straight from the reference
+#: (https://docs.slack.dev/reference/methods/search.messages): `sort` is
+#: `score` (relevance) or `timestamp` (date), defaulting to `score`; `sort_dir`
+#: is `asc` or `desc`, defaulting to `desc`. Named here because the default is
+#: the load-bearing surprise — a caller that omits `sort` gets the top-SCORING
+#: matches of all time, never the newest, and an answer built on them will
+#: happily describe them as "the latest".
+SEARCH_SORT_RELEVANCE = "score"
+SEARCH_SORT_NEWEST = "timestamp"
+_SEARCH_SORTS = (SEARCH_SORT_RELEVANCE, SEARCH_SORT_NEWEST)
+_SEARCH_SORT_DIRS = ("asc", "desc")
+
+
 def search_messages(
     user_access_token: str,
     *,
     query: str,
     count: int = 20,
     page: int = 1,
+    sort: str = SEARCH_SORT_RELEVANCE,
+    sort_dir: str = "desc",
 ) -> dict[str, Any]:
     """Search the authorizing user's own content via search.messages.
 
@@ -612,12 +656,27 @@ def search_messages(
     available to bot tokens. Reads as the user, so results span everything
     that user can see (their DMs, private channels, etc.).
 
+    `sort`/`sort_dir` are passed straight through to Slack. The default stays
+    Slack's own (`score`, `desc`) so keyword searches are unaffected; a caller
+    that wants the NEWEST matches must ask for `timestamp` explicitly — Slack
+    will never volunteer date order. Both are clamped to the documented value
+    sets, because Slack rejects anything else outright and a typo'd sort would
+    turn a working search into a 400.
+
     Returns the trimmed shape {matches: [...], total}. Raises
     HTTPException(400) on Slack-side rejection."""
+    sort = sort if sort in _SEARCH_SORTS else SEARCH_SORT_RELEVANCE
+    sort_dir = sort_dir if sort_dir in _SEARCH_SORT_DIRS else "desc"
     resp = requests.get(
         SLACK_SEARCH_MESSAGES_URL,
         headers={"Authorization": f"Bearer {user_access_token}"},
-        params={"query": query, "count": str(count), "page": str(page)},
+        params={
+            "query": query,
+            "count": str(count),
+            "page": str(page),
+            "sort": sort,
+            "sort_dir": sort_dir,
+        },
         timeout=15,
     )
     parsed: dict[str, Any] = {}
