@@ -82,8 +82,11 @@ def test_assembled_ask_system_variants_all_carry_voice_guard():
     system-prompt assembly, not just the bare ASK_SYSTEM constant. Mirrors the
     exact concatenation each call site performs:
       - ask_runner.compose_ask_answer: ASK_SYSTEM (+ PRD addendum) or
-        ASK_SYSTEM (+ KG addendum) or plain ASK_SYSTEM.
+        ASK_SYSTEM (+ KG addendum) or plain ASK_SYSTEM, each optionally
+        followed by the company-facts addendum when the tenant has
+        user-authoritative identity facts.
       - qa_agent._answer_single_shot: ASK_SYSTEM + PRD? + KG? + custom-skill?
+        + company-facts?
       - qa_agent._answer_with_script: ASK_SYSTEM + PRD?
     Addenda are appended AFTER ASK_SYSTEM (which already ends with
     VOICE_GUARD), so the guard is never pushed out — this proves it rather
@@ -100,6 +103,15 @@ def test_assembled_ask_system_variants_all_carry_voice_guard():
         ),
         prompts.ASK_SYSTEM + prompts.ASK_SYSTEM_KG_ADDENDUM
         + prompts.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
+        # New real assemblies this ticket creates (the company-facts addendum).
+        prompts.ASK_SYSTEM + prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
+        (
+            prompts.ASK_SYSTEM
+            + prompts.ASK_SYSTEM_PRD_ADDENDUM
+            + prompts.ASK_SYSTEM_KG_ADDENDUM
+            + prompts.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM
+            + prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+        ),
     ]
     for system in variants:
         assert prompts.VOICE_GUARD in system

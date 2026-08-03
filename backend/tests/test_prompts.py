@@ -57,3 +57,53 @@ def test_predefined_ask_prompts_are_strings():
     for p in prompts.PREDEFINED_ASK_PROMPTS:
         assert isinstance(p, str)
         assert p.strip() == p
+
+
+# ── ASK_SYSTEM_COMPANY_FACTS_ADDENDUM — precedence wording is load-bearing ────
+# A blanket "the company is always right" would be a worse bug than the wrong-
+# domain incident it fixes (stale positioning beating measured churn), so
+# these are property tests on the actual wording, not just presence.
+
+
+def test_company_facts_addendum_scopes_authority_to_identity():
+    a = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    for needle in ("IDENTITY AND INTENT", "website or domain", "product names",
+                   "what it sells", "METHOD"):
+        assert needle in a, f"addendum missing {needle!r}"
+
+
+def test_company_facts_addendum_carves_out_empirical_claims():
+    a = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    assert "EMPIRICAL" in a
+    assert "NO special weight" in a
+    assert "Measured evidence wins" in a
+    assert "label which one is the company's stated view" in a
+
+
+def test_company_facts_addendum_has_no_blanket_authority_language():
+    low = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM.lower()
+    for phrase in ("always right", "always correct", "always wins",
+                   "in all cases", "overrides everything"):
+        assert phrase not in low, f"blanket-authority phrase found: {phrase!r}"
+
+
+def test_company_facts_addendum_length_within_bounds():
+    assert 400 <= len(prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM) <= 1600
+
+
+def test_company_facts_addendum_frames_configuration_not_verified_fact():
+    """This ticket's revised framing (planner decision): the block is
+    configuration of record — what the workspace typed into its own fields,
+    typos included — never independently verified truth."""
+    a = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    assert "WORKSPACE CONFIGURATION" in a
+    assert "configuration of record" in a
+    assert "not independently verified fact" in a
+
+
+def test_ask_cache_version_is_unchanged():
+    """Bumping this would demote/regenerate every pre-warmed cached row —
+    unnecessary here since the warm path never carries workspace configuration
+    (see test_generate_one_sync_prompt_has_no_company_facts in
+    test_ask_runner.py) and no skill-sourced value can reach a cached row."""
+    assert prompts.ASK_CACHE_VERSION == 5

@@ -9,6 +9,7 @@ cached row.
 import asyncio
 import json
 import logging
+from urllib.parse import urlparse
 
 from app.corpus import load_corpus
 from app.db import (
@@ -22,6 +23,7 @@ from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
+    ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
     ASK_USER_TEMPLATE_WITH_KG,
@@ -29,6 +31,90 @@ from app.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The header of the self-reported workspace-identity block injected into the
+# answer prompt (see `company_facts_block` below). Deliberately NOT phrased as
+# "authoritative" or "facts" alone — this is configuration of record (whatever
+# the workspace typed into its own name/product/website fields), not
+# independently verified truth; a customer's own typo renders as-is rather
+# than being "corrected" toward a more plausible-looking value.
+WORKSPACE_CONFIG_HEADER = "WORKSPACE CONFIGURATION (self-reported by this team)"
+
+# Hostnames that are obviously infra, not a brand site — a preview-deploy
+# domain, or localhost. The website is omitted rather than rendered when it
+# resolves to one of these, or to an "app." subdomain, or carries a query
+# string / a path deeper than the bare domain (see `_should_skip_website`).
+_GUARDED_HOST_SUFFIXES = (".vercel.app",)
+
+
+def _clean_text(value: str) -> str:
+    """Trim and collapse internal whitespace (`"  Acme   Inc "` -> `"Acme Inc"`)."""
+    return " ".join(value.split())
+
+
+def _should_skip_website(url: str) -> bool:
+    """True when `url` is obviously not the company's own brand site: a
+    preview-deploy host (`*.vercel.app`), `localhost`, an "app." subdomain
+    (the product itself, not the marketing site), or a URL carrying a query
+    string or a path deeper than the bare domain. Fails safe: an unparseable
+    or hostless value is also skipped rather than rendered."""
+    try:
+        parsed = urlparse(url if "://" in url else f"//{url}")
+    except ValueError:
+        return True
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(_GUARDED_HOST_SUFFIXES):
+        return True
+    if host.split(".")[0] == "app":
+        return True
+    if parsed.query:
+        return True
+    if parsed.path not in ("", "/"):
+        return True
+    return False
+
+
+def company_facts_block(enterprise_id: str | None) -> str:
+    """The workspace's self-reported identity — company name
+    (`companies.display_name`) and its primary product's name/website
+    (`products`, `is_primary` row) — rendered for the answer prompt as
+    configuration of record, not verified fact (see `WORKSPACE_CONFIG_HEADER`).
+
+    Returns "" for every degradation path — no tenant, no company row, no
+    product row, every field empty/guarded, or any read failure — so chat
+    behaves exactly as before for a tenant with no onboarding data yet."""
+    if not enterprise_id:
+        return ""
+    try:
+        from app.db.companies import display_name_for_company_id
+        from app.db.products import get_primary_product
+
+        company_name = _clean_text(display_name_for_company_id(enterprise_id) or "")
+        product = get_primary_product(enterprise_id) or {}
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "workspace configuration unavailable for %s; answering without it",
+            enterprise_id, exc_info=True,
+        )
+        return ""
+
+    product_name = _clean_text(product.get("name") or "")
+    website = (product.get("website") or "").strip()
+    if website and _should_skip_website(website):
+        website = ""
+
+    lines: list[str] = []
+    if company_name:
+        lines.append(f"Company name: {company_name}")
+    if product_name:
+        lines.append(f"Product name: {product_name}")
+    if website:
+        lines.append(f"Website: {website}")
+    if not lines:
+        return ""
+    return WORKSPACE_CONFIG_HEADER + "\n" + "\n".join(lines)
 
 # Prompt version stamped onto the Ask decision-log row so the §4d audit spine
 # pins the exact Ask composition (corpus + KG bridge, #18) behind each answer.
@@ -161,6 +247,8 @@ def compose_ask_answer(
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
+    facts = company_facts_block(enterprise_id)
+
     if prd_context:
         # PRD-grounded ask (PRD-tab chat): the PRD context block (PRD + insight
         # + evidence + tickets + prototype, ~26K tokens) dominates the prompt
@@ -199,6 +287,14 @@ def compose_ask_answer(
         else:
             system = ASK_SYSTEM
             user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+
+    # Self-reported workspace identity (interim incident fix): computed once
+    # above so it rides EVERY branch's cacheable prefix, first — a long corpus
+    # or PRD block can never push it out. facts == "" ⇒ cacheable/system are
+    # byte-identical to the pre-fix composition (including the None case).
+    cacheable = "\n\n---\n\n".join(p for p in (facts, cacheable) if p) or None
+    if facts:
+        system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
 
     # Bind the tenant's own Claude key (when configured) for this direct
     # (non-gateway) answer call. See app.llm_keys.

@@ -455,6 +455,129 @@ def test_kg_grounding_does_not_touch_wired_call_digest_path(monkeypatch):
     assert out["_skill_source"] == "call-digest"
 
 
+# ── workspace configuration in the single-shot skill answer prompt ────────────
+
+
+def _seed_company_with_config(
+    isolated_settings, company_id, *, website="https://sprntly.ai",
+    display_name="Sprntly", product_name="Sprntly",
+):
+    """A companies row + its primary product row — the two reads
+    `ask_runner.company_facts_block` composes into the answer-prompt
+    configuration block."""
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": company_id, "slug": f"slug-{company_id}", "display_name": display_name}
+    ).execute()
+    db.table("products").insert(
+        {
+            "id": f"prod-{company_id}",
+            "company_id": company_id,
+            "name": product_name,
+            "website": website,
+            "is_primary": 1,
+        }
+    ).execute()
+
+
+def test_answer_single_shot_prompt_carries_company_domain_over_skill_typo(
+    monkeypatch, isolated_settings
+):
+    """Regression: a custom skill's METHOD text carries the WRONG domain
+    (the actual incident); the workspace's own, correct domain must still
+    ride the prompt so it can outrank it. Fails on unfixed code — the
+    cacheable prefix carries no company facts at all when there is no PRD
+    context, so the domain appears nowhere in the assembled prompt. (AC12)"""
+    from app.qa_agent import RouteDecision, _answer_single_shot
+    from app.skills.loader import SkillSpec
+
+    _seed_company_with_config(isolated_settings, "co-1")
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+
+    decision = RouteDecision(skill_id="my-estimator", confidence=1.0, source="slash")
+    skill_spec = SkillSpec(
+        id="my-estimator",
+        method="# Estimation method\nLearn more at [sprintly.ai](https://sprintly.ai)",
+        content_hash="abc123def456",
+    )
+
+    _answer_single_shot(
+        decision, "co-1", "what's our domain?", [], skill_spec=skill_spec,
+    )
+
+    prefix = captured["user_cacheable_prefix"]
+    assert prefix is not None
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    assert WORKSPACE_CONFIG_HEADER in prefix
+    lines = prefix.splitlines()
+    domain_lines = [l for l in lines if "https://sprntly.ai" in l]
+    assert domain_lines, f"correct domain missing from prefix: {prefix!r}"
+
+
+def test_answer_single_shot_sets_cacheable_prefix_to_company_facts_without_prd(
+    monkeypatch, isolated_settings
+):
+    """No prd_context, tenant with workspace configuration → the cacheable
+    prefix IS the config block (not None, the pre-fix value). (AC8)"""
+    from app.qa_agent import RouteDecision, _answer_single_shot
+    from app.ask_runner import company_facts_block
+
+    _seed_company_with_config(isolated_settings, "co-1")
+    facts = company_facts_block("co-1")
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+
+    decision = RouteDecision(skill_id="roadmap", confidence=1.0, source="slash")
+    _answer_single_shot(decision, "co-1", "what should we build next?", [])
+
+    assert captured["user_cacheable_prefix"] == facts
+
+
+def test_answer_single_shot_prefix_is_none_when_no_facts_and_no_prd(monkeypatch):
+    """No workspace configuration (no company/product row) and no PRD →
+    user_cacheable_prefix is None, exactly as before this ticket. (AC6, AC8)"""
+    from app.qa_agent import RouteDecision, _answer_single_shot
+
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+
+    decision = RouteDecision(skill_id="roadmap", confidence=1.0, source="slash")
+    _answer_single_shot(decision, "ent-with-no-config", "what next?", [])
+
+    assert captured["user_cacheable_prefix"] is None
+
+
+def test_answer_single_shot_facts_addendum_follows_custom_skill_addendum(
+    monkeypatch, isolated_settings
+):
+    """With `skill_spec` set (a custom skill) AND workspace configuration
+    present, the model reads the custom-skill addendum BEFORE the company-
+    facts precedence clause. (AC8)"""
+    from app.qa_agent import RouteDecision, _answer_single_shot
+    from app.prompts import ASK_SYSTEM_COMPANY_FACTS_ADDENDUM, ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM
+    from app.skills.loader import SkillSpec
+
+    _seed_company_with_config(isolated_settings, "co-1")
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+
+    decision = RouteDecision(skill_id="my-estimator", confidence=1.0, source="slash")
+    skill_spec = SkillSpec(id="my-estimator", method="# Method\nDo the thing.")
+
+    _answer_single_shot(decision, "co-1", "q?", [], skill_spec=skill_spec)
+
+    system = captured["system"]
+    assert system.index(ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM) < system.index(
+        ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    )
+
+
 # ── script skills run via the tool loop (on our infra) ────────────────────────
 
 def test_script_skill_uses_tool_loop_not_single_shot(monkeypatch):
