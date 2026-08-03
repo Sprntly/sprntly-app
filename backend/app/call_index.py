@@ -1316,10 +1316,33 @@ def answer_single_call(
 # NB every noun takes an optional plural. Without it "\btickets\b" never matched
 # "ticket\b", and "what tickets did we close last week" routed to the calls —
 # caught by the control cases below, invisible otherwise.
+#
+# And every RELEASE word needs its VERB forms. This list originally held only
+# the nouns, which is how "did the prototype ship last week?" — a yes/no
+# question about a ship date — was claimed by this routing and answered with a
+# full voice-of-customer digest over the week's calls: ~188 seconds and a
+# multi-section report for a question whose answer is one word. "ship" and
+# "prototype" were absent entirely, and "releases?"/"deploys?" matched the noun
+# but never "released"/"deployed". Same lesson as the plural bug one line up: a
+# miss in the NEGATIVE vocabulary silently answers from the wrong source too.
+#
+# The asymmetry that settles what belongs here: a word wrongly INCLUDED only
+# demotes a question from "prefer the calls" back to normal routing, which still
+# answers it from the KG. A word wrongly OMITTED spends ~3 minutes building a
+# document from a source the question was never about. The costs are not
+# comparable, so release vocabulary is included even though customers do discuss
+# launches and shipping on calls.
+#
+# "cut" is deliberately NOT here despite being release slang ("cut a release"):
+# "cut costs", "price cut" and "cut the feature" are all ordinary customer talk,
+# and this list is only defensible while every word in it is unambiguous.
 _NOT_CALLS = re.compile(
     r"\b(?:tickets?|issues?|epics?|sprints?|backlogs?|jira|linear|clickup|asana|"
-    r"commits?|pull\s*requests?|prs?|repos?|branch(?:es)?|deploys?|deployments?|"
-    r"releases?|code|csvs?|spreadsheets?|excel|dashboards?|analytics|funnels?|"
+    r"commits?|pull\s*requests?|prs?|repos?|branch(?:es)?|"
+    r"ship(?:s|ped|ping|ment|ments)?|launch(?:es|ed|ing)?|"
+    r"deploy(?:s|ed|ing|ment|ments)?|releas(?:e|es|ed|ing)|"
+    r"roll(?:s|ed|ing)?[-\s]*outs?|prototypes?|"
+    r"code|csvs?|spreadsheets?|excel|dashboards?|analytics|funnels?|"
     r"retention\s+curves?)\b",
     re.I,
 )

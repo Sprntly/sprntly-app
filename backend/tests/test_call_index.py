@@ -550,11 +550,56 @@ def test_not_calls_matches_plurals():
         assert ci._NOT_CALLS.search(question), question
 
 
+def test_release_questions_are_not_call_questions():
+    """Reproduced on staging: "did the prototype ship last week?" took 188s and
+    returned a multi-section voice-of-customer report — a yes/no question about
+    a ship date, answered from the week's customer calls.
+
+    It named a window, the company had calls in it, and `_NOT_CALLS` vetoed
+    nothing: the list carried the release NOUNS ("releases", "deploys") but not
+    "ship", not "prototype", and not the verb forms of the nouns it did carry.
+    """
+    for question in (
+        "did the prototype ship last week?",
+        "did we ship the prototype last week",
+        "what shipped last week",
+        "is the prototype shipping this week",
+        "was it released last week",
+        "did anything get deployed last week",
+        "did we launch last week",
+        "what did we launch this month",
+        "did we roll out the new pricing last week",
+        "how did the rollout go last week",
+    ):
+        assert ci._NOT_CALLS.search(question), question
+
+
+def test_windowed_routing_stands_down_for_a_release_question(monkeypatch):
+    """The veto fires BEFORE any freshness or DB work, so a question that was
+    never about calls does not even pay for a sync — the ordering `_NOT_CALLS`
+    is placed first to guarantee."""
+    monkeypatch.setattr(
+        ci, "ensure_fresh",
+        lambda *a, **k: pytest.fail("a release question must not trigger a sync"),
+    )
+    monkeypatch.setattr(
+        ci, "list_calls",
+        lambda *a, **k: pytest.fail("a release question must not read the index"),
+    )
+    assert ci.windowed_call_question("ent-A", "did the prototype ship last week?") is None
+
+
 def test_call_phrasings_are_not_excluded():
+    """The control set. Widening `_NOT_CALLS` is only safe while these still
+    reach the calls — a veto list that swallows genuine customer-voice questions
+    has traded one silent misroute for another."""
     for question in (
         "give me top 3 product requests from last week",
         "what did customers want last week",
         "biggest complaints last week",
+        "what did customers say about pricing last week",
+        "top feature requests from last week",
+        "what frustrated customers most last week",
     ):
         assert not ci._NOT_CALLS.search(question), question
 
