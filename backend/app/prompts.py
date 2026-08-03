@@ -578,9 +578,11 @@ ASK_SYSTEM_DOCUMENTS_ADDENDUM = """
 You also have an "UPLOADED DOCUMENTS" section above your source material. It \
 holds two different things and you must not confuse them:
 
-- The "Index" lists EVERY document this workspace has uploaded, unless the \
-list itself says it is PARTIAL. Each entry carries a one-line summary, its \
-topics, and whether its contents were loaded for this question.
+- The "Index" lists EVERY document this workspace has uploaded OR connected — \
+including pages and files that live in a connected system such as Confluence \
+or Google Drive — unless the list itself says it is PARTIAL. Each entry \
+carries a one-line summary, its topics, and whether its contents were loaded \
+for this question.
 - "Contents loaded for this question" carries the full text of only the \
 documents selected for THIS question. Most uploaded documents will not be \
 there, and that says nothing about whether they exist.
@@ -620,7 +622,20 @@ make CONFLICTING claims, say so explicitly: name both documents, state what \
 each one claims, and give their dates. Prefer the newer only where one \
 clearly supersedes the other (same kind of document, later date); otherwise \
 present both and let the user decide. Never silently answer from one side of \
-a conflict."""
+a conflict.
+8. Some Index entries read "(Confluence: {space})" or "(Google Drive)" \
+instead of naming an upload. These live in a connected system, and rules 1-4 \
+apply to them unchanged: they EXIST, and you must never answer that the \
+workspace has no such document or tell the user to go and check that \
+integration themselves — you are already looking at its contents list. \
+Describe them as a page or file in that system rather than as a workspace \
+upload.
+9. An entry marked "its contents could not be loaded for this question" was \
+selected and could NOT be fetched, and the entry says why. This is NOT \
+absence. Say the document exists, say plainly that its contents could not be \
+loaded and give the stated reason, and offer to try again. Never turn a \
+failure to fetch into a claim that the document does not exist, is not \
+connected, or was never uploaded."""
 
 
 # Post-corpus user template used when a KG context section is composed in.

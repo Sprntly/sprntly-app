@@ -11,6 +11,7 @@ import contextvars
 import json
 import logging
 import re
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from app.corpus import load_corpus
@@ -20,8 +21,11 @@ from app.db import (
     find_cached_ask,
     start_cached_ask,
 )
+from app.document_bodies import BodyResolver
 from app.document_catalog import (
     PROVIDER_CHAT_ATTACHMENT,
+    PROVIDER_CONFLUENCE,
+    PROVIDER_GOOGLE_DRIVE,
     PROVIDER_UPLOADS,
     find_candidates as find_catalog_candidates,
     list_documents as list_catalog_documents,
@@ -155,27 +159,41 @@ MAX_SELECTED_DOCUMENTS = 3
 #: Index entries rendered before the list is visibly truncated.
 MAX_INDEX_ENTRIES = 200
 
-#: Providers whose bodies THIS module can actually resolve, and therefore the
-#: only ones selection may choose. Uploads resolve through
-#: `document_sources.get_file_text`; chat attachments reach the model through
-#: their own turn's folded history.
+#: EVERY provider is selectable. There is deliberately no provider predicate
+#: here any more: the previous one existed only because Drive files and
+#: Confluence pages had no body reader, and both now resolve through
+#: `document_bodies`. If a provider ever does need excluding, that belongs in
+#: `document_find_candidates`, where the candidate window is COMPUTED — a
+#: Python filter over the top-k the RPC already chose silently shrinks the
+#: result set instead of asking for a different one, and starves selection
+#: without saying so.
 #:
-#: Drive files and Confluence pages are catalogued and summarised, so the rank
-#: will surface them — but nothing here can fetch their bodies. Selecting one
-#: would render an index entry marked loaded with no contents behind it and
-#: push the model straight back to "I have this document but could not load
-#: its contents", which is the exact answer this change exists to stop
-#: producing. Excluding them leaves both providers behaving precisely as they
-#: do today: indexed, never falsely promised. Delete this set and its two uses
-#: when body resolution for those providers lands — it is a temporary
-#: predicate with a named owner, not a permanent policy.
-SELECTABLE_PROVIDERS = frozenset({PROVIDER_UPLOADS, PROVIDER_CHAT_ATTACHMENT})
+#: What remains below is dispatch, not selection: uploads read from
+#: `document_source_file`, chat attachments already reached the model through
+#: their own turn's folded history, and everything else — today Drive and
+#: Confluence, tomorrow whatever registers next — is read by
+#: `document_bodies.BodyResolver`, which answers with a stated reason rather
+#: than an exception when it does not know a source.
+
+#: Providers whose documents are ALREADY represented in the index by another
+#: read, and so must not also be rendered as connected-source entries.
+#: `uploads` come from `list_company_files`; `chat_attachment` rows come from
+#: the active conversation's turns.
+_LOCALLY_INDEXED_PROVIDERS = frozenset({PROVIDER_UPLOADS, PROVIDER_CHAT_ATTACHMENT})
+
+#: How a connected-source document names its origin in an index line. A
+#: provider with no entry here renders under its own key rather than being
+#: hidden — an unlabelled document is still a document that exists.
+_PROVIDER_LABELS = {
+    PROVIDER_GOOGLE_DRIVE: "Google Drive",
+    PROVIDER_CONFLUENCE: "Confluence",
+}
 
 #: Candidates requested from the hybrid rank per question. Comfortably above
-#: MAX_SELECTED_DOCUMENTS so `SELECTABLE_PROVIDERS` has headroom to discard
-#: unresolvable rows without starving selection. A capacity number, not a
-#: relevance one: raising it cannot change which document ranks first, only
-#: how deep the provider filter can dig before it runs out of rows.
+#: MAX_SELECTED_DOCUMENTS so rows that cannot be turned into a body (an
+#: upload deleted since it was catalogued, a chat attachment already folded
+#: into history) do not starve selection. A capacity number, not a relevance
+#: one: raising it cannot change which document ranks first.
 _CATALOG_CANDIDATE_K = 25
 
 _EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
@@ -239,6 +257,11 @@ def _topical_candidates(
     and which holds the tenant filter and the conversation-ownership join
     inside its own body — there is no argument here that widens scope.
 
+    Every provider the catalog holds is a candidate. Nothing is filtered out
+    of the RPC's result here — see the note on `_LOCALLY_INDEXED_PROVIDERS`
+    above for why a Python-side provider filter is the wrong shape and where
+    one would belong instead.
+
     **There is no similarity floor and no score threshold.** RRF is rank-based
     by construction; the fusion constants are fusion shape, not a relevance
     knob. The consequence is deliberate and stated: whenever the catalog is
@@ -274,8 +297,6 @@ def _topical_candidates(
 
     out: list[dict] = []
     for position, row in enumerate(rows or [], start=1):
-        if row.get("provider") not in SELECTABLE_PROVIDERS:
-            continue
         external_id = row.get("external_id")
         if not external_id or external_id in exclude_external_ids:
             continue
@@ -464,36 +485,60 @@ def active_conversation_attachment_names(enterprise_id: str) -> list[str]:
     return names
 
 
-def _catalog_by_external_id(
+def _catalog_documents(
     enterprise_id: str, conversation_id: int | None, user_id: str | None
-) -> dict[str, object]:
-    """`{external_id: CatalogDocument}` for the rows this caller may see,
-    limited to providers selection can resolve.
+) -> list:
+    """Every catalog row this caller may see. [] on any read failure.
 
-    Used only to ENRICH index lines the uploads/attachment reads already
-    produced — the catalog is not the index's spine, so a catalog that is
-    empty, stale or unreadable costs summaries and topics, never existence.
-    That is what keeps a catalog outage a degradation instead of an
-    incident."""
+    Serves two jobs at once, which is why it returns the rows rather than a
+    map. It ENRICHES the index lines the uploads/attachment reads already
+    produced — for those, the catalog is not the index's spine, so a catalog
+    that is empty, stale or unreadable costs summaries and topics, never
+    existence. And it SUPPLIES the entries for documents that live in a
+    connected system, which have no other read: a Confluence page or a Drive
+    file is in this workspace's index only because the catalog says so.
+
+    That asymmetry is worth stating plainly, because it is a real reduction in
+    robustness for those two providers: a catalog outage downgrades an upload
+    to a summary-less line, but makes a connected-source document invisible.
+    It is still strictly better than the alternative it replaces, which was
+    that they were never in the index at all."""
     try:
-        docs = list_catalog_documents(
+        return list_catalog_documents(
             enterprise_id, conversation_id=conversation_id, user_id=user_id
         )
     except Exception:  # noqa: BLE001 — enrichment must never break an answer
         logger.warning(
             "document catalog read failed for %s; index renders without "
-            "summaries", enterprise_id, exc_info=True,
+            "summaries and without connected-source documents",
+            enterprise_id, exc_info=True,
         )
-        return {}
-    return {
-        doc.external_id: doc
-        for doc in docs
-        if doc.provider in SELECTABLE_PROVIDERS
-    }
+        return []
+
+
+def _connected_source_head(doc) -> str:
+    """The `- {name} ({where}, updated {date})` head for a document that lives
+    in a connected system rather than in this workspace's uploads.
+
+    Deliberately NOT phrased like an upload. The prompt's existence rules key
+    off the difference: the model must be able to say "that is a Confluence
+    page in the SD space", not describe a wiki page as something the workspace
+    uploaded."""
+    label = _PROVIDER_LABELS.get(doc.provider, doc.provider)
+    source_name = (doc.source_name or "").strip()
+    where = (
+        f"{label}: {source_name}"
+        if source_name and source_name != label
+        else label
+    )
+    date = (doc.doc_date or doc.updated_at or "")[:10]
+    head = f"- {doc.title} ({where}"
+    return f"{head}, updated {date})" if date else f"{head})"
 
 
 def _index_line(
-    head: str, catalog_doc, loaded: bool, partial_index: bool
+    head: str, catalog_doc, loaded: bool, partial_index: bool,
+    unavailable_reason: str = "",
 ) -> str:
     """One index entry: the existing `- {name} ({scope}, {date})` head, then
     the catalog's one-line summary, then its topics, then whether the body is
@@ -502,7 +547,14 @@ def _index_line(
     The summary is the routing hint that lets the model notice a selection
     mistake — "the loaded documents don't cover this, but X looks relevant" —
     which is the point of showing it. The loaded-marker is what stops the
-    model treating a one-line summary as if it had read the document."""
+    model treating a one-line summary as if it had read the document.
+
+    `unavailable_reason` is the THIRD state, and the one this whole line of
+    work exists for: a document that WAS selected and whose contents could not
+    be fetched. It is not "not loaded" (nobody asked for it) and it is
+    emphatically not absent — the entry is right there in the index. The
+    marker says so in words the model can repeat to the user without turning a
+    fetch failure into a denial that the document exists."""
     parts = [head]
     if catalog_doc is not None:
         summary = (catalog_doc.summary or "").strip()
@@ -511,10 +563,33 @@ def _index_line(
         topics = [t for t in (catalog_doc.topics or []) if t]
         if topics:
             parts.append(f"Topics: {', '.join(topics)}.")
-    parts.append(
-        "[loaded for this question]" if loaded else "[not loaded for this question]"
-    )
+    if unavailable_reason:
+        parts.append(
+            f"[this document exists, but its contents could not be loaded for "
+            f"this question: {unavailable_reason}]"
+        )
+    else:
+        parts.append(
+            "[loaded for this question]" if loaded
+            else "[not loaded for this question]"
+        )
     return " ".join(parts)
+
+
+@dataclass
+class _Chosen:
+    """One document selection has picked, whatever it is stored in.
+
+    `key` is the manifest's `file_id` — an upload's own id, the synthetic
+    `turn:{id}:attachment:{i}` for a chat attachment, or `{provider}:{id}`
+    for a document that lives in a connected system. `name` is what the model
+    is told to cite, and must match the Index line exactly."""
+
+    key: str
+    name: str
+    provider: str
+    ref: DocumentFileRef | None = None
+    catalog_doc: object | None = None
 
 
 def document_grounding(
@@ -547,6 +622,21 @@ def document_grounding(
     by the catalog's fused lexical+semantic rank (`_topical_candidates`, no
     floor, no threshold). Named beats topical always.
 
+    BOTH STAGES COVER EVERY PROVIDER. Documents that live in a connected
+    system — Confluence pages, Drive files — are indexed from the catalog and
+    their bodies resolve through `document_bodies`: Drive from the corpus
+    markdown its sync already wrote, Confluence by fetching the page live.
+    Until that existed those two were reachable only by NAMING them, which is
+    the same defect, one layer up, as needing to spell a filename: a user who
+    asked what their wiki said about a topic got nothing, and was told to go
+    ask about Confluence specifically.
+
+    A connected-source document whose body cannot be fetched stays in the
+    index with its summary and a marker saying its contents could not be
+    loaded AND WHY. It must never read as absence — "we could not reach
+    Confluence" and "you have no such page" are different sentences, and
+    collapsing them is the incident this exists to close.
+
     `question_embedding` is computed ONCE per ask by the caller and threaded
     in, because this function runs BEFORE knowledge-graph retrieval and on
     PRD-grounded asks that retrieval never runs at all — so there is no
@@ -577,10 +667,25 @@ def document_grounding(
         enterprise_id, conversation_id, caller_user_id
     )
 
-    if not refs and not conv_attachments:
+    catalog_docs = _catalog_documents(
+        enterprise_id, conversation_id, caller_user_id
+    )
+    catalog = {doc.external_id: doc for doc in catalog_docs}
+
+    # Documents that live in a connected system. `uploads` and
+    # `chat_attachment` rows are dropped here NOT as a selection filter but
+    # because they are already in the index by another route, and listing them
+    # twice would tell the model the workspace holds two copies of one file.
+    connected = [
+        doc for doc in catalog_docs
+        if doc.provider not in _LOCALLY_INDEXED_PROVIDERS
+    ]
+    connected.sort(key=lambda d: (d.doc_date or d.updated_at or ""), reverse=True)
+
+    if not refs and not conv_attachments and not connected:
         return "", []
 
-    total = len(refs)
+    total = len(refs) + len(connected)
     truncated_index = total > MAX_INDEX_ENTRIES
     # Truncate BEFORE selecting: if selection ran against the untruncated
     # list, a matched document ranked outside the visible index could have
@@ -588,15 +693,49 @@ def document_grounding(
     # the rendered Index and the manifest — reproducing, inside a
     # >MAX_INDEX_ENTRIES tenant, the exact content-present/existence-missing
     # inconsistency this ticket exists to eliminate.
+    #
+    # Uploads and connected-source documents share ONE cap rather than getting
+    # one each, so connecting a wiki cannot grow the worst-case prompt: the
+    # ceiling on rendered entries is exactly what it was before. Uploads fill
+    # it first, which means a workspace already at the cap on uploads alone
+    # sees no connected-source entries — visibly, via the PARTIAL marker,
+    # rather than silently.
     refs = refs[:MAX_INDEX_ENTRIES]
+    connected = connected[:max(0, MAX_INDEX_ENTRIES - len(refs))]
 
-    catalog = _catalog_by_external_id(enterprise_id, conversation_id, caller_user_id)
+    def _connected_key(doc) -> str:
+        return f"{doc.provider}:{doc.external_id}"
+
+    connected_by_external_id = {doc.external_id: doc for doc in connected}
 
     # ── Stage N: the documents the question NAMES. These load first, and a
     #    ranking never displaces them.
-    selected = _select_documents(question, refs)
+    selected: list[_Chosen] = [
+        _Chosen(key=ref.id, name=ref.filename, provider=PROVIDER_UPLOADS, ref=ref)
+        for ref in _select_documents(question, refs)
+    ]
+    # Stage N over the catalog too, so naming a wiki page or a Drive file
+    # lands the same way naming an upload does. Same binary substring rule,
+    # same no-tunable: a title the question spells out is an unambiguous
+    # request for that document whatever system it happens to live in.
+    named_keys = {chosen.key for chosen in selected}
+    question_norm = _normalize(question)
+    for doc in connected:
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        title_norm = _normalize(doc.title)
+        if not title_norm or title_norm not in question_norm:
+            continue
+        key = _connected_key(doc)
+        if key in named_keys:
+            continue
+        named_keys.add(key)
+        selected.append(_Chosen(
+            key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+        ))
+    selected = selected[:MAX_SELECTED_DOCUMENTS]
     match_by_id: dict[str, tuple[str, int | None]] = {
-        ref.id: ("named", None) for ref in selected
+        chosen.key: ("named", None) for chosen in selected
     }
 
     # ── Stage T: fill whatever slots remain by fused rank.
@@ -619,21 +758,80 @@ def document_grounding(
             # body slot that a workspace document could use.
             if candidate["provider"] == PROVIDER_CHAT_ATTACHMENT:
                 continue
-            ref = by_ref_id.get(candidate["external_id"])
-            # A catalog row whose upload has since been deleted (or is below
-            # the index cap) has no body to resolve — skip rather than render
-            # an entry with nothing behind it.
-            if ref is None or ref.id in match_by_id:
+            external_id = candidate["external_id"]
+            if candidate["provider"] == PROVIDER_UPLOADS:
+                ref = by_ref_id.get(external_id)
+                # A catalog row whose upload has since been deleted (or is
+                # below the index cap) has no body to resolve — skip rather
+                # than render an entry with nothing behind it.
+                if ref is None or ref.id in match_by_id:
+                    continue
+                selected.append(_Chosen(
+                    key=ref.id, name=ref.filename,
+                    provider=PROVIDER_UPLOADS, ref=ref,
+                ))
+                match_by_id[ref.id] = ("topic", candidate["rank"])
                 continue
-            selected.append(ref)
-            match_by_id[ref.id] = ("topic", candidate["rank"])
+            # A connected-source document. Same rule as above about the index
+            # cap: only rows that are actually RENDERED may be selected, so a
+            # body can never appear under "Contents loaded" for a document the
+            # Index does not list.
+            doc = connected_by_external_id.get(external_id)
+            if doc is None:
+                continue
+            key = _connected_key(doc)
+            if key in match_by_id:
+                continue
+            selected.append(_Chosen(
+                key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+            ))
+            match_by_id[key] = ("topic", candidate["rank"])
 
-    selected_ids = {ref.id for ref in selected}
+    selected_ids = {chosen.key for chosen in selected}
+
+    # ── Bodies. Resolved BEFORE the index renders, because whether a
+    #    connected-source fetch succeeded is part of that document's index
+    #    line: a page whose body could not be loaded says so there, next to
+    #    its summary, instead of being silently marked loaded with nothing
+    #    behind it.
+    resolver = BodyResolver(enterprise_id)
+    bodies: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
+    if selected:
+        per_doc_budget = max(1, _DOCUMENT_CHAR_BUDGET // len(selected))
+        for chosen in selected:
+            if chosen.ref is not None:
+                text = get_file_text(enterprise_id, chosen.ref.id) or ""
+            else:
+                # At most MAX_SELECTED_DOCUMENTS of these per ask (3), so the
+                # worst case is three page fetches — the cap that already
+                # bounds how much document text an answer carries also bounds
+                # how much network an answer does.
+                resolved = resolver.resolve(chosen.provider, chosen.catalog_doc.external_id)
+                if not resolved.resolved:
+                    unavailable[chosen.key] = resolved.reason
+                    continue
+                text = resolved.text or ""
+                if not text:
+                    # Read successfully and genuinely empty. Distinct from
+                    # unavailable, and said so: "this document has no text" is
+                    # true, "we could not load it" would not be.
+                    bodies[chosen.key] = "[This document has no readable text.]"
+                    continue
+            if len(text) > per_doc_budget:
+                body = (
+                    text[:per_doc_budget]
+                    + f"\n[Truncated — showing the first {per_doc_budget} of "
+                    f"{len(text)} characters of this document.]"
+                )
+            else:
+                body = text
+            bodies[chosen.key] = body
 
     lines = [
         f"# {DOCUMENT_INDEX_HEADER}",
         "",
-        "## Index — every document this workspace has uploaded",
+        "## Index — every document this workspace has uploaded or connected",
     ]
     for ref in refs:
         date = (ref.uploaded_at or "")[:10]
@@ -648,39 +846,32 @@ def document_grounding(
             f"- {attachment['name']} (attached to this conversation, {date})",
             catalog.get(external_id), True, truncated_index,
         ))
+    for doc in connected:
+        key = _connected_key(doc)
+        lines.append(_index_line(
+            _connected_source_head(doc), doc, key in bodies, truncated_index,
+            unavailable_reason=unavailable.get(key, ""),
+        ))
     if truncated_index:
         # The marker states PARTIAL explicitly, because above the cap the
         # existence contract genuinely changes: the index is no longer the
         # complete inventory, so an absence from it stops being evidence of
         # absence. The prompt's existence rule keys off this wording.
         lines.append(
-            f"[This list is PARTIAL: it shows the {MAX_INDEX_ENTRIES} most "
-            f"recently uploaded of {total} documents in this workspace. A "
-            f"document missing from this list may still exist.]"
+            f"[This list is PARTIAL: it shows {MAX_INDEX_ENTRIES} of {total} "
+            f"documents in this workspace. A document missing from this list "
+            f"may still exist.]"
         )
-
-    bodies: dict[str, str] = {}
-    if selected:
-        per_doc_budget = max(1, _DOCUMENT_CHAR_BUDGET // len(selected))
-        for ref in selected:
-            text = get_file_text(enterprise_id, ref.id) or ""
-            if len(text) > per_doc_budget:
-                body = (
-                    text[:per_doc_budget]
-                    + f"\n[Truncated — showing the first {per_doc_budget} of "
-                    f"{len(text)} characters of this document.]"
-                )
-            else:
-                body = text
-            bodies[ref.id] = body
 
     if bodies:
         lines.append("")
         lines.append("## Contents loaded for this question")
-        for ref in selected:
+        for chosen in selected:
+            if chosen.key not in bodies:
+                continue
             lines.append("")
-            lines.append(f"### {ref.filename}")
-            lines.append(bodies[ref.id])
+            lines.append(f"### {chosen.name}")
+            lines.append(bodies[chosen.key])
 
     block = "\n".join(lines)
 
@@ -724,6 +915,27 @@ def document_grounding(
             "loaded": True,
         }
         for turn_id, index, attachment, turn_created_at in conv_attachments
+    )
+    manifest.extend(
+        {
+            "file_id": _connected_key(doc),
+            "filename": doc.title,
+            # The system it lives in, which is what a reader of this manifest
+            # needs to tell a Confluence page from a same-named upload.
+            "source_name": (
+                doc.source_name or _PROVIDER_LABELS.get(doc.provider, doc.provider)
+            ),
+            "uploaded_at": doc.doc_date or doc.updated_at,
+            # `loaded` means THE BODY REACHED THE PROMPT — never merely that
+            # selection wanted it. A page selected and then unfetchable is
+            # loaded=False, which is what keeps the manifest honest about a
+            # degraded answer instead of recording an intent as a fact.
+            "loaded": _connected_key(doc) in bodies,
+            "scope": "workspace",
+            "match": match_by_id.get(_connected_key(doc), (None, None))[0],
+            "rank": match_by_id.get(_connected_key(doc), (None, None))[1],
+        }
+        for doc in connected
     )
     return block, manifest
 

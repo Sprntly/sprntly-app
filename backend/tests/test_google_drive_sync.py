@@ -738,3 +738,61 @@ def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
     contents = _json.loads(row["config_json"])["folder_contents"]
     assert "goneforever" not in contents
     assert contents == {"folder0001": []}
+
+
+def test_sync_tells_the_extractor_where_it_wrote_the_markdown(
+    drive_connected, kg_kickoff
+):
+    """The converted name is normalised and collision-suffixed, so the moment
+    `ingest_file` returns is the ONLY moment it is knowable. The sync carries
+    it to the extractor, which records it against the file's provenance row —
+    without that, a Drive document can be catalogued, summarised and ranked
+    and still have no readable body.
+
+    The KG-only refresh pass (corpus already fresh) reports NO location, which
+    is correct rather than sloppy: it never wrote a file, so it has nothing to
+    report, and the extractor keeps whatever the earlier pass recorded instead
+    of being handed a blank to overwrite it with.
+    """
+    company_id = drive_connected
+    file_meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    patches = (
+        patch(
+            "app.connectors.google_drive_sync.build_drive_service",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "app.connectors.google_drive_sync.get_file_metadata",
+            return_value=file_meta,
+        ),
+        patch(
+            "app.connectors.google_drive_sync.download_file_content",
+            return_value=("notes.txt", b"hello from drive"),
+        ),
+        patch(
+            "app.connectors.google_drive_sync._refresh_credentials",
+            return_value=MagicMock(),
+        ),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+
+        doc = kg_kickoff[0][0]
+        assert doc.dataset == "acme"
+        assert doc.md_file == result.synced[0]["md_path"]
+        assert Path(doc.md_file).exists()
+
+        # Second pass: corpus fresh, extraction retrying. No location claimed.
+        sync_google_drive(company_id=company_id)
+        assert kg_kickoff[1][0].md_file == ""
+    finally:
+        for p in patches:
+            p.stop()

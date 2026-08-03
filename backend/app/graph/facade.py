@@ -327,6 +327,23 @@ class GraphFacade:
             q = q.eq("source_type", source_type)
         return [self._row_to_source(r) for r in (q.execute().data or [])]
 
+    def get_source(self, enterprise_id: str, source_id: str) -> Optional[Source]:
+        """ONE `kg_source` row by id, tenant-scoped — or None.
+
+        Sibling of get_entity/get_signal, and the read half of create_source.
+        Exists because source ids are DETERMINISTIC (uuid5 over a stable
+        per-file key), so a caller that knows the file can address its
+        provenance row directly instead of listing every source the tenant has
+        just to find one — a listing that grows with the connected corpus and
+        would run on every ask."""
+        r = (
+            self._tbl("kg_source").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", source_id)
+            .execute()
+        )
+        return self._row_to_source(r.data[0]) if r.data else None
+
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (
             self._tbl("kg_entity").select("*")

@@ -24,12 +24,30 @@ from app.kg_ingest.drive_extract import DriveDoc, extract_drive_docs
 
 
 class FakeFacade:
+    """Enough of GraphFacade for the extractor: sources are written by id and
+    read back by id.
+
+    `get_source` is not decoration — `extract_drive_docs` reads the existing
+    provenance row whenever the doc it was handed carries no corpus location,
+    so that a pass which knows less than its predecessor cannot blank the
+    stored one. A fake without it would make every such file raise, and the
+    per-file handler would quietly turn that into "this file failed"."""
+
     def __init__(self):
         self.sources = []
 
     def create_source(self, enterprise_id, source):
+        # Append LOG, not a dict: tests here assert on the sequence of writes.
+        # `get_source` reads the newest matching entry, which is what the real
+        # upsert leaves behind.
         self.sources.append(source)
         return source
+
+    def get_source(self, enterprise_id, source_id):
+        for source in reversed(self.sources):
+            if source.id == source_id and source.enterprise_id == enterprise_id:
+                return source
+        return None
 
 
 def _doc(**kw):
@@ -189,3 +207,141 @@ def test_one_files_registration_failure_does_not_stop_the_batch(
     )
     assert set(result["ok"]) == {"file-y", "file-z"}
     assert result["signals"] == 3, "extraction stopped early for the good files"
+
+
+# ────────── T4: where the file landed, and the same retry semantics ────────
+#
+# The catalog can point at a Drive document, and the answer path can rank it,
+# and its text still cannot be READ unless something recorded where the
+# converted markdown was written. `md_filename` normalises the name and a
+# collision appends `.1.md`, so the path is not reconstructible from anything
+# else that is kept — it has to be persisted at sync time.
+#
+# Which puts it under exactly the rule the catalog registration above is
+# under, for exactly the same reason.
+
+
+def test_the_corpus_location_is_persisted_on_the_provenance_row(
+    isolated_settings, monkeypatch
+):
+    """AC7. The sync hands over where it wrote the markdown; the extractor
+    stores it, keyed so a `document_catalog` row for this Drive file id can
+    resolve it later."""
+    from app import document_bodies
+
+    _stub_extraction(monkeypatch)
+    monkeypatch.setattr(
+        drive_extract.document_catalog, "register_document",
+        lambda company_id, **kw: None,
+    )
+    facade = FakeFacade()
+
+    extract_drive_docs(facade, "co-1", [
+        _doc(dataset="acme", md_file="/var/data/acme/q3_roadmap.1.md"),
+    ])
+
+    source = facade.get_source(
+        "co-1", document_bodies.drive_source_id("co-1", "fileaaaa01")
+    )
+    assert source is not None
+    # The basename, not the absolute path: the absolute form embeds the data
+    # volume's mount point and would strand every stored value at once if that
+    # ever moved.
+    assert source.config["md_dataset"] == "acme"
+    assert source.config["md_file"] == "q3_roadmap.1.md"
+    # The collision suffix survives, which is the entire point — without it
+    # both colliding files resolve to the same text.
+    assert source.config["md_file"].endswith(".1.md")
+
+
+def test_a_kg_only_refresh_does_not_blank_a_recorded_location(
+    isolated_settings, monkeypatch
+):
+    """A retry must not know LESS than the pass before it.
+
+    `create_source` upserts the whole row, and the KG-only refresh branch of
+    the sync (corpus copy already current, extraction retrying) never calls
+    `ingest_file`, so it has no name to report. Writing its empty value would
+    erase the location an earlier sync learned — a retry destroying the thing
+    the retry exists to produce."""
+    _stub_extraction(monkeypatch)
+    monkeypatch.setattr(
+        drive_extract.document_catalog, "register_document",
+        lambda company_id, **kw: None,
+    )
+    facade = FakeFacade()
+
+    extract_drive_docs(facade, "co-1", [
+        _doc(dataset="acme", md_file="/var/data/acme/q3_roadmap.md"),
+    ])
+    extract_drive_docs(facade, "co-1", [_doc(modified="2026-07-09T00:00:00Z")])
+
+    assert facade.sources[-1].config["md_file"] == "q3_roadmap.md"
+    assert facade.sources[-1].config["modified"] == "2026-07-09T00:00:00Z"
+
+
+def test_a_location_persist_failure_does_not_advance_the_file_watermark(
+    isolated_settings, monkeypatch
+):
+    """T4/AC8, the trap. Persisting the location raises for file X and not for
+    file Y.
+
+    X must be EXCLUDED from `ok`, so `_record_kg_result` leaves its
+    `kg_file_mtime` where it was and the next sync re-fetches it. Swallow the
+    error instead and X is marked successfully extracted, its watermark
+    advances, and — because Drive re-fetches a file only when its
+    `modifiedTime` changes — the file becomes PERMANENTLY unresolvable until a
+    human edits it in Drive. Catalogued, summarised, ranked, and unreadable.
+    """
+    _stub_extraction(monkeypatch)
+    monkeypatch.setattr(
+        drive_extract.document_catalog, "register_document",
+        lambda company_id, **kw: None,
+    )
+
+    class _FailingFacade(FakeFacade):
+        def create_source(self, enterprise_id, source):
+            if source.config.get("file_id") == "file-x":
+                raise RuntimeError("provenance write failed")
+            return super().create_source(enterprise_id, source)
+
+    facade = _FailingFacade()
+    result = extract_drive_docs(facade, "co-1", [
+        _doc(file_id="file-x", name="X", modified="2026-07-02T00:00:00Z",
+             dataset="acme", md_file="/var/data/acme/x.md"),
+        _doc(file_id="file-y", name="Y", modified="2026-07-03T00:00:00Z",
+             dataset="acme", md_file="/var/data/acme/y.md"),
+    ])
+
+    assert "file-x" not in result["ok"], (
+        "a file whose corpus location could not be persisted was marked "
+        "successfully extracted — its watermark would advance and Drive, "
+        "which re-fetches only on a changed modifiedTime, would never retry it"
+    )
+    assert result["ok"] == {"file-y": "2026-07-03T00:00:00Z"}
+    assert result["files"] == 1
+    assert len(result["errors"]) == 1 and "X" in result["errors"][0]
+
+    # Y completed normally, location and all.
+    assert facade.sources[-1].config["md_file"] == "y.md"
+
+    stored = {}
+    monkeypatch.setattr(
+        drive_extract.db, "get_connection",
+        lambda cid, provider: {"config_json": json.dumps(
+            {"kg_file_mtime": {"file-x": "2026-06-01T00:00:00Z"}}
+        )},
+    )
+    monkeypatch.setattr(
+        drive_extract.db, "patch_connection_config",
+        lambda cid, provider, config: stored.update(config),
+    )
+    monkeypatch.setattr(
+        drive_extract.db, "update_connection_sync", lambda *a, **k: None
+    )
+    drive_extract._record_kg_result("co-1", result["ok"], result["errors"])
+
+    assert stored["kg_file_mtime"]["file-x"] == "2026-06-01T00:00:00Z", (
+        "file X's watermark advanced despite its location persist failing"
+    )
+    assert stored["kg_file_mtime"]["file-y"] == "2026-07-03T00:00:00Z"

@@ -433,6 +433,11 @@ def sync_google_drive(
             continue
 
         md_text = ""
+        # Where this file's converted markdown landed, when this pass is the
+        # one that writes it. Empty on the KG-only refresh below: that branch
+        # converts in memory and writes nothing, so it has no name to report
+        # and the extractor keeps whatever an earlier sync recorded.
+        md_path = ""
         if not corpus_fresh:
             try:
                 ingested = datasets.ingest_file(slug, filename, data)
@@ -446,6 +451,7 @@ def sync_google_drive(
                 result.errors.append({"name": name, "error": str(e)})
                 continue
 
+            md_path = ingested.md_path
             try:
                 md_text = Path(ingested.md_path).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -488,6 +494,12 @@ def sync_google_drive(
                 text=md_text,
                 mime=meta.get("mimeType") or "",
                 link=meta.get("webViewLink") or "",
+                # The corpus location this sync just wrote. Carried through so
+                # the extractor can record it on the file's provenance row:
+                # the converted name is normalised and collision-suffixed, so
+                # this is the only moment it is knowable.
+                dataset=slug,
+                md_file=md_path,
             ))
 
     patch: dict = {
