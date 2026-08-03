@@ -6,7 +6,7 @@ its references/expected-signal-shape.md.
 
 LLM calls are mocked (no live model in this suite — see
 test_kg_extraction_skills.py for the same convention); what's under test
-here is (1) the skill loads and is catalogued the same way the other three
+here is (1) the skill loads and is bound the same way the other three
 extraction skills are, (2) the routing/gateway plumbing (skill= kwarg,
 provenance stamping) matches theirs, and (3) a plausible roadmap output is a
 legal member of the vocabulary this skill's own reference doc declares —
@@ -25,7 +25,7 @@ import pytest
 
 import app.graph.extractor as ex
 from app.graph.gateway import LLMResult
-from app.skills.catalog import NON_ROUTABLE, SKILL_CATEGORY, routable_manifest
+import app.qa_agent as qa
 from app.skills.loader import get_skill, list_skills
 
 # Declared source_type x kind vocabulary, mirroring
@@ -67,16 +67,15 @@ def test_skill_is_installed():
     assert "roadmap-extraction" in list_skills()
 
 
-def test_skill_is_categorized_as_data_extraction():
-    assert SKILL_CATEGORY["roadmap-extraction"] == "Data Extraction"
-
-
-def test_skill_is_non_routable():
-    """An ingestion-time method bound by name, not something the Q&A router
-    should ever offer — same posture as hubspot/jira/clickup-extraction."""
-    assert "roadmap-extraction" in NON_ROUTABLE
-    routable_ids = {s["id"] for s in routable_manifest()}
-    assert "roadmap-extraction" not in routable_ids
+def test_skill_is_not_invocable_from_chat():
+    """An ingestion-time method bound by name from app.kg_ingest.roadmap — not
+    something a chat turn may reach. It used to be listed in NON_ROUTABLE (a
+    per-skill opt-out of a router menu that offered every other built-in); with
+    the built-in menu gone the guarantee is stronger and needs no allow-list:
+    NO vendored id is invocable from chat, this one included. Same posture as
+    hubspot/jira/clickup-extraction."""
+    assert qa._routable("roadmap-extraction", "co-1") is False
+    assert qa._invocable("roadmap-extraction", "co-1") is False
 
 
 def test_skill_runs_against_a_realistic_roadmap_chunk(facade):

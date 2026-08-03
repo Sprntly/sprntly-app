@@ -233,80 +233,100 @@ def test_build_corpus_untrimmed_reports_no_quote_cap(monkeypatch):
 
 
 # ── answer branches ──────────────────────────────────────────────────────────
+#
+# `app.voc_report` is gone. It rendered the pinned HTML template from a filling
+# schema; the full-window VoC pass is an ordinary gateway call now, so these
+# tests stub `graph.gateway.llm_call` (imported lazily inside `answer`) instead
+# of `voc_report.build`. Everything they assert about the CORPUS — the live
+# fetch, the window, auto-widening, the coverage disclosure in the source line,
+# uploaded voice documents — is unchanged; only the rendering seam moved, and
+# the answer is markdown rather than a document.
+
+
+class _VocResult:
+    def __init__(self, answer):
+        self.output = {"answer": answer, "key_points": [], "citations": [],
+                       "confidence": 0.6, "unanswered": ""}
+
+
+def _stub_voc_pass(monkeypatch, answer="## Voice of customer\n\nThemes…"):
+    """Capture the full VoC pass's gateway kwargs; return the capture dict.
+
+    `input` carries what `source_line` and `corpus_text` used to be handed
+    separately, so assertions on either now read that one string.
+    """
+    import app.graph.gateway as gateway_mod
+
+    captured: dict = {}
+
+    def _fake(**kwargs):
+        captured.update(kwargs)
+        return _VocResult(answer)
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _fake)
+    return captured
+
+
 
 def test_answer_not_connected_skips_report(monkeypatch):
-    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
-    called = []
-    monkeypatch.setattr(vr, "build", lambda **k: called.append(k) or "<html></html>")
+    captured = _stub_voc_pass(monkeypatch)
     p = cd.answer(enterprise_id="co", question="summarize calls last week")
     assert "Fireflies" in p["answer"]
     assert p["_skill_source"] == "call-digest"
-    assert called == []  # no spend when there's nothing to summarize
+    assert captured == {}  # no spend when there's nothing to summarize
 
 
-def test_answer_ok_renders_html_report_over_corpus(monkeypatch):
-    import app.voc_report as vr
+def test_answer_ok_runs_the_voc_pass_over_the_whole_corpus(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
-    captured = {}
-    monkeypatch.setattr(
-        vr, "build",
-        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>report</body></html>",
-    )
+    captured = _stub_voc_pass(monkeypatch)
     p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
-    # The answer is the rendered HTML report (front-end shows it in an iframe).
-    assert p["answer"].startswith("<!DOCTYPE html>")
-    assert p["key_points"] == [] and p["citations"] == []
+    # The answer is an ordinary chat answer — markdown, not a document. This is
+    # the point of the change: "give me top 3 product requests from last week"
+    # used to come back as a 29 KB HTML report with web fonts.
+    assert p["answer"].startswith("## Voice of customer")
+    assert not p["answer"].lstrip().startswith("<")
     assert p["_skill"] == "voice-of-customer-report"
     assert p["_skill_source"] == "call-digest"
-    # The report ran over the assembled corpus, scoped to the VoC skill.
+    # The pass ran over the assembled corpus, scoped to the VoC skill.
     assert captured["model"] == cd.ANSWER_MODEL
-    assert "Call 1" in captured["corpus_text"] and 'Cust: "quote 1"' in captured["corpus_text"]
+    assert captured["skill"] == "voice-of-customer-report"
+    assert "Call 1" in captured["input"] and 'Cust: "quote 1"' in captured["input"]
 
 
 def test_answer_disclosure_when_quotes_trimmed(monkeypatch):
     # When the fit trimmed quotes to keep every call in, the source line the
     # report sees says so — the run line can then state real coverage.
-    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     calls = [_chatty_call(i) for i in range(30)]
     full = len("\n\n".join(c.render() for c in calls))
     monkeypatch.setattr(cd, "_CORPUS_CHAR_BUDGET", full // 3)
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls)
-    captured = {}
-    monkeypatch.setattr(
-        vr, "build",
-        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
-    )
+    captured = _stub_voc_pass(monkeypatch)
     p = cd.answer(enterprise_id="co", question="summarize calls from the last 30 days")
-    assert p["answer"].startswith("<!DOCTYPE html>")
-    assert "30 calls" in captured["source_line"]
-    assert "quotes sampled" in captured["source_line"]
+    assert p["answer"].startswith("## Voice of customer")
+    assert "30 calls" in captured["input"]
+    assert "quotes sampled" in captured["input"]
 
 
 def test_answer_autowidens_default_window_until_calls_found(monkeypatch):
     # Generic ask (no window named): the 7-day default is empty, 30 days has
     # calls → the digest widens instead of dead-ending, and the report runs
     # over the widened window.
-    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     windows = []
     def fetch(key, *, since, until):
         windows.append((until - since).days)
         return [_call(1)] if (until - since).days >= 29 else []
     monkeypatch.setattr(cd, "fetch_calls", fetch)
-    captured = {}
-    monkeypatch.setattr(
-        vr, "build",
-        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
-    )
+    captured = _stub_voc_pass(monkeypatch)
     p = cd.answer(enterprise_id="co", question="give me a summary of feedback of recent customer conversations")
-    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert p["answer"].startswith("## Voice of customer")
     # Fetched 7d (empty) then 30d (found) — never needed 90d.
     assert len(windows) == 2 and windows[0] <= 7 and 29 <= windows[1] <= 30
     assert "the last 30 days" in p["_skill_action"]
-    assert "the last 30 days" in captured["source_line"]
+    assert "the last 30 days" in captured["input"]
 
 
 def test_answer_explicit_window_is_never_widened(monkeypatch):
@@ -339,12 +359,12 @@ def test_parse_window_explicit_flag():
 
 
 def test_answer_report_failure_degrades_gracefully(monkeypatch):
-    import app.voc_report as vr
+    import app.graph.gateway as gateway_mod
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
     def boom(**k):
         raise RuntimeError("model timeout")
-    monkeypatch.setattr(vr, "build", boom)
+    monkeypatch.setattr(gateway_mod, "llm_call", boom)
     p = cd.answer(enterprise_id="co", question="summarize customer calls")
     assert "error" in p["answer"].lower() and p["_skill_source"] == "call-digest"
 
@@ -411,22 +431,17 @@ def test_has_call_source_true_from_docs_alone(monkeypatch):
     assert cd.has_call_source("co") is True
 
 
-def test_answer_docs_only_runs_voc_report(monkeypatch):
-    """Docs-only tenant asking for VoC gets the SAME report pipeline; the
-    source line and skill action disclose the uploaded-document basis."""
-    import app.voc_report as vr
+def test_answer_docs_only_runs_the_voc_pass(monkeypatch):
+    """Docs-only tenant asking for VoC gets the SAME pipeline; the source line
+    and skill action disclose the uploaded-document basis."""
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
     monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1), _doc(2)])
-    captured = {}
-    monkeypatch.setattr(
-        vr, "build",
-        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
-    )
+    captured = _stub_voc_pass(monkeypatch)
     p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
-    assert p["answer"].startswith("<!DOCTYPE html>")
-    assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]
-    assert "2 uploaded voice documents" in captured["source_line"]
-    assert "support export 1" in captured["corpus_text"]
+    assert p["answer"].startswith("## Voice of customer")
+    assert "UPLOADED VOICE DOCUMENTS" in captured["input"]
+    assert "2 uploaded voice documents" in captured["input"]
+    assert "support export 1" in captured["input"]
     assert "2 uploaded docs" in p["_skill_action"]
 
 
@@ -477,7 +492,6 @@ def test_staging_scenario_top_customer_feedback_over_category_upload(
     the pinned VoC report over the uploaded file's converted text."""
     import os
 
-    import app.voc_report as vr
     from app import datasets
     from app.ingest import md_filename
 
@@ -494,11 +508,7 @@ def test_staging_scenario_top_customer_feedback_over_category_upload(
     monkeypatch.setattr("app.db.companies.slug_for_company_id", lambda cid: "acme")
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)  # no Fireflies
     monkeypatch.setattr(cd, "_utc_now", lambda: NOW)
-    captured = {}
-    monkeypatch.setattr(
-        vr, "build",
-        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>voc</body></html>",
-    )
+    captured = _stub_voc_pass(monkeypatch)
 
     question = "What is the top customer feedback"
     assert is_voc_report_request(question)          # router now matches
@@ -506,9 +516,14 @@ def test_staging_scenario_top_customer_feedback_over_category_upload(
 
     p = cd.answer(enterprise_id="co", question=question)
     assert p["_skill"] == "voice-of-customer-report"
-    assert p["answer"].startswith("<!DOCTYPE html>")
-    assert "latency complaint; mobile access ask" in captured["corpus_text"]
-    assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]
+    assert p["answer"].startswith("## Voice of customer")
+    # The uploaded file's CONVERTED TEXT is what the pass reasoned over — the
+    # point of the original staging replay. Asserted on the corpus rather than
+    # on the report branch's source line, because this phrasing is
+    # query-shaped (`is_voc_query`) and both branches now run through the same
+    # gateway seam; either one answering from this text is the correct outcome.
+    assert "latency complaint; mobile access ask" in captured["input"]
+    assert captured["skill"] == "voice-of-customer-report"
 
 
 # ── Query mode: pointed questions answered FROM the corpus ───────────────────
@@ -605,22 +620,13 @@ def test_query_mode_falls_back_to_report_on_failure(monkeypatch):
     def _boom(**kw):
         raise RuntimeError("llm down")
 
-    rendered = {}
-
-    class _FakeVoc:
-        @staticmethod
-        def build(**kw):
-            rendered["called"] = True
-            return "<html>report</html>"
-
     monkeypatch.setattr(cd, "build_corpus", _fake_build)
     monkeypatch.setattr(cd, "_answer_query", _boom)
-    import sys
-    monkeypatch.setitem(sys.modules, "app.voc_report", _FakeVoc)
+    captured = _stub_voc_pass(monkeypatch)
 
     out = cd.answer(enterprise_id="ent-A",
                     question="how many customers raised billing issues")
-    assert rendered.get("called") or out.get("answer")  # report path reached
+    assert captured or out.get("answer")  # full-pass path reached
 
 
 def test_apurva_acceptance_phrases_mode_selection():

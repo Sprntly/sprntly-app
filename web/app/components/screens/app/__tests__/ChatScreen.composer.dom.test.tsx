@@ -55,19 +55,16 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    // askApi.skills IS the slash palette now: it serves the company's own
+    // uploaded skills (category "Custom"). It used to serve the vendored
+    // built-in catalog, which ChatScreen merged behind a second skillsApi.list
+    // fetch — one list, one fetch, since a chat turn can no longer invoke a
+    // built-in at all.
     askApi: {
       ask: vi.fn(),
       skills: vi.fn().mockResolvedValue({
         skills: [
-          { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas", category: "Prioritization & Decision" },
-        ],
-      }),
-    },
-    // Custom skills (PRD 1854) — merged into the slash palette, listed first.
-    skillsApi: {
-      list: vi.fn().mockResolvedValue({
-        skills: [
-          { id: "c1", slug: "my-estimator", trigger: "/my-estimator", name: "My Estimator", description: "Scores features", uploader_name: "Fortune", created_at: null, has_file: true },
+          { id: "my-estimator", label: "My Estimator", trigger: "/my-estimator", description: "Scores features", category: "Custom" },
         ],
       }),
     },
@@ -133,7 +130,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
-import { skillsApi } from "../../../../lib/api"
+import { askApi } from "../../../../lib/api"
 
 function renderScreen() {
   return render(
@@ -257,26 +254,28 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
   })
 
   // Selecting a skill pins a removable CHIP instead of pasting
-  // "/prioritize " into the draft as raw text the user must not delete — and the
-  // trigger is re-attached to the query on send, so the backend's deterministic
-  // slash fast-path is unchanged.
+  // "/my-estimator " into the draft as raw text the user must not delete — and
+  // the trigger is re-attached to the query on send, so the backend's
+  // deterministic slash fast-path is unchanged. That fast-path is CUSTOM-ONLY
+  // now (`qa_agent._routable` refuses every vendored id), which is exactly what
+  // this palette offers — so the wire protocol behind the chip still resolves.
   it("pins a skill chip instead of pasting the trigger, and sends the trigger", async () => {
     searchString = "new=1"
     renderScreen()
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
-      fireEvent.change(textarea, { target: { value: "/prior" } })
+      fireEvent.change(textarea, { target: { value: "/my-est" } })
     })
     const palette = await screen.findByRole("listbox", { name: "Skills" })
     await act(async () => {
       fireEvent.mouseDown(within(palette).getAllByRole("option")[0])
     })
 
-    // The draft is clear (no "/prioritize " text) and a chip names the skill.
+    // The draft is clear (no "/my-estimator " text) and a chip names the skill.
     expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
     const chip = document.querySelector('[data-testid="skill-chip"]') as HTMLElement
     expect(chip).toBeTruthy()
-    expect(chip.textContent).toContain("Prioritize")
+    expect(chip.textContent).toContain("My Estimator")
     expect(within(chip).getByLabelText(/Remove the .* skill/)).toBeTruthy()
 
     await act(async () => {
@@ -295,7 +294,7 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     searchString = "new=1"
     renderScreen()
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
-    await act(async () => { fireEvent.change(textarea, { target: { value: "/prior" } }) })
+    await act(async () => { fireEvent.change(textarea, { target: { value: "/my-est" } }) })
     const palette = await screen.findByRole("listbox", { name: "Skills" })
     await act(async () => { fireEvent.mouseDown(within(palette).getAllByRole("option")[0]) })
     const chip = document.querySelector('[data-testid="skill-chip"]') as HTMLElement
@@ -326,9 +325,10 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
   })
 
   // Custom skills (PRD 1854): typing "/" opens the slash palette with the
-  // company's uploaded skills listed FIRST, ahead of the built-in catalog,
-  // and filtering by slug narrows to them.
-  it("lists custom skills first in the slash palette and filters by slug", async () => {
+  // company's uploaded skills, and filtering by slug narrows to them. There is
+  // no built-in catalog to be listed ahead of any more — the palette is the
+  // company's own library, which is the only thing a slash trigger can invoke.
+  it("lists the company's custom skills in the slash palette and filters by slug", async () => {
     searchString = "new=1"
     renderScreen()
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -341,7 +341,6 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     const rows = within(palette).getAllByRole("option")
     expect(rows[0].textContent).toContain("/my-estimator")
     expect(rows[0].textContent).toContain("My Estimator")
-    expect(palette.textContent).toContain("/prioritize")
 
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "/my-est" } })
@@ -351,23 +350,14 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     expect(narrowed[0].textContent).toContain("/my-estimator")
   })
 
-  // No-override (PRD 1854 revision): a custom skill named after a built-in
-  // replaces nothing — both are listed, each with its own trigger and its own
+  // No-override (PRD 1854 revision): a skill named after another replaces
+  // nothing — both are listed, each with its own trigger and its own
   // description, because the description is what tells them apart.
-  it("lists BOTH skills when a custom skill shares a built-in's name", async () => {
-    vi.mocked(skillsApi.list).mockResolvedValueOnce({
+  it("lists BOTH skills when two uploads share a name", async () => {
+    vi.mocked(askApi.skills).mockResolvedValueOnce({
       skills: [
-        {
-          id: "c2",
-          slug: "prioritize-2", // the built-in kept /prioritize
-          trigger: "/prioritize-2",
-          name: "Prioritize",
-          description: "House ranking rules",
-          uploader_name: "Fortune",
-          created_at: null,
-          has_file: true,
-          name_conflict: true,
-        },
+        { id: "prioritize-2", label: "Prioritize", trigger: "/prioritize-2", description: "House ranking rules", category: "Custom" },
+        { id: "prioritize-3", label: "Prioritize", trigger: "/prioritize-3", description: "Rank ideas", category: "Custom" },
       ],
     })
     searchString = "new=1"
@@ -380,10 +370,10 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     const palette = await screen.findByRole("listbox", { name: "Skills" })
     const rows = within(palette).getAllByRole("option")
     expect(rows).toHaveLength(2)
-    // The custom one leads, and each row carries the trigger that invokes IT.
+    // Each row carries the trigger that invokes IT.
     expect(rows[0].textContent).toContain("/prioritize-2")
     expect(rows[0].textContent).toContain("House ranking rules")
-    expect(rows[1].textContent).toContain("/prioritize")
+    expect(rows[1].textContent).toContain("/prioritize-3")
     expect(rows[1].textContent).toContain("Rank ideas")
     // Same name on both rows — the descriptions are the distinguisher.
     expect(rows.every((r) => r.textContent?.includes("Prioritize"))).toBe(true)

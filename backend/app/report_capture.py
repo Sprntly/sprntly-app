@@ -1,13 +1,19 @@
 """Capture a chat-generated HTML report as a durable `reports` artifact.
 
-The report skills (voice-of-customer-report, competitive-intelligence-review,
-public-feedback-report, …) answer with a SELF-CONTAINED HTML DOCUMENT rather
-than markdown. The chat thread already detects that and renders it in a
-sandboxed iframe (web/app/components/shared/HtmlReportView.tsx via
-`looksLikeHtmlBrief`); until now nothing kept it, so the document died with the
-`ask_jobs` row. This module is the capture side: the same sniff, server-side,
-writing the document to `reports` so it becomes a listable, downloadable,
-shareable artifact.
+An answer that is a SELF-CONTAINED HTML DOCUMENT rather than markdown gets kept.
+The chat thread already detects that and renders it in a sandboxed iframe
+(web/app/components/shared/HtmlReportView.tsx via `looksLikeHtmlBrief`); until
+this module existed nothing kept it, so the document died with the `ask_jobs`
+row. This is the capture side: the same sniff, server-side, writing the document
+to `reports` so it becomes a listable, downloadable, shareable artifact.
+
+`_HTML_DOC_RE` IS THE WHOLE POLICY, and it is why nothing here needed changing
+when the pinned report templates were removed. VoC, competitive-intelligence and
+public-feedback answers used to be rendered HTML and were captured; they are
+markdown now, so the sniff simply stops matching and capture self-disables for
+them — no allow-list to prune, no dead branch. Reports already in the library
+keep rendering, and any future HTML-shaped answer is still captured. The
+`reports` table, its routes, sharing and PDF are all untouched.
 
 BEST-EFFORT BY CONTRACT. Capture runs after the answer is finished, so it can
 only ever add an artifact — it must never break, delay, or alter the reply the
@@ -26,8 +32,8 @@ import re
 from collections.abc import Callable
 from html import unescape
 
+from app.labels import humanize_label
 from app.llm import strip_code_fence
-from app.skills.catalog import humanize_label
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +45,14 @@ _HTML_DOC_RE = re.compile(r"^\s*<(?:!doctype|meta|html|div|style)\b", re.IGNOREC
 
 # Skills whose HTML output ALREADY has an artifact home. Capturing these would
 # list the same document twice on /artifacts, under two different types:
-#   prd-author     → `prds` (chat "write me a PRD" routes here and emits HTML)
-#   evidence-brief → `evidences` (NON_ROUTABLE today, so it cannot reach this
-#                    path at all — named so the exclusion stays correct if that
-#                    ever changes)
+#   prd-author     → `prds`
+#   evidence-brief → `evidences`
+# Neither is reachable from a chat turn any more (both are bound by name from
+# their own pipelines — prd_runner / evidence_kg — and chat can no longer route
+# to a built-in at all), so this frozenset is belt-and-braces rather than a live
+# gate. Kept because the exclusion is about the ARTIFACT TYPE, not about who can
+# reach it: if either pipeline ever routes an answer through capture, listing
+# the same document under two types is still the wrong outcome.
 SKILLS_WITH_OWN_ARTIFACT: frozenset[str] = frozenset({"prd-author", "evidence-brief"})
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)

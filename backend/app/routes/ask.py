@@ -301,9 +301,19 @@ async def ask(
 
 
 @router.get("/skills")
-def get_skills():
-    """Return the list of available skills for the chat composer UI."""
-    return {"skills": list_available_skills()}
+def get_skills(company: CompanyContext = Depends(require_company)):
+    """The skills the chat composer may offer — the company's OWN uploads.
+
+    COMPANY-SCOPED as of the bare-chat change, which is why this gained an auth
+    dependency it never had. It used to serve a process-global list of vendored
+    built-ins, so no tenant was involved; it now serves one customer's uploaded
+    library, so serving it unauthenticated would hand any caller another
+    company's skill names and descriptions.
+
+    See `skill_router.list_available_skills` for why built-ins are no longer
+    offered here at all.
+    """
+    return {"skills": list_available_skills(company.company_id)}
 
 
 # Same ceiling as PRD import — a slide deck or spec is comfortably under this.

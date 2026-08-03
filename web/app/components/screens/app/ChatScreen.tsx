@@ -34,7 +34,7 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -1281,10 +1281,15 @@ export function ChatScreen() {
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
+  // The palette's entries — the company's own uploaded skills (PRD 1854).
+  //
+  // This used to be TWO lists merged at render time: the vendored built-in
+  // catalog from `askApi.skills()` and the company's uploads from
+  // `skillsApi.list()`. Chat no longer selects a built-in method for a turn, so
+  // the built-in half would have offered ~78 triggers that resolve to nothing;
+  // `askApi.skills()` now serves the company's own library and there is one
+  // list again.
   const [skills, setSkills] = useState<SkillInfo[]>([])
-  // The company's custom skills (PRD 1854), kept separate from built-ins so
-  // the two fetches can't race each other's setState; merged for the palette.
-  const [customSkills, setCustomSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
@@ -1459,40 +1464,15 @@ export function ChatScreen() {
     e.target.value = "" // reset so same file can be re-selected
   }, [showToast])
 
-  // Load skills on mount
+  // Load the palette on mount.
+  //
+  // A failure leaves it EMPTY rather than falling back to a hardcoded list.
+  // The old fallback named nine built-in triggers (`/prd`, `/prioritize`,
+  // `/compete`, …) and would now be nine dead entries — a palette that offers
+  // a trigger the backend will not honour is worse than an empty one, which is
+  // also exactly what a company with no uploads correctly sees.
   useEffect(() => {
-    askApi.skills().then((r) => setSkills(r.skills)).catch(() => {
-      // Hardcoded fallback if endpoint not available
-      setSkills([
-        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document", category: "Documentation & Specification" },
-        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF", category: "Prioritization & Decision" },
-        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories", category: "Documentation & Specification" },
-        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe", category: "Prioritization & Decision" },
-        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision", category: "Prioritization & Decision" },
-        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes", category: "Stakeholder & Communication" },
-        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review", category: "Strategy & Vision" },
-        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook", category: "Delivery & Operations" },
-        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources", category: "Verification" },
-      ])
-    })
-    // Custom skills join the same palette (mapped into the SkillInfo shape,
-    // category "Custom"). Optional-chained so suites that mock lib/api without
-    // skillsApi keep working; a fetch failure just leaves built-ins only —
-    // the palette must never blank because this list couldn't load.
-    Promise.resolve(skillsApi?.list?.())
-      .then((r) => {
-        if (!r) return
-        setCustomSkills(
-          r.skills.map((s) => ({
-            id: `custom-${s.id}`,
-            label: s.name,
-            trigger: s.trigger,
-            description: s.description,
-            category: "Custom",
-          })),
-        )
-      })
-      .catch(() => {})
+    askApi.skills().then((r) => setSkills(r.skills)).catch(() => setSkills([]))
   }, [])
 
   // Create a new tab or, if a tab with the same title already exists, switch to it
@@ -4288,18 +4268,16 @@ export function ChatScreen() {
   }
 
   const filteredSkills = useMemo(() => {
-    // Custom skills first — the user's own workflows outrank the catalog.
-    // Two skills may share a NAME (an upload no longer replaces a built-in),
-    // and both are listed: their descriptions are what tells them apart, and
-    // their triggers differ, so picking either one invokes what was picked.
-    return [...customSkills, ...skills].filter(
+    // One list now (the company's own uploads) — the built-in catalog it used
+    // to be merged ahead of is gone. Server order is newest-first.
+    return skills.filter(
       (s) =>
         slashFilter === "" ||
         s.trigger.toLowerCase().includes("/" + slashFilter) ||
         s.label.toLowerCase().includes(slashFilter) ||
         s.description.toLowerCase().includes(slashFilter),
     )
-  }, [customSkills, skills, slashFilter])
+  }, [skills, slashFilter])
   const slashOpen = showSlash && filteredSkills.length > 0
   // Keep the highlight in range as the filtered list shrinks/grows.
   useEffect(() => {
@@ -4435,8 +4413,8 @@ export function ChatScreen() {
     const first = query.trim().split(/\s+/)[0]
     if (!first || !first.startsWith("/")) return null
     const wanted = first.toLowerCase()
-    return [...customSkills, ...skills].find((s) => s.trigger.toLowerCase() === wanted) ?? null
-  }, [customSkills, skills])
+    return skills.find((s) => s.trigger.toLowerCase() === wanted) ?? null
+  }, [skills])
 
   /** ONE composer, rendered on the landing and in the thread dock. `home` is the
    *  only difference between the two calls — everything else is shared state, so

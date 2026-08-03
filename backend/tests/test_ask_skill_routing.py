@@ -1,11 +1,16 @@
-"""Integration tests for the skill-routed branch of POST /v1/ask.
+"""Integration tests for the routed branches of POST /v1/ask.
 
 Before this, ask.py's skill branch called `gateway.llm_call` with the wrong
 signature and an undefined schema name, so it threw on every request and
-silently fell back to the generic corpus answer — the skill path never ran.
-These tests pin the now-working behaviour: a question that matches a skill is
-answered via `gateway.llm_call(skill=...)`, which injects the skill's SKILL.md
-method into the call.
+silently fell back to the generic corpus answer — the routed path never ran.
+These tests pin the wire end to end.
+
+The BUILT-IN skill branch they were originally written against is gone: a chat
+turn no longer selects a `SKILL.md` method, so "write user stories for the
+checkout flow" is now answered directly and that test was retired with its
+subject. What is left is the branch that still exists and still matters — a
+question reaching a dedicated PIPELINE — plus the default, which is now the
+common case rather than the fallback.
 
 The `fake_llm` fixture patches `app.llm.call_json` and the per-route refs, but
 NOT `app.graph.gateway.call_json` (the gateway imported it into its own
@@ -56,45 +61,12 @@ def _patch_gateway_call_json(monkeypatch, payload):
     return calls
 
 
-def test_ask_skill_route_executes_via_gateway(
+def test_ask_ordinary_question_is_answered_directly(
     tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
-    """A 'write user stories …' question routes to the user-stories skill (a
-    non-script skill) and is answered through the gateway with the SKILL.md
-    method bound — not the generic fallback. (Script skills like prioritize
-    take the tool-loop path instead; see test_qa_agent.)"""
-    t = tenant_client.make(slug="acme")
-    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
-
-    skill_payload = {
-        "answer": "## Stories\n\n- As a user…",
-        "key_points": ["INVEST"],
-        "citations": [],
-        "confidence": 0.92,
-        "unanswered": "",
-    }
-    gw_calls = _patch_gateway_call_json(monkeypatch, skill_payload)
-
-    body = _ask_and_wait(
-        t.client, "Write user stories for the checkout flow", "acme"
-    )
-    assert body["status"] == "ready"
-    # Answer came from the skill payload, tagged with the matched skill.
-    assert body["answer"].startswith("## Stories")
-    assert body["_skill"] == "user-stories"
-    # The gateway was used, and the user-stories SKILL.md method was injected
-    # into the cacheable prefix.
-    assert len(gw_calls) >= 1
-    prefix = gw_calls[-1]["kwargs"].get("user_cacheable_prefix") or ""
-    assert "## METHOD (skill: user-stories" in prefix
-
-
-def test_ask_non_skill_question_uses_generic_path(
-    tenant_client, isolated_settings, fake_llm, monkeypatch
-):
-    """A question with no skill match: the LLM router (gateway) returns 'none',
-    so the answer comes from the generic compose_ask_answer path (fake_llm) and
-    carries no _skill tag."""
+    """A question no pipeline claims: the LLM router (gateway) returns 'none',
+    so the answer comes from compose_ask_answer (fake_llm) and carries no
+    _skill tag. This is the DEFAULT path now, not a fallback."""
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
 
@@ -116,9 +88,13 @@ def test_ask_non_skill_question_uses_generic_path(
     assert body["status"] == "ready"
     assert body["answer"] == "generic answer"
     assert "_skill" not in body  # answered directly, not via a skill
-    # The one gateway call was the router (skill menu), not a skill answer.
+    # The one gateway call was the router, not a skill answer — and it carried
+    # NO cacheable prefix: the ~9.6k-token built-in menu that used to ride there
+    # is gone, and the four pipelines the router still picks between are
+    # described in the (tenant-invariant, already cached) system prompt.
     assert len(gw_calls) == 1
-    assert "Available skills:" in (gw_calls[0]["kwargs"].get("user_cacheable_prefix") or "")
+    assert gw_calls[0]["kwargs"].get("user_cacheable_prefix") is None
+    assert "competitive-intelligence-review" in gw_calls[0]["system"]
 
 
 def test_ask_company_research_reaches_the_dedicated_pipeline(

@@ -535,12 +535,18 @@ export const jiraApi = {
   }) => api.post<JiraWriteResult>("/v1/jira/write", change),
 }
 
+/** One entry the chat composer's skill palette may offer.
+ *
+ *  This used to be the vendored BUILT-IN catalog. It is now the company's own
+ *  uploaded skills: chat no longer selects a built-in method for a turn, so a
+ *  palette of built-ins would have offered triggers nothing would honour.
+ *  `category` is therefore always "Custom". The shape is unchanged so the
+ *  composer, the Skills screen and the command palette need no new contract. */
 export type SkillInfo = {
   id: string
   label: string
   trigger: string
   description: string
-  /** Display category from the backend catalog (e.g. "Discovery & Research"). */
   category: string
 }
 
@@ -611,7 +617,9 @@ export const askApi = {
     api.post<{ ask_id: number; status: "generating" | "ready" | "error" | "cancelled" }>(
       `/v1/ask/${askId}/cancel`,
     ),
-  /** List available skills the chat can route to. */
+  /** The skills the chat composer may offer — the company's own uploads.
+   *  Company-scoped and authenticated (it serves one customer's library now,
+   *  not a global catalog). */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
   /** Parse a binary document attachment (pptx/pdf/docx/…) to markdown so the
@@ -624,9 +632,9 @@ export const askApi = {
 }
 
 /** A user-uploaded custom skill (PRD 1854) — COMPANY-scoped: every workspace
- *  in the company shares one library. Distinct from SkillInfo (the built-in
- *  routable manifest): custom skills carry uploader attribution and no
- *  category. `trigger` invokes exactly like a built-in's. */
+ *  in the company shares one library. The MANAGEMENT view of the same skills
+ *  `askApi.skills()` returns for the composer: this one carries uploader
+ *  attribution, the file, and the id the delete/download routes take. */
 export type CustomSkillInfo = {
   id: string
   slug: string
@@ -4069,16 +4077,6 @@ export const artifactsApi = {
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 
-/** One entry in the "New report" picker (GET /v1/reports/kinds). */
-export type ReportKindOption = {
-  /** The skill to pin when starting the run, e.g. "voice-of-customer-report". */
-  skill: string
-  label: string
-  blurb: string
-  /** The seeded question the run is started with. */
-  prompt: string
-}
-
 /** One row in a thread's report list (GET /v1/reports?conversation_id=…) — the
  *  same document as `ReportDoc` minus the body, which the list never carries. */
 export type ReportSummary = Omit<ReportDoc, "html" | "share_token">
@@ -4116,15 +4114,6 @@ export const reportsApi = {
     if (!res.ok) throw new ApiError(res.status, await res.text())
     return { blob: await res.blob(), filename: filenameFromDisposition(res.headers) }
   },
-
-  /**
-   * The report kinds the "New report" picker offers. Server-owned (and filtered
-   * to skills that actually exist) so the client never shows a button that would
-   * fail on click. Each carries the prompt to run — generation goes through the
-   * ordinary ask pipeline with the skill pinned, so a report started here is
-   * identical to one asked for in chat and is captured the same way.
-   */
-  kinds: () => api.get<{ kinds: ReportKindOption[] }>("/v1/reports/kinds"),
 
   /** Turn link sharing on/off. Passcode is required iff share_mode==="passcode".
    *  The returned token is null while private. */

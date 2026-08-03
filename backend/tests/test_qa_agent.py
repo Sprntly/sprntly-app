@@ -3,10 +3,50 @@
 `route()` and `answer()` flow through the gateway's `llm_call` (imported into
 the qa_agent namespace) and `compose_ask_answer`; these tests patch those refs
 directly so no Anthropic / Supabase call is made.
+
+WHAT A "ROUTED SKILL" IS NOW. These tests used to reach the single-shot answer
+path by naming a vendored built-in (`roadmap`, `user-stories`, `prd-author`,
+`prioritize`) — a chat turn could route to any of ~78. It cannot route to a
+built-in at all now, so the two things it CAN route to stand in instead:
+
+  * `CUSTOM_SKILL` — one of the company's own uploads, seeded by
+    `_seed_custom_skill`. This is the stand-in wherever the test is really
+    about the single-shot answer's SHAPE (model, grounding, prefix, phases,
+    PRD context), because that path is unchanged and a custom skill is what
+    still walks it.
+  * a PIPELINE id — where the test is about ROUTING reaching real machinery.
+
+Every assertion those tests made is preserved; only the id changed.
 """
 from __future__ import annotations
 
+import app.db.custom_skills as custom_skills_db
 import app.qa_agent as qa
+import app.skills.resolver as resolver
+
+# One of the company's uploaded skills — the generic invocable id these tests
+# use to reach the single-shot answer path.
+CUSTOM_SKILL = "house-method"
+
+
+def _seed_custom_skill(monkeypatch, slug: str = CUSTOM_SKILL):
+    """Make `slug` a real custom skill for every company.
+
+    Patches BOTH per-request reads, for the same reason
+    `test_qa_router_custom_skills._seed_library` does: `_custom_skill_block`
+    lists the library and `_routable` re-checks the id by slug.
+    """
+    row = {
+        "slug": slug, "name": slug, "description": "The house method, written by us.",
+        "method": f"# {slug}\nmethod text", "modules": {}, "references": {},
+        "content_hash": "hash" + slug,
+    }
+    monkeypatch.setattr(custom_skills_db, "list_custom_skills", lambda cid: [dict(row)])
+    monkeypatch.setattr(
+        resolver, "get_custom_skill",
+        lambda cid, wanted: dict(row) if wanted == slug else None,
+    )
+    return row
 
 
 class _Result:
@@ -30,45 +70,70 @@ def _answer_out():
 # ── routing ──────────────────────────────────────────────────────────────────
 
 def test_slash_fastpath(monkeypatch):
+    """The slash trigger still resolves — for a CUSTOM skill.
+
+    It used to accept any routable built-in (`/prioritize`). That half is gone
+    with the built-in skill layer; this branch survives because it is the wire
+    protocol behind the composer's skill chip, which re-attaches the trigger to
+    the message text, so deleting it would make a company's own uploads
+    uninvocable."""
+    _seed_custom_skill(monkeypatch)
     calls = []
     monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _route_out())
-    d = qa.route("/prioritize rank these", enterprise_id="ent")
-    assert d.skill_id == "prioritize" and d.source == "slash"
+    d = qa.route(f"/{CUSTOM_SKILL} rank these", enterprise_id="ent")
+    assert d.skill_id == CUSTOM_SKILL and d.source == "slash"
     assert calls == []  # fast-path: no LLM
 
 
-def test_slash_nonroutable_falls_through(monkeypatch):
+def test_slash_builtin_falls_through(monkeypatch):
+    """A VENDORED id is never slash-selected.
+
+    Was `test_slash_nonroutable_falls_through`, covering the handful of
+    built-ins on a NON_ROUTABLE opt-out list. The property is unconditional
+    now: `resolve_skill` is built-in-first, so honouring `/prd-author` here
+    would promise an upload and deliver the built-in's method."""
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router says none
-    d = qa.route("/business-context build it", enterprise_id="ent")
-    assert d.skill_id != "business-context"  # non-routable, never slash-selected
+    d = qa.route("/prd-author build it", enterprise_id="ent")
+    assert d.skill_id != "prd-author"
 
 
 def test_regex_fastpath(monkeypatch):
+    """The keyword tier still short-circuits — for a PIPELINE.
+
+    Was "generate a PRD for onboarding" → prd-author. That rule is deleted: it
+    picked a long-output document generator for anything mentioning a PRD, so
+    "what's in the PRD for onboarding?" came back as a full PRD."""
     calls = []
     monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _route_out())
-    d = qa.route("generate a PRD for onboarding", enterprise_id="ent")
-    assert d.skill_id == "prd-author" and d.source == "regex"
+    d = qa.route("run a competitive intelligence report", enterprise_id="ent")
+    assert d.skill_id == "competitive-intelligence-review" and d.source == "regex"
     assert calls == []  # regex short-circuits the LLM router
 
 
 def test_llm_router_selects(monkeypatch):
     monkeypatch.setattr(
-        qa, "llm_call", lambda **k: _route_out("retention-churn", 0.82, "churn")
+        qa, "llm_call", lambda **k: _route_out("company-research", 0.82, "ours")
     )
-    d = qa.route("why do users stop logging in after a couple weeks?", enterprise_id="ent")
-    assert d.skill_id == "retention-churn" and d.source == "llm"
+    d = qa.route("what does our pricing look like out there?", enterprise_id="ent")
+    assert d.skill_id == "company-research" and d.source == "llm"
 
 
 def test_llm_router_below_threshold_is_direct(monkeypatch):
-    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out("roadmap", 0.3, "weak"))
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("company-research", 0.3, "weak")
+    )
     d = qa.route("hello there", enterprise_id="ent")
     assert d.skill_id is None
 
 
-def test_llm_router_rejects_nonroutable(monkeypatch):
-    # "verify …" hits the fact-check regex, but fact-check is non-routable, so
-    # the regex fast-path is skipped; even if the LLM names it, it's rejected.
-    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out("fact-check", 0.99, "x"))
+def test_llm_router_rejects_a_builtin_id(monkeypatch):
+    """Even a confident built-in pick is refused — nothing can run it.
+
+    Was `test_llm_router_rejects_nonroutable`, which relied on `fact-check`
+    being on a per-skill opt-out list. No vendored id is invocable from chat
+    now, so the guarantee holds without an allow-list."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out("prd-author", 0.99, "x"))
     d = qa.route("verify these market claims", enterprise_id="ent")
     assert d.skill_id is None
 
@@ -105,10 +170,10 @@ def test_route_skill_match_wins_over_scope_flag(monkeypatch):
     # router contradicts itself on the flag.
     monkeypatch.setattr(
         qa, "llm_call",
-        lambda **k: _route_out("retention-churn", 0.85, "churn", in_scope=False),
+        lambda **k: _route_out("company-research", 0.85, "ours", in_scope=False),
     )
-    d = qa.route("why do users churn?", enterprise_id="ent")
-    assert d.skill_id == "retention-churn" and d.source == "llm"
+    d = qa.route("how are we placed at the moment?", enterprise_id="ent")
+    assert d.skill_id == "company-research" and d.source == "llm"
 
 
 # ── router determinism + schema shape ────────────────────────────────────────
@@ -125,7 +190,7 @@ def test_route_pins_temperature_to_zero(monkeypatch):
     captured: list[dict] = []
     monkeypatch.setattr(
         qa, "llm_call",
-        lambda **k: captured.append(k) or _route_out("retention-churn", 0.9, "churn"),
+        lambda **k: captured.append(k) or _route_out("company-research", 0.9, "ours"),
     )
     d = qa.route("why do users drop off after week two?", enterprise_id="ent")
     assert d.source == "llm", "test needs a question that reaches the LLM router"
@@ -148,13 +213,13 @@ def test_route_temperature_reaches_the_anthropic_call(monkeypatch):
 
     def _fake_call_json(**kwargs):
         captured.append(kwargs)
-        return {"reason": "churn", "skill_id": "retention-churn",
+        return {"reason": "ours", "skill_id": "company-research",
                 "confidence": 0.9, "in_scope": True}
 
     monkeypatch.setattr(gateway_mod, "call_json", _fake_call_json, raising=True)
 
     d = qa.route("why do users drop off after week two?", enterprise_id="ent")
-    assert d.skill_id == "retention-churn" and d.source == "llm"
+    assert d.skill_id == "company-research" and d.source == "llm"
     assert len(captured) == 1
     assert captured[0]["temperature"] == 0
     # ...and it is the router's own schema that was sent.
@@ -171,9 +236,11 @@ def test_route_schema_generates_reason_before_the_label():
       rationalisation. Anthropic's ticket-routing guide: "always include your
       classification reasoning before your actual intent output".
     * `company_skill_id` before `skill_id` (2026-08-02). The company's own
-      library has to be judged on its own merits BEFORE the 74-entry menu is
-      considered; judged afterwards it competed as one flat peer among 74 and
-      reliably lost to a near-miss built-in.
+      library has to be judged on its own merits BEFORE the alternatives are
+      considered; judged afterwards it competed as one flat peer among 74
+      built-ins and reliably lost to a near-miss. `skill_id` now names one of
+      four pipelines rather than one of 74 methods, and the ordering matters
+      for the same reason.
 
     `additionalProperties: False` pins the contract to exactly these six fields.
     """
@@ -184,7 +251,7 @@ def test_route_schema_generates_reason_before_the_label():
         "skill_id", "confidence", "in_scope",
     }
     assert props.index("company_skill_id") < props.index("skill_id"), (
-        f"the company library must be judged before the menu, got {props}"
+        f"the company library must be judged first, got {props}"
     )
     assert qa._ROUTE_SCHEMA["additionalProperties"] is False
     # Every property stays required — the reorder must not drop the contract.
@@ -266,30 +333,36 @@ def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
 
 
 def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
-    # A pinned follow-up has already chosen a PM skill — the router (and its
+    # A pinned follow-up has already chosen a skill — the router (and its
     # scope flag) is never consulted.
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: _answer_out()
     )
     out = qa.answer(
         enterprise_id="ent", question="anything", dataset="acme",
-        pinned_skill="user-stories",
+        pinned_skill=CUSTOM_SKILL,
     )
-    assert out["_skill"] == "user-stories"
+    assert out["_skill"] == CUSTOM_SKILL
 
 
 # ── answer dispatch ────────────────────────────────────────────────────────────
 
 def test_answer_skill_path_uses_sonnet(monkeypatch):
-    # user-stories is a non-script, non-heavy skill → single-shot gateway call.
+    # A custom skill is non-heavy → single-shot gateway call on the default model.
+    _seed_custom_skill(monkeypatch)
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
-        enterprise_id="ent", question="write user stories for checkout", dataset="acme"
+        enterprise_id="ent", question="score this the house way", dataset="acme",
+        pinned_skill=CUSTOM_SKILL,
     )
-    assert out["_skill"] == "user-stories"
-    assert captured["skill"] == "user-stories"
+    assert out["_skill"] == CUSTOM_SKILL
+    assert captured["skill"] == CUSTOM_SKILL
     assert captured["model"] == qa.ANSWER_MODEL
+    # The uploaded METHOD really was injected, and labelled as user content.
+    assert captured["skill_spec"] is not None
+    assert qa.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM in captured["system"]
 
 
 def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
@@ -303,14 +376,11 @@ def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
     assert captured["model"] == qa.HEAVY_MODEL
 
 
-def test_answer_prd_author_stays_on_sonnet(monkeypatch):
-    # The deep reasoning happens upstream in the KG + Top Insights brief; the PRD
-    # composes off that material and answers on the default (sonnet) model.
-    captured = {}
-    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
-    assert out["_skill"] == "prd-author"
-    assert captured["model"] == qa.ANSWER_MODEL
+# `test_answer_prd_author_stays_on_sonnet` was removed here. Its subject — the
+# model a chat-routed `prd-author` answer runs on — no longer exists: chat
+# cannot route to prd-author, which is bound by name from `prd_runner.py`. The
+# model choice it guarded lives in that pipeline, which never passed an opus
+# override and still does not.
 
 
 def test_answer_intercepts_call_digest_before_routing(monkeypatch):
@@ -359,12 +429,13 @@ def test_answer_voc_request_falls_through_when_no_source(monkeypatch):
 
 
 def test_answer_pinned_skill_bypasses_call_digest(monkeypatch):
+    _seed_custom_skill(monkeypatch)
     # A pinned follow-up wins even if the text looks like a call digest.
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(enterprise_id="ent", question="summarize the customer calls",
-                    dataset="acme", pinned_skill="user-stories")
-    assert out["_skill"] == "user-stories"
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
+    assert out["_skill"] == CUSTOM_SKILL
 
 
 def test_answer_direct_path(monkeypatch):
@@ -386,21 +457,24 @@ def test_answer_pinned_skill_skips_routing(monkeypatch):
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: purposes.append(k.get("purpose")) or _answer_out()
     )
+    _seed_custom_skill(monkeypatch)
     out = qa.answer(
-        enterprise_id="ent", question="anything", dataset="acme", pinned_skill="roadmap"
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill=CUSTOM_SKILL,
     )
-    assert out["_skill"] == "roadmap"
+    assert out["_skill"] == CUSTOM_SKILL
     assert "route" not in purposes  # router never consulted
 
 
 def test_answer_history_folded_into_skill_input(monkeypatch):
+    _seed_custom_skill(monkeypatch)
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     qa.answer(
         enterprise_id="ent",
-        question="turn that into a roadmap",
+        question="turn that into a plan",
         dataset="acme",
-        pinned_skill="roadmap",  # non-script skill → single-shot, captures input
+        pinned_skill=CUSTOM_SKILL,  # → single-shot, captures input
         history=[{"role": "user", "content": "here are 3 features: A, B, C"}],
     )
     assert "here are 3 features" in captured["input"]
@@ -409,8 +483,12 @@ def test_answer_history_folded_into_skill_input(monkeypatch):
 # ── KG grounding of the single-shot skill answer ──────────────────────────────
 
 def test_single_shot_grounds_skill_on_kg_when_present(monkeypatch):
-    """A generic skill (prd-author) is handed the tenant's KG bundle so it has
-    real signal to work from — no more corpus-less "not enough signal" refusal."""
+    """A skill answer is handed the tenant's KG bundle so it has real signal to
+    work from — no more corpus-less "not enough signal" refusal.
+
+    Was routed to `prd-author` by the (deleted) PRD keyword rule; a company's
+    own upload walks the identical path and is now what reaches it."""
+    _seed_custom_skill(monkeypatch)
     captured = {}
     monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
     import app.graph.retrieval as retrieval
@@ -419,28 +497,31 @@ def test_single_shot_grounds_skill_on_kg_when_present(monkeypatch):
     )
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
 
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+    out = qa.answer(enterprise_id="ent", question="score the billing epic",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
 
-    assert out["_skill"] == "prd-author"
+    assert out["_skill"] == CUSTOM_SKILL
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in captured["input"]  # KG folded in
     assert "churn up 12%" in captured["input"]
     assert qa.ASK_SYSTEM_KG_ADDENDUM in captured["system"]  # model told to treat it as evidence
-    assert captured["input"].rstrip().endswith("Question: write a PRD for billing")
+    assert captured["input"].rstrip().endswith("Question: score the billing epic")
 
 
 def test_single_shot_stays_corpus_less_when_kg_empty(monkeypatch):
     """No tenant signal (empty KG / no company / read error) → the pre-fix path:
     no KG block, no KG addendum. Preserves behaviour for signal-less tenants."""
+    _seed_custom_skill(monkeypatch)
     captured = {}
     monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
 
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+    out = qa.answer(enterprise_id="ent", question="score the billing epic",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
 
-    assert out["_skill"] == "prd-author"
+    assert out["_skill"] == CUSTOM_SKILL
     assert "LIVE CONTEXT" not in captured["input"]
     assert qa.ASK_SYSTEM_KG_ADDENDUM not in captured["system"]
-    assert captured["input"] == "Question: write a PRD for billing"
+    assert captured["input"] == "Question: score the billing epic"
 
 
 def test_kg_grounding_does_not_touch_wired_call_digest_path(monkeypatch):
@@ -531,7 +612,7 @@ def test_answer_single_shot_sets_cacheable_prefix_to_company_facts_without_prd(
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
 
-    decision = RouteDecision(skill_id="roadmap", confidence=1.0, source="slash")
+    decision = RouteDecision(skill_id=CUSTOM_SKILL, confidence=1.0, source="slash")
     _answer_single_shot(decision, "co-1", "what should we build next?", [])
 
     assert captured["user_cacheable_prefix"] == facts
@@ -546,7 +627,7 @@ def test_answer_single_shot_prefix_is_none_when_no_facts_and_no_prd(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
 
-    decision = RouteDecision(skill_id="roadmap", confidence=1.0, source="slash")
+    decision = RouteDecision(skill_id=CUSTOM_SKILL, confidence=1.0, source="slash")
     _answer_single_shot(decision, "ent-with-no-config", "what next?", [])
 
     assert captured["user_cacheable_prefix"] is None
@@ -578,35 +659,31 @@ def test_answer_single_shot_facts_addendum_follows_custom_skill_addendum(
     )
 
 
-# ── script skills run via the tool loop (on our infra) ────────────────────────
-
-def test_script_skill_uses_tool_loop_not_single_shot(monkeypatch):
-    """A script skill (prioritize) answers through run_tool_loop, not llm_call."""
-    loop_calls = {}
-    single_shot = []
-    monkeypatch.setattr(
-        qa, "run_tool_loop", lambda **k: loop_calls.update(k) or "Ranked: A > B"
-    )
-    monkeypatch.setattr(qa, "llm_call", lambda **k: single_shot.append(k) or _answer_out())
-    out = qa.answer(enterprise_id="ent", question="prioritize A, B with RICE", dataset="acme")
-    assert out["_skill"] == "prioritize"
-    assert out["answer"] == "Ranked: A > B"
-    assert single_shot == []  # did NOT take the single-shot path
-    # the prioritize script tool was offered to the loop
-    assert loop_calls["tools"][0]["name"] == "prioritize_score"
+# ── script skills: REMOVED ───────────────────────────────────────────────────
+# `test_script_skill_uses_tool_loop_not_single_shot` covered `app/skills/
+# scripts.py` — RICE/ICE scoring, A/B sample size, SaaS-metric math and PRD lint
+# running as deterministic Python through `run_tool_loop` instead of being
+# estimated by the model. That module and `_answer_with_script` are deleted and
+# the math is model-estimated now. It is the ONE removal in this change that
+# alters behaviour beyond prompting, and it is intended — so the test goes with
+# its subject rather than being weakened into something that still passes.
 
 
 # ── CIR runs on a fresh route (no confirm gate) ───────────────────────────────
 
-def test_cir_slash_generates_report(monkeypatch):
-    """A fresh /competitive-intelligence-review ask runs the skill and returns a
-    real answer — no needs_confirmation interstitial (the old confirm gate was
-    never consumed by any UI, so it rendered as an empty message)."""
+def test_cir_named_competitors_generates_report(monkeypatch):
+    """A CIR ask naming competitors runs the pipeline and returns a real answer
+    — no needs_confirmation interstitial (the old confirm gate was never
+    consumed by any UI, so it rendered as an empty message).
+
+    Was written as `/competitive-intelligence-review Linear, Jira, Asana`. The
+    slash trigger is custom-skills-only now, so the same request arrives the way
+    a user actually types it and routes through the keyword tier instead."""
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
         enterprise_id="ent",
-        question="/competitive-intelligence-review Linear, Jira, Asana",
+        question="competitive analysis vs Linear, Jira and Asana",
         dataset="acme",
     )
     assert out.get("type") != "needs_confirmation"
@@ -633,7 +710,8 @@ def test_cir_regex_route_generates_report(monkeypatch):
 
 def test_verify_pass_off_by_default(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+    out = qa.answer(enterprise_id="ent", question="what are people saying about us online?",
+                    dataset="acme")
     assert "_verification" not in out  # disabled → untouched
 
 
@@ -648,7 +726,11 @@ def test_verify_pass_when_enabled_annotates(monkeypatch):
 
     monkeypatch.setattr(qa, "llm_call", fake_llm)
     monkeypatch.setattr(qa, "VERIFY_ENABLED", True)
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+    # HIGH_STAKES_SKILLS is the web-research pipelines now — the method-only
+    # skills it used to name (prd-author, saas-metrics-diagnosis, …) are not
+    # reachable from a chat turn at all.
+    out = qa.answer(enterprise_id="ent", question="what are people saying about us online?",
+                    dataset="acme")
     assert out["_verification"] == {"verdict": "grounded"}
     assert "fact_check" in calls
 
@@ -681,11 +763,13 @@ def test_on_route_fires_with_the_skill_before_the_answer_call(monkeypatch):
         qa, "llm_call",
         lambda **k: events.append(("llm", k.get("purpose"))) or _answer_out(),
     )
+    _seed_custom_skill(monkeypatch)
     out = qa.answer(
-        enterprise_id="ent", question="write user stories for checkout",
-        dataset="acme", on_route=lambda s, a: events.append(("route", s, a)),
+        enterprise_id="ent", question="score this the house way",
+        dataset="acme", pinned_skill=CUSTOM_SKILL,
+        on_route=lambda s, a: events.append(("route", s, a)),
     )
-    assert events[0] == ("route", "user-stories", "Generate user stories")
+    assert events[0] == ("route", CUSTOM_SKILL, CUSTOM_SKILL)
     assert events[1] == ("llm", "skill_answer"), "the answer call comes after"
     assert len([e for e in events if e[0] == "route"]) == 1, "fires exactly once"
     # The pair matches what the finished payload carries, so the mid-run label
@@ -726,10 +810,11 @@ def test_on_route_reports_a_pinned_skill(monkeypatch):
     """A pinned follow-up skips the router but the skill IS resolved, so the
     waiting surface can still name it."""
     events: list[tuple] = []
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
     qa.answer(enterprise_id="ent", question="anything", dataset="acme",
-              pinned_skill="roadmap", on_route=lambda s, a: events.append((s, a)))
-    assert events == [("roadmap", "roadmap")]
+              pinned_skill=CUSTOM_SKILL, on_route=lambda s, a: events.append((s, a)))
+    assert events == [(CUSTOM_SKILL, CUSTOM_SKILL)]
 
 
 def test_on_route_does_not_fire_for_a_pre_routing_interceptor(monkeypatch):
@@ -755,8 +840,9 @@ def test_on_route_failure_never_breaks_the_answer(monkeypatch):
     def _boom(_skill, _action):
         raise RuntimeError("supabase blip")
 
-    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
-                    dataset="acme", on_route=_boom)
+    _seed_custom_skill(monkeypatch)
+    out = qa.answer(enterprise_id="ent", question="score this the house way",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL, on_route=_boom)
     assert out["answer"] == "ok"
 
 
@@ -774,8 +860,9 @@ def test_phases_name_retrieval_then_writing_in_order(monkeypatch):
     monkeypatch.setattr(retrieval, "render_context_section", lambda b: "LIVE CONTEXT")
     monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
 
-    qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme",
-              on_phase=phases.append)
+    _seed_custom_skill(monkeypatch)
+    qa.answer(enterprise_id="ent", question="score the billing epic", dataset="acme",
+              pinned_skill=CUSTOM_SKILL, on_phase=phases.append)
 
     assert phases == ["Searching your connected sources…", "Writing the answer…"]
 
@@ -790,8 +877,9 @@ def test_no_retrieval_phase_when_retrieval_is_skipped(monkeypatch):
     monkeypatch.setattr(
         prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
     )
+    _seed_custom_skill(monkeypatch)
     qa.answer(enterprise_id="ent", question="anything", dataset="acme",
-              pinned_skill="roadmap", prd_id=7, on_phase=phases.append)
+              pinned_skill=CUSTOM_SKILL, prd_id=7, on_phase=phases.append)
 
     assert phases == ["Writing the answer…"]
 
@@ -803,17 +891,19 @@ def test_phase_sink_failure_never_breaks_the_answer(monkeypatch):
     def _boom(_label):
         raise RuntimeError("stream closed")
 
-    out = qa.answer(enterprise_id="ent", question="write a PRD for billing",
-                    dataset="acme", on_phase=_boom)
+    _seed_custom_skill(monkeypatch)
+    out = qa.answer(enterprise_id="ent", question="score the billing epic",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL, on_phase=_boom)
     assert out["answer"] == "ok"
 
 
 def test_answer_without_hooks_behaves_exactly_as_before(monkeypatch):
     """Both hooks are optional; every existing caller omits them."""
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
-    out = qa.answer(enterprise_id="ent", question="write user stories for checkout",
-                    dataset="acme")
-    assert out["_skill"] == "user-stories"
+    out = qa.answer(enterprise_id="ent", question="score this the house way",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
+    assert out["_skill"] == CUSTOM_SKILL
 
 
 # ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
@@ -823,6 +913,7 @@ def test_answer_prd_id_grounds_skill_answer(monkeypatch):
     the gateway's CACHEABLE user prefix (byte-stable across turns → prompt-cache
     reads) — NOT in the uncached input — and the PRD addendum in the system
     prompt."""
+    _seed_custom_skill(monkeypatch)
     calls = []
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: calls.append(k) or _answer_out()
@@ -836,7 +927,7 @@ def test_answer_prd_id_grounds_skill_answer(monkeypatch):
     )
     out = qa.answer(
         enterprise_id="ent", question="anything", dataset="acme",
-        pinned_skill="roadmap", prd_id=7,
+        pinned_skill=CUSTOM_SKILL, prd_id=7,
     )
     assert out["answer"] == "ok"
     answer_call = calls[-1]
@@ -850,6 +941,7 @@ def test_answer_prd_id_grounds_skill_answer(monkeypatch):
 def test_answer_prd_id_skips_kg_retrieval_on_skill_path(monkeypatch):
     """A PRD-grounded skill ask must NOT run KG retrieval (embeddings HTTP call
     + pgvector) — the PRD block is the grounding. A plain skill ask still does."""
+    _seed_custom_skill(monkeypatch)
     retrievals = []
     monkeypatch.setattr(
         qa, "_retrieve_kg_bundle",
@@ -862,11 +954,11 @@ def test_answer_prd_id_skips_kg_retrieval_on_skill_path(monkeypatch):
         prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
     )
     qa.answer(enterprise_id="ent", question="anything", dataset="acme",
-              pinned_skill="roadmap", prd_id=7)
+              pinned_skill=CUSTOM_SKILL, prd_id=7)
     assert retrievals == []  # PRD-grounded → no KG retrieval
 
     qa.answer(enterprise_id="ent", question="anything", dataset="acme",
-              pinned_skill="roadmap")
+              pinned_skill=CUSTOM_SKILL)
     assert len(retrievals) == 1  # non-PRD skill ask unchanged
 
 
@@ -874,6 +966,7 @@ def test_answer_prd_prefix_stable_across_turns(monkeypatch):
     """Turns 2+ of the same PRD conversation must send a byte-identical
     cacheable prefix (same PRD content → cache read), with only the question
     varying in the uncached input."""
+    _seed_custom_skill(monkeypatch)
     calls = []
     monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
     import app.prd_context as prd_context_mod
@@ -883,9 +976,9 @@ def test_answer_prd_prefix_stable_across_turns(monkeypatch):
         lambda ent, prd_id: f"=== CURRENT PRD CONTEXT ===\nprd {prd_id}",
     )
     qa.answer(enterprise_id="ent", question="first question", dataset="acme",
-              pinned_skill="roadmap", prd_id=7)
+              pinned_skill=CUSTOM_SKILL, prd_id=7)
     qa.answer(enterprise_id="ent", question="second question", dataset="acme",
-              pinned_skill="roadmap", prd_id=7)
+              pinned_skill=CUSTOM_SKILL, prd_id=7)
     assert calls[0]["user_cacheable_prefix"] == calls[1]["user_cacheable_prefix"]
     assert calls[0]["input"] != calls[1]["input"]
 

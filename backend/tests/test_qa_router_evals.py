@@ -1,138 +1,103 @@
-"""Router regression gate.
+"""Routing evals for the keyword tier, after the built-in skill layer was cut.
 
-A labeled (question → expected skill) set. The offline gate is deterministic
-and runs everywhere: (1) every expected id is installed + routable, and (2) the
-regex fast-path NEVER mis-routes a labeled question — for each case it either
-returns the expected skill or defers (None / low-confidence / non-routable),
-letting the LLM router decide. A wrong regex match is a regression.
+This file used to label questions with the vendored SKILL.md method the router
+was expected to pick ("Write a PRD …" → prd-author, "Diagnose our SaaS metrics
+health" → saas-metrics-diagnosis, …). Those labels have no referent now: chat
+selects no method, and every skill they named is either deleted or bound by
+name from its own pipeline, never from a chat turn. Chat→PRD and chat→tickets
+run through POST /v1/chat/intent, which does not import `skill_router` at all.
 
-The live-router accuracy check (real haiku) is opt-in (`-m integration` with an
-API key) so the gate needs no network by default.
+What replaced them is the property the trim was FOR. The keyword tier may now
+emit only ids that name real machinery, and it must keep its hands off ordinary
+questions — the regression that made this change urgent was a bare
+`\\bprototype\\b` rule and a `\\bprd\\b …\\b(for|about|from)\\b` rule sending
+"did the prototype ship last week?" and "what's in the PRD for onboarding?" to
+`prd-author`, a long-output document generator, so a one-line question came
+back as a full PRD.
 """
 from __future__ import annotations
-
-import os
 
 import pytest
 
 import app.qa_agent as qa
-from app.skill_router import detect_intent
-from app.skills.catalog import routable_manifest
+from app.skill_router import _RULES, PIPELINE_SKILLS, detect_intent
 
-# (question, expected skill id). Mix of regex-covered and LLM-only skills.
-EVALS: list[tuple[str, str]] = [
-    ("Write a PRD for in-app onboarding checklists", "prd-author"),
-    # Broadened PRD phrasings — "Give me a prd for …" was a real user miss
-    # under the old generate/create/write/draft-only verb list.
-    ("Give me a prd for the Machine Purchase Order project", "prd-author"),
-    ("We need a PRD for offline exports", "prd-author"),
-    ("Put together a quick prd for usage-based pricing", "prd-author"),
-    ("Generate user stories for the checkout flow", "user-stories"),
-    ("Prioritize these features with RICE: SSO, export, dark mode", "prioritize"),
-    ("Re-rank our backlog by WSJF", "prioritize"),
-    ("Triage this messy backlog and dedupe it", "ideation-prioritize"),
-    ("Draft a decision memo: build vs buy for billing", "decision-memo"),
-    ("Synthesize this pile of customer feedback into themes", "feedback-synthesis"),
-    ("Synthesize these user interviews into themes", "interview-synthesis"),
-    ("What did we learn from these customer calls?", "interview-synthesis"),
-    ("What are people saying about us on the App Store and Reddit?", "public-feedback-report"),
-    ("Mine our G2 and Trustpilot reviews for sentiment trends", "public-feedback-report"),
-    ("Analyze our support tickets and customer complaints", "voice-of-customer-report"),
-    ("Summarize my customer calls", "voice-of-customer-report"),
-    ("What feedback came up in our Fireflies call recordings?", "voice-of-customer-report"),
-    ("Build a voice of customer report from last quarter's calls", "voice-of-customer-report"),
-    ("Run a competitive analysis vs Linear and Jira", "competitive-intelligence-review"),
-    ("Write an incident runbook for a sev-1 outage", "incident-runbook"),
-    # LLM-only skills (no regex rule) — regex must defer, not mis-route.
-    ("Why are users churning after the second week?", "retention-churn"),
-    ("Design an A/B test for the new pricing page", "experiment-design"),
-    ("Where is our activation funnel leaking?", "funnel-activation"),
-    ("Build a Now/Next/Later roadmap for Q3", "roadmap"),
-    ("Write OKRs for the growth team", "okr-nct"),
-    ("Help me position this product against incumbents", "positioning"),
-    ("Frame the real problem behind this feature request", "problem-framing"),
-    ("Map our stakeholders and their interests", "stakeholder-map"),
-    ("Write a status update for leadership", "status-report"),
-    ("Diagnose our SaaS metrics health", "saas-metrics-diagnosis"),
-    ("Pre-mortem this launch — how could it fail?", "pre-mortem"),
+# Questions that must reach the ORDINARY answer — no pipeline, no document.
+# The first four are the reported bug; the rest are the method-only rules that
+# went with it (prioritize, user-stories, decision-memo, interview-synthesis,
+# feedback-synthesis, incident-runbook, fact-check).
+ORDINARY: list[str] = [
+    "did the prototype ship last week?",
+    "what's in the PRD for onboarding?",
+    "is the prd for billing signed off yet?",
+    "who built the prototype for the new nav?",
+    "how do we prioritize which bugs to fix first?",
+    "what acceptance criteria did we agree on?",
+    "was that a good decision in hindsight?",
+    "what did we learn from the interviews with the design team?",
+    "is there an incident runbook for the billing outage?",
+    "can you fact-check that number for me?",
+    "write a PRD for in-app onboarding checklists",
+    "generate user stories for the checkout flow",
+    "rank these ideas with RICE",
+]
+
+# ...and questions that must still reach a pipeline, because the work they ask
+# for cannot be done by answering.
+PIPELINES: list[tuple[str, str]] = [
+    ("run a competitive intelligence report", "competitive-intelligence-review"),
+    ("where do we stand vs our competitors?", "competitive-intelligence-review"),
+    ("what are people saying about us on the app store?", "public-feedback-report"),
+    ("do some deep research on our company pricing", "company-research"),
+    ("give me a voice of customer report", "voice-of-customer-report"),
+    ("summarize the feedback from our sales calls", "voice-of-customer-report"),
 ]
 
 
-def test_expected_skills_are_routable():
-    routable = {s["id"] for s in routable_manifest()}
-    bad = sorted({exp for _, exp in EVALS} - routable)
-    assert bad == [], f"eval labels not routable/installed: {bad}"
+def test_every_rule_names_a_pipeline():
+    """The admission test for `_RULES`, asserted rather than documented.
+
+    A rule that names anything else is a rule that picks a prompt style, which
+    is the whole class this change removed — and it would also route to an id
+    `qa_agent.answer` has no dispatch branch for.
+    """
+    emitted = {skill_id for _, skill_id, _, _ in _RULES}
+    assert emitted <= PIPELINE_SKILLS, (
+        f"keyword rules emit non-pipeline ids: {sorted(emitted - PIPELINE_SKILLS)}"
+    )
 
 
-# Apurva's canonical command list (2026-07-23) — mirrored in the web test
-# (web/app/components/shared/__tests__/BriefChat.prdCommand.test.ts). Every
-# phrasing must HIT the regex tier on the backend router too.
-_CANONICAL_PRD_COMMANDS = [
-    "generate a PRD for",
-    "make a PRD for",
-    "make me a PRD for",
-    "create a PRD for",
-    "write a PRD for",
-    "draft a PRD for",
-    "build a PRD for",
-    "put together a PRD for",
-    "have it make a PRD for",
-    "generate a product requirements document for",
-    "create a product requirements document for",
-    "write a product requirements document for",
-    "draft a product requirements document for",
-    "make a product requirements document for",
-    "write a product brief for",
-    "create a product brief for",
-    "generate a product brief for",
-    "draft a product brief for",
-    "make a product brief for",
-    "generate a product brief based on",
-    "write a product spec for",
-    "create a product spec for",
-    "generate a product spec for",
-    "draft a product spec for",
-    "make a product spec for",
-    "write a product specification for",
-    "create a product specification for",
-    "generate a product specification for",
-    "spec this out for",
-    "spec it out for",
-]
+def test_pipeline_ids_all_dispatch():
+    """Every id the router can produce must be invocable, or it dead-ends."""
+    for skill_id in PIPELINE_SKILLS:
+        assert qa._invocable(skill_id) is True
 
 
-@pytest.mark.parametrize("question", [
-    "Give me a prd for the Machine Purchase Order project",
-    "We need a PRD for offline exports",
-    "Put together a quick prd for usage-based pricing",
-    "can you build a prd for the referral program",
-] + [f"{p} the checkout revamp" for p in _CANONICAL_PRD_COMMANDS])
-def test_regex_catches_broadened_prd_phrasings(question):
-    """These must HIT the regex tier (not merely defer to the LLM router) —
-    the fast-path is what guarantees the phrasing routes even when the LLM
-    router is down or times out."""
+@pytest.mark.parametrize("question", ORDINARY)
+def test_ordinary_questions_are_not_claimed(question):
+    """No keyword rule may claim these — they are answered, not generated."""
     m = detect_intent(question)
-    assert m is not None and m.skill_id == "prd-author"
+    assert m is None or m.confidence < 0.75, (
+        f"{question!r} was claimed by the {m.skill_id!r} rule; it should get an "
+        "ordinary answer"
+    )
+
+
+@pytest.mark.parametrize("question,expected", PIPELINES)
+def test_pipeline_questions_still_fast_path(question, expected):
+    m = detect_intent(question)
+    assert m is not None, f"{question!r} lost its pipeline fast-path"
+    assert m.skill_id == expected
     assert m.confidence >= 0.75
 
 
-@pytest.mark.parametrize("question,expected", EVALS)
-def test_regex_never_misroutes(question, expected):
-    m = detect_intent(question)
-    if m and m.confidence >= 0.75 and qa._routable(m.skill_id):
-        assert m.skill_id == expected, (
-            f"regex mis-routed {question!r}: got {m.skill_id}, expected {expected}"
-        )
-    # else: regex defers to the LLM router — fine.
+def test_builtin_ids_are_no_longer_routable():
+    """A vendored id must not be invocable from a chat turn by any route.
 
-
-@pytest.mark.integration
-@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="needs live router")
-def test_live_router_accuracy():
-    """Opt-in: the real haiku router should get most labels right."""
-    correct = sum(
-        1
-        for q, exp in EVALS
-        if qa.route(q, enterprise_id="eval").skill_id == exp
-    )
-    assert correct / len(EVALS) >= 0.7, f"router accuracy {correct}/{len(EVALS)}"
+    `_routable` is the custom-skill test now, and `resolve_skill` is
+    built-in-first — so returning True for a vendored id here would promise a
+    company's upload and deliver the built-in's method.
+    """
+    for builtin in ("prd-author", "user-stories", "top-insights", "evidence-brief"):
+        assert qa._routable(builtin, "co-1") is False
+        assert qa._invocable(builtin, "co-1") is False

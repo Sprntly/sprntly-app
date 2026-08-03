@@ -1,19 +1,29 @@
 """The LLM router can pick a company's OWN uploaded skill (PRD 1854).
 
-Before this, `qa_agent.route()`'s haiku classifier saw `_router_menu()` — the
-vendored disk manifest and nothing else — so an uploaded skill was reachable
-only by typing `/its-slug` or pinning it. These tests pin the new shape and,
-more importantly, the two invariants it must not break:
+Before this, `qa_agent.route()`'s haiku classifier saw the vendored disk
+manifest and nothing else, so an uploaded skill was reachable only by typing
+`/its-slug` or pinning it. These tests pin that shape and, more importantly,
+the two invariants it must not break:
 
   * TENANT ISOLATION — company A's skill names never appear in company B's
     router prompt. The block is built per request from
     `list_custom_skills(company_id)` and rides the router's `input`; nothing
-    per-company touches the process-global `_router_menu()`.
-  * PROMPT CACHING — `user_cacheable_prefix` (the ~9.6k-token menu) and the
-    `system` prompt stay byte-identical across tenants, so one cache entry
-    still serves every company. app/llm.py cache-controls BOTH blocks and
-    Anthropic keys the cache on the cumulative prefix, so a per-tenant system
-    prompt would fork the menu's cache entry as surely as a per-tenant menu.
+    per-company is memoized process-globally.
+  * PROMPT CACHING — the `system` prompt stays byte-identical across tenants,
+    so one cache entry still serves every company. app/llm.py cache-controls it
+    and Anthropic keys the cache on the cumulative prefix, so a per-tenant
+    system prompt would fork that entry.
+
+WHAT CHANGED WITH THE BARE-CHAT TRIM, and what deliberately did not. The
+~78-entry BUILT-IN menu is gone: `skill_id` now names one of four dedicated
+research PIPELINES, described in four lines of the (tenant-invariant) system
+block, so the router no longer carries a `user_cacheable_prefix` at all. Every
+test below that used `prioritize` as "the menu pick a company skill competes
+with" now uses a pipeline id — the PRECEDENCE being asserted is identical, only
+the thing on the other side of it changed. Fortune's feature is untouched:
+the company block, the guard, the gates, the cap and the fail-open contract are
+all exactly as they were, and they are now the router's primary job rather than
+one job among many.
 
 Everything here stubs `qa.llm_call` — no network, and the router's decision is
 whatever the stub returns, which is what makes "did the description change the
@@ -90,6 +100,11 @@ def _capture_router(monkeypatch, output: dict) -> list[dict]:
 # regex rule claims it, that test fails first and names the reason.)
 NEUTRAL_Q = "Score the login epic the way our team usually scores things"
 
+# The id a company skill competes with. Was `prioritize`, a vendored method;
+# `skill_id` may only name a PIPELINE now, and this is the one the keyword tier
+# also has a rule for, which the keyword-prior tests below need.
+MENU_PICK = "competitive-intelligence-review"
+
 ESTIMATOR = _row("my-estimator", "Scores features by reach × confidence.")
 
 
@@ -123,16 +138,20 @@ def test_custom_skill_is_selectable_from_a_plain_message(monkeypatch):
     assert "- my-estimator: Scores features by reach × confidence." in calls[0]["input"]
 
 
-def test_custom_block_rides_input_not_the_cacheable_prefix(monkeypatch):
-    """The company block must never reach `_router_menu()`'s cached prefix."""
+def test_custom_block_rides_input_not_a_cacheable_block(monkeypatch):
+    """The company block must never reach a CACHED block.
+
+    It used to be stated against `_router_menu()`'s `user_cacheable_prefix`;
+    that prefix is gone with the built-in menu, so the cached surface on this
+    call is the system prompt alone. The invariant is unchanged and the
+    assertion now covers all of it: nothing per-tenant is cached."""
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
 
     qa.route(NEUTRAL_Q, enterprise_id="co-1")
 
-    assert "my-estimator" not in calls[0]["user_cacheable_prefix"]
+    assert calls[0].get("user_cacheable_prefix") is None
     assert "my-estimator" not in calls[0]["system"]
-    assert calls[0]["user_cacheable_prefix"] == qa._router_menu()
     # The question still lands last — the block leads, the question closes.
     assert calls[0]["input"].rstrip().endswith(f"Question: {NEUTRAL_Q}")
 
@@ -142,6 +161,8 @@ def test_custom_block_rides_input_not_the_cacheable_prefix(monkeypatch):
 # reliably lost to a near-miss built-in. Reported 2026-08-02: "should we
 # prioritise the stripe integration or the notion one?" chose the vendored
 # `decision-by-traffic-lights` over the company's own integration-review skill.
+# The 74 near-misses are gone; the four pipelines that replaced them are far
+# stronger competitors when they DO fit, so the precedence still has to hold.
 
 
 def test_a_company_pick_beats_the_menu_pick(monkeypatch):
@@ -150,7 +171,7 @@ def test_a_company_pick_beats_the_menu_pick(monkeypatch):
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     _capture_router(monkeypatch, {
         "company_skill_id": "my-estimator", "company_confidence": 0.8,
-        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+        "skill_id": MENU_PICK, "confidence": 0.9, "in_scope": True,
     })
 
     decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
@@ -159,33 +180,33 @@ def test_a_company_pick_beats_the_menu_pick(monkeypatch):
     assert decision.source == "llm_custom"
 
 
-def test_no_company_fit_leaves_the_menu_pick_alone(monkeypatch):
-    """'none' means no company skill fits. The menu decides, exactly as before —
-    custom-first must not become custom-always."""
+def test_no_company_fit_leaves_the_pipeline_pick_alone(monkeypatch):
+    """'none' means no company skill fits. The pipeline pick decides, exactly as
+    before — custom-first must not become custom-always."""
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     _capture_router(monkeypatch, {
         "company_skill_id": "none", "company_confidence": 0.0,
-        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+        "skill_id": MENU_PICK, "confidence": 0.9, "in_scope": True,
     })
 
     decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "llm"
 
 
 def test_a_weak_company_pick_does_not_win(monkeypatch):
-    """Custom skills win TIES, not arguments: the same confidence bar a menu
-    pick clears. Below it, the menu pick stands."""
+    """Custom skills win TIES, not arguments: the same confidence bar a pipeline
+    pick clears. Below it, the pipeline pick stands."""
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     _capture_router(monkeypatch, {
         "company_skill_id": "my-estimator", "company_confidence": 0.3,
-        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+        "skill_id": MENU_PICK, "confidence": 0.9, "in_scope": True,
     })
 
     decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
 
 
 def test_a_builtin_id_in_the_company_field_is_refused(monkeypatch):
@@ -197,12 +218,12 @@ def test_a_builtin_id_in_the_company_field_is_refused(monkeypatch):
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     _capture_router(monkeypatch, {
         "company_skill_id": "prd-author", "company_confidence": 0.99,
-        "skill_id": "prioritize", "confidence": 0.8, "in_scope": True,
+        "skill_id": MENU_PICK, "confidence": 0.8, "in_scope": True,
     })
 
     decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "llm"
 
 
@@ -226,7 +247,7 @@ def test_a_company_pick_also_beats_a_keyword_hit(monkeypatch):
     _seed_library(monkeypatch, {"co-1": [ESTIMATOR]})
     _capture_router(monkeypatch, {
         "company_skill_id": "my-estimator", "company_confidence": 0.8,
-        "skill_id": "prioritize", "confidence": 0.9, "in_scope": True,
+        "skill_id": MENU_PICK, "confidence": 0.9, "in_scope": True,
     })
 
     decision = qa.route(REGEX_Q, enterprise_id="co-1")
@@ -236,14 +257,16 @@ def test_a_company_pick_also_beats_a_keyword_hit(monkeypatch):
 
 
 # ─── the keyword tier as a prior, not a verdict ──────────────────────────────
-# A tier-2 rule hard-codes a VENDORED id and fires before the classifier, so a
-# custom skill — which exists only on the LLM tier — could never win a question
-# containing one of those keywords. Reported 2026-08-02: "should we prioritise
-# the stripe integration or the notion one?" went to `prioritize` at 0.9 and the
-# company's own integration-review skill was never offered.
+# A tier-2 rule fires before the classifier, so a custom skill — which exists
+# only on the LLM tier — could never win a question matching one. Reported
+# 2026-08-02: "should we prioritise the stripe integration or the notion one?"
+# went to `prioritize` at 0.9 and the company's own integration-review skill was
+# never offered. (That particular rule is gone with the built-in skill layer;
+# the tier still owns the pipeline rules, and the prior mechanism is what keeps
+# a company's own skill able to override them.)
 
-# Hits the `prioritize` rule at 0.90, well over _REGEX_ROUTE_THRESHOLD.
-REGEX_Q = "Prioritize these features with RICE: SSO, export, dark mode"
+# Hits the competitive-intelligence rule at 0.85, over _REGEX_ROUTE_THRESHOLD.
+REGEX_Q = "Run a competitive intelligence report on our rivals"
 
 
 def test_keyword_tier_stays_terminal_when_the_company_has_no_skills(monkeypatch):
@@ -254,7 +277,7 @@ def test_keyword_tier_stays_terminal_when_the_company_has_no_skills(monkeypatch)
 
     decision = qa.route(REGEX_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "regex"
     assert calls == []  # the classifier was never consulted
 
@@ -273,7 +296,7 @@ def test_a_company_skill_can_override_the_keyword_tier(monkeypatch):
     assert decision.source == "llm"
     # The classifier was told what the keywords matched, rather than the hit
     # being silently discarded.
-    assert 'Keyword match: a keyword rule matched "prioritize"' in calls[0]["input"]
+    assert f'Keyword match: a keyword rule matched the "{MENU_PICK}"' in calls[0]["input"]
 
 
 def test_the_keyword_hit_survives_an_abstaining_classifier(monkeypatch):
@@ -284,7 +307,7 @@ def test_the_keyword_hit_survives_an_abstaining_classifier(monkeypatch):
 
     decision = qa.route(REGEX_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "regex"
 
 
@@ -300,17 +323,16 @@ def test_the_keyword_hit_survives_a_failing_classifier(monkeypatch):
 
     decision = qa.route(REGEX_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prioritize"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "regex"
 
 
-def test_the_keyword_prior_never_reaches_the_cacheable_blocks(monkeypatch):
-    """The matched ID varies per QUESTION, so it must ride `input` only —
-    in `system` or the prefix it would fork the ~9.6k-token menu's cache entry
-    once per distinct keyword hit.
+def test_the_keyword_prior_never_reaches_the_cacheable_block(monkeypatch):
+    """The matched ID varies per QUESTION, so it must ride `input` only — in
+    `system` it would fork that block's cache entry once per distinct hit.
 
     Asserted as byte-equality across two questions matching DIFFERENT rules,
-    which is the cache invariant itself. (The word "Keyword match:" does appear
+    which is the cache invariant itself. (The words "Keyword match:" do appear
     in `system` — the sentence explaining what such a line means is
     tenant-invariant and belongs there. Only the matched id must not.)
     """
@@ -318,19 +340,17 @@ def test_the_keyword_prior_never_reaches_the_cacheable_blocks(monkeypatch):
     calls = _capture_router(monkeypatch, {"skill_id": "none", "confidence": 0.0})
 
     qa.route(REGEX_Q, enterprise_id="co-1")
-    qa.route("Write an incident runbook for a sev-1 outage", enterprise_id="co-1")
+    qa.route("What are people saying about us on the app store?", enterprise_id="co-1")
 
     first, second = calls[0], calls[1]
     # Different rules matched, so the per-question block really does differ...
-    assert 'matched "prioritize"' in first["input"]
-    assert 'matched "incident-runbook"' in second["input"]
-    # ...while both cacheable blocks stay byte-identical.
+    assert f'matched the "{MENU_PICK}"' in first["input"]
+    assert 'matched the "public-feedback-report"' in second["input"]
+    # ...while the cacheable block stays byte-identical.
     assert first["system"] == second["system"]
-    assert first["user_cacheable_prefix"] == second["user_cacheable_prefix"]
-    assert first["user_cacheable_prefix"] == qa._router_menu()
     # The matched id never leaks into the system block.
     for call in (first, second):
-        assert 'a keyword rule matched "' not in call["system"]
+        assert 'a keyword rule matched the "' not in call["system"]
 
 
 def test_no_keyword_hit_means_no_prior(monkeypatch):
@@ -433,10 +453,10 @@ def test_one_companys_skill_never_appears_in_anothers_router_prompt(monkeypatch)
     assert "acme-scorer" not in c_input and "beta-triage" not in c_input
 
 
-def test_cacheable_prefix_and_system_are_identical_across_companies(monkeypatch):
-    """Proof the shared prompt cache still works: the two cache-controlled
-    blocks (system, and the menu prefix) do not vary by tenant, however
-    different the companies' libraries are."""
+def test_system_is_identical_across_companies(monkeypatch):
+    """Proof the shared prompt cache still works: the cache-controlled block
+    (the system prompt — the menu prefix that used to sit beside it is gone)
+    does not vary by tenant, however different the companies' libraries are."""
     _seed_library(
         monkeypatch,
         {
@@ -449,7 +469,6 @@ def test_cacheable_prefix_and_system_are_identical_across_companies(monkeypatch)
     qa.route(NEUTRAL_Q, enterprise_id="co-a")
     qa.route(NEUTRAL_Q, enterprise_id="co-b")
 
-    assert calls[0]["user_cacheable_prefix"] == calls[1]["user_cacheable_prefix"]
     assert calls[0]["system"] == calls[1]["system"]
     # …and the inputs did differ, so the equality above is not vacuous.
     assert calls[0]["input"] != calls[1]["input"]
@@ -590,15 +609,14 @@ def test_db_failure_still_routes_normally(monkeypatch):
 
     monkeypatch.setattr(custom_skills_db, "list_custom_skills", _boom)
     calls = _capture_router(
-        monkeypatch, {"skill_id": "prd-author", "confidence": 0.9, "in_scope": True}
+        monkeypatch, {"skill_id": MENU_PICK, "confidence": 0.9, "in_scope": True}
     )
 
     decision = qa.route(NEUTRAL_Q, enterprise_id="co-1")
 
-    assert decision.skill_id == "prd-author"
+    assert decision.skill_id == MENU_PICK
     assert decision.source == "llm"
     assert calls[0]["input"] == f"Question: {NEUTRAL_Q}"
-    assert calls[0]["user_cacheable_prefix"] == qa._router_menu()
 
 
 def test_no_company_id_reads_no_library(monkeypatch):

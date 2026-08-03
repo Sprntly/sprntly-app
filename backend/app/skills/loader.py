@@ -11,7 +11,18 @@ process. The hash is recorded by the gateway in `prompt_version` so every
 decision is traceable to the exact method version behind it.
 
 Skills are STATIC bindings — agents name the skill they use directly in code.
-There is no dynamic routing here.
+There is no dynamic routing here, and as of the bare-chat change there is none
+anywhere: the library is NINE skills, each bound by name from the one pipeline
+that needs it (prd-author + implementation-spec from the PRD runner,
+evidence-brief from evidence_kg, user-stories from the ticket generator,
+top-insights from the synthesis agent, and the four connector-extraction
+contracts from kg_ingest). A chat turn selects none of them.
+
+`get_skill` still RAISES `UnknownSkillError` on a missing directory, and that is
+deliberate — those nine bindings are load-bearing and a silent empty method
+would be worse than a stack trace. The tolerance for ids that are no longer
+vendored lives one layer up, in `graph.gateway._build_method_prefix`, where it
+can be scoped to callers that only pass `skill=` for attribution.
 """
 from __future__ import annotations
 
@@ -102,16 +113,15 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     SCALARS — `key: >` (folded) and `key: |` (literal) — whose value lives on the
     following indented lines rather than after the colon.
 
-    Block scalars are not a nicety here. The router classifies a question against
-    each skill's frontmatter `description`, and a plain `partition(":")` on the
-    line `description: >` captured the single character ">" as the entire
-    description. `prd-author` — the most-used skill in the product — therefore
-    reached `_router_menu()` as the literal line `- prd-author: >`, carrying zero
-    semantic signal; it stayed reachable only because `skill_router`'s regex
-    fast-path caught PRD phrasings before the LLM router ever saw the menu. Four
-    more vendored skills (hubspot/jira/clickup/roadmap-extraction) had the same
-    empty description, though all four are NON_ROUTABLE so only their catalog
-    entry was affected.
+    Block scalars are not a nicety here. A plain `partition(":")` on the line
+    `description: >` captured the single character ">" as the entire
+    description. That was found via the (since-deleted) chat router menu, which
+    listed `prd-author` as the literal line `- prd-author: >` — zero semantic
+    signal. The router menu is gone, but the trap is NOT: five of the nine
+    skills we still vendor use a block scalar, including all four
+    KG-extraction skills, whose descriptions `app.graph.evals` reads. A skill
+    author has no reason to know `>` is unsupported, which is why this is fixed
+    in the parser rather than by reflowing the files.
 
     Fixed here rather than by rewriting the five SKILL.md files on purpose:
     editing a SKILL.md changes its `content_hash`, which is the `prompt_version`

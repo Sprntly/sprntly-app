@@ -1,13 +1,28 @@
-"""Intent detection + skill routing for the Ask endpoint.
+"""Intent detection + PIPELINE routing for the Ask endpoint.
 
-Given a user question, determines which skill (if any) should handle it.
-Falls back to general Ask (corpus + KG) when no skill matches.
+Given a user question, determines which dedicated PIPELINE (if any) should
+handle it. Everything else falls back to the general Ask answer (corpus + KG) —
+which is now the default, not the fallback.
 
-The router uses keyword matching first (fast, no LLM call), then an optional
-LLM classifier for ambiguous queries. The keyword rules are deliberately
-broad — false positives are cheap (the skill produces a structured answer),
-false negatives are expensive (the user gets a generic response when a
-specialized one was available).
+WHAT THIS MODULE STOPPED DOING. It used to pick one of ~78 vendored `SKILL.md`
+methods for a chat turn. That layer is gone: chat answers on the default model
+with no method injected. What survives here is the small set of rules whose
+match selects a piece of REAL MACHINERY the answer model cannot substitute for —
+a live call fetch, a web-search sweep, a tracker read, the DS engine. Those are
+capabilities, not prose styles, so keyword routing still earns its keep for
+them.
+
+The rules that only chose a METHOD were deleted, and two of them were live bugs:
+a bare `\\bprototype\\b` and `\\bprd\\b …\\b(for|about|from)\\b` sent "did the
+prototype ship last week?" and "what's in the PRD for onboarding?" to
+`prd-author` — a long-output document generator — so an ordinary question came
+back as a full PRD. Those rules were terminal (no LLM tier could override them
+for a tenant with no uploaded skills), which is exactly why removing them is the
+fix rather than a re-tune.
+
+The rules are still deliberately broad within their narrow subject: a false
+positive costs a pipeline run, a false negative costs the user an answer only
+that pipeline can give.
 """
 from __future__ import annotations
 
@@ -132,65 +147,24 @@ def is_competitive_report_request(question: str) -> bool:
     return bool(re.search(_CIR_REPORT_RULE_SRC, q, re.I))
 
 
-# Keyword patterns → skill mapping. Order matters: first match wins.
-# Each entry: (compiled regex, skill_id, action_label, base_confidence)
+# Keyword patterns → PIPELINE mapping. Order matters: first match wins.
+# Each entry: (compiled regex, pipeline_id, action_label, base_confidence)
+#
+# Every id below names a dedicated module in `app/` that does something the
+# answer model cannot do for itself — a paid web-search sweep, a live call
+# fetch. That is the ONLY admission test now. Rules that merely picked a
+# `SKILL.md` method (prd-author, prioritize, user-stories, ideation-prioritize,
+# decision-memo, interview-synthesis, feedback-synthesis, incident-runbook,
+# fact-check, sales-battlecard, "prototype", "deep dive") were deleted with the
+# built-in skill layer: those questions now reach the ordinary answer, which is
+# the point of the change, not a casualty of it.
+#
+# `sales-battlecard`'s rule is gone but the behaviour it protected is NOT: it
+# sat above the CIR rule to stop "sell against Acme" / "build a battlecard"
+# buying a multi-minute web sweep. That veto lives in `_CIR_VETO` (which matches
+# `battle ?cards?`), which is where it always actually was — the rule ordering
+# was belt-and-braces.
 _RULES: list[tuple[re.Pattern, str, str, float]] = [
-    # PRD generation. Verb + noun lists mirror the web command rule
-    # (BriefChat.isPrdCommand) — "give me a prd for X" was a real user miss
-    # under the old generate/create/write/draft-only list, and users also say
-    # "product brief" / "product spec(ification)" / "product requirements
-    # document" for the same artifact. Gap widened to 40 chars for multi-word
-    # fillers ("put together a quick one-page prd").
-    (re.compile(
-        r"\b(generate|create|write|draft|make|build|prepare|produce|compose"
-        r"|develop|author|give|need|want|put\s+together)\b.{0,40}"
-        r"\b(prd|product\s+requirements?\s+doc(?:ument)?|product\s+brief"
-        r"|product\s+spec(?:ification)?)s?\b", re.I),
-     "prd-author", "Generate PRD", 0.95),
-    # "spec this/it out (for X)" — same command, no artifact noun.
-    (re.compile(r"\bspec\s+(this|that|it)\s+out\b", re.I),
-     "prd-author", "Generate PRD", 0.90),
-    (re.compile(r"\bprd\b.{0,20}\b(for|about|from)\b", re.I),
-     "prd-author", "Generate PRD", 0.90),
-
-    # Prioritization
-    (re.compile(r"\b(prioriti[sz]e|rank|rice|wsjf|ice\s+score|moscow)\b", re.I),
-     "prioritize", "Prioritize ideas", 0.90),
-    (re.compile(r"\b(re-?prioriti[sz]e|re-?rank|re-?sequence)\b", re.I),
-     "prioritize", "Re-prioritize ideas", 0.90),
-
-    # User stories / tickets
-    (re.compile(r"\b(create|generate|write)\b.{0,20}\b(ticket|story|stories|task)\b", re.I),
-     "user-stories", "Generate user stories", 0.90),
-    (re.compile(r"\b(user\s+stor|acceptance\s+criteria|ac\s+for)\b", re.I),
-     "user-stories", "Generate user stories", 0.85),
-
-    # Ideation prioritize ("backlog" kept as a chat alias for the old name)
-    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate|prioriti[sz]e).{0,20}\b(ideation|ideas|backlog)\b", re.I),
-     "ideation-prioritize", "Prioritize ideation", 0.85),
-
-    # Decision memo
-    (re.compile(r"\b(decision|build\s+vs?\s+buy|pivot|persevere|trade-?off)\b", re.I),
-     "decision-memo", "Draft decision memo", 0.80),
-
-    # Interview synthesis (qualitative research: 1:1s, focus groups, usability,
-    # win/loss & churn-exit interviews → themes). Before feedback-synthesis; the
-    # two share no keywords.
-    (re.compile(r"\b(synthes\w*|analyz\w*|theme).{0,25}\b(interviews?|user\s+research|usability\s+(?:test|session)s?|focus\s+groups?|roundtables?)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.85),
-    (re.compile(r"\b(interviews?|usability\s+(?:test|session)s?|focus\s+groups?|user\s+research|win[\s/-]?loss|churn[\s-]?exit).{0,30}\b(synthes|analyz|theme|learn|insight|takeaway)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.85),
-    (re.compile(r"\binterview\s+(notes?|transcripts?)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.80),
-    (re.compile(r"\bwhat.{0,20}\b(learn|hear|find).{0,25}\b(call|interview|session|conversation)s?\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.80),
-
-    # Feedback synthesis (quick thematic pass over a pile of feedback)
-    (re.compile(r"\b(feedback|nps|csat|survey|sentiment).{0,20}\b(synthe|analyz|review|summary)\b", re.I),
-     "feedback-synthesis", "Synthesize feedback", 0.85),
-    (re.compile(r"\b(synthe|analyz|review).{0,20}\b(feedback|nps|csat|survey)\b", re.I),
-     "feedback-synthesis", "Synthesize feedback", 0.85),
-
     # Public feedback report (external reviews & social: App Store, Google Play,
     # Reddit, G2, X; "what are people saying about us online")
     (re.compile(r"\b(review\s+mining|online\s+reputation|public\s+sentiment|public\s+feedback|public\s+standings?|app[\s-]?store|google\s+play|trustpilot|capterra|\bg2\b|reddit)\b", re.I),
@@ -239,17 +213,6 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
                 r"\b(offer|sell|charge)\b", re.I),
      "company-research", "Deep company research", 0.85),
 
-    # Sales battlecard — ABOVE competitive intelligence on purpose: "how do we
-    # sell against Acme" and "build a battlecard for the competitive deal" both
-    # carry competitor vocabulary, and before this rule existed the CIR rule
-    # swallowed them into a multi-minute landscape review.
-    (re.compile(
-        r"\bbattle\s?cards?\b"
-        r"|\b(?:sell|selling|pitch|pitching|win|winning)\s+against\b"
-        r"|\bobjection\s+handling\b|\bhandle\s+objections?\b"
-        r"|\b(?:talk|trap)\s+tracks?\b", re.I),
-     "sales-battlecard", "Sales battlecard", 0.90),
-
     # Competitive intelligence — REPORT-INTENT shapes only.
     #
     # This rule used to be `\b(competit|competitor|competitive analysis|market
@@ -263,23 +226,28 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     # tests/test_cir_routing_phrases.py, not as ever-growing regexes.
     (re.compile(_CIR_REPORT_RULE_SRC, re.I),
      "competitive-intelligence-review", "Competitive intelligence report", 0.85),
-
-    # Incident runbook
-    (re.compile(r"\b(incident|runbook|post-?mortem|sev-?\d|on-?call|outage)\b", re.I),
-     "incident-runbook", "Generate incident runbook", 0.80),
-
-    # Fact check
-    (re.compile(r"\b(fact.?check|verify|is\s+it\s+true|source.?check)\b", re.I),
-     "fact-check", "Fact-check claims", 0.85),
-
-    # Prototype
-    (re.compile(r"\b(prototype|generate\s+prototype|design\s+prototype)\b", re.I),
-     "prd-author", "Generate prototype", 0.80),
-
-    # Evidence / deep dive
-    (re.compile(r"\b(evidence|deep\s*dive|root\s*cause|investigate)\b", re.I),
-     "feedback-synthesis", "Deep dive analysis", 0.70),
 ]
+
+
+# The ids `_RULES` may emit, and the complete set of ids a CHAT TURN can be
+# routed to that is not one of the company's own uploads.
+#
+# This is the contract that replaced "is it a vendored skill and not
+# NON_ROUTABLE". Each id keys a dispatch branch in `qa_agent.answer` that hands
+# the turn to a dedicated module, and each of those modules is reachable ONLY
+# through one of these ids — so a name that drops out of here silently
+# un-ships a capability rather than degrading it. `test_skill_router.py` pins
+# the set against the rules and against qa_agent's dispatch.
+#
+# All four have rules above; the set is stated separately because `pinned_skill`
+# (Slack's `/competitive` command) and the classifier can also name one without
+# a rule firing.
+PIPELINE_SKILLS: frozenset[str] = frozenset({
+    "voice-of-customer-report",
+    "public-feedback-report",
+    "company-research",
+    "competitive-intelligence-review",
+})
 
 
 # ── Call-digest intent ──────────────────────────────────────────────────────
@@ -1052,13 +1020,14 @@ def is_context_dependent_followup(question: str, history: list[dict] | None = No
 
 
 def detect_intent(question: str) -> SkillMatch | None:
-    """Match a user question to a skill via keyword rules.
+    """Match a user question to a PIPELINE via keyword rules.
 
-    Returns the best SkillMatch, or None if no skill matches (→ general Ask).
+    Returns the best SkillMatch, or None if no pipeline matches (→ general Ask,
+    which is now the default answer rather than a fallback).
 
     A rule with a `_RULE_VETOES` entry defers when its veto also matches, so a
-    question that belongs to a sibling skill keeps falling through instead of
-    being claimed by a broader rule.
+    question that belongs elsewhere keeps falling through instead of being
+    claimed by a broader rule.
     """
     for pattern, skill_id, action, confidence in _RULES:
         if not pattern.search(question):
@@ -1070,23 +1039,44 @@ def detect_intent(question: str) -> SkillMatch | None:
     return None
 
 
-def list_available_skills() -> list[dict]:
-    """Return the routable skills for the chat composer UI, grouped-ready.
+def list_available_skills(enterprise_id: str | None = None) -> list[dict]:
+    """The company's OWN uploaded skills, for the chat composer's palette.
 
-    Computed from the vendored catalog (`backend/skills/`) — not a hand-list —
-    so installing a skill folder surfaces it automatically. Non-routable skills
-    (business-context, fact-check) are excluded; the UI shape stays
-    {id, label, trigger, description, category}.
+    This used to be the vendored built-in catalog, filtered to what the router
+    could pick. Both halves of that are gone: the library is down to nine
+    method docs bound by name from their own pipelines, and of those exactly
+    three were ever routable — so the endpoint would have advertised three
+    triggers the router can no longer select. A palette that offers a skill
+    nothing will honour is worse than an empty one, so it now offers only the
+    library the user themselves built, which IS still selectable (the LLM
+    router's per-company block, and the composer's own trigger chip).
+
+    Shape is unchanged — {id, label, trigger, description, category} — so the
+    composer, the Skills screen and the command palette need no new contract;
+    `category` is always "Custom" now, which is the honest grouping.
+
+    Fails OPEN to [] on any error and on a missing tenant: this backs a picker,
+    and a picker that 500s is worse than a picker that is empty.
     """
-    from app.skills.catalog import routable_manifest
+    if not enterprise_id:
+        return []
+    try:
+        from app.db.custom_skills import list_custom_skills
 
-    return [
-        {
-            "id": s["id"],
-            "label": s["label"],
-            "trigger": s["trigger"],
-            "description": s["description"],
-            "category": s["category"],
-        }
-        for s in routable_manifest()
-    ]
+        rows = list_custom_skills(enterprise_id) or []
+    except Exception:  # noqa: BLE001 — a palette must never break the app
+        logger.warning("custom-skill palette lookup failed", exc_info=True)
+        return []
+    out: list[dict] = []
+    for row in rows:
+        slug = (row.get("slug") or "").strip()
+        if not slug:
+            continue
+        out.append({
+            "id": slug,
+            "label": (row.get("name") or slug).strip(),
+            "trigger": f"/{slug}",
+            "description": (row.get("description") or "").strip(),
+            "category": "Custom",
+        })
+    return out

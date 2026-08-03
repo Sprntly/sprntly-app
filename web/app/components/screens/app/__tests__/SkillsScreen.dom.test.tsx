@@ -1,19 +1,23 @@
 // @vitest-environment jsdom
 //
-// Tests for the Skills gallery: it lists the routable skills from
-// askApi.skills grouped by catalog category (in display order, unknown
-// categories appended rather than dropped), plus the company's CUSTOM skills
-// from skillsApi.list (own section, uploader byline). Clicking any card hands
-// off to the chat — setPendingOndemandDraft("<trigger> ") + goTo("chat") — so
-// the composer opens pre-filled with the skill invoked. "Create or upload
-// skill" opens the upload modal; a successful upload prepends the new skill.
+// Tests for the Skills gallery: it lists the company's CUSTOM skills from
+// skillsApi.list (uploader byline). Clicking a card hands off to the chat —
+// setPendingOndemandDraft("<trigger> ") + goTo("chat") — so the composer opens
+// pre-filled with the skill invoked. "Create or upload skill" opens the upload
+// modal; a successful upload prepends the new skill.
+//
+// The BUILT-IN catalog this screen used to list alongside them (askApi.skills,
+// grouped by category) is gone, and so are its tests + `groupSkills`. Their
+// subject went with the built-in skill layer: chat selects no vendored method,
+// so every one of those cards was a trigger that would have done nothing. The
+// custom-skill tests below are untouched — that feature is the whole screen
+// now.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-const skillsMock = vi.fn()
 const customListMock = vi.fn()
 const customUploadMock = vi.fn()
 const customRemoveMock = vi.fn()
@@ -22,9 +26,6 @@ const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
 
 vi.mock("../../../../lib/api", () => ({
-  askApi: {
-    skills: (...a: unknown[]) => skillsMock(...a),
-  },
   skillsApi: {
     list: (...a: unknown[]) => customListMock(...a),
     upload: (...a: unknown[]) => customUploadMock(...a),
@@ -53,50 +54,34 @@ vi.mock("../AppLayout", () => ({
     React.createElement("div", null, children),
 }))
 
-import { SkillsScreen, skillBlurb, groupSkills } from "../SkillsScreen"
-import type { SkillInfo } from "../../../../lib/api"
-
-const STAKEHOLDER_MAP: SkillInfo = {
-  id: "stakeholder-map",
-  label: "Stakeholder map",
-  trigger: "/stakeholder-map",
-  description:
-    'Map stakeholders and plan alignment, including RACI. Use when the user says "stakeholder map".',
-  category: "Stakeholder & Communication",
-}
-
-const JOURNEY_MAP: SkillInfo = {
-  id: "journey-map",
-  label: "Journey map",
-  trigger: "/journey-map",
-  description: "Map a specific actor's end-to-end journey toward a goal.",
-  category: "Discovery & Research",
-}
-
-const POSITIONING: SkillInfo = {
-  id: "positioning",
-  label: "Positioning",
-  trigger: "/positioning",
-  description: "Define product positioning and messaging.",
-  category: "Strategy & Vision",
-}
+import { SkillsScreen, skillBlurb } from "../SkillsScreen"
 
 const CUSTOM_SKILL = {
   id: "b8f3a1c2-0000-0000-0000-000000000001",
   slug: "estimation-helper",
   trigger: "/estimation-helper",
   name: "Estimation helper",
-  description: "Scores features by reach × confidence.",
+  description:
+    'Scores features by reach × confidence. Use when the user says "estimate".',
   uploader_name: "Fortune Tede",
   created_at: "2026-07-28T18:00:00+00:00",
   has_file: true,
   name_conflict: false,
 }
 
+// A second upload, so search/filter behaviour has something to discriminate.
+const OTHER_SKILL = {
+  ...CUSTOM_SKILL,
+  id: "b8f3a1c2-0000-0000-0000-000000000002",
+  slug: "journey-mapper",
+  trigger: "/journey-mapper",
+  name: "Journey mapper",
+  description: "Maps an actor's end-to-end journey toward a goal.",
+  uploader_name: "Ada Lovelace",
+}
+
 beforeEach(() => {
-  // Deliberately NOT in display order — the screen must impose it.
-  skillsMock.mockResolvedValue({ skills: [STAKEHOLDER_MAP, POSITIONING, JOURNEY_MAP] })
-  customListMock.mockResolvedValue({ skills: [] })
+  customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
   searchParamsMock = new URLSearchParams()
 })
 
@@ -106,55 +91,32 @@ afterEach(() => {
 })
 
 describe("SkillsScreen", () => {
-  it("lists skills from askApi.skills grouped by category in display order", async () => {
+  it("lists the company's uploaded skills", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(skillsMock).toHaveBeenCalled())
+    await waitFor(() => expect(customListMock).toHaveBeenCalled())
 
-    // Numbered category headings in catalog display order, not API order.
-    const headings = screen.getAllByRole("heading").map((h) => h.textContent)
-    expect(headings).toEqual([
-      "1 · Discovery & Research",
-      "2 · Strategy & Vision",
-      "3 · Stakeholder & Communication",
-    ])
-    expect(screen.getByText("Journey map")).toBeTruthy()
-    expect(screen.getByText("Positioning")).toBeTruthy()
-    expect(screen.getByText("Stakeholder map")).toBeTruthy()
+    expect(screen.getByRole("heading", { name: "Custom skills" })).toBeTruthy()
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
   })
 
-  it("shows the first sentence of the description, without the router tail", async () => {
+  it("shows the first sentence of the description, without the routing tail", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
 
-    expect(
-      screen.getByText("Map stakeholders and plan alignment, including RACI"),
-    ).toBeTruthy()
+    expect(screen.getByText("Scores features by reach × confidence")).toBeTruthy()
     expect(screen.queryByText(/Use when the user says/)).toBeNull()
-  })
-
-  it("hands a clicked skill off to the chat with its trigger pre-filled", async () => {
-    await act(async () => {
-      render(React.createElement(SkillsScreen))
-    })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /stakeholder map/i }))
-    })
-
-    expect(setPendingOndemandDraftMock).toHaveBeenCalledWith("/stakeholder-map ")
-    expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
   it("opens the upload modal from Create or upload skill (no navigation)", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
@@ -184,31 +146,25 @@ describe("SkillsScreen", () => {
     expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
-  it("keeps the built-in card when a custom skill shares its name", async () => {
-    // No-override (PRD 1854 revision): the upload replaces nothing, so BOTH
-    // cards belong in the library — under the different triggers they run on.
+  it("lists two same-named uploads under the triggers that invoke each", async () => {
+    // No-override (PRD 1854 revision): an upload replaces nothing and takes the
+    // next free trigger, so BOTH cards belong in the library. Still true with
+    // the built-in catalog gone — the collision this covers is now
+    // upload-vs-upload as much as upload-vs-built-in.
     customListMock.mockResolvedValue({
       skills: [
-        {
-          ...CUSTOM_SKILL,
-          id: "c-shadow",
-          slug: "journey-map-2",
-          trigger: "/journey-map-2",
-          name: "Journey map",
-          name_conflict: true,
-        },
+        OTHER_SKILL,
+        { ...OTHER_SKILL, id: "c-shadow", slug: "journey-mapper-2",
+          trigger: "/journey-mapper-2", name_conflict: true },
       ],
     })
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getAllByText("Journey map").length).toBe(2))
+    await waitFor(() => expect(screen.getAllByText("Journey mapper").length).toBe(2))
 
-    // Two same-named cards, each carrying the trigger that invokes IT.
-    expect(screen.getByTitle(/^\/journey-map —/)).toBeTruthy()
-    expect(screen.getByTitle(/^\/journey-map-2 —/)).toBeTruthy()
-    // Other built-ins are untouched.
-    expect(screen.getByText("Stakeholder map")).toBeTruthy()
+    expect(screen.getByTitle(/^\/journey-mapper —/)).toBeTruthy()
+    expect(screen.getByTitle(/^\/journey-mapper-2 —/)).toBeTruthy()
   })
 
   it("toasts the assigned trigger when the uploaded name was taken", async () => {
@@ -219,7 +175,7 @@ describe("SkillsScreen", () => {
       name_conflict: true,
     })
     const { container } = render(React.createElement(SkillsScreen))
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
@@ -338,21 +294,28 @@ describe("SkillsScreen", () => {
     expect(screen.getByText("Estimation helper")).toBeTruthy()
   })
 
-  it("keeps built-ins rendering when the custom-skills fetch fails", async () => {
+  it("surfaces the failure inline when the skills fetch fails", async () => {
     customListMock.mockRejectedValueOnce(new Error("custom down"))
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText(/Custom skills couldn’t load/)).toBeTruthy(),
+    )
 
-    expect(screen.getByText(/Custom skills couldn’t load/)).toBeTruthy()
-    expect(screen.getByText("Journey map")).toBeTruthy()
+    // ...and the surface still offers the way out of an empty library.
+    expect(screen.getByRole("button", { name: /create or upload skill/i })).toBeTruthy()
   })
 
   it("uploads a skill through the modal and prepends it to the library", async () => {
+    // Starts from an EMPTY library so "it's in the list now" is unambiguous —
+    // uploading a skill whose name is already on screen proves nothing.
+    customListMock.mockResolvedValue({ skills: [] })
     customUploadMock.mockResolvedValue(CUSTOM_SKILL)
     const { container } = render(React.createElement(SkillsScreen))
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /create or upload skill/i })).toBeTruthy(),
+    )
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
@@ -390,89 +353,70 @@ describe("SkillsScreen", () => {
     expect(screen.getByText("Fortune Tede")).toBeTruthy()
   })
 
-  it("surfaces an error when loading fails", async () => {
-    skillsMock.mockRejectedValueOnce(new Error("network down"))
+  it("filters cards by search query, over name / trigger / description", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText(/network down/i)).toBeTruthy())
-  })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
 
-  it("filters cards by search query, dropping empty categories and renumbering", async () => {
-    await act(async () => {
-      render(React.createElement(SkillsScreen))
-    })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
-
-    // "RACI" only appears in stakeholder-map's full description — search must
-    // match the router description, not just the visible blurb.
+    // "reach" only appears in Estimation helper's FULL description — search
+    // must match the stored description, not just the visible blurb.
     await act(async () => {
       fireEvent.change(screen.getByRole("searchbox", { name: /search skills/i }), {
-        target: { value: "RACI" },
+        target: { value: "reach" },
       })
     })
 
-    expect(screen.getByText("Stakeholder map")).toBeTruthy()
-    expect(screen.queryByText("Journey map")).toBeNull()
-    expect(screen.queryByText("Positioning")).toBeNull()
-    // Only one section remains and its number re-flows to 1.
-    const headings = screen.getAllByRole("heading").map((h) => h.textContent)
-    expect(headings).toEqual(["1 · Stakeholder & Communication"])
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+    expect(screen.queryByText("Journey mapper")).toBeNull()
   })
 
   it("seeds the filter from the ?q= deep link (global search palette)", async () => {
-    searchParamsMock = new URLSearchParams("q=Journey map")
+    searchParamsMock = new URLSearchParams("q=Journey mapper")
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Journey map")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("Journey mapper")).toBeTruthy())
 
     const input = screen.getByRole("searchbox", { name: /search skills/i }) as HTMLInputElement
-    expect(input.value).toBe("Journey map")
-    expect(screen.queryByText("Stakeholder map")).toBeNull()
-    expect(screen.queryByText("Positioning")).toBeNull()
+    expect(input.value).toBe("Journey mapper")
+    expect(screen.queryByText("Estimation helper")).toBeNull()
   })
 
   it("shows a no-match placeholder and restores the list when cleared", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
     const input = screen.getByRole("searchbox", { name: /search skills/i })
 
     await act(async () => {
       fireEvent.change(input, { target: { value: "zzz-nothing" } })
     })
     expect(screen.getByText(/No skills match/)).toBeTruthy()
-    expect(screen.queryByText("Stakeholder map")).toBeNull()
+    expect(screen.queryByText("Estimation helper")).toBeNull()
 
     await act(async () => {
       fireEvent.change(input, { target: { value: "" } })
     })
-    expect(screen.getByText("Stakeholder map")).toBeTruthy()
-    expect(screen.getByText("Journey map")).toBeTruthy()
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
   })
-})
 
-describe("groupSkills", () => {
-  it("appends unknown categories instead of dropping them", () => {
-    const oddball: SkillInfo = {
-      id: "future-skill",
-      label: "Future skill",
-      trigger: "/future-skill",
-      description: "Does something new.",
-      category: "Brand-New Category",
-    }
-    const groups = groupSkills([oddball, JOURNEY_MAP])
-    expect(groups.map((g) => g.category)).toEqual([
-      "Discovery & Research",
-      "Brand-New Category",
-    ])
+  it("invites an upload when the library is empty", async () => {
+    customListMock.mockResolvedValue({ skills: [] })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() =>
+      expect(screen.getByText(/No skills yet — upload one to get started\./)).toBeTruthy(),
+    )
   })
+
 })
 
 describe("skillBlurb", () => {
-  it("cuts the router-guidance tail even mid-sentence flow", () => {
+  it("cuts the routing-guidance tail even mid-sentence flow", () => {
     expect(
       skillBlurb(
         'Map stakeholders and plan alignment, including RACI. Use when the user says "RACI".',
