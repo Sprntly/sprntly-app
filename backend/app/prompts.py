@@ -985,4 +985,20 @@ def connected_sources_line(company_id) -> str:
         "you could not retrieve something, say you could not retrieve it and name "
         "what you tried, rather than blaming the user's setup. If the answer "
         "genuinely needs a source that is NOT listed, name that source specifically."
+        "\n"
+        # Reported 2026-08-03. Asked to check what had just changed in a
+        # connected wiki, this path answered "I cannot perform a live, real-time
+        # pull of your Confluence space on demand — I am not able to trigger a
+        # fresh crawl". Sprntly does exactly that (app/connector_lookup/), just
+        # not from THIS path, which reads the synced snapshot. Describing a
+        # missing route as a missing capability tells the user the product
+        # cannot do something they watched it do a minute earlier, and leaves
+        # them with nothing to try.
+        "You are answering from SYNCED data here, which may lag the source. "
+        "Sprntly CAN read these sources live in chat — you simply are not on "
+        "that path right now. So never claim you are unable to fetch live or "
+        "real-time data, unable to trigger a sync, or limited to what loaded "
+        "with the session. If freshness matters to the answer, say the data "
+        "comes from the last sync and invite the user to ask you to check the "
+        "source by name (\"check Confluence for…\"), which does read it live."
     )

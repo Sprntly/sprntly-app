@@ -445,6 +445,33 @@ _JIRA_WRITE_VERB = re.compile(
 # A genuine pivot ("prioritize these features", "what's our churn rate?") trips
 # the pivot veto and falls through to normal routing.
 _JIRA_THREAD_MARKER = re.compile(r"\bjira\b|view in jira|issue key|workflow status", re.I)
+# The subset strong enough to survive appearing inside QUOTED SOURCE CONTENT.
+# These are tracker-UI vocabulary — nothing else produces them. The bare word
+# "jira" is not: Atlassian's own stock Confluence page template ships the line
+# "Add Jira work item links or other relevant project links here", so a wiki
+# read that quotes a template quotes the word too.
+_JIRA_THREAD_MARKER_STRONG = re.compile(r"view in jira|issue key|workflow status", re.I)
+
+#: Live-read sources whose answers QUOTE documents and messages verbatim. An
+#: assistant turn that is one of these answers is a document in the same sense a
+#: generated report is — see _in_tracker_thread.
+_QUOTING_SOURCE_PROVIDERS = (
+    "confluence", "google_drive", "slack", "github", "hubspot", "fireflies",
+)
+
+
+def _reads_as_another_sources_answer(text: str) -> bool:
+    """True when this turn is an answer ABOUT a non-tracker source.
+
+    Deliberately reuses _CONNECTOR_STRONG_NAMES (defined further down; resolved
+    at call time) so this list can never drift from the names the connector
+    router recognises.
+    """
+    for provider in _QUOTING_SOURCE_PROVIDERS:
+        pattern = _CONNECTOR_STRONG_NAMES.get(provider)
+        if pattern is not None and pattern.search(text):
+            return True
+    return False
 _JIRA_FILTER = re.compile(
     r"\b(to[\s-]?do|in[\s-]?progress|in\s+review|done|open|closed|blocked|"
     r"backlog|status|project|board|sprint|epic|tickets?|issues?|bugs?|"
@@ -572,7 +599,23 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
     that happened to say "more" / "details" / "expand" was answered by the
     tracker path with "no tracker is connected — connect Jira or ClickUp"
     instead of by the report. Reported live against a Voice of Customer report.
-    A tracker thread is established by what was SAID, never by a document."""
+    A tracker thread is established by what was SAID, never by a document.
+
+    A LIVE SOURCE READ is a document by the same argument, and the HTML check
+    above does not catch it because those answers are markdown. Reported
+    2026-08-03: "give me all information on confluence" listed the wiki, one
+    listed page was Atlassian's stock product-requirements template, and that
+    template's body says "Add Jira work item links or other relevant project
+    links here". The quoted word made the next turn a tracker thread, so "tell
+    me more about ChoisBits Decision Making" — `more` matches _TRACKER_DETAIL —
+    was answered "no tracker is connected, connect Jira or ClickUp" about a
+    Confluence page the assistant had just read. The user had to type "so check
+    confluence" to get back to the thread they were already in.
+
+    So an assistant turn that reads as ANOTHER source's answer needs a tracker
+    signal that could not have come from the quoted material: an issue key, or
+    tracker-UI vocabulary. Its own clarifying questions ("which Jira project?")
+    are unaffected — they name no other source."""
     if not history:
         return False
     for turn in history[-_TRACKER_THREAD_WINDOW:]:
@@ -581,9 +624,18 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
             continue
         if looks_like_html(content):
             continue
+        role = turn.get("role") or "user"
+        if role == "assistant" and _reads_as_another_sources_answer(content):
+            # Quoted content: only an unmistakable tracker signal counts.
+            if (
+                _JIRA_THREAD_MARKER_STRONG.search(content)
+                or _JIRA_ISSUE_KEY.search(content)
+            ):
+                return True
+            continue
         if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
             return True
-        if (turn.get("role") or "user") == "user" and _stateless_tracker_lookup(content):
+        if role == "user" and _stateless_tracker_lookup(content):
             return True
     return False
 
@@ -941,6 +993,85 @@ _CONNECTOR_ARTIFACT_VETO = re.compile(
 )
 
 
+#: Product names long enough that a ONE-character slip is unambiguous. Reported
+#: twice on 2026-08-03: "conflunece just added something new, check and tell me
+#: what the content is" named the source, meant it, and was answered "I cannot
+#: perform a live, real-time pull of your Confluence space" — because the
+#: transposed `ne` missed \bconfluence\b and the question fell to the generic
+#: path. A typo in the source name is the one case where the user could not have
+#: been clearer about intent.
+#:
+#: Short names are deliberately excluded. One edit from `slack` is `black`, from
+#: `jira` is `jars`; at five letters a typo and a different word are the same
+#: thing. Seven-plus letters is where a single slip stops being ambiguous.
+_FUZZY_PROVIDER_WORDS: dict[str, str] = {
+    "confluence": "confluence",
+    "fireflies": "fireflies",
+    "amplitude": "amplitude",
+    "sprinklr": "sprinklr",
+    "mixpanel": "mixpanel",
+    "intercom": "intercom",
+    "superset": "superset",
+    "clickup": "clickup",
+    "hubspot": "hubspot",
+    "zendesk": "zendesk",
+}
+_FUZZY_MIN_LEN = min(len(w) for w in _FUZZY_PROVIDER_WORDS.values()) - 1
+_WORD_TOKEN = re.compile(r"[a-z]+")
+
+
+def _within_one_edit(word: str, target: str) -> bool:
+    """True when `word` is `target` give or take ONE edit.
+
+    Damerau-Levenshtein ≤ 1 — substitution, insertion, deletion, or a
+    transposition of two ADJACENT characters. The transposition case is the
+    reason this is not plain Levenshtein: swapped letters are the most common
+    way a product name gets mistyped, and it is exactly what "conflunece" is.
+
+    Distance 1 rather than a similarity ratio, because the boundary has to be
+    sharp: "confluence" → "conflunece" is one transposition, while
+    "confidence" → "confluence" is two substitutions. A ratio puts those within
+    ~0.1 of each other and would eventually route "confidence interval" into a
+    wiki lookup.
+    """
+    if word == target:
+        return True
+    la, lb = len(word), len(target)
+    if abs(la - lb) > 1:
+        return False
+    i = 0
+    while i < min(la, lb) and word[i] == target[i]:
+        i += 1
+    if i == min(la, lb):
+        return True  # one trailing insert/delete
+    if la == lb:
+        if word[i + 1:] == target[i + 1:]:
+            return True  # substitution
+        return (
+            i + 1 < la
+            and word[i] == target[i + 1]
+            and word[i + 1] == target[i]
+            and word[i + 2:] == target[i + 2:]
+        )  # adjacent transposition
+    if la > lb:
+        return word[i + 1:] == target[i:]  # extra character
+    return word[i:] == target[i + 1:]  # missing character
+
+
+def _misspelled_connector_providers(text: str) -> set[str]:
+    """Providers named with a single typo. Runs only when exact matching found
+    nothing, so a correctly-spelled message never pays for it."""
+    found: set[str] = set()
+    for token in _WORD_TOKEN.findall(text.lower()):
+        if len(token) < _FUZZY_MIN_LEN:
+            continue
+        for provider, word in _FUZZY_PROVIDER_WORDS.items():
+            if _within_one_edit(token, word):
+                found.add(provider)
+                break
+    return found
+
+
 def _named_connector_providers(text: str) -> set[str]:
     """Provider keys explicitly named in one message."""
     if _CONNECTOR_MENTION_VETO.search(text) or _CONNECTOR_ARTIFACT_VETO.search(text):
@@ -949,6 +1080,8 @@ def _named_connector_providers(text: str) -> set[str]:
     for provider, pattern in _CONNECTOR_STRONG_NAMES.items():
         if pattern.search(text):
             found.add(provider)
+    if not found:
+        found |= _misspelled_connector_providers(text)
     if _SLACK_CHANNEL_REF.search(text):
         found.add("slack")
     if not _CONNECTOR_AMBIGUOUS_VETO.search(text) and _CONNECTOR_READ_CONTEXT.search(text):
@@ -997,15 +1130,183 @@ def is_connector_lookup(
         or _CONNECTOR_FOLLOWUP_DETAIL.search(q)
     ):
         return None
-    prior: set[str] = set()
+    # The USER's own words decide what the thread is about, and the assistant's
+    # turns are only a fallback for when they said nothing nameable.
+    #
+    # Both are scanned because a thread can be established either way, but they
+    # are not equal evidence: an answer QUOTES its source material, so a wiki
+    # read that reproduces a page saying "Add Jira work item links" names Jira
+    # without the thread being about Jira. Merging the two sets sent the
+    # follow-up to Confluence AND Jira, and the ≤2 provider cap meant that extra
+    # source was paid for on every turn of the thread. Same 2026-08-03 report as
+    # the _in_tracker_thread narrowing; same root cause, one layer along.
+    user_named: set[str] = set()
+    any_named: set[str] = set()
     for turn in history[-_TRACKER_THREAD_WINDOW:]:
         content = turn.get("content") or ""
         # A report DOCUMENT names its sources as provenance, not as a source
         # this thread is reading live — see _in_tracker_thread for the same
         # exclusion on the tracker side.
-        if content and not looks_like_html(content):
-            prior |= _named_connector_providers(content)
-    return prior or None
+        if not content or looks_like_html(content):
+            continue
+        found = _named_connector_providers(content)
+        if not found:
+            continue
+        any_named |= found
+        if (turn.get("role") or "user") == "user":
+            user_named |= found
+    return user_named or any_named or None
+
+
+# ── Document intent: a wiki question that names no source ────────────────────
+#
+# is_connector_lookup above requires the message to NAME a source. That is the
+# right bar for Slack and HubSpot — you say "check slack" because the tool IS
+# the subject — and the wrong one for a wiki. Nobody asks "what does Confluence
+# say about the onboarding spec"; they ask "what does our onboarding spec say".
+# You name the tool when you talk about a chat app, and you name the DOCUMENT
+# when you talk about a wiki.
+#
+# The asymmetry was visible sitting next to Jira, which has never needed its own
+# name: _stateless_tracker_lookup fires on a read verb over a PM noun ("get me
+# the open tickets"), so the tracker already answers questions phrased the way
+# people actually phrase them. Confluence had no equivalent, so every document
+# question fell through to the generic path and was answered out of KG signals —
+# the atomic facts the extractor lifted OUT of pages — while the page itself sat
+# unread. The adapter (connector_lookup/confluence.py) could have answered it
+# the whole time; nothing routed to it.
+#
+# This is the "provider-specific NOUNS plus that provider being connected"
+# trigger the block above deferred. The connection half cannot live in this
+# module — it takes no enterprise_id by design — so this returns CANDIDATES and
+# qa_agent intersects them with the company's real connections. That intersection
+# is what makes a trigger this broad safe: a company with no wiki connected is
+# untouched by every regex below, and the ones that do have it lose nothing but
+# a KG paraphrase of a page we can now quote.
+#
+# Deliberately Confluence-only for now. Google Drive is the same shape and is its
+# own PR — a doc noun maps to both, and shipping them together would make a
+# false positive twice as hard to attribute.
+_DOCUMENT_NOUN = re.compile(
+    r"\b(spec|specs|specification|specifications|"
+    r"docs?|documents?|documented|documentation|"
+    r"wikis?|"
+    r"runbooks?|playbooks?|handbooks?|"
+    r"rfcs?|adrs?|"
+    r"one[\s-]?pagers?|"
+    r"charter|sop)\b",
+    re.I,
+)
+# Nouns deliberately NOT in that list, because each one costs more than it wins:
+# `page` ("the pricing page", "landing page"), `guide` ("guide me through this"),
+# `notes` (a meeting artifact — Fireflies' subject, not the wiki's), and `report`
+# (see the subject veto below).
+
+# The read half. Kept separate from _CONNECTOR_READ_CONTEXT on purpose: that one
+# folds the nouns INTO the verb alternation, so a bare "the spec" would satisfy
+# both halves of an AND and the trigger would fire on a passing mention.
+_DOCUMENT_READ_VERB = re.compile(
+    r"\b(what'?s?|what\s+do(?:es)?|which|where|who|why|how\s+do(?:es)?|"
+    r"find|get|fetch|show|pull|open|read|check|search|look\s*(?:in|up|at|for)|"
+    r"summari[sz]e|summary|explain|describe|walk\s+me\s+through|"
+    # "brief me on the company documents" — the shape that reported this gap.
+    # `brief` is also one of Sprntly's own surfaces, so only the VERB form (with
+    # its object pronoun) counts here; the subject veto below still owns the
+    # noun. Same for the other ways people ask to be told about a thing without
+    # using an interrogative.
+    r"brief\s+(?:me|us)|tell\s+(?:me|us)\s+about|catch\s+(?:me|us)\s+up|"
+    r"run\s?down|overview\s+of|"
+    r"do\s+we\s+have|have\s+we\s+got|is\s+there|are\s+there|anything|any)\b",
+    re.I,
+)
+
+# Sprntly's OWN surfaces, which share this vocabulary and must keep their
+# routing. A PRD, a brief, Top Insights, a persona, a report and a prototype are
+# things Sprntly GENERATES; answering "summarise the PRD" by searching a customer
+# wiki would break the product's core loop to serve an edge case. `roadmap` is
+# here for the same reason it is in _TRACKER_PIVOT.
+#
+# The cost is real and accepted: a customer whose PRDs genuinely live in
+# Confluence has to name Confluence to get them. That is one extra word, and the
+# named path (is_connector_lookup) has always handled it. The reverse mistake —
+# a generated-PRD request silently answered from a wiki page — has no such
+# escape hatch.
+#
+# `brief` carries a lookahead because it is the one word here that is also a
+# VERB people use to ask for exactly this ("brief me on the company documents",
+# the phrasing that reported the gap). The noun — "the weekly brief" — keeps the
+# veto; "brief me" / "brief us" does not.
+_DOCUMENT_SUBJECT_VETO = re.compile(
+    r"\b(prds?|briefs?\b(?!\s+(?:me|us)\b)|top\s+insights?|insights?|reports?|"
+    r"personas?|roadmaps?|prototypes?|user\s+stor(?:y|ies))\b",
+    re.I,
+)
+
+
+# A document already IN the conversation — "summarize this document", "what does
+# the attached spec say", "rewrite this one-pager". The subject is content the
+# user pasted, uploaded or is looking at, not a page to go and find, and
+# test_connector_lookup_routing has asserted since the named path shipped that
+# "summarize this document" is not a source lookup.
+#
+# One optional adjective of slack ("this design doc") and no more: widening it
+# lets an unrelated determiner reach across a clause ("this quarter the spec we
+# wrote…") and veto a genuine read.
+_DOCUMENT_DEICTIC_VETO = re.compile(
+    r"\b(?:this|that|these|those|attached|pasted|uploaded|the\s+above|the\s+below)\s+"
+    r"(?:[\w-]+\s+)?"
+    r"(?:spec|specs|specification|specifications|docs?|documents?|documentation|"
+    r"wikis?|runbooks?|playbooks?|handbooks?|rfcs?|adrs?|one[\s-]?pagers?|"
+    r"charter|sop)\b",
+    re.I,
+)
+
+
+def _vetoed_as_document_creation(question: str) -> bool:
+    """True when a create verb GOVERNS the document rather than describing it.
+
+    Same rule, and the same reasoning, as _vetoed_as_creation — position decides,
+    not presence — but anchored on the DOCUMENT noun instead of the PM noun.
+    Reusing that function directly would mis-veto "get me the spec for the
+    checkout build": `build` is a creation verb sitting at the END of the thing
+    being searched for, and with no PM noun anywhere in the sentence that
+    function treats a trailing verb as a command.
+    """
+    m_veto = _JIRA_LOOKUP_VETO.search(question)
+    if m_veto is None:
+        return False
+    m_noun = _DOCUMENT_NOUN.search(question)
+    return m_noun is None or m_veto.start() < m_noun.start()
+
+
+def document_lookup_candidates(question: str) -> set[str]:
+    """Providers that could answer a document question which names no source.
+
+    Returns CANDIDATES, not a decision. The caller must intersect the result with
+    the company's connected providers before acting on it — see the block comment
+    above for why the connection check cannot live in this module.
+
+    Returns an empty set for write requests, for Sprntly's own generated
+    surfaces, and for any message that already names a source (the named path
+    owns those, and it reaches sources this one deliberately does not).
+    """
+    q = question or ""
+    if _CONNECTOR_WRITE_VETO.search(q) or _vetoed_as_document_creation(q):
+        return set()
+    # A tool named as a SUBJECT rather than a source — "our confluence
+    # integration", "confluence vs notion". Same two vetoes the named path runs,
+    # for the same reason: these are product questions about a tool, and the
+    # skill router answers them.
+    if _CONNECTOR_MENTION_VETO.search(q) or _CONNECTOR_ARTIFACT_VETO.search(q):
+        return set()
+    if _DOCUMENT_SUBJECT_VETO.search(q) or _DOCUMENT_DEICTIC_VETO.search(q):
+        return set()
+    # Already names a source → is_connector_lookup ran first and owns it.
+    if _named_connector_providers(q):
+        return set()
+    if not (_DOCUMENT_NOUN.search(q) and _DOCUMENT_READ_VERB.search(q)):
+        return set()
+    return {"confluence"}
 
 
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:

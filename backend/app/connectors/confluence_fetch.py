@@ -163,8 +163,20 @@ def search_pages(
 def list_pages(
     session: ConfluenceSession, *, space_key: str | None = None
 ) -> list[dict[str, Any]]:
-    """Recently-updated pages, newest first — the fallback when search is
-    unavailable, and the natural read for "what's in our wiki"."""
+    """Recently-updated content, newest first — the fallback when search is
+    unavailable, and the natural read for "what's in our wiki".
+
+    Covers PAGES AND BLOGPOSTS. Both this function's callers describe it as
+    returning "pages and blog posts" (the search tool's description says so
+    outright), but it read only /api/v2/pages, so a blogpost was invisible to
+    every listing. That is survivable while search works and is not while it
+    doesn't: on a connection authorized before the `search:confluence` scope,
+    listing is the ONLY way content is reached, and content the listing cannot
+    see is content chat will state does not exist.
+
+    v2 keeps blogposts on their own collection rather than behind a type filter,
+    so this is two calls per space merged on last_modified, not one.
+    """
     ctx = session.ctx
     targets = spaces(session)
     if space_key:
@@ -172,32 +184,56 @@ def list_pages(
         targets = [s for s in targets if s["id"] == sid] if sid else []
     rows: list[dict[str, Any]] = []
     for s in targets[:10]:
-        body = api_get(
-            ctx.access_token, f"{ctx.base}/api/v2/pages",
-            {"space-id": s["id"], "sort": "-modified-date", "limit": SEARCH_LIMIT},
-            what="list_pages",
-        )
-        for p in body.get("results") or []:
-            rows.append({
-                "id": p.get("id"),
-                "title": p.get("title"),
-                "kind": "page",
-                "space": s.get("key"),
-                "url": _page_url(ctx, p),
-                "last_modified": (p.get("version") or {}).get("createdAt"),
-            })
+        for collection, kind in (("pages", "page"), ("blogposts", "blogpost")):
+            try:
+                body = api_get(
+                    ctx.access_token, f"{ctx.base}/api/v2/{collection}",
+                    {"space-id": s["id"], "sort": "-modified-date",
+                     "limit": SEARCH_LIMIT},
+                    what=f"list_{collection}",
+                )
+            except Exception:  # noqa: BLE001
+                # One collection failing (a scope that covers pages but not
+                # blogposts, a 5xx on one call) must not lose the other's rows.
+                logger.warning(
+                    "confluence lookup: %s listing failed for space %s",
+                    collection, s.get("key"), exc_info=True,
+                )
+                continue
+            for p in body.get("results") or []:
+                rows.append({
+                    "id": p.get("id"),
+                    "title": p.get("title"),
+                    "kind": kind,
+                    "space": s.get("key"),
+                    "url": _page_url(ctx, p),
+                    "last_modified": (p.get("version") or {}).get("createdAt"),
+                })
     rows.sort(key=lambda r: r.get("last_modified") or "", reverse=True)
     return rows
 
 
 def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
-    """One page in full, body included. None when it doesn't exist or the
-    connected account can't read it."""
+    """One page or blogpost in full, body included. None when it doesn't exist
+    or the connected account can't read it.
+
+    Tries /pages then /blogposts: v2 gives the two collections separate
+    endpoints and an id from the wrong one 404s, so a blogpost surfaced by
+    list_pages would otherwise be listed and then unreadable — the model would
+    report the page as missing while looking straight at its id.
+    """
     ctx = session.ctx
-    body = api_get(
-        ctx.access_token, f"{ctx.base}/api/v2/pages/{page_id}",
-        {"body-format": "storage"}, what="get_page",
-    )
+    body: dict[str, Any] | None = None
+    for collection in ("pages", "blogposts"):
+        try:
+            body = api_get(
+                ctx.access_token, f"{ctx.base}/api/v2/{collection}/{page_id}",
+                {"body-format": "storage"}, what="get_page",
+            )
+        except Exception:  # noqa: BLE001 — a 404 here just means "try the other"
+            body = None
+        if body and body.get("id"):
+            break
     if not body or not body.get("id"):
         return None
     return {
