@@ -37,6 +37,7 @@ interface GooglePicker {
     setCallback: (
       cb: (data: PickerResponse) => void,
     ) => GooglePicker["PickerBuilder"]["prototype"]
+    setAppId: (id: string) => GooglePicker["PickerBuilder"]["prototype"]
     build: () => { setVisible: (v: boolean) => void }
   }
   DocsView: new (viewId?: unknown) => { setMode: (m: unknown) => unknown }
@@ -207,7 +208,7 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
         picker.DocsViewMode.LIST,
       )
 
-      const built = new picker.PickerBuilder()
+      const builder = new picker.PickerBuilder()
         .setDeveloperKey(apiKey)
         .setOAuthToken(token.access_token)
         .addView(view)
@@ -235,7 +236,18 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
             }
           })()
         })
-        .build()
+
+      // Under the drive.file scope, the Picker must be told which Cloud
+      // project (app) to bind a picked file to — otherwise the file is
+      // picked but never granted to this app, and the backend's later read
+      // fails with "File not found". Skip the call entirely when app_id is
+      // absent/empty rather than passing "" — Google may read an empty
+      // string as a malformed app id rather than as unset.
+      if (token.app_id) {
+        builder.setAppId(token.app_id)
+      }
+
+      const built = builder.build()
 
       built.setVisible(true)
     } catch (e) {
