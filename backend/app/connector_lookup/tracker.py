@@ -64,6 +64,14 @@ def named_trackers(text: str) -> list[str]:
     return [t for t in TRACKERS if _NAMES[t].search(text or "")]
 
 
+def any_connected(enterprise_id: str) -> bool:
+    """True when at least one tracker (Jira or ClickUp) is connected for this
+    company. Mirrors the `connected` comprehension inside `pick`, exposed so a
+    capability-gate caller (qa_agent's tracker-lookup interceptor) can test
+    connectivity without pulling in `pick`'s full resolution logic."""
+    return any(_has_connection(enterprise_id, t) for t in TRACKERS)
+
+
 def pick(
     enterprise_id: str, question: str, history: list[dict] | None = None
 ) -> str | None:

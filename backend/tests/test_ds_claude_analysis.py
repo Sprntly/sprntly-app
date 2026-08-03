@@ -948,11 +948,12 @@ CLAUDE_SENTINEL = {"answer": "<!doctype html><div>claude</div>", "key_points": [
                    "_skill": "ds-agent", "_skill_source": "ds-claude"}
 
 
-def test_explicit_false_uses_the_deterministic_engine(monkeypatch):
+def test_explicit_false_uses_the_deterministic_engine(workspace, monkeypatch):
     """The named opt-outs (Freezing Point LLC, Chaostrack Inc.) are stored as an
     explicit false — the ONLY thing that turns the engine off now."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, False)
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
@@ -963,11 +964,12 @@ def test_explicit_false_uses_the_deterministic_engine(monkeypatch):
     assert out is LEGACY_SENTINEL
 
 
-def test_absent_flag_defaults_on(monkeypatch):
+def test_absent_flag_defaults_on(workspace, monkeypatch):
     """DEFAULT ON (Apurva, 2026-07-30): a company whose flags never mention the
     key — grandfathered or freshly onboarded — gets the Claude engine."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flags(monkeypatch, {})
     monkeypatch.setattr(ca, "answer", lambda **kw: CLAUDE_SENTINEL)
     monkeypatch.setattr(
@@ -979,11 +981,12 @@ def test_absent_flag_defaults_on(monkeypatch):
     ) is CLAUDE_SENTINEL
 
 
-def test_other_flags_present_but_ours_absent_still_defaults_on(monkeypatch):
+def test_other_flags_present_but_ours_absent_still_defaults_on(workspace, monkeypatch):
     """A real grandfathered row: full DEFAULT_FEATURE_FLAGS payload, no key of
     ours. The onboarding insert writes exactly this shape."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flags(monkeypatch, {
         "agents": True, "top_insights": True, "chat_intent_envelope": True,
         "on_demand_analysis": True, "auto_prd_generation": True,
@@ -1000,12 +1003,13 @@ def test_other_flags_present_but_ours_absent_still_defaults_on(monkeypatch):
     ) is CLAUDE_SENTINEL
 
 
-def test_flag_read_failure_still_defaults_off(monkeypatch):
+def test_flag_read_failure_still_defaults_off(workspace, monkeypatch):
     """Deliberately NOT symmetric with the missing-key default. An unknown flag
     state must not ship a tenant's CSVs to the Files API — unlike #893, which
     fails open because it only picks a routing strategy."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flags(monkeypatch, None)  # read_feature_flags signals failure with None
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
@@ -1017,10 +1021,12 @@ def test_flag_read_failure_still_defaults_off(monkeypatch):
     ) is LEGACY_SENTINEL
 
 
-def test_flag_read_raising_defaults_off(monkeypatch):
+def test_flag_read_raising_defaults_off(workspace, monkeypatch):
     """Belt to the None braces: even if the reader raises instead of returning
     None, the gate resolves OFF rather than propagating."""
     import app.qa_agent as qa
+
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
 
     def _boom(cid):  # noqa: ARG001
         raise RuntimeError("flags column missing")
@@ -1033,9 +1039,10 @@ def test_flag_read_raising_defaults_off(monkeypatch):
     ) is LEGACY_SENTINEL
 
 
-def test_flag_on_uses_the_claude_engine(monkeypatch):
+def test_flag_on_uses_the_claude_engine(workspace, monkeypatch):
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     seen: dict = {}
 
@@ -1054,9 +1061,10 @@ def test_flag_on_uses_the_claude_engine(monkeypatch):
     assert "is_cancelled" in seen, "cancellation must reach the loop"
 
 
-def test_flag_on_but_claude_raises_falls_back_and_never_500s(monkeypatch):
+def test_flag_on_but_claude_raises_falls_back_and_never_500s(workspace, monkeypatch):
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     monkeypatch.setattr(
         ca, "answer",
@@ -1071,10 +1079,11 @@ def test_flag_on_but_claude_raises_falls_back_and_never_500s(monkeypatch):
         assert field in out
 
 
-def test_cancellation_is_not_swallowed_by_the_fallback(monkeypatch):
+def test_cancellation_is_not_swallowed_by_the_fallback(workspace, monkeypatch):
     """A user Stop must abandon the ask, not spend a second full run."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     monkeypatch.setattr(
         ca, "answer", lambda **kw: (_ for _ in ()).throw(AskCancelled())

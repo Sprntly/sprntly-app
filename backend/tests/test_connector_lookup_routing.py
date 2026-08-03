@@ -252,10 +252,17 @@ def test_call_digest_still_wins_over_a_named_source(monkeypatch):
     assert out["_skill_source"] == "call-digest"
 
 
-def test_data_analysis_still_wins_over_a_named_source(monkeypatch):
+def test_data_analysis_still_wins_over_a_named_source(monkeypatch, tmp_path):
+    """Tabular data must actually exist for the DS interceptor to claim the
+    turn at all (Part 3 capability gate, AC10) — a real raw/ dir with a file
+    in it, mirroring `test_ds_chat_analysis.py`'s `workspace` fixture."""
     from app.connector_lookup import registry
     from app.ds import chat_analysis
 
+    raw = tmp_path / "acme" / "raw"
+    raw.mkdir(parents=True)
+    (raw / "usage.csv").write_text("user_id,used_export\nu1,1\n")
+    monkeypatch.setattr(qa.datasets, "raw_path", lambda slug: tmp_path / slug / "raw")
     monkeypatch.setattr(chat_analysis, "answer", lambda **k: {"answer": "ds", "_skill_source": "ds"})
     monkeypatch.setattr(registry, "answer_for_hints",
                         lambda **k: {"answer": "lookup", "_skill_source": "connector-lookup"})
@@ -279,9 +286,19 @@ def test_tracker_path_wins_over_the_connector_router(monkeypatch):
 
 def test_tracker_path_is_the_generalized_picker(monkeypatch):
     """The fast-path now goes through the tracker picker, not straight to Jira —
-    this is what lets a ClickUp-only company get an answer."""
+    this is what lets a ClickUp-only company get an answer.
+
+    A tracker must be CONNECTED for a generic "show me my open tickets" (no
+    tracker named) to claim the turn at all — the Part 3 capability gate
+    (AC9): the bare PM-noun-plus-verb match alone is not enough, only a real
+    connection or an explicitly-named tracker is."""
+    import app.db as db
     from app.connector_lookup import tracker
 
+    monkeypatch.setattr(
+        db, "get_connection",
+        lambda cid, prov: {"token_json_encrypted": "enc"} if prov == "jira" else None,
+    )
     seen = {}
     monkeypatch.setattr(tracker, "answer", lambda **k: seen.update(k) or {"answer": "t"})
     qa.answer(enterprise_id="ent", question="show me my open tickets", dataset="acme")

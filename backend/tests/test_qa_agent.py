@@ -20,6 +20,10 @@ Every assertion those tests made is preserved; only the id changed.
 """
 from __future__ import annotations
 
+import os
+
+import pytest
+
 import app.db.custom_skills as custom_skills_db
 import app.qa_agent as qa
 import app.skills.resolver as resolver
@@ -1029,3 +1033,431 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
         enterprise_id="ent", question="what changed", dataset="acme", prd_id=404
     )
     assert out["answer"] == "plain"
+
+
+# ── routing text split — attachment content must not steer the interceptors ──
+# An attached document's own vocabulary ("board", "ticket") must never decide
+# which interceptor claims a turn; only what the user actually typed does. See
+# `ChatScreen.tsx` `submitAsk`, which inlines every attachment's extracted text
+# after a literal `\n\n[Attached files]\n` marker before POSTing.
+
+_ATTACHED_DOC_QUESTION = (
+    "Can you get me a summary of how our roadmap compares to Productboard, "
+    "based on this doc?"
+    "\n\n[Attached files]\n"
+    "--- Sprntly_vs_Productboard_Comparison.docx ---\n"
+    "Sprntly focuses on evidence-linked PRDs; the Productboard board view "
+    "groups initiatives by objective. Neither product auto-files a ticket "
+    "from a customer call today.\n"
+)
+
+
+def test_answer_does_not_route_attached_document_to_tracker(monkeypatch):
+    """T1 — RED-first, the headline regression.
+
+    The attached comparison document contains "board" once and "ticket" once
+    — measured live as enough to make `is_jira_lookup` fire on the question +
+    attachment text and claim the turn for the tracker path, which then
+    replies "connect Jira" without ever reading the document. No tracker is
+    connected here, so a misroute is unambiguous.
+
+    Asserted on the turn's ROUTING METADATA (`_skill_source`/`_skill_action`),
+    never the refusal's prose (fragile to wording) and never by calling
+    `is_jira_lookup` directly — the defect is that the interceptor CLAIMS the
+    turn, so the test must observe the turn's fate."""
+    import app.db as db
+
+    monkeypatch.setattr(db, "get_connection", lambda cid, prov: None)
+    monkeypatch.setattr(
+        "app.connector_lookup.registry.connected_providers", lambda cid: []
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "grounded", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question=_ATTACHED_DOC_QUESTION, dataset="acme"
+    )
+    assert out.get("_skill_source") != "connector-lookup", out
+    assert out.get("_skill_action") != "Tracker lookup", out
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="needs live model")
+def test_named_document_question_reaches_route_in_scope(monkeypatch):
+    """T5 (live half) — RED-first, ~80% nondeterministic refusal measured
+    live (AC6). NOT exercised in the authoring session: both available keys
+    (`ANTHROPIC_API_KEY` and `DESIGN_AGENT_ANTHROPIC_API_KEY`) returned
+    "credit balance is too low" from the real Anthropic endpoint — a `route()`
+    call that fails outright degrades to the direct/none path (by design,
+    see `test_llm_router_failure_is_direct`), which would silently read as a
+    false pass here. This AC's real-LLM behaviour therefore belongs to the
+    ship-gate-verifier's live gate (PI12); `test_route_input_carries_a_
+    document_name_from_the_measured_case` below is the deterministic, WIRING
+    half of the same regression, run and verified this session.
+
+    The mid-conversation case DR-02 shipped grounding for (LV3): a bare
+    follow-up NAMING a document already in this workspace's index, with no
+    attachment text riding along this turn. Before the AC5 filename fix the
+    scope classifier saw only the bare words and this exact case (measured
+    against the real router) refused out-of-scope roughly 4 times in 5. The
+    fix hands the classifier the attached/uploaded FILENAMES — never their
+    content — so the same question is unambiguously in-scope.
+
+    Hits the REAL Anthropic haiku router (no `llm_call` mock) — nondeterministic
+    by nature, so this asserts the STRONG majority the ticket measured (0/5
+    refusals post-fix) across N runs, matching the root-cause section's own
+    measurement methodology, not a single sample."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(
+        "app.document_sources.list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Sprntly_vs_Productboard_Comparison.docx",
+                uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    # Only the ROUTER call needs to be real; stub the (expensive, unrelated)
+    # answer-generation call so an in-scope result returns fast.
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "grounded", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    question = "summarize the Sprntly_vs_Productboard_Comparison.docx file"
+    n = 5
+    refusals = 0
+    for _ in range(n):
+        out = qa.answer(enterprise_id="ent", question=question, dataset="acme")
+        if out.get("_skill_source") == "scope_gate":
+            refusals += 1
+    assert refusals == 0, f"{refusals}/{n} out-of-scope refusals for {question!r}"
+
+
+def test_route_input_carries_a_document_name_from_the_measured_case(monkeypatch):
+    """T5 (deterministic, WIRING half of AC6). The router's classifier INPUT
+    must carry the workspace's uploaded filenames — the measured regression
+    case is a question naming a document already in the index —, mocked here
+    rather than judged by a real model. Complements (does not replace) the
+    live half above, which is gated behind a real Anthropic key."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(
+        qa, "list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Sprntly_vs_Productboard_Comparison.docx",
+                uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "ok", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(
+        enterprise_id="ent",
+        question="summarize the Sprntly_vs_Productboard_Comparison.docx file",
+        dataset="acme",
+    )
+    assert "Sprntly_vs_Productboard_Comparison.docx" in captured["input"]
+
+
+def test_routing_text_stops_at_marker_grounding_keeps_full_question(monkeypatch):
+    """T2 — interceptors receive only the user's typed text (up to the
+    marker); grounding still receives the FULL question, marker and all.
+    Both halves asserted in one test."""
+    seen_interceptor_arg = {}
+
+    def _spy_is_call_digest(q):
+        seen_interceptor_arg["text"] = q
+        return False
+
+    monkeypatch.setattr(qa, "is_call_digest", _spy_is_call_digest)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    seen_grounding_arg = {}
+
+    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
+        seen_grounding_arg["question"] = q
+        return {"answer": "ok", "key_points": [], "citations": [],
+                "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _compose)
+    question = "what happened?" + qa._ATTACHED_FILES_MARKER + "body text here"
+    qa.answer(enterprise_id="ent", question=question, dataset="acme")
+    assert seen_interceptor_arg["text"] == "what happened?"
+    assert "[Attached files]" not in seen_interceptor_arg["text"]
+    assert "body text here" not in seen_interceptor_arg["text"]
+    assert seen_grounding_arg["question"] == question
+    assert "body text here" in seen_grounding_arg["question"]
+
+
+def test_routing_text_equals_question_when_no_marker():
+    """T3 — a question with no marker produces routing text IDENTICAL to the
+    question, proved by equality (the no-attachment path is provably
+    untouched)."""
+    q = "what happened last week?"
+    assert qa._routing_text(q) == q
+
+
+def test_routing_text_not_truncated_by_a_bare_prose_mention():
+    """T4 (AC4) — a question that merely MENTIONS the phrase in prose, with
+    no attachment block actually present (no surrounding newlines), is not
+    truncated. The matched literal is the two-newline-prefixed marker the
+    composer emits, not the bare words."""
+    q = "what does [Attached files] even mean in this UI?"
+    assert qa._routing_text(q) == q
+
+
+def test_route_input_carries_filenames_and_never_a_document_body(monkeypatch):
+    """T4 — router input at `route()`'s call site carries the attached and
+    workspace filenames, and explicitly never a document BODY."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(
+        qa, "list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Sprint Planning Board.docx", uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        qa, "active_conversation_attachment_names",
+        lambda cid: ["Roadmap Notes.docx"],
+    )
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "ok", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what should we prioritize?", dataset="acme")
+    assert "Sprint Planning Board.docx" in captured["input"]
+    assert "Roadmap Notes.docx" in captured["input"]
+    # No document BODY text — the DocumentFileRef type carries no body field
+    # at all, and the conversation-attachment source above is mocked as
+    # already name-only, matching what `active_conversation_attachment_names`
+    # actually returns (see test_ask_runner.py's body-stripping proof).
+
+
+def test_empty_document_index_leaves_routing_unchanged(monkeypatch):
+    """T6 — an empty index (no workspace files, no conversation attachments)
+    or a read failure degrades `route()`'s input to the plain routing text —
+    routing behaves exactly as today."""
+    monkeypatch.setattr(qa, "list_company_files", lambda cid: [])
+    monkeypatch.setattr(qa, "active_conversation_attachment_names", lambda cid: [])
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "ok", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what happened last week?", dataset="acme")
+    assert captured["input"].endswith("Question: what happened last week?")
+
+    # Read failure degrades the same way.
+    def _boom(cid):
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr(qa, "list_company_files", _boom)
+    captured.clear()
+    qa.answer(enterprise_id="ent", question="what happened last week?", dataset="acme")
+    assert captured["input"].endswith("Question: what happened last week?")
+
+
+def test_no_interceptor_ever_sees_the_filename_augmented_string(monkeypatch):
+    """T6a (AC5a) — the byte-identical AC1 routing text reaches every
+    interceptor; NONE of them ever see the filename-augmented string built
+    for `route()`. A filename like "Sprint Planning Board.docx" carries the
+    same tracker nouns an attachment body does, so leaking it upward would
+    reopen this exact bug through a new door."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(
+        qa, "list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Sprint Planning Board.docx", uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    seen_by_interceptor = {}
+
+    def _spy_is_call_digest(q):
+        seen_by_interceptor["text"] = q
+        return False
+
+    monkeypatch.setattr(qa, "is_call_digest", _spy_is_call_digest)
+    captured_router_input = {}
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: captured_router_input.update(k) or _route_out()
+    )
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "ok", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    qa.answer(enterprise_id="ent", question="what should we prioritize?", dataset="acme")
+    assert "Sprint Planning Board.docx" not in seen_by_interceptor["text"]
+    # ...while route() itself DID get the augmented string — proving this is
+    # a real split, not an accident of the interceptor never running.
+    assert "Sprint Planning Board.docx" in captured_router_input["input"]
+
+
+# ── Part 3 — capability gates (an interceptor may only claim what it can serve)
+
+def test_tracker_lookup_requires_capability(monkeypatch):
+    """T7 (Part 3) — with NO tracker connected, a bare PM-noun-plus-verb
+    question (no attachment, no tracker named — the generic match AC9 calls
+    out) must not reach the tracker path and must not be answered with
+    "connect Jira". Driven through `qa_agent.answer`, not by calling
+    `is_jira_lookup` directly — the defect is that the interceptor CLAIMS the
+    turn."""
+    import app.db as db
+
+    monkeypatch.setattr(db, "get_connection", lambda cid, prov: None)
+    monkeypatch.setattr(
+        "app.connector_lookup.registry.connected_providers", lambda cid: []
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "a real answer about the launch", "key_points": [],
+            "citations": [], "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="show me the open tickets for the launch",
+        dataset="acme",
+    )
+    assert out.get("_skill_source") != "connector-lookup", out
+    assert out.get("_skill_action") != "Tracker lookup", out
+    assert "connect" not in out["answer"].lower()
+
+
+def test_data_analysis_requires_tabular_data(monkeypatch, tmp_path):
+    """T8 — with NO tabular data uploaded, a data-analysis-shaped question
+    does not reach the DS path (the exact defect that sent an attached PDF
+    into a data-science refusal in 458ms with no model call)."""
+    monkeypatch.setattr(qa.datasets, "raw_path", lambda slug: tmp_path / slug / "raw")
+    monkeypatch.setattr(qa, "_ds_claude_enabled", lambda ent: False)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "a real answer", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    import app.ds.chat_analysis as ca
+
+    def _must_not_run(**k):
+        raise AssertionError("chat_analysis.answer must not run with no tabular data")
+
+    monkeypatch.setattr(ca, "answer", _must_not_run)
+    out = qa.answer(
+        enterprise_id="ent", question="can you analyze our product usage data?",
+        dataset="acme",
+    )
+    assert out["answer"] == "a real answer"
+
+
+def test_call_index_listing_already_gates_on_call_source(monkeypatch):
+    """T9 (AC11 — regression test only, no new gating logic). The call-index
+    listing path is ALREADY correct: `answer_listing` returns None when the
+    index isn't `usable`, and the call site already falls through on None."""
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "ensure_fresh", lambda ent: ci.Freshness(connected=False))
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "a real answer", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="give me the 5 latest transcripts",
+        dataset="acme",
+    )
+    assert out["answer"] == "a real answer"
+
+
+def test_declined_precondition_falls_through_to_a_real_answer(monkeypatch):
+    """T10 (AC12) — a declined precondition (no tracker connected, no
+    tabular data) falls through to normal routing and produces a REAL
+    answer. The user never sees a canned refusal caused by the decline —
+    an interceptor that declines must be invisible to the user."""
+    import app.db as db
+
+    monkeypatch.setattr(db, "get_connection", lambda cid, prov: None)
+    monkeypatch.setattr(
+        "app.connector_lookup.registry.connected_providers", lambda cid: []
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+            "answer": "the launch board has 12 open items", "key_points": [],
+            "citations": [], "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="show me the open tickets for the launch",
+        dataset="acme",
+    )
+    assert out["answer"] == "the launch board has 12 open items"
+    assert "connect" not in out["answer"].lower()
+    assert "no tracker is connected" not in out["answer"].lower()
+
+
+def test_tracker_lookup_still_fires_when_connected(monkeypatch):
+    """T11 — with a tracker CONNECTED, "check jira for open bugs" still
+    reaches the tracker path. Guards against fixing the false positives
+    (T7) by breaking the true ones."""
+    import app.db as db
+
+    monkeypatch.setattr(
+        db, "get_connection",
+        lambda cid, prov: {"token_json_encrypted": "enc"} if prov == "jira" else None,
+    )
+    from app.connector_lookup import tracker as tracker_mod
+
+    monkeypatch.setattr(
+        tracker_mod, "answer",
+        lambda **k: {"answer": "jira answer", "_skill": None,
+                     "_skill_action": "Tracker lookup", "_skill_source": "connector-lookup"},
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="check jira for open bugs", dataset="acme",
+    )
+    assert out["_skill_source"] == "connector-lookup"
+    assert out["_skill_action"] == "Tracker lookup"

@@ -316,6 +316,64 @@ def _owned_conversation_attachments(
     return out
 
 
+def active_conversation_attachment_names(enterprise_id: str) -> list[str]:
+    """Filenames only — never bodies — for every attachment on the ACTIVE
+    conversation (the request-scoped ContextVar pair set by
+    `ask_job_runner._run_sync` via `set_active_conversation`).
+
+    A DELIBERATE DUPLICATE of `_owned_conversation_attachments`'s two-query
+    ownership check (conversation belongs to `enterprise_id` AND to the
+    caller), not a call into it: that function's return shape carries full
+    attachment dicts (including extracted body text), and this one exists
+    specifically so a caller building a ROUTING string (qa_agent's filename
+    augmentation, see the module docstring above) never has a body anywhere
+    in scope to leak — even transiently in a local variable one refactor away
+    from being included. A filename like "Sprint Planning Board.docx" is
+    already enough signal for the router; the body is exactly the thing that
+    hijacked routing before this existed.
+
+    Best-effort like every other read here: no active conversation, failed
+    ownership, or any read error → []."""
+    conversation_id = _active_conversation_id.get()
+    caller_user_id = _active_conversation_user_id.get()
+    if not conversation_id or not caller_user_id:
+        return []
+    try:
+        from app.db.client import require_client
+
+        c = require_client()
+        owned = (
+            c.table("conversations")
+            .select("id")
+            .eq("id", conversation_id)
+            .eq("company_id", enterprise_id)
+            .eq("user_id", caller_user_id)
+            .limit(1)
+            .execute()
+        )
+        if not owned.data:
+            return []
+        turns = (
+            c.table("conversation_turns")
+            .select("attachments")
+            .eq("conversation_id", conversation_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — routing must never break the answer
+        logger.warning(
+            "conversation attachment name read failed for conversation=%s; "
+            "treating as no attachments", conversation_id, exc_info=True,
+        )
+        return []
+    names: list[str] = []
+    for turn in turns.data or []:
+        for attachment in turn.get("attachments") or []:
+            name = attachment.get("name")
+            if name:
+                names.append(name)
+    return names
+
+
 def document_grounding(
     enterprise_id: str | None, question: str, conversation_id: int | None = None
 ) -> tuple[str, list[dict]]:
