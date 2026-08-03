@@ -12,6 +12,7 @@ failure marks the row `error` and never crashes the task (the asyncio loop
 holds a strong ref via routes/ask.py's `_inflight_tasks`).
 """
 import asyncio
+import json
 import logging
 
 from app import ask_runner, qa_agent
@@ -138,6 +139,37 @@ def _run_sync(
         )
     except Exception:  # noqa: BLE001 — analytics logging must never fail the answer
         logger.exception("log_ask failed for ask_id=%s", ask_id)
+    # The other half of the planner-first shadow (backend/docs/ASK_PLANNER.md):
+    # the plan was logged at the TOP of qa_agent.answer, before anything
+    # decided; this line records what the ladder ACTUALLY did, read off the
+    # finished payload (`_skill`/`_skill_action` are set by whichever
+    # interceptor, pipeline or skill answered — both None on the direct path).
+    # The two lines join on `question`. Logged here because this is the one
+    # exit point where the outcome is known — answer() returns from a dozen
+    # places, and instrumenting each was the invasive option.
+    #
+    # Same flag as the shadow itself, checked cheaply: this whole function is
+    # already on a background worker, and `shadow_enabled` fails closed, so an
+    # unenrolled company logs nothing and a broken flag read costs one line.
+    try:
+        from app import ask_planner
+
+        if ask_planner.shadow_enabled(enterprise_id):
+            logger.info(
+                "ask-planner actual: %s",
+                json.dumps(
+                    {
+                        "enterprise_id": enterprise_id,
+                        "question": ask_planner._clamp_for_log(question),
+                        "skill": payload.get("_skill"),
+                        "action": payload.get("_skill_action"),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+    except Exception:  # noqa: BLE001 — shadow telemetry must never fail the answer
+        logger.exception("ask-planner actual line failed for ask_id=%s", ask_id)
     complete_ask_job(ask_id, _strip_citations(payload))
     # A report skill answers with a self-contained HTML document rather than
     # markdown. Capture it as a durable `reports` artifact so it survives the

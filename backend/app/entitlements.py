@@ -152,6 +152,39 @@ def ds_claude_analysis_enabled(flags: dict | None) -> bool:
     return True
 
 
+def ask_planner_shadow_enabled(flags: dict | None) -> bool:
+    """Resolve the `ask_planner_shadow` flag from a raw feature_flags dict.
+
+    Gates the SHADOW-MODE Ask planner (app/ask_planner.py) — an extra LLM call
+    that runs alongside `qa_agent.route`, logs what it would have decided, and
+    acts on nothing. Slice 1 of backend/docs/ASK_PLANNER.md.
+
+    DEFAULT OFF, which is the reverse of every sibling in this module, and the
+    reverse on BOTH of the two "not an explicit true" cases:
+
+      * explicit `true`             → ON
+      * key absent                  → OFF
+      * flags UNKNOWN (read failed) → OFF
+
+    `agents` / `top_insights` / `company_research` grandfather a missing key ON
+    so existing companies keep a capability they already had without a backfill.
+    This flag gates the opposite kind of thing: not a capability anyone has, but
+    an extra paid model call on EVERY chat message, collecting measurements for
+    a feature that does not exist yet. Nobody has opted in, so a missing key must
+    mean "not enrolled" rather than "enrolled by default", and an unreadable
+    flags row must mean the same — "I couldn't read your flags" is not a reason
+    to start spending a company's tokens. `ds_claude_analysis` already
+    established the failed-read half of that reasoning; this flag extends it to
+    the missing-key half because the spend is unconditional rather than gated on
+    a rare question shape.
+
+    The cost of failing closed is exactly one missing shadow row.
+    """
+    if not isinstance(flags, dict):
+        return False
+    return bool(flags.get("ask_planner_shadow", False))
+
+
 def read_feature_flags(company_id: str) -> dict | None:
     """A company's raw feature_flags dict, or None when the READ itself failed.
 

@@ -1113,6 +1113,35 @@ def answer(
     # grounding/answering/persistence/caching unchanged everywhere below.
     routing_text = _routing_text(question)
 
+    # SHADOW MODE, PLANNER-FIRST — observes, logs, decides nothing (slice 1 of
+    # backend/docs/ASK_PLANNER.md, placement reversed by owner decision
+    # 2026-08-03). The planner judges EVERY message from here, before any
+    # interceptor — "the planner should be the first thing" — and logs the
+    # full plan it would have executed; the ladder below then answers exactly
+    # as it always has. Nothing below reads the plan, so every answer is
+    # byte-identical with the planner on or off. What the ladder actually did
+    # is logged as `ask-planner actual:` by the ask job runner, and the two
+    # lines join on `question`.
+    #
+    # Returns immediately — the model call, the flag read, and the two
+    # filename reads (`augment_filenames=True`) all happen on a daemon thread,
+    # after the flag check, so an unenrolled company pays nothing at all.
+    # A pinned turn is excluded (the user already chose; nothing to plan) and
+    # a `/slug` turn is excluded inside `shadow_plan_async` for the same
+    # reason. Wrapped anyway: shadow telemetry must never cost an answer.
+    if not pinned_skill:
+        try:
+            from app import ask_planner
+
+            ask_planner.shadow_plan_async(
+                enterprise_id=enterprise_id,
+                question=routing_text,
+                history=history,
+                augment_filenames=True,
+            )
+        except Exception:  # noqa: BLE001 — shadow telemetry, never the answer
+            logger.exception("ask-planner shadow dispatch failed")
+
     # The call index's freshness check, memoized for this answer. Computed
     # LAZILY and at most once: the interceptions below are each behind a cheap
     # regex gate, and a question that matches none of them must not pay for a
@@ -1398,6 +1427,12 @@ def answer(
         # are exactly what hijacked routing in the first place.
         route_text = _routing_text_with_filenames(routing_text, enterprise_id)
         decision = route(route_text, enterprise_id=enterprise_id, history=history)
+        # The planner shadow used to fire HERE, against this decision. It now
+        # fires at the TOP of answer() (owner decision 2026-08-03: the planner
+        # judges every message, not just the residue the interceptors leave),
+        # so this branch carries no shadow of its own — the comparison against
+        # what actually ran is assembled offline from the runner's
+        # `ask-planner actual:` line.
 
     # The choice is made — publish it NOW, not when the answer lands. This is
     # the whole point of the hook: on a competitive review the next step runs
