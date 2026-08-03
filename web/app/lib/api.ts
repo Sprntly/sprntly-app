@@ -644,22 +644,28 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
-  /** The name was already taken when this skill was uploaded, so its trigger
-   *  was disambiguated away from the name's plain slug (`/prd-author-2` for a
-   *  skill named "PRD Author"). Nothing was replaced — the skill that owned
-   *  the name keeps its own trigger and both are invocable. */
+  /** A BUILT-IN skill's name was already taken when this skill was uploaded,
+   *  so its trigger was disambiguated away from the name's plain slug
+   *  (`/prd-author-2` for a skill named "PRD Author"). Nothing was replaced —
+   *  the skill that owned the name keeps its own trigger and both are
+   *  invocable. */
   name_conflict: boolean
+  /** POST only: this upload REPLACED the company's existing skill of the same
+   *  name (same id, same trigger, new content) rather than adding a new one.
+   *  Absent on list items, where it would mean nothing. */
+  replaced?: boolean
 }
 
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
-   *  Server is the authoritative validator (422/400/413/409 with readable
+   *  Server is the authoritative validator (422/400/413 with readable
    *  `detail`); the modal mirrors the cheap checks client-side. A name shared
    *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
    *  report the disambiguated trigger); a name already used by one of the
-   *  company's OWN custom skills is the 409. */
+   *  company's OWN custom skills REPLACES that skill in place — same id, same
+   *  trigger, new content — and the 201 comes back with `replaced: true`. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)

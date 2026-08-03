@@ -111,22 +111,40 @@ describe("UploadSkillModal", () => {
     expect(screen.getByRole("status").textContent).toContain("/prd-author-3")
   })
 
-  it("alerts when the company's OWN library already has the name (the 409)", async () => {
-    render(
+  it("warns that the company's OWN same-named skill will be replaced", async () => {
+    const onUpload = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
       React.createElement(UploadSkillModal, {
         open: true,
-        onUpload: vi.fn(),
+        onUpload,
         onClose: vi.fn(),
-        customSkills: [{ slug: "estimation-helper", name: "Estimation Helper" }],
+        customSkills: [{ slug: "estimation-helper-2", name: "Estimation Helper" }],
       }),
     )
     await act(async () => {
-      // Same name once slugified — the equivalence the server rejects on.
+      // Same name once slugified — the equivalence the server replaces on.
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "estimation  helper!" },
       })
     })
-    expect(screen.getByRole("alert").textContent).toMatch(/rename this one/i)
+    // Announced as an alert (it overwrites something the team has) and it
+    // names the trigger the replacement keeps — the STORED slug, which may
+    // have been disambiguated away from the name's plain slug.
+    const notice = screen.getByRole("alert").textContent ?? ""
+    expect(notice).toMatch(/replaces it with this version/i)
+    expect(notice).toContain("/estimation-helper-2")
+
+    // It is a warning, not a block: the upload still goes through.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Ours, v2." },
+      })
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
+    })
+    await waitFor(() => expect(onUpload).toHaveBeenCalled())
   })
 
   it("shows no name notice for a free name", async () => {
@@ -256,7 +274,11 @@ describe("UploadSkillModal", () => {
   })
 
   it("keeps inputs intact when the upload fails, so the user can retry", async () => {
-    const onUpload = vi.fn().mockRejectedValue(new Error("A skill with this name already exists in your company."))
+    // Any server rejection — this one is the concurrent-upload 409 the route
+    // still returns when two uploads race for the same free trigger.
+    const onUpload = vi
+      .fn()
+      .mockRejectedValue(new Error("Another upload just took this skill's trigger. Please try again."))
     const { container } = render(
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
     )
@@ -272,7 +294,7 @@ describe("UploadSkillModal", () => {
     })
 
     await waitFor(() =>
-      expect(screen.getByText(/already exists in your company/)).toBeTruthy(),
+      expect(screen.getByText(/just took this skill's trigger/)).toBeTruthy(),
     )
     expect((screen.getByLabelText(/skill name/i) as HTMLInputElement).value).toBe("Dupe")
     expect(screen.getByText("skill.md")).toBeTruthy()

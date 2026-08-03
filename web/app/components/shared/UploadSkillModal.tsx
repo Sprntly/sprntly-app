@@ -14,16 +14,19 @@
  *     only (zip content is parsed server-side), on submit
  *   - name + description: required, non-whitespace — the submit gates on them
  *     and empty-but-touched fields are highlighted (aria-invalid + field-error)
- * A name that's already taken shows a NON-BLOCKING notice as the user types:
+ * A name that's already taken shows a notice as the user types — neither case
+ * blocks the upload, but they end differently:
  *   - taken by a BUILT-IN Sprntly skill → the upload is accepted and nothing
  *     is replaced; both skills stay invocable, so this one gets the next free
  *     trigger (/prd-author-2). The notice previews that trigger.
- *   - taken by one of the company's OWN custom skills → the server refuses it
- *     with a 409, so the notice says to rename it.
+ *   - taken by one of the company's OWN custom skills → the upload REPLACES
+ *     that skill with this version (same trigger, new content), so the notice
+ *     says so before the user commits to it. Announced assertively because it
+ *     overwrites something the team already has.
  * Both are advisory: the client only knows the ROUTABLE built-in catalog (the
  * server also guards the non-routable ids) and its custom list can be stale,
- * so submit stays enabled and the server's `trigger` / `name_conflict` / 409
- * `detail` are the authoritative answers.
+ * so the server's `trigger` / `name_conflict` / `replaced` are the
+ * authoritative answers.
  * On a server rejection the modal keeps every input intact so the user fixes
  * and retries (the failure ACs across the PRD's validation tickets).
  */
@@ -101,11 +104,12 @@ export type UploadSkillModalViewProps = {
   submitting: boolean
   /** Inline error — client pre-check or server `detail`. */
   error: string | null
-  /** Non-blocking: the typed name is already taken. `blocking` marks the case
-   *  the server will refuse (the company's own library already has the name)
-   *  so it reads as an alert rather than an FYI — submit stays enabled either
-   *  way, since the server is the authority on both. */
-  nameNotice: { text: string; blocking: boolean } | null
+  /** Non-blocking: the typed name is already taken. `assertive` marks the
+   *  consequential case (the company's own library has the name, so this
+   *  upload replaces that skill) so it is announced as an alert rather than an
+   *  FYI — submit stays enabled either way, since the server is the authority
+   *  on both. */
+  nameNotice: { text: string; assertive: boolean } | null
   /** Marks empty required fields once the user has interacted with them. */
   touched: { name: boolean; description: boolean }
   onNameChange: (next: string) => void
@@ -188,10 +192,11 @@ export function UploadSkillModalView({
           ) : null}
           {nameNotice ? (
             // role="status" for the FYI (the upload proceeds, it just gets its
-            // own trigger); role="alert" when the server will refuse the name.
+            // own trigger); role="alert" when it will overwrite a skill the
+            // company already has.
             <p
               className="settings-msg settings-warning"
-              role={nameNotice.blocking ? "alert" : "status"}
+              role={nameNotice.assertive ? "alert" : "status"}
             >
               {nameNotice.text}
             </p>
@@ -281,10 +286,10 @@ type Props = {
    */
   builtinSlugs?: string[]
   /**
-   * The company's existing custom skills. `name` catches the duplicate the
-   * server 409s on (compared slugified, since that's the equivalence the
-   * server uses); `slug` keeps the previewed trigger clear of one already
-   * handed out.
+   * The company's existing custom skills. `name` catches the one this upload
+   * would replace (compared slugified, since that's the equivalence the server
+   * matches on); `slug` names the trigger that replacement keeps, and keeps a
+   * previewed built-in trigger clear of one already handed out.
    */
   customSkills?: { slug: string; name: string }[]
 }
@@ -343,17 +348,21 @@ export function UploadSkillModal({
   }
 
   // Live "that name is taken" notice, recomputed as the user types. Two very
-  // different cases behind one message slot: the company's own library refuses
-  // a repeat (409), while a built-in's name is fine — nothing is replaced, the
+  // different cases behind one message slot: a repeat of the company's OWN
+  // name REPLACES that skill (the server updates the row in place, keeping its
+  // trigger), while a built-in's name is fine — nothing is replaced, the
   // upload just gets the next free trigger, which we preview here.
   const base = slugifyName(name)
   const mine = customSkills ?? []
+  const replacing = base ? mine.find((s) => slugifyName(s.name) === base) : undefined
   const nameNotice = !base
     ? null
-    : mine.some((s) => slugifyName(s.name) === base)
+    : replacing
       ? {
-          text: `You already have a skill named “${name.trim()}”. Rename this one to upload it.`,
-          blocking: true,
+          text:
+            `You already have a skill named “${name.trim()}”. Uploading ` +
+            `replaces it with this version — it stays at /${replacing.slug}.`,
+          assertive: true,
         }
       : (builtinSlugs ?? []).includes(base)
         ? {
@@ -363,7 +372,7 @@ export function UploadSkillModal({
                 ...(builtinSlugs ?? []),
                 ...mine.map((s) => s.slug),
               ])}.`,
-            blocking: false,
+            assertive: false,
           }
         : null
 

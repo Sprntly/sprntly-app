@@ -321,9 +321,28 @@ function SkillsScreenContent() {
 
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
+  //
+  // A name this company already used REPLACES that skill server-side (same
+  // row, same id, same trigger), so the response has to swap the existing card
+  // in place — prepending would render the same id twice. `replaced` comes
+  // back on the 201; the id check is the belt-and-braces version for a list
+  // that predates the field.
   async function onUpload(file: File, name: string, description: string) {
     const created = await skillsApi.upload(file, name, description)
-    setCustomSkills((prev) => [created, ...prev])
+    const wasReplaced =
+      created.replaced === true || customSkills.some((s) => s.id === created.id)
+    setCustomSkills((prev) =>
+      prev.some((s) => s.id === created.id)
+        ? prev.map((s) => (s.id === created.id ? created : s))
+        : [created, ...prev],
+    )
+    if (wasReplaced) {
+      showToast(
+        "Skill updated",
+        `${created.name} now uses the file you just uploaded — it is still invoked with ${created.trigger} in chat.`,
+      )
+      return
+    }
     showToast(
       "Skill uploaded",
       created.name_conflict
@@ -356,10 +375,10 @@ function SkillsScreenContent() {
         onClose={() => setUploadOpen(false)}
         // No `builtinSlugs`: this screen no longer fetches the vendored
         // catalog, so it has nothing honest to pass. That only costs the
-        // non-blocking "…is also the name of a built-in" preview. The blocking
-        // check (a name this company already used, which the server 409s) is
-        // driven by `customSkills` below and is unaffected, and the server's
-        // 201 remains authoritative about the trigger actually assigned.
+        // "…is also the name of a built-in" trigger preview. The other notice
+        // (a name this company already used, which the server replaces in
+        // place) is driven by `customSkills` below and is unaffected, and the
+        // server's 201 remains authoritative about the trigger assigned.
         customSkills={customSkills}
       />
     </AppLayout>
