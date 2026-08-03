@@ -656,9 +656,56 @@ export type CustomSkillInfo = {
   replaced?: boolean
 }
 
+/** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
+ *  edit form pre-fills from. Split from the list because a method can run to
+ *  50,000 characters and the library grid needs none of it.
+ *
+ *  `modules`/`references` are FILENAMES only: editing swaps the main method
+ *  and leaves a .zip's supporting files attached untouched, so the form
+ *  reports them rather than editing them. `attached_chars` is what those files
+ *  contribute toward the 50,000-character cap, which is measured over the
+ *  whole parsed skill — without it a client-side check would be wrong for
+ *  every skill uploaded as an archive. */
+export type CustomSkillDetail = CustomSkillInfo & {
+  method: string
+  modules: string[]
+  references: string[]
+  attached_chars: number
+}
+
+/** The PATCH result: the edited skill, plus the id of the company's OTHER
+ *  skill this edit absorbed (a rename onto a name they already used replaces
+ *  that skill). `null` means nothing else changed. */
+export type CustomSkillEditResult = CustomSkillDetail & {
+  replaced_skill_id: string | null
+}
+
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
+  /** One skill with its method text (the edit form's source). 404s on a
+   *  foreign or unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<CustomSkillDetail>(`/v1/skills/${encodeURIComponent(id)}`),
+  /** Edit a skill's name, description, and method in place — same row, same
+   *  id. All three are always sent: the form owns the complete set it
+   *  rendered, so a partial write could revert a field.
+   *
+   *  Two consequences the caller has to handle. RENAMING re-derives the
+   *  trigger (the response's `slug`/`trigger` are authoritative — a name
+   *  shared with a built-in lands on the `-2` series, and the old `/slug`
+   *  stops working). Renaming onto one of the company's OWN skill names
+   *  REPLACES that skill: it is deleted and its id comes back as
+   *  `replaced_skill_id`, so the caller must drop that card. That is
+   *  destructive — confirm it with the user before calling. */
+  update: (
+    id: string,
+    patch: { name: string; description: string; method: string },
+  ) =>
+    api.patch<CustomSkillEditResult>(
+      `/v1/skills/${encodeURIComponent(id)}`,
+      patch,
+    ),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
    *  Server is the authoritative validator (422/400/413 with readable
    *  `detail`); the modal mirrors the cheap checks client-side. A name shared

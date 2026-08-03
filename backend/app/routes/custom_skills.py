@@ -1,7 +1,9 @@
-"""Custom skill endpoints — upload, list, and original-file links (PRD 1854).
+"""Custom skill endpoints — upload, list, edit, and original-file links (PRD 1854).
 
   POST   /v1/skills               -> upload a .md/.zip skill with name+description
   GET    /v1/skills               -> list the company's custom skills (metadata)
+  GET    /v1/skills/{id}          -> one skill WITH its method text (the edit form's source)
+  PATCH  /v1/skills/{id}          -> edit name/description/method in place
   GET    /v1/skills/{id}/file     -> signed view/download URLs for the original upload
   DELETE /v1/skills/{id}          -> delete a skill (row + original file)
 
@@ -39,12 +41,31 @@ equivalence the 409 used: `slugify(name)`, so "PRD  author!" replaces
 "PRD Author". Matching is company-scoped, so another tenant's identically
 named skill is never touched. The 201 body carries `replaced` so the UI can
 say "updated" rather than "uploaded".
+
+EDITING a skill in place (PATCH) is the same product decision without the file:
+a typo in a method doc should not need a re-export from whatever tool wrote it.
+name, description and method are all editable; the modules and references a
+.zip carried are preserved untouched, because the form only edits the main
+method text. Two consequences the edit path owns and the upload path does not:
+
+  - Renaming RE-DERIVES the trigger through the same `available_slug`
+    deconfliction, so renaming a skill to a built-in's name lands on the `-2`
+    series and still never overrides the built-in. The old `/slug` stops
+    resolving — accepted, because a skill's trigger is derived from its name
+    and a rename that kept the old one would be the more surprising outcome.
+  - Renaming onto ANOTHER of the company's skills REPLACES that skill: the
+    edited row survives (same id) with the new name and the other row is
+    deleted, its original file cleaned up best-effort exactly as DELETE does.
+    That is destructive, so the Skills screen makes the user confirm it before
+    the PATCH is sent; the API itself is permissive, mirroring the re-upload
+    replace it is the sibling of.
 """
 from __future__ import annotations
 
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from app import db, skills_storage
 from app.auth import WorkspaceContext, require_workspace
@@ -53,6 +74,7 @@ from app.skills.custom import (
     MAX_DESCRIPTION_CHARS,
     MAX_NAME_CHARS,
     MAX_SKILL_CONTENT_CHARS,
+    ParsedSkill,
     SkillParseError,
     available_slug,
     content_chars,
@@ -65,6 +87,21 @@ from app.skills.loader import list_skills
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/skills", tags=["skills"])
+
+
+class SkillEditIn(BaseModel):
+    """PATCH body — the three fields the Skills screen's edit form owns.
+
+    All three are required rather than an optional patch set: the form always
+    submits the complete trio it rendered, and a partial write would let a
+    stale form silently revert a field. The defaults are empty strings so a
+    missing key lands on this route's own 422/400 ladder — the same messages
+    upload returns — instead of a pydantic validation blob the modal can't
+    render."""
+
+    name: str = ""
+    description: str = ""
+    method: str = ""
 
 
 def _skill_payload(row: dict, *, replaced: bool | None = None) -> dict:
@@ -93,6 +130,28 @@ def _skill_payload(row: dict, *, replaced: bool | None = None) -> dict:
     if replaced is not None:
         payload["replaced"] = replaced
     return payload
+
+
+def _skill_detail(row: dict) -> dict:
+    """The list payload PLUS the method text — what the edit form reads.
+
+    `modules`/`references` are FILENAMES only, not their markdown: the form
+    edits the main method and leaves the archive's supporting files alone, so
+    the client needs to say "3 supporting files stay attached" and nothing
+    more. `attached_chars` is how many characters those files contribute, so
+    the modal can mirror MAX_SKILL_CONTENT_CHARS exactly (the cap is on the
+    TOTAL parsed text, and a bare method-length check would be wrong for a
+    skill uploaded as a .zip)."""
+    modules = dict(row.get("modules") or {})
+    references = dict(row.get("references") or {})
+    return {
+        **_skill_payload(row),
+        "method": row.get("method") or "",
+        "modules": sorted(modules),
+        "references": sorted(references),
+        "attached_chars": sum(len(t) for t in modules.values())
+        + sum(len(t) for t in references.values()),
+    }
 
 
 @router.post(
@@ -264,6 +323,177 @@ def list_skills_route(company: WorkspaceContext = Depends(require_workspace)):
     across all of the company's workspaces."""
     rows = db.list_custom_skills(company.company_id)
     return {"skills": [_skill_payload(r) for r in rows]}
+
+
+@router.get("/{skill_id}")
+def get_skill_route(
+    skill_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """One custom skill WITH its method text — the edit form's source.
+
+    Split from the list deliberately: the list is metadata-only because the
+    method can run to 50k characters, and shipping every skill's full text to
+    render a grid of cards would be absurd. 404 on a foreign or missing id,
+    made indistinguishable by the company-filtered lookup."""
+    row = db.get_custom_skill_by_id(company.company_id, skill_id)
+    if row is None:
+        raise HTTPException(404, "Skill not found.")
+    return _skill_detail(row)
+
+
+@router.patch(
+    "/{skill_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def edit_skill(
+    skill_id: str,
+    body: SkillEditIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Edit a custom skill's name, description, and method text in place.
+
+    The validation ladder mirrors upload's, because the same values end up in
+    the same columns: empty/over-limit name or description → 422, a name with
+    no letters or digits → 422, empty method → 400, and parsed content over
+    MAX_SKILL_CONTENT_CHARS → 413 with upload's message verbatim. The cap is
+    measured over the WHOLE parsed skill (this method plus the modules and
+    references the row already carries), not the method alone.
+
+    A rename re-derives the trigger; see the module docstring for why, and for
+    what happens when the new name is another of the company's skills."""
+    name = (body.name or "").strip()
+    description = (body.description or "").strip()
+    # The method keeps its interior whitespace verbatim — it is markdown, and
+    # leading indentation can be load-bearing inside a fenced block. Only the
+    # emptiness check strips.
+    method = body.method or ""
+    if not name:
+        raise HTTPException(422, "Skill name is required.")
+    if not description:
+        raise HTTPException(422, "Skill description is required.")
+    if len(name) > MAX_NAME_CHARS:
+        raise HTTPException(422, f"Skill name must be {MAX_NAME_CHARS} characters or fewer.")
+    if len(description) > MAX_DESCRIPTION_CHARS:
+        raise HTTPException(
+            422, f"Skill description must be {MAX_DESCRIPTION_CHARS} characters or fewer."
+        )
+    if not method.strip():
+        raise HTTPException(
+            400, "The skill method is empty — add the skill's method text and try again."
+        )
+
+    base = slugify(name)
+    if not base:
+        raise HTTPException(422, "Skill name must contain at least one letter or number.")
+
+    # Company-filtered read: a foreign id is indistinguishable from a missing
+    # one, and everything below only ever touches rows this read could reach.
+    row = db.get_custom_skill_by_id(company.company_id, skill_id)
+    if row is None:
+        raise HTTPException(404, "Skill not found.")
+
+    # Editing swaps the METHOD only — a .zip skill keeps every module and
+    # reference the archive carried. content_hash_for is content-derived, so
+    # recomputing it over the whole parsed set follows for free, and it has to:
+    # prompt_version in agent_decision_log carries this hash, so a stale one
+    # would misreport which method text actually answered.
+    parsed = ParsedSkill(
+        method=method,
+        modules=dict(row.get("modules") or {}),
+        references=dict(row.get("references") or {}),
+    )
+    if content_chars(parsed) > MAX_SKILL_CONTENT_CHARS:
+        raise HTTPException(
+            413,
+            f"Skill content exceeds the {MAX_SKILL_CONTENT_CHARS:,} character "
+            "limit. Please trim the skill text and try again.",
+        )
+
+    existing = db.list_custom_skills(company.company_id)
+    others = [r for r in existing if r["id"] != skill_id]
+
+    # A name that slugifies to what this skill already had is NOT a rename:
+    # the trigger stays exactly as it is, including a `-2` it was handed at
+    # upload time. Only a real rename re-derives it, so fixing a description
+    # or a typo in the method can never move a trigger a team has learned.
+    renaming = base != slugify(row.get("name") or "")
+    replacing = None
+    new_slug = None
+    if renaming:
+        # The same equivalence the re-upload replace uses: slugify(name), so
+        # renaming to "PRD  author!" lands on the row named "PRD Author".
+        # `others` comes from the company-filtered library read, so this can
+        # only ever select a row inside the caller's own company.
+        replacing = next(
+            (r for r in others if slugify(r.get("name") or "") == base), None
+        )
+        # The replaced row is about to be deleted, so its trigger is free for
+        # this skill to take over — that is the point of the replacement.
+        contenders = [r for r in others if replacing is None or r["id"] != replacing["id"]]
+        new_slug = available_slug(
+            base, set(list_skills()) | {r["slug"] for r in contenders}
+        )
+
+    if replacing is not None:
+        # Row first, then the write that takes its place: the (company_id,
+        # slug) unique constraint means the loser has to be gone before this
+        # skill can move onto its trigger. The delete is company-filtered too.
+        # Its original file is cleaned up after the update lands, so a failed
+        # update doesn't strand the bytes of a row that still exists.
+        db.delete_custom_skill(company.company_id, replacing["id"])
+
+    try:
+        updated = db.update_custom_skill(
+            company_id=company.company_id,
+            skill_id=skill_id,
+            workspace_id=company.workspace_id,
+            name=name,
+            description=description,
+            method=method,
+            modules=parsed.modules,
+            references=parsed.references,
+            content_hash=content_hash_for(parsed),
+            # The stored original no longer describes this skill — its text is
+            # whatever was uploaded, and the method above is what now answers.
+            # Serving it would hand someone a file that contradicts the skill,
+            # so the row stops pointing at it and the object is dropped below.
+            # A later re-upload restores a downloadable original.
+            storage_key=None,
+            uploader_id=company.user_id,
+            uploader_name=company.user_name or company.user_email or "",
+            slug=new_slug,
+        )
+    except db.DuplicateSkillSlug:
+        # Another upload or edit in this company took the trigger between the
+        # library read above and this write.
+        raise HTTPException(
+            409,
+            "Another skill just took this trigger. Please try again.",
+        )
+    if updated is None:
+        # The row vanished between the read and the update (a concurrent
+        # delete). Nothing to report but the 404 the caller would have got.
+        raise HTTPException(404, "Skill not found.")
+
+    old_key = row.get("storage_key")
+    if old_key:
+        await skills_storage.delete_skill_file(company_id=company.company_id, key=old_key)
+    if replacing is not None and replacing.get("storage_key"):
+        await skills_storage.delete_skill_file(
+            company_id=company.company_id, key=replacing["storage_key"]
+        )
+
+    logger.info(
+        "custom_skill_edited slug=%s renamed=%s replaced=%s",
+        updated["slug"], renaming, replacing is not None,
+    )
+    return {
+        **_skill_detail(updated),
+        # The id of the company's OTHER skill this edit absorbed, or None. The
+        # Skills screen drops that card; null means nothing else changed.
+        "replaced_skill_id": replacing["id"] if replacing is not None else None,
+    }
 
 
 @router.get("/{skill_id}/file")
