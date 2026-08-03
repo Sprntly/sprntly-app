@@ -382,6 +382,16 @@ class Settings(BaseSettings):
     # Per-company overrides in companies.notification_settings["drip"] win over
     # this (see app/drip_email.py:resolve_cadence).
     drip_cadence_days: str = ""
+    # Upper bound on a step's send window, in days: a step is only sent while
+    # day_offset <= age_days <= day_offset + grace. Past that it is recorded
+    # as "skipped" and never fires. Without this, a member older than the whole
+    # ladder receives every unsent step at once. Empty → DEFAULT_GRACE_DAYS in
+    # app/drip_email.py. Per-company overrides in
+    # companies.notification_settings["drip"]["grace_days"] win over this
+    # (see app/drip_email.py:resolve_grace_days). Kept a str (not an int) so an
+    # unparseable value falls back to the default instead of failing boot on an
+    # email path.
+    drip_grace_days: str = ""
     # How often the drip job runs. Hourly+ is fine: a step fires the first
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
