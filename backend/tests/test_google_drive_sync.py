@@ -9,6 +9,7 @@ arrive on their own), bounded by depth and count, with what it expanded to
 recorded in config["folder_contents"] for the UI.
 """
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -180,6 +181,13 @@ def test_sync_downloads_and_ingests_each_picked_file(drive_connected, kg_kickoff
         assert result.dataset == "acme"
         assert len(result.synced) == 1
         assert result.synced[0]["md_chars"] > 0
+        # The converted markdown is really on disk in the dataset corpus.
+        # This is where a Drive file's TEXT lives, and it is why the document
+        # catalog deliberately stores no body of its own for Drive — doing so
+        # would be a second copy of the same customer file.
+        md_path = Path(result.synced[0]["md_path"])
+        assert md_path.exists()
+        assert "hello from drive" in md_path.read_text(encoding="utf-8")
         # The changed file was handed to the KG extractor (async).
         assert result.kg_queued == ["notes"]
         assert len(kg_kickoff) == 1
