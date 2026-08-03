@@ -117,17 +117,53 @@ def test_answer_capture_failure_is_graceful(monkeypatch):
 
 def test_answer_no_records_found(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False, None))
     out = pf.answer(enterprise_id="e1", question="public feedback?")
     assert "couldn't find enough feedback" in out["answer"]
     assert "Strava" in out["answer"]
+
+
+def test_subject_mismatch_sentinel_parsing():
+    assert pf._subject_mismatch('{"subject_mismatch": "Notion"}') == "Notion"
+    assert pf._subject_mismatch('junk {"subject_mismatch":"Linear App"} tail') == "Linear App"
+    assert pf._subject_mismatch(json.dumps(RECORDS)) is None
+    assert pf._subject_mismatch("") is None
+    assert pf._subject_mismatch("no sentinel here") is None
+
+
+def test_answer_third_party_subject_redirects_to_cir(monkeypatch):
+    # "Grab the public feedback for Notion" in a Strava workspace: no sweep,
+    # no report, no stored run — a redirect naming both products and the
+    # competitive-intelligence path instead.
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False, "Notion"))
+    calls: dict = {"analyse": 0, "save": 0}
+
+    def no_analyse(**kw):
+        calls["analyse"] += 1
+        raise AssertionError("analyse must not run on a subject mismatch")
+
+    monkeypatch.setattr(pf, "llm_call", no_analyse)
+    import app.db as db
+
+    def no_save(*a, **k):
+        calls["save"] += 1
+
+    monkeypatch.setattr(db, "save_public_feedback_run", no_save)
+
+    out = pf.answer(enterprise_id="e1", question="grab the public feedback for Notion")
+    assert "Notion" in out["answer"]
+    assert "Strava" in out["answer"]  # names the workspace's own product
+    assert "competitive intelligence review" in out["answer"]
+    assert out["_skill"] == "public-feedback-report"
+    assert calls == {"analyse": 0, "save": 0}
 
 
 def test_answer_truncated_empty_capture_never_claims_no_feedback(monkeypatch):
     # The sweep hit the output budget and nothing was salvageable: the honest
     # answer is "retry", never "no feedback found".
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], True))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], True, None))
     out = pf.answer(enterprise_id="e1", question="public feedback?")
     assert "hit an internal limit" in out["answer"]
     assert "couldn't find enough feedback" not in out["answer"]
@@ -135,7 +171,7 @@ def test_answer_truncated_empty_capture_never_claims_no_feedback(monkeypatch):
 
 def test_answer_happy_path_renders_and_persists(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False, None))
     calls: dict = {}
 
     def fake_llm_call(**kw):
@@ -171,7 +207,7 @@ def test_answer_happy_path_renders_and_persists(monkeypatch):
 
 def test_answer_save_failure_never_breaks_the_answer(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False, None))
     monkeypatch.setattr(
         pf, "llm_call", lambda **kw: SimpleNamespace(output=dict(REPORT_DATA))
     )
@@ -185,7 +221,7 @@ def test_answer_save_failure_never_breaks_the_answer(monkeypatch):
 
 def test_answer_synthesis_failure_is_graceful(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False, None))
     def boom(**kw): raise RuntimeError("model error")
     monkeypatch.setattr(pf, "llm_call", boom)
     out = pf.answer(enterprise_id="e1", question="q")
@@ -267,7 +303,7 @@ def test_followup_answers_from_stored_run(monkeypatch):
 def test_followup_without_run_falls_to_full_pipeline(monkeypatch):
     _patch_profile(monkeypatch)
     _patch_latest_run(monkeypatch, None)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False, None))
     out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
     # no stored run → the full pipeline ran (and found nothing, in this stub)
     assert "couldn't find enough feedback" in out["answer"]
@@ -279,7 +315,7 @@ def test_followup_query_failure_falls_back_to_full_run(monkeypatch):
 
     def boom(**kw): raise RuntimeError("model error")
     monkeypatch.setattr(pf, "llm_call", boom)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False, None))
     out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
     assert "couldn't find enough feedback" in out["answer"]
 
@@ -294,7 +330,7 @@ def test_report_shaped_ask_ignores_stored_run(monkeypatch):
         return dict(RUN)
 
     monkeypatch.setattr(db, "latest_public_feedback_run", fake_latest)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False, None))
     pf.answer(enterprise_id="e1", question="what are people saying about us online?")
     assert called["latest"] is False  # report-shaped → straight to the pipeline
 

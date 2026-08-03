@@ -51,6 +51,12 @@ _CAPTURE_SYSTEM = (
     "app stores, Reddit, review sites (G2/Capterra/Trustpilot), X, YouTube, "
     "forums, Hacker News, comparison articles — and log every relevant piece "
     "of feedback as an individual record per the capture spec below.\n\n"
+    "The report's subject is ONLY the company described below — this is the "
+    "workspace's own product. If the user's question asks about a DIFFERENT "
+    "company or product (naming a platform such as Reddit, Trustpilot or the "
+    "App Store is fine — those are sources, not subjects), do NOT run any "
+    'search: output exactly {"subject_mismatch": "<the asked-about name>"} '
+    "and nothing else.\n\n"
     "Output ONLY a JSON array of record objects (no prose before or after). "
     f"Cap the array at {_CAPTURE_RECORD_CAP} records, preferring the most "
     "recent; if you hit the cap, still spread records across the sources you "
@@ -245,6 +251,19 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
 _parse_records = parse_records
 
 
+_MISMATCH_RE = re.compile(r'"subject_mismatch"\s*:\s*"([^"]{1,120})"')
+
+
+def _subject_mismatch(text: str) -> str | None:
+    """The asked-about product name when the capture model declared the
+    question is about a different subject than the workspace's product, else
+    None. The sentinel is the model's judgment call — a regex over the
+    question can't reliably separate 'about Notion' from 'about us on
+    Reddit', but the model sees both the scope and the ask."""
+    m = _MISMATCH_RE.search(text or "")
+    return m.group(1).strip() if m else None
+
+
 def _scope_block(profile: dict, question: str) -> str:
     """The capture prompt's subject description, from the company profile."""
     name = profile.get("display_name") or ""
@@ -262,11 +281,13 @@ def _scope_block(profile: dict, question: str) -> str:
     return ". ".join(bits)
 
 
-def _capture(enterprise_id: str, scope: str, subject: str) -> tuple[list[dict], bool]:
-    """Run the web capture pass. Returns (records, truncated) — `truncated`
-    True when the output hit the token budget, so an empty parse means "the
-    capture overflowed", never "nothing was found". Raises on API failure —
-    the caller degrades to a plain chat message."""
+def _capture(enterprise_id: str, scope: str, subject: str) -> tuple[list[dict], bool, str | None]:
+    """Run the web capture pass. Returns (records, truncated, mismatch) —
+    `truncated` True when the output hit the token budget, so an empty parse
+    means "the capture overflowed", never "nothing was found"; `mismatch` is
+    the asked-about name when the model declared the question is about a
+    different product than this workspace's (no searches were run). Raises on
+    API failure — the caller degrades to a plain chat message."""
     from datetime import datetime, timezone
 
     from app.graph.config_layers import resolve_config
@@ -300,7 +321,8 @@ def _capture(enterprise_id: str, scope: str, subject: str) -> tuple[list[dict], 
         meta_out=meta,
         skill=PF_SKILL,
     )
-    records = _parse_records(raw)
+    mismatch = _subject_mismatch(raw)
+    records = [] if mismatch else _parse_records(raw)
     truncated = meta.get("stop_reason") == "max_tokens"
     try:
         from app.graph.decision_log import log_agent_decision
@@ -309,13 +331,14 @@ def _capture(enterprise_id: str, scope: str, subject: str) -> tuple[list[dict], 
             enterprise_id=enterprise_id, agent="qa",
             decision_type="public_feedback_capture",
             factors={"records": len(records), "truncated": truncated,
+                     "subject_mismatch": mismatch,
                      "search_tokens": meta.get("input_tokens", 0)},
             model=meta.get("model"),
-            prompt_version="qa-public-feedback-capture-v1",
+            prompt_version="qa-public-feedback-capture-v2",
         )
     except Exception:  # noqa: BLE001 — audit is best-effort
         logger.exception("public-feedback capture decision-log write failed")
-    return records, truncated
+    return records, truncated, mismatch
 
 
 def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict | None:
@@ -363,12 +386,28 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     product = profile.get("product") or {}
     subject = product.get("name") or profile.get("display_name") or ""
     try:
-        records, truncated = _capture(enterprise_id, scope, subject)
+        records, truncated, mismatch = _capture(enterprise_id, scope, subject)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
         logger.exception("public-feedback: capture pass failed for %s", enterprise_id)
         return _plain_payload(
             "I couldn't complete the public web search just now. Please retry "
             "in a moment."
+        )
+    if mismatch:
+        # The question asks about a product that isn't this workspace's. A
+        # sweep would come back wrongly framed ("What people are saying about
+        # US online") and its stored run would poison later follow-ups — so
+        # redirect to the skill that owns third-party research instead.
+        own = profile.get("display_name") or "your product"
+        return _plain_payload(
+            f"This report covers what the public says about **{own}** — your "
+            f"own product. **{mismatch}** looks like a different product, so "
+            "I didn't run the sweep: the report would have presented "
+            f"{mismatch}'s feedback as if it were yours. To research "
+            f"{mismatch} as a competitor, ask for a **competitive "
+            f'intelligence review** (e.g. "run a competitive intelligence '
+            f'review of {mismatch}"). To see your own public feedback, just '
+            'ask "what are people saying about us online?".'
         )
     if not records:
         if truncated:
