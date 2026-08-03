@@ -107,3 +107,36 @@ def test_ask_cache_version_is_unchanged():
     (see test_generate_one_sync_prompt_has_no_company_facts in
     test_ask_runner.py) and no skill-sourced value can reach a cached row."""
     assert prompts.ASK_CACHE_VERSION == 5
+
+
+# ── ASK_SYSTEM_DOCUMENTS_ADDENDUM — the existence-vs-retrieval contract ─────
+# The negative-space clauses (never deny an indexed document's existence,
+# never blame a specific integration) are what the incident's answer
+# violated, so they are asserted here rather than left to review.
+
+
+def test_ask_system_documents_addendum_length_bounds():
+    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 2500
+
+
+def test_ask_system_documents_addendum_required_content():
+    a = prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM
+    for needle in (
+        "UPLOADED DOCUMENTS", "Index", "Contents loaded for this question",
+        "EXISTS", "[Source:",
+    ):
+        assert needle in a, f"addendum missing {needle!r}"
+
+
+def test_ask_system_documents_addendum_negative_space():
+    a = prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM
+    assert "never" in a
+    assert "not in any connected source" in a
+
+
+def test_ask_cache_version_unchanged():
+    """Same invariant as test_ask_cache_version_is_unchanged, named per the
+    ticket's planner-authored test list: a document appended to the answer
+    prompt is additive (empty for a tenant with no uploads), so it does not
+    require demoting every pre-warmed cached row."""
+    assert prompts.ASK_CACHE_VERSION == 5

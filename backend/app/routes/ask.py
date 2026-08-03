@@ -405,6 +405,10 @@ def get_ask(
         "citations": payload.get("citations", []),
         "confidence": payload.get("confidence", 0),
         "unanswered": payload.get("unanswered", ""),
+        # Server-derived document manifest (existence-vs-retrieval contract) —
+        # defaulted explicitly so a warm/cached row from before this ticket
+        # (no "documents" key) still returns [] rather than dropping the key.
+        "documents": payload.get("documents", []),
         # Pass through any extra fields the qa_agent attaches (e.g. confirm-gate
         # metadata, the payload's own `_skill`) so the contract stays a superset
         # of the old body. The two routed_skill* keys are excluded so the job
@@ -422,6 +426,7 @@ def get_ask(
                 "unanswered",
                 "routed_skill",
                 "routed_skill_action",
+                "documents",
             }
         },
     }

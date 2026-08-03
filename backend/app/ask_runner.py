@@ -9,6 +9,7 @@ cached row.
 import asyncio
 import json
 import logging
+import re
 from urllib.parse import urlparse
 
 from app.corpus import load_corpus
@@ -18,12 +19,14 @@ from app.db import (
     find_cached_ask,
     start_cached_ask,
 )
+from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
+    ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
     ASK_USER_TEMPLATE_WITH_KG,
@@ -115,6 +118,184 @@ def company_facts_block(enterprise_id: str | None) -> str:
     if not lines:
         return ""
     return WORKSPACE_CONFIG_HEADER + "\n" + "\n".join(lines)
+
+
+# ── Uploaded-document grounding (existence-vs-retrieval contract) ───────────
+# Closes the incident where an uploaded document (stored in
+# `document_source_file`, extraction succeeded) was reported as "not present
+# in any connected source" because the ask path never read that table at
+# all. Structural precedent: `company_facts_block` above — a per-tenant block
+# computed once and composed into the cacheable user prefix.
+
+DOCUMENT_INDEX_HEADER = "UPLOADED DOCUMENTS"
+
+#: Chars per token, matching graph/retrieval.py's _CHARS_PER_TOKEN idiom —
+#: size by serialized length, no tokenizer dependency.
+_CHARS_PER_TOKEN = 4
+
+#: Total budget for loaded document BODIES. Sized above the KG bundle's
+#: DEFAULT_TOKEN_BUDGET (2200, graph/retrieval.py:41) because a document is
+#: quoted, not summarized, and well under the 12000 max_tokens the answer
+#: call already reserves.
+DOCUMENT_TOKEN_BUDGET = 6000
+_DOCUMENT_CHAR_BUDGET = DOCUMENT_TOKEN_BUDGET * _CHARS_PER_TOKEN  # 24000
+
+#: At most this many documents load per question, however many match.
+MAX_SELECTED_DOCUMENTS = 3
+
+#: Index entries rendered before the list is visibly truncated.
+MAX_INDEX_ENTRIES = 200
+
+#: Tokens shorter than this cannot carry a token-overlap match alone (so
+#: "vs", "of", "q3" can't spuriously select a document).
+_MIN_MATCH_TOKEN_LEN = 3
+
+#: Matched-stem-tokens ÷ total-stem-tokens threshold for a fuzzy match.
+_TOKEN_OVERLAP_RATIO = 0.8
+
+_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
+_SEPARATOR_RE = re.compile(r"[_\-.]+")
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, drop a file extension, turn _ - . into spaces, collapse
+    whitespace. 'Sprntly_vs_Productboard_Comparison.docx' ->
+    'sprntly vs productboard comparison'."""
+    stripped = _EXTENSION_RE.sub("", text)
+    spaced = _SEPARATOR_RE.sub(" ", stripped)
+    return " ".join(spaced.lower().split())
+
+
+def _tokens(text: str) -> set[str]:
+    """Normalized words, dropping anything shorter than
+    `_MIN_MATCH_TOKEN_LEN` so short words can't carry a match alone."""
+    return {t for t in _normalize(text).split() if len(t) >= _MIN_MATCH_TOKEN_LEN}
+
+
+def _select_documents(
+    question: str, refs: list[DocumentFileRef]
+) -> list[DocumentFileRef]:
+    """Deterministic, pure selection — no I/O, no LLM call, no new latency
+    leg. A ref matches when its normalized filename stem is a substring of
+    the normalized question, or its normalized source name is, or its stem
+    tokens overlap the question's tokens at ratio >= _TOKEN_OVERLAP_RATIO.
+    Ranked by ratio descending, then uploaded_at descending; keeps the first
+    MAX_SELECTED_DOCUMENTS.
+
+    Fail-closed on selection, never on existence: no match means no bodies
+    load, but the index still renders every document, so the honest "I have
+    it, I did not load it" answer stays available. A wrong load costs
+    budget; a wrong denial is the incident."""
+    question_norm = _normalize(question)
+    question_tokens = _tokens(question)
+    candidates: list[tuple[float, DocumentFileRef]] = []
+    for ref in refs:
+        stem_norm = _normalize(ref.filename)
+        source_norm = _normalize(ref.source_name) if ref.source_name else ""
+        stem_tokens = _tokens(ref.filename)
+        ratio = (
+            len(stem_tokens & question_tokens) / len(stem_tokens)
+            if stem_tokens
+            else 0.0
+        )
+        is_match = (
+            (bool(stem_norm) and stem_norm in question_norm)
+            or (bool(source_norm) and source_norm in question_norm)
+            or ratio >= _TOKEN_OVERLAP_RATIO
+        )
+        if is_match:
+            candidates.append((ratio, ref))
+    candidates.sort(key=lambda pair: (pair[0], pair[1].uploaded_at or ""), reverse=True)
+    return [ref for _, ref in candidates[:MAX_SELECTED_DOCUMENTS]]
+
+
+def document_grounding(
+    enterprise_id: str | None, question: str
+) -> tuple[str, list[dict]]:
+    """Render the "UPLOADED DOCUMENTS" block (index of every uploaded file,
+    plus the bodies selected for this question) and its server-derived
+    manifest, for composition into the answer prompt.
+
+    Returns ("", []) for every degradation path — no tenant, no uploaded
+    files, or any read failure — so composition is byte-identical to today
+    for a tenant with no uploads."""
+    if not enterprise_id:
+        return "", []
+    try:
+        refs = list_company_files(enterprise_id)
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "document index unavailable for %s; answering without it",
+            enterprise_id, exc_info=True,
+        )
+        return "", []
+    if not refs:
+        return "", []
+
+    total = len(refs)
+    truncated_index = total > MAX_INDEX_ENTRIES
+    # Truncate BEFORE selecting: if selection ran against the untruncated
+    # list, a matched document ranked outside the visible index could have
+    # its body rendered under "Contents loaded" while being absent from both
+    # the rendered Index and the manifest — reproducing, inside a
+    # >MAX_INDEX_ENTRIES tenant, the exact content-present/existence-missing
+    # inconsistency this ticket exists to eliminate.
+    refs = refs[:MAX_INDEX_ENTRIES]
+
+    selected = _select_documents(question, refs)
+    selected_ids = {ref.id for ref in selected}
+
+    lines = [
+        f"# {DOCUMENT_INDEX_HEADER}",
+        "",
+        "## Index — every document this workspace has uploaded",
+    ]
+    for ref in refs:
+        date = (ref.uploaded_at or "")[:10]
+        lines.append(f"- {ref.filename} (source: {ref.source_name}, uploaded {date})")
+    if truncated_index:
+        lines.append(
+            f"[This list shows the {MAX_INDEX_ENTRIES} most recently uploaded "
+            f"of {total} documents.]"
+        )
+
+    bodies: dict[str, str] = {}
+    if selected:
+        per_doc_budget = max(1, _DOCUMENT_CHAR_BUDGET // len(selected))
+        for ref in selected:
+            text = get_file_text(enterprise_id, ref.id) or ""
+            if len(text) > per_doc_budget:
+                body = (
+                    text[:per_doc_budget]
+                    + f"\n[Truncated — showing the first {per_doc_budget} of "
+                    f"{len(text)} characters of this document.]"
+                )
+            else:
+                body = text
+            bodies[ref.id] = body
+
+    if bodies:
+        lines.append("")
+        lines.append("## Contents loaded for this question")
+        for ref in selected:
+            lines.append("")
+            lines.append(f"### {ref.filename}")
+            lines.append(bodies[ref.id])
+
+    block = "\n".join(lines)
+
+    manifest = [
+        {
+            "file_id": ref.id,
+            "filename": ref.filename,
+            "source_name": ref.source_name,
+            "uploaded_at": ref.uploaded_at,
+            "loaded": ref.id in selected_ids,
+        }
+        for ref in refs
+    ]
+    return block, manifest
+
 
 # Prompt version stamped onto the Ask decision-log row so the §4d audit spine
 # pins the exact Ask composition (corpus + KG bridge, #18) behind each answer.
@@ -248,6 +429,11 @@ def compose_ask_answer(
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
     facts = company_facts_block(enterprise_id)
+    # Computed once, beside `facts`, so it rides EVERY branch's cacheable
+    # prefix — including the PRD-grounded branch below, which skips corpus +
+    # KG for cost reasons but must not go blind to uploads (that would
+    # reintroduce the false-denial bug inside PRD-tab chat).
+    docs_block, documents = document_grounding(enterprise_id, question)
 
     if prd_context:
         # PRD-grounded ask (PRD-tab chat): the PRD context block (PRD + insight
@@ -292,9 +478,14 @@ def compose_ask_answer(
     # above so it rides EVERY branch's cacheable prefix, first — a long corpus
     # or PRD block can never push it out. facts == "" ⇒ cacheable/system are
     # byte-identical to the pre-fix composition (including the None case).
-    cacheable = "\n\n---\n\n".join(p for p in (facts, cacheable) if p) or None
+    # Documents sit after facts and before the corpus/PRD/KG block.
+    cacheable = (
+        "\n\n---\n\n".join(p for p in (facts, docs_block, cacheable) if p) or None
+    )
     if facts:
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    if docs_block:
+        system += ASK_SYSTEM_DOCUMENTS_ADDENDUM
 
     # Bind the tenant's own Claude key (when configured) for this direct
     # (non-gateway) answer call. See app.llm_keys.
@@ -314,6 +505,11 @@ def compose_ask_answer(
             on_json_delta=on_delta,
         )
 
+    # Server-derived, never model-authored — the model attributes a loaded
+    # document by filename inline; this is what lets the client resolve that
+    # attribution to a durable file_id (or show the held-but-not-loaded set).
+    payload["documents"] = documents
+
     # Decision-log the ask onto the §4d audit spine. Best-effort + tenant-
     # scoped — only when a tenant resolved (legacy cookie sessions have none).
     if enterprise_id:
@@ -331,6 +527,9 @@ def compose_ask_answer(
                     "prd_grounded": bool(prd_context),
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
+                    # Counts only — never filenames or document text.
+                    "documents": len(documents),
+                    "documents_loaded": sum(d["loaded"] for d in documents),
                 },
                 output={
                     "key_points": payload.get("key_points", []),

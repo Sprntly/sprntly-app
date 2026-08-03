@@ -270,3 +270,95 @@ def delete_document_file(company_id: str, source_id: str, file_id: str) -> bool:
 def has_document_sources(company_id: str) -> bool:
     """True iff the company has at least one named document source."""
     return bool(list_document_sources(company_id))
+
+
+class DocumentFileRef(BaseModel):
+    """Index entry for one uploaded file — metadata only, NO body.
+
+    Deliberately not DocumentSourceFile: this shape exists so the answer path
+    can know a document EXISTS without paying to read its text."""
+
+    id: str
+    source_id: str
+    source_name: str
+    filename: str
+    uploaded_at: Optional[str] = None
+
+
+def list_company_files(company_id: str) -> list[DocumentFileRef]:
+    """Every uploaded file for the company, newest first.
+
+    ONE query per table — deliberately not list_document_sources() +
+    list_source_files() per source, which is N+1 AND selects extracted_text.
+    `extracted_text` is never in the select list here: the index must stay
+    cheap enough to build on every ask."""
+    try:
+        c = require_client()
+        files_r = (
+            c.table("document_source_file")
+            .select("id,source_id,filename,uploaded_at")
+            .eq("company_id", company_id)
+            .execute()
+        )
+        sources_r = (
+            c.table("document_source")
+            .select("id,name")
+            .eq("company_id", company_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — fail open, matching every other read here
+        logger.warning(
+            "document_source_file index read failed for %s; treating as no files",
+            company_id, exc_info=True,
+        )
+        return []
+    # A file whose parent source row is missing keeps source_name="" rather
+    # than being dropped — a document must never vanish from the index
+    # because of a join miss.
+    names_by_source = {s["id"]: (s.get("name") or "") for s in (sources_r.data or [])}
+    out: list[DocumentFileRef] = []
+    for raw in (files_r.data or []):
+        if not raw.get("filename"):
+            continue
+        try:
+            out.append(
+                DocumentFileRef(
+                    id=raw["id"],
+                    source_id=raw["source_id"],
+                    source_name=names_by_source.get(raw["source_id"], ""),
+                    filename=raw["filename"],
+                    uploaded_at=raw.get("uploaded_at"),
+                )
+            )
+        except Exception:  # noqa: BLE001 — tolerate hand-edited rows
+            logger.warning("invalid document_source_file for %s; ignoring",
+                           company_id, exc_info=True)
+    # Newest first; "" (no uploaded_at) sorts last.
+    out.sort(key=lambda f: (f.uploaded_at or ""), reverse=True)
+    return out
+
+
+def get_file_text(company_id: str, file_id: str) -> Optional[str]:
+    """The stored extracted_text for one owned file, or None when absent —
+    unknown id, wrong company, or any read failure. Company-scoped for the
+    same reason get_document_source is: a guessed id must never reach
+    another tenant's document."""
+    try:
+        r = (
+            require_client().table("document_source_file")
+            .select("extracted_text")
+            .eq("company_id", company_id)
+            .eq("id", file_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — fail open
+        logger.warning(
+            "document_source_file text read failed for %s/%s", company_id, file_id,
+            exc_info=True,
+        )
+        return None
+    rows = r.data or []
+    if not rows:
+        return None
+    return rows[0].get("extracted_text") or ""
