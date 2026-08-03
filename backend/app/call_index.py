@@ -619,6 +619,39 @@ def list_calls(
     ]
 
 
+def count_calls(
+    company_id: str,
+    *,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> Optional[int]:
+    """The TRUE number of calls in a window, without fetching them.
+
+    Only needed when a listing hits its render cap. `answer_listing` STATES a
+    number, and a number taken from `len(rows)` is really "the number of rows
+    the cap happened to return" — which is how "how many calls did we have last
+    week" answered *50* on a 485-call index, for every window, forever.
+
+    Returns None when the count cannot be read, and the caller then declines to
+    state a total rather than stating a wrong one.
+    """
+    from app.db.client import require_client
+
+    try:
+        query = (
+            require_client().table("call_index").select("id", count="exact")
+            .eq("company_id", company_id)
+        )
+        if since is not None:
+            query = query.gte("call_date", since.isoformat())
+        if until is not None:
+            query = query.lte("call_date", until.isoformat())
+        return query.execute().count
+    except Exception:  # noqa: BLE001 — a count failure must not fail the answer
+        logger.warning("call-index: count failed for %s", company_id, exc_info=True)
+        return None
+
+
 def has_index(company_id: str) -> bool:
     """True when this company has any indexed calls — the gate a caller checks
     before preferring the index over the full-corpus path."""
@@ -685,6 +718,32 @@ def is_listing_request(question: str) -> bool:
     return bool(_LISTING_RULE.search(text))
 
 
+# How many calls a listing RENDERS. A window may legitimately hold more, and
+# then the count and the list must disagree honestly: state the true total for
+# the window, show the newest N, and say that is what happened. The previous
+# behaviour was to fetch 50, render 50 and call it "50 calls" — silent
+# truncation dressed as a fact.
+_LISTING_RENDER_CAP = 50
+
+
+def _question_window(question: str):
+    """The window the QUESTION names, or None when it names none.
+
+    Uses `call_digest.parse_window` and honours `.explicit` exactly as
+    `windowed_call_question` does, rather than introducing a second window
+    vocabulary. The non-explicit 7-day fallback is a DEFAULT, not a request:
+    applying it to "list the calls" would silently hide everything older than a
+    week from a question that asked for no cutoff at all.
+    """
+    from app.call_digest import parse_window
+
+    try:
+        window = parse_window(question)
+    except Exception:  # noqa: BLE001 — a parse failure must not fail the answer
+        return None
+    return window if getattr(window, "explicit", False) else None
+
+
 def answer_listing(
     company_id: str, question: str, window=None, fresh: Optional[Freshness] = None,
 ) -> Optional[dict]:
@@ -696,21 +755,39 @@ def answer_listing(
     tell an empty index from an unsynced one, and would answer "no calls" to a
     question it has no data to answer at all. Callers that omit it get one
     computed here rather than a silently unguarded read.
+
+    `window` is likewise optional in signature and load-bearing in substance,
+    which is why it is now derived from the QUESTION when the caller omits one.
+    `qa_agent` never passed it, so `since`/`until` were always None and every
+    listing returned the newest 50 rows whatever period was asked for: on a
+    485-call index, "list the calls from last week" answered with two weeks of
+    calls and "how many calls did we have last week" answered "50 calls" — a
+    wrong number, stated with no hedge. Only `_COUNT_RULE` ever narrowed
+    anything, which is why "the 5 latest" looked correct and masked the rest.
     """
     fresh = fresh if fresh is not None else ensure_fresh(company_id)
     if not fresh.usable:
         return None
 
+    if window is None:
+        window = _question_window(question)
     since = getattr(window, "since", None)
     until = getattr(window, "until", None)
-    calls = list_calls(company_id, since=since, until=until)
+    label = getattr(window, "label", None)
+
+    # Fetch one MORE than we will render, so "are there others?" is answered by
+    # the read itself and costs nothing in the common case. Only an actual
+    # overflow pays for an exact count.
+    calls = list_calls(
+        company_id, since=since, until=until, limit=_LISTING_RENDER_CAP + 1
+    )
     if not calls:
         # A successful sync with no matching calls is a FACT, and saying so
         # beats falling through to a path that will spend 168s rediscovering
         # it — or worse, answer from the KG's distilled summaries and imply
         # coverage we don't have. Only reachable when `fresh.usable`, i.e. a
         # sync really did complete.
-        where = "in that window" if since else "recorded at all"
+        where = f"in {label}" if label else "recorded at all"
         return {
             "answer": (
                 f"No calls {where}. Your transcript source is connected and I "
@@ -720,21 +797,44 @@ def answer_listing(
             "unanswered": "", "_skill": None, "_skill_source": "call-index",
         }
 
+    overflowed = len(calls) > _LISTING_RENDER_CAP
+    # Exact and free unless we actually hit the cap.
+    total = count_calls(company_id, since=since, until=until) if overflowed \
+        else len(calls)
+    calls = calls[:_LISTING_RENDER_CAP]
+
     # Honour an explicit small count ("the 5 latest", "the latest 5") so the
     # answer matches the question rather than dumping the whole window.
     match = _COUNT_RULE.search(question or "")
+    requested = None
     if match:
         wanted = int(match.group(1) or match.group(2))
         if wanted > 0:
+            requested = wanted
             calls = calls[:wanted]
 
     lines = "\n".join(f"- {call.render()}" for call in calls)
-    scope = " in that window" if since else ""
-    # A bare count is a completeness claim. Only make it when the index is
-    # actually current — otherwise state the list and disclose its age, the
-    # same rule `render_transcript` applies to an elided transcript.
+    scope = f" in {label}" if label else ""
+    shown = len(calls)
+
+    # A bare count is a COMPLETENESS CLAIM — the same principle `as_of_note` and
+    # `render_transcript`'s elision marker already apply. State a total only
+    # when it is the true total for the window that was asked about; otherwise
+    # say what is actually being shown.
+    if requested is not None:
+        header = f"**{shown} call{'s' if shown != 1 else ''}**{scope}, newest first:"
+    elif total is None:
+        header = (
+            f"**More than {shown} calls**{scope} — I couldn't get an exact "
+            f"count. Showing the {shown} most recent:"
+        )
+    elif total > shown:
+        header = f"**{total} calls**{scope}. Showing the {shown} most recent:"
+    else:
+        header = f"**{total} call{'s' if total != 1 else ''}**{scope}, newest first:"
+
     answer = (
-        f"**{len(calls)} call{'s' if len(calls) != 1 else ''}**{scope}, newest first:\n\n"
+        f"{header}\n\n"
         f"{lines}\n\n"
         "Ask me to summarize any one of these, or all of them, and I'll pull the "
         "full transcript."
@@ -780,6 +880,10 @@ query Transcript($id: String!) {
 
 # Words that describe the ASK rather than the call, stripped before matching so
 # "summarize the mayer brown call" is matched on "mayer brown".
+#
+# The second block is the polite/verb-particle wrapping a request carries. It
+# was missing, and "can" is why: three characters, survives the strip, and sits
+# inside "candidate" — see _MIN_SUBSTRING_TERM.
 _ASK_WORDS = frozenset({
     "summarize", "summarise", "summary", "recap", "tell", "me", "about", "the",
     "a", "an", "of", "for", "on", "in", "with", "call", "calls", "meeting",
@@ -787,6 +891,43 @@ _ASK_WORDS = frozenset({
     "what", "was", "were", "did", "we", "discuss", "discussed", "happened",
     "give", "show", "get", "please", "and", "from", "our", "their", "this",
     "that", "it", "recording", "session", "sync", "notes", "detail", "details",
+    # Request wrapping and the particles of the verbs in _SINGLE_SUMMARY_VERB
+    # ("walk me through", "dig into"), which otherwise survive as fake names.
+    "can", "could", "would", "will", "you", "your", "let", "lets", "want",
+    "need", "walk", "through", "dig", "into", "pull", "up", "over", "run",
+    # Call-type nouns. _SELECTION_STOPWORDS' comment already describes these as
+    # dropped here ("sync", "demo", "meeting") — "demo" and "check" simply never
+    # were. Among hundreds of calls a call-type noun names nothing; narrowing
+    # BETWEEN candidates still keeps them, which is that stopword set's job.
+    "demo", "demos", "check", "checkin", "standup", "huddle", "chat",
+})
+
+# Words that describe a call GENERICALLY — recency, who was on it in the
+# abstract, when it happened — and so can never be the name of one.
+#
+# This is the same stripping mechanism as _ASK_WORDS, split out only because the
+# reason differs: an ask-word describes the request, a generic word describes the
+# call but identifies no particular one. Both must go before we ask "did this
+# question name anything?", because a question whose only surviving words are
+# "recent" and "customer" has named nothing at all — it is a digest ask, and
+# every one of these words is a qualifier the digest and listing paths already
+# understand.
+_GENERIC_CALL_WORDS = frozenset({
+    # recency / quantity
+    "recent", "recently", "latest", "last", "past", "previous", "prior",
+    "few", "couple", "several", "some", "any", "all", "every", "each",
+    "more", "most", "other", "another", "next", "upcoming", "new",
+    # who, in the abstract
+    "customer", "customers", "client", "clients", "user", "users",
+    "prospect", "prospects", "buyer", "buyers", "people", "folks",
+    "everyone", "anyone", "someone", "team", "teams", "them", "they",
+    # kind of call, in the abstract
+    "sales", "discovery", "support", "success", "onboarding", "internal",
+    "external", "weekly", "daily", "monthly",
+    # when
+    "today", "yesterday", "day", "days", "week", "weeks", "month", "months",
+    "quarter", "quarters", "year", "years", "morning", "afternoon",
+    "evening", "night", "ago",
 })
 
 # A verb that means the caller wants THIS call's content, not a list.
@@ -805,35 +946,85 @@ def _norm(text: str) -> str:
 
 
 def _query_terms(question: str) -> list[str]:
-    """The words that plausibly name a call, ask-words removed."""
+    """The words that plausibly NAME a call — ask-words and generic call words
+    removed.
+
+    An empty result is the signal that the question named nothing: "can you
+    summarize our recent customer calls" leaves nothing behind, which is exactly
+    right, because it names no call.
+    """
     words = re.findall(r"[A-Za-z0-9]+", question or "")
-    return [w for w in words if w.lower() not in _ASK_WORDS and len(w) > 2]
+    return [
+        w for w in words
+        if len(w) > 2
+        and w.lower() not in _ASK_WORDS
+        and w.lower() not in _GENERIC_CALL_WORDS
+    ]
+
+
+# A date the user typed, which names a call as surely as an account does. Same
+# form `select_from_candidates` already accepts when narrowing a disambiguation.
+_DATE_REFERENCE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+# Minimum length before a term is trusted as a MID-WORD match. A whole-word hit
+# is trusted at any length — "BBVA", "IBM" and "SSO" are real accounts — so this
+# floor only applies to substrings.
+#
+# It exists because "can" is three characters and sits inside "candidate". With
+# unrestricted substring matching, "can you summarize our recent customer calls"
+# scored an internal SE-candidate interview as a named match, resolved to that
+# one call, and summarized it — a plural, general question answered from a
+# single wrong transcript. Same class as the failures _LISTING_RULE and
+# _NOT_CALLS exist for: routed from the vocabulary, answered from the wrong
+# source.
+_MIN_SUBSTRING_TERM = 4
+
+
+def _call_words(call: IndexedCall) -> set[str]:
+    """A call's account and title as individual normalized words, for whole-word
+    matching. 'Mayer Brown + ChaosTrack Briefing' with account 'Mayerbrown'
+    yields {mayerbrown, mayer, brown, chaostrack, briefing} — so either spelling
+    of the account matches on a whole word rather than on a lucky substring."""
+    return {
+        _norm(w)
+        for w in re.findall(r"[A-Za-z0-9]+", f"{call.account or ''} {call.title or ''}")
+    } - {""}
 
 
 def resolve_calls(company_id: str, question: str, *, limit: int = 200) -> list[IndexedCall]:
     """Indexed calls this question plausibly names, best first.
 
-    Matches the question's distinctive words against each call's account and
-    title in normalized form. Returns [] when nothing matches, so the caller
+    Matches the question's naming words against each call's account and title,
+    preferring WHOLE-WORD hits and admitting a substring only when the term is
+    long enough to be distinctive. Returns [] when nothing matches, so the caller
     falls through rather than summarizing an arbitrary call.
     """
     terms = _query_terms(question)
-    if not terms:
+    date_match = _DATE_REFERENCE.search(question or "")
+    on_date = date_match.group(1) if date_match else None
+    if not terms and not on_date:
         return []
     joined = _norm("".join(terms))
     scored: list[tuple[int, IndexedCall]] = []
     for call in list_calls(company_id, limit=limit):
         haystack = _norm(f"{call.account or ''}{call.title or ''}")
-        if not haystack:
-            continue
+        words = _call_words(call)
         score = 0
-        # Whole-phrase hit ("mayerbrown") is the strongest signal.
-        if joined and joined in haystack:
-            score += 10
-        for term in terms:
-            token = _norm(term)
-            if token and token in haystack:
-                score += 1
+        # A date the user named is a reference to that day's call(s).
+        if on_date and (call.call_date or "").startswith(on_date):
+            score += 5
+        if haystack:
+            # Whole-phrase hit ("mayerbrown") is the strongest signal.
+            if len(joined) >= _MIN_SUBSTRING_TERM and joined in haystack:
+                score += 10
+            for term in terms:
+                token = _norm(term)
+                if not token:
+                    continue
+                if token in words:
+                    score += 3          # whole word — trusted at any length
+                elif len(token) >= _MIN_SUBSTRING_TERM and token in haystack:
+                    score += 1          # mid-word, and only if distinctive
         if score:
             scored.append((score, call))
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -851,6 +1042,13 @@ def is_single_call_request(question: str, history=None) -> bool:
         on its own words; only the pending disambiguation in `history` makes it
         meaningful. Without this the disambiguation was a dead end and "both"
         fell through to the KG.
+
+    A summary verb ALONE is not enough, and that was the bug: "can you summarize
+    our recent customer calls" is a plural, general ask naming no call, and this
+    claimed it, resolved it to exactly one call, and summarized an internal
+    hiring interview as though it were the customer call asked about. A general
+    ask belongs to the listing or digest path, which answer over the whole
+    window instead of picking one member of it.
     """
     text = question or ""
     if _prior_disambiguation(history):
@@ -860,7 +1058,10 @@ def is_single_call_request(question: str, history=None) -> bool:
     # A window word means they want the digest, not one call.
     if re.search(r"\b(?:last|this|past)\s+(?:week|month|quarter)\b|\ball\b", text, re.I):
         return False
-    return bool(_query_terms(text))
+    # Something must NAME a call: an account or a distinctive title term (what
+    # survives _query_terms), or a date. "our recent customer calls" survives
+    # none of it — every word is a generic qualifier — and so stands down.
+    return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
 
 
 def fetch_transcript(company_id: str, external_id: str) -> Optional[dict]:
@@ -1215,10 +1416,38 @@ def answer_single_call(
 # NB every noun takes an optional plural. Without it "\btickets\b" never matched
 # "ticket\b", and "what tickets did we close last week" routed to the calls —
 # caught by the control cases below, invisible otherwise.
+#
+# And every RELEASE word needs its VERB forms. This list originally held only
+# the nouns, which is how "did the prototype ship last week?" — a yes/no
+# question about a ship date — was claimed by this routing and answered with a
+# full voice-of-customer digest over the week's calls: ~188 seconds and a
+# multi-section report for a question whose answer is one word. "ship" and
+# "prototype" were absent entirely, and "releases?"/"deploys?" matched the noun
+# but never "released"/"deployed". Same lesson as the plural bug one line up: a
+# miss in the NEGATIVE vocabulary silently answers from the wrong source too.
+#
+# THE MEMBERSHIP RULE, and it is narrower than "sounds like engineering": a word
+# belongs here only when ANOTHER SOURCE OWNS THE ANSWER. Tickets, PRs, deploys,
+# CSVs and dashboards live in a tracker or a spreadsheet, so a call is
+# definitionally the wrong place to look them up.
+#
+# A word does NOT belong here merely because it is product vocabulary that
+# customers happen to use. Customers say "when does this launch", "how did the
+# rollout go" — that is customer-voice material and the calls are the RIGHT
+# source for it. `launch` and `rollout` were tried here and REMOVED for exactly
+# that reason: vetoing them sent "what did customers say about the launch last
+# week" to the KG's distilled summaries while we held the actual transcripts,
+# which is this module's original bug pointed the other way.
+#
+# "cut" is excluded on the same test, plus ambiguity: "cut costs", "price cut"
+# and "cut the feature" are ordinary customer talk. This list is only defensible
+# while every word in it names a system of record other than the calls.
 _NOT_CALLS = re.compile(
     r"\b(?:tickets?|issues?|epics?|sprints?|backlogs?|jira|linear|clickup|asana|"
-    r"commits?|pull\s*requests?|prs?|repos?|branch(?:es)?|deploys?|deployments?|"
-    r"releases?|code|csvs?|spreadsheets?|excel|dashboards?|analytics|funnels?|"
+    r"commits?|pull\s*requests?|prs?|repos?|branch(?:es)?|"
+    r"ship(?:s|ped|ping|ment|ments)?|prototypes?|"
+    r"deploy(?:s|ed|ing|ment|ments)?|releas(?:e|es|ed|ing)|"
+    r"code|csvs?|spreadsheets?|excel|dashboards?|analytics|funnels?|"
     r"retention\s+curves?)\b",
     re.I,
 )
