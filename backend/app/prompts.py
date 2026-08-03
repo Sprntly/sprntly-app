@@ -897,3 +897,92 @@ ONLY data:
 
 {evidence_trail}
 """
+
+
+# ── temporal grounding ───────────────────────────────────────────────────────
+#
+# The model is not told what day it is unless we tell it. Only the web-research
+# paths ever did (competitive_intel, public_feedback, company_research), because
+# recency obviously matters when searching the web. The Ask/KG answer path never
+# did — and that produced a real wrong answer:
+#
+#     Q (asked 2026-08-02): "give me top 3 product requests from last week"
+#     A: "The top 3 product requests from Jan 1-10, 2026 (50 calls) are ..."
+#
+# Seven months stale, presented as "last week", off an uploaded simulated CSV.
+# With no anchor for "last week" the model cannot check the evidence against the
+# question, so it silently substituted whatever period the data happened to
+# cover. Stating the date is necessary but NOT sufficient — the instruction to
+# flag a mismatch is what turns a wrong answer into an honest one.
+def today_line(now=None) -> str:
+    """A dated preamble for any prompt that may face a relative time expression."""
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    return (
+        f"\n\nTODAY'S DATE IS {now.strftime('%A, %d %B %Y')} (UTC). "
+        "Resolve every relative time expression — \"last week\", \"this quarter\", "
+        "\"recently\" — against that date.\n"
+        "If the source material does not cover the period the user asked about, "
+        "SAY SO EXPLICITLY and state the period the evidence actually covers. "
+        "Never present data from a different period as though it answered the "
+        "question: a user who asks for last week and is shown data from seven "
+        "months ago has been given a wrong answer, not a partial one."
+    )
+
+
+# ── source grounding ─────────────────────────────────────────────────────────
+#
+# The model is not told which connectors this company has, so it guesses — and
+# the guesses have been wrong in both directions:
+#
+#   * "To get a real summary, you'd need to connect the recording or transcript
+#      directly (e.g. via Fireflies)" — said while Fireflies WAS connected and
+#      working, in the same answer that cited a KG signal about the team using
+#      Fireflies.
+#   * "No connected source covers the period you asked about" — said while the
+#      call index held real calls from exactly that week.
+#
+# Both are worse than an unhelpful answer: they blame the user's setup for a
+# routing failure, and a PM acting on either would go configure something they
+# already have. Stating the inventory is what makes "what is missing" a fact
+# rather than an inference.
+def connected_sources_line(company_id) -> str:
+    """A factual inventory of this company's connected sources, for the prompt.
+
+    Returns "" when we do not KNOW the inventory — no company id (the warm/
+    predefined Ask path carries only a dataset slug, and an unresolvable slug
+    leaves it None) or a read failure. Saying nothing is the only safe answer
+    there: emitting the "nothing is connected" branch on a company whose
+    connections we simply failed to look up would assert a falsehood with the
+    full authority of a system prompt, which is precisely the failure mode this
+    function exists to remove.
+    """
+    if not company_id:
+        return ""
+    try:
+        from app.db.connections import list_connections
+
+        rows = list_connections(company_id) or []
+    except Exception:  # noqa: BLE001 — never let this break an answer
+        return ""
+
+    live = sorted({
+        (r.get("provider") or "").strip()
+        for r in rows
+        if (r.get("status") or "").lower() in ("active", "connected", "")
+        and r.get("provider")
+    })
+    if not live:
+        return (
+            "\n\nCONNECTED SOURCES: none. Say plainly that nothing is connected "
+            "rather than implying data exists."
+        )
+    return (
+        f"\n\nCONNECTED SOURCES for this company: {', '.join(live)}.\n"
+        "These ARE connected and working. Never tell the user to connect one of "
+        "them, and never say a source is unavailable when it is listed here — if "
+        "you could not retrieve something, say you could not retrieve it and name "
+        "what you tried, rather than blaming the user's setup. If the answer "
+        "genuinely needs a source that is NOT listed, name that source specifically."
+    )

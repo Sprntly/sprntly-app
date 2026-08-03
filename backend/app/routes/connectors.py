@@ -98,6 +98,7 @@ from app.connectors.tokens import (
 )
 from app.deps.ownership import require_owned_dataset
 from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
     kickoff_corpus_seed,
     kickoff_slack_corpus_sync,
     kickoff_sync,
@@ -3258,6 +3259,14 @@ def fireflies_connect_apikey(
     )
 
     kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Populate the CALL INDEX at connect time too. kickoff_sync above fills the
+    # KG (distilled summaries); this fills the metadata index chat answers call
+    # listings from. Without it the index stays empty until the next 6-hourly
+    # scheduler cycle, and an empty index is not an error anyone can see — every
+    # interception in qa_agent just returns None and the question silently
+    # degrades to the old expensive path. Same gap, same fix as d30ca7ee's
+    # "sync Slack the moment it's connected, not six hours later".
+    kickoff_call_index_sync(company.company_id)
 
     return {
         "ok": True,
@@ -3275,6 +3284,20 @@ def fireflies_disconnect(
     if not row:
         raise HTTPException(404, "Fireflies is not connected")
     db.delete_connection(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Drop the call index with the connection. Leaving it is NOT harmless: chat
+    # would keep answering call questions from indexed rows while
+    # prompts.connected_sources_line correctly reports that no transcript source
+    # is connected — two contradictory claims inside one answer, with no way for
+    # the reader to tell which half is wrong. Best-effort; call_index.ensure_fresh
+    # independently refuses to serve once the source is gone, so a failure here
+    # degrades to "no answer from the index" rather than to a stale one.
+    try:
+        from app import call_index
+
+        call_index.clear_company(company.company_id)
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("fireflies: could not clear call index for %s",
+                       company.company_id, exc_info=True)
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 

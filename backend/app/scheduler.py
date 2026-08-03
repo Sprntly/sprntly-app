@@ -42,7 +42,11 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
+from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -150,6 +154,21 @@ def _refresh_all_company_connectors() -> None:
                         company_id,
                     )
                 continue
+            # Fireflies: refresh the CALL INDEX alongside the KG pull below.
+            # They fill different things — kickoff_sync writes distilled
+            # summaries into the graph, this writes the per-call metadata chat
+            # answers listings from — and only the index can answer "which
+            # calls last week" without a 168-second corpus pass. Not `continue`:
+            # fireflies IS in PULLERS, so it must still fall through to the KG
+            # kickoff below.
+            if provider == "fireflies":
+                try:
+                    kickoff_call_index_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: call-index kickoff raised for %s",
+                        company_id,
+                    )
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).

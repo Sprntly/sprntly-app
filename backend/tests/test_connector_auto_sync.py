@@ -362,6 +362,9 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
     calls = []
     monkeypatch.setattr(conn_route, "kickoff_sync",
                         lambda cid, prov: calls.append((cid, prov)))
+    index_calls = []
+    monkeypatch.setattr(conn_route, "kickoff_call_index_sync",
+                        lambda cid: index_calls.append(cid))
 
     require_company = conn_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
@@ -373,6 +376,69 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
         main_mod.app.dependency_overrides.pop(require_company, None)
     assert r.status_code == 200
     assert calls == [("co-X", "fireflies")]
+    # And the CALL INDEX, which kickoff_sync does not fill. Without this the
+    # index stays empty until the next 6-hourly cycle, and an empty index is a
+    # SILENT failure: every interception in qa_agent returns None and the
+    # question degrades to the ~168s path with nothing reporting a problem.
+    assert index_calls == ["co-X"]
+
+
+def test_fireflies_disconnect_clears_the_call_index(isolated_settings, monkeypatch):
+    """Leaving the index behind is not harmless.
+
+    Chat would keep answering call questions from indexed rows while
+    prompts.connected_sources_line correctly reports no transcript source is
+    connected — two contradictory claims in one answer, with no way for the
+    reader to tell which half is wrong.
+    """
+    import app.main as main_mod
+    from app.auth import CompanyContext
+    import app.call_index as ci
+    import app.routes.connectors as conn_route
+
+    monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
+    monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
+    cleared = []
+    monkeypatch.setattr(ci, "clear_company", lambda cid: cleared.append(cid))
+
+    require_company = conn_route.require_company
+    main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
+        company_id="co-X", role="admin", user_id="u1")
+    try:
+        client = TestClient(main_mod.app)
+        r = client.delete("/v1/connectors/fireflies")
+    finally:
+        main_mod.app.dependency_overrides.pop(require_company, None)
+    assert r.status_code == 200
+    assert cleared == ["co-X"]
+
+
+def test_disconnect_survives_a_failed_index_clear(isolated_settings, monkeypatch):
+    """A cleanup failure must not fail a disconnect the user actually made —
+    ensure_fresh independently refuses to serve once the source is gone, so this
+    degrades to "no answer from the index" rather than to a stale one."""
+    import app.main as main_mod
+    from app.auth import CompanyContext
+    import app.call_index as ci
+    import app.routes.connectors as conn_route
+
+    monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
+    monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
+
+    def _boom(_cid):
+        raise RuntimeError("PostgREST down")
+
+    monkeypatch.setattr(ci, "clear_company", _boom)
+
+    require_company = conn_route.require_company
+    main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
+        company_id="co-X", role="admin", user_id="u1")
+    try:
+        client = TestClient(main_mod.app)
+        r = client.delete("/v1/connectors/fireflies")
+    finally:
+        main_mod.app.dependency_overrides.pop(require_company, None)
+    assert r.status_code == 200
 
 
 def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):

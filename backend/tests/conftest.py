@@ -1436,6 +1436,12 @@ def _no_background_connector_sync(request, monkeypatch):
         # otherwise inherit exactly the two hazards above.
         monkeypatch.setattr(auto_sync, "kickoff_slack_corpus_sync", _noop_sync,
                             raising=False)
+        # And for the call-index refresh, fired by POST /v1/connectors/fireflies
+        # /apikey and by the scheduler cycle: its thread hits api.fireflies.ai
+        # for real and upserts call_index / call_index_sync through the same
+        # mid-reset DB — the identical pair of hazards.
+        monkeypatch.setattr(auto_sync, "kickoff_call_index_sync", _noop_sync,
+                            raising=False)
     except Exception:
         pass
     try:
