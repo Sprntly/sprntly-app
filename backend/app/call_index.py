@@ -780,6 +780,10 @@ query Transcript($id: String!) {
 
 # Words that describe the ASK rather than the call, stripped before matching so
 # "summarize the mayer brown call" is matched on "mayer brown".
+#
+# The second block is the polite/verb-particle wrapping a request carries. It
+# was missing, and "can" is why: three characters, survives the strip, and sits
+# inside "candidate" — see _MIN_SUBSTRING_TERM.
 _ASK_WORDS = frozenset({
     "summarize", "summarise", "summary", "recap", "tell", "me", "about", "the",
     "a", "an", "of", "for", "on", "in", "with", "call", "calls", "meeting",
@@ -787,6 +791,43 @@ _ASK_WORDS = frozenset({
     "what", "was", "were", "did", "we", "discuss", "discussed", "happened",
     "give", "show", "get", "please", "and", "from", "our", "their", "this",
     "that", "it", "recording", "session", "sync", "notes", "detail", "details",
+    # Request wrapping and the particles of the verbs in _SINGLE_SUMMARY_VERB
+    # ("walk me through", "dig into"), which otherwise survive as fake names.
+    "can", "could", "would", "will", "you", "your", "let", "lets", "want",
+    "need", "walk", "through", "dig", "into", "pull", "up", "over", "run",
+    # Call-type nouns. _SELECTION_STOPWORDS' comment already describes these as
+    # dropped here ("sync", "demo", "meeting") — "demo" and "check" simply never
+    # were. Among hundreds of calls a call-type noun names nothing; narrowing
+    # BETWEEN candidates still keeps them, which is that stopword set's job.
+    "demo", "demos", "check", "checkin", "standup", "huddle", "chat",
+})
+
+# Words that describe a call GENERICALLY — recency, who was on it in the
+# abstract, when it happened — and so can never be the name of one.
+#
+# This is the same stripping mechanism as _ASK_WORDS, split out only because the
+# reason differs: an ask-word describes the request, a generic word describes the
+# call but identifies no particular one. Both must go before we ask "did this
+# question name anything?", because a question whose only surviving words are
+# "recent" and "customer" has named nothing at all — it is a digest ask, and
+# every one of these words is a qualifier the digest and listing paths already
+# understand.
+_GENERIC_CALL_WORDS = frozenset({
+    # recency / quantity
+    "recent", "recently", "latest", "last", "past", "previous", "prior",
+    "few", "couple", "several", "some", "any", "all", "every", "each",
+    "more", "most", "other", "another", "next", "upcoming", "new",
+    # who, in the abstract
+    "customer", "customers", "client", "clients", "user", "users",
+    "prospect", "prospects", "buyer", "buyers", "people", "folks",
+    "everyone", "anyone", "someone", "team", "teams", "them", "they",
+    # kind of call, in the abstract
+    "sales", "discovery", "support", "success", "onboarding", "internal",
+    "external", "weekly", "daily", "monthly",
+    # when
+    "today", "yesterday", "day", "days", "week", "weeks", "month", "months",
+    "quarter", "quarters", "year", "years", "morning", "afternoon",
+    "evening", "night", "ago",
 })
 
 # A verb that means the caller wants THIS call's content, not a list.
@@ -805,35 +846,85 @@ def _norm(text: str) -> str:
 
 
 def _query_terms(question: str) -> list[str]:
-    """The words that plausibly name a call, ask-words removed."""
+    """The words that plausibly NAME a call — ask-words and generic call words
+    removed.
+
+    An empty result is the signal that the question named nothing: "can you
+    summarize our recent customer calls" leaves nothing behind, which is exactly
+    right, because it names no call.
+    """
     words = re.findall(r"[A-Za-z0-9]+", question or "")
-    return [w for w in words if w.lower() not in _ASK_WORDS and len(w) > 2]
+    return [
+        w for w in words
+        if len(w) > 2
+        and w.lower() not in _ASK_WORDS
+        and w.lower() not in _GENERIC_CALL_WORDS
+    ]
+
+
+# A date the user typed, which names a call as surely as an account does. Same
+# form `select_from_candidates` already accepts when narrowing a disambiguation.
+_DATE_REFERENCE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+# Minimum length before a term is trusted as a MID-WORD match. A whole-word hit
+# is trusted at any length — "BBVA", "IBM" and "SSO" are real accounts — so this
+# floor only applies to substrings.
+#
+# It exists because "can" is three characters and sits inside "candidate". With
+# unrestricted substring matching, "can you summarize our recent customer calls"
+# scored an internal SE-candidate interview as a named match, resolved to that
+# one call, and summarized it — a plural, general question answered from a
+# single wrong transcript. Same class as the failures _LISTING_RULE and
+# _NOT_CALLS exist for: routed from the vocabulary, answered from the wrong
+# source.
+_MIN_SUBSTRING_TERM = 4
+
+
+def _call_words(call: IndexedCall) -> set[str]:
+    """A call's account and title as individual normalized words, for whole-word
+    matching. 'Mayer Brown + ChaosTrack Briefing' with account 'Mayerbrown'
+    yields {mayerbrown, mayer, brown, chaostrack, briefing} — so either spelling
+    of the account matches on a whole word rather than on a lucky substring."""
+    return {
+        _norm(w)
+        for w in re.findall(r"[A-Za-z0-9]+", f"{call.account or ''} {call.title or ''}")
+    } - {""}
 
 
 def resolve_calls(company_id: str, question: str, *, limit: int = 200) -> list[IndexedCall]:
     """Indexed calls this question plausibly names, best first.
 
-    Matches the question's distinctive words against each call's account and
-    title in normalized form. Returns [] when nothing matches, so the caller
+    Matches the question's naming words against each call's account and title,
+    preferring WHOLE-WORD hits and admitting a substring only when the term is
+    long enough to be distinctive. Returns [] when nothing matches, so the caller
     falls through rather than summarizing an arbitrary call.
     """
     terms = _query_terms(question)
-    if not terms:
+    date_match = _DATE_REFERENCE.search(question or "")
+    on_date = date_match.group(1) if date_match else None
+    if not terms and not on_date:
         return []
     joined = _norm("".join(terms))
     scored: list[tuple[int, IndexedCall]] = []
     for call in list_calls(company_id, limit=limit):
         haystack = _norm(f"{call.account or ''}{call.title or ''}")
-        if not haystack:
-            continue
+        words = _call_words(call)
         score = 0
-        # Whole-phrase hit ("mayerbrown") is the strongest signal.
-        if joined and joined in haystack:
-            score += 10
-        for term in terms:
-            token = _norm(term)
-            if token and token in haystack:
-                score += 1
+        # A date the user named is a reference to that day's call(s).
+        if on_date and (call.call_date or "").startswith(on_date):
+            score += 5
+        if haystack:
+            # Whole-phrase hit ("mayerbrown") is the strongest signal.
+            if len(joined) >= _MIN_SUBSTRING_TERM and joined in haystack:
+                score += 10
+            for term in terms:
+                token = _norm(term)
+                if not token:
+                    continue
+                if token in words:
+                    score += 3          # whole word — trusted at any length
+                elif len(token) >= _MIN_SUBSTRING_TERM and token in haystack:
+                    score += 1          # mid-word, and only if distinctive
         if score:
             scored.append((score, call))
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -851,6 +942,13 @@ def is_single_call_request(question: str, history=None) -> bool:
         on its own words; only the pending disambiguation in `history` makes it
         meaningful. Without this the disambiguation was a dead end and "both"
         fell through to the KG.
+
+    A summary verb ALONE is not enough, and that was the bug: "can you summarize
+    our recent customer calls" is a plural, general ask naming no call, and this
+    claimed it, resolved it to exactly one call, and summarized an internal
+    hiring interview as though it were the customer call asked about. A general
+    ask belongs to the listing or digest path, which answer over the whole
+    window instead of picking one member of it.
     """
     text = question or ""
     if _prior_disambiguation(history):
@@ -860,7 +958,10 @@ def is_single_call_request(question: str, history=None) -> bool:
     # A window word means they want the digest, not one call.
     if re.search(r"\b(?:last|this|past)\s+(?:week|month|quarter)\b|\ball\b", text, re.I):
         return False
-    return bool(_query_terms(text))
+    # Something must NAME a call: an account or a distinctive title term (what
+    # survives _query_terms), or a date. "our recent customer calls" survives
+    # none of it — every word is a generic qualifier — and so stands down.
+    return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
 
 
 def fetch_transcript(company_id: str, external_id: str) -> Optional[dict]:

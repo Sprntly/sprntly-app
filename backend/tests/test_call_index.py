@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import app.call_index as ci
 
 
@@ -223,6 +225,55 @@ def test_listing_questions_are_not_single_call():
     assert not ci.is_single_call_request("give me the 5 latest transcripts")
 
 
+# ── the single-call path must not claim a general ask ────────────────────────
+#
+# Reproduced live on staging (485 indexed calls): "can you summarize our recent
+# customer calls" — plural, general, naming no call — was claimed by the
+# single-call path, resolved to exactly ONE call, and answered about an internal
+# SE-candidate interview. The model happened to notice the mismatch and said so;
+# that is luck, not a safety net, and the next wrong pick may be plausible enough
+# to pass for an answer.
+#
+# Two independent defects, so two independent guards and two sets of tests:
+#   1. INTENT — a summary verb alone claimed the question. It must also NAME
+#      something (an account, a distinctive title term, or a date).
+#   2. RESOLUTION — "can" matched mid-word inside "Candidate". A short term may
+#      no longer match as a substring.
+
+def test_the_staging_overreach_is_not_a_single_call_request():
+    """The exact reported question. Plural and general: it names no call, so the
+    single-call path must stand down and leave it to the digest."""
+    assert not ci.is_single_call_request("can you summarize our recent customer calls")
+
+
+def test_general_plural_asks_are_never_claimed():
+    """These all describe a SET of calls with generic qualifiers only. Every one
+    of them belongs to the listing or digest path, which answer over the whole
+    window rather than picking one member of it."""
+    for question in (
+        "can you summarize our recent customer calls",
+        "summarize our recent customer calls",
+        "summarize the last few calls",
+        "recap the last few calls",
+        "summarize all the calls",
+        "tell me about the customer calls",
+        "what happened on our calls",
+        "summarize recent conversations",
+        "recap our discovery calls",
+        "summarize the sales calls",
+        "summarize the most recent call",
+        "give me a summary of our meetings",
+        "walk me through this week's customer conversations",
+    ):
+        assert not ci.is_single_call_request(question), question
+
+
+def test_a_date_names_a_call():
+    """A date is a NAMED reference just as an account is — it identifies which
+    call without needing its title."""
+    assert ci.is_single_call_request("summarize the call on 2026-07-29")
+
+
 def _indexed(account, title):
     return ci.IndexedCall(
         external_id=f"id-{account}", title=title,
@@ -244,6 +295,69 @@ def test_resolution_matches_a_squashed_account_name(monkeypatch):
     for question in ("Summarize Mayerbrown", "summarize the Mayer Brown call"):
         best = ci.resolve_calls("ent-A", question)
         assert best and best[0].account == "Mayerbrown", question
+
+
+def test_a_general_ask_resolves_to_nothing_rather_than_to_one_call(monkeypatch):
+    """The resolution half of the staging bug, in one assertion.
+
+    "can" survived the ask-word strip and matched INSIDE "Candidate", so a
+    question naming no call scored an internal hiring interview as a named match
+    and summarized it. Nothing here may match — an empty list is what makes the
+    caller fall through to the digest.
+    """
+    calls = [
+        _indexed(None, "SE Candidate Interview"),
+        _indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"),
+        _indexed("Genworth", "Genworth Discovery"),
+    ]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
+    assert ci.resolve_calls("ent-A", "can you summarize our recent customer calls") == []
+
+
+def test_a_general_ask_produces_no_single_call_answer(monkeypatch):
+    """The live symptom, end to end: an answer WAS produced, headed with an
+    internal hiring interview. No transcript may be fetched and no answer
+    returned — the caller falls through to the digest, which answers over the
+    whole window."""
+    calls = [
+        _indexed(None, "SE Candidate Interview"),
+        _indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"),
+    ]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
+    monkeypatch.setattr(
+        ci, "fetch_transcript",
+        lambda *a, **k: pytest.fail("a general ask must not fetch a transcript"),
+    )
+    assert ci.answer_single_call(
+        "ent-A", "can you summarize our recent customer calls", fresh=_fresh()
+    ) is None
+
+
+def test_a_short_term_never_matches_mid_word(monkeypatch):
+    """A whole-word hit is trusted at any length ("BBVA"); a SUBSTRING hit needs
+    a distinctive term. Without the floor, any 3-letter fragment of a real word
+    silently resolves a call."""
+    calls = [_indexed(None, "SE Candidate Interview")]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
+    # "can" is inside "Candidate" — must NOT resolve.
+    assert ci.resolve_calls("ent-A", "summarize the can call") == []
+    # ...while a short term that IS a whole word still resolves.
+    bbva = [_indexed("Bbva", "Luis Saiz and Carter Hayes")]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: bbva)
+    assert ci.resolve_calls("ent-A", "what did we discuss with BBVA") == bbva
+
+
+def test_resolution_selects_by_date(monkeypatch):
+    """A date the user typed picks that day's call, the same reference form
+    `select_from_candidates` already accepts in a disambiguation reply."""
+    older = ci.IndexedCall(
+        "id-old", "Genworth Discovery", "2026-07-22T10:00:00+00:00", 30.0, [],
+        "Genworth", "",
+    )
+    calls = [_indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"), older]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
+    got = ci.resolve_calls("ent-A", "summarize the call on 2026-07-22")
+    assert [c.external_id for c in got] == ["id-old"]
 
 
 def test_resolution_returns_nothing_when_no_call_matches(monkeypatch):
