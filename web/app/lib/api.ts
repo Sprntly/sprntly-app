@@ -1561,8 +1561,14 @@ export type ConnectionSummary = {
     dataset?: string
     folder_id?: string
     folder_name?: string
-    // Google Drive — files picked via the Google Picker (drive.file scope)
+    // Google Drive — files picked via the Google Picker (drive.file scope).
+    // An entry may be a FOLDER: only Drive metadata says which, so the shape is
+    // identical either way.
     files?: GoogleDrivePickedFile[]
+    // Written by the sync: folder id -> the files that folder expanded to on
+    // the last run. Present (possibly empty) for every picked entry that turned
+    // out to be a folder, which is also how the UI knows an entry IS one.
+    folder_contents?: Record<string, GoogleDrivePickedFile[]>
     // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string

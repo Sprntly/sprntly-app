@@ -482,6 +482,7 @@ export function ConfigureConnectorDrawer({
       <GoogleDrivePicker
         dataset={activeCompany}
         savedFiles={connection?.config?.files}
+        folderContents={connection?.config?.folder_contents}
         onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
