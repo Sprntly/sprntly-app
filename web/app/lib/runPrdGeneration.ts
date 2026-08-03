@@ -188,6 +188,26 @@ export async function runPrdGenerationFromIdeation(
 }
 
 /**
+ * Kick off + poll PRD generation from a TASK the user named in their own words
+ * ("generate a PRD for magic-link sign-in"). The backend synthesizes the
+ * insight (find-or-create keyed on the task text) and returns a generating
+ * prd_id; polling and the result shape are identical to the brief-insight path.
+ *
+ * This is the AIBar entry point. AIBar previously answered every PRD command by
+ * generating from the brief's TOP INSIGHT and discarding what the user actually
+ * typed, which is how an ordinary question produced a PRD about an unrelated
+ * topic. There is no pending-job marker because a task PRD has no insight scope
+ * to resume against — AIBar has no remount-resume path for it either.
+ */
+export async function runPrdGenerationFromTask(
+  task: string,
+  onPartial?: OnPrdPartial,
+): Promise<PrdGenResult> {
+  const start = await prdApi.generateFromTask(task)
+  return pollPrdToResult(start.prd_id, null, onPartial)
+}
+
+/**
  * Re-enter polling for a PRD whose generation was already kicked off (its
  * prd_id was persisted via `setPendingJob`) — used on screen/tab remount so a
  * background-finished job resumes in the UI instead of being orphaned. Does NOT
