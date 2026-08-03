@@ -619,6 +619,39 @@ def list_calls(
     ]
 
 
+def count_calls(
+    company_id: str,
+    *,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> Optional[int]:
+    """The TRUE number of calls in a window, without fetching them.
+
+    Only needed when a listing hits its render cap. `answer_listing` STATES a
+    number, and a number taken from `len(rows)` is really "the number of rows
+    the cap happened to return" — which is how "how many calls did we have last
+    week" answered *50* on a 485-call index, for every window, forever.
+
+    Returns None when the count cannot be read, and the caller then declines to
+    state a total rather than stating a wrong one.
+    """
+    from app.db.client import require_client
+
+    try:
+        query = (
+            require_client().table("call_index").select("id", count="exact")
+            .eq("company_id", company_id)
+        )
+        if since is not None:
+            query = query.gte("call_date", since.isoformat())
+        if until is not None:
+            query = query.lte("call_date", until.isoformat())
+        return query.execute().count
+    except Exception:  # noqa: BLE001 — a count failure must not fail the answer
+        logger.warning("call-index: count failed for %s", company_id, exc_info=True)
+        return None
+
+
 def has_index(company_id: str) -> bool:
     """True when this company has any indexed calls — the gate a caller checks
     before preferring the index over the full-corpus path."""
@@ -685,6 +718,32 @@ def is_listing_request(question: str) -> bool:
     return bool(_LISTING_RULE.search(text))
 
 
+# How many calls a listing RENDERS. A window may legitimately hold more, and
+# then the count and the list must disagree honestly: state the true total for
+# the window, show the newest N, and say that is what happened. The previous
+# behaviour was to fetch 50, render 50 and call it "50 calls" — silent
+# truncation dressed as a fact.
+_LISTING_RENDER_CAP = 50
+
+
+def _question_window(question: str):
+    """The window the QUESTION names, or None when it names none.
+
+    Uses `call_digest.parse_window` and honours `.explicit` exactly as
+    `windowed_call_question` does, rather than introducing a second window
+    vocabulary. The non-explicit 7-day fallback is a DEFAULT, not a request:
+    applying it to "list the calls" would silently hide everything older than a
+    week from a question that asked for no cutoff at all.
+    """
+    from app.call_digest import parse_window
+
+    try:
+        window = parse_window(question)
+    except Exception:  # noqa: BLE001 — a parse failure must not fail the answer
+        return None
+    return window if getattr(window, "explicit", False) else None
+
+
 def answer_listing(
     company_id: str, question: str, window=None, fresh: Optional[Freshness] = None,
 ) -> Optional[dict]:
@@ -696,21 +755,39 @@ def answer_listing(
     tell an empty index from an unsynced one, and would answer "no calls" to a
     question it has no data to answer at all. Callers that omit it get one
     computed here rather than a silently unguarded read.
+
+    `window` is likewise optional in signature and load-bearing in substance,
+    which is why it is now derived from the QUESTION when the caller omits one.
+    `qa_agent` never passed it, so `since`/`until` were always None and every
+    listing returned the newest 50 rows whatever period was asked for: on a
+    485-call index, "list the calls from last week" answered with two weeks of
+    calls and "how many calls did we have last week" answered "50 calls" — a
+    wrong number, stated with no hedge. Only `_COUNT_RULE` ever narrowed
+    anything, which is why "the 5 latest" looked correct and masked the rest.
     """
     fresh = fresh if fresh is not None else ensure_fresh(company_id)
     if not fresh.usable:
         return None
 
+    if window is None:
+        window = _question_window(question)
     since = getattr(window, "since", None)
     until = getattr(window, "until", None)
-    calls = list_calls(company_id, since=since, until=until)
+    label = getattr(window, "label", None)
+
+    # Fetch one MORE than we will render, so "are there others?" is answered by
+    # the read itself and costs nothing in the common case. Only an actual
+    # overflow pays for an exact count.
+    calls = list_calls(
+        company_id, since=since, until=until, limit=_LISTING_RENDER_CAP + 1
+    )
     if not calls:
         # A successful sync with no matching calls is a FACT, and saying so
         # beats falling through to a path that will spend 168s rediscovering
         # it — or worse, answer from the KG's distilled summaries and imply
         # coverage we don't have. Only reachable when `fresh.usable`, i.e. a
         # sync really did complete.
-        where = "in that window" if since else "recorded at all"
+        where = f"in {label}" if label else "recorded at all"
         return {
             "answer": (
                 f"No calls {where}. Your transcript source is connected and I "
@@ -720,21 +797,44 @@ def answer_listing(
             "unanswered": "", "_skill": None, "_skill_source": "call-index",
         }
 
+    overflowed = len(calls) > _LISTING_RENDER_CAP
+    # Exact and free unless we actually hit the cap.
+    total = count_calls(company_id, since=since, until=until) if overflowed \
+        else len(calls)
+    calls = calls[:_LISTING_RENDER_CAP]
+
     # Honour an explicit small count ("the 5 latest", "the latest 5") so the
     # answer matches the question rather than dumping the whole window.
     match = _COUNT_RULE.search(question or "")
+    requested = None
     if match:
         wanted = int(match.group(1) or match.group(2))
         if wanted > 0:
+            requested = wanted
             calls = calls[:wanted]
 
     lines = "\n".join(f"- {call.render()}" for call in calls)
-    scope = " in that window" if since else ""
-    # A bare count is a completeness claim. Only make it when the index is
-    # actually current — otherwise state the list and disclose its age, the
-    # same rule `render_transcript` applies to an elided transcript.
+    scope = f" in {label}" if label else ""
+    shown = len(calls)
+
+    # A bare count is a COMPLETENESS CLAIM — the same principle `as_of_note` and
+    # `render_transcript`'s elision marker already apply. State a total only
+    # when it is the true total for the window that was asked about; otherwise
+    # say what is actually being shown.
+    if requested is not None:
+        header = f"**{shown} call{'s' if shown != 1 else ''}**{scope}, newest first:"
+    elif total is None:
+        header = (
+            f"**More than {shown} calls**{scope} — I couldn't get an exact "
+            f"count. Showing the {shown} most recent:"
+        )
+    elif total > shown:
+        header = f"**{total} calls**{scope}. Showing the {shown} most recent:"
+    else:
+        header = f"**{total} call{'s' if total != 1 else ''}**{scope}, newest first:"
+
     answer = (
-        f"**{len(calls)} call{'s' if len(calls) != 1 else ''}**{scope}, newest first:\n\n"
+        f"{header}\n\n"
         f"{lines}\n\n"
         "Ask me to summarize any one of these, or all of them, and I'll pull the "
         "full transcript."
@@ -1326,22 +1426,27 @@ def answer_single_call(
 # but never "released"/"deployed". Same lesson as the plural bug one line up: a
 # miss in the NEGATIVE vocabulary silently answers from the wrong source too.
 #
-# The asymmetry that settles what belongs here: a word wrongly INCLUDED only
-# demotes a question from "prefer the calls" back to normal routing, which still
-# answers it from the KG. A word wrongly OMITTED spends ~3 minutes building a
-# document from a source the question was never about. The costs are not
-# comparable, so release vocabulary is included even though customers do discuss
-# launches and shipping on calls.
+# THE MEMBERSHIP RULE, and it is narrower than "sounds like engineering": a word
+# belongs here only when ANOTHER SOURCE OWNS THE ANSWER. Tickets, PRs, deploys,
+# CSVs and dashboards live in a tracker or a spreadsheet, so a call is
+# definitionally the wrong place to look them up.
 #
-# "cut" is deliberately NOT here despite being release slang ("cut a release"):
-# "cut costs", "price cut" and "cut the feature" are all ordinary customer talk,
-# and this list is only defensible while every word in it is unambiguous.
+# A word does NOT belong here merely because it is product vocabulary that
+# customers happen to use. Customers say "when does this launch", "how did the
+# rollout go" — that is customer-voice material and the calls are the RIGHT
+# source for it. `launch` and `rollout` were tried here and REMOVED for exactly
+# that reason: vetoing them sent "what did customers say about the launch last
+# week" to the KG's distilled summaries while we held the actual transcripts,
+# which is this module's original bug pointed the other way.
+#
+# "cut" is excluded on the same test, plus ambiguity: "cut costs", "price cut"
+# and "cut the feature" are ordinary customer talk. This list is only defensible
+# while every word in it names a system of record other than the calls.
 _NOT_CALLS = re.compile(
     r"\b(?:tickets?|issues?|epics?|sprints?|backlogs?|jira|linear|clickup|asana|"
     r"commits?|pull\s*requests?|prs?|repos?|branch(?:es)?|"
-    r"ship(?:s|ped|ping|ment|ments)?|launch(?:es|ed|ing)?|"
+    r"ship(?:s|ped|ping|ment|ments)?|prototypes?|"
     r"deploy(?:s|ed|ing|ment|ments)?|releas(?:e|es|ed|ing)|"
-    r"roll(?:s|ed|ing)?[-\s]*outs?|prototypes?|"
     r"code|csvs?|spreadsheets?|excel|dashboards?|analytics|funnels?|"
     r"retention\s+curves?)\b",
     re.I,

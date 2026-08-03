@@ -141,6 +141,101 @@ def test_answer_listing_honours_an_explicit_count(monkeypatch):
     assert out["answer"].count("\n- ") == 5
 
 
+# ── a listing must answer for the window it was asked about ──────────────────
+#
+# Observed in Chrome on staging, company with 485 indexed calls:
+#
+#   "list the calls from last week"      -> "50 calls"  spanning 07-16…07-31
+#   "how many calls did we have last week" -> "50 calls"  same two-week span
+#   "who did we talk to this week"       -> "50 calls"  same two-week span
+#   "Give me the 5 latest transcripts"   -> "5 calls"    CORRECT
+#
+# `qa_agent` never passed `window=`, so `since`/`until` were always None and
+# `list_calls` returned its default 50 newest rows whatever period was asked
+# for. The only thing that ever narrowed a listing was `_COUNT_RULE`, which is
+# why the "5 latest" case looked right and masked every other one.
+#
+# The stated number is the dangerous part: "50 calls" is not a slow answer or a
+# vague one, it is a WRONG FACT delivered with no hedge.
+
+def _capturing_list_calls(returns):
+    """A `list_calls` stand-in that records the window it was scoped with."""
+    seen: dict = {}
+
+    def _list(company_id, *, since=None, until=None, limit=50):
+        seen["since"], seen["until"], seen["limit"] = since, until, limit
+        return returns
+
+    return _list, seen
+
+
+def test_a_windowed_listing_is_scoped_to_that_window(monkeypatch):
+    """"last week" must reach `list_calls` as a real since/until pair."""
+    _list, seen = _capturing_list_calls([_call(i) for i in range(1, 4)])
+    monkeypatch.setattr(ci, "list_calls", _list)
+
+    out = ci.answer_listing("ent-A", "list the calls from last week", fresh=_fresh())
+
+    assert seen["since"] is not None and seen["until"] is not None
+    assert (seen["until"] - seen["since"]).days == 7      # one week, not two
+    assert "last week" in out["answer"]                    # and it says so
+
+
+def test_a_windowed_count_states_the_window_total_not_the_row_cap(monkeypatch):
+    """The wrong-number case. Three calls in the window must answer "3", never
+    the number of rows the cap happened to return."""
+    monkeypatch.setattr(
+        ci, "list_calls", lambda *a, **k: [_call(i) for i in range(1, 4)]
+    )
+    monkeypatch.setattr(
+        ci, "count_calls",
+        lambda *a, **k: pytest.fail("a window under the cap needs no count query"),
+    )
+    out = ci.answer_listing(
+        "ent-A", "how many calls did we have last week", fresh=_fresh()
+    )
+    assert "3 calls" in out["answer"]
+    assert "50" not in out["answer"]
+
+
+def test_an_unwindowed_listing_is_not_scoped(monkeypatch):
+    """The 7-day fallback is a DEFAULT, not a request. Applying it to "list the
+    calls" would hide everything older than a week from a question that named no
+    cutoff — `.explicit` is the same flag `windowed_call_question` honours."""
+    _list, seen = _capturing_list_calls([_call(1)])
+    monkeypatch.setattr(ci, "list_calls", _list)
+
+    ci.answer_listing("ent-A", "list the calls", fresh=_fresh())
+
+    assert seen["since"] is None and seen["until"] is None
+
+
+def test_an_overflowing_window_states_the_true_total_and_says_it_truncated(monkeypatch):
+    """A window may hold more than the render cap. Then the count and the list
+    must disagree HONESTLY — state the real total, show the newest N, say so."""
+    over = [_call(1) for _ in range(ci._LISTING_RENDER_CAP + 1)]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: over)
+    monkeypatch.setattr(ci, "count_calls", lambda *a, **k: 485)
+
+    out = ci.answer_listing("ent-A", "list the calls from last week", fresh=_fresh())
+
+    assert "485 calls" in out["answer"]
+    assert f"Showing the {ci._LISTING_RENDER_CAP} most recent" in out["answer"]
+    assert out["answer"].count("\n- ") == ci._LISTING_RENDER_CAP
+
+
+def test_an_uncountable_overflow_does_not_invent_a_total(monkeypatch):
+    """If the count cannot be read we say "more than N" — never a number we
+    did not get."""
+    over = [_call(1) for _ in range(ci._LISTING_RENDER_CAP + 1)]
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: over)
+    monkeypatch.setattr(ci, "count_calls", lambda *a, **k: None)
+
+    out = ci.answer_listing("ent-A", "list the calls from last week", fresh=_fresh())
+
+    assert f"More than {ci._LISTING_RENDER_CAP} calls" in out["answer"]
+
+
 def test_answer_listing_states_no_calls_when_a_sync_proved_there_are_none(monkeypatch):
     """An empty index BEHIND a successful sync is a fact, not a gap.
 
@@ -566,12 +661,23 @@ def test_release_questions_are_not_call_questions():
         "is the prototype shipping this week",
         "was it released last week",
         "did anything get deployed last week",
-        "did we launch last week",
-        "what did we launch this month",
-        "did we roll out the new pricing last week",
-        "how did the rollout go last week",
     ):
         assert ci._NOT_CALLS.search(question), question
+
+
+def test_product_vocabulary_customers_use_is_not_vetoed():
+    """The membership rule is "another source OWNS the answer", not "sounds like
+    engineering". `launch` and `rollout` were tried in `_NOT_CALLS` and removed:
+    customers say "when does this launch" and "how did the rollout go" on calls,
+    so the calls are the RIGHT source and vetoing them sends the question to the
+    KG's distilled summaries while we hold the transcripts."""
+    for question in (
+        "what did customers say about the launch last week",
+        "how did customers react to the rollout last week",
+        "did we launch last week",
+        "how did the rollout go last week",
+    ):
+        assert not ci._NOT_CALLS.search(question), question
 
 
 def test_windowed_routing_stands_down_for_a_release_question(monkeypatch):
