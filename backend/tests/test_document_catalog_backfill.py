@@ -170,15 +170,22 @@ def _populated_catalog_row(db, file_id, company_id=_CID):
     }).execute()
 
 
-def test_a_populated_catalog_changes_nothing_about_an_answer(
+def test_a_populated_catalog_enriches_the_index_and_an_empty_one_does_not_break_it(
     isolated_settings, fake_llm
 ):
-    """T10/AC18, the ships-dark proof.
+    """This test used to assert the opposite, and the inversion is the point.
 
-    Same company, same question, same uploaded document. Once with a fully
-    populated catalog row, once with the catalog empty. The composed prompt
-    and the document manifest must be byte-identical — that is what "nothing
-    reads the catalog" means operationally.
+    While the catalog had no reader, the proof that it shipped dark was that a
+    populated catalog and an empty one produced byte-identical prompts. The
+    reader has now landed, so a populated catalog SHOULD change the prompt —
+    that is the whole feature — and asserting equivalence would assert the
+    feature's absence.
+
+    What replaces it is the contract that actually matters now: the catalog
+    ENRICHES the index, and its absence degrades the index rather than
+    breaking it. The document's existence — the thing the original incident
+    got wrong — is carried by the uploads read either way, so an empty,
+    stale or unreachable catalog costs summaries, never existence.
     """
     from app import ask_runner
 
@@ -195,11 +202,7 @@ def test_a_populated_catalog_changes_nothing_about_an_answer(
     _populated_catalog_row(db, "file-1")
     assert db.table("document_catalog").select("*").eq(
         "company_id", _CID).execute().data, "fixture did not populate the catalog"
-    with_catalog_block, with_catalog_manifest = ask_runner.document_grounding(
-        _CID, question
-    )
-    ask_runner.compose_ask_answer("asurion", question, enterprise_id=_CID)
-    with_catalog = fake_llm["calls"][-1]
+    with_catalog_block, _ = ask_runner.document_grounding(_CID, question)
 
     db.table("document_catalog").delete().eq("company_id", _CID).execute()
     assert db.table("document_catalog").select("*").eq(
@@ -207,32 +210,40 @@ def test_a_populated_catalog_changes_nothing_about_an_answer(
     without_catalog_block, without_catalog_manifest = ask_runner.document_grounding(
         _CID, question
     )
-    ask_runner.compose_ask_answer("asurion", question, enterprise_id=_CID)
-    without_catalog = fake_llm["calls"][-1]
 
-    assert with_catalog["system"] == without_catalog["system"]
-    assert (
-        with_catalog["kwargs"]["user_cacheable_prefix"]
-        == without_catalog["kwargs"]["user_cacheable_prefix"]
+    # Enriched: the catalog's one-line summary reaches the index.
+    assert "Seat pricing becomes usage-based for enterprise tiers in Q3." in (
+        with_catalog_block
     )
-    assert with_catalog["user"] == without_catalog["user"]
-    assert with_catalog_block == without_catalog_block
-    assert with_catalog_manifest == without_catalog_manifest
+    assert with_catalog_block != without_catalog_block
 
-    # And the assertion has teeth: the document really was in the prompt, so a
-    # catalog leak would have had somewhere to show up.
+    # Degraded, not broken: without a catalog row the document is still
+    # indexed and still accounted for — it simply has no summary.
     assert "Q3_pricing.txt" in with_catalog_block
+    assert "Q3_pricing.txt" in without_catalog_block
+    assert "Seat pricing becomes usage-based" not in without_catalog_block
+    assert [m["file_id"] for m in without_catalog_manifest] == ["file-1"]
 
 
-def test_the_selection_constants_are_untouched():
-    """AC18: `_select_documents` and its constants are what this change
-    deliberately does NOT touch — the behaviour change lives in the reader,
-    which ships separately."""
+def test_the_capacity_caps_are_untouched_and_the_relevance_gate_is_gone():
+    """The selection constants, restated for the reader that now exists.
+
+    This test previously pinned `_TOKEN_OVERLAP_RATIO == 0.8` to prove the
+    catalog shipped without touching selection. Selection has now changed, so
+    the honest invariant changed with it — and it is asserted in both
+    directions rather than merely relaxed.
+
+    The two CAPACITY caps are unchanged: they bound cost and prompt size, and
+    mis-setting them loads fewer or more documents, visibly. The RELEVANCE
+    gate is gone and must stay gone: it decided, invisibly, that a user asking
+    about their own document's topic got nothing. Its absence is the fix, so a
+    reintroduction under any name is a regression this test should catch.
+    """
     from app import ask_runner
 
-    assert ask_runner._TOKEN_OVERLAP_RATIO == 0.8
     assert ask_runner.MAX_SELECTED_DOCUMENTS == 3
     assert ask_runner.MAX_INDEX_ENTRIES == 200
+    assert not hasattr(ask_runner, "_TOKEN_OVERLAP_RATIO")
 
 
 def test_nothing_outside_the_accessor_names_the_catalog_table():

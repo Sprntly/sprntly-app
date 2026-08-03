@@ -404,14 +404,29 @@ def test_manifest_entry_shape_and_file_id(isolated_settings):
 
     db = isolated_settings["supabase"]
     src = _seed_source(db, "src-a")
-    _seed_file(db, "f1", src, filename="a.txt")
+    # Deliberately NOT the original "a.txt": a one-character stem is a
+    # substring of almost any question ("a" is inside "unrelated"), so that
+    # fixture silently selected the document and could not express the
+    # nothing-selected shape this test is about. The substring arm's
+    # behaviour is unchanged here — only the fixture stopped hiding it.
+    _seed_file(db, "f1", src, filename="quarterly_metrics.txt")
 
     _, manifest = document_grounding(_CID, "unrelated")
     assert len(manifest) == 1
+    # `scope`, `match` and `rank` joined when selection became two-staged:
+    # they are what distinguishes "never selected" from "selected by name"
+    # from "selected by topic at rank N", which are indistinguishable in the
+    # answer but mean opposite things about whether selection is working.
     assert set(manifest[0].keys()) == {
         "file_id", "filename", "source_name", "uploaded_at", "loaded",
+        "scope", "match", "rank",
     }
     assert manifest[0]["file_id"] == "f1"
+    assert manifest[0]["scope"] == "workspace"
+    # Nothing selected this document, so there is no match reason and no rank.
+    assert manifest[0]["loaded"] is False
+    assert manifest[0]["match"] is None
+    assert manifest[0]["rank"] is None
 
 
 def test_manifest_loaded_flag_true_only_for_rendered_bodies(isolated_settings):
@@ -537,10 +552,16 @@ def test_index_truncates_visibly_at_max_entries(isolated_settings):
     block, manifest = document_grounding(_CID, "unrelated")
 
     assert block.count("- doc-") == MAX_INDEX_ENTRIES
+    # The marker now says PARTIAL in as many words, because above the cap the
+    # EXISTENCE contract changes, not just the display: the index stops being
+    # the complete inventory, so absence from it stops being evidence of
+    # absence. The prompt's existence rule keys off this exact word.
+    assert "PARTIAL" in block
     assert (
-        f"[This list shows the {MAX_INDEX_ENTRIES} most recently uploaded of "
-        "250 documents.]" in block
+        f"it shows the {MAX_INDEX_ENTRIES} most recently uploaded of 250 "
+        "documents in this workspace" in block
     )
+    assert "may still exist" in block
     assert len(manifest) == MAX_INDEX_ENTRIES
 
 
@@ -575,7 +596,9 @@ def test_compose_ask_answer_unchanged_when_no_uploaded_documents(
     ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-empty-docs")
     real_call = fake_llm["calls"][0]
 
-    monkeypatch.setattr(ask_runner, "document_grounding", lambda eid, q: ("", []))
+    monkeypatch.setattr(
+        ask_runner, "document_grounding", lambda eid, q, *a, **kw: ("", [])
+    )
     ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-empty-docs")
     patched_call = fake_llm["calls"][1]
 
@@ -607,7 +630,9 @@ def test_answer_single_shot_unchanged_when_no_uploaded_documents(
     _answer_single_shot(decision, "co-empty-docs-2", "what next?", [])
     real_prefix = captured[0]["user_cacheable_prefix"]
 
-    monkeypatch.setattr(qa, "document_grounding", lambda eid, q: ("", []))
+    monkeypatch.setattr(
+        qa, "document_grounding", lambda eid, q, *a, **kw: ("", [])
+    )
     _answer_single_shot(decision, "co-empty-docs-2", "what next?", [])
     patched_prefix = captured[1]["user_cacheable_prefix"]
 
@@ -629,7 +654,9 @@ def test_generate_one_sync_composition_unchanged(isolated_settings, fake_llm, mo
     ask_runner._generate_one_sync("asurion", "probe question")
     real_call = fake_llm["calls"][0]
 
-    monkeypatch.setattr(ask_runner, "document_grounding", lambda eid, q: ("", []))
+    monkeypatch.setattr(
+        ask_runner, "document_grounding", lambda eid, q, *a, **kw: ("", [])
+    )
     ask_runner._generate_one_sync("asurion", "probe question")
     patched_call = fake_llm["calls"][1]
 
@@ -1293,3 +1320,685 @@ def test_no_existing_signature_changed():
         "decision", "enterprise_id", "question", "history", "prd_context",
         "on_delta", "skill_spec", "on_phase",
     }
+
+
+# ══════════════ Topical selection — finding a document by what it is about ══
+#
+# The incident these cover: selection used to require the question to nearly
+# spell the filename (stem-token overlap at a fixed ratio). A user who asked
+# about the TOPIC of a document they had uploaded was told to ask again using
+# the exact filename. Selection is now two stages — documents the question
+# NAMES, then documents the question is ABOUT, ranked by the catalog's hybrid
+# lexical+semantic search — with no ratio and no score floor anywhere.
+
+_CANDIDATES_FN = "document_find_candidates"
+
+
+@pytest.fixture
+def catalog_candidates():
+    """Stub the hybrid-rank SQL function and hand back a setter.
+
+    `document_find_candidates` keeps its ranking AND its tenant filter inside
+    the Postgres function body; the fake client has no SQL engine behind
+    `rpc()`. So these tests fix the function's RESULT and assert what the
+    reader does with it — which providers it will select, how it orders them,
+    how it accounts for them. The ranking itself is exercised against real
+    Postgres, and whether the ranking picks the right document for a real
+    question is a live-verification question, not a unit-test one.
+    """
+    from tests._fake_supabase import FakeSupabaseClient
+
+    FakeSupabaseClient.rpc_returns.pop(_CANDIDATES_FN, None)
+    FakeSupabaseClient.rpc_calls.clear()
+
+    def _set(rows):
+        FakeSupabaseClient.rpc_returns[_CANDIDATES_FN] = rows
+
+    yield _set
+    # Class-level state on the fake: leaving a stub behind would silently feed
+    # candidates to every later test in the session.
+    FakeSupabaseClient.rpc_returns.pop(_CANDIDATES_FN, None)
+    FakeSupabaseClient.rpc_calls.clear()
+
+
+def _seed_catalog_row(
+    db, *, provider, external_id, title, company_id=_CID, source_name="Uploads",
+    summary="", topics=(), doc_date="2026-08-02T10:00:00+00:00",
+    conversation_id=None, user_id=None,
+):
+    _seed_company(db, company_id)
+    db.table("document_catalog").insert({
+        "company_id": company_id,
+        "provider": provider,
+        "external_id": external_id,
+        "title": title,
+        "source_name": source_name,
+        "content_hash": f"hash-{external_id}",
+        "summary": summary,
+        "topics": list(topics),
+        "doc_date": doc_date,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }).execute()
+
+
+def _candidate(
+    *, provider, external_id, title, score=0.04, source_name="Uploads",
+    summary="", topics=(), doc_date="2026-08-02T10:00:00+00:00",
+    conversation_id=None,
+):
+    """One row shaped exactly like `document_find_candidates` returns."""
+    return {
+        "id": f"cat-{external_id}",
+        "provider": provider,
+        "external_id": external_id,
+        "title": title,
+        "source_name": source_name,
+        "summary": summary,
+        "topics": list(topics),
+        "url": None,
+        "doc_date": doc_date,
+        "conversation_id": conversation_id,
+        "score": score,
+    }
+
+
+# T1 — the reported incident.
+def test_topic_question_loads_the_document_it_is_about(
+    isolated_settings, catalog_candidates
+):
+    """The user's verbatim question, against the document it is about.
+
+    The file is "Sprntly_vs_Productboard_Comparison.docx"; he wrote "product
+    board" as two words and never named the file. Stem-token overlap scored
+    1/3 against a 0.8 requirement, so nothing loaded and the answer told him
+    to come back with the exact filename. The document is an ordinary
+    workspace upload, so it is in scope for body resolution.
+
+    Whether the composed answer then READS well is live-verification's
+    question — a stubbed model cannot judge content fidelity. What is
+    mechanically checkable, and is the whole defect, is that the body loads.
+    """
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _, file_id, text = _seed_incident_fixture(db)
+    _seed_catalog_row(
+        db, provider="uploads", external_id=file_id,
+        title="Sprntly_vs_Productboard_Comparison.docx",
+        source_name="Competitive research",
+        summary="Compares Sprntly and Productboard on PRD-to-prototype speed.",
+        topics=["competitive comparison", "productboard", "prd tooling"],
+    )
+    catalog_candidates([_candidate(
+        provider="uploads", external_id=file_id,
+        title="Sprntly_vs_Productboard_Comparison.docx",
+        source_name="Competitive research",
+        summary="Compares Sprntly and Productboard on PRD-to-prototype speed.",
+    )])
+
+    block, manifest = document_grounding(
+        _CID, "give me a summary of the product board vs sprntly discussion"
+    )
+
+    entry = next(m for m in manifest if m["file_id"] == file_id)
+    assert entry["loaded"] is True, (
+        "the document the question is about did not load — this is the "
+        "reported defect"
+    )
+    assert text[:80] in block
+
+
+# T13 — the provider exclusion.
+def test_only_providers_whose_bodies_resolve_are_selectable(
+    isolated_settings, catalog_candidates
+):
+    """Selection covers `uploads` and `chat_attachment` and nothing else.
+
+    Drive files and Confluence pages are catalogued and summarised, so the
+    rank will happily surface them — but no code here can fetch their bodies.
+    Selecting one would render an entry with no contents behind it and push
+    the model back to "I have this document but could not load it", which is
+    the exact answer this change exists to stop producing. So they stay
+    indexed and unselectable until body resolution for them lands.
+
+    The Confluence row below is a PERFECT match for the question; the test is
+    that a perfect match on an unresolvable provider still does not select.
+    """
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-1", name="Competitive research")
+    _seed_file(
+        db, "file-1", src, filename="Pricing_Notes.docx",
+        extracted_text="Usage-based pricing lands in Q3." * 10,
+    )
+    _seed_catalog_row(
+        db, provider="uploads", external_id="file-1", title="Pricing_Notes.docx",
+        summary="Usage-based pricing replaces seat pricing in Q3.",
+    )
+
+    question = "what is happening with enterprise billing"
+    # The unresolvable providers outrank the upload, so a filter that merely
+    # reordered rather than excluded would still fail this test.
+    catalog_candidates([
+        _candidate(provider="confluence", external_id="page-99",
+                   title="Enterprise billing", source_name="Finance space",
+                   summary="what is happening with enterprise billing",
+                   score=0.09),
+        _candidate(provider="google_drive", external_id="drive-77",
+                   title="Billing model 2026", source_name="Finance drive",
+                   summary="what is happening with enterprise billing",
+                   score=0.08),
+        _candidate(provider="uploads", external_id="file-1",
+                   title="Pricing_Notes.docx", score=0.02),
+    ])
+
+    block, manifest = ask_runner.document_grounding(_CID, question)
+
+    # The resolvable upload still selects, from a rank position below both
+    # unresolvable rows.
+    entry = next(m for m in manifest if m["file_id"] == "file-1")
+    assert entry["loaded"] is True
+
+    # Neither unresolvable provider is selected, quoted, or accounted for as
+    # loaded anywhere.
+    assert "page-99" not in block and "drive-77" not in block
+    assert "Enterprise billing" not in block
+    assert "Billing model 2026" not in block
+    assert all(m["file_id"] not in {"page-99", "drive-77"} for m in manifest)
+
+    # And the filter is asserted where it lives, so this cannot pass merely
+    # because an unresolvable row had nowhere to appear.
+    selectable = ask_runner._topical_candidates(
+        _CID, question, question_embedding=None,
+        conversation_id=None, user_id=None, exclude_external_ids=set(),
+    )
+    assert [c["provider"] for c in selectable] == ["uploads"]
+
+
+# T2 — topical selection over WORKSPACE uploads.
+def test_workspace_upload_loads_from_a_question_that_never_names_it(
+    isolated_settings, catalog_candidates
+):
+    """A workspace upload, a question with no filename in it at all.
+
+    Deliberately not a chat attachment: an attachment is hardcoded loaded and
+    reaches the model through history-folding, so an attachment fixture would
+    pass this test without either selection stage running — proving nothing
+    about the mechanism under change.
+    """
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a", name="Research")
+    body = "Churn concentrates in month two of the annual plan. " * 30
+    _seed_file(db, "f1", src, filename="Q3_retention_deep_dive.docx",
+               extracted_text=body)
+    _seed_catalog_row(
+        db, provider="uploads", external_id="f1",
+        title="Q3_retention_deep_dive.docx", source_name="Research",
+        summary="Where and when customers churn on the annual plan.",
+        topics=["churn", "retention", "annual plan"],
+    )
+    catalog_candidates([_candidate(
+        provider="uploads", external_id="f1",
+        title="Q3_retention_deep_dive.docx",
+        summary="Where and when customers churn on the annual plan.",
+    )])
+
+    block, manifest = document_grounding(_CID, "why are customers leaving us?")
+
+    entry = next(m for m in manifest if m["file_id"] == "f1")
+    assert entry["loaded"] is True
+    assert entry["match"] == "topic"
+    assert entry["rank"] == 1
+    assert "Churn concentrates in month two" in block
+
+
+# T3 — the no-floor consequence, stated honestly.
+def test_documents_may_load_for_an_irrelevant_question_and_the_prompt_says_ignore(
+    isolated_settings, catalog_candidates
+):
+    """With no score floor, Stage T fills its slots whenever the catalog is
+    non-empty — including for questions no document is relevant to.
+
+    That is accepted, not a bug: a wrong load costs bounded budget, a wrong
+    denial is the incident this change exists to fix. What keeps the ANSWER
+    honest is the prompt, not a hidden threshold — so the contract asserted
+    here is "an irrelevant document may load, AND the model is told to ignore
+    what doesn't bear on the question", which is the pair that has to hold
+    together.
+    """
+    from app.ask_runner import document_grounding
+    from app.prompts import ASK_SYSTEM_DOCUMENTS_ADDENDUM
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a", name="Ops")
+    _seed_file(db, "f1", src, filename="office_move_logistics.docx",
+               extracted_text="The new floor plan seats 40." * 10)
+    _seed_catalog_row(
+        db, provider="uploads", external_id="f1",
+        title="office_move_logistics.docx", source_name="Ops",
+        summary="Seating and logistics for the office move.",
+    )
+    catalog_candidates([_candidate(
+        provider="uploads", external_id="f1",
+        title="office_move_logistics.docx",
+        summary="Seating and logistics for the office move.",
+    )])
+
+    _, manifest = document_grounding(_CID, "what is our API rate limit?")
+
+    # It loads. There is no floor that would have stopped it, by design.
+    assert next(m for m in manifest if m["file_id"] == "f1")["loaded"] is True
+    # And the instruction that makes that safe is present and explicit.
+    assert "IGNORE the ones that don't" in ASK_SYSTEM_DOCUMENTS_ADDENDUM
+
+
+# T4 — conflict: both documents load, with their dates, into the prompt.
+def test_two_conflicting_documents_both_reach_the_prompt_with_their_dates(
+    isolated_settings, catalog_candidates
+):
+    """Mechanically checkable half of the conflict contract.
+
+    Whether the model then NAMES the disagreement instead of silently picking
+    one is real-model behaviour and belongs to live verification. What can be
+    proven here is that it has what it needs to: both bodies, and both dates.
+    """
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a", name="Pricing")
+    _seed_file(db, "old", src, filename="pricing_2025.docx",
+               extracted_text="Enterprise pricing is per seat." * 10,
+               uploaded_at="2025-06-01T00:00:00+00:00")
+    _seed_file(db, "new", src, filename="pricing_2026.docx",
+               extracted_text="Enterprise pricing is usage-based." * 10,
+               uploaded_at="2026-07-01T00:00:00+00:00")
+    for ext, title, date in (
+        ("old", "pricing_2025.docx", "2025-06-01T00:00:00+00:00"),
+        ("new", "pricing_2026.docx", "2026-07-01T00:00:00+00:00"),
+    ):
+        _seed_catalog_row(db, provider="uploads", external_id=ext, title=title,
+                          source_name="Pricing", summary="How enterprise is priced.",
+                          doc_date=date)
+    catalog_candidates([
+        _candidate(provider="uploads", external_id="new", title="pricing_2026.docx",
+                   doc_date="2026-07-01T00:00:00+00:00", score=0.05),
+        _candidate(provider="uploads", external_id="old", title="pricing_2025.docx",
+                   doc_date="2025-06-01T00:00:00+00:00", score=0.04),
+    ])
+
+    block, manifest = document_grounding(_CID, "how do we price enterprise?")
+
+    loaded = {m["file_id"] for m in manifest if m["loaded"]}
+    assert loaded == {"old", "new"}
+    assert "Enterprise pricing is per seat." in block
+    assert "Enterprise pricing is usage-based." in block
+    # Dates are what let the model reason about which supersedes which.
+    assert "2025-06-01" in block and "2026-07-01" in block
+
+
+# T5 — Stage N still works.
+def test_naming_the_file_still_loads_it_without_any_catalog(
+    isolated_settings, catalog_candidates
+):
+    """Stage N is unchanged and does not depend on the catalog at all: naming
+    a document must keep working when the catalog is empty, unreachable, or
+    has never been populated for this tenant."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _, file_id, text = _seed_incident_fixture(db)
+    catalog_candidates([])
+
+    _, manifest = document_grounding(
+        _CID, "What does the Sprntly_vs_Productboard_Comparison document say?"
+    )
+
+    entry = next(m for m in manifest if m["file_id"] == file_id)
+    assert entry["loaded"] is True
+    assert entry["match"] == "named"
+    # Named matches carry no rank — they did not come from the ranking.
+    assert entry["rank"] is None
+
+
+# T6 — conversation scope outranks workspace scope on equal match.
+def test_conversation_scoped_document_outranks_workspace_on_equal_score(
+    isolated_settings, catalog_candidates
+):
+    """The SQL orders by fused score alone, so this precedence is applied in
+    Python and asserted here rather than assumed from the query."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    catalog_candidates([
+        # Workspace row arrives FIRST from the ranking; equal score.
+        _candidate(provider="uploads", external_id="workspace-doc",
+                   title="workspace.docx", score=0.05),
+        _candidate(provider="chat_attachment", external_id="turn:9:attachment:0",
+                   title="attached.docx", score=0.05, conversation_id=42),
+    ])
+
+    ordered = ask_runner._topical_candidates(
+        _CID, "pricing", question_embedding=None,
+        conversation_id=42, user_id="user-x", exclude_external_ids=set(),
+    )
+
+    assert [c["external_id"] for c in ordered] == [
+        "turn:9:attachment:0", "workspace-doc",
+    ]
+
+
+def test_a_better_workspace_match_still_beats_a_conversation_document(
+    isolated_settings, catalog_candidates
+):
+    """The tie-break is a TIE-break: session scope wins when the match is
+    equal, and must not let a weakly-matching attachment displace a document
+    that genuinely answers the question."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    catalog_candidates([
+        _candidate(provider="uploads", external_id="workspace-doc",
+                   title="workspace.docx", score=0.09),
+        _candidate(provider="chat_attachment", external_id="turn:9:attachment:0",
+                   title="attached.docx", score=0.01, conversation_id=42),
+    ])
+
+    ordered = ask_runner._topical_candidates(
+        _CID, "pricing", question_embedding=None,
+        conversation_id=42, user_id="user-x", exclude_external_ids=set(),
+    )
+
+    assert [c["external_id"] for c in ordered] == [
+        "workspace-doc", "turn:9:attachment:0",
+    ]
+
+
+# T7 — embedding unavailable degrades to lexical-only, and it is recorded.
+def test_missing_embedding_degrades_to_lexical_and_is_recorded(
+    isolated_settings, monkeypatch
+):
+    """A zero vector is worse than no vector — in cosine kNN it ranks
+    arbitrarily — so the accessor drops it. The point of this test is that the
+    CALLER still surfaces that the degradation happened: the system keeps
+    answering, slightly worse, and without this nothing in the record says
+    why.
+    """
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+
+    # Exactly what embed_texts returns with no API key configured.
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts", lambda texts, **kw: [[0.0] * 1536]
+    )
+
+    vec, degraded = ask_runner._question_embedding(_CID, "anything")
+
+    assert vec is None
+    assert degraded is True
+
+
+def test_a_usable_embedding_is_not_reported_as_degraded(isolated_settings, monkeypatch):
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts", lambda texts, **kw: [[0.02] * 1536]
+    )
+
+    vec, degraded = ask_runner._question_embedding(_CID, "anything")
+
+    assert vec is not None and degraded is False
+
+
+def test_degraded_embedding_is_written_to_the_decision_log(
+    isolated_settings, fake_llm, monkeypatch
+):
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="notes.txt", extracted_text="body")
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts", lambda texts, **kw: [[0.0] * 1536]
+    )
+    logged = {}
+    monkeypatch.setattr(
+        "app.graph.decision_log.log_agent_decision",
+        lambda **kw: logged.update(kw),
+    )
+
+    ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert logged["factors"]["retrieval_embedding_degraded"] is True
+
+
+# T8 — catalog read failure degrades Stage T only.
+def test_catalog_failure_leaves_stage_n_and_the_answer_intact(
+    isolated_settings, fake_llm, monkeypatch
+):
+    """A catalog outage costs topical selection and nothing else. Stage N
+    keeps working off `list_company_files`, the index still renders, the
+    answer is still produced — and the deleted ratio is NOT resurrected as a
+    fallback, because the fallback for "cannot rank" is "do not rank", not
+    "guess from the filename".
+    """
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _, file_id, text = _seed_incident_fixture(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    def _boom(*a, **k):
+        raise RuntimeError("catalog is down")
+
+    monkeypatch.setattr(ask_runner, "find_catalog_candidates", _boom)
+    monkeypatch.setattr(ask_runner, "list_catalog_documents", _boom)
+
+    # Naming the document still loads it.
+    block, manifest = ask_runner.document_grounding(
+        _CID, "What does the Sprntly_vs_Productboard_Comparison document say?"
+    )
+    assert next(m for m in manifest if m["file_id"] == file_id)["loaded"] is True
+    assert text[:60] in block
+
+    # And a topical question simply loads nothing, rather than erroring.
+    _, topical_manifest = ask_runner.document_grounding(
+        _CID, "give me a summary of the product board vs sprntly discussion"
+    )
+    assert all(not m["loaded"] for m in topical_manifest)
+
+    # The answer is still produced.
+    payload = ask_runner.compose_ask_answer(
+        "asurion", "anything at all", enterprise_id=_CID
+    )
+    assert payload["answer"] == "x"
+
+
+# T9 — the index line carries every field selection is judged on.
+def test_index_line_carries_summary_topics_date_scope_and_loaded_marker(
+    isolated_settings, catalog_candidates
+):
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a", name="Research")
+    _seed_file(db, "f1", src, filename="retention.docx", extracted_text="body",
+               uploaded_at="2026-08-02T10:00:00+00:00")
+    _seed_catalog_row(
+        db, provider="uploads", external_id="f1", title="retention.docx",
+        source_name="Research",
+        summary="Where and when customers churn on the annual plan.",
+        topics=["churn", "retention"],
+    )
+    catalog_candidates([])
+
+    block, _ = document_grounding(_CID, "unrelated question")
+
+    line = next(l for l in block.splitlines() if l.startswith("- retention.docx"))
+    assert "retention.docx" in line                      # filename
+    assert "source: Research" in line                    # source + scope tag
+    assert "2026-08-02" in line                          # date
+    assert "Where and when customers churn" in line      # summary
+    assert "Topics: churn, retention." in line           # topics
+    assert "[not loaded for this question]" in line      # loaded-marker
+
+
+def test_loaded_marker_flips_for_a_selected_document(
+    isolated_settings, catalog_candidates
+):
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _, file_id, _ = _seed_incident_fixture(db)
+    catalog_candidates([])
+
+    block, _ = document_grounding(
+        _CID, "What does the Sprntly_vs_Productboard_Comparison document say?"
+    )
+
+    line = next(
+        l for l in block.splitlines()
+        if l.startswith("- Sprntly_vs_Productboard_Comparison.docx")
+    )
+    assert "[loaded for this question]" in line
+
+
+# T10 — the partial-index contract, both directions.
+def test_a_complete_index_still_permits_an_absence_claim(isolated_settings):
+    """The other half of the partial-index rule, and the one that is easy to
+    lose: below the cap the index IS the complete inventory, so it must not be
+    marked partial — otherwise the model is forbidden from ever saying a
+    document does not exist, which was the original incident's failure mode
+    pointing the other way."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="only_one.txt")
+
+    block, _ = document_grounding(_CID, "unrelated")
+
+    assert "PARTIAL" not in block
+    assert "may still exist" not in block
+
+
+# T11 — one embedding per ask, shared by both consumers.
+def test_the_question_is_embedded_once_and_shared_by_both_consumers(
+    isolated_settings, fake_llm, monkeypatch
+):
+    """Document selection runs BEFORE knowledge-graph retrieval, and on
+    PRD-grounded asks KG retrieval never runs at all — so neither consumer can
+    produce the vector for the other. It is computed once at the top of the
+    ask and threaded into both; this test is what stops that regressing into
+    two embedding calls per question.
+    """
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="notes.txt", extracted_text="body")
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls = []
+
+    def _embed(texts, **kw):
+        calls.append(texts)
+        return [[0.03] * 1536 for _ in texts]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _embed)
+
+    seen = {}
+    real_grounding = ask_runner.document_grounding
+
+    def _spy_grounding(eid, q, conversation_id=None, *, question_embedding=None):
+        seen["documents"] = question_embedding
+        return real_grounding(
+            eid, q, conversation_id, question_embedding=question_embedding
+        )
+
+    monkeypatch.setattr(ask_runner, "document_grounding", _spy_grounding)
+
+    def _spy_retrieve(facade, eid, q, **kw):
+        seen["kg"] = kw.get("question_embedding")
+        return {"empty": True}
+
+    monkeypatch.setattr("app.graph.retrieval.retrieve_context", _spy_retrieve)
+
+    ask_runner.compose_ask_answer("asurion", "how do we price?", enterprise_id=_CID)
+
+    assert len(calls) == 1, f"expected one embedding call per ask, got {len(calls)}"
+    assert seen["documents"] is not None
+    assert seen["documents"] == seen["kg"], (
+        "both consumers must receive the SAME vector, not two of their own"
+    )
+
+
+def test_retrieve_context_still_embeds_for_callers_that_pass_nothing(
+    isolated_settings, monkeypatch
+):
+    """The sharing is opt-in: every other caller of `retrieve_context` keeps
+    the self-contained behaviour it relies on."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    calls = []
+
+    def _embed(texts, **kw):
+        calls.append(texts)
+        return [[0.03] * 1536 for _ in texts]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _embed)
+
+    retrieve_context(GraphFacade(), _CID, "a question")
+
+    assert len(calls) == 1
+
+
+# T12 — the prompt clauses this change depends on, as a property.
+def test_addendum_carries_the_conflict_and_ignore_irrelevant_clauses():
+    """Both clauses are load-bearing for a no-floor selection design: without
+    ignore-irrelevant, generous loading turns into padded answers; without the
+    conflict clause, two disagreeing documents are silently resolved to
+    whichever the model read first."""
+    from app.prompts import ASK_SYSTEM_DOCUMENTS_ADDENDUM as a
+
+    # Ignore-irrelevant.
+    assert "IGNORE the ones that don't" in a
+    assert "never pad an answer" in a
+    # Conflict.
+    assert "CONFLICTING claims" in a
+    assert "name both documents" in a
+    assert "Never silently answer from one side of a conflict." in a
+    # A summary is a routing hint, not loaded content.
+    assert "ROUTING HINT" in a
+    # The partial-index existence rule.
+    assert "PARTIAL" in a

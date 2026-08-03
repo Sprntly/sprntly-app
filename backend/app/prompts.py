@@ -578,9 +578,9 @@ ASK_SYSTEM_DOCUMENTS_ADDENDUM = """
 You also have an "UPLOADED DOCUMENTS" section above your source material. It \
 holds two different things and you must not confuse them:
 
-- The "Index" lists EVERY document this workspace has uploaded. It is the \
-complete inventory unless the section itself says it was truncated. Whether a \
-document exists is settled by this index and by nothing else.
+- The "Index" lists EVERY document this workspace has uploaded, unless the \
+list itself says it is PARTIAL. Each entry carries a one-line summary, its \
+topics, and whether its contents were loaded for this question.
 - "Contents loaded for this question" carries the full text of only the \
 documents selected for THIS question. Most uploaded documents will not be \
 there, and that says nothing about whether they exist.
@@ -589,13 +589,18 @@ Rules, in order:
 1. If a document appears in the Index, it EXISTS. Never reply that the \
 workspace has no such document, never say it is not in any connected source, \
 and never suggest connecting another integration to find it.
-2. If a document appears in the Index but NOT under "Contents loaded", say \
-plainly that you have the document but did not load its contents for this \
-question, and invite the user to ask about it directly. Do not guess what it \
-says and do not describe it from its filename.
+2. An entry marked [not loaded for this question] is one you have NOT read. \
+Its one-line summary and topics are a ROUTING HINT — enough to say what the \
+document is about and to offer it, never enough to answer FROM. Say plainly \
+that you have the document but did not load its contents, and invite the user \
+to ask about it directly. Never present a summary as if you had read the \
+document, and never describe its contents from its filename or its summary.
 3. Only when a document is absent from the Index may you say the workspace \
-has not uploaded it. Say it is not among the uploaded documents — do not \
-blame a specific integration whose contents you cannot see.
+has not uploaded it, AND only when the Index is complete. Say it is not among \
+the uploaded documents — do not blame a specific integration whose contents \
+you cannot see. If the Index says it is PARTIAL, never claim a document does \
+not exist: say it was not among those most relevant to this question, and \
+offer to look for it by name.
 4. When you use a loaded document, attribute it inline by its exact filename, \
 for example `[Source: Q3_pricing_research.pdf]`. Use the filename exactly as \
 the Index spells it; never invent a document name, an id, or a URL.
@@ -604,7 +609,18 @@ of "(source: {name}, uploaded {date})". These exist exactly like workspace \
 uploads for the purposes of rules 1-3 above — they are not absent, and never \
 say the workspace hasn't uploaded one. Describe them as attached by the user \
 in this conversation, not as uploaded by the workspace. Rule 4's filename \
-attribution applies to them unchanged."""
+attribution applies to them unchanged.
+6. Documents are selected for you automatically, by topic, so a loaded \
+document may simply not bear on the question. IGNORE the ones that don't. Do \
+not summarise a loaded document just because it is there, and never pad an \
+answer with one. If you checked the loaded documents and none of them covers \
+the question, say so and name what you checked.
+7. When two loaded documents — or a loaded document and the live context — \
+make CONFLICTING claims, say so explicitly: name both documents, state what \
+each one claims, and give their dates. Prefer the newer only where one \
+clearly supersedes the other (same kind of document, later date); otherwise \
+present both and let the user decide. Never silently answer from one side of \
+a conflict."""
 
 
 # Post-corpus user template used when a KG context section is composed in.

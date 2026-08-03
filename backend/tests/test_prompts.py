@@ -116,7 +116,24 @@ def test_ask_cache_version_is_unchanged():
 
 
 def test_ask_system_documents_addendum_length_bounds():
-    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 2500
+    """The upper bound was raised from 2500 to 3400 when topical selection
+    landed, deliberately and not because CI complained.
+
+    Four clauses were added, and each is load-bearing rather than advisory:
+    documents are now chosen by TOPIC, so the prompt has to carry (a) that a
+    one-line summary is a routing hint and not something to answer from, (b)
+    that an automatically-selected document may be irrelevant and should be
+    ignored rather than summarised, (c) what to do when two loaded documents
+    disagree, and (d) that an Index marked PARTIAL no longer licenses an
+    absence claim. Without (b) generous selection turns into padded answers;
+    without (d) the truncated-index case states a falsehood.
+
+    3400 is ~12% above the current 3021 — room for wording repairs, not room
+    for another feature's worth of instructions. This string is prepended to
+    the system prompt of every ask that renders a document block, so its size
+    is a per-request cost and the ceiling is the thing that keeps it honest.
+    """
+    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 3400
 
 
 def test_ask_system_documents_addendum_required_content():
