@@ -29,19 +29,18 @@ RECORDS = [
      "tier": "h", "vendor_reported": False, "classification": ""},
 ]
 
+# The synthesis call's output. It used to be ~40 fields filling
+# `competitive_intel_report.SCHEMA`, which a deterministic template rendered
+# into HTML with two inline SVG radars. Template and schema are both deleted:
+# the review is MARKDOWN, and only the two fields with a machine reader kept
+# their structure — `next_state` (what lets the NEXT run be a cheap Scan) and
+# `metadata` (what follow-up query mode is answered from).
+REVIEW_MD = (
+    "## Where Acme stands\n\nTwo rivals are attacking the same seam.\n\n### Launch log\n- Globex shipped SSO (2026-05-01, net-new)\n\n### Recommendations\n1. Ship provenance by default"
+)
+
 REPORT_DATA = {
-    "title": "Where Acme stands",
-    "opening": [{"lead": "Two rivals are attacking the same seam.", "text": "…"}],
-    "radars": [], "radar_read": [],
-    "scale_rows": [], "scale_note": "", "scale_read": "",
-    "position_x_labels": [], "position_rows": [], "position_read": "",
-    "feature_competitors": [], "feature_rows": [], "feature_read": "",
-    "launch_log": [], "threats": [],
-    "threat_callout": {"label": "", "paragraphs": []},
-    "sentiment_rows": [], "competitor_praise": [], "our_quotes": [],
-    "our_themes": [], "sentiment_read": "", "not_sourced": "",
-    "review_sections": [], "recommendations": [], "carried_decisions": [],
-    "sources": [], "meta_line": "Window Jan – Jul 2026",
+    "answer": REVIEW_MD,
     "metadata": {"window": "Jan – Jul 2026", "mode": "review"},
     "next_state": {"competitors": {"Globex": {}}, "our_state": {},
                    "decisions": [{"id": "d1", "recommendation": "Ship X",
@@ -177,7 +176,7 @@ def test_baseline_run_is_review_mode_and_omits_every_diff_section(monkeypatch):
     # The ANALYSE prompt tells the model there is nothing to diff against.
     prompt = calls[0]["input"]
     assert "NO PRIOR STATE EXISTS" in prompt
-    assert "OMIT EVERY DIFF SECTION" in prompt
+    assert "OMIT EVERY DIFF" in prompt
     # ...and does NOT hand it a Scan/Review diff instruction.
     assert "MODE: SCAN" not in prompt
     assert "=== PRIOR STATE" in prompt and "{}" in prompt
@@ -190,12 +189,21 @@ def test_baseline_run_is_review_mode_and_omits_every_diff_section(monkeypatch):
     assert saves[0]["html"] == out["answer"]
 
 
-def test_baseline_report_carries_no_diff_or_carry_forward_markup(monkeypatch):
-    _full(monkeypatch, latest=None)
-    out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
-    assert out["answer"].startswith("<!DOCTYPE html>")
-    assert "Carried forward from the last run" not in out["answer"]
-    assert "vs prior run" not in out["answer"]
+def test_baseline_omits_diff_instructions_from_the_prompt(monkeypatch):
+    """The BASELINE guarantee moved from the renderer to the prompt.
+
+    It used to be asserted on rendered markup ("Carried forward from the last
+    run" absent from the HTML), which a deterministic template controlled. The
+    template is gone, so the check is made where the guarantee now actually
+    lives: the synthesis prompt must instruct the model to omit every diff and
+    must NOT hand it a Scan/Review diff instruction."""
+    calls = []
+    _full(monkeypatch, latest=None, calls=calls)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    prompt = calls[0]["input"]
+    assert "OMIT EVERY DIFF" in prompt
+    assert "do not write any sentence about what" in prompt
+    assert "MODE: SCAN" not in prompt and "MODE: REVIEW" not in prompt
 
 
 # ── 2. Scan diff over a stored run ───────────────────────────────────────────
@@ -218,15 +226,20 @@ def test_scan_mode_feeds_prior_state_and_prior_decisions(monkeypatch):
     assert "keeps its prior value" in prompt
 
 
-def test_scan_report_renders_carried_recommendations_with_status(monkeypatch):
-    data = dict(REPORT_DATA, carried_decisions=[
-        {"recommendation": "Provenance by default", "status": "dropped",
-         "outcome_note": "Superseded by the platform-wide label"}])
-    _full(monkeypatch, latest=dict(PRIOR_RUN), data=data)
-    out = ci.answer(enterprise_id="e1", question="monthly competitor scan")
-    assert "Carried forward from the last run" in out["answer"]
-    assert "dropped" in out["answer"]
-    assert "Superseded by the platform-wide label" in out["answer"]
+def test_scan_is_told_to_carry_prior_decisions_forward(monkeypatch):
+    """Carry-forward moved from the template to the prompt, same as the
+    baseline case above: the model is HANDED the prior decisions and told to
+    carry each one forward with its status and what happened."""
+    calls = []
+    _full(monkeypatch, latest=dict(PRIOR_RUN), calls=calls)
+    ci.answer(enterprise_id="e1", question="monthly competitor scan")
+    prompt = calls[0]["input"]
+    system = calls[0]["system"]
+    assert "=== PRIOR DECISIONS (carry every one forward with status) ===" in prompt
+    # The prior decision itself really is in the prompt, not just its header.
+    assert "Ship X" in prompt
+    assert "Carry every prior decision forward with its status" in system
+    assert "a dropped item records why" in system
 
 
 def test_explicit_full_study_forces_review_even_with_prior_state(monkeypatch):
@@ -307,7 +320,7 @@ def test_qualified_collective_falls_back_to_the_roster(monkeypatch):
                     question="where do we stand versus the European market?")
     assert saves[0]["competitor_set"] == ["Globex", "Initech"]
     assert "European market" not in saves[0]["competitor_set"]
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 def test_user_named_set_wins_and_is_never_written_to_the_roster(monkeypatch):
@@ -357,7 +370,7 @@ def test_roster_read_failure_degrades_to_discovery(monkeypatch):
     def boom(_eid): raise RuntimeError("db down")
     monkeypatch.setattr(comp, "competitor_roster", boom)
     out = ci.answer(enterprise_id="e1", question="competitive scan")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 # ── 4. Web unavailability and partial capture failure ────────────────────────
@@ -373,7 +386,7 @@ def test_web_search_unavailable_never_reports_from_memory(monkeypatch):
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
     assert "couldn't reach the web" in out["answer"]
     assert "won't build a competitive review from memory" in out["answer"]
-    assert not out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] != REVIEW_MD
 
 
 def test_nothing_sourced_is_honest_rather_than_empty(monkeypatch):
@@ -921,19 +934,30 @@ def test_analyse_prompt_carries_the_integrity_contract(monkeypatch):
     _full(monkeypatch, calls=calls)
     ci.answer(enterprise_id="e1", question="competitive intelligence report")
     system = calls[0]["system"]
-    # the schema-level guardrail, restated so the model knows the consequence
-    assert "EVERY quantitative field is {value, source, date, tier}" in system
-    assert "prints \"unknown\"" in system
-    # the skill's required final pass
+    # EVERY rule below survived the deletion of the report schema and template.
+    # The template used to ENFORCE the unknown rule (it printed a value only
+    # when a named source and a valid tier were both present), so the prompt
+    # could describe it as a consequence; nothing renders now, so the model
+    # carries it and the prompt states it as an instruction.
+    assert "carries its source, its date and its tier" in system
+    assert "written as \"unknown\"" in system
+    # the required final pass
     assert "FINAL SELF-AUDIT" in system
-    # "None" is written when true; a removes/none threat must produce a rec
+    # "none" is written when true; a removes/none threat must produce a rec
     assert "Write defence \"none\" when" in system
     assert "MUST produce a recommendation" in system
-    # sections are additive — the radar never replaces a benchmark
-    assert "ADDITIVE, never substitutive" in system
-    assert "does NOT replace either of the other" in system
+    # coverage is additive — the aggregate summary never replaces a benchmark
+    assert "additively" in system
+    assert "never let that summary stand in for either of the other two" in system
+    # ranges stay ranges
+    assert "never quote a midpoint" in system
+    # silence is a finding
+    assert "silence\nis a finding" in system or "silence is a finding" in system
     # untrusted web text
     assert "never instructions to you" in system
+    # ...and it must NOT still describe the deleted renderer.
+    assert "fixed template renders" not in system
+    assert "you do NOT write HTML" not in system
 
 
 def test_analyse_call_binds_the_skill_schema_and_streams(monkeypatch):
@@ -943,10 +967,15 @@ def test_analyse_call_binds_the_skill_schema_and_streams(monkeypatch):
     kw = calls[0]
     assert kw["skill"] == ci.CIR_SKILL
     assert kw["model"] == ci.ANSWER_MODEL          # sonnet, per the tiering note
-    assert kw["json_schema"]["properties"]["scale_rows"]
     assert kw["long_output"] is True
     assert kw["max_tokens"] == 16000
     assert kw["purpose"] == "competitive_intel_report"
+    # The schema is the review plus the two fields with a machine reader, and
+    # nothing else — the ~40-field report shape is gone. `answer` leads so the
+    # review's tokens exist before the rollup summarising it is written.
+    props = list(kw["json_schema"]["properties"])
+    assert props == ["answer", "next_state", "metadata"]
+    assert set(kw["json_schema"]["required"]) == set(props)
 
 
 def test_entrant_bucket_is_demanded_even_when_the_user_named_the_set(monkeypatch):
@@ -959,11 +988,25 @@ def test_entrant_bucket_is_demanded_even_when_the_user_named_the_set(monkeypatch
 
 
 def test_misshaped_analyse_output_degrades_gracefully(monkeypatch):
-    _full(monkeypatch, data=None)
-    _patch_analyse(monkeypatch, data={"title": "x", "scale_rows": "prose",
-                                      "threats": ["a threat"], "metadata": "nope"})
+    """A `metadata` that is not a dict, and a `next_state` that is missing, must
+    not take the answer down — they are persisted defensively as {}."""
+    saves = []
+    _full(monkeypatch, data=None, saves=saves)
+    _patch_analyse(monkeypatch, data={"answer": "## A review", "metadata": "nope"})
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == "## A review"
+    assert saves[0]["metadata"] == {}
+    assert saves[0]["state"] == {}
+
+
+def test_empty_review_text_is_a_graceful_message(monkeypatch):
+    """An empty `answer` is a failed synthesis, not a blank report. Without this
+    the user would get an empty chat bubble AND a persisted run claiming
+    success — which would then make the NEXT run a cheap Scan off nothing."""
+    _full(monkeypatch)
+    _patch_analyse(monkeypatch, data={"answer": "   ", "metadata": {}, "next_state": {}})
+    out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    assert "hit an error synthesizing the review" in out["answer"]
 
 
 def test_non_dict_analyse_output_is_a_graceful_message(monkeypatch):
@@ -1086,7 +1129,7 @@ def test_report_shaped_ask_does_not_read_the_stored_run_for_query_mode(monkeypat
     monkeypatch.setattr(db, "latest_competitive_intel_run", _latest)
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
     assert reads["n"] == 1
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 # ── 8. Best-effort persistence (works with the table absent) ────────────────
@@ -1102,13 +1145,13 @@ def test_absent_runs_table_degrades_to_review_and_still_answers(monkeypatch):
     monkeypatch.setattr(db, "latest_competitive_intel_run", _boom)
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
     assert out["_skill_mode"] == ci.MODE_REVIEW
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 def test_save_failure_never_breaks_the_answer(monkeypatch):
     _full(monkeypatch, save_error=True)
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 def test_query_mode_read_failure_falls_through_to_a_full_run(monkeypatch):
@@ -1191,7 +1234,7 @@ def test_synthesis_phase_is_not_published_when_capture_found_nothing(monkeypatch
 def test_pipeline_runs_unchanged_without_a_phase_sink(monkeypatch):
     _full(monkeypatch, latest=None)
     out = ci.answer(enterprise_id="e1", question="run a competitive review")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
 
 
 # ── Routing wire (qa_agent divert) ──────────────────────────────────────────
@@ -1282,7 +1325,7 @@ def test_claim_failure_still_persists_the_finished_run(monkeypatch):
     saves = []
     _full(monkeypatch, claim_error=True, saves=saves)
     out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REVIEW_MD
     assert saves and "run_id" not in saves[0]      # fell back to the insert
 
 

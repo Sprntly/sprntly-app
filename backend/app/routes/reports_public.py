@@ -115,10 +115,10 @@ def _resolve_shared(token: str) -> dict:
 def _projection(row: dict) -> PublicReport:
     """Narrow a report row to the public four fields.
 
-    `kind` is the humanised skill label (the same helper the skills catalog uses),
-    not the raw skill id — a visitor has no use for an internal identifier.
+    `kind` is the humanised skill label (`app.labels`), not the raw skill id —
+    a visitor has no use for an internal identifier.
     """
-    from app.skills.catalog import humanize_label
+    from app.labels import humanize_label
 
     return PublicReport(
         title=row.get("title") or "Report",

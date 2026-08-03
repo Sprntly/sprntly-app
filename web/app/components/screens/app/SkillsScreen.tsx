@@ -1,22 +1,22 @@
 "use client"
 
-// Skills · the PM-skill gallery.
+// Skills · the company's own skill library.
 //
-// Top-level surface listing every skill the chat can route to (GET
-// /v1/ask/skills — the routable manifest computed from backend/skills/).
+// Top-level surface listing the CUSTOM skills this company uploaded (PRD 1854
+// — .md/.zip files, company-scoped so every workspace shares one library).
 // Clicking a card hands off to the chat via setPendingOndemandDraft with the
 // skill's `/trigger ` pre-filled, so the user lands in a focused thread ready
 // to type their specifics; the backend's slash fast-path (qa_agent) then pins
-// that skill with confidence 1.0 on send.
+// that skill with confidence 1.0 on send. That fast-path is now CUSTOM-ONLY,
+// which is exactly what this screen lists.
 //
-// Two listings render here: the built-in catalog (grouped by the backend
-// catalog's category) and the company's CUSTOM skills (PRD 1854 — uploaded
-// .md/.zip files, company-scoped so every workspace shares one library).
-// "Create or upload skill" opens the upload modal (UploadSkillModal → POST
-// /v1/skills); a created skill appears in the "Custom skills" section
-// immediately, byline = uploader. Built-in cards keep the Sprntly byline.
-// The two fetches fail independently: a custom-skills error never blanks the
-// built-in catalog — it shows an inline notice instead.
+// The vendored BUILT-IN catalog used to render here as a second, grouped
+// listing off GET /v1/ask/skills. It is gone: the library is down to nine
+// method docs, each bound by name from the one pipeline that needs it, and a
+// chat turn can invoke none of them — so every card was a trigger that would
+// have done nothing. "Create or upload skill" opens the upload modal
+// (UploadSkillModal → POST /v1/skills); a created skill appears here
+// immediately, byline = uploader.
 //
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
@@ -24,15 +24,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import {
-  IconChartLine,
-  IconCompass,
-  IconFileText,
-  IconListCheck,
   IconPlus,
-  IconRocket,
-  IconSearch,
-  IconSparkles,
-  IconSpeakerphone,
   IconTrash,
   IconUser,
   IconWand,
@@ -41,33 +33,13 @@ import { AppLayout } from "./AppLayout"
 import { UploadSkillModal } from "../../shared/UploadSkillModal"
 import { useNavigation } from "../../../context/NavigationContext"
 import {
-  askApi,
   skillsApi,
   type CustomSkillInfo,
-  type SkillInfo,
 } from "../../../lib/api"
 
-// Backend category → display order, tagline, and icon. Categories are owned by
-// the backend catalog (app/skills/catalog.py); this map only decorates them.
-// A category the backend adds later still renders (appended, wand icon) — it
-// just won't have a tagline until listed here.
-const CATEGORY_DISPLAY: {
-  id: string
-  tagline: string
-  icon: React.ComponentType<{ size?: number | string }>
-}[] = [
-  { id: "Discovery & Research", tagline: "figuring out what's worth building", icon: IconSearch },
-  { id: "Strategy & Vision", tagline: "deciding where to play and how to win", icon: IconCompass },
-  { id: "Documentation & Specification", tagline: "writing it down so it ships right", icon: IconFileText },
-  { id: "Prioritization & Decision", tagline: "choosing the next bet with a clear head", icon: IconListCheck },
-  { id: "Metrics, Experimentation & Growth", tagline: "measuring what matters and growing it", icon: IconChartLine },
-  { id: "Delivery & Operations", tagline: "shipping it and keeping it running", icon: IconRocket },
-  { id: "Stakeholder & Communication", tagline: "keeping everyone aligned and informed", icon: IconSpeakerphone },
-]
-
-/** First sentence of a skill's frontmatter description, minus the router
- *  guidance tail ("Use when the user says …"). The catalog descriptions are
- *  written for the LLM router, so cards show just the lead. Pure → testable. */
+/** First sentence of a skill's description, minus the routing-guidance tail
+ *  ("Use when the user says …"). Descriptions are written for the classifier,
+ *  so cards show just the lead. Pure → testable. */
 export function skillBlurb(description: string, label: string): string {
   const d = (description || "").trim()
   if (!d) return `Run the ${label} workflow`
@@ -77,40 +49,9 @@ export function skillBlurb(description: string, label: string): string {
   return (sentence ? sentence[0] : head).trim().replace(/[.!?]+$/, "")
 }
 
-export type SkillGroup = {
-  category: string
-  tagline: string
-  icon: React.ComponentType<{ size?: number | string }>
-  skills: SkillInfo[]
-}
-
-/** Group skills by backend category in CATEGORY_DISPLAY order; categories the
- *  map doesn't know yet are appended alphabetically rather than dropped. */
-export function groupSkills(skills: SkillInfo[]): SkillGroup[] {
-  const byCategory = new Map<string, SkillInfo[]>()
-  for (const s of skills) {
-    const key = s.category || "Other"
-    const list = byCategory.get(key)
-    if (list) list.push(s)
-    else byCategory.set(key, [s])
-  }
-  const groups: SkillGroup[] = []
-  for (const c of CATEGORY_DISPLAY) {
-    const list = byCategory.get(c.id)
-    if (!list) continue
-    byCategory.delete(c.id)
-    groups.push({ category: c.id, tagline: c.tagline, icon: c.icon, skills: list })
-  }
-  for (const [category, list] of [...byCategory.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    groups.push({ category, tagline: "", icon: IconWand, skills: list })
-  }
-  return groups
-}
-
 /** Pure presentational view — all state arrives as props, so it renders
  *  identically in a static-markup test (no API, no effects). */
 export function SkillsView({
-  groups,
   customSkills,
   customError,
   loading,
@@ -124,10 +65,9 @@ export function SkillsView({
   onDeleteRequest,
   onDeleteConfirm,
 }: {
-  groups: SkillGroup[]
   /** The company's uploaded skills (already search-filtered by the caller). */
   customSkills: CustomSkillInfo[]
-  /** Non-blocking: custom-skills fetch failed but built-ins still render. */
+  /** Inline notice when the fetch failed after a list was already on screen. */
   customError: string | null
   loading: boolean
   error: string | null
@@ -270,47 +210,13 @@ export function SkillsView({
 
         {loading ? (
           <p className="skl-placeholder">Loading skills…</p>
-        ) : groups.length === 0 && customSkills.length === 0 ? (
+        ) : customSkills.length === 0 ? (
           <p className="skl-placeholder">
             {query.trim()
               ? `No skills match “${query.trim()}”.`
-              : "No skills available."}
+              : "No skills yet — upload one to get started."}
           </p>
-        ) : (
-          groups.map((g, i) => (
-            <section key={g.category} className="skl-group" aria-label={g.category}>
-              <div className="skl-group-head">
-                <h2 className="skl-group-title">
-                  {i + 1} · {g.category}
-                </h2>
-                {g.tagline && <span className="skl-group-tag">{g.tagline}</span>}
-              </div>
-              <div className="skl-grid">
-                {g.skills.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className="skl-card"
-                    onClick={() => onInvoke(s)}
-                    title={`${s.trigger} — start a thread with this skill`}
-                  >
-                    <span className="skl-card-icon">
-                      <g.icon size={16} />
-                    </span>
-                    <span className="skl-card-t">{s.label}</span>
-                    <span className="skl-card-d">{skillBlurb(s.description, s.label)}</span>
-                    <span className="skl-card-foot">
-                      <span className="skl-by">
-                        <IconSparkles size={11} />
-                        Sprntly
-                      </span>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ))
-        )}
+        ) : null}
       </div>
     </div>
   )
@@ -319,7 +225,6 @@ export function SkillsView({
 function SkillsScreenContent() {
   const { goTo, setPendingOndemandDraft, showToast } = useNavigation()
   const searchParams = useSearchParams()
-  const [skills, setSkills] = useState<SkillInfo[]>([])
   const [customSkills, setCustomSkills] = useState<CustomSkillInfo[]>([])
   const [customError, setCustomError] = useState<string | null>(null)
   const [deletePendingId, setDeletePendingId] = useState<string | null>(null)
@@ -339,62 +244,37 @@ function SkillsScreenContent() {
     if (qParam != null) setQuery(qParam)
   }, [qParam])
 
+  // ONE fetch now. The built-in catalog this screen used to list alongside the
+  // uploads is gone — those skills are bound by name from their own pipelines
+  // and a chat turn cannot invoke any of them, so every card would have been a
+  // trigger that does nothing. `error` / `loading` stay: they now describe this
+  // fetch, and `customError` remains for the case where it fails after a
+  // successful first load.
   useEffect(() => {
     let cancelled = false
-    // Independent fetches: a custom-skills failure must not blank the built-in
-    // catalog (and vice versa) — each surfaces its own inline error.
-    askApi
-      .skills()
-      .then((r) => {
-        if (cancelled) return
-        setSkills(r.skills)
-        setError(null)
-      })
-      .catch((e) => {
-        if (cancelled) return
-        setError(e instanceof Error ? e.message : "Could not load skills")
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
     skillsApi
       .list()
       .then((r) => {
         if (cancelled) return
         setCustomSkills(r.skills)
         setCustomError(null)
+        setError(null)
       })
       .catch((e) => {
         if (cancelled) return
-        setCustomError(e instanceof Error ? e.message : "Could not load custom skills")
+        const message = e instanceof Error ? e.message : "Could not load custom skills"
+        setCustomError(message)
+        setError(message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
       })
     return () => {
       cancelled = true
     }
   }, [])
 
-  // Search filters BEFORE grouping, so empty categories drop out and the
-  // section numbering re-flows over what's visible. Matching runs over the
-  // full router description (not just the card blurb) — searching "RACI"
-  // should surface stakeholder-map even though its blurb doesn't say it.
-  const groups = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    // Every built-in card stays, including one whose name a custom skill
-    // shares: an upload no longer replaces a built-in, so both still run —
-    // under different triggers, which is what the two cards show.
-    const visible = !q
-      ? skills
-      : skills.filter(
-          (s) =>
-            s.label.toLowerCase().includes(q) ||
-            s.trigger.toLowerCase().includes(q) ||
-            s.description.toLowerCase().includes(q) ||
-            s.category.toLowerCase().includes(q),
-        )
-    return groupSkills(visible)
-  }, [skills, query])
-
-  // Custom skills join the same search — name, trigger, or description.
+  // Custom skills search — name, trigger, or description.
   const visibleCustom = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return customSkills
@@ -457,7 +337,6 @@ function SkillsScreenContent() {
     // main-column chrome strip would just duplicate "Skills" above it.
     <AppLayout mainClassName="main--skills" hideChromeStrip>
       <SkillsView
-        groups={groups}
         customSkills={visibleCustom}
         customError={customError}
         loading={loading}
@@ -475,7 +354,12 @@ function SkillsScreenContent() {
         open={uploadOpen}
         onUpload={onUpload}
         onClose={() => setUploadOpen(false)}
-        builtinSlugs={skills.map((s) => s.id)}
+        // No `builtinSlugs`: this screen no longer fetches the vendored
+        // catalog, so it has nothing honest to pass. That only costs the
+        // non-blocking "…is also the name of a built-in" preview. The blocking
+        // check (a name this company already used, which the server 409s) is
+        // driven by `customSkills` below and is unaffected, and the server's
+        // 201 remains authoritative about the trigger actually assigned.
         customSkills={customSkills}
       />
     </AppLayout>

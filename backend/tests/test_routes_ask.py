@@ -439,20 +439,35 @@ def test_worker_records_the_routed_skill_before_the_answer_lands(
     tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
     """End to end through the worker: by the time qa_agent is inside the answer
-    call, the job row already carries the skill."""
+    call, the job row already carries the skill.
+
+    The QUESTION changed, the guarantee did not. This used to drive "write user
+    stories for checkout", which the keyword tier routed to the `user-stories`
+    built-in; a chat turn cannot be routed to a built-in any more, so that
+    question now reaches the ordinary answer — `_answer_single_shot` is never
+    called, the spy never fires, and the test failed on `KeyError: 'row'` rather
+    than on anything to do with the hook. A competitive-intelligence ask is the
+    equivalent that still routes, so the mid-run write is exercised again.
+    """
     import app.qa_agent as qa_agent_mod
 
+    question = "run a competitive intelligence report"
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
     ask_id = db.start_ask_job(
-        company_id=t.company_id, dataset="acme", question="write user stories for checkout"
+        company_id=t.company_id, dataset="acme", question=question
     )
     seen: dict = {}
+
+    # The CIR pipeline declines (no company profile in this fixture), which is
+    # what hands the turn on to the single-shot answer the spy sits in.
+    import app.competitive_intel as ci
+    monkeypatch.setattr(ci, "answer", lambda **k: None)
 
     def _fake_single_shot(decision, *a, **k):  # noqa: ARG001
         # Read the row from INSIDE the answer step — mid-run, by construction.
         seen["row"] = db.get_ask_job(ask_id)
-        return {"answer": "stories", "key_points": [], "citations": [],
+        return {"answer": "review", "key_points": [], "citations": [],
                 "confidence": 0.9, "unanswered": ""}
 
     monkeypatch.setattr(qa_agent_mod, "_answer_single_shot", _fake_single_shot)
@@ -462,15 +477,57 @@ def test_worker_records_the_routed_skill_before_the_answer_lands(
     asyncio.run(run_ask_job(
         ask_id=ask_id,
         enterprise_id=t.company_id,
-        question="write user stories for checkout",
+        question=question,
         dataset="acme",
     ))
 
+    routed = "competitive-intelligence-review"
     assert seen["row"]["status"] == "generating"
-    assert seen["row"]["routed_skill"] == "user-stories"
+    assert seen["row"]["routed_skill"] == routed
     # It survives completion, so a client that only polls after the fact sees it.
-    assert db.get_ask_job(ask_id)["routed_skill"] == "user-stories"
-    assert t.client.get(f"/v1/ask/{ask_id}").json()["routed_skill"] == "user-stories"
+    assert db.get_ask_job(ask_id)["routed_skill"] == routed
+    assert t.client.get(f"/v1/ask/{ask_id}").json()["routed_skill"] == routed
+
+
+def test_worker_records_nothing_when_no_skill_is_routed(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """The other half of the hook's contract, and now the COMMON case.
+
+    `on_route` still fires on the direct path — it carries None, and
+    `set_ask_job_route` no-ops on a falsy id so the columns stay NULL. That NULL
+    is what the UI reads as "render no chip" rather than inventing a default.
+    Worth pinning explicitly now that most questions take this path: a
+    regression here would show up as a phantom skill chip on every ordinary
+    answer, not as an error.
+    """
+    import app.qa_agent as qa_agent_mod
+
+    question = "what happened in our business last week?"
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question=question
+    )
+
+    routes: list = []
+    real_route = qa_agent_mod.route
+    monkeypatch.setattr(
+        qa_agent_mod, "route",
+        lambda *a, **k: routes.append(1) or real_route(*a, **k),
+    )
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question=question,
+        dataset="acme",
+    ))
+
+    assert routes, "the router really did run (so the hook really did fire)"
+    assert db.get_ask_job(ask_id)["routed_skill"] is None
 
 
 # ---- POST /v1/ask/extract-file ----------------------------------------------

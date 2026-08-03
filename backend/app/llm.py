@@ -574,8 +574,10 @@ def run_tool_loop(
     Bounded by `max_iters` so a misbehaving model can't loop forever.
 
     This is the shared, single-chokepoint tool loop (same retry/concurrency gate
-    as every other call). Used for skills whose deterministic scripts run as
-    local tools (app.skills.scripts) — the math runs on our infra, not in-prompt.
+    as every other call). Used by the paths that need the model to REACH a live
+    system mid-answer — the tracker lookup, ticket updates, connector reads.
+    (It also backed the deleted `app.skills.scripts`, whose deterministic PM
+    math ran as a local tool; that path is gone, the live-read ones are not.)
     """
     client = get_client()
     base = _build_base_kwargs(
@@ -644,6 +646,17 @@ def call_with_web_search(
     prompt stays as the agent-specific layer after it. The web-search path has
     no cacheable-prefix mechanism, so the method rides the system prompt here.
 
+    TOLERANT of a `skill` that names no vendored directory, for the same reason
+    `graph.gateway._build_method_prefix` is: every research pass on this path
+    (public-feedback capture, company-research stages, the competitive sweep and
+    its weekly deep-dive) passes `skill=` for ATTRIBUTION as much as for method
+    text, and those ids no longer name a vendored skill. Raising here would take
+    the entire web-research capability down over a missing prompt fragment.
+    Each of those callers carries its own capture contract in `system`, which is
+    what the records are actually parsed against, so a missing method is a
+    quality tradeoff. A missing `skill_module` inside a skill that DOES exist
+    still raises — that is a caller bug, not a vendoring decision.
+
     The request STREAMS on the long read timeout: a search-heavy call (the
     server runs up to `max_searches` web searches before composing the answer)
     routinely outlives the default non-streaming read timeout — the
@@ -654,14 +667,18 @@ def call_with_web_search(
     """
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
-        from app.skills.loader import get_skill
+        from app.skills.loader import UnknownSkillError, get_skill
 
-        spec = get_skill(skill)
-        method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
-        if skill_module:
-            module_text = spec.modules[skill_module]
-            method += f"\n\n### MODULE: {skill_module}\n{module_text}"
-        system = f"{method}\n{system}"
+        try:
+            spec = get_skill(skill)
+        except UnknownSkillError:
+            spec = None  # not vendored -> run method-less; see the docstring
+        if spec is not None:
+            method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
+            if skill_module:
+                module_text = spec.modules[skill_module]
+                method += f"\n\n### MODULE: {skill_module}\n{module_text}"
+            system = f"{method}\n{system}"
     msg = _create_with_retries(
         get_client(),
         stream=True,

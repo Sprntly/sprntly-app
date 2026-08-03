@@ -476,12 +476,43 @@ def test_sequence_binds_backlog_triage_skill(facade, isolated_settings):
     assert captured["purpose"] == "sequence_ideation"
 
 
-def test_ideation_prioritize_skill_is_vendored():
-    from app.skills.loader import get_skill
-    spec = get_skill("ideation-prioritize")
-    assert spec.id == "ideation-prioritize"
-    assert "Ideation Prioritize" in spec.method
-    assert spec.content_hash   # fingerprinted
+def test_ideation_prioritize_binding_survives_the_skill_being_unvendored():
+    """`ideation-prioritize` is no longer vendored, and the pipeline must still
+    RUN — method-less, not raising.
+
+    This asserted the skill loaded off disk (`get_skill(...).method` contained
+    "Ideation Prioritize"). It was one of ~78 chat-routable methods and is not
+    on the nine-skill keep-list, so its directory is gone. What it was really
+    protecting is upstream of the file: that `sequence_ideation`'s
+    `skill=PRIORITIZE_SKILL` binding resolves to something rather than blowing
+    up. `synthesis/ideation.py` still carries that binding — the test directly
+    above pins it — and `gateway._build_method_prefix` answers a missing
+    directory with an empty method block plus a `+bare` version suffix.
+
+    So the ranking is model-shaped rather than method-shaped now (the accepted
+    degradation), and the failure mode that would NOT be acceptable — a 500 on
+    every ideation sequence — is what this asserts against.
+    """
+    from app.graph.gateway import _build_method_prefix
+    from app.skills.loader import UnknownSkillError, get_skill, list_skills
+    from app.synthesis.ideation import PRIORITIZE_SKILL
+
+    assert PRIORITIZE_SKILL == "ideation-prioritize"
+    assert PRIORITIZE_SKILL not in list_skills()
+
+    # The loader still raises — that is deliberate, and scoped to the loader.
+    try:
+        get_skill(PRIORITIZE_SKILL)
+    except UnknownSkillError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected UnknownSkillError from the loader")
+
+    # ...and the gateway, which is what the pipeline actually goes through,
+    # degrades instead.
+    block, suffix = _build_method_prefix(PRIORITIZE_SKILL, None)
+    assert block == ""
+    assert suffix == "+bare"
 
 
 # ─────────────────────── synthesis hook (resilience) ───────────────────────

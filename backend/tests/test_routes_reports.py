@@ -156,49 +156,25 @@ def test_listing_requires_auth(unauth_client, isolated_settings):
     assert unauth_client.get("/v1/reports?conversation_id=42").status_code == 401
 
 
-# ─── Report kinds (the "New report" picker) ──────────────────────────────────
+# ─── Report kinds (the "New report" picker) — REMOVED ────────────────────────
+# `GET /v1/reports/kinds`, `app/report_kinds.py` and the web picker are gone
+# with the pinned report formats. The picker offered exactly three of them
+# (Voice of Customer / Competitor Analysis / Public Feedback) as fixed skills to
+# pin; those formats no longer exist, so there is nothing left to pick between.
+# The button was already dark behind `SHOW_NEW_REPORT_BUTTON = false`, so nothing
+# user-facing changed. Reports are asked for in chat and captured from there —
+# every test below this line covers that surviving path unchanged.
 
 
-def test_kinds_lists_the_offered_reports_with_their_prompts(isolated_settings, monkeypatch):
+def test_kinds_route_is_gone(isolated_settings, monkeypatch):
+    """The route must not still be serving.
+
+    `/kinds` was a literal path declared BEFORE `/{report_id}` precisely so the
+    int-typed dynamic segment could not shadow it. With the literal removed the
+    dynamic route sees "kinds", fails int coercion, and FastAPI answers 422 —
+    a fine answer for a path that no longer exists. What must not happen is a
+    200, i.e. the picker quietly still being served."""
     ctx = company_client(monkeypatch)
-
-    r = ctx.client.get("/v1/reports/kinds")
-    assert r.status_code == 200
-    kinds = r.json()["kinds"]
-    assert kinds, "the picker must offer something"
-    by_skill = {k["skill"]: k for k in kinds}
-    assert "voice-of-customer-report" in by_skill
-    assert "competitive-intelligence-review" in by_skill
-    voc = by_skill["voice-of-customer-report"]
-    assert voc["label"] == "Voice of Customer"
-    assert voc["blurb"]
-    # The prompt rides along so the client can start the run through the ordinary
-    # ask pipeline with the skill pinned.
-    assert "voice of customer" in voc["prompt"].lower()
+    assert ctx.client.get("/v1/reports/kinds").status_code in (404, 422)
 
 
-def test_kinds_only_offers_skills_that_exist(isolated_settings, monkeypatch):
-    """A vendored skill can be renamed or removed; a picker entry whose skill is
-    gone would be a button that only fails once clicked."""
-    ctx = company_client(monkeypatch)
-    import app.report_kinds as rk
-
-    monkeypatch.setattr(rk, "list_skills", lambda: ["competitive-intelligence-review"], raising=False)
-    monkeypatch.setattr(
-        "app.skills.loader.list_skills",
-        lambda: ["competitive-intelligence-review"],
-    )
-
-    skills = [k["skill"] for k in ctx.client.get("/v1/reports/kinds").json()["kinds"]]
-    assert skills == ["competitive-intelligence-review"]
-
-
-def test_kinds_route_is_not_shadowed_by_the_id_route(isolated_settings, monkeypatch):
-    """`/kinds` is a literal path declared before `/{report_id}` — if the dynamic
-    route won, this would 404 (or 422) instead of listing."""
-    ctx = company_client(monkeypatch)
-    assert ctx.client.get("/v1/reports/kinds").status_code == 200
-
-
-def test_kinds_requires_auth(unauth_client, isolated_settings):
-    assert unauth_client.get("/v1/reports/kinds").status_code == 401

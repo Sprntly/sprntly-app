@@ -12,8 +12,33 @@ patched.
 """
 from __future__ import annotations
 
+import app.db.custom_skills as custom_skills_db
 import app.qa_agent as qa
+import app.skills.resolver as resolver
 from app.skill_router import is_connector_lookup, is_jira_lookup
+
+# The bypass tests below need an id this build can actually dispatch. They used
+# a vendored built-in (`prd-author`); a chat turn can no longer be routed to one,
+# so the pin/slash was accepted, found nothing to run, and fell through to the
+# DIRECT path — which those tests never stubbed, because it was never reached.
+# In CI that meant a real Anthropic call and a 401. A company's own uploaded
+# skill is the id that still walks the pinned/slash path.
+CUSTOM_SKILL = "house-method"
+
+
+def _seed_custom_skill(monkeypatch, slug: str = CUSTOM_SKILL):
+    """Make `slug` a real custom skill for every company (both per-request
+    reads: the library listing and the by-slug re-check)."""
+    row = {
+        "slug": slug, "name": slug, "description": "The house method.",
+        "method": f"# {slug}\nmethod text", "modules": {}, "references": {},
+        "content_hash": "hash" + slug,
+    }
+    monkeypatch.setattr(custom_skills_db, "list_custom_skills", lambda cid: [dict(row)])
+    monkeypatch.setattr(
+        resolver, "get_custom_skill",
+        lambda cid, wanted: dict(row) if wanted == slug else None,
+    )
 
 
 # ── explicit-name trigger ────────────────────────────────────────────────────
@@ -267,23 +292,49 @@ def test_pinned_skill_bypasses_the_connector_lookup(monkeypatch):
     """An explicit skill invocation that merely mentions a tool isn't hijacked."""
     from app.connector_lookup import registry
 
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(registry, "answer_for_hints",
                         lambda **k: {"answer": "lookup", "_skill_source": "connector-lookup"})
     monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
     out = qa.answer(enterprise_id="ent", question="check slack for the pricing thread",
-                    dataset="acme", pinned_skill="prd-author")
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
     assert out.get("_skill_source") != "connector-lookup"
+    # ...and it really did run the pinned skill, rather than merely dodging the
+    # lookup on its way to the generic answer. Without this the assertion above
+    # passes for the wrong reason — which is exactly how it started making a
+    # live API call.
+    assert out.get("_skill") == CUSTOM_SKILL
+
+
+def test_pinned_pipeline_also_bypasses_the_connector_lookup(monkeypatch):
+    """The other kind of id a pin may carry. Slack's `/competitive` command pins
+    CIR outright (routes/connectors.py), and its question can easily name a
+    tool — so the bypass has to hold for a pipeline id too."""
+    from app.connector_lookup import registry
+
+    monkeypatch.setattr(registry, "answer_for_hints",
+                        lambda **k: {"answer": "lookup", "_skill_source": "connector-lookup"})
+    import app.competitive_intel as ci
+    monkeypatch.setattr(ci, "answer", lambda **k: {"answer": "review",
+                                                   "_skill_source": "competitive-intel"})
+    out = qa.answer(enterprise_id="ent", question="how do we compare to slack?",
+                    dataset="acme",
+                    pinned_skill="competitive-intelligence-review")
+    assert out["_skill_source"] == "competitive-intel"
 
 
 def test_slash_command_bypasses_the_connector_lookup(monkeypatch):
     from app.connector_lookup import registry
 
+    _seed_custom_skill(monkeypatch)
     monkeypatch.setattr(registry, "answer_for_hints",
                         lambda **k: {"answer": "lookup", "_skill_source": "connector-lookup"})
     monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
-    out = qa.answer(enterprise_id="ent", question="/prd-author about slack integration",
+    out = qa.answer(enterprise_id="ent",
+                    question=f"/{CUSTOM_SKILL} about slack integration",
                     dataset="acme")
     assert out.get("_skill_source") != "connector-lookup"
+    assert out.get("_skill") == CUSTOM_SKILL
 
 
 def _skill_answer():
