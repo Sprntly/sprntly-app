@@ -33,6 +33,7 @@ from app.ask_runner import (
     _retrieve_kg_bundle,
     company_facts_block,
     compose_ask_answer,
+    document_grounding,
 )
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
@@ -41,6 +42,7 @@ from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
+    ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_PRD_ADDENDUM,
     OUT_OF_SCOPE_MESSAGE,
@@ -682,6 +684,10 @@ def _answer_single_shot(
         emit_phase(on_phase, "Searching your connected sources…")
         kg_block, kg_used = _kg_grounding(enterprise_id, question)
     facts = company_facts_block(enterprise_id)
+    # This path loads no corpus, so without this every skill-routed question
+    # stays blind to uploads and reproduces the incident on that half of the
+    # traffic (compose_ask_answer's direct path is the other half).
+    docs_block, documents = document_grounding(enterprise_id, question)
     system = (
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
@@ -693,6 +699,7 @@ def _answer_single_shot(
         # METHOD is user content" before "and here is who actually wins on
         # identity" — the precedence clause needs the METHOD framing first.
         + (ASK_SYSTEM_COMPANY_FACTS_ADDENDUM if facts else "")
+        + (ASK_SYSTEM_DOCUMENTS_ADDENDUM if docs_block else "")
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
     )
@@ -708,7 +715,10 @@ def _answer_single_shot(
         model=model,
         system=system,
         input=_render_history(history) + kg_block + f"Question: {question}",
-        user_cacheable_prefix="\n\n---\n\n".join(p for p in (facts, prd_context) if p) or None,
+        user_cacheable_prefix=(
+            "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p)
+            or None
+        ),
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,
@@ -724,6 +734,7 @@ def _answer_single_shot(
         else {"answer": str(result.output), "key_points": [], "citations": [],
               "confidence": decision.confidence, "unanswered": ""}
     )
+    payload["documents"] = documents
     return _tag(payload, decision)
 
 

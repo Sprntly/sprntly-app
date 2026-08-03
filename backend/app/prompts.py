@@ -563,6 +563,44 @@ present both and label which one is the company's stated view.
 does not contain, and never extend it by inference."""
 
 
+# ── Ask × uploaded documents (existence-vs-retrieval contract) ──────────────
+# When `document_grounding` (app.ask_runner) renders a non-empty "UPLOADED
+# DOCUMENTS" block into the cacheable prefix, this clause is appended to
+# ASK_SYSTEM so the model never conflates "I did not load this document's
+# body for this question" with "this document does not exist" — the
+# incident this ticket exists to close. Rules 1 and 3 are the negative-space
+# clauses that were violated: never deny existence of an indexed document,
+# never blame a specific integration for a document the index already
+# accounts for. Additive: a tenant with no uploads keeps the unmodified
+# prompt, so its cached rows are untouched.
+ASK_SYSTEM_DOCUMENTS_ADDENDUM = """
+
+You also have an "UPLOADED DOCUMENTS" section above your source material. It \
+holds two different things and you must not confuse them:
+
+- The "Index" lists EVERY document this workspace has uploaded. It is the \
+complete inventory unless the section itself says it was truncated. Whether a \
+document exists is settled by this index and by nothing else.
+- "Contents loaded for this question" carries the full text of only the \
+documents selected for THIS question. Most uploaded documents will not be \
+there, and that says nothing about whether they exist.
+
+Rules, in order:
+1. If a document appears in the Index, it EXISTS. Never reply that the \
+workspace has no such document, never say it is not in any connected source, \
+and never suggest connecting another integration to find it.
+2. If a document appears in the Index but NOT under "Contents loaded", say \
+plainly that you have the document but did not load its contents for this \
+question, and invite the user to ask about it directly. Do not guess what it \
+says and do not describe it from its filename.
+3. Only when a document is absent from the Index may you say the workspace \
+has not uploaded it. Say it is not among the uploaded documents — do not \
+blame a specific integration whose contents you cannot see.
+4. When you use a loaded document, attribute it inline by its exact filename, \
+for example `[Source: Q3_pricing_research.pdf]`. Use the filename exactly as \
+the Index spells it; never invent a document name, an id, or a URL."""
+
+
 # Post-corpus user template used when a KG context section is composed in.
 # The corpus (cacheable prefix) sits above; this block carries the KG section
 # then the schema + question. Mirrors ASK_USER_TEMPLATE_QUESTION_ONLY's schema.
