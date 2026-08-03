@@ -557,9 +557,13 @@ def test_index_truncates_visibly_at_max_entries(isolated_settings):
     # the complete inventory, so absence from it stops being evidence of
     # absence. The prompt's existence rule keys off this exact word.
     assert "PARTIAL" in block
+    # Wording no longer says "most recently uploaded": the index also carries
+    # documents that live in a connected system, which nobody uploaded. The
+    # count and the may-still-exist clause are what the existence rule needs,
+    # and both are unchanged.
     assert (
-        f"it shows the {MAX_INDEX_ENTRIES} most recently uploaded of 250 "
-        "documents in this workspace" in block
+        f"it shows {MAX_INDEX_ENTRIES} of 250 documents in this workspace"
+        in block
     )
     assert "may still exist" in block
     assert len(manifest) == MAX_INDEX_ENTRIES
@@ -1449,21 +1453,22 @@ def test_topic_question_loads_the_document_it_is_about(
     assert text[:80] in block
 
 
-# T13 — the provider exclusion.
-def test_only_providers_whose_bodies_resolve_are_selectable(
+# T8 — the exclusion is GONE. Replaces the previous
+# `test_only_providers_whose_bodies_resolve_are_selectable`, which asserted
+# the opposite and was correct while it stood: Drive and Confluence had no
+# body reader, so ranking one and then failing to read it would have told the
+# user their document was present but unreadable — verbatim the complaint this
+# whole line of work exists to close. They have readers now, so the exclusion
+# is deleted rather than weakened, and this is the test that proves it.
+def test_every_catalogued_provider_is_selectable(
     isolated_settings, catalog_candidates
 ):
-    """Selection covers `uploads` and `chat_attachment` and nothing else.
+    """All four providers reach selection, and no Python-side provider filter
+    survives anywhere between the rank and the choice.
 
-    Drive files and Confluence pages are catalogued and summarised, so the
-    rank will happily surface them — but no code here can fetch their bodies.
-    Selecting one would render an entry with no contents behind it and push
-    the model back to "I have this document but could not load it", which is
-    the exact answer this change exists to stop producing. So they stay
-    indexed and unselectable until body resolution for them lands.
-
-    The Confluence row below is a PERFECT match for the question; the test is
-    that a perfect match on an unresolvable provider still does not select.
+    Asserted at BOTH levels on purpose. `_topical_candidates` is where the old
+    predicate lived, so its output is checked directly — a reinstated filter
+    would show up there even if the end-to-end block happened to look right.
     """
     from app import ask_runner
 
@@ -1479,42 +1484,30 @@ def test_only_providers_whose_bodies_resolve_are_selectable(
     )
 
     question = "what is happening with enterprise billing"
-    # The unresolvable providers outrank the upload, so a filter that merely
-    # reordered rather than excluded would still fail this test.
     catalog_candidates([
         _candidate(provider="confluence", external_id="page-99",
                    title="Enterprise billing", source_name="Finance space",
-                   summary="what is happening with enterprise billing",
                    score=0.09),
         _candidate(provider="google_drive", external_id="drive-77",
                    title="Billing model 2026", source_name="Finance drive",
-                   summary="what is happening with enterprise billing",
                    score=0.08),
         _candidate(provider="uploads", external_id="file-1",
                    title="Pricing_Notes.docx", score=0.02),
+        _candidate(provider="chat_attachment", external_id="turn:1:attachment:0",
+                   title="billing.pdf", score=0.01),
     ])
 
-    block, manifest = ask_runner.document_grounding(_CID, question)
-
-    # The resolvable upload still selects, from a rank position below both
-    # unresolvable rows.
-    entry = next(m for m in manifest if m["file_id"] == "file-1")
-    assert entry["loaded"] is True
-
-    # Neither unresolvable provider is selected, quoted, or accounted for as
-    # loaded anywhere.
-    assert "page-99" not in block and "drive-77" not in block
-    assert "Enterprise billing" not in block
-    assert "Billing model 2026" not in block
-    assert all(m["file_id"] not in {"page-99", "drive-77"} for m in manifest)
-
-    # And the filter is asserted where it lives, so this cannot pass merely
-    # because an unresolvable row had nowhere to appear.
-    selectable = ask_runner._topical_candidates(
+    candidates = ask_runner._topical_candidates(
         _CID, question, question_embedding=None,
         conversation_id=None, user_id=None, exclude_external_ids=set(),
     )
-    assert [c["provider"] for c in selectable] == ["uploads"]
+    assert [c["provider"] for c in candidates] == [
+        "confluence", "google_drive", "uploads", "chat_attachment"
+    ], "a provider filter is still discarding rows the rank returned"
+
+    # And the constant that used to hold the exclusion is gone outright, so it
+    # cannot be reintroduced by re-adding a single call site.
+    assert not hasattr(ask_runner, "SELECTABLE_PROVIDERS")
 
 
 # T2 — topical selection over WORKSPACE uploads.
@@ -2002,3 +1995,385 @@ def test_addendum_carries_the_conflict_and_ignore_irrelevant_clauses():
     assert "ROUTING HINT" in a
     # The partial-index existence rule.
     assert "PARTIAL" in a
+
+
+# ══════════ Connected-source documents — findable without naming them ═══════
+#
+# Measured on staging before this landed: "what were the most recent product
+# release notes?" carried eight documents into the prompt, every one of them
+# an upload, and not a single Confluence page — and the model, correctly
+# following its instructions, offered to check Confluence if asked directly.
+# Asking it to "check Confluence for release notes in the SD space" then
+# returned real wiki content. Routing metadata was null both times, so no
+# interceptor was involved: the naming distinction WAS the defect.
+#
+# These cover the mechanism that closes it. Whether the composed answer then
+# reads well is live-verification's question — a stubbed model cannot judge
+# content fidelity — but whether the body reaches the prompt at all is
+# mechanically checkable, and that is the whole failure.
+
+_CONFLUENCE_PAGE_ID = "page-sd-4471"
+_DRIVE_FILE_ID = "drive-file-9922"
+
+
+class _FakeConfluenceFetch:
+    def __init__(self, page=None, *, session=object(), raises=False):
+        self.page = page
+        self.session = session
+        self.raises = raises
+        self.pages_fetched = []
+        self.sessions_opened = 0
+
+    def open_session(self, enterprise_id):
+        self.sessions_opened += 1
+        return self.session
+
+    def get_page(self, session, page_id):
+        self.pages_fetched.append(page_id)
+        if self.raises:
+            raise RuntimeError("auth expired")
+        return self.page
+
+
+@pytest.fixture
+def confluence_pages(monkeypatch):
+    """Stub the live wiki read. Bodies are fetched at ANSWER time by design
+    (nothing is cached), so the seam under test is the fetch itself."""
+    from app.connectors import confluence_fetch
+
+    def _install(**kwargs):
+        fake = _FakeConfluenceFetch(**kwargs)
+        monkeypatch.setattr(confluence_fetch, "open_session", fake.open_session)
+        monkeypatch.setattr(confluence_fetch, "get_page", fake.get_page)
+        return fake
+
+    return _install
+
+
+def _seed_drive_corpus_file(db, data_dir, *, file_id, label, slug, name, text):
+    """A synced Drive file: its corpus markdown, plus the provenance row that
+    records WHERE that markdown landed."""
+    from app import document_bodies
+    from app.datasets import dataset_path
+
+    target = dataset_path(slug) / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    db.table("kg_source").insert({
+        "id": document_bodies.drive_source_id(_CID, file_id),
+        "enterprise_id": _CID,
+        "source_type": "google_drive",
+        "label": label,
+        "config": {
+            "file_id": file_id, "md_dataset": slug, "md_file": name,
+        },
+        "status": "active",
+    }).execute()
+
+
+# T1 — RED-first. A Confluence page, found by topic, never named.
+def test_topic_question_loads_a_confluence_page_without_naming_confluence(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """The staging question, verbatim, against a wiki page it is about.
+
+    The question names neither Confluence nor the page. Before body
+    resolution existed the page was catalogued and summarised but could not be
+    selected, so the prompt carried nothing from the wiki and the answer said
+    to go and ask about Confluence specifically.
+    """
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes for the August product release.",
+        topics=["release notes", "shipping"],
+    )
+    catalog_candidates([_candidate(
+        provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes for the August product release.",
+    )])
+    fake = confluence_pages(page={
+        "id": _CONFLUENCE_PAGE_ID,
+        "text": "August release ships on the 14th. ChoisBits is shurting down.",
+    })
+
+    block, manifest = document_grounding(
+        _CID, "what were the most recent product release notes?"
+    )
+
+    entry = next(
+        m for m in manifest if m["file_id"] == f"confluence:{_CONFLUENCE_PAGE_ID}"
+    )
+    assert entry["loaded"] is True, (
+        "a wiki page the question is about did not load — this is the defect"
+    )
+    assert "August release ships on the 14th" in block
+    assert fake.pages_fetched == [_CONFLUENCE_PAGE_ID]
+    # Never named in the question, and the question is what selection saw.
+    assert "confluence" not in "what were the most recent product release notes?"
+
+
+# T2 — RED-first. A Drive file, found by topic, never named.
+def test_topic_question_loads_a_drive_file_without_naming_it(
+    isolated_settings, catalog_candidates
+):
+    """Drive's half of the same defect. The body comes from the corpus
+    markdown its own sync already wrote — read back via the path that sync
+    recorded, because the name is not reconstructible."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    data_dir = isolated_settings["data_dir"]
+    _seed_drive_corpus_file(
+        db, data_dir, file_id=_DRIVE_FILE_ID, label="Billing model 2026",
+        slug="acme", name="billing_model_2026.md",
+        text="Enterprise billing moves to usage-based in Q1.",
+    )
+    _seed_catalog_row(
+        db, provider="google_drive", external_id=_DRIVE_FILE_ID,
+        title="Billing model 2026", source_name="Google Drive",
+        summary="Enterprise billing moves from seats to usage in Q1.",
+        topics=["billing", "usage-based pricing"],
+    )
+    catalog_candidates([_candidate(
+        provider="google_drive", external_id=_DRIVE_FILE_ID,
+        title="Billing model 2026", source_name="Google Drive",
+        summary="Enterprise billing moves from seats to usage in Q1.",
+    )])
+
+    block, manifest = document_grounding(
+        _CID, "how is enterprise billing changing next year"
+    )
+
+    entry = next(
+        m for m in manifest if m["file_id"] == f"google_drive:{_DRIVE_FILE_ID}"
+    )
+    assert entry["loaded"] is True
+    assert "Enterprise billing moves to usage-based in Q1." in block
+
+
+# T5 — AC5. A fetch failure is a degradation, never a denial.
+def test_confluence_fetch_failure_degrades_to_summary_only(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """The page stays in the Index with its summary, the model is told the
+    contents could not be loaded AND why, and nothing anywhere reads as "this
+    document does not exist" — which is the incident this work exists to
+    close, and the one shape that must never come back."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes for the August product release.",
+        topics=["release notes"],
+    )
+    catalog_candidates([_candidate(
+        provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes for the August product release.",
+    )])
+    confluence_pages(raises=True)
+
+    block, manifest = document_grounding(
+        _CID, "what were the most recent product release notes?"
+    )
+
+    # Still in the index, still summarised — existence is not in doubt.
+    assert "Release notes — August" in block
+    assert "Ship dates and fixes for the August product release." in block
+    assert "Confluence: SD" in block
+    # And explicitly marked as present-but-unloaded, with a reason.
+    assert "could not be loaded for this question" in block
+    assert "this document exists" in block
+
+    # `loaded` is about the BODY reaching the prompt, so it is False — the
+    # manifest must not record an intention as a fact.
+    entry = next(
+        m for m in manifest if m["file_id"] == f"confluence:{_CONFLUENCE_PAGE_ID}"
+    )
+    assert entry["loaded"] is False
+    assert entry["match"] == "topic"
+
+    # Nothing in the block may read as absence.
+    lowered = block.lower()
+    for forbidden in (
+        "does not exist", "no such document", "not in any connected source",
+        "has not been uploaded",
+    ):
+        assert forbidden not in lowered
+
+
+def test_an_unfetchable_page_is_not_quoted_as_empty_content(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """The distinction AC9 exists for, at block level: a page that could not
+    be fetched contributes NO body section at all. Rendering it with an empty
+    body would tell the model it had read a page with nothing in it."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes.",
+    )
+    catalog_candidates([_candidate(
+        provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+    )])
+    confluence_pages(page=None)
+
+    block, _ = document_grounding(_CID, "what shipped recently")
+
+    assert "## Contents loaded for this question" not in block
+
+
+# AC6 — the fetch count is bounded by the selection cap that already exists.
+def test_confluence_fetches_are_bounded_by_the_selection_cap(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """Ten ranked pages, three slots. The worst case for added latency on an
+    ask is therefore three page fetches, sharing one session."""
+    from app.ask_runner import MAX_SELECTED_DOCUMENTS, document_grounding
+
+    db = isolated_settings["supabase"]
+    rows = []
+    for i in range(10):
+        page_id = f"page-{i}"
+        _seed_catalog_row(
+            db, provider="confluence", external_id=page_id,
+            title=f"Wiki page {i}", source_name="SD",
+            summary=f"Notes about topic {i}.",
+        )
+        rows.append(_candidate(
+            provider="confluence", external_id=page_id,
+            title=f"Wiki page {i}", source_name="SD", score=1.0 - i / 100,
+        ))
+    catalog_candidates(rows)
+    fake = confluence_pages(page={"id": "x", "text": "body text"})
+
+    document_grounding(_CID, "tell me about the wiki")
+
+    assert len(fake.pages_fetched) == MAX_SELECTED_DOCUMENTS
+    assert fake.sessions_opened == 1
+
+
+# AC4 — no caching. Two asks, two fetches.
+def test_a_second_ask_fetches_the_page_again(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """Bodies are read live every time. A wiki page can change between two
+    questions in one conversation, and the cache that was considered — the
+    conversation turn row — does not exist while an answer is being composed
+    and would replay a body clamped smaller than a live fetch delivers."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD", summary="Ship dates.",
+    )
+    catalog_candidates([_candidate(
+        provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+    )])
+    fake = confluence_pages(page={"id": _CONFLUENCE_PAGE_ID, "text": "first read"})
+
+    document_grounding(_CID, "what shipped recently")
+    document_grounding(_CID, "what shipped recently")
+
+    assert fake.pages_fetched == [_CONFLUENCE_PAGE_ID, _CONFLUENCE_PAGE_ID]
+
+
+def test_a_connected_document_is_indexed_even_when_nothing_selects_it(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """AC5's precondition, asserted on its own: the page is in the Index
+    because it is in the wiki, not because this question happened to pick it.
+    Without this, "stays in the index" has nothing to stay in."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Release notes — August", source_name="SD",
+        summary="Ship dates and fixes.",
+    )
+    catalog_candidates([])
+    fake = confluence_pages(page={"id": _CONFLUENCE_PAGE_ID, "text": "body"})
+
+    block, manifest = document_grounding(_CID, "something else entirely")
+
+    line = next(
+        line for line in block.splitlines()
+        if line.startswith("- Release notes — August")
+    )
+    assert "Confluence: SD" in line
+    assert "[not loaded for this question]" in line
+    # Not selected means not fetched: the index costs no network.
+    assert fake.pages_fetched == []
+    assert len(manifest) == 1
+
+
+def test_naming_a_connected_document_selects_it_through_stage_n(
+    isolated_settings, catalog_candidates, confluence_pages
+):
+    """Stage N extended over the catalog. Naming a wiki page is as
+    unambiguous a request as naming an uploaded file, and no ranking should
+    have to be involved for it to land."""
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Pricing rollout plan", source_name="SD", summary="Rollout steps.",
+    )
+    # Stage T contributes nothing, so a pass here is Stage N's alone.
+    catalog_candidates([])
+    confluence_pages(page={"id": _CONFLUENCE_PAGE_ID, "text": "Step one: notify."})
+
+    block, manifest = document_grounding(
+        _CID, "summarise the Pricing rollout plan for me"
+    )
+
+    entry = next(
+        m for m in manifest if m["file_id"] == f"confluence:{_CONFLUENCE_PAGE_ID}"
+    )
+    assert entry["match"] == "named"
+    assert entry["loaded"] is True
+    assert "Step one: notify." in block
+
+
+def test_uploads_and_connected_documents_share_one_index_cap(
+    isolated_settings, catalog_candidates
+):
+    """Connecting a wiki must not grow the worst-case prompt. Uploads fill the
+    cap first and the overflow is declared PARTIAL, rather than the index
+    quietly getting a second allowance."""
+    from app.ask_runner import MAX_INDEX_ENTRIES, document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    for i in range(MAX_INDEX_ENTRIES):
+        _seed_file(
+            db, f"f{i}", src, filename=f"doc-{i}.txt",
+            uploaded_at=f"2026-01-{(i % 27) + 1:02d}T00:00:00+00:00",
+        )
+    _seed_catalog_row(
+        db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
+        title="Overflowed wiki page", source_name="SD", summary="Anything.",
+    )
+    catalog_candidates([])
+
+    block, manifest = document_grounding(_CID, "unrelated")
+
+    assert block.count("\n- ") == MAX_INDEX_ENTRIES
+    assert "Overflowed wiki page" not in block
+    assert "PARTIAL" in block
+    assert len(manifest) == MAX_INDEX_ENTRIES

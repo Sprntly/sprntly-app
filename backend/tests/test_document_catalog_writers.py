@@ -335,6 +335,13 @@ def test_no_writer_stores_a_document_body(isolated_settings, monkeypatch):
         def create_source(self, *a, **k):
             return None
 
+        def get_source(self, *a, **k):
+            # The extractor reads the file's existing provenance row when the
+            # doc it was handed carries no corpus location, so that a pass
+            # which knows less than its predecessor cannot blank the stored
+            # one. No prior row here.
+            return None
+
     drive_extract.extract_drive_docs(_Facade(), _CID, [DriveDoc(
         file_id="drive-1", name="D", modified="2026-07-01T00:00:00Z",
         text="drive body text " * 500,
