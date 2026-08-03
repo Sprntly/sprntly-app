@@ -346,6 +346,40 @@ def test_an_unknown_sort_falls_back_to_relevance(monkeypatch):
     assert "ordered by RELEVANCE" in out
 
 
+def test_a_queryless_search_windows_and_sorts_newest(monkeypatch):
+    """No query means "the latest, whatever it is". search.messages requires a
+    query string, but accepts a modifier-only one (verified live 2026-08-03),
+    so the adapter sends `after:<date>` and forces newest — a keyword-free
+    relevance ranking would be ranking nothing."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {})
+    assert captured["query"].startswith("after:")
+    assert captured["sort"] == "timestamp"
+    assert captured["sort_dir"] == "desc"
+    assert "ordered NEWEST FIRST" in out
+    assert "no keyword given" in out
+
+
+def test_a_queryless_search_overrides_a_relevance_sort(monkeypatch):
+    """`sort` is model input; pairing it with no query is a contradiction the
+    adapter resolves in favour of time, never silently in favour of Slack's
+    score default."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"sort": "relevance"})
+    assert captured["sort"] == "timestamp"
+
+
+def test_an_empty_queryless_search_names_its_window(monkeypatch):
+    """Zero rows from a windowed read means "quiet week", not "no such
+    messages" — and the copy must not leak the synthetic after: query the
+    model never wrote."""
+    _capture_search(monkeypatch, matches=[])
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {})
+    assert "last 7 days" in out
+    assert "after:" not in out
+
+
 def test_the_search_tool_tells_the_model_when_to_sort_by_time():
     """The disclosure only helps after the fact; the tool schema is what makes
     the model pick the right order in the first place."""
@@ -354,6 +388,10 @@ def test_the_search_tool_tells_the_model_when_to_sort_by_time():
     assert "newest" in sl.SEARCH_TOOL["description"]
     assert "most recent" in sl.SEARCH_TOOL["description"]
     assert "sort=\"newest\"" in sl.PROVIDER.system_block()
+    # `query` is optional now — a schema that still required it would turn the
+    # queryless mode into a validation error at the API layer.
+    assert "query" not in sl.SEARCH_TOOL["input_schema"].get("required", [])
+    assert "OMIT" in sl.SEARCH_TOOL["input_schema"]["properties"]["query"]["description"]
 
 
 def test_search_messages_clamps_sort_before_it_reaches_slack(monkeypatch):

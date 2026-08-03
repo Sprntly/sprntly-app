@@ -30,6 +30,7 @@ biggest UX risk on this surface, so it widens later, deliberately.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import re
@@ -114,7 +115,10 @@ SYSTEM = (
     "isn't, the tool says so — read channels instead and say that's what you "
     "did. It sorts by RELEVANCE unless you pass sort=\"newest\", so a "
     "latest/what's-new question MUST pass sort=\"newest\" or you will be "
-    "reading the top-scoring messages of all time and calling them recent.\n\n"
+    "reading the top-scoring messages of all time and calling them recent. "
+    "For a no-topic \"what's the latest in Slack\" question, omit `query` "
+    "entirely — that returns the newest messages of the last 7 days with no "
+    "keyword filter.\n\n"
     "Honest limits you MUST respect: these reads see the channels the Sprntly "
     "bot was added to, plus public channels in search mode. DMs, group DMs and "
     "private channels the bot isn't in are NEVER readable: search runs as the "
@@ -186,13 +190,23 @@ SEARCH_TOOL = {
         "returns the most recent matches first. Use \"newest\" for anything "
         "asking what is latest / new / most recent / happening now, and "
         "\"relevance\" when the user is looking for a topic regardless of when "
-        "it was said. The result states which order it used — repeat that "
-        "framing and never call a relevance-ordered list \"the latest\"."
+        "it was said. Omitting `query` altogether is the third mode: the newest "
+        "messages across every searchable channel, no keyword filter — use that "
+        "when the user asks what's new WITHOUT naming a topic. The result "
+        "states which order it used — repeat that framing and never call a "
+        "relevance-ordered list \"the latest\"."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search terms (Slack search syntax allowed)."},
+            "query": {
+                "type": "string",
+                "description": (
+                    "Search terms (Slack search syntax allowed). OMIT entirely "
+                    "for 'what's the latest in Slack' — no keyword filter, just "
+                    "the newest messages from the last 7 days."
+                ),
+            },
             "sort": {
                 "type": "string",
                 "enum": ["relevance", "newest"],
@@ -203,7 +217,6 @@ SEARCH_TOOL = {
                 ),
             },
         },
-        "required": ["query"],
     },
 }
 
@@ -582,14 +595,30 @@ class SlackProvider:
         if not handle.user_token:
             return SEARCH_UNAVAILABLE
         query = (inp.get("query") or "").strip()
-        if not query:
-            return "(slack_search_messages: 'query' is required)"
         # Model input, so it is validated, not trusted: anything that isn't the
         # explicit "newest" falls back to Slack's own relevance default. The
         # default deliberately stays relevance — a keyword question ("what did
         # we decide about pricing") wants the best match, not last Tuesday's
         # passing mention — so only an explicit ask flips it.
         order = "newest" if str(inp.get("sort") or "").strip().lower() == "newest" else "relevance"
+        window_note = None
+        if not query:
+            # No keyword means "the latest, whatever it is". search.messages
+            # REQUIRES a query string, but accepts a modifier-only one —
+            # verified live 2026-08-03 against this app: query="after:<date>"
+            # returns ok with every indexed message after that date (a "*"
+            # wildcard quietly searches a smaller corpus, so it is not used).
+            # Relevance is meaningless with nothing to rank, so the order is
+            # forced to newest regardless of what the model passed.
+            order = "newest"
+            since = _dt.date.fromtimestamp(time.time() - _DEFAULT_DAYS * 86400).isoformat()
+            query = f"after:{since}"
+            window_note = (
+                f"(no keyword given — these are the newest indexed messages "
+                f"since {since}, across every channel search can see. A "
+                f"just-posted message can lag the search index by a minute or "
+                f"two; read the channel directly for up-to-the-second data.)"
+            )
         result = slack_oauth.search_messages(
             handle.user_token,
             query=query,
@@ -603,6 +632,11 @@ class SlackProvider:
         matches = result.get("matches") or []
         total = result.get("total") or 0
         if not matches:
+            if window_note:
+                return (
+                    f"(no Slack messages in the last {_DEFAULT_DAYS} days in "
+                    "channels search can see)"
+                )
             return f"(no Slack messages match {query!r})"
         # PRIVACY GATE — see is_shareable_match. search.messages reads as the
         # authorizing USER, so raw results can contain their DMs and private
@@ -634,6 +668,8 @@ class SlackProvider:
         # Ordering first: it is the one property of this list that changes what
         # the rows MEAN, and an answer that gets it wrong is wrong about time.
         notes = [SEARCH_ORDER_NOTES[order], SEARCH_DISCLOSURE]
+        if window_note:
+            notes.insert(0, window_note)
         if excluded:
             notes.append(
                 f"({excluded} further match(es) were in DMs or private channels "
