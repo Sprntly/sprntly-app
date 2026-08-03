@@ -515,7 +515,7 @@ def _run_start_scheduler(monkeypatch, *, invite_enabled):
     monkeypatch.setattr(sched_mod.settings, "invite_reminders_enabled", invite_enabled)
     monkeypatch.setattr(sched_mod.settings, "invite_reminder_interval_hours", 6)
     fake = _FakeScheduler()
-    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda: fake)
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda **kw: fake)
     sched_mod.start_scheduler()
     sched_mod.shutdown_scheduler()
     return fake
