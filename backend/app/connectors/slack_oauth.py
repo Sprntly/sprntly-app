@@ -798,6 +798,93 @@ def join_channel(bot_access_token: str, channel_id: str) -> bool:
     return True
 
 
+# The bot scopes `conversations.leave` actually needs, read from
+# https://docs.slack.dev/reference/methods/conversations.leave on 2026-08-03:
+# `channels:manage` (public channels — `channels:write` is its legacy alias),
+# `groups:write` (private), `im:write`/`mpim:write` (DMs).
+#
+# NONE of the channel ones are in `settings.slack_bot_scopes` today, which
+# requests `channels:join` (join, NOT leave — the two are separate scopes:
+# https://docs.slack.dev/reference/scopes/channels.manage lists the eight
+# methods channels:manage covers and conversations.join is not among them).
+# So on every install issued before this constant existed, `leave_channel`
+# below gets `missing_scope` back and returns False. That is a deliberately
+# soft failure: unchecking still saves, still purges the synced data, and
+# only the "bot walks out of the channel" half is skipped until an operator
+# adds the scope to the Slack app and each workspace re-authorizes (adding a
+# scope does NOT upgrade tokens already issued).
+LEAVE_CHANNEL_PUBLIC_SCOPE = "channels:manage"
+LEAVE_CHANNEL_PRIVATE_SCOPE = "groups:write"
+LEAVE_CHANNEL_SCOPES = (
+    LEAVE_CHANNEL_PUBLIC_SCOPE,
+    "channels:write",  # legacy alias Slack still honors on older installs
+    LEAVE_CHANNEL_PRIVATE_SCOPE,
+)
+
+SLACK_CONVERSATIONS_LEAVE_URL = "https://slack.com/api/conversations.leave"
+
+
+def has_leave_channel_scope(scopes: str | None) -> bool:
+    """True when the stored install granted a scope that lets the bot leave a
+    channel. Mirrors `has_file_upload_scope` — the connection row records the
+    granted scope string at install time, so this answers "will the leave even
+    be attempted usefully?" without spending a Slack round-trip.
+
+    Advisory only: the leave is attempted regardless (a stored scope string can
+    lag a re-authorization in either direction), and Slack remains the
+    authority. Callers use this to decide what to TELL the operator."""
+    granted = {s.strip() for s in (scopes or "").split(",") if s.strip()}
+    return any(s in granted for s in LEAVE_CHANNEL_SCOPES)
+
+
+def leave_channel(bot_access_token: str, channel_id: str) -> bool:
+    """Have the bot leave a channel via conversations.leave — the exact
+    reverse of `join_channel`, called when an admin unticks a channel in the
+    pull-channel picker.
+
+    Idempotent by Slack's own definition: leaving a conversation the bot was
+    never in is NOT an error, it comes back as `ok:false` with
+    `not_in_channel:true`, which this treats as success because the end state
+    the caller wanted (bot not in that channel) already holds.
+
+    Returns False (never raises) on any real rejection, so a failed leave can
+    never take down the selection save that triggered it. The two rejections
+    worth naming: `missing_scope`, which is what today's installs return
+    because `settings.slack_bot_scopes` requests `channels:join` but not
+    `channels:manage`/`groups:write` (see LEAVE_CHANNEL_SCOPES above), and
+    `last_member`, which Slack returns when the bot is the only member left."""
+    resp = requests.post(
+        SLACK_CONVERSATIONS_LEAVE_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"channel": channel_id},
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if resp.ok and parsed.get("not_in_channel"):
+        # Already out — the desired end state, not a failure.
+        logger.info(
+            "Slack conversations.leave: bot was not in %s (already left)",
+            channel_id,
+        )
+        return True
+    if not resp.ok or not parsed.get("ok"):
+        logger.info(
+            "Slack conversations.leave did not leave %s: http=%s err=%s",
+            channel_id,
+            resp.status_code,
+            parsed.get("error"),
+        )
+        return False
+    return True
+
+
 # ───── File upload (reports that don't fit in a message) ─────
 
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
