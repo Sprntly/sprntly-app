@@ -116,6 +116,42 @@ def test_regex_catches_broadened_prd_phrasings(question):
     assert m.confidence >= 0.75
 
 
+# The gap that let a bug ship. Every labelled case above is a phrasing that
+# SHOULD route somewhere, so `test_regex_never_misroutes` could only ever catch
+# a rule stealing another rule's question — never a rule stealing a question
+# that belongs to NO skill. Asking about a document is exactly that shape, and
+# `\bprd\b.{0,20}\b(for|about|from)\b` matched all of it: "is there a prd for
+# the sync service?" authored a PRD at 0.90, terminally, with no LLM involved.
+#
+# These assert the regex tier DEFERS. They deliberately do not assert what the
+# LLM router then picks — that is a live-model question (`prd-critique`,
+# `answer`, something else), and pinning it here would make this suite depend
+# on a network call it is designed not to need.
+@pytest.mark.parametrize("question", [
+    # (a) opens as a question about an existing document
+    "what does the PRD for onboarding actually say about metrics?",
+    "what is in the prd for exports",
+    "is there a prd for the sync service?",
+    "do we have a prd for billing?",
+    "according to the prd for exports, what is the rollout plan",
+    "which prd covers the payments work?",
+    # (b) a read verb governing the document
+    "review the PRD for checkout and tell me what is missing",
+    "summarise our product brief for the mobile app",
+    "walk me through the product spec for onboarding",
+    "critique the existing prd for the referral program",
+    # (c) an extraction noun — the shape that catches the `give` verb
+    "can you give me the highlights of our product spec for billing?",
+    "give me the gist of the prd for exports",
+])
+def test_asking_about_a_prd_is_not_asking_for_one(question):
+    m = detect_intent(question)
+    assert not (m and m.skill_id == "prd-author" and m.confidence >= 0.75), (
+        f"{question!r} is a question ABOUT a PRD; the regex tier claimed "
+        f"prd-author and would author a new document instead of answering"
+    )
+
+
 @pytest.mark.parametrize("question,expected", EVALS)
 def test_regex_never_misroutes(question, expected):
     m = detect_intent(question)

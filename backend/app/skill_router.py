@@ -113,8 +113,53 @@ _CIR_VETO = re.compile(
 # skill_id → veto pattern. When a rule matches but its veto also matches, the
 # fast-path DEFERS (falls through to the remaining rules, then the haiku router)
 # rather than claiming a question that belongs to a sibling skill.
+# Asking ABOUT a PRD is not asking FOR one. The three prd-author rules match on
+# a verb-or-noun pair that a QUESTION about an existing document satisfies just
+# as well as a command to write a new one: `\bprd\b.{0,20}\b(for|about|from)\b`
+# is true of "is there a prd for the sync service?" — a yes/no question that
+# authored a whole PRD at 0.90, terminally, with no LLM involved. Reported
+# 2026-08-02.
+#
+# Three shapes, each a way of REFERRING to a document rather than commissioning
+# one:
+#
+#   (a) the message OPENS as a question — "what does the prd say", "is there a
+#       prd for X", "according to the prd". Anchored to the start (past the
+#       usual politeness prefixes) because a command that merely CONTAINS a
+#       later question ("write a prd for checkout — what should it cover?") is
+#       still a command, and must keep its fast path.
+#   (b) a READ verb governing the document — "review the prd", "summarise our
+#       product brief". Requires the article, so "review and write a prd" does
+#       not trip it.
+#   (c) an EXTRACTION noun — "the highlights of our product spec", "the gist
+#       of the prd". This is the one that catches the `give` verb, since "give
+#       me the highlights of our product spec for billing" satisfies the same
+#       rule as "give me a prd for billing".
+#
+# A veto DEFERS to the LLM tier, it does not refuse the skill — so a false veto
+# costs one haiku call and is usually recovered, while a false MATCH costs the
+# user an unwanted document. That asymmetry is why this is worth having, and it
+# is the same argument _CIR_VETO was written for: narrow the trigger on the
+# expensive outcome. Intent-first convention (#925) — this narrows, never
+# widens.
+_PRD_MENTION_VETO = re.compile(
+    r"^\s*(?:(?:so|and|but|ok(?:ay)?|hey|hi|also|quick\s+q(?:uestion)?)\b[\s,]*)*"
+    r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:what|whats|what's|which|where|when|who|why|how|is\s+there|are\s+there|"
+    r"do\s+we\s+have|does\s+(?:the|our|this|that)|did\s+we|according\s+to)\b"
+    r"|\b(?:review|critique|summari[sz]e|summarise|read|explain|assess|evaluate|"
+    r"check|compare|walk\s+me\s+through|look\s+at|go\s+over|talk\s+me\s+through)\s+"
+    r"(?:the|our|this|that|my|his|her|their)\s+(?:existing\s+|current\s+|draft\s+)?"
+    r"(?:prd|product\s+requirements?\s+doc(?:ument)?|product\s+brief|"
+    r"product\s+spec(?:ification)?)\b"
+    r"|\b(?:highlights?|summary|gist|overview|contents?|key\s+points?|takeaways?)\s+"
+    r"(?:of|in|from)\b",
+    re.I,
+)
+
 _RULE_VETOES: dict[str, re.Pattern] = {
     "competitive-intelligence-review": _CIR_VETO,
+    "prd-author": _PRD_MENTION_VETO,
 }
 
 

@@ -202,6 +202,43 @@ def test_low_confidence_answer_is_not_downgraded(monkeypatch):
     assert env["source"] == "llm"
 
 
+def test_generate_without_a_topic_downgrades(monkeypatch):
+    """An action needs its object resolved before it fires.
+
+    `edit_prd` has always required a target PRD and an instruction; the two
+    tests below pin that. `generate_prd` required NOTHING — the schema even
+    authorised `task: null` — and the frontend dispatches on the intent alone,
+    so a confident-but-topicless read authored a document about nothing.
+    """
+    _patch_llm(monkeypatch, {"intent": "generate_prd", "confidence": 0.95,
+                             "task": None, "reason": "seems like a doc"})
+    env = ci.resolve_chat_intent("ent-1", "write this up", [])
+    assert env["intent"] == "answer"
+    assert env["source"] == "no_task"
+
+
+def test_generate_with_a_topic_still_fires(monkeypatch):
+    """The slot check must not disarm the feature: a resolved topic goes
+    through untouched."""
+    _patch_llm(monkeypatch, {"intent": "generate_prd", "confidence": 0.95,
+                             "task": "offline exports for the mobile app",
+                             "reason": "explicit request"})
+    env = ci.resolve_chat_intent("ent-1", "write this up", [])
+    assert env["intent"] == "generate_prd"
+    assert env["source"] == "llm"
+    assert env["task"] == "offline exports for the mobile app"
+
+
+def test_blank_task_counts_as_no_topic(monkeypatch):
+    """`_clean` normalises whitespace-only to None; the gate reads the cleaned
+    value, so '   ' is as topicless as null."""
+    _patch_llm(monkeypatch, {"intent": "generate_prd", "confidence": 0.95,
+                             "task": "   ", "reason": "blank"})
+    env = ci.resolve_chat_intent("ent-1", "do the thing", [])
+    assert env["intent"] == "answer"
+    assert env["source"] == "no_task"
+
+
 def test_edit_without_target_prd_downgrades(monkeypatch):
     _patch_llm(monkeypatch, {"intent": "edit_prd", "confidence": 0.9,
                              "instruction": "shorten it", "reason": "edit"})
