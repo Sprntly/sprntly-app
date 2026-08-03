@@ -52,8 +52,13 @@ import {
  * Reviewed categories stay re-openable. Categories + connectors come from
  * CONNECTOR_CATALOG so this page tracks Settings automatically (the design
  * kit's hardcoded grid is NOT the source of truth) — which is why the counter
- * says "of M", not "of 8": wizardCategories hides any category with no
- * connectable provider.
+ * says "of M" rather than a literal: wizardCategories hides any category with
+ * no connectable provider, so the total moves as connectors get wired.
+ *
+ * Company documentation is the last category (added 2026-08-03) — Confluence
+ * and Google Docs. It is the one category with no upload strip AND no
+ * onboarding-side upload alternative: its named-source picker ("Add a document
+ * source") is a Settings-only surface, so here it is connectors only.
  *
  * Every connector is OPTIONAL: leaving is never gated on having a live
  * connection, and a reviewed category reads "Connected" whether or not

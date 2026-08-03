@@ -47,6 +47,7 @@ import {
   CONNECTOR_IDS_WITH_OAUTH,
   CONNECTOR_TYPE_LABELS,
   connectableCatalog,
+  UPLOADS_PROVIDER_ID,
 } from "../../../../lib/connectorsCatalog"
 import {
   ApiError,
@@ -89,8 +90,14 @@ import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 // components instead.
 import { IconCloudUpload, IconLoader2, IconTrash } from "@tabler/icons-react"
 
-/** Provider id of the "upload your own documents" connector. */
-export const UPLOADS_PROVIDER_ID = "uploads"
+/**
+ * Provider id of the "upload your own documents" connector.
+ *
+ * Defined in the catalog (the onboarding wizard has to exclude it too, and a
+ * pure lib module can't import this screen); re-exported here so the existing
+ * import path keeps working.
+ */
+export { UPLOADS_PROVIDER_ID }
 
 /**
  * Catalog category KEY of the merged "Company documentation" category — the

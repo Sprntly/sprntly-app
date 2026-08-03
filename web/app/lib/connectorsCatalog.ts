@@ -14,11 +14,25 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 // Category order follows the v6 onboarding screenshot spec (2026-07-17):
 // Analytics → Voice → Research → CRM → Project Management → Monitoring →
-// Design → Codebase → Communications, with the settings-only extras (docs,
-// revenue) appended. Research was added 2026-08-02 and sits next to Voice
-// because both carry what users told us — Voice unsolicited, Research
-// deliberately gathered. The onboarding wizard shows only
-// ONBOARDING_CONNECTOR_CATEGORIES (lib/onboarding/connectorsWizard.ts).
+// Design → Codebase → Communications, with Company documentation and the
+// settings-only Revenue appended. Research was added 2026-08-02 and sits
+// next to Voice because both carry what users told us — Voice unsolicited,
+// Research deliberately gathered. The onboarding wizard shows only
+// ONBOARDING_CONNECTOR_CATEGORIES (lib/onboarding/connectorsWizard.ts);
+// Company documentation joined that list 2026-08-03, so Revenue is now the
+// only settings-only category.
+
+/**
+ * Provider id of the "upload your own documents" connector — the user's own
+ * named document sources rather than a third-party integration.
+ *
+ * Lives here (not in ConnectorsSettings, where it used to) because the
+ * onboarding wizard needs it too, and a pure catalog module must not import a
+ * settings screen. Both surfaces exclude it from their connector grids: it has
+ * no auth flow to open, only the "Add a document source" picker that Settings
+ * renders and onboarding does not.
+ */
+export const UPLOADS_PROVIDER_ID = "uploads"
 
 // Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
 // communication tool (brief delivery target) AND a customer-voice source —
@@ -200,8 +214,13 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     // in NON_EVIDENCE_CATEGORIES (Notion / Google Docs are context, not
     // customer/product evidence on their own), while the `uploads` provider is
     // an explicit evidence exception (see EVIDENCE_PROVIDER_EXCEPTIONS) —
-    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS. Settings-only (not an
-    // onboarding wizard category since v6).
+    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS.
+    //
+    // An onboarding wizard category again since 2026-08-03: Confluence and
+    // Google Docs are both OAuth-wired, and a PM's wiki is the richest product
+    // context we can read on day one, so asking for it during onboarding beats
+    // waiting for them to find Settings. The `uploads` provider is excluded
+    // there (see wizardCategories) — same reason Settings excludes it.
     key: "docs",
     title: "Company documentation",
     // One upload path only: the named-source picker ("Add a document source",
@@ -211,7 +230,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "uploads",      name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
+      { id: UPLOADS_PROVIDER_ID, name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
