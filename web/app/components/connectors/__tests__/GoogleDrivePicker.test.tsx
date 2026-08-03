@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import type { GoogleDrivePickedFile } from "../../../lib/api"
-import { GoogleDrivePickerView } from "../GoogleDrivePicker"
+import { GoogleDrivePickerView, syncFailureMessage } from "../GoogleDrivePicker"
 
 const FILES: GoogleDrivePickedFile[] = [
   { id: "file0001", name: "Product Plan" },
@@ -65,5 +65,48 @@ describe("GoogleDrivePickerView", () => {
     expect(html.toLowerCase()).toContain("configured")
     // The Add button is not rendered in the unconfigured state.
     expect(html).not.toContain("Add Drive files")
+  })
+
+  it("renders the Selected files heading", () => {
+    const html = render()
+    expect(html).toContain("Selected files")
+    expect(html).not.toContain("Synced files")
+  })
+
+  it("surfaces a sync failure message in the alert region", () => {
+    const html = render({ error: "Xometry: is a folder" })
+    expect(html).toContain('role="alert"')
+    expect(html).toContain("Xometry: is a folder")
+  })
+})
+
+describe("syncFailureMessage", () => {
+  it("returns null for empty and undefined", () => {
+    expect(syncFailureMessage([])).toBeNull()
+    expect(syncFailureMessage(undefined)).toBeNull()
+  })
+
+  it("formats a single failure", () => {
+    expect(syncFailureMessage([{ name: "Xometry", error: "is a folder" }])).toBe(
+      "Xometry: is a folder",
+    )
+  })
+
+  it("appends a count for multiple failures", () => {
+    expect(
+      syncFailureMessage([
+        { name: "Xometry", error: "is a folder" },
+        { name: "archive.zip", error: "Unsupported file type (application/zip)" },
+      ]),
+    ).toBe("Xometry: is a folder (+1 more)")
+  })
+
+  it("ignores malformed entries", () => {
+    expect(
+      syncFailureMessage([
+        { name: "a", error: "" },
+        { name: "b", error: undefined as unknown as string },
+      ]),
+    ).toBeNull()
   })
 })

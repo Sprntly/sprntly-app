@@ -77,6 +77,17 @@ class SyncConfigError(ValueError):
     pass
 
 
+FOLDER_UNSUPPORTED = (
+    "{name} is a folder. Sprntly can't read folders yet — open it in the "
+    "picker and select the files inside it."
+)
+
+
+def folder_error_message(name: str) -> str:
+    """User-facing message for a picked item that turned out to be a folder."""
+    return FOLDER_UNSUPPORTED.format(name=name)
+
+
 def drive_http_error_message(err: HttpError) -> str:
     """Turn a Drive API HttpError into a short, user-facing message."""
     try:
@@ -333,6 +344,11 @@ def sync_google_drive(
             continue
 
         name = meta.get("name") or picked_name
+
+        if (meta.get("mimeType") or "") == GOOGLE_FOLDER:
+            result.errors.append({"name": name, "error": folder_error_message(name)})
+            continue
+
         modified = meta.get("modifiedTime") or ""
         corpus_fresh = mtime_map.get(file_id) == modified
         kg_fresh = kg_mtime_map.get(file_id) == modified
@@ -347,20 +363,23 @@ def sync_google_drive(
             continue
 
         if downloaded is None:
-            result.skipped.append(
+            result.errors.append(
                 {
                     "name": name,
-                    "reason": f"unsupported type ({meta.get('mimeType')})",
+                    "error": (
+                        f"Unsupported file type ({meta.get('mimeType')}) — "
+                        "Sprntly reads documents, spreadsheets, slides and PDFs."
+                    ),
                 }
             )
             continue
 
         filename, data = downloaded
         if len(data) > MAX_SYNC_BYTES:
-            result.skipped.append(
+            result.errors.append(
                 {
                     "name": name,
-                    "reason": f"exceeds {MAX_SYNC_BYTES // (1024 * 1024)}MB limit",
+                    "error": "File is larger than the 20MB sync limit.",
                 }
             )
             continue
@@ -370,7 +389,10 @@ def sync_google_drive(
             try:
                 ingested = datasets.ingest_file(slug, filename, data)
             except UnsupportedFileType:
-                result.skipped.append({"name": name, "reason": "unsupported after export"})
+                result.errors.append({
+                    "name": name,
+                    "error": "Sprntly couldn't convert this file after downloading it.",
+                })
                 continue
             except Exception as e:
                 result.errors.append({"name": name, "error": str(e)})
@@ -401,7 +423,10 @@ def sync_google_drive(
             try:
                 md_text = convert(filename, data)
             except UnsupportedFileType:
-                result.skipped.append({"name": name, "reason": "unsupported after export"})
+                result.errors.append({
+                    "name": name,
+                    "error": "Sprntly couldn't convert this file after downloading it.",
+                })
                 continue
             except Exception as e:
                 result.errors.append({"name": name, "error": str(e)})
@@ -426,7 +451,11 @@ def sync_google_drive(
     merge_config(row, patch)
     err = None
     if result.errors:
-        err = f"{len(result.errors)} file(s) failed"
+        first = result.errors[0]
+        err = f"{first['name']}: {first['error']}"
+        if len(result.errors) > 1:
+            err = f"{err} (+{len(result.errors) - 1} more)"
+        err = err[:500]
     db.update_connection_sync(
         company_id,
         google_oauth.GOOGLE_DRIVE_PROVIDER,
@@ -435,14 +464,22 @@ def sync_google_drive(
 
     if kg_docs:
         result.kg_queued = [d.name for d in kg_docs]
+        started = False
         try:
             if kg_inline:
                 extract = run_drive_extract(company_id, kg_docs)
                 result.kg_signals = extract.get("signals", 0)
+                started = True
             else:
-                kickoff_drive_extract(company_id, kg_docs)
+                started = kickoff_drive_extract(company_id, kg_docs)
         except Exception:  # noqa: BLE001 — extraction must never fail the sync
             logger.exception(
                 "drive sync: KG extraction kick failed for %s", company_id
+            )
+        if not started:
+            msg = "Files synced, but knowledge-graph extraction didn't start. Re-run the sync."
+            result.errors.append({"name": "knowledge graph", "error": msg})
+            db.update_connection_sync(
+                company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg[:500],
             )
     return result

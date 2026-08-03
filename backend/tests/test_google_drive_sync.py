@@ -12,7 +12,9 @@ from cryptography.fernet import Fernet
 from app import db
 from app.connectors import google_oauth
 from app.connectors.google_drive_sync import (
+    MAX_SYNC_BYTES,
     SyncConfigError,
+    SyncResult,
     drive_http_error_message,
     normalize_picked_files,
     sync_google_drive,
@@ -309,3 +311,390 @@ def test_sync_stores_picked_files_passed_in(drive_connected):
     row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     cfg = json.loads(row["config_json"])
     assert cfg["files"] == [{"id": "newfile01", "name": "spec.txt"}]
+
+
+# ─── Fail-loud: a picked item that can't be ingested is never a silent skip ──
+
+
+def _folder_meta(name: str = "Xometry", modified: str = "2026-05-20T12:00:00.000Z") -> dict:
+    return {
+        "id": "folder0001",
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "modifiedTime": modified,
+    }
+
+
+def test_picked_folder_reports_error_not_silent_success(drive_connected, kg_kickoff):
+    """RED on unfixed code: the folder lands in `skipped` with `errors == []`."""
+    company_id = drive_connected
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              new=MagicMock()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    assert len(result.errors) == 1
+    assert "is a folder" in result.errors[0]["error"]
+    assert "Xometry" in result.errors[0]["error"]
+    assert result.synced == []
+    assert result.skipped == []
+
+
+def test_picked_folder_sets_last_sync_error(drive_connected, kg_kickoff):
+    """RED on unfixed code: last_sync_error stays None for a picked folder."""
+    company_id = drive_connected
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              new=MagicMock()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    err = row.get("last_sync_error")
+    assert err is not None
+    assert "Xometry" in err
+    assert "is a folder" in err
+    assert err != "1 file(s) failed"
+
+
+def test_picked_folder_never_attempts_download(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    download_mock = MagicMock()
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              new=download_mock),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    download_mock.assert_not_called()
+
+
+def test_unsupported_type_is_error_not_skip(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    meta = {
+        "id": "file0001aa",
+        "name": "archive.zip",
+        "mimeType": "application/zip",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "5",
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=meta),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    assert result.skipped == []
+    assert len(result.errors) == 1
+    assert "Unsupported file type" in result.errors[0]["error"]
+    assert "application/zip" in result.errors[0]["error"]
+
+
+def test_oversize_file_is_error_not_skip(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    meta = {
+        "id": "file0001aa",
+        "name": "huge.pdf",
+        "mimeType": "application/pdf",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": str(MAX_SYNC_BYTES + 1),
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=meta),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    assert len(result.errors) == 1
+    assert "20MB" in result.errors[0]["error"]
+
+
+def test_last_sync_error_names_first_failure_and_counts_rest(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    metas = {
+        "badtype01": {
+            "id": "badtype01", "name": "archive.zip", "mimeType": "application/zip",
+            "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+        },
+        "badtype02": {
+            "id": "badtype02", "name": "video.mov", "mimeType": "video/quicktime",
+            "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+        },
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              side_effect=lambda service, fid: metas[fid]),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(
+            company_id=company_id,
+            files=[
+                {"id": "badtype01", "name": "archive.zip"},
+                {"id": "badtype02", "name": "video.mov"},
+            ],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+    assert len(result.errors) == 2
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    first = result.errors[0]
+    expected = f"{first['name']}: {first['error']} (+1 more)"[:500]
+    assert row["last_sync_error"] == expected
+    assert len(row["last_sync_error"]) <= 500
+
+
+def test_kg_kickoff_false_reports_error(drive_connected, monkeypatch):
+    company_id = drive_connected
+    monkeypatch.setattr(
+        "app.kg_ingest.drive_extract.kickoff_drive_extract",
+        lambda company_id, docs: False,
+    )
+    file_meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=file_meta),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("notes.txt", b"hello from drive")),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    kg_errors = [e for e in result.errors if e["name"] == "knowledge graph"]
+    assert len(kg_errors) == 1
+    assert "extraction didn't start" in kg_errors[0]["error"]
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    assert row["last_sync_error"] is not None
+    assert "extraction didn't start" in row["last_sync_error"]
+
+
+def test_kg_kickoff_raise_does_not_break_sync(drive_connected, monkeypatch):
+    company_id = drive_connected
+
+    def _raise(company_id, docs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "app.kg_ingest.drive_extract.kickoff_drive_extract", _raise
+    )
+    file_meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=file_meta),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("notes.txt", b"hello from drive")),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)  # must not raise
+    finally:
+        for p in patches:
+            p.stop()
+    assert isinstance(result, SyncResult)
+    kg_errors = [e for e in result.errors if e["name"] == "knowledge graph"]
+    assert len(kg_errors) == 1
+    assert "extraction didn't start" in kg_errors[0]["error"]
+
+
+def test_folder_with_matching_mtime_still_errors(drive_connected, kg_kickoff):
+    """RED on unfixed code: proves the folder guard precedes the freshness
+    short-circuit — a folder with a matching cached mtime must still error."""
+    company_id = drive_connected
+    import json as _json
+
+    modified = "2026-05-20T12:00:00.000Z"
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    cfg["file_mtime"] = {"folder0001": modified}
+    cfg["kg_file_mtime"] = {"folder0001": modified}
+    db.patch_connection_config(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg)
+
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta(modified=modified)),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              new=MagicMock()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(
+            company_id=company_id,
+            files=[{"id": "folder0001", "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+    assert len(result.errors) == 1
+    assert "is a folder" in result.errors[0]["error"]
+    assert result.skipped == []
+
+
+def test_skipped_only_ever_carries_unchanged(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    import json as _json
+
+    modified = "2026-05-20T12:00:00.000Z"
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    cfg["file_mtime"] = {"file0001aa": modified}
+    cfg["kg_file_mtime"] = {"file0001aa": modified}
+    cfg["files"] = [
+        {"id": "file0001aa", "name": "notes.txt"},
+        {"id": "badtype01", "name": "archive.zip"},
+    ]
+    db.patch_connection_config(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg)
+
+    metas = {
+        "file0001aa": {
+            "id": "file0001aa", "name": "notes.txt", "mimeType": "text/plain",
+            "modifiedTime": modified, "size": "12",
+        },
+        "badtype01": {
+            "id": "badtype01", "name": "archive.zip", "mimeType": "application/zip",
+            "modifiedTime": "2026-06-01T00:00:00.000Z", "size": "5",
+        },
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              side_effect=lambda service, fid: metas[fid]),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    assert {s["reason"] for s in result.skipped} == {"unchanged"}
+    assert any(
+        e["name"] == "archive.zip" and "Unsupported file type" in e["error"]
+        for e in result.errors
+    )
+
+
+def test_all_success_leaves_last_sync_error_none(drive_connected, kg_kickoff):
+    company_id = drive_connected
+    file_meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=file_meta),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("notes.txt", b"hello from drive")),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(company_id=company_id)
+    finally:
+        for p in patches:
+            p.stop()
+    assert result.errors == []
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    assert row["last_sync_error"] is None
+
+
+def test_sync_result_to_dict_keys_unchanged():
+    keys = set(SyncResult(dataset="acme").to_dict())
+    assert keys == {"dataset", "synced", "skipped", "errors", "kg_queued", "kg_signals"}

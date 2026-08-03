@@ -141,7 +141,7 @@ export function GoogleDrivePickerView({
     <div className="conn-drive-setup">
       {savedFiles.length > 0 ? (
         <div className="conn-drive-saved">
-          <span className="conn-drive-selected-label">Synced files</span>
+          <span className="conn-drive-selected-label">Selected files</span>
           <ul className="conn-drive-file-list">
             {savedFiles.map((f) => (
               <li key={f.id} className="conn-drive-file">
@@ -224,7 +224,9 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
             setBusy(true)
             setError(null)
             try {
-              await connectorsApi.saveGoogleDriveFiles({ files })
+              const res = await connectorsApi.saveGoogleDriveFiles({ files })
+              const failure = syncFailureMessage(res.errors)
+              if (failure) setError(failure)
               onSaved?.()
             } catch (e) {
               setError(toMessage(e))
@@ -258,4 +260,16 @@ function toMessage(e: unknown): string {
   if (e instanceof ApiError) return apiErrorMessage(e.status, e.body)
   if (e instanceof Error) return e.message
   return String(e)
+}
+
+/** One-line summary of per-file sync failures returned in a 200 body. */
+export function syncFailureMessage(
+  errors: { name: string; error: string }[] | undefined,
+): string | null {
+  const list = (errors ?? []).filter(
+    (e) => e && typeof e.error === "string" && e.error.length > 0,
+  )
+  if (list.length === 0) return null
+  const first = `${list[0].name}: ${list[0].error}`
+  return list.length === 1 ? first : `${first} (+${list.length - 1} more)`
 }
