@@ -200,6 +200,7 @@ def answer_for_hints(
     question: str,
     history: list[dict] | None,
     hints: set[str],
+    include_knowledge_graph: bool = False,
 ) -> dict:
     """Answer an ad-hoc connector question for the providers the router matched.
 
@@ -207,6 +208,10 @@ def answer_for_hints(
     MAX_PROVIDERS_PER_LOOKUP of them, connected ones first). When the question
     only named sources we cannot read, nothing is fetched and nothing is
     invented — the honest message is returned directly.
+
+    `include_knowledge_graph` is passed through to the tool loop for questions
+    that named no source at all (the document-intent path) — see
+    connector_lookup/knowledge_graph.py for why those need both readers.
     """
     supported = [h for h in hints if h in LOOKUP_PROVIDERS]
     if not supported:
@@ -238,4 +243,5 @@ def answer_for_hints(
         history=history,
         providers=providers,
         unavailable_names=unavailable,
+        include_knowledge_graph=include_knowledge_graph,
     )

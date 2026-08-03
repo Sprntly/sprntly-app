@@ -161,6 +161,18 @@ def not_connected_message(
     )
 
 
+def kg_module():
+    """The knowledge-graph toolset, imported lazily.
+
+    Same reason the registry defers its adapter imports: this module is imported
+    on every intercepted question, and the KG package pulls in the graph facade
+    and embeddings. Also the seam tests patch.
+    """
+    from app.connector_lookup import knowledge_graph
+
+    return knowledge_graph
+
+
 def _unavailable_display_names(
     missing: list[LookupProvider], extra: list[str] | None
 ) -> list[str]:
@@ -177,6 +189,7 @@ def _unavailable_display_names(
 def _build_system(
     connected: list[tuple[LookupProvider, LookupSession]],
     unavailable: list[str] | None = None,
+    knowledge_graph: bool = False,
 ) -> str:
     """Framework rules + each connected adapter's own block + any honest mode
     notes the session recorded (e.g. Slack's search-vs-channel-read mode), plus
@@ -200,6 +213,10 @@ def _build_system(
             "explicitly in your answer; do not let an answer from the other "
             "source(s) imply you covered this one."
         )
+    if knowledge_graph:
+        from app.connector_lookup import knowledge_graph as kg
+
+        parts.append(f"\n## Sprntly knowledge graph\n{kg.SYSTEM}")
     if len(connected) > 1:
         parts.append(
             "\nSeveral sources are connected. Prefer the one the question names; "
@@ -208,7 +225,13 @@ def _build_system(
     return "\n".join(parts)
 
 
-def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadline: float):
+def _make_dispatch(
+    connected: list[tuple[LookupProvider, LookupSession]],
+    deadline: float,
+    *,
+    enterprise_id: str | None = None,
+    knowledge_graph: bool = False,
+):
     """One (name, input) -> str dispatcher over every connected adapter.
 
     Framework guarantees applied on top of whatever the adapter does:
@@ -216,6 +239,11 @@ def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadli
     per-result char cap with an honest truncation marker, the wall-clock budget,
     and a readable error string instead of an exception (run_tool_loop guards
     too; this keeps the message ours).
+
+    The knowledge-graph tool is dispatched here too when enabled. It is not a
+    provider — no session, no OAuth — so it sits beside the owner map rather than
+    inside it, and it is deliberately subject to the SAME wall-clock deadline: a
+    slow KG read late in a loop must not be what makes the user wait.
     """
     owner: dict[str, tuple[LookupProvider, LookupSession]] = {}
     for provider, session in connected:
@@ -224,6 +252,16 @@ def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadli
 
     def dispatch(name: str, inp: dict) -> str:
         inp = inp if isinstance(inp, dict) else {}
+        if knowledge_graph and name == kg_module().TOOL_NAME:
+            if time.monotonic() > deadline:
+                return (
+                    "(lookup time budget reached — no more fetches. Answer from "
+                    "what you already read, and say it may be incomplete.)"
+                )
+            return cap_text(
+                kg_module().dispatch(enterprise_id or "", name, inp),
+                limit=DEFAULT_RESULT_CHARS,
+            )
         pair = owner.get(name)
         if pair is None:
             return f"(unknown tool {name})"
@@ -260,6 +298,7 @@ def answer(
     exception_text: str | None = None,
     system_text: str | None = None,
     unavailable_names: list[str] | None = None,
+    include_knowledge_graph: bool = False,
     run_loop=None,
     log=None,
 ) -> dict:
@@ -281,6 +320,14 @@ def answer(
     answer says what it did not cover, instead of quietly answering from half the
     sources and sounding complete.
 
+    `include_knowledge_graph` adds Sprntly's own extracted knowledge as a further
+    tool (connector_lookup/knowledge_graph.py). OFF by default, and deliberately
+    so: a question that NAMES a source is asking about that source, and the
+    adapters that pass their own `system_text` (Jira) would otherwise be handed a
+    tool their prompt never mentions. The document-intent path turns it on,
+    because a question that names no source at all has no way to say which of the
+    two readers it meant.
+
     Never raises — a chat answer degrades, it does not error.
     """
     loop = run_loop or _default_run_loop
@@ -301,15 +348,25 @@ def answer(
     tools: list[dict] = []
     for provider, _session in connected:
         tools.extend(provider.tools())
+    # An adapter passing verbatim `system_text` (Jira) has a prompt that predates
+    # this tool and never mentions it, so it does not get it — offering a tool the
+    # system block does not describe is how a loop wastes an iteration.
+    kg_on = include_knowledge_graph and not system_text
+    if kg_on:
+        tools.extend(kg_module().TOOLS)
     try:
         text = loop(
             system=system_text or _build_system(
                 connected,
                 unavailable=_unavailable_display_names(missing, unavailable_names),
+                knowledge_graph=kg_on,
             ),
             user=_render_history(history) + f"Question: {question}",
             tools=tools,
-            dispatch=_make_dispatch(connected, deadline),
+            dispatch=_make_dispatch(
+                connected, deadline,
+                enterprise_id=enterprise_id, knowledge_graph=kg_on,
+            ),
             model=ANSWER_MODEL,
             max_tokens=MAX_TOKENS,
             max_iters=MAX_ITERS,

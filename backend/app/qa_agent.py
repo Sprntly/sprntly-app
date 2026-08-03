@@ -67,6 +67,7 @@ from app.skill_router import (
     PIPELINE_SKILLS,
     SkillMatch,
     detect_intent,
+    document_lookup_candidates,
     is_call_digest,
     is_connector_lookup,
     is_context_dependent_followup,
@@ -1231,10 +1232,49 @@ def answer(
         if connector_hints:
             from app.connector_lookup import registry
 
+            # The knowledge graph rides along here too. Naming a source says
+            # which tool to open, not that the question wants a thinner answer —
+            # and the graph is the only reader that spans sources the ≤2-provider
+            # cap left out. The model is told which reader is which and must
+            # attribute every fact, so the live read stays the authority on what
+            # a document currently says.
             return registry.answer_for_hints(
                 enterprise_id=enterprise_id, question=question,
                 history=history, hints=connector_hints,
+                include_knowledge_graph=True,
             )
+
+    # A DOCUMENT question that names no source — "what does our onboarding spec
+    # say?", "do we have a runbook for failover?". The block above needs the
+    # message to name a tool, which is how people talk about Slack and not how
+    # they talk about a wiki, so these fell to the generic path and were answered
+    # from KG signals while the page itself went unread.
+    #
+    # The connection check is the whole safety mechanism, and it lives here
+    # because skill_router takes no enterprise_id by design: the router says
+    # "this COULD be a wiki question", and only a company that actually has the
+    # wiki connected ever reaches the tool loop. Everyone else falls straight
+    # through to normal routing, exactly as before.
+    #
+    # Below every other interception for the usual reason — this trigger is the
+    # broadest on the path, so it must only see what nothing else claimed.
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        candidates = document_lookup_candidates(question)
+        if candidates:
+            from app.connector_lookup import registry
+
+            hints = candidates & set(registry.connected_providers(enterprise_id))
+            if hints:
+                # Both readers, because this question named neither. The wiki
+                # knows what the page SAYS; the knowledge graph knows what the
+                # company already concluded across every synced source. The
+                # reported failure answered from the graph alone and then told
+                # the user to connect the wiki it never opened.
+                return registry.answer_for_hints(
+                    enterprise_id=enterprise_id, question=question,
+                    history=history, hints=hints,
+                    include_knowledge_graph=True,
+                )
 
     # A pinned id is honoured only when something can actually run it: one of
     # the four pipelines (Slack's `/competitive` command pins CIR outright), or
