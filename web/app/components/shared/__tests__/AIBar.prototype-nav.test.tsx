@@ -59,7 +59,7 @@ vi.mock("../../../lib/api", () => {
 })
 
 vi.mock("../../../lib/runPrdGeneration", () => ({
-  runPrdGeneration: vi.fn().mockResolvedValue({
+  runPrdGenerationFromTask: vi.fn().mockResolvedValue({
     ok: true,
     prd: { prd_id: 42, title: "Retention PRD" },
   }),
@@ -104,7 +104,11 @@ vi.mock("../../../context/NavigationContext", () => ({
   useNavigation: () => ({
     currentScreen: "chat",
     goTo: goToSpy,
-    aiBarValue: "generate a prd for this",
+    // A command that NAMES a topic. AIBar no longer generates from the brief's
+    // top insight for a topicless command ("generate a prd for this") — that
+    // deictic now asks for a topic instead, so this suite drives the real
+    // generate path with an explicit task.
+    aiBarValue: "generate a prd for onboarding retention",
     setAIBarValue: vi.fn(),
     showToast: vi.fn(),
     aiPanelWidth: 360,
