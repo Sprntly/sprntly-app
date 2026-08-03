@@ -114,6 +114,9 @@ function SignUpForm() {
   const [role, setRole] = useState("Product Manager")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // Separate from `submitting` because the Google button owns its own label,
+  // and it is never cleared — the OAuth redirect takes the tab away.
+  const [googleSubmitting, setGoogleSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -169,11 +172,16 @@ function SignUpForm() {
   }
 
   async function onGoogle() {
+    if (submitting || googleSubmitting) return
     setError(null)
+    setGoogleSubmitting(true)
     try {
       await auth.signInWithGoogle()
+      // No reset on success: the call ends in a full-page redirect to Google,
+      // so the button stays busy until this document is gone.
     } catch {
       setError("Couldn't start Google sign-up. Try again.")
+      setGoogleSubmitting(false)
     }
   }
 
@@ -206,6 +214,7 @@ function SignUpForm() {
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
         setStep(1)
+        setSubmitting(false)
         return
       }
       if (result === "confirm_email") {
@@ -216,6 +225,10 @@ function SignUpForm() {
       } else {
         router.replace(await auth.postLoginPath())
       }
+      // Deliberately no reset on the success paths. router.replace() is
+      // asynchronous and this component stays mounted while the next route
+      // loads; clearing `submitting` here flipped the button back to
+      // "Continue" mid-navigation, which read as "nothing happened".
     } catch (e) {
       if (e instanceof AuthApiError && e.message.toLowerCase().includes("registered")) {
         setError("An account with this email already exists. Try signing in.")
@@ -223,7 +236,6 @@ function SignUpForm() {
       } else {
         setError("Couldn't create your account. Try again in a moment.")
       }
-    } finally {
       setSubmitting(false)
     }
   }
@@ -263,6 +275,8 @@ function SignUpForm() {
       password={password}
       confirmPassword={confirmPassword}
       showPassword={showPassword}
+      submitting={submitting}
+      googleSubmitting={googleSubmitting}
       error={error}
       termsHref={publicPath("/terms")}
       privacyHref={publicPath("/privacy")}

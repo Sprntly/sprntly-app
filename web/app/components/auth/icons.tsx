@@ -26,6 +26,20 @@ export function ArrowRight(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+/** Busy spinner for the auth CTAs — a three-quarter arc that reads as motion
+ *  even at 14px. Rotation lives in `.auth-btn-spin` (globals.css) so the
+ *  reduced-motion opt-out is handled once, in CSS. */
+export function Spinner({ className, ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      {...base(props)}
+      className={className ? `auth-btn-spin ${className}` : "auth-btn-spin"}
+    >
+      <path d="M12 3a9 9 0 1 0 9 9" />
+    </svg>
+  )
+}
+
 export function Eye(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...base(props)}>

@@ -22,6 +22,8 @@ function renderStep1(override: Partial<SignUpStep1ViewProps> = {}): string {
     password: "",
     confirmPassword: "",
     showPassword: false,
+    submitting: false,
+    googleSubmitting: false,
     error: null,
     termsHref: "/terms",
     privacyHref: "/privacy",
@@ -107,6 +109,29 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).not.toContain("share-context-strip")
     expect(html).not.toContain("sign-up-domain-hint")
   })
+
+  it("test_sign_up_step1_create_button_shows_busy_state_while_checking", () => {
+    const html = renderStep1({ submitting: true })
+    expect(html).toContain("Checking…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).toContain('aria-busy="true"')
+    // Disabled so a second click can't fire another availability check.
+    expect(html).toContain("disabled")
+  })
+
+  it("test_sign_up_step1_create_button_is_idle_by_default", () => {
+    const html = renderStep1()
+    expect(html).toContain("Create account")
+    expect(html).not.toContain("auth-btn-spin")
+    expect(html).not.toContain("Checking…")
+  })
+
+  it("test_sign_up_step1_google_button_stays_busy_through_the_redirect", () => {
+    const html = renderStep1({ googleSubmitting: true })
+    expect(html).toContain("Redirecting…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).not.toContain("Sign up with Google")
+  })
 })
 
 describe("SignUpStep2View (v4 page 03 — about you)", () => {
@@ -137,6 +162,21 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
 
   it("renders the 'Who are you?' serif heading", () => {
     expect(renderStep2()).toContain("<em>you?</em>")
+  })
+
+  it("test_sign_up_step2_continue_button_shows_spinner_while_creating", () => {
+    const html = renderStep2({ submitting: true })
+    expect(html).toContain("Creating account…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).toContain('aria-busy="true"')
+    expect(html).not.toContain(">Continue")
+  })
+
+  it("test_sign_up_step2_continue_button_is_idle_by_default", () => {
+    const html = renderStep2()
+    expect(html).toContain("Continue")
+    expect(html).not.toContain("auth-btn-spin")
+    expect(html).not.toContain('aria-busy="true"')
   })
 
   it("no longer renders a priorities textarea (v7 — about-you is name + role only)", () => {

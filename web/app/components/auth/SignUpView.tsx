@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { AuthShell } from "./AuthShell"
 import { PasswordStrengthBar } from "./PasswordStrengthBar"
-import { ArrowRight, Eye, EyeOff, Google, Key } from "./icons"
+import { ArrowRight, Eye, EyeOff, Google, Key, Spinner } from "./icons"
 import { ShareContextStrip } from "../shared/ShareContextStrip"
 
 // Roles from design-v4 page 03 ("Who are you?").
@@ -25,6 +25,11 @@ export type SignUpStep1ViewProps = {
   password: string
   confirmPassword: string
   showPassword: boolean
+  /** True while the email-availability check is in flight. */
+  submitting: boolean
+  /** True once the Google OAuth redirect has been kicked off — the browser
+   *  leaves this page, so the button stays busy rather than resetting. */
+  googleSubmitting: boolean
   error: string | null
   termsHref: string
   privacyHref: string
@@ -135,17 +140,35 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
             ))}
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}
-        <button type="submit" className="btn btn-brand btn-block" style={{ marginTop: 6 }}>
-          Create account
-          <ArrowRight width={14} height={14} />
+        {/* Busy for the whole email-availability round-trip, so the click has
+            visible feedback instead of a silent pause before step 2. */}
+        <button
+          type="submit"
+          className="btn btn-brand btn-block"
+          style={{ marginTop: 6 }}
+          disabled={props.submitting || props.googleSubmitting}
+          aria-busy={props.submitting}
+        >
+          {props.submitting ? "Checking…" : "Create account"}
+          {props.submitting ? (
+            <Spinner width={14} height={14} />
+          ) : (
+            <ArrowRight width={14} height={14} />
+          )}
         </button>
       </form>
 
       <div className="auth-divider">or continue with</div>
       <div className="sso-row">
-        <button type="button" className="sso-btn" onClick={props.onGoogle}>
-          <Google />
-          Sign up with Google
+        <button
+          type="button"
+          className="sso-btn"
+          onClick={props.onGoogle}
+          disabled={props.submitting || props.googleSubmitting}
+          aria-busy={props.googleSubmitting}
+        >
+          {props.googleSubmitting ? <Spinner /> : <Google />}
+          {props.googleSubmitting ? "Redirecting…" : "Sign up with Google"}
         </button>
         <button type="button" className="sso-btn" disabled>
           <Key />
@@ -241,18 +264,32 @@ export function SignUpStep2View(props: SignUpStep2ViewProps) {
           </div>
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}
+        {/* `submitting` stays true through the redirect that follows a
+            successful signup (see sign-up/page.tsx) — the account call and the
+            route change together are seconds of wait, and the button must not
+            flip back to "Continue" in the middle of it. */}
         <button
           type="submit"
           className="btn btn-brand btn-block"
           style={{ marginTop: 10 }}
           disabled={props.submitting}
+          aria-busy={props.submitting}
         >
           {props.submitting ? "Creating account…" : "Continue"}
-          {!props.submitting && <ArrowRight width={14} height={14} />}
+          {props.submitting ? (
+            <Spinner width={14} height={14} />
+          ) : (
+            <ArrowRight width={14} height={14} />
+          )}
         </button>
       </form>
       <div className="auth-foot">
-        <button type="button" className="auth-link" onClick={props.onBack}>
+        <button
+          type="button"
+          className="auth-link"
+          onClick={props.onBack}
+          disabled={props.submitting}
+        >
           Back
         </button>
       </div>

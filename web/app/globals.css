@@ -16536,6 +16536,27 @@
     cursor: default;
   }
 
+  /* Busy spinner for the auth CTAs. Clicking "Create account"/"Continue" fires
+     a network round-trip and then a route change; without a spinner the button
+     sat inert for that whole wait and read as a dropped click, so people
+     clicked again. Kept alive until the navigation actually happens. */
+  .auth-btn-spin {
+    animation: auth-btn-spin 0.8s linear infinite;
+    transform-origin: 50% 50%;
+  }
+
+  @keyframes auth-btn-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .auth-btn-spin {
+      animation: none;
+    }
+  }
+
   /* Account-choice buttons on /invite-conflict (kept-session mode). Stacked,
      full-width, left-aligned rows — a small caption over the (often long)
      email — so addresses read cleanly and wrap instead of crowding a centered
@@ -16762,6 +16783,17 @@
   .auth-foot a:hover,
   .auth-link:hover {
     text-decoration: underline;
+  }
+
+  /* The Back link goes inert while a signup is in flight — dim it so the
+     dead click is explained rather than just ignored. */
+  .auth-link:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .auth-link:disabled:hover {
+    text-decoration: none;
   }
 
   .auth-foot-meta {
