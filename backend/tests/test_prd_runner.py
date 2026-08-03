@@ -1037,3 +1037,31 @@ def test_no_chat_docs_leaves_prompt_unchanged(isolated_settings, monkeypatch):
     # The brief/insight paths have no competing user material, so their grounding
     # is NOT background — it is the evidence, and must not be relabelled.
     assert "SUPPORTING WORKSPACE CONTEXT" not in captured[0]["input"]
+
+
+def test_part_b_receives_its_normative_skeleton(isolated_settings, monkeypatch):
+    """The implementation-spec SKILL.md calls the B0-B9 skeleton NORMATIVE, but
+    the gateway injects only SKILL.md / modules/ / references/ — never
+    `templates/`. So until `_load_part_b_template` existed the model was told to
+    conform to a structure it was never shown and rebuilt B0-B9 from prose.
+
+    Part A never had this gap. This pins the same treatment for Part B: the
+    skeleton rides the CACHEABLE prefix (byte-stable per method version, so it
+    is one cache write then reads), not the per-PRD input.
+    """
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    asyncio.run(prd_runner.generate_prd_and_warm(prd_id, brief_id, 0))
+
+    part_b = next(c for c in captured if c["purpose"] == "generate_prd_part_b")
+    prefix = part_b.get("user_cacheable_prefix") or ""
+    assert "B0. Derivation" in prefix, "the B0-B9 skeleton must reach the model"
+    assert "B7" in prefix and "B9" in prefix, "the whole skeleton, not a fragment"
+    # On the cacheable prefix, NOT the per-PRD input — otherwise every PRD pays
+    # full price for a block that never changes.
+    assert "B0. Derivation" not in (part_b.get("input") or "")

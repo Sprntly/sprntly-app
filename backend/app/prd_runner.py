@@ -167,6 +167,10 @@ _TEMPLATE_PREFIX = """\
 TEMPLATE (the HTML skeleton + design system — produce a filled copy as your output):
 {template}"""
 
+_TEMPLATE_PREFIX_B = """\
+TEMPLATE (the normative B0–B9 skeleton — produce a filled copy as your output):
+{template}"""
+
 _USER_TEMPLATE = """\
 {part_directive}
 
@@ -619,6 +623,20 @@ def _load_part_a_template() -> str:
     return get_skill(_SKILL).templates["prd-template.html"]
 
 
+def _load_part_b_template() -> str:
+    """The implementation-spec skill's B0–B9 markdown skeleton.
+
+    Its SKILL.md calls this skeleton NORMATIVE ("Output spec (B0-B9 — normative;
+    skeleton in `templates/implementation-spec-template.md`)") — but the gateway
+    injects only SKILL.md, `modules/` and `references/`, never `templates/`, so
+    until this function existed the model was told to conform to a skeleton it
+    was never shown and had to reconstruct B0-B9 from the prose description
+    alone. Part A never had that problem: `_load_part_a_template` has always fed
+    prd-author its template. This is the same treatment for Part B.
+    """
+    return get_skill(_SKILL_B).templates["implementation-spec-template.md"]
+
+
 def _exemplars_block(ctx: dict) -> str:
     """The FORMAT/STYLE EXEMPLARS block for a prompt, or '' when no templates."""
     exemplars = ctx.get("exemplars") or ""
@@ -675,6 +693,11 @@ def _call_impl_spec(ctx: dict, human_prd: str, background: bool = False):
         evidence=ctx["evidence"],
         exemplars=_exemplars_block(ctx),
     )
+    # The B0-B9 skeleton rides the cacheable prefix, exactly as Part A's HTML
+    # template does: the gateway prepends the skill METHOD, so METHOD+skeleton
+    # become one globally-identical cached block and only the per-PRD input
+    # stays uncached. ~500 tokens, written once per method version.
+    template_prefix = _TEMPLATE_PREFIX_B.format(template=_load_part_b_template())
     return llm_call(
         enterprise_id=ctx["company_id"] or ctx["dataset"],
         agent=_AGENT,
@@ -682,6 +705,7 @@ def _call_impl_spec(ctx: dict, human_prd: str, background: bool = False):
         prompt_version=PROMPT_VERSION_B,
         system=_SYSTEM_B,
         input=user,
+        user_cacheable_prefix=template_prefix,
         skill=_SKILL_B,
         background=background,
     )
