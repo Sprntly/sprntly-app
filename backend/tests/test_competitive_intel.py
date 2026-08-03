@@ -39,14 +39,134 @@ REVIEW_MD = (
     "## Where Acme stands\n\nTwo rivals are attacking the same seam.\n\n### Launch log\n- Globex shipped SSO (2026-05-01, net-new)\n\n### Recommendations\n1. Ship provenance by default"
 )
 
+# A REALISTIC response — one that actually validates against `_REVIEW_SCHEMA`.
+#
+# The previous fixture had `competitors` as a map keyed by name
+# (`{"Globex": {}}`). Expressing that in the schema needs `additionalProperties`,
+# which puts the node back to naming no fields at all — the shape this change is
+# moving away from. `competitors` is a LIST now, and
+# `test_report_data_fixture_matches_the_schema` below pins the fixture to the
+# schema so a test can never again pass against a payload the model could not
+# have produced. That is precisely how the bug survived its own test suite.
 REPORT_DATA = {
     "answer": REVIEW_MD,
-    "metadata": {"window": "Jan – Jul 2026", "mode": "review"},
-    "next_state": {"competitors": {"Globex": {}}, "our_state": {},
-                   "decisions": [{"id": "d1", "recommendation": "Ship X",
-                                  "status": "open"}]},
+    "metadata": {
+        "window": "Jan – Jul 2026",
+        "mode": "review",
+        "competitor_set": [
+            {"name": "Globex", "reason": "Named by the user and shipped SSO in the window."},
+            {"name": "Initech", "reason": "Closest specialist on provenance."},
+        ],
+        "launch_counts": [{"classification": "net-new", "count": 1}],
+        "threat_counts": [{"severity": "removes", "timing": "now",
+                           "defence": "none", "count": 1}],
+        "benchmark_counts": [{"benchmark": "scale", "rows": 2}],
+        "recommendations": ["Ship provenance by default"],
+    },
+    "next_state": {
+        "competitors": [
+            {"name": "Globex", "features": "SSO shipped", "pricing": "$99/mo",
+             "sentiment": "4.2 on G2", "hiring": "", "exec_commentary": "",
+             "financials": "", "geo": "", "observed_on": "2026-05-01",
+             "source": "changelog", "stale": ""},
+        ],
+        "our_state": {"position": "Own performance budgets",
+                      "strategy": "provenance first", "gaps": "no SSO",
+                      "observed_on": "2026-07-01", "source": "our changelog"},
+        "decisions": [{"id": "d1", "raised_in_run": "8",
+                       "recommendation": "Ship X", "owner": "product",
+                       "status": "open", "outcome_note": ""}],
+    },
 }
 
+def test_report_data_fixture_matches_the_schema():
+    """The fixture every test below stubs the model with must be something the
+    model could ACTUALLY produce.
+
+    Staging run 8 (2026-08-03) came back with `state: {}` / `metadata: {}` while
+    this suite was fully green, because the stub returned a hand-written dict
+    that the real `input_schema` would never have permitted. Validating the
+    fixture against the schema is what ties the two together: if the schema
+    tightens, or the fixture drifts into a shape the grammar forbids, this
+    fails rather than every other test passing for the wrong reason.
+    """
+    import jsonschema
+
+    jsonschema.validate(REPORT_DATA, ci._REVIEW_SCHEMA)
+
+
+def test_a_schema_valid_response_persists_a_usable_state_and_metadata(monkeypatch):
+    """The whole loop, end to end: a realistic response -> `_finish_run` ->
+    the NEXT run being cheap.
+
+    This is the regression test for staging run 8. It deliberately asserts the
+    product CONSEQUENCE rather than the call: `choose_mode` fed the persisted
+    state must return SCAN. Asserting only "`_finish_run` was called with a
+    non-empty state" is what the suite already did, and it passed throughout the
+    incident.
+    """
+    import jsonschema
+
+    saves = []
+    _full(monkeypatch, latest=None, saves=saves)
+    out = ci.answer(enterprise_id="e1", question="run a competitive review")
+
+    # The response really is one the grammar allows...
+    jsonschema.validate(REPORT_DATA, ci._REVIEW_SCHEMA)
+    # ...the markdown reached the user...
+    assert out["answer"] == REVIEW_MD
+    # ...and the structured half survived to the row, non-empty.
+    saved = saves[0]
+    assert saved["state"], "empty state condemns every future run to a full Review"
+    assert saved["state"]["competitors"], "no competitor state to diff against"
+    assert saved["state"]["decisions"], "prior decisions cannot be carried forward"
+    assert saved["metadata"], "empty metadata leaves follow-ups nothing to read"
+    assert saved["window_label"] == "Jan – Jul 2026", (
+        "window_label is read off metadata['window']; empty here is what made "
+        "every stored run undateable"
+    )
+
+    # The consequence that actually matters: the NEXT run is a Scan, not a
+    # multi-minute Review.
+    prior_run = {"state": saved["state"], "competitor_set": saved["competitor_set"]}
+    mode, reason = ci.choose_mode("monthly competitor scan", prior_run,
+                                  saved["competitor_set"])
+    assert mode == ci.MODE_SCAN, reason
+
+
+def test_an_empty_structured_half_does_not_silently_persist(monkeypatch):
+    """The failure mode from run 8, asserted directly.
+
+    A model that returns `{}` for both blocks must not leave a row that LOOKS
+    complete — because `choose_mode` would then read a falsy state and quietly
+    fall back to Review forever, which is exactly the silent degradation that
+    made the incident hard to see.
+    """
+    saves = []
+    _full(monkeypatch, latest=None, saves=saves)
+    _patch_analyse(monkeypatch, data={"answer": REVIEW_MD, "next_state": {},
+                                      "metadata": {}})
+    ci.answer(enterprise_id="e1", question="run a competitive review")
+
+    saved = saves[0]
+    # It persists (the review is real and worth keeping) but the emptiness is
+    # visible rather than disguised...
+    assert saved["state"] == {}
+    assert saved["window_label"] == ""
+    # ...and the next run correctly refuses to Scan off nothing.
+    mode, reason = ci.choose_mode("monthly competitor scan",
+                                  {"state": saved["state"]},
+                                  saved["competitor_set"])
+    assert mode == ci.MODE_REVIEW
+    assert reason == "no prior state on file"
+
+
+# DELIBERATELY the OLD shape — `competitors` as a map keyed by name, which is
+# what every run persisted before 2026-08-03 carries. Do not "fix" it to match
+# `REPORT_DATA`'s new list form: prior state is read back out of the DB and
+# json-dumped into the prompt as free text, and `choose_mode` only asks whether
+# it is a non-empty dict, so old rows must keep working unchanged. Keeping one
+# fixture in each shape is what proves there is no migration to write.
 PRIOR_STATE = {
     "run_id": 4, "previous_run": 3,
     "competitors": {"Globex": {"pricing": [{"value": "$99/mo",

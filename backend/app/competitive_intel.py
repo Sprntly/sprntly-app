@@ -281,21 +281,24 @@ _REVIEW_SYSTEM = (
 #
 # Both stay JSON. Only the prose became prose.
 _STATE_SYSTEM = (
-    "\n\nAlongside the review, return two machine-readable objects. They are "
+    "\n\nAlongside the review, fill the two machine-readable blocks. They are "
     "not shown to the reader; they are how the next run and any follow-up "
-    "question stay cheap and accurate.\n"
-    "- `next_state`: the rewritten state file — `competitors` keyed by name "
-    "(features, pricing, sentiment, hiring, exec_commentary, financials, geo), "
-    "`our_state`, and `decisions` (each with id, raised_in_run, "
-    "recommendation, owner, status, outcome_note). Every field carries "
-    "`observed_on` and a source. A field that could not be re-observed KEEPS "
-    "ITS PRIOR VALUE and is marked stale with its age — never silently "
-    "refreshed, never re-derived from memory.\n"
-    "- `metadata`: `window` (the human window label for this run, e.g. "
-    "\"1 May - 31 Jul 2026\"), `mode`, the derived competitor set with the "
-    "reason each name is in, launch counts by classification, threat counts by "
-    "severity/timing/defence, benchmark counts, and the recommendation list. "
-    "Make it complete — a thin block makes every follow-up a dead end."
+    "question stay cheap and accurate. Both are REQUIRED and neither may be "
+    "left empty — an empty `next_state` forces the next run to redo this entire "
+    "sweep from scratch, and an empty `metadata` leaves every follow-up "
+    "question with nothing to answer from.\n"
+    "- `next_state`: the rewritten state file. `competitors` is a LIST, one "
+    "entry per competitor covered (including any you carried forward "
+    "unchanged), each carrying its `observed_on` and `source`. A field that "
+    "could not be re-observed KEEPS ITS PRIOR VALUE and says so in `stale` with "
+    "its age — never silently refreshed, never re-derived from memory. "
+    "`our_state` is our own position, and `decisions` carries every prior "
+    "decision forward plus any this run raises.\n"
+    "- `metadata`: the rollup. `window` is the human window label for this run "
+    "(e.g. \"1 May - 31 Jul 2026\") — always set it, it is what dates every "
+    "later answer. `competitor_set` gives the reason each name is in the set. "
+    "Fill the counts from the review you just wrote, and list the "
+    "recommendations you made."
 )
 
 _REPORT_SYSTEM = _REVIEW_SYSTEM + _STATE_SYSTEM
@@ -310,12 +313,194 @@ _REPORT_SYSTEM = _REVIEW_SYSTEM + _STATE_SYSTEM
 # classifier's `reason` field — and so the rollup summarises a document that has
 # actually been written rather than one being planned.
 #
-# `next_state` and `metadata` are typed loosely on purpose. Their real contract
-# is prose in `_STATE_SYSTEM`, both are persisted as opaque JSON
-# (`competitive_intel_runs.state` / `.metadata`), and every reader is tolerant
-# (`_answer_from_run` json-dumps them; `choose_mode` only asks whether state is
-# a non-empty dict). Re-encoding them as a strict shape would re-create the
-# 956-line schema this change exists to delete.
+# `next_state` and `metadata` DECLARE THEIR FIELDS. This is a ROBUSTNESS
+# MEASURE, NOT A TARGETED FIX: we do not know what caused the failure below.
+# Read the next two paragraphs before assuming this comment explains it.
+#
+# WHAT HAPPENED. They were first written as bare `{"type": "object"}` whose
+# descriptions pointed at the prose in `_STATE_SYSTEM`, on the reasoning that a
+# strict shape would re-create the 956-line schema this change deleted. On the
+# first real markdown-mode run (staging run 8, 2026-08-03) the pipeline captured
+# 121 records and wrote a 28.8k-char review — with `state: {}` and
+# `metadata: {"status": "complete"}`. `window_label` came back empty for the
+# same single reason, since it is read off `metadata["window"]`. Not a parse or
+# persist failure: `complete_competitive_intel_run` faithfully wrote the empty
+# dicts it was handed.
+#
+# WHAT WE RULED OUT — four candidate mechanisms, all refuted:
+#   * Grammar constraint. `call_json` does NOT set `strict: true` (see the
+#     `submit_response` tool in app/llm.py), so `input_schema` is advisory
+#     guidance, not an enforced grammar. `{}` was always a legal completion.
+#   * `required` membership. `graph.extractor._EXTRACT_SCHEMA` has an equally
+#     bare node at `$.signals[].properties` that is NOT required, and it fills
+#     ~70%+ of the time in production (73% / 70% on two companies). These two
+#     WERE required and came back empty — the opposite of the prediction.
+#   * Description quality. Experiment: the exact shipped shape, two arms
+#     differing only in description. Pointer descriptions ("see the system
+#     prompt") -> next_state 1 key, metadata 6 keys. Self-contained descriptions
+#     with examples -> next_state 2 keys, metadata 6 keys. BOTH FILLED. The
+#     pointer arm is literally the code that failed on staging.
+#   * Answer length / position. Experiment on the streaming path production
+#     uses: a 2,414-char answer filled both objects; a 32,568-char answer —
+#     LONGER than the real failure's 28,845 — filled them with MORE keys (3 and
+#     14). The "cheap exit after a long markdown block" theory does not
+#     reproduce.
+#
+# So the cause is NOT ESTABLISHED. Whatever it is lives in something specific to
+# the real call that the experiments did not carry: the actual `_REPORT_SYSTEM`
+# text, the 121-record input, the gateway wrapping, `long_output`, or a token
+# budget interaction. Declaring the fields is worth doing on its own terms —
+# self-documenting, unambiguous, and it removes one variable — and it is likely
+# to help, but do not read it as a diagnosis. If a future run still comes back
+# empty, the schema was never the issue: look at the prompt and the gateway
+# path, with the four above already eliminated.
+#
+# The shapes below are deliberately MODEST — the fields consumers actually read
+# plus what the prompt already promises, not the old report schema. Two design
+# notes:
+#   * `competitors` is an ARRAY, not a map keyed by name. A keyed map is only
+#     expressible via `additionalProperties`, which puts us straight back to a
+#     node that names no fields — the thing this change is moving away from.
+#     Every reader is tolerant of the shape (`_answer_from_run` json-dumps it;
+#     `choose_mode` only asks whether state is a non-empty dict), so the list is
+#     a free change — and `_STATE_SYSTEM` says "is a LIST" so prompt and schema
+#     agree.
+#   * Sub-fields are strings rather than nested objects. The model writes
+#     "$99/mo (pricing page, 2026-04-01)" instead of a 4-key object, which is
+#     what `_QUERY_SYSTEM` reads back as prose anyway.
+#
+# `tests/test_llm_schemas.py` lints every forced-tool schema in the app for
+# object nodes that name no fields, so this shape cannot reappear unnoticed. It
+# is a lint, not a bug detector — such a node is legal and often filled; it is
+# the combination with a contentless description that cost us run 8.
+_COMPETITOR_STATE = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "features": {"type": "string"},
+        "pricing": {"type": "string"},
+        "sentiment": {"type": "string"},
+        "hiring": {"type": "string"},
+        "exec_commentary": {"type": "string"},
+        "financials": {"type": "string"},
+        "geo": {"type": "string"},
+        "observed_on": {"type": "string", "description": "YYYY-MM-DD"},
+        "source": {"type": "string"},
+        "stale": {
+            "type": "string",
+            "description": (
+                "Empty when re-observed this run; otherwise which fields kept a "
+                "prior value and how old that value is."
+            ),
+        },
+    },
+    "required": ["name", "observed_on", "source"],
+}
+
+_DECISION_STATE = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "raised_in_run": {"type": "string"},
+        "recommendation": {"type": "string"},
+        "owner": {"type": "string"},
+        "status": {"type": "string", "description": "open|done|dropped|carried"},
+        "outcome_note": {"type": "string"},
+    },
+    "required": ["id", "recommendation", "status"],
+}
+
+_NEXT_STATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "competitors": {"type": "array", "items": _COMPETITOR_STATE},
+        "our_state": {
+            "type": "object",
+            "properties": {
+                "position": {"type": "string"},
+                "strategy": {"type": "string"},
+                "gaps": {"type": "string"},
+                "observed_on": {"type": "string", "description": "YYYY-MM-DD"},
+                "source": {"type": "string"},
+            },
+            "required": ["position"],
+        },
+        "decisions": {"type": "array", "items": _DECISION_STATE},
+    },
+    "required": ["competitors", "our_state", "decisions"],
+}
+
+_METADATA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        # Read directly by `answer` for the persisted run's window_label, and by
+        # `_QUERY_SYSTEM` to date every follow-up. The single most load-bearing
+        # string in this block.
+        "window": {
+            "type": "string",
+            "description": "Human window label, e.g. \"1 May - 31 Jul 2026\".",
+        },
+        "mode": {"type": "string", "description": "scan|review"},
+        "competitor_set": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this name is in the set.",
+                    },
+                },
+                "required": ["name", "reason"],
+            },
+        },
+        "launch_counts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "classification": {
+                        "type": "string",
+                        "description": "net-new|parity|deprecation|beta|market",
+                    },
+                    "count": {"type": "integer"},
+                },
+                "required": ["classification", "count"],
+            },
+        },
+        "threat_counts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string"},
+                    "timing": {"type": "string"},
+                    "defence": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["severity", "count"],
+            },
+        },
+        "benchmark_counts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "benchmark": {
+                        "type": "string",
+                        "description": "scale|market position|feature",
+                    },
+                    "rows": {"type": "integer"},
+                },
+                "required": ["benchmark", "rows"],
+            },
+        },
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["window", "mode", "competitor_set", "recommendations"],
+}
+
 _REVIEW_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -323,14 +508,8 @@ _REVIEW_SCHEMA: dict = {
             "type": "string",
             "description": "The competitive-intelligence review, in markdown.",
         },
-        "next_state": {
-            "type": "object",
-            "description": "The rewritten state file — see the system prompt.",
-        },
-        "metadata": {
-            "type": "object",
-            "description": "The machine-readable rollup — see the system prompt.",
-        },
+        "next_state": _NEXT_STATE_SCHEMA,
+        "metadata": _METADATA_SCHEMA,
     },
     "required": ["answer", "next_state", "metadata"],
 }
