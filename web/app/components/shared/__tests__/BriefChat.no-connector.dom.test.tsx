@@ -131,10 +131,15 @@ function Harness() {
   return React.createElement(
     "div",
     null,
+    // Every patch below carries `connectorsHydrated: true` — these tests are
+    // about the SETTLED verdict. The unsettled window (both fetches still in
+    // flight) is the loading placeholder's job, covered at the bottom of this
+    // file and in BriefChat.initial-load.dom.test.tsx.
     button("set-no-connectors", {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
       connectedConnectorIds: [],
+      connectorsHydrated: true,
     }),
     // MS Teams (comms) + Jira (pm) + GitHub (code) — three excluded
     // categories. (Slack no longer belongs here: dual-typed communication +
@@ -143,26 +148,39 @@ function Harness() {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
       connectedConnectorIds: ["msteams", "jira", "github"],
+      connectorsHydrated: true,
     }),
     button("set-evidence-connector", {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
       connectedConnectorIds: ["msteams", "superset"],
+      connectorsHydrated: true,
     }),
     button("set-slack-only", {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
       connectedConnectorIds: ["slack"],
+      connectorsHydrated: true,
     }),
     button("set-findings-without-connector", {
       briefHydration: "ready",
       briefV2: READY_BRIEF,
       connectedConnectorIds: [],
+      connectorsHydrated: true,
     }),
     button("set-generating-without-connector", {
       briefHydration: "generating",
       briefV2: null,
       connectedConnectorIds: [],
+      connectorsHydrated: true,
+    }),
+    // The load window itself: the brief has answered "nothing here", but the
+    // connectors fetch hasn't come back yet, so "no sources" is still a guess.
+    button("set-connectors-unsettled", {
+      briefHydration: "ready",
+      briefV2: EMPTY_BRIEF,
+      connectedConnectorIds: [],
+      connectorsHydrated: false,
     }),
     React.createElement(BriefChat),
   )
@@ -266,6 +284,27 @@ describe("BriefChat — no evidence connector", () => {
     // over it would contradict what the user just triggered.
     expect(document.querySelector(".bc-generating")).not.toBeNull()
     expect(screen.queryByText(CONNECT_TITLE)).toBeNull()
+  })
+
+  it("test_connect_page_waits_for_the_connector_fetch: no flash while connectors are unknown", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-connectors-unsettled"))
+    })
+
+    // `connectedConnectorIds` defaults to [], which is "we haven't asked yet",
+    // not "this workspace has none". Rendering the dead-end connect page off
+    // that default is what made it flash before the brief on every load.
+    expect(screen.queryByText(CONNECT_TITLE)).toBeNull()
+    expect(document.querySelector(".bc-empty")).toBeNull()
+    expect(document.querySelector(".bc-loading")).not.toBeNull()
+
+    // …and once the fetch answers "genuinely none", the page arrives.
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-no-connectors"))
+    })
+    expect(screen.getByText(CONNECT_TITLE)).not.toBeNull()
+    expect(document.querySelector(".bc-loading")).toBeNull()
   })
 
   it("test_cta_routes_to_connector_settings: the button navigates to Settings → Connectors", () => {
