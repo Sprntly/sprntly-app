@@ -380,6 +380,51 @@ def test_an_empty_queryless_search_names_its_window(monkeypatch):
     assert "after:" not in out
 
 
+def test_a_generic_newest_keyword_is_dropped_and_widened(monkeypatch):
+    """The observed failure: "latest feedback in slack" became query='feedback'
+    — and Slack only matches messages CONTAINING that word, so the fresh
+    message (which never says "feedback") was structurally invisible. A generic
+    word + newest means "show me what's new": the keyword is dropped, the read
+    widens to the window, and the result says so."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "feedback", "sort": "newest"})
+    assert captured["query"].startswith("after:")
+    assert captured["sort"] == "timestamp"
+    assert "'feedback' was dropped" in out
+    assert "ordered NEWEST FIRST" in out
+
+
+def test_a_generic_word_on_relevance_stays_a_real_search(monkeypatch):
+    """Without sort=newest there is no recency intent to honour — someone
+    hunting for where the word "feedback" was literally used gets exactly
+    that."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "feedback"})
+    assert captured["query"] == "feedback"
+    assert captured["sort"] == "score"
+
+
+def test_a_specific_newest_keyword_keeps_its_query(monkeypatch):
+    """The widening is for generic words only — "newest about pricing" is a
+    real, answerable question and must stay one."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "pricing", "sort": "newest"})
+    assert captured["query"] == "pricing"
+    assert captured["sort"] == "timestamp"
+
+
+def test_a_multi_word_generic_query_is_not_widened(monkeypatch):
+    """"customer feedback" or "pricing feedback" carries a real subject; only
+    a bare single generic word triggers the widening."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "customer feedback", "sort": "newest"})
+    assert captured["query"] == "customer feedback"
+
+
 def test_the_search_tool_tells_the_model_when_to_sort_by_time():
     """The disclosure only helps after the fact; the tool schema is what makes
     the model pick the right order in the first place."""

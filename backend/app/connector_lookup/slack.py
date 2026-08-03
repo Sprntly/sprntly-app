@@ -63,6 +63,21 @@ _TEXT_CHARS = 1200
 #: straight through without touching the channel directory.
 _CHANNEL_ID = re.compile(r"[CGD][A-Z0-9]+")
 
+#: Words the model mirrors from a "what's the latest …" question that are NOT
+#: topics. Slack search matches message TEXT, so query='feedback' only returns
+#: messages containing that literal word — actual feedback rarely says
+#: "feedback", and a just-posted message about anything else can never match.
+#: Observed live 2026-08-03: "latest feedback in slack" became query='feedback'
+#: twice in a row and missed the fresh message both times. When one of these
+#: arrives with sort=newest, the intent is "show me what's new", so the keyword
+#: is dropped and the read widens to the whole window. Single words only —
+#: multi-word queries ("pricing feedback") stay real searches.
+_GENERIC_QUERY_TERMS = frozenset({
+    "activity", "anything", "chatter", "conversations", "discussion",
+    "discussions", "everything", "feedback", "latest", "message", "messages",
+    "new", "news", "recent", "update", "updates",
+})
+
 SEARCH_UNAVAILABLE = (
     "(slack_search_messages is unavailable for this workspace: the Slack "
     "connection granted bot access only, with no user token carrying "
@@ -204,7 +219,10 @@ SEARCH_TOOL = {
                 "description": (
                     "Search terms (Slack search syntax allowed). OMIT entirely "
                     "for 'what's the latest in Slack' — no keyword filter, just "
-                    "the newest messages from the last 7 days."
+                    "the newest messages from the last 7 days. Generic words "
+                    "('feedback', 'updates', 'messages') are NOT topics — omit "
+                    "the query for those too; search only matches messages "
+                    "containing the literal word."
                 ),
             },
             "sort": {
@@ -602,23 +620,36 @@ class SlackProvider:
         # passing mention — so only an explicit ask flips it.
         order = "newest" if str(inp.get("sort") or "").strip().lower() == "newest" else "relevance"
         window_note = None
-        if not query:
-            # No keyword means "the latest, whatever it is". search.messages
+        generic = order == "newest" and query.lower() in _GENERIC_QUERY_TERMS
+        if not query or generic:
+            # No keyword means "the latest, whatever it is" — and so does a
+            # generic one + newest (see _GENERIC_QUERY_TERMS). search.messages
             # REQUIRES a query string, but accepts a modifier-only one —
             # verified live 2026-08-03 against this app: query="after:<date>"
             # returns ok with every indexed message after that date (a "*"
             # wildcard quietly searches a smaller corpus, so it is not used).
             # Relevance is meaningless with nothing to rank, so the order is
             # forced to newest regardless of what the model passed.
-            order = "newest"
             since = _dt.date.fromtimestamp(time.time() - _DEFAULT_DAYS * 86400).isoformat()
+            if generic:
+                window_note = (
+                    f"(the keyword {query!r} was dropped — it is a generic "
+                    "word that would only match messages containing it "
+                    f"literally. These are ALL the newest indexed messages "
+                    f"since {since}, across every channel search can see. A "
+                    "just-posted message can lag the search index by a minute "
+                    "or two; read the channel directly for up-to-the-second "
+                    "data.)"
+                )
+            else:
+                window_note = (
+                    f"(no keyword given — these are the newest indexed messages "
+                    f"since {since}, across every channel search can see. A "
+                    f"just-posted message can lag the search index by a minute or "
+                    f"two; read the channel directly for up-to-the-second data.)"
+                )
+            order = "newest"
             query = f"after:{since}"
-            window_note = (
-                f"(no keyword given — these are the newest indexed messages "
-                f"since {since}, across every channel search can see. A "
-                f"just-posted message can lag the search index by a minute or "
-                f"two; read the channel directly for up-to-the-second data.)"
-            )
         result = slack_oauth.search_messages(
             handle.user_token,
             query=query,
