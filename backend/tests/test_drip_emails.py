@@ -102,6 +102,71 @@ def test_resolve_cadence_disabled(isolated_settings):
     assert drip.resolve_cadence({"drip": {"enabled": False}}) == []
 
 
+# ── grace (send-window upper bound) resolution ────────────────────────
+
+
+def test_resolve_grace_days_default(isolated_settings):
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    assert drip.resolve_grace_days(None) == drip.DEFAULT_GRACE_DAYS
+    assert drip.resolve_grace_days({}) == drip.DEFAULT_GRACE_DAYS
+    assert drip.resolve_grace_days({"drip": {}}) == drip.DEFAULT_GRACE_DAYS
+    # The default must stay under the smallest gap in the default ladder
+    # (day_1 → day_3 = 2 days) so normal members never sit in 3 windows at once.
+    offsets = [s.day_offset for s in drip.DEFAULT_CADENCE]
+    smallest_gap = min(b - a for a, b in zip(offsets, offsets[1:]))
+    assert drip.DEFAULT_GRACE_DAYS <= smallest_gap
+
+
+def test_resolve_grace_days_global_override(isolated_settings, monkeypatch):
+    monkeypatch.setenv("DRIP_GRACE_DAYS", "5")
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    assert drip.resolve_grace_days(None) == 5
+
+
+def test_resolve_grace_days_per_company_wins(isolated_settings, monkeypatch):
+    monkeypatch.setenv("DRIP_GRACE_DAYS", "5")  # should be overridden
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    assert drip.resolve_grace_days({"drip": {"grace_days": 1}}) == 1
+    # 0 is a real value ("same-day only"), not "unset" — it must not fall back.
+    assert drip.resolve_grace_days({"drip": {"grace_days": 0}}) == 0
+
+
+def test_resolve_grace_days_junk_falls_through(isolated_settings, monkeypatch):
+    # A typo in one tenant's JSONB must not raise inside the scheduler's email
+    # path, and must not silently change the window for everyone else.
+    monkeypatch.delenv("DRIP_GRACE_DAYS", raising=False)
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    for junk in ("soon", None, [], {}, "", True, False):
+        assert drip.resolve_grace_days(
+            {"drip": {"grace_days": junk}}
+        ) == drip.DEFAULT_GRACE_DAYS
+    # Negative windows are meaningless → clamped to 0, not treated as unset.
+    assert drip.resolve_grace_days({"drip": {"grace_days": -3}}) == 0
+    # Numeric strings are accepted (JSONB written by hand / by a form).
+    assert drip.resolve_grace_days({"drip": {"grace_days": "4"}}) == 4
+    # Malformed notification_settings shapes degrade to the default.
+    assert drip.resolve_grace_days({"drip": "nope"}) == drip.DEFAULT_GRACE_DAYS
+
+
+def test_resolve_grace_days_junk_global_falls_through(isolated_settings, monkeypatch):
+    monkeypatch.setenv("DRIP_GRACE_DAYS", "not-a-number")
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    assert drip.resolve_grace_days(None) == drip.DEFAULT_GRACE_DAYS
+
+
 # ── copy rendering ─────────────────────────────────────────────────────
 
 
@@ -246,39 +311,58 @@ def drip_mod(isolated_settings, monkeypatch):
     importlib.reload(drip_db)
     drip = importlib.import_module("app.drip_email")
     importlib.reload(drip)
+
     # Always-succeed sender so we exercise the eligibility + tracking logic.
-    monkeypatch.setattr(drip, "send_drip_email", lambda **kw: True)
+    # Every call is recorded on `drip.sent_calls` so a test can assert that an
+    # aged-out step produced NO send attempt at all (not merely a failed one).
+    sent_calls: list[dict] = []
+
+    def _fake_send(**kw):
+        sent_calls.append(kw)
+        return True
+
+    monkeypatch.setattr(drip, "send_drip_email", _fake_send)
+    drip.sent_calls = sent_calls
     return drip
 
 
 def test_run_drip_cycle_sends_eligible_steps(drip_mod, isolated_settings):
     client = require_client()
+    # Member joined 4 days ago. With the default grace of 2 the windows are
+    # day_1=[1,3], day_3=[3,5], day_7=[7,9]: day_1 has aged out, day_3 is in
+    # window, day_7 isn't due. (Before the upper bound existed this sent both
+    # day_1 and day_3.)
     _seed_company(client)
-    # Member joined 4 days ago → day_1 and day_3 are eligible, day_7 not yet.
     _seed_member(client, "co-1", "u1", joined_days_ago=4)
 
     summary = drip_mod.run_drip_cycle()
-    assert summary["sent"] == 2
+    assert summary["sent"] == 1
+    assert summary["aged_out"] == 1
 
     rows = client.table("drip_email_sends").select("step_key, status").eq(
         "company_id", "co-1"
     ).execute().data
-    sent_keys = {r["step_key"] for r in rows}
-    assert sent_keys == {"day_1", "day_3"}
-    assert all(r["status"] == "sent" for r in rows)
+    by_key = {r["step_key"]: r["status"] for r in rows}
+    assert by_key == {"day_1": "skipped", "day_3": "sent"}
+    # Exactly one email actually went out, and it was the in-window step.
+    assert len(drip_mod.sent_calls) == 1
 
 
 def test_run_drip_cycle_does_not_double_send(drip_mod, isolated_settings):
     client = require_client()
-    _seed_company(client)
+    # Wide per-company grace so all three steps stay in window for a 10-day-old
+    # member — this test is about de-dup, not about the window.
+    _seed_company(client, notification_settings={"drip": {"grace_days": 30}})
     _seed_member(client, "co-1", "u1", joined_days_ago=10)
 
     first = drip_mod.run_drip_cycle()
     assert first["sent"] == 3  # day_1 + day_3 + day_7
+    assert first["aged_out"] == 0
 
     second = drip_mod.run_drip_cycle()
     assert second["sent"] == 0
     assert second["steps_considered"] == 0
+    assert second["aged_out"] == 0
 
     rows = client.table("drip_email_sends").select("id").eq(
         "company_id", "co-1"
@@ -295,13 +379,32 @@ def test_run_drip_cycle_skips_brand_new_member(drip_mod, isolated_settings):
 
 
 def test_run_drip_cycle_respects_company_disable(drip_mod, isolated_settings):
+    # The kill switch short-circuits the company entirely: resolve_cadence
+    # returns [] and the member loop is never entered. In particular a disabled
+    # company writes NO rows at all — not even aged-out "skipped" ones — so
+    # re-enabling drips later leaves the ladder intact rather than pre-disarmed.
     client = require_client()
     _seed_company(client, notification_settings={"drip": {"enabled": False}})
     _seed_member(client, "co-1", "u1", joined_days_ago=30)
     summary = drip_mod.run_drip_cycle()
     assert summary["sent"] == 0
+    assert summary["aged_out"] == 0
     rows = client.table("drip_email_sends").select("id").execute().data
     assert rows == []
+    assert drip_mod.sent_calls == []
+
+
+def test_run_drip_cycle_disable_wins_over_grace_override(drip_mod, isolated_settings):
+    # enabled:false and grace_days set together — the kill switch still wins.
+    client = require_client()
+    _seed_company(
+        client,
+        notification_settings={"drip": {"enabled": False, "grace_days": 90}},
+    )
+    _seed_member(client, "co-1", "u1", joined_days_ago=2)
+    summary = drip_mod.run_drip_cycle()
+    assert summary["sent"] == 0
+    assert client.table("drip_email_sends").select("id").execute().data == []
 
 
 def test_run_drip_cycle_records_skipped_when_send_fails(isolated_settings, monkeypatch):
@@ -343,7 +446,10 @@ def test_run_drip_cycle_isolates_companies(drip_mod, isolated_settings):
 
     summary = drip_mod.run_drip_cycle()
     assert summary["companies"] == 2
-    assert summary["sent"] == 4  # day_1 + day_3 for each company
+    # Age 5: day_1=[1,3] aged out, day_3=[3,5] in window (upper edge), day_7
+    # not due → one send per company.
+    assert summary["sent"] == 2
+    assert summary["aged_out"] == 2
 
     co1 = client.table("drip_email_sends").select("id").eq(
         "company_id", "co-1").execute().data
@@ -351,6 +457,219 @@ def test_run_drip_cycle_isolates_companies(drip_mod, isolated_settings):
         "company_id", "co-2").execute().data
     assert len(co1) == 2
     assert len(co2) == 2
+
+
+# ── send-window upper bound (the aged-out burst fix) ──────────────────
+
+
+def _rows_by_key(client, company_id="co-1"):
+    rows = client.table("drip_email_sends").select("step_key, status").eq(
+        "company_id", company_id
+    ).execute().data
+    return {r["step_key"]: r["status"] for r in rows}
+
+
+@pytest.mark.parametrize("age", [1, 2, 3])
+def test_step_sends_anywhere_inside_its_window(drip_mod, isolated_settings, age):
+    # day_1's window with the default grace of 2 is [1, 3] inclusive — the
+    # lower edge, the middle, and the upper edge all send.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=age)
+
+    summary = drip_mod.run_drip_cycle()
+    assert _rows_by_key(client)["day_1"] == "sent"
+    assert summary["aged_out"] == 0
+    assert any(c["to_email"] == "u1@example.com" for c in drip_mod.sent_calls)
+
+
+def test_step_one_day_past_window_is_recorded_skipped_and_not_sent(
+    drip_mod, isolated_settings
+):
+    # Age 4 is exactly one day past day_1's upper edge (1 + 2). It must be
+    # disarmed, and no email may be attempted for it.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=4)
+
+    summary = drip_mod.run_drip_cycle()
+    assert _rows_by_key(client)["day_1"] == "skipped"
+    assert summary["aged_out"] == 1
+    # No send was even attempted for the aged-out step: the only email that
+    # went out is the in-window day_3 one.
+    assert len(drip_mod.sent_calls) == 1
+    assert "first week" not in drip_mod.sent_calls[0]["subject"]
+
+
+def test_aged_out_step_never_fires_on_a_later_cycle(drip_mod, isolated_settings):
+    # The whole point of recording "skipped" rather than ignoring: the step is
+    # permanently disarmed, because sent_steps_for_company() treats 'skipped'
+    # like 'sent'. Even widening the window afterwards must not resurrect it.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=14)
+
+    first = drip_mod.run_drip_cycle()
+    assert first["aged_out"] == 3
+    drip_mod.sent_calls.clear()
+
+    # Re-run with a hugely widened per-company grace — the recorded rows win.
+    client.table("companies").update(
+        {"notification_settings": {"drip": {"grace_days": 365}}}
+    ).eq("id", "co-1").execute()
+
+    second = drip_mod.run_drip_cycle()
+    assert second["sent"] == 0
+    assert second["steps_considered"] == 0
+    assert drip_mod.sent_calls == []
+
+
+def test_member_still_gets_a_later_step_they_are_in_window_for(
+    drip_mod, isolated_settings
+):
+    # Age 7: day_1=[1,3] and day_3=[3,5] have aged out, but day_7=[7,9] is due
+    # right now. Ageing out the early steps must not suppress the current one.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=7)
+
+    summary = drip_mod.run_drip_cycle()
+    assert summary["sent"] == 1
+    assert summary["aged_out"] == 2
+    assert _rows_by_key(client) == {
+        "day_1": "skipped",
+        "day_3": "skipped",
+        "day_7": "sent",
+    }
+    assert len(drip_mod.sent_calls) == 1
+    # And it's the day_7 copy, not a re-run of the "connect your first data
+    # source" onboarding nudge.
+    assert "first week" in drip_mod.sent_calls[0]["subject"]
+
+
+def test_backfill_suppression_for_existing_aged_out_member(
+    drip_mod, isolated_settings
+):
+    # THE CASE THIS FIX EXISTS FOR. A member who joined 14 days ago with
+    # nothing but 'welcome' recorded: before the upper bound, the first cycle
+    # blasted day_1 + day_3 + day_7 at once — including "connect your first
+    # data source" to someone who connected two weeks ago.
+    #
+    # Now the first cycle after this ships must send ZERO emails and write
+    # three 'skipped' rows. That backfill-suppression is the desired behaviour
+    # and it is what protects existing members on the first deploy.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=14)
+    client.table("drip_email_sends").insert(
+        {
+            "id": "de-welcome",
+            "company_id": "co-1",
+            "user_id": "u1",
+            "step_key": "welcome",
+            "email": "u1@example.com",
+            "status": "sent",
+        }
+    ).execute()
+
+    summary = drip_mod.run_drip_cycle()
+
+    assert summary["sent"] == 0
+    assert summary["steps_considered"] == 0
+    assert summary["aged_out"] == 3
+    assert drip_mod.sent_calls == []
+
+    by_key = _rows_by_key(client)
+    # The pre-existing welcome row is untouched; the three ladder steps are
+    # each disarmed as 'skipped'.
+    assert by_key == {
+        "welcome": "sent",
+        "day_1": "skipped",
+        "day_3": "skipped",
+        "day_7": "skipped",
+    }
+
+    # And the cycle right after the backfill is a clean no-op.
+    second = drip_mod.run_drip_cycle()
+    assert second == {
+        "companies": 1,
+        "sent": 0,
+        "skipped": 0,
+        "aged_out": 0,
+        "steps_considered": 0,
+    }
+
+
+def test_brand_new_member_keeps_future_steps_armed(drip_mod, isolated_settings):
+    # Not-yet-due steps must NOT be recorded as skipped — only aged-out ones.
+    # A day-0 member has to still receive the full ladder later.
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=0)
+
+    summary = drip_mod.run_drip_cycle()
+    assert summary["sent"] == 0
+    assert summary["aged_out"] == 0
+    assert client.table("drip_email_sends").select("id").execute().data == []
+
+
+def test_grace_override_widens_the_window(drip_mod, isolated_settings):
+    # A company that wants the old catch-all behaviour can opt back into it.
+    client = require_client()
+    _seed_company(client, notification_settings={"drip": {"grace_days": 20}})
+    _seed_member(client, "co-1", "u1", joined_days_ago=8)
+
+    summary = drip_mod.run_drip_cycle()
+    assert summary["sent"] == 3
+    assert summary["aged_out"] == 0
+
+
+def test_grace_zero_makes_the_window_a_single_day(drip_mod, isolated_settings):
+    client = require_client()
+    _seed_company(client, notification_settings={"drip": {"grace_days": 0}})
+    _seed_member(client, "co-1", "u1", joined_days_ago=2)
+
+    summary = drip_mod.run_drip_cycle()
+    # age 2 is past day_1's zero-width window and short of day_3.
+    assert summary["sent"] == 0
+    assert summary["aged_out"] == 1
+    assert _rows_by_key(client) == {"day_1": "skipped"}
+
+
+def test_global_grace_env_applies_to_the_cycle(isolated_settings, monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("DRIP_GRACE_DAYS", "10")
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    import app.db.drip as drip_db
+    importlib.reload(drip_db)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    monkeypatch.setattr(drip, "send_drip_email", lambda **kw: True)
+
+    client = require_client()
+    _seed_company(client)
+    _seed_member(client, "co-1", "u1", joined_days_ago=9)
+
+    summary = drip.run_drip_cycle()
+    # With a 10-day grace every step is still in window at age 9.
+    assert summary["sent"] == 3
+    assert summary["aged_out"] == 0
+
+
+def test_aged_out_uses_skipped_status_that_dedup_honours(isolated_settings):
+    # Guards the mechanism this fix leans on: sent_steps_for_company() must go
+    # on treating 'skipped' as delivered. If that ever narrows to 'sent' only,
+    # every aged-out step re-arms and the burst comes back.
+    import app.db.drip as drip_db
+    importlib.reload(drip_db)
+    client = require_client()
+    _seed_company(client)
+    drip_db.record_drip_sent(
+        company_id="co-1", user_id="u1", step_key="day_1",
+        email="u1@example.com", status="skipped",
+    )
+    assert ("u1", "day_1") in drip_db.sent_steps_for_company("co-1")
 
 
 # ── scheduler wiring ───────────────────────────────────────────────────
