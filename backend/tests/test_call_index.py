@@ -1136,8 +1136,12 @@ def test_a_ds_question_with_a_window_is_not_hijacked_to_the_calls(monkeypatch):
     assert is_data_analysis_request(question), "premise: this IS a DS question"
     assert not ci._NOT_CALLS.search(question), "premise: _NOT_CALLS misses it"
 
+    # `qa.answer` judges every interceptor off `routing_text` (the question
+    # up to the `[Attached files]` marker, see qa_agent._routing_text) rather
+    # than the raw `question` — an argument rename, not a reordering. The
+    # literal this ordering check searches for moved with it.
     src = __import__("inspect").getsource(qa.answer)
-    ds_at = src.index("is_data_analysis_request(question)")
+    ds_at = src.index("is_data_analysis_request(routing_text)")
     window_at = src.index("call_index.windowed_call_question")
     assert ds_at < window_at, (
         "the windowed-calls route must sit BELOW the DS interception, or a DS "
@@ -1151,5 +1155,5 @@ def test_the_index_routing_still_precedes_the_call_digest(monkeypatch):
     import app.qa_agent as qa
 
     src = __import__("inspect").getsource(qa.answer)
-    assert src.index("call_index.is_listing_request") < src.index("is_call_digest(question)")
-    assert src.index("call_index.is_single_call_request") < src.index("is_call_digest(question)")
+    assert src.index("call_index.is_listing_request") < src.index("is_call_digest(routing_text)")
+    assert src.index("call_index.is_single_call_request") < src.index("is_call_digest(routing_text)")

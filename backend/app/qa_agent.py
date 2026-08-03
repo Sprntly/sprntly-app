@@ -42,14 +42,16 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from app import call_index
+from app import call_index, datasets
 from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
+    active_conversation_attachment_names,
     company_facts_block,
     compose_ask_answer,
     document_grounding,
 )
+from app.document_sources import list_company_files
 from app.graph.gateway import llm_call
 from app.prompt_history import clamp_turn_text
 from app.prompts import (
@@ -986,6 +988,71 @@ def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
         return False
 
 
+# The composer inlines every attachment's extracted text after this literal
+# block, client-side (`ChatScreen.tsx` `submitAsk`:
+# `` `${sendQuery}\n\n[Attached files]\n${ctx}` ``). It is already an
+# established backend convention, not a new coupling — `db/asks.py` and
+# `routes/ask.py` both reason about it today.
+_ATTACHED_FILES_MARKER = "\n\n[Attached files]\n"
+
+
+def _routing_text(question: str) -> str:
+    """The question up to (not including) the first `[Attached files]` block,
+    for every ROUTING decision — every interceptor predicate and `route()`
+    itself. An attached document's own vocabulary must never decide which
+    interceptor claims a turn (a comparison doc mentioning "board" and
+    "ticket" once each was enough to hijack a turn to the tracker path); only
+    what the user actually TYPED does.
+
+    First occurrence only, literal split on the exact marker above — a
+    question that merely MENTIONS the phrase in prose, with no attachment
+    block actually present, is not truncated.
+
+    Everything downstream of the routing decision — grounding, the answer
+    call, persistence, caching, the documents manifest — keeps the FULL
+    `question` unchanged. This function's result is used ONLY for routing."""
+    marker_index = question.find(_ATTACHED_FILES_MARKER)
+    if marker_index == -1:
+        return question
+    return question[:marker_index]
+
+
+def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
+    """`routing_text` plus the FILENAMES only — never content — of every
+    document this workspace has uploaded and every document attached to the
+    active conversation. Used ONLY as `route()`'s input.
+
+    A new local value, never assigned back over `routing_text`: every
+    interceptor ABOVE `route()` must keep seeing the byte-identical
+    `_routing_text` result, because a filename like
+    "Sprint Planning Board.docx" carries the same PM-tracker nouns an
+    attachment BODY does — leaking it upward would reopen this exact bug
+    through a different door.
+
+    Both reads fail open to nothing found (`list_company_files` and
+    `active_conversation_attachment_names` each degrade to `[]` on any read
+    error), so an empty/unreadable index means this returns `routing_text`
+    unchanged — routing behaves exactly as today."""
+    names: list[str] = []
+    try:
+        names.extend(ref.filename for ref in list_company_files(enterprise_id))
+    except Exception:  # noqa: BLE001 — routing must never break the answer
+        logger.exception(
+            "workspace file index read failed for %s; routing without "
+            "workspace filenames", enterprise_id,
+        )
+    try:
+        names.extend(active_conversation_attachment_names(enterprise_id))
+    except Exception:  # noqa: BLE001 — routing must never break the answer
+        logger.exception(
+            "conversation attachment name read failed for %s; routing "
+            "without conversation filenames", enterprise_id,
+        )
+    if not names:
+        return routing_text
+    return routing_text + "\n\n[Attached document names]\n" + "\n".join(names)
+
+
 def answer(
     *,
     enterprise_id: str,
@@ -1039,6 +1106,13 @@ def answer(
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
 
+    # Everything below that decides WHERE this turn goes — every interceptor
+    # predicate and route() itself — judges the user's own words, never an
+    # attached document's. See `_routing_text`'s docstring for why: the full
+    # `question` (with the [Attached files] block, when present) still reaches
+    # grounding/answering/persistence/caching unchanged everywhere below.
+    routing_text = _routing_text(question)
+
     # The call index's freshness check, memoized for this answer. Computed
     # LAZILY and at most once: the interceptions below are each behind a cheap
     # regex gate, and a question that matches none of them must not pay for a
@@ -1059,7 +1133,7 @@ def answer(
     # transcripts are unavailable. Placed ahead of the digest, and deliberately
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
-    if not pinned_skill and call_index.is_listing_request(question):
+    if not pinned_skill and call_index.is_listing_request(routing_text):
         try:
             listed = call_index.answer_listing(
                 enterprise_id, question, fresh=_index_fresh()
@@ -1076,7 +1150,7 @@ def answer(
     # via Fireflies)" — while Fireflies was connected and working. A wrong answer
     # that blames the user's setup is worse than a slow one, so this sits ahead
     # of the digest. Falls through when the reference resolves to nothing.
-    if not pinned_skill and call_index.is_single_call_request(question, history):
+    if not pinned_skill and call_index.is_single_call_request(routing_text, history):
         try:
             single = call_index.answer_single_call(
                 enterprise_id, question, history=history, fresh=_index_fresh()
@@ -1091,7 +1165,7 @@ def answer(
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
     # from the lossy, token-capped KG, so intercept it first — unless the user has
     # pinned a specific skill via a follow-up.
-    if not pinned_skill and is_call_digest(question):
+    if not pinned_skill and is_call_digest(routing_text):
         from app import call_digest
 
         return call_digest.answer(
@@ -1104,7 +1178,7 @@ def answer(
     # call source IS connected, run the same live digest so the natural phrasing
     # yields a real report; when it isn't, fall through to the skill route so it
     # can explain what to connect.
-    if not pinned_skill and is_voc_report_request(question):
+    if not pinned_skill and is_voc_report_request(routing_text):
         from app import call_digest
 
         if call_digest.has_call_source(enterprise_id):
@@ -1117,34 +1191,48 @@ def answer(
     # Intercept before generic routing for the same reason as the call digest:
     # the keyword rules would send it to a synthesis skill, which answers from
     # the KG instead of computing over the actual data.
-    if not pinned_skill and is_data_analysis_request(question):
-        # Opt-in per company: the Claude code-execution engine actually reads the
-        # question (the v5.8 battery never does) but sends the raw CSVs to the
-        # Files API, so it stays behind a flag until that's signed off. Any
-        # failure falls through to the deterministic engine — the permanent
-        # fail-open floor — so this can never 500 the chat.
-        if _ds_claude_enabled(enterprise_id):
-            try:
-                from app.ds import claude_analysis
+    if not pinned_skill and is_data_analysis_request(routing_text):
+        # Capability gate: matching the lexical pattern is not enough — a
+        # document question that happens to use a data-noun ("what does the
+        # attached PDF's data show?") with no tabular data uploaded got sent
+        # to this path's canned refusal in ~458ms with no model call, ever
+        # reading the document. `_ds_claude_enabled` below is a FEATURE FLAG
+        # (which engine reads the data), not a check the data exists at all —
+        # a cheap local filesystem check, never `_stage_workspace`/the DS
+        # engine, which would parse every upload on every merely-matching
+        # question.
+        raw_dir = datasets.raw_path(dataset)
+        has_tabular_data = raw_dir.is_dir() and any(raw_dir.iterdir())
+        if has_tabular_data:
+            # Opt-in per company: the Claude code-execution engine actually reads the
+            # question (the v5.8 battery never does) but sends the raw CSVs to the
+            # Files API, so it stays behind a flag until that's signed off. Any
+            # failure falls through to the deterministic engine — the permanent
+            # fail-open floor — so this can never 500 the chat.
+            if _ds_claude_enabled(enterprise_id):
+                try:
+                    from app.ds import claude_analysis
 
-                return claude_analysis.answer(
-                    enterprise_id=enterprise_id,
-                    question=question,
-                    history=history,
-                    is_cancelled=is_cancelled,
-                )
-            except AskCancelled:
-                raise  # a user Stop must not spend a second (legacy) run
-            except Exception:  # noqa: BLE001 — fall back, never fail
-                logger.exception(
-                    "DS Claude analysis failed for %s; falling back to the "
-                    "deterministic engine", enterprise_id,
-                )
-        from app.ds import chat_analysis
+                    return claude_analysis.answer(
+                        enterprise_id=enterprise_id,
+                        question=question,
+                        history=history,
+                        is_cancelled=is_cancelled,
+                    )
+                except AskCancelled:
+                    raise  # a user Stop must not spend a second (legacy) run
+                except Exception:  # noqa: BLE001 — fall back, never fail
+                    logger.exception(
+                        "DS Claude analysis failed for %s; falling back to the "
+                        "deterministic engine", enterprise_id,
+                    )
+            from app.ds import chat_analysis
 
-        return chat_analysis.answer(
-            enterprise_id=enterprise_id, question=question, history=history
-        )
+            return chat_analysis.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
+        # No tabular data to analyze: a declined precondition falls through to
+        # normal routing — never a canned refusal the user never asked for.
 
     # INDEX-DRIVEN routing: the question names a window and this company
     # actually has calls in it. Ask the data rather than the vocabulary — the
@@ -1169,7 +1257,7 @@ def answer(
     # last week") match no DS rule, so they are unaffected by sitting here.
     if not pinned_skill:
         try:
-            window = call_index.windowed_call_question(enterprise_id, question)
+            window = call_index.windowed_call_question(enterprise_id, routing_text)
         except Exception:  # noqa: BLE001 — routing must never break the answer
             window = None
         if window is not None:
@@ -1189,7 +1277,7 @@ def answer(
     if (
         not pinned_skill
         and not question.lstrip().startswith("/")
-        and is_ticket_update(question, history)
+        and is_ticket_update(routing_text, history)
     ):
         from app import ticket_update
 
@@ -1211,12 +1299,26 @@ def answer(
     # returns a connect message rather than falling through. A slash command
     # (handled by route()) is exempt so an explicit skill invocation that merely
     # names Jira isn't hijacked.
-    if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(question, history):
+    if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
         from app.connector_lookup import tracker
 
-        return tracker.answer(
-            enterprise_id=enterprise_id, question=question, history=history
-        )
+        # Capability gate: matching the PM-noun-plus-verb regex is not enough
+        # to claim the turn — tonight's failure was exactly this interceptor
+        # answering "no tracker is connected yet" to a question it had no
+        # capability to serve, and no way to serve the document underneath
+        # it either. Claim the turn only when either (a) a tracker is
+        # actually connected, so there is something to read, or (b) the
+        # question NAMES one explicitly — `named_trackers`, checked on the
+        # same `routing_text` every interceptor above `route()` sees, never
+        # the raw `question`, so an attachment merely mentioning "Jira" can't
+        # trigger this either — in which case the honest "connect Jira/
+        # ClickUp" reply is still the right answer.
+        if tracker.any_connected(enterprise_id) or tracker.named_trackers(routing_text):
+            return tracker.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
+        # Neither holds: a declined precondition falls through to normal
+        # routing — never a canned refusal the user never asked for.
 
     # Live read of any OTHER connected tool the question names — "check slack for
     # what was said about the pricing change", "what changed in the repo this
@@ -1228,7 +1330,7 @@ def answer(
     # is answered honestly here too (registry.not_supported_message), which is
     # better than the generic path guessing from the KG.
     if not pinned_skill and not question.lstrip().startswith("/"):
-        connector_hints = is_connector_lookup(question, history)
+        connector_hints = is_connector_lookup(routing_text, history)
         if connector_hints:
             from app.connector_lookup import registry
 
@@ -1259,7 +1361,7 @@ def answer(
     # Below every other interception for the usual reason — this trigger is the
     # broadest on the path, so it must only see what nothing else claimed.
     if not pinned_skill and not question.lstrip().startswith("/"):
-        candidates = document_lookup_candidates(question)
+        candidates = document_lookup_candidates(routing_text)
         if candidates:
             from app.connector_lookup import registry
 
@@ -1285,7 +1387,17 @@ def answer(
     if pinned_skill and _invocable(pinned_skill, enterprise_id):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:
-        decision = route(question, enterprise_id=enterprise_id, history=history)
+        # AC5/AC5a: the router — and ONLY the router — additionally sees the
+        # attached/uploaded document FILENAMES, never their content. The
+        # filename-augmented text is a value never assigned back over
+        # `routing_text`, so nothing above this line was ever exposed to it.
+        # Naming a document is what makes the scope gate recognise a document
+        # question as in-scope (measured: a bare "summarize the X.docx file"
+        # follow-up, with no filename context, reads out-of-scope roughly 4
+        # times in 5); the document's own words are not needed for that and
+        # are exactly what hijacked routing in the first place.
+        route_text = _routing_text_with_filenames(routing_text, enterprise_id)
+        decision = route(route_text, enterprise_id=enterprise_id, history=history)
 
     # The choice is made — publish it NOW, not when the answer lands. This is
     # the whole point of the hook: on a competitive review the next step runs
