@@ -120,22 +120,120 @@ _REPORT_SYSTEM = (
     # read off it for the persisted run — deleting the schema wholesale would
     # have quietly turned query mode into records-only guessing with no window
     # to anchor them.
-    "\n\nAlongside the report, return two machine-readable values. They are not "
-    "shown to the reader; they are how follow-up questions stay cheap and "
-    "accurate.\n"
+    "\n\nAlongside the report, fill the two machine-readable values. They are "
+    "not shown to the reader; they are how follow-up questions stay cheap and "
+    "accurate, and neither may be left empty — an empty `metadata` leaves every "
+    "later question with nothing to answer from.\n"
     "- `window_label`: the human window this report covers, e.g. "
     "\"Feb - Jul 2026\".\n"
-    "- `metadata`: the rollup — generated_by, window, totals, by_source (per "
-    "platform: totals, sentiment, product/non-product, earliest and latest "
-    "post, caution), by_month, themes (label, first_seen, last_seen, status, "
-    "owner), resolved, switching, competitors, external ratings, limits. Make "
-    "it complete — a thin block makes every follow-up a dead end."
+    "- `metadata`: the rollup. Every count is POSTS WE FOUND, never users, and "
+    "must agree with the report you just wrote. `by_month` runs oldest to "
+    "newest across the window with a zero for months where we found nothing. "
+    "`totals.leaving` counts only people who said outright they are leaving."
 )
 
 # See `competitive_intel._REVIEW_SCHEMA` for the full reasoning; the same shape
 # and the same reason. `metadata` is typed loosely because its real contract is
 # the prose above, it is persisted as opaque JSON
 # (`public_feedback_runs.metadata`), and its only reader json-dumps it.
+# `metadata` DECLARES ITS FIELDS — a robustness measure, not a targeted fix.
+# See the long note on `competitive_intel._REVIEW_SCHEMA`: CIR shipped this same
+# bare-object shape and its structured half came back empty on staging run 8,
+# but four candidate mechanisms were tested and all four were refuted, so the
+# cause is NOT established. Do not read this change as a diagnosis.
+#
+# THE SAME SHAPE, changed by sweeping rather than after a second incident. This
+# path had not been exercised live yet; whether it would have failed the same
+# way is unknown. Declaring the fields is cheap, self-documenting, and removes
+# one variable — that is the whole justification here. `metadata` is the field a
+# follow-up question answers from, so an empty one fails silently and late.
+#
+# `window_label` was already a declared string, so that one field would have
+# survived; it is what dates a follow-up, which is why it is asked for by name.
+_PF_METADATA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "generated_by": {"type": "string"},
+        "window": {"type": "string", "description": "e.g. \"Feb - Jul 2026\"."},
+        "totals": {
+            "type": "object",
+            "properties": {
+                "collected": {"type": "integer", "description": "POSTS, never users."},
+                "product": {"type": "integer"},
+                "non_product": {"type": "integer"},
+                "sources": {"type": "integer"},
+                "leaving": {
+                    "type": "integer",
+                    "description": "Said outright they are leaving. Angry is not leaving.",
+                },
+            },
+            "required": ["collected"],
+        },
+        "by_source": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string"},
+                    "total": {"type": "integer"},
+                    "sentiment": {"type": "string"},
+                    "product": {"type": "integer"},
+                    "non_product": {"type": "integer"},
+                    "earliest_post": {"type": "string", "description": "YYYY-MM-DD"},
+                    "latest_post": {"type": "string", "description": "YYYY-MM-DD"},
+                    "caution": {"type": "string"},
+                },
+                "required": ["platform", "total"],
+            },
+        },
+        "by_month": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "string", "description": "YYYY-MM"},
+                    "count": {
+                        "type": "integer",
+                        "description": "Zero means we found none, not that people were happy.",
+                    },
+                },
+                "required": ["month", "count"],
+            },
+        },
+        "themes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "first_seen": {"type": "string", "description": "YYYY-MM-DD"},
+                    "last_seen": {"type": "string", "description": "YYYY-MM-DD"},
+                    "status": {"type": "string", "description": "new|unresolved|fixed"},
+                    "owner": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["label", "status"],
+            },
+        },
+        "switching": {"type": "string"},
+        "competitors": {"type": "array", "items": {"type": "string"}},
+        "external_ratings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string"},
+                    "rating": {"type": "string"},
+                    "as_of": {"type": "string", "description": "YYYY-MM-DD"},
+                },
+                "required": ["platform", "rating"],
+            },
+        },
+        "limits": {"type": "string", "description": "The big limitation, stated plainly."},
+    },
+    "required": ["window", "totals", "by_source", "themes"],
+}
+
 _REPORT_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -147,10 +245,7 @@ _REPORT_SCHEMA: dict = {
             "type": "string",
             "description": "The human window label — see the system prompt.",
         },
-        "metadata": {
-            "type": "object",
-            "description": "The machine-readable rollup — see the system prompt.",
-        },
+        "metadata": _PF_METADATA_SCHEMA,
     },
     "required": ["answer", "window_label", "metadata"],
 }

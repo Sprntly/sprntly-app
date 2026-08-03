@@ -37,11 +37,50 @@ REPORT_MD = (
     "### Integrity\n- 2 posts collected across 2 sources."
 )
 
+# A REALISTIC response — one that validates against `_REPORT_SCHEMA`. The
+# previous `{"totals": {"collected": 2}}` fixture was thinner than the schema
+# requires, which is how the sibling CIR bug survived its own suite: the stub
+# returned a payload the real grammar would never have produced.
 REPORT_DATA = {
     "answer": REPORT_MD,
     "window_label": "Public feedback · 2026",
-    "metadata": {"totals": {"collected": 2}},
+    "metadata": {
+        "generated_by": "public-feedback-report",
+        "window": "Feb - Jul 2026",
+        "totals": {"collected": 2, "product": 1, "non_product": 1,
+                   "sources": 2, "leaving": 0},
+        "by_source": [
+            {"platform": "App Store", "total": 1, "sentiment": "negative",
+             "product": 1, "non_product": 0, "earliest_post": "2026-06-01",
+             "latest_post": "2026-06-01", "caution": ""},
+            {"platform": "Reddit", "total": 1, "sentiment": "mixed",
+             "product": 0, "non_product": 1, "earliest_post": "2026-07-02",
+             "latest_post": "2026-07-02", "caution": "single thread"},
+        ],
+        "by_month": [{"month": "2026-06", "count": 1},
+                     {"month": "2026-07", "count": 1}],
+        "themes": [{"label": "export latency", "first_seen": "2026-06-01",
+                    "last_seen": "2026-07-02", "status": "unresolved",
+                    "owner": "platform", "count": 1}],
+        "switching": "Nobody said outright they are leaving.",
+        "competitors": ["Globex"],
+        "external_ratings": [{"platform": "App Store", "rating": "4.1",
+                              "as_of": "2026-07-30"}],
+        "limits": "Two posts is too few to trend; treat as directional only.",
+    },
 }
+
+
+def test_report_data_fixture_matches_the_schema():
+    """The stub must be something the model could ACTUALLY produce.
+
+    Same guard as the competitive-intelligence suite, for the same reason: a
+    bare `{"type": "object"}` metadata block meant the grammar could only emit
+    `{}`, and a hand-written fixture hid that from every test here. Validating
+    the fixture against the schema ties the two together."""
+    import jsonschema
+
+    jsonschema.validate(REPORT_DATA, pf._REPORT_SCHEMA)
 
 
 # ── record parsing ───────────────────────────────────────────────────────────
@@ -164,7 +203,14 @@ def test_answer_happy_path_renders_and_persists(monkeypatch):
     # the run is persisted with records + metadata + html
     assert calls["save"]["company_id"] == "e1"
     assert calls["save"]["records"] == RECORDS
-    assert calls["save"]["metadata"] == {"totals": {"collected": 2}}
+    # Persisted INTACT — asserted against the fixture rather than a hand-copied
+    # thin dict, so it cannot drift out of step with what the schema permits.
+    assert calls["save"]["metadata"] == REPORT_DATA["metadata"]
+    assert calls["save"]["metadata"]["window"], (
+        "an empty window leaves every follow-up question undateable — the "
+        "sibling of the competitive-intelligence failure on staging run 8"
+    )
+    assert calls["save"]["metadata"]["by_source"]
     # `window_label` is what query mode reads back to date its answers. It came
     # off the deleted schema's `eyebrow`; it is asked for by name now.
     assert calls["save"]["window_label"] == "Public feedback · 2026"
