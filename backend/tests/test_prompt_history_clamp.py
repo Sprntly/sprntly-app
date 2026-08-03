@@ -167,11 +167,132 @@ def test_every_history_fold_site_is_bounded():
 
 
 def test_qa_agent_render_history_bounds_many_fat_turns():
-    """Six report-sized turns must still fold into a sane prompt block."""
+    """Twelve report-sized turns must still fold into a sane prompt block.
+
+    The bound is the CHAR budget now that the turn cap is gone. That budget is
+    the old worst case (6 turns x MAX_TURN_CHARS), so uncapping the turn count
+    did not raise the ceiling on what this block can cost — it only changed
+    which turns get to sit under it."""
     import app.qa_agent as qa
 
     history = [{"role": "assistant", "content": _REPORT} for _ in range(12)]
     rendered = qa._render_history(history)
 
     assert "base64" not in rendered
-    assert len(rendered) <= (MAX_TURN_CHARS + 200) * qa._HISTORY_TURNS
+    assert len(rendered) <= qa._HISTORY_CHAR_BUDGET + 500
+    assert qa._HISTORY_CHAR_BUDGET == 6 * MAX_TURN_CHARS
+
+
+# ─── whole-conversation folding: compact, never silently drop ────────────────
+
+
+def _turns(n: int, *, chars: int) -> list[dict]:
+    """`n` distinguishable turns, each `chars` long once clamped."""
+    return [
+        {"role": "user", "content": f"turn-{i:03d} " + "z" * chars}
+        for i in range(n)
+    ]
+
+
+def test_short_thread_is_byte_identical_to_the_old_renderer():
+    """The common case must not move. This is the exact string the pre-uncap
+    last-N/newest-first renderer produced for a small thread, written out by
+    hand rather than derived from the implementation under test."""
+    from app.prompt_history import render_history_block
+
+    history = [
+        {"role": "user", "content": "Users keep asking for CSV export."},
+        {"role": "assistant", "content": "14 requests this quarter."},
+        {"role": "user", "content": "Cap it at 50k rows."},
+    ]
+
+    assert render_history_block(history) == (
+        "Conversation so far:\n"
+        "User: Users keep asking for CSV export.\n"
+        "Assistant: 14 requests this quarter.\n"
+        "User: Cap it at 50k rows.\n"
+        "\n"
+    )
+
+
+def test_thread_past_the_old_turn_cap_still_fits_whole():
+    """40 short turns blow the OLD 6-turn window but not the byte budget, so
+    every one of them survives — no elision, nothing dropped. This is the case
+    the turn cap was silently destroying."""
+    from app.prompt_history import render_history_block
+
+    rendered = render_history_block(_turns(40, chars=100))
+
+    for i in range(40):
+        assert f"turn-{i:03d}" in rendered
+    assert "omitted" not in rendered
+
+
+def test_long_thread_keeps_head_and_tail_and_marks_the_elision():
+    """The deictic case: the earliest topic turn AND the newest turns both
+    survive a thread far past the budget, and the gap between them is declared
+    in-band rather than left for the model to misread as continuity."""
+    from app.prompt_history import render_history_block
+
+    rows = _turns(60, chars=1_000)
+    rendered = render_history_block(rows, turn_chars=1_500, char_budget=24_000)
+
+    assert "turn-000" in rendered, "earliest turn (the topic) must survive"
+    assert "turn-059" in rendered, "newest turn must survive"
+    assert "turn-030" not in rendered, "the middle is what gets elided"
+
+    marker = [ln for ln in rendered.splitlines() if ln.startswith("[...")]
+    assert len(marker) == 1, rendered
+    assert "the middle is NOT" in marker[0]
+
+    # The marker states the true count, and the numbers reconcile.
+    dropped = int(re.search(r"\[\.\.\. (\d+) earlier turns", marker[0]).group(1))
+    kept = len([ln for ln in rendered.splitlines() if ln.startswith("User: ")])
+    assert dropped + kept == 60
+
+
+def test_the_newest_turn_is_never_dropped():
+    """Invariant guard: even a budget too small for one clamped turn keeps the
+    last one, because a history block whose newest turn vanished is the worst
+    possible outcome of a function that exists to preserve context."""
+    from app.prompt_history import compact_rows
+
+    body = compact_rows(["A: " + "x" * 5_000, "B: newest"], char_budget=10)
+
+    assert body[-1] == "B: newest"
+
+
+def test_head_and_tail_never_overlap():
+    """A turn must not be rendered twice across the elision — that would let the
+    model read one exchange as two and double-count a requirement."""
+    from app.prompt_history import compact_rows
+
+    rows = [f"User: turn-{i:03d} " + "z" * 900 for i in range(60)]
+    body = compact_rows(rows, char_budget=24_000)
+
+    kept = [ln for ln in body if not ln.startswith("[...")]
+    assert len(kept) == len(set(kept))
+
+
+def test_empty_and_malformed_turns_are_skipped_not_rendered():
+    """An empty turn carries nothing; a bare "User: " line is prompt noise. A
+    None role falls back to `user` rather than raising."""
+    from app.prompt_history import render_history_block
+
+    rendered = render_history_block(
+        [
+            {"role": "user", "content": ""},
+            {"role": None, "content": "kept"},
+            "not-a-dict",
+            {"role": "assistant", "content": None},
+        ]
+    )
+
+    assert rendered == "Conversation so far:\nUser: kept\n\n"
+
+
+def test_no_turns_at_all_renders_nothing():
+    from app.prompt_history import render_history_block
+
+    for empty in ([], None, "", [{"role": "user", "content": ""}]):
+        assert render_history_block(empty) == ""
