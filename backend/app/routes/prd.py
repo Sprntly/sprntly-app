@@ -720,6 +720,18 @@ def generate_impl_spec(
 
 # ── PRD editing + version control ──────────────────────────────────────
 
+def _actor(company: WorkspaceContext) -> str:
+    """Who to record on a version snapshot.
+
+    `prd_versions.saved_by` used to be the literal string "auto" on every
+    automatic snapshot, so version history recorded WHAT made the snapshot and
+    never WHO — which made a two-user editing report impossible to confirm from
+    the data alone. The column is free text rendered straight into the history
+    list ("Edit · {saved_by} · {date}"), so an address needs no schema or
+    frontend change; rows written before this stay "auto" and still render.
+    """
+    return company.user_email or company.user_id or "auto"
+
 
 class PrdUpdateIn(BaseModel):
     title: str = Field(..., min_length=1)
@@ -736,7 +748,7 @@ def update(
     row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     # Save current content as a version before overwriting
     try:
-        save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
+        save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by=_actor(company))
     except Exception:
         # Non-blocking: a failed snapshot must not fail the save. But don't
         # swallow it silently — a lost auto-version is the user's undo point
@@ -904,7 +916,7 @@ def answer_input_question(
 
     # Snapshot the pre-edit content so the change is undoable (mirrors PUT /{id}).
     try:
-        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
     except Exception:
         logger.warning(
             "auto-version snapshot failed for prd_id=%s before input-answer edit "
@@ -966,7 +978,7 @@ def chat_edit(
         # Snapshot the pre-edit content so the change is undoable (mirrors
         # PUT /{id} and the input-answer path).
         try:
-            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
         except Exception:
             logger.warning(
                 "auto-version snapshot failed for prd_id=%s before chat edit "
