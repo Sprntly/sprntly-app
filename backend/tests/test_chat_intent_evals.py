@@ -12,6 +12,14 @@ meaning lives in the conversation ("draft it up", "break this into work
 items", "make it shorter" beside an open PRD). Keyword phrasing tests all
 pass while those keep breaking; these are the acceptance criteria for the
 envelope dispatcher.
+
+The EVALS run in both directions on purpose, because the two failure modes
+pull against each other. Scoping generate_prd to PRODUCT WORK (a capability,
+an improvement, a fix) is what keeps a report / summary / one-pager request
+out of the PRD pipeline; keeping the deictic cases green is what stops that
+scoping from gutting the envelope's reason to exist. A change that fixes one
+direction and quietly breaks the other reads as "8/9 correct" unless both
+halves are in the table.
 """
 from __future__ import annotations
 
@@ -33,6 +41,21 @@ _FEATURE_THREAD = [
 ]
 
 _PRD_OPEN_CTX = {"prd_id": 42, "prd_title": "CSV export"}
+
+# A second converging thread, this one about a DEFECT — the other half of what
+# a PRD legitimately covers (a fix, not just a new capability). Its deictic
+# closers are the exact twins of the report-shaped phrasings below: the words
+# are identical, only the subject differs.
+_BUG_THREAD = [
+    {"role": "user",
+     "content": "People get logged out of checkout when they apply a promo code."},
+    {"role": "assistant",
+     "content": "Support has 23 tickets on it this month — the session token is "
+                "dropped when the promo re-renders the page."},
+    {"role": "user",
+     "content": "The cart has to stay intact and the user has to stay signed in "
+                "through the whole promo flow."},
+]
 
 EVALS: list[tuple[str, str, list[dict], dict, str]] = [
     # The three reported acceptance phrases — keyword-free, context-only.
@@ -78,6 +101,58 @@ EVALS: list[tuple[str, str, list[dict], dict, str]] = [
      [], _PRD_OPEN_CTX, "answer"),
     ("cir-shipping-ask", "what have our competitors shipped this month?",
      _FEATURE_THREAD, {}, "answer"),
+    # ── Subject-matter scope for generate_prd ────────────────────────────────
+    # A PRD is for PRODUCT WORK — a new capability, an improvement, or a fix.
+    # Everything below is document-SHAPED (a doc noun and/or a writing verb)
+    # but ABOUT information that already exists, so it belongs to the answer
+    # path, which writes reports and summaries itself. `product-one-pager` was
+    # one of the vendored skills deleted in #1024; no skill produces one now,
+    # which makes "answer" the only sane home for these.
+    ("one-pager-pricing", "put together a one-pager on our pricing", [], {},
+     "answer"),
+    ("report-on-complaints", "generate a report on customer complaints", [], {},
+     "answer"),
+    ("summarize-calls-into-doc", "summarize last week's calls into a document",
+     [], {}, "answer"),
+    ("competitor-summary", "create a summary of our competitors", [], {},
+     "answer"),
+    ("top-issues-formatted-doc", "write up the top issues in a formatted doc",
+     [], {}, "answer"),
+    ("exec-update", "draft an exec update on this quarter", [], {}, "answer"),
+    ("onboarding-briefing", "put together a briefing on how the onboarding "
+     "funnel moved last month", [], {}, "answer"),
+    # The sharpest discriminator: a report-shaped request sitting INSIDE a
+    # feature thread. The thread is converging on a product change, but this
+    # message asks for a recap of existing customer input — subject wins.
+    ("recap-inside-feature-thread",
+     "before that — write me a one-pager recapping what customers have told us "
+     "about exports so far", _FEATURE_THREAD, {}, "answer"),
+    # ── …and the other direction: product work still fires ───────────────────
+    ("prd-checkout-abandonment", "generate a PRD for checkout abandonment", [],
+     {}, "generate_prd"),
+    ("spec-a-fix", "we keep losing users at the login timeout - spec a fix", [],
+     {}, "generate_prd"),
+    ("prd-bulk-export", "write a PRD for the new bulk export feature", [], {},
+     "generate_prd"),
+    # Multi-turn deictic: the message carries no subject at all, the thread
+    # does. These are what the envelope EXISTS for — the scope rule must not
+    # touch them. "put that together" here is word-for-word the one-pager
+    # phrasing above; only the subject differs.
+    ("spec-this-out-bug-thread", "spec this out", _BUG_THREAD, {},
+     "generate_prd"),
+    ("put-that-together-bug-thread", "okay, put that together", _BUG_THREAD, {},
+     "generate_prd"),
+    ("write-this-up-as-a-doc", "write this up as a doc", _FEATURE_THREAD, {},
+     "generate_prd"),
+    # ── Same scope test on generate_prototype ────────────────────────────────
+    # A prototype shows a product change working; there is nothing to prototype
+    # about a report. The deictic prototype path must survive it.
+    ("prototype-this", "prototype this", _FEATURE_THREAD, _PRD_OPEN_CTX,
+     "generate_prototype"),
+    ("mock-it-up", "mock it up", _FEATURE_THREAD, _PRD_OPEN_CTX,
+     "generate_prototype"),
+    ("mock-up-a-report", "mock up a one-pager of our Q3 numbers", [], {},
+     "answer"),
 ]
 
 
@@ -216,6 +291,56 @@ def test_edit_without_instruction_downgrades(monkeypatch):
     env = ci.resolve_chat_intent("ent-1", "tweak it", [], prd_id=42)
     assert env["intent"] == "answer"
     assert env["source"] == "no_instruction"
+
+
+def test_prompt_scopes_prd_to_product_work():
+    """The model's verdict can only be checked live, but the RULE it is given
+    is plain text and assertable everywhere.
+
+    Both halves have to be present, and this test fails if a future edit drops
+    either one: the scope test (a PRD is a change to the product) and the
+    exclusion list (report / summary / one-pager / exec update are answer).
+    Naming the excluded document types explicitly matters — the old prompt
+    described generate_prd purely by artifact name, so a document-shaped noun
+    plus a document-shaped verb fired it whatever the document was about.
+    """
+    system = ci._SYSTEM.lower()
+    # The subject-matter test itself.
+    assert "change to the product" in system
+    for product_work in ("new capability", "improvement", "fix"):
+        assert product_work in system, product_work
+    # The excluded document types, named so the model cannot infer the rule
+    # from the shape of the request.
+    for excluded in ("report", "summary", "one-pager", "exec update",
+                     "briefing"):
+        assert excluded in system, excluded
+    # …and the exclusion is stated as answer, not merely mentioned.
+    assert "however document-shaped" in system
+
+
+def test_prompt_still_carries_the_deictic_phrasings():
+    """The envelope's whole reason to exist: keyword-free commands whose
+    referent lives in the thread. Scoping generate_prd by subject matter must
+    not cost us these — the discriminator is what the document is about, not
+    how bare the sentence is."""
+    system = ci._SYSTEM
+    for phrase in ("draft it up", "spec this out", "write this up as a doc",
+                   "put that together"):
+        assert phrase in system, phrase
+    # The worked contrast that makes the cut concrete for the model: the same
+    # deictic words go both ways depending on subject.
+    assert "put that together" in system and "one-pager on our pricing" in system
+
+
+def test_prompt_version_records_the_scoped_rule(monkeypatch):
+    """The decision log has to distinguish verdicts made under the scoped
+    prompt from the ones before it — the eval table is the only other record
+    of which rule was live."""
+    calls: list[dict] = []
+    _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
+               calls)
+    ci.resolve_chat_intent("ent-1", "put together a one-pager on our pricing", [])
+    assert calls[0]["prompt_version"] == "chat-intent-v2"
 
 
 def test_tickets_without_target_keeps_intent(monkeypatch):
