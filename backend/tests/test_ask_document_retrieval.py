@@ -721,6 +721,296 @@ def test_get_file_text_tenant_isolation(isolated_settings):
     assert get_file_text(_OTHER_CID, "fb1") == "other tenant body"
 
 
+# ═══════════════════ Conversation-scoped attachments (chat) ════════════════
+# A user attaches a document to a chat turn; the file lives in
+# `conversation_turns.attachments`, a table `list_company_files` can never see
+# by construction (it reads `document_source_file`). `document_grounding` now
+# ALSO folds the active conversation's attachments into the index (as
+# "attached to this conversation" entries) and manifest — ownership-checked
+# (company AND user, mirroring `routes.ask._load_history`'s per-user guard),
+# never by conversation_id equality alone.
+
+def _seed_conversation_with_attachment(
+    tenant, *, title="chat", attachment_name="Notes.docx",
+    attachment_content="body text", question="look at the attached file",
+):
+    """A REAL conversation + turn via the conversations API (not a hand-built
+    row), owned by `tenant` (a `tenant_client.make(...)` namespace). Returns
+    (conversation_id, turn_id)."""
+    conv = tenant.client.post("/v1/conversations", json={"title": title}).json()
+    turn = tenant.client.post(
+        f"/v1/conversations/{conv['id']}/turns",
+        json={
+            "role": "user", "content": question,
+            "attachments": [{"name": attachment_name, "content": attachment_content}],
+        },
+    ).json()
+    return conv["id"], turn["id"]
+
+
+def test_document_grounding_includes_conversation_attachment_in_index(
+    tenant_client, isolated_settings
+):
+    """T4 — the real `ask_runner.document_grounding(...)` against a seeded
+    `conversation_turns` row: the attachment appears in the index bearing
+    'attached to this conversation' and carries no `source:` token. RED
+    today (pre-fix `document_grounding` takes two arguments)."""
+    from app import ask_runner
+
+    t = tenant_client.make(slug="acme-conv-doc")
+    conv_id, _ = _seed_conversation_with_attachment(
+        t, attachment_name="Sprntly_vs_Productboard_Comparison.docx",
+        attachment_content="the real attached body",
+    )
+
+    token = ask_runner.set_active_conversation(conv_id, t.user_id)
+    try:
+        block, manifest = ask_runner.document_grounding(
+            t.company_id, "unrelated question", conversation_id=conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    line = next(
+        l for l in block.splitlines()
+        if "Sprntly_vs_Productboard_Comparison.docx" in l
+    )
+    assert "attached to this conversation" in line
+    assert "source:" not in line
+    assert any(
+        m["filename"] == "Sprntly_vs_Productboard_Comparison.docx" for m in manifest
+    )
+
+
+def test_document_grounding_conversation_scoping_excludes_other_conversations(
+    tenant_client, isolated_settings
+):
+    """T5 — an attachment from a DIFFERENT conversation of the SAME owner must
+    not appear; document_grounding scopes strictly to the passed
+    conversation_id, not to "anything this user owns"."""
+    from app import ask_runner
+
+    t = tenant_client.make(slug="acme-conv-scope")
+    _seed_conversation_with_attachment(
+        t, attachment_name="other_conversation.docx", attachment_content="OTHER BODY",
+    )
+    this_conv_id, _ = _seed_conversation_with_attachment(
+        t, title="this one", attachment_name="this_conversation.docx",
+        attachment_content="THIS BODY",
+    )
+
+    token = ask_runner.set_active_conversation(this_conv_id, t.user_id)
+    try:
+        block, manifest = ask_runner.document_grounding(
+            t.company_id, "unrelated question", conversation_id=this_conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    assert "other_conversation.docx" not in block
+    assert all(m.get("filename") != "other_conversation.docx" for m in manifest)
+    assert "this_conversation.docx" in block
+
+
+def test_document_grounding_degrades_to_empty_when_conversation_read_raises(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """T6 — a read failure ISOLATED to the conversation-attachments path
+    (uploaded-document reads still succeed normally, finding none) must
+    degrade the SAME way every other read here does: no exception escapes,
+    the attachment is simply absent."""
+    from app import ask_runner
+
+    t = tenant_client.make(slug="acme-conv-fail")
+    conv_id, _ = _seed_conversation_with_attachment(t)
+
+    real_select = _Query.select
+
+    def _boom(self, cols="*", count=None):
+        if self.table in ("conversations", "conversation_turns"):
+            raise RuntimeError("boom")
+        return real_select(self, cols, count)
+
+    monkeypatch.setattr(_Query, "select", _boom)
+
+    token = ask_runner.set_active_conversation(conv_id, t.user_id)
+    try:
+        result = ask_runner.document_grounding(
+            t.company_id, "unrelated", conversation_id=conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    assert result == ("", [])
+
+
+def test_document_grounding_conversation_attachment_manifest_synthetic_id(
+    tenant_client, isolated_settings
+):
+    """T7 — B7's synthetic id: f"turn:{turn_id}:attachment:{index}"
+    (`TurnAttachment` has no id field of its own)."""
+    from app import ask_runner
+
+    t = tenant_client.make(slug="acme-conv-manifest")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+    turn = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={
+            "role": "user", "content": "q",
+            "attachments": [
+                {"name": "first.docx", "content": "first body"},
+                {"name": "second.docx", "content": "second body"},
+            ],
+        },
+    ).json()
+    turn_id = turn["id"]
+
+    token = ask_runner.set_active_conversation(conv_id, t.user_id)
+    try:
+        _, manifest = ask_runner.document_grounding(
+            t.company_id, "unrelated", conversation_id=conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    ids = {m["file_id"] for m in manifest}
+    assert f"turn:{turn_id}:attachment:0" in ids
+    assert f"turn:{turn_id}:attachment:1" in ids
+
+
+def test_document_grounding_tenancy_check_blocks_foreign_company_conversation(
+    tenant_client, isolated_settings
+):
+    """T9 (B) — TENANCY / IDOR, distinct from T5. A REAL conversation id
+    belonging to a DIFFERENT COMPANY must not leak its attachments, even when
+    a legitimate same-company caller is active — proves the ownership QUERY
+    itself rejects it, not merely an absent calling-user context."""
+    from app import ask_runner
+
+    company_a = tenant_client.make(slug="acme-tenancy-a")
+    company_b = tenant_client.make(slug="acme-tenancy-b")
+    foreign_conv_id, _ = _seed_conversation_with_attachment(
+        company_b, attachment_name="company_b_secret.docx",
+        attachment_content="COMPANY B PRIVATE BODY",
+    )
+
+    token = ask_runner.set_active_conversation(foreign_conv_id, company_a.user_id)
+    try:
+        block, manifest = ask_runner.document_grounding(
+            company_a.company_id, "unrelated question",
+            conversation_id=foreign_conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    assert "company_b_secret.docx" not in block
+    assert "COMPANY B PRIVATE BODY" not in block
+    assert all(m.get("filename") != "company_b_secret.docx" for m in manifest)
+
+
+def test_document_grounding_tenancy_check_blocks_different_user_same_company(
+    tenant_client, isolated_settings
+):
+    """T9's other branch — a REAL conversation belonging to a DIFFERENT USER
+    inside the SAME company must not leak either. A company-only ownership
+    check would PASS this (same tenant); B4 requires per-user scoping."""
+    from app import ask_runner
+
+    a = tenant_client.make(slug="acme-tenancy-users")
+    b = tenant_client.make(slug="acme-tenancy-users", user_id="user-b-tenancy")
+    assert a.company_id == b.company_id
+    b_conv_id, _ = _seed_conversation_with_attachment(
+        b, attachment_name="teammate_private.docx",
+        attachment_content="TEAMMATE PRIVATE BODY",
+    )
+
+    token = ask_runner.set_active_conversation(b_conv_id, a.user_id)
+    try:
+        block, manifest = ask_runner.document_grounding(
+            a.company_id, "unrelated question", conversation_id=b_conv_id,
+        )
+    finally:
+        ask_runner.reset_active_conversation(token)
+
+    assert "teammate_private.docx" not in block
+    assert "TEAMMATE PRIVATE BODY" not in block
+    assert all(m.get("filename") != "teammate_private.docx" for m in manifest)
+
+
+def test_document_grounding_conversation_attachment_no_context_no_leak(
+    tenant_client, isolated_settings
+):
+    """B1/B4 — passing conversation_id alone, with NO active calling-user
+    context, must behave exactly as if conversation_id had never been passed
+    — proves the check isn't satisfiable by conversation_id equality alone,
+    even for an otherwise-legitimately-owned conversation."""
+    from app import ask_runner
+
+    t = tenant_client.make(slug="acme-conv-no-context")
+    conv_id, _ = _seed_conversation_with_attachment(
+        t, attachment_name="no_context.docx",
+    )
+
+    # No set_active_conversation call at all — the contextvar is unset.
+    block, manifest = ask_runner.document_grounding(
+        t.company_id, "unrelated question", conversation_id=conv_id,
+    )
+
+    assert "no_context.docx" not in block
+    assert all(m.get("filename") != "no_context.docx" for m in manifest)
+
+
+def test_run_sync_sets_and_resets_active_conversation_around_answer(
+    isolated_settings, monkeypatch
+):
+    """B5 wiring: `ask_job_runner._run_sync` sets the request-scoped
+    conversation context immediately before `qa_agent.answer(...)` and ALWAYS
+    clears it afterward — even when the answer call raises. Proven against
+    the set/reset contract itself (called, in order, with the right args,
+    reset always reached) rather than a full round trip through a background
+    thread, which would prove nothing more about ordering than this does."""
+    import asyncio
+
+    import pytest
+
+    from app import ask_job_runner, ask_runner
+    from app.db import start_ask_job
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-ctx")
+    ask_id = start_ask_job(company_id="co-ctx", dataset="ds", question="q")
+    calls: list = []
+    monkeypatch.setattr(
+        ask_runner, "set_active_conversation",
+        lambda cid, uid: calls.append(("set", cid, uid)) or "TOKEN",
+    )
+    monkeypatch.setattr(
+        ask_runner, "reset_active_conversation",
+        lambda token: calls.append(("reset", token)),
+    )
+
+    def _boom(**kwargs):
+        calls.append(("answer_called",))
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ask_job_runner.qa_agent, "answer", _boom)
+
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(RuntimeError):
+            ask_job_runner._run_sync(
+                ask_id, "co-ctx", "q", "ds", [], None, None, loop,
+                conversation_id=77, user_id="user-x",
+            )
+    finally:
+        loop.close()
+
+    assert calls[0] == ("set", 77, "user-x")
+    assert calls[1] == ("answer_called",)
+    assert calls[2] == ("reset", "TOKEN")
+
+
 # ═══════════════════════════ Wiring ═════════════════════════════════════════
 
 

@@ -14,7 +14,7 @@ holds a strong ref via routes/ask.py's `_inflight_tasks`).
 import asyncio
 import logging
 
-from app import qa_agent
+from app import ask_runner, qa_agent
 from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
 from app.db.asks import (
@@ -82,6 +82,7 @@ def _run_sync(
     prd_id: int | None,
     loop: asyncio.AbstractEventLoop,
     conversation_id: int | None = None,
+    user_id: str | None = None,
     workspace_id: str | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
@@ -93,28 +94,39 @@ def _run_sync(
     extractor = AnswerFieldExtractor(
         token_stream.delta_sink(loop, ask_channel(ask_id))
     )
-    payload = qa_agent.answer(
-        enterprise_id=enterprise_id,
-        question=question,
-        dataset=dataset,
-        history=history,
-        pinned_skill=pinned_skill,
-        prd_id=prd_id,
-        # Cooperative cancellation: the user's Stop flips the job row to
-        # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
-        # steps and raises AskCancelled to abort before the expensive answer call.
-        is_cancelled=lambda: is_ask_cancelled(ask_id),
-        on_delta=extractor,
-        # The routed skill goes onto the job row the INSTANT the router resolves
-        # — seconds into a run that can last minutes — so GET /v1/ask/{id} can
-        # name the running skill while the job is still `generating`. Two
-        # different transports on purpose: the skill is durable state the poll
-        # must still find after a reload, whereas a phase is an ephemeral "which
-        # leg is live right now" that only means anything to a client currently
-        # attached to the stream.
-        on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
-        on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
-    )
+    # `qa_agent.answer()` has no conversation_id/user_id parameter — and
+    # keeping it that way is the point (see app.ask_runner.set_active_conversation
+    # for the full rationale: threading either through answer() ->
+    # _answer_single_shot -> its document_grounding call would be four edits
+    # inside qa_agent.py, the file this fix stays out of). Both ride a
+    # request-scoped ContextVar pair instead, set here immediately before the
+    # call and ALWAYS cleared in the finally below — even when answer() raises.
+    context_token = ask_runner.set_active_conversation(conversation_id, user_id)
+    try:
+        payload = qa_agent.answer(
+            enterprise_id=enterprise_id,
+            question=question,
+            dataset=dataset,
+            history=history,
+            pinned_skill=pinned_skill,
+            prd_id=prd_id,
+            # Cooperative cancellation: the user's Stop flips the job row to
+            # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
+            # steps and raises AskCancelled to abort before the expensive answer call.
+            is_cancelled=lambda: is_ask_cancelled(ask_id),
+            on_delta=extractor,
+            # The routed skill goes onto the job row the INSTANT the router resolves
+            # — seconds into a run that can last minutes — so GET /v1/ask/{id} can
+            # name the running skill while the job is still `generating`. Two
+            # different transports on purpose: the skill is durable state the poll
+            # must still find after a reload, whereas a phase is an ephemeral "which
+            # leg is live right now" that only means anything to a client currently
+            # attached to the stream.
+            on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
+            on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
+        )
+    finally:
+        ask_runner.reset_active_conversation(context_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask
@@ -161,6 +173,7 @@ async def run_ask_job(
     pinned_skill: str | None = None,
     prd_id: int | None = None,
     conversation_id: int | None = None,
+    user_id: str | None = None,
     workspace_id: str | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
@@ -184,6 +197,7 @@ async def run_ask_job(
             prd_id,
             loop,
             conversation_id,
+            user_id,
             workspace_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)

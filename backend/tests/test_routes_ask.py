@@ -644,6 +644,135 @@ def test_ask_accepts_question_with_inlined_attachment_block(tenant_client, isola
     assert body["status"] == "ready"
 
 
+# ---- conversation attachment history fold ------------------------------
+# A user attaches a document to turn 1; by turn 3 the per-turn history clamp
+# has erased every trace of it because `_load_history` never selected the
+# `attachments` column at all. `_load_history` now folds each turn's OWN
+# attachment text onto that turn's `content` before returning it, so the
+# text survives the clamp on every later turn — without qa_agent.py's
+# `_render_history` / `clamp_turn_text` changing at all.
+
+def test_load_history_folds_attachment_text_and_survives_to_turn_three(
+    tenant_client, isolated_settings
+):
+    """T1 — the actual reproduction: an attachment's extracted text must
+    still be readable by the REAL, unmodified `qa_agent._render_history` on
+    turn 3, not just turn 1 (where it happened to ride inside the question
+    string the composer built client-side). Calls the real `_load_history`
+    against a REAL seeded `conversation_turns` row via the conversations API
+    — not a hand-built list."""
+    from app.qa_agent import _render_history
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-attach-survive")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+
+    unique_body = " ".join(
+        ["Sprntly ships faster PRD-to-prototype cycles than Productboard on turnaround time."] * 5
+    )
+    resp1 = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={
+            "role": "user",
+            "content": "give me a summary of the document that compares us to Productboard",
+            "attachments": [
+                {"name": "Sprntly_vs_Productboard_Comparison.docx", "content": unique_body},
+            ],
+        },
+    )
+    assert resp1.status_code == 200, resp1.text
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "assistant", "content": "Here is a summary of the document."},
+    )
+    resp3 = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "user", "content": "which source did you find this information in"},
+    )
+    assert resp3.status_code == 200, resp3.text
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+    assert len(history) == 3
+    rendered = _render_history(history)
+
+    assert unique_body in rendered
+
+
+def test_load_history_no_attachments_is_byte_identical_to_today(
+    tenant_client, isolated_settings
+):
+    """A4 / T2 — a turn with no attachments produces history BYTE-IDENTICAL
+    to today: exactly `{role, content}` (no leaked `attachments` key), and the
+    same rendered string `qa_agent._render_history` has always produced for
+    it — captured by hand from a real run, not derived via `git show`."""
+    from app.qa_agent import _render_history
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-no-attach")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "user", "content": "plain question, no attachment"},
+    )
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+
+    assert len(history) == 1
+    assert list(history[0].keys()) == ["role", "content"]
+    assert history[0]["content"] == "plain question, no attachment"
+
+    rendered = _render_history(history)
+    assert rendered == "Conversation so far:\nUser: plain question, no attachment\n\n"
+
+
+def test_load_history_empty_attachment_content_is_skipped(tenant_client, isolated_settings):
+    """A1/A2 — a PRD-import turn persists a name-only attachment chip
+    (`content == ""`, per TurnAttachment's docstring: the file BECAME the
+    PRD, not this turn's context). Folding must tolerate that rather than
+    appending an empty `[Attached: name]` stub."""
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-empty-attach")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={
+            "role": "user", "content": "generate a PRD from this",
+            "attachments": [{"name": "spec.docx", "content": ""}],
+        },
+    )
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+
+    assert history[0]["content"] == "generate a PRD from this"
+    assert "[Attached:" not in history[0]["content"]
+
+
+def test_load_history_foreign_conversation_returns_empty_no_attachment_leak(
+    tenant_client, isolated_settings
+):
+    """A5 / T3 — the existing ownership guard is untouched: a conversation not
+    owned by the caller (company AND user) still returns [], attachments
+    included."""
+    from app.routes.ask import _load_history
+
+    a = tenant_client.make(slug="acme-foreign-attach")
+    b = tenant_client.make(slug="acme-foreign-attach", user_id="user-b-foreign-attach")
+    conv = a.client.post("/v1/conversations", json={"title": "A's chat"}).json()
+    a.client.post(
+        f"/v1/conversations/{conv['id']}/turns",
+        json={
+            "role": "user", "content": "q",
+            "attachments": [{"name": "secret.docx", "content": "PRIVATE ATTACHMENT BODY"}],
+        },
+    )
+
+    assert _load_history(conv["id"], b.company_id, b.user_id) == []
+
+
 def test_find_cached_ask_skips_oversized_question_without_hitting_the_client():
     """An oversized question (a chat ask carrying an inlined [Attached files]
     block — tens of KB) can never match a pre-warmed prompt, and sending it as a
