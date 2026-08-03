@@ -8,6 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
+import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
@@ -1030,10 +1031,10 @@ export function ChatScreen() {
   // Action-envelope dispatch (DEFAULT ON; staff-panel kill switch): one
   // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
   // decides what each message asks for, replacing the client regex/classifier
-  // ladder in submitAsk. parseFeatureFlags fills a missing key from
-  // DEFAULT_FEATURE_FLAGS (true), so only an explicit staff-set false — or a
-  // workspace that hasn't loaded — lands on the legacy ladder.
-  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
+  // ladder in submitAsk. Only an explicit `false` lands on that ladder — a
+  // missing key, and a workspace that hasn't loaded, both resolve to ON (see
+  // chatIntentEnvelopeOn for why an UNKNOWN flag state fails OPEN here).
+  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
