@@ -7,6 +7,7 @@ time we make those clicks render instantly — the route just returns a
 cached row.
 """
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -211,16 +212,134 @@ def _select_documents(
     return [ref for _, ref in candidates[:MAX_SELECTED_DOCUMENTS]]
 
 
+# ── Conversation-scoped attachments (chat attachments in the index) ─────────
+# `qa_agent.answer()` -> `_answer_single_shot` has no `conversation_id` (or
+# user identity) parameter, and adding one would mean four signature/call-site
+# edits inside qa_agent.py — the file this fix is deliberately kept out of
+# (see the ticket's Part C). `document_grounding` (called from BOTH grounding
+# call sites — this module's `compose_ask_answer` and qa_agent.py's
+# `_answer_single_shot`, neither of which changes) instead learns the active
+# conversation, AND the identity of whoever is asking, from a pair of
+# request-scoped ContextVars. `asyncio.to_thread` copies the current Context
+# per call, so two Asks running concurrently in different worker threads never
+# see each other's value.
+#
+# The user-id half exists ONLY because ownership here means company AND user
+# — mirroring `routes.ask._load_history`'s per-user guard (a company-only
+# check would still let one teammate's conversation_id pull another
+# teammate's attachment text into their own prompt). `conversation_id` alone
+# is genuinely unvalidated client input by the time it reaches this module —
+# see `_owned_conversation_attachments` below.
+_active_conversation_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "ask_runner_active_conversation_id", default=None
+)
+_active_conversation_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ask_runner_active_conversation_user_id", default=None
+)
+
+
+def set_active_conversation(conversation_id: int | None, user_id: str | None):
+    """Record the conversation + caller identity for the Ask running on THIS
+    thread's context. Call from `ask_job_runner._run_sync` immediately before
+    `qa_agent.answer(...)`, and always undo via `reset_active_conversation` in
+    a `finally` — a value left set past its own request would leak into
+    whatever reuses that context next.
+
+    Returns an opaque token, passed back to `reset_active_conversation`.
+    """
+    return (_active_conversation_id.set(conversation_id),
+            _active_conversation_user_id.set(user_id))
+
+
+def reset_active_conversation(tokens) -> None:
+    """Undo `set_active_conversation` — call from a `finally`."""
+    token_conversation, token_user = tokens
+    _active_conversation_id.reset(token_conversation)
+    _active_conversation_user_id.reset(token_user)
+
+
+def _owned_conversation_attachments(
+    enterprise_id: str, conversation_id: int | None, caller_user_id: str | None
+) -> list[tuple[int, int, dict, str]]:
+    """(turn_id, index, attachment, turn_created_at) for every attachment on
+    every turn of `conversation_id` — but ONLY when that conversation belongs
+    to `enterprise_id` AND to `caller_user_id`, mirroring
+    `routes.ask._load_history`'s per-user ownership guard.
+
+    `conversation_id` reaching this function is genuinely unvalidated: it
+    rides `ask_job_runner._run_sync`'s local variable straight from
+    `AskIn.conversation_id`, with no ownership check anywhere on that path —
+    `routes.ask._load_history` checks ownership too, but only to decide what
+    goes into `history`; it does not gate what `conversation_id` itself gets
+    passed onward. A query filtered on `conversation_id` alone would be an
+    IDOR: any caller could supply another company's or another teammate's
+    real conversation id and pull its private attachment text into their own
+    prompt. Failing the check — wrong company, wrong user, no id, or any read
+    error — returns [] silently, exactly as if no conversation_id had been
+    passed at all."""
+    if not conversation_id or not caller_user_id:
+        return []
+    try:
+        from app.db.client import require_client
+
+        c = require_client()
+        owned = (
+            c.table("conversations")
+            .select("id")
+            .eq("id", conversation_id)
+            .eq("company_id", enterprise_id)
+            .eq("user_id", caller_user_id)
+            .limit(1)
+            .execute()
+        )
+        if not owned.data:
+            return []
+        turns = (
+            c.table("conversation_turns")
+            .select("id,attachments,created_at")
+            .eq("conversation_id", conversation_id)
+            .order("created_at")
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "conversation attachment index read failed for conversation=%s; "
+            "treating as no attachments", conversation_id, exc_info=True,
+        )
+        return []
+    out: list[tuple[int, int, dict, str]] = []
+    for turn in turns.data or []:
+        for index, attachment in enumerate(turn.get("attachments") or []):
+            if not attachment.get("name"):
+                continue
+            out.append((turn["id"], index, attachment, turn.get("created_at") or ""))
+    return out
+
+
 def document_grounding(
-    enterprise_id: str | None, question: str
+    enterprise_id: str | None, question: str, conversation_id: int | None = None
 ) -> tuple[str, list[dict]]:
     """Render the "UPLOADED DOCUMENTS" block (index of every uploaded file,
     plus the bodies selected for this question) and its server-derived
     manifest, for composition into the answer prompt.
 
-    Returns ("", []) for every degradation path — no tenant, no uploaded
-    files, or any read failure — so composition is byte-identical to today
-    for a tenant with no uploads."""
+    `conversation_id`, when it resolves (either passed explicitly, or — when
+    left at its default `None` — read from the active-conversation ContextVar
+    set by `ask_job_runner._run_sync`, see `set_active_conversation` above)
+    AND passes the ownership check in `_owned_conversation_attachments`,
+    additionally folds that ONE conversation's chat attachments into the
+    index as entries reading "attached to this conversation" — distinct from
+    workspace-upload entries, which read "source: {name}" — and into the
+    manifest, each carrying the synthetic id
+    `f"turn:{turn_id}:attachment:{index}"` (`TurnAttachment` has no id field
+    of its own). A conversation_id that fails ownership — wrong company,
+    wrong user, unset, or any read error — behaves exactly as if it had never
+    been passed: no attachment entries, no error.
+
+    Returns ("", []) for every degradation path — no tenant, nothing to show
+    (no uploaded files AND no conversation attachments), or any read failure
+    — so composition is byte-identical to today for a tenant with no uploads
+    and no attached-in-chat documents."""
     if not enterprise_id:
         return "", []
     try:
@@ -231,7 +350,14 @@ def document_grounding(
             enterprise_id, exc_info=True,
         )
         return "", []
-    if not refs:
+
+    if conversation_id is None:
+        conversation_id = _active_conversation_id.get()
+    conv_attachments = _owned_conversation_attachments(
+        enterprise_id, conversation_id, _active_conversation_user_id.get()
+    )
+
+    if not refs and not conv_attachments:
         return "", []
 
     total = len(refs)
@@ -255,6 +381,11 @@ def document_grounding(
     for ref in refs:
         date = (ref.uploaded_at or "")[:10]
         lines.append(f"- {ref.filename} (source: {ref.source_name}, uploaded {date})")
+    for turn_id, index, attachment, turn_created_at in conv_attachments:
+        date = (turn_created_at or "")[:10]
+        lines.append(
+            f"- {attachment['name']} (attached to this conversation, {date})"
+        )
     if truncated_index:
         lines.append(
             f"[This list shows the {MAX_INDEX_ENTRIES} most recently uploaded "
@@ -296,6 +427,24 @@ def document_grounding(
         }
         for ref in refs
     ]
+    manifest.extend(
+        {
+            "file_id": f"turn:{turn_id}:attachment:{index}",
+            "filename": attachment["name"],
+            # Not a workspace upload — nothing named it "source: X" in the
+            # index either (see B2/B3); left unset rather than invented.
+            "source_name": None,
+            "uploaded_at": turn_created_at,
+            # The attachment's extracted text already reached the model via
+            # this SAME turn's folded history (routes.ask._load_history,
+            # part A of this fix) — true regardless of whether this prompt
+            # also rendered it under "Contents loaded" above, which it does
+            # not for conversation attachments (existence is this block's
+            # job; Part A already delivers the content).
+            "loaded": True,
+        }
+        for turn_id, index, attachment, turn_created_at in conv_attachments
+    )
     return block, manifest
 
 

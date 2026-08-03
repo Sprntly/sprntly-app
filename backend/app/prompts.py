@@ -598,7 +598,13 @@ has not uploaded it. Say it is not among the uploaded documents — do not \
 blame a specific integration whose contents you cannot see.
 4. When you use a loaded document, attribute it inline by its exact filename, \
 for example `[Source: Q3_pricing_research.pdf]`. Use the filename exactly as \
-the Index spells it; never invent a document name, an id, or a URL."""
+the Index spells it; never invent a document name, an id, or a URL.
+5. Some Index entries read "(attached to this conversation, {date})" instead \
+of "(source: {name}, uploaded {date})". These exist exactly like workspace \
+uploads for the purposes of rules 1-3 above — they are not absent, and never \
+say the workspace hasn't uploaded one. Describe them as attached by the user \
+in this conversation, not as uploaded by the workspace. Rule 4's filename \
+attribution applies to them unchanged."""
 
 
 # Post-corpus user template used when a KG context section is composed in.
