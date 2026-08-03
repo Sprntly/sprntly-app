@@ -8,6 +8,7 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
 import { briefApi, type AskResponse } from "../../lib/api"
+import { chatIntentEnvelopeOn } from "../../lib/onboarding/types"
 import { loadLatestPrd } from "../../lib/runPrdGeneration"
 import {
   isPrdCommand,
@@ -521,10 +522,16 @@ export function BriefChat() {
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const { workspace } = useWorkspace()
-  // Action-envelope dispatch (staged rollout, staff-panel flag) — see
-  // ChatScreen.submitAsk for the full story. On the brief tab the envelope
-  // replaces the isPrdCommand/isPrototypeCommand/isTicketsCommand triage.
-  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
+  // Action-envelope dispatch (DEFAULT ON, staff-panel kill switch) — on the
+  // brief tab the envelope replaces the
+  // isPrdCommand/isPrototypeCommand/isTicketsCommand triage in submitAsk.
+  //
+  // DORMANT SURFACE: the brief's own composer was removed on 2026-07-19
+  // (7120b4f0) — chatting happens in each PRD's chat tab now — so nothing in
+  // this file's JSX reaches submitAsk today. Kept in lockstep with ChatScreen
+  // via the shared gate so the two can't drift while this path sleeps; the
+  // three-state semantics are pinned by chatIntentEnvelopeOn's own tests.
+  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
   // Keep the pipeline-status poll mounted (other surfaces rely on its side
   // effects); the brief header no longer reads its result directly.
   usePipelineStatus(activeCompany)

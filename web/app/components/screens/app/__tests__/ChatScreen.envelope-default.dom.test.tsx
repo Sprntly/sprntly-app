@@ -1,13 +1,26 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — action-envelope dispatch (flag: chat_intent_envelope ON).
-// Every message goes to POST /v1/chat/intent first; the backend's verdict —
-// not a client regex — decides the executor. The reported failures this
-// architecture fixes are KEYWORD-FREE commands ("draft it up") whose meaning
-// lives in the conversation: the envelope carries the intent AND the task the
-// backend synthesized from the thread. Fail-open: an envelope fetch failure
-// falls back to the full legacy regex ladder, so command dispatch never
-// degrades below flag-off behavior.
+// ChatScreen — the THREE states of `chat_intent_envelope`, at the ChatScreen
+// read site. The flag is DEFAULT ON (2026-08-03): a company that never had the
+// key written is on the envelope, and the staff checkbox is a kill switch
+// rather than an opt-in.
+//
+//   * explicit `true`                  → envelope
+//   * key absent                       → envelope   ← the default-on behaviour
+//   * no feature_flags object at all   → envelope
+//   * workspace UNKNOWN (null/loading) → envelope   ← fails OPEN, on purpose
+//   * explicit `false`                 → legacy regex ladder
+//
+// Every case sends the SAME message, one the regex ladder CAN parse, so the
+// two routers are distinguishable by their output rather than by a mock spy
+// alone: the envelope generates from the task it synthesized off the thread,
+// the ladder generates from the substring its regex extracted.
+//
+// Why UNKNOWN fails open (the opposite of ds_claude_analysis, which fails
+// closed — see backend/app/qa_agent.py::_ds_claude_enabled): this flag picks a
+// ROUTING STRATEGY, not whether a tenant's data leaves the box. "I can't read
+// your flags yet" must resolve to the better router, and the envelope call
+// keeps its own fail-open floor back to the ladder if the request fails.
 import * as React from "react"
 import { act, cleanup, fireEvent, waitFor, within, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -25,14 +38,10 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 }
 
 const { generateFromTask, classifyCommand, clarifyTask, resolveIntent } = vi.hoisted(() => ({
-  generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "CSV export", status: "generating", variant: "v3" }),
+  generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode", status: "generating", variant: "v3" }),
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
-  // The envelope call. Default: answer — individual tests override per-case.
-  resolveIntent: vi.fn().mockResolvedValue({
-    intent: "answer", confidence: 0.9, task: null, instruction: null,
-    reason: "plain question", source: "llm", prd_id: null, prd_title: null,
-  }),
+  resolveIntent: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -58,7 +67,7 @@ const runPrdGeneration = vi.fn().mockResolvedValue({
 })
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
-  resumePrdGeneration: vi.fn().mockResolvedValue({ ok: true, prd: { prd_id: 501, title: "CSV export", metaLine: "", sections: [] } }),
+  resumePrdGeneration: vi.fn().mockResolvedValue({ ok: true, prd: { prd_id: 501, title: "Dark mode", metaLine: "", sections: [] } }),
   runPrdGenerationFromIdeation: vi.fn(),
   loadPrdById: vi.fn(),
 }))
@@ -80,17 +89,15 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useSearchParams: () => new URLSearchParams("new=1"),
 }))
-// Flag EXPLICITLY on — the whole point of this suite. The other two states of
-// the flag (key absent, explicit false) have their own suites:
-// ChatScreen.envelope-default.dom.test.tsx. (The sibling command suites now
-// mock an explicit `chat_intent_envelope: false`, since a null/flagless
-// workspace resolves to ON.)
+
+// The workspace is swapped PER TEST — that's the whole subject of this suite.
+const { workspaceRef } = vi.hoisted(() => ({
+  workspaceRef: { current: null as Record<string, unknown> | null },
+}))
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
   useWorkspace: () => ({
-    loading: false, profile: null,
-    workspace: { feature_flags: { chat_intent_envelope: true } },
-    refresh: async () => {},
+    loading: false, profile: null, workspace: workspaceRef.current, refresh: async () => {},
   }),
 }))
 vi.mock("../../../../context/CompanyContext", () => ({
@@ -125,6 +132,14 @@ async function typeAndSend(text: string) {
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
+// A phrasing BOTH routers claim, so the two are told apart by their output.
+const MESSAGE = "generate a PRD for dark mode on mobile"
+// What the regex ladder extracts from it…
+const LADDER_TASK = "dark mode on mobile"
+// …versus what the backend classifier synthesized off the whole thread.
+const ENVELOPE_TASK =
+  "Dark mode on mobile: honor the OS setting, per-account override, and an AMOLED-true-black variant"
+
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
@@ -137,84 +152,71 @@ beforeEach(() => {
   clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
   resolveIntent.mockReset()
   resolveIntent.mockResolvedValue({
-    intent: "answer", confidence: 0.9, task: null, instruction: null,
-    reason: "plain question", source: "llm", prd_id: null, prd_title: null,
+    intent: "generate_prd", confidence: 0.95, task: ENVELOPE_TASK, instruction: null,
+    reason: "thread converged on the feature", source: "llm", prd_id: null, prd_title: null,
   })
+  workspaceRef.current = null
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
-describe("ChatScreen — action-envelope dispatch (flag on)", () => {
-  it("a KEYWORD-FREE command generates the PRD from the envelope's synthesized task", async () => {
-    resolveIntent.mockResolvedValue({
-      intent: "generate_prd", confidence: 0.95,
-      task: "CSV export of the weekly report: respect report filters, 50k-row cap, scheduled exports",
-      instruction: null, reason: "thread converged on the feature",
-      source: "llm", prd_id: null, prd_title: null,
-    })
-    renderChat()
-    await typeAndSend("okay, draft it up")
+async function expectEnvelopeRouted() {
+  renderChat()
+  await typeAndSend(MESSAGE)
+  await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+  expect(resolveIntent).toHaveBeenCalledTimes(1)
+  // The ENVELOPE's synthesized task drove generation — proof the backend
+  // classifier, not the client regex, decided this turn.
+  expect(generateFromTask.mock.calls[0][0]).toBe(ENVELOPE_TASK)
+  expect(classifyCommand).not.toHaveBeenCalled()
+}
 
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    // The ENVELOPE task (composed from the conversation) drives the PRD — not
-    // the deictic message text, which the regex extractor could never parse.
-    expect(generateFromTask.mock.calls[0][0]).toMatch(/CSV export .* 50k-row cap/)
-    expect(runAskGeneration).not.toHaveBeenCalled()
-    // The legacy tier-2 classifier is dead on this path.
-    expect(classifyCommand).not.toHaveBeenCalled()
+describe("ChatScreen — chat_intent_envelope default-on", () => {
+  it("explicit true → envelope dispatch", async () => {
+    workspaceRef.current = { feature_flags: { chat_intent_envelope: true } }
+    await expectEnvelopeRouted()
   })
 
-  it("an answer verdict falls through to the grounded ask path", async () => {
+  it("KEY ABSENT → envelope dispatch (the default-on behaviour)", async () => {
+    // A company whose feature_flags row was never written for this key — 17 of
+    // 33 at the time of the flip. No data migration turns these on; this read
+    // site does.
+    workspaceRef.current = { feature_flags: { agents: true, top_insights: true } }
+    await expectEnvelopeRouted()
+  })
+
+  it("no feature_flags object at all → envelope dispatch", async () => {
+    workspaceRef.current = {}
+    await expectEnvelopeRouted()
+  })
+
+  it("workspace not loaded yet → envelope dispatch (fails OPEN)", async () => {
+    // An unknown flag state must not silently downgrade the router. The
+    // envelope call keeps its own fallback if the request itself fails.
+    workspaceRef.current = null
+    await expectEnvelopeRouted()
+  })
+
+  it("explicit false → the legacy regex ladder, and no intent call at all", async () => {
+    workspaceRef.current = { feature_flags: { chat_intent_envelope: false } }
+    renderChat()
+    await typeAndSend(MESSAGE)
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    // The ladder's regex-extracted task — NOT the envelope's synthesized one.
+    expect(generateFromTask.mock.calls[0][0]).toBe(LADDER_TASK)
+    // The kill switch has to actually save the call: a company that opted out
+    // must not be billed for a Sonnet classification per message.
+    expect(resolveIntent).not.toHaveBeenCalled()
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("explicit false keeps the ladder's fall-through for a plain question", async () => {
+    workspaceRef.current = { feature_flags: { chat_intent_envelope: false } }
     renderChat()
     await typeAndSend("why are enterprise users asking for this?")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    expect(resolveIntent).toHaveBeenCalledTimes(1)
-    expect(generateFromTask).not.toHaveBeenCalled()
-    expect(classifyCommand).not.toHaveBeenCalled()
-  })
-
-  it("a mention of a PRD inside a question is NOT hijacked into generation", async () => {
-    // Envelope says answer even though the message names a PRD — the exact
-    // mention-trap the regex tier used to mis-route.
-    renderChat()
-    await typeAndSend("what's the acceptance criteria in the PRD for onboarding?")
-
-    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    expect(generateFromTask).not.toHaveBeenCalled()
-    expect(runPrdGeneration).not.toHaveBeenCalled()
-  })
-
-  it("an envelope fetch failure falls back to the legacy regex ladder (fail-open floor)", async () => {
-    resolveIntent.mockRejectedValue(new Error("network down"))
-    renderChat()
-    await typeAndSend("generate a PRD for dark mode on mobile")
-
-    // The regex ladder still catches the classic phrasing — dispatch never
-    // degrades below flag-off behavior when the intent endpoint is down.
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")
-    expect(runAskGeneration).not.toHaveBeenCalled()
-  })
-
-  it("a /slash message skips the envelope entirely (explicit intent, backend fast-path)", async () => {
-    renderChat()
-    await typeAndSend("/prioritize rank these features")
-
-    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(resolveIntent).not.toHaveBeenCalled()
-  })
-
-  it("generate_tickets with no PRD on the tab falls through to the ask path", async () => {
-    resolveIntent.mockResolvedValue({
-      intent: "generate_tickets", confidence: 0.9, task: null, instruction: null,
-      reason: "tickets", source: "llm", prd_id: null, prd_title: null,
-    })
-    renderChat()
-    await typeAndSend("break this into work items")
-
-    // No PRD anywhere → the user-stories skill answers in markdown (parity
-    // with the ladder's fall-through), no crash, no generation.
-    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 })
