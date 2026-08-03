@@ -613,6 +613,7 @@ export function ConnectorConnectModal({
         <GoogleDrivePicker
           dataset={activeCompany}
           savedFiles={connection.config?.files}
+          folderContents={connection.config?.folder_contents}
           onSaved={onConnected}
         />
       )

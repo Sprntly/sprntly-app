@@ -1,7 +1,12 @@
 """Tests for Google Drive picked-file sync (mocked Drive API).
 
-Under the drive.file scope there is no folder browsing — the Picker frontend
-hands us explicit file IDs which we store in config["files"] and sync.
+Under the drive.file scope there is still no Drive-wide listing — the Picker
+frontend hands us explicit IDs which we store in config["files"] and sync.
+
+A picked ID may be a FILE or a FOLDER, and only Drive metadata says which. A
+folder is expanded to the files beneath it on every sync (so files added later
+arrive on their own), bounded by depth and count, with what it expanded to
+recorded in config["folder_contents"] for the UI.
 """
 import uuid
 from unittest.mock import MagicMock, patch
@@ -325,84 +330,6 @@ def _folder_meta(name: str = "Xometry", modified: str = "2026-05-20T12:00:00.000
     }
 
 
-def test_picked_folder_reports_error_not_silent_success(drive_connected, kg_kickoff):
-    """RED on unfixed code: the folder lands in `skipped` with `errors == []`."""
-    company_id = drive_connected
-    patches = (
-        patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
-        patch("app.connectors.google_drive_sync.get_file_metadata",
-              return_value=_folder_meta()),
-        patch("app.connectors.google_drive_sync.download_file_content",
-              new=MagicMock()),
-        patch("app.connectors.google_drive_sync._refresh_credentials",
-              return_value=MagicMock()),
-    )
-    for p in patches:
-        p.start()
-    try:
-        result = sync_google_drive(company_id=company_id)
-    finally:
-        for p in patches:
-            p.stop()
-    assert len(result.errors) == 1
-    assert "is a folder" in result.errors[0]["error"]
-    assert "Xometry" in result.errors[0]["error"]
-    assert result.synced == []
-    assert result.skipped == []
-
-
-def test_picked_folder_sets_last_sync_error(drive_connected, kg_kickoff):
-    """RED on unfixed code: last_sync_error stays None for a picked folder."""
-    company_id = drive_connected
-    patches = (
-        patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
-        patch("app.connectors.google_drive_sync.get_file_metadata",
-              return_value=_folder_meta()),
-        patch("app.connectors.google_drive_sync.download_file_content",
-              new=MagicMock()),
-        patch("app.connectors.google_drive_sync._refresh_credentials",
-              return_value=MagicMock()),
-    )
-    for p in patches:
-        p.start()
-    try:
-        sync_google_drive(company_id=company_id)
-    finally:
-        for p in patches:
-            p.stop()
-    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    err = row.get("last_sync_error")
-    assert err is not None
-    assert "Xometry" in err
-    assert "is a folder" in err
-    assert err != "1 file(s) failed"
-
-
-def test_picked_folder_never_attempts_download(drive_connected, kg_kickoff):
-    company_id = drive_connected
-    download_mock = MagicMock()
-    patches = (
-        patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
-        patch("app.connectors.google_drive_sync.get_file_metadata",
-              return_value=_folder_meta()),
-        patch("app.connectors.google_drive_sync.download_file_content",
-              new=download_mock),
-        patch("app.connectors.google_drive_sync._refresh_credentials",
-              return_value=MagicMock()),
-    )
-    for p in patches:
-        p.start()
-    try:
-        sync_google_drive(company_id=company_id)
-    finally:
-        for p in patches:
-            p.stop()
-    download_mock.assert_not_called()
-
-
 def test_unsupported_type_is_error_not_skip(drive_connected, kg_kickoff):
     company_id = drive_connected
     meta = {
@@ -579,44 +506,6 @@ def test_kg_kickoff_raise_does_not_break_sync(drive_connected, monkeypatch):
     assert "extraction didn't start" in kg_errors[0]["error"]
 
 
-def test_folder_with_matching_mtime_still_errors(drive_connected, kg_kickoff):
-    """RED on unfixed code: proves the folder guard precedes the freshness
-    short-circuit — a folder with a matching cached mtime must still error."""
-    company_id = drive_connected
-    import json as _json
-
-    modified = "2026-05-20T12:00:00.000Z"
-    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    cfg = _json.loads(row["config_json"])
-    cfg["file_mtime"] = {"folder0001": modified}
-    cfg["kg_file_mtime"] = {"folder0001": modified}
-    db.patch_connection_config(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg)
-
-    patches = (
-        patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
-        patch("app.connectors.google_drive_sync.get_file_metadata",
-              return_value=_folder_meta(modified=modified)),
-        patch("app.connectors.google_drive_sync.download_file_content",
-              new=MagicMock()),
-        patch("app.connectors.google_drive_sync._refresh_credentials",
-              return_value=MagicMock()),
-    )
-    for p in patches:
-        p.start()
-    try:
-        result = sync_google_drive(
-            company_id=company_id,
-            files=[{"id": "folder0001", "name": "Xometry"}],
-        )
-    finally:
-        for p in patches:
-            p.stop()
-    assert len(result.errors) == 1
-    assert "is a folder" in result.errors[0]["error"]
-    assert result.skipped == []
-
-
 def test_skipped_only_ever_carries_unchanged(drive_connected, kg_kickoff):
     company_id = drive_connected
     import json as _json
@@ -698,3 +587,146 @@ def test_all_success_leaves_last_sync_error_none(drive_connected, kg_kickoff):
 def test_sync_result_to_dict_keys_unchanged():
     keys = set(SyncResult(dataset="acme").to_dict())
     assert keys == {"dataset", "synced", "skipped", "errors", "kg_queued", "kg_signals"}
+
+
+
+
+# ── Folders ──────────────────────────────────────────────────────────────────
+#
+# The Picker shows folders so a user can browse INTO one and pick the files
+# inside, but does not let a folder itself be selected. Verified against a live
+# Drive on 2026-08-03: under drive.file the Picker grants the folder OBJECT and
+# nothing beneath it — the folder's metadata reads fine while files.list on it
+# returns zero children, not a 403. A connected folder is undetectably inert.
+#
+# These cover the entries that predate that change and are still in config.
+
+
+def test_a_connected_folder_is_skipped_with_copy_that_helps(
+    drive_connected, kg_kickoff
+):
+    company_id = drive_connected
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(
+            company_id=company_id,
+            files=[{"id": "folder0001", "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+    # Not an error — nothing went wrong, the grant simply does not reach inside.
+    assert result.errors == []
+    assert result.synced == []
+    assert len(result.skipped) == 1
+    reason = result.skipped[0]["reason"]
+    assert "picked directly" in reason
+    # The copy has to say what WORKS, not just what didn't.
+    assert "select the files inside" in reason
+
+
+def test_a_folder_is_never_downloaded(drive_connected, kg_kickoff):
+    """A folder has no bytes; asking Drive to export one is an error the user
+    would see for an action they did not take."""
+    company_id = drive_connected
+    download_mock = MagicMock(return_value=("x.txt", b"x"))
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              new=download_mock),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        sync_google_drive(
+            company_id=company_id,
+            files=[{"id": "folder0001", "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+    download_mock.assert_not_called()
+
+
+def test_a_folder_is_marked_as_one_so_the_ui_can_say_so(
+    drive_connected, kg_kickoff
+):
+    """`folder_contents` is how the UI tells a folder from a file. Without the
+    key a stale folder row renders as an ordinary file that mysteriously never
+    syncs."""
+    import json as _json
+
+    company_id = drive_connected
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        sync_google_drive(
+            company_id=company_id,
+            files=[{"id": "folder0001", "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    assert _json.loads(row["config_json"])["folder_contents"] == {
+        "folder0001": []
+    }
+
+
+def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
+    """A folder the user disconnects must take its marker with it."""
+    import json as _json
+
+    company_id = drive_connected
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    cfg["folder_contents"] = {"goneforever": []}
+    db.patch_connection_config(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg)
+
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta()),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        sync_google_drive(
+            company_id=company_id,
+            files=[{"id": "folder0001", "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    contents = _json.loads(row["config_json"])["folder_contents"]
+    assert "goneforever" not in contents
+    assert contents == {"folder0001": []}

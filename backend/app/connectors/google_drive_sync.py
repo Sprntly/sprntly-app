@@ -1,12 +1,21 @@
-"""Sync explicitly-picked Google Drive files into a dataset corpus.
+"""Sync explicitly-picked Google Drive files and folders into a dataset corpus.
 
-Under the ``drive.file`` OAuth scope this app can only see files the user
-explicitly picks via the Google Picker — there is no Drive-wide listing or
-folder browsing. The frontend Picker POSTs the picked file IDs (see
-``routes/connectors.py`` ``POST /v1/connectors/google-drive/files``) which we
-store in the connection config under ``config["files"]`` as a list of
-``{"id": "...", "name": "..."}`` entries. ``sync_google_drive`` iterates those
-IDs, fetches each file's metadata, downloads/exports it, and ingests it.
+Under the ``drive.file`` OAuth scope this app can only see what the user
+explicitly picks via the Google Picker — there is still no Drive-wide listing.
+The frontend Picker POSTs the picked IDs (see ``routes/connectors.py``
+``POST /v1/connectors/google-drive/files``) which we store in the connection
+config under ``config["files"]`` as ``{"id": "...", "name": "..."}`` entries.
+
+FOLDERS: the Picker shows them so a user can browse INTO one and pick the files
+inside, but does not let a folder itself be selected. Verified against a live
+Drive on 2026-08-03 — under ``drive.file`` the Picker grants the folder OBJECT
+and nothing beneath it: the folder's metadata reads fine while ``files.list``
+on it returns zero children, not a 403. A connected folder is therefore
+undetectably inert, contributing no documents while looking connected, so the
+selection is blocked at the Picker rather than failing quietly later. A folder
+still in ``config["files"]`` from before that change is skipped with copy
+saying what to do instead. Folder-as-a-source needs ``drive.readonly``, which
+is a scope decision, not a code one.
 """
 from __future__ import annotations
 
@@ -75,17 +84,6 @@ class SyncResult:
 
 class SyncConfigError(ValueError):
     pass
-
-
-FOLDER_UNSUPPORTED = (
-    "{name} is a folder. Sprntly can't read folders yet — open it in the "
-    "picker and select the files inside it."
-)
-
-
-def folder_error_message(name: str) -> str:
-    """User-facing message for a picked item that turned out to be a folder."""
-    return FOLDER_UNSUPPORTED.format(name=name)
 
 
 def drive_http_error_message(err: HttpError) -> str:
@@ -328,6 +326,30 @@ def sync_google_drive(
         )
         raise SyncConfigError(msg) from e
 
+    # ── Resolve the picked entries to FILES ──────────────────────────────────
+    #
+    # A picked entry is a file or a folder, and only its metadata says which.
+    # Folders are expanded to the files beneath them here, so everything below
+    # this block deals in files only and folder support costs the ingest loop
+    # nothing. Expanding at SYNC time rather than at pick time is the whole
+    # value of picking a folder: files added to it later are picked up by the
+    # next sync without the user touching the Picker again.
+    targets: list[dict] = []
+    seen_ids: set[str] = set()
+    # folder id -> the files it expanded to, so the UI can show what connecting
+    # a folder actually brought in. Rebuilt from scratch every sync rather than
+    # merged, so a folder the user disconnects takes its listing with it and a
+    # folder that shrank in Drive shrinks here too.
+    folder_contents: dict[str, list[dict]] = {}
+
+    def _add_target(meta: dict) -> None:
+        fid = meta.get("id")
+        # A file reachable from two picked folders, or picked directly AND
+        # inside a picked folder, must ingest once — not once per path to it.
+        if fid and fid not in seen_ids:
+            seen_ids.add(fid)
+            targets.append(meta)
+
     for entry in picked:
         file_id = entry["id"]
         picked_name = entry.get("name") or file_id
@@ -345,9 +367,35 @@ def sync_google_drive(
 
         name = meta.get("name") or picked_name
 
-        if (meta.get("mimeType") or "") == GOOGLE_FOLDER:
-            result.errors.append({"name": name, "error": folder_error_message(name)})
+        if (meta.get("mimeType") or "") != GOOGLE_FOLDER:
+            _add_target(meta)
             continue
+
+        # A FOLDER. The Picker no longer lets one be selected — folders are
+        # browsable so the user can go inside and pick the files — so reaching
+        # here means a folder connected before that changed.
+        #
+        # Verified against a live Drive on 2026-08-03: under drive.file the
+        # Picker grants the folder OBJECT and nothing beneath it. The folder's
+        # own metadata reads fine while `files.list` on it returns zero children
+        # — not a 403, just an empty answer — so a folder cannot even be
+        # detected as broken; it silently contributes no documents. Walking it
+        # is therefore pointless rather than merely bounded, which is why the
+        # expansion machinery is gone instead of disabled. Folder-as-a-source
+        # needs drive.readonly, a scope decision rather than a code one.
+        folder_contents[file_id] = []
+        result.skipped.append({
+            "name": name,
+            "reason": (
+                "folder is connected but Google only grants access to items "
+                "picked directly — open it in the picker and select the "
+                "files inside"
+            ),
+        })
+
+    for meta in targets:
+        file_id = meta["id"]
+        name = meta.get("name") or file_id
 
         modified = meta.get("modifiedTime") or ""
         corpus_fresh = mtime_map.get(file_id) == modified
@@ -442,7 +490,12 @@ def sync_google_drive(
                 link=meta.get("webViewLink") or "",
             ))
 
-    patch: dict = {"file_mtime": mtime_map, "dataset": slug}
+    patch: dict = {
+        "file_mtime": mtime_map,
+        "dataset": slug,
+        # Whole-value replace, not a merge — see where this is built.
+        "folder_contents": folder_contents,
+    }
     if grandfathered:
         # Persist the adopted ledger so the next sync doesn't grandfather
         # again over a by-then-updated file_mtime. Safe from clobbering the
