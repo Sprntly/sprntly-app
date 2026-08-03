@@ -473,6 +473,12 @@ class SlackProvider:
 
     def dispatch(self, session: LookupSession, name: str, inp: dict) -> str:
         handle: SlackHandle = session.handle
+        # INFO, not DEBUG: successful Slack reads used to be invisible — the
+        # 2026-08-03 "stale answer" report could only be traced through a
+        # failure line, with no record of which tools ran or with what input.
+        # One line per call makes "did chat actually go to Slack?" answerable
+        # from the logs alone.
+        logger.info("slack-lookup: call %s %s", name, inp)
         try:
             if name == "slack_list_channels":
                 return self._channels(handle)
@@ -538,6 +544,10 @@ class SlackProvider:
                 return access
             raise
         messages = list(reversed(data.get("messages") or []))  # oldest first
+        logger.info(
+            "slack-lookup: history %s (id=%s, days=%d) -> %d messages",
+            ref, channel_id, days, len(messages),
+        )
         if not messages:
             return (
                 f"(no messages in {ref} in the last {days} days — or the bot "
@@ -599,6 +609,10 @@ class SlackProvider:
         # channels; this answer goes to whoever asked in Sprntly chat.
         shareable = [m for m in matches if is_shareable_match(m, handle.bot_channel_ids())]
         excluded = len(matches) - len(shareable)
+        logger.info(
+            "slack-lookup: search %r sort=%s -> %d matches (%d shareable, %d total)",
+            query, order, len(matches), len(shareable), total,
+        )
         if not shareable:
             return (
                 f"(no Slack messages match {query!r} in channels I'm allowed to "
