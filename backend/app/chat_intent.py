@@ -115,10 +115,13 @@ the message yourself.
 Actions:
 
 - generate_prd — the user wants a PRD (product requirements document / \
-product spec / product brief / requirements doc) produced. This includes \
+product spec / product brief / requirements doc) produced FOR A CHANGE TO THE \
+PRODUCT: a new capability, an improvement to an existing one, or a fix. What \
+the document would be ABOUT is what selects this action — not the noun the \
+user gives the document, and not the verb they ask with. This includes \
 keyword-free phrasings whose meaning lives in the thread — "draft it up", \
 "spec this out", "write this up as a doc", "put that together" — when the \
-conversation has been converging on a feature, idea, or problem. \
+conversation has been converging on a feature, idea, or problem to solve. \
 task: a SELF-CONTAINED brief for the document author, composed from the \
 whole conversation: the topic plus EVERY requirement, constraint, and detail \
 the user gave, kept verbatim where possible — never summarize away \
@@ -137,7 +140,10 @@ items: "create tickets", "break this into work items", "turn that into \
 stories", "split this up for the team".
 
 - generate_prototype — an interactive prototype / mockup of the PRD: \
-"prototype this", "mock it up", "can I see it working".
+"prototype this", "mock it up", "can I see it working". The same subject test \
+applies: a prototype shows a PRODUCT CHANGE working, so a request to lay out \
+or visualize existing information — a report, a summary, a deck, a one-pager \
+— is answer, not a prototype.
 
 - answer — everything else: questions (including questions ABOUT PRDs or \
 tickets — "what's in the PRD for onboarding?", "what makes a good PRD?"), \
@@ -152,6 +158,20 @@ discussing a feature mean "generate a PRD for THAT feature" (task = the \
 discussed feature, fully specified from the thread).
 - Mentioning an artifact is not requesting it. Asking about, criticizing, \
 or referencing a PRD or ticket is answer.
+- SUBJECT MATTER decides generate_prd, never document shape. A PRD specifies \
+a change to the product — something to build, improve, or fix. When the user \
+instead wants information they already have gathered, explained, compared, \
+summarized or reformatted — a report, a summary, a one-pager, an exec update, \
+a briefing, a recap, a status write-up — that is answer, however \
+document-shaped the request sounds ("put together a one-pager on our \
+pricing", "write up the top issues in a formatted doc", "draft an exec update \
+on this quarter", "summarize last week's calls into a document"). There is no \
+report or summary action here; the answer path writes those documents itself. \
+The two cases part cleanly on what the document is about, not on how it is \
+phrased: after a thread about a checkout bug, "put that together" is \
+generate_prd — the thing being written up is a product change; "put together \
+a one-pager on our pricing" is answer — the thing being written up is \
+information that already exists.
 - generate_prd vs edit_prd: no PRD exists yet in this tab/thread → \
 generate_prd; one exists and the message asks to change it → edit_prd. \
 "Redo it with X" aimed at an existing PRD is still edit_prd.
@@ -257,7 +277,7 @@ def resolve_chat_intent(
                 + _render_history(history)
                 + f"Newest message: {message}"
             ),
-            prompt_version="chat-intent-v1",
+            prompt_version="chat-intent-v2",
             json_schema=_SCHEMA,
             # The task field echoes requirement details verbatim from a long
             # thread — give it room.
