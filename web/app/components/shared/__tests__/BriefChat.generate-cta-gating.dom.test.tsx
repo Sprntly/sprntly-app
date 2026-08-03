@@ -137,7 +137,10 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
 // has a source to have gotten a brief from. With no connector BriefChat shows
 // the "connect a source" page instead (BriefChat.no-connector.dom.test.tsx),
 // so seed an evidence connector to reach the greeting under test.
-const WITH_SOURCE = { connectedConnectorIds: ["superset"] }
+// `connectorsHydrated` marks the connectors fetch as having actually answered;
+// without it the surface holds its loading placeholder rather than judging an
+// empty brief against an unknown connector list.
+const WITH_SOURCE = { connectedConnectorIds: ["superset"], connectorsHydrated: true }
 
 function Harness() {
   const { setContent } = useContent()

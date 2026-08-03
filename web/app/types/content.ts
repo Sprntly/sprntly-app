@@ -757,6 +757,14 @@ export interface AppContentState {
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
   connectedConnectorIds: string[]
+  /** Whether `connectedConnectorIds` has actually been answered by the backend
+   *  yet. It starts `[]`, which is indistinguishable from "this workspace has
+   *  no connectors" — and the Top Insights surface turns that into a dead-end
+   *  "connect a source" page. Surfaces that branch on the connector list must
+   *  wait for this flag instead of reading the default. Set (to `true`) by
+   *  AppShell on both success and failure of the connectors fetch, and reset to
+   *  `false` on a workspace switch. */
+  connectorsHydrated: boolean
   /** The workspace's Top Insights filter (companies.notification_settings.
    *  brief_insight_types), loaded once by AppShell. The Top Insights tab shows
    *  the findings whose types intersect it; empty/absent = surface everything

@@ -65,6 +65,7 @@ const EMPTY: AppContentState = {
   teamPending: [],
   connectorCategories: [],
   connectedConnectorIds: [],
+  connectorsHydrated: false,
   sidebarBriefCount: null,
   sidebarConvCount: null,
   aiScreenChips: {},

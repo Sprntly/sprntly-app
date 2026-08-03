@@ -443,6 +443,23 @@ function BriefRefreshingBanner() {
   )
 }
 
+// ── Brief initial-load placeholder ───────────────────────────────────────────
+// Held on screen while the two async inputs the surface branches on — the brief
+// itself and the workspace's connector list — are still in flight. Both default
+// to "nothing" before they answer (hydration null/idle/loading, connectors []),
+// and reading those defaults as a verdict is what made the dead-end connect
+// page flash for a beat on every load. Neutral on purpose: it must not promise
+// a brief (there may not be one) or a connect page (there may be no need for
+// one) before we know which of the two the surface owes.
+function BriefLoadingState() {
+  return (
+    <div className="bc-loading" role="status" aria-live="polite">
+      <span className="bc-loading-spinner" aria-hidden />
+      <p className="bc-loading-copy">Loading your Top Insights…</p>
+    </div>
+  )
+}
+
 // ── No-evidence-connector empty state ────────────────────────────────────────
 // Shown IN PLACE OF the brief when the workspace has no evidence-bearing
 // connector (see hasEvidenceConnector). This is a dead end the user cannot
@@ -1273,6 +1290,25 @@ export function BriefChat() {
     findings.length === 0
     && !generatingBrief
     && !hasEvidenceConnector(content.connectedConnectorIds)
+  // Neither input above is trustworthy until it has actually answered.
+  // `briefHydration` starts null and passes through idle/loading, and
+  // `connectedConnectorIds` starts [] until AppShell's connectors fetch
+  // resolves — so on a plain load or refresh of a workspace that HAS a brief,
+  // the surface briefly saw "no findings, no sources" and rendered the connect
+  // page, then swapped it for the brief a moment later. The tab now shows one
+  // thing or the other and never both: hold the neutral loading placeholder
+  // until both inputs are in. "generating" counts as settled — it owns the
+  // surface with its own indicator — and failed/empty settle too, so a
+  // genuinely source-less workspace still reaches the connect page promptly.
+  const briefSettled =
+    content.briefHydration != null
+    && content.briefHydration !== "idle"
+    && content.briefHydration !== "loading"
+  // Findings already on screen mean the brief resolved at least once (e.g. a
+  // workspace switch re-entering "loading" over a rendered brief) — never pull
+  // a readable brief back behind a spinner.
+  const initialLoading =
+    findings.length === 0 && (!briefSettled || !content.connectorsHydrated)
 
   return (
     <section className="briefx" aria-label="Top Insights">
@@ -1296,6 +1332,8 @@ export function BriefChat() {
               <div className="bc-agent-body">
                 {generatingBrief ? (
                   <BriefGeneratingState />
+                ) : initialLoading ? (
+                  <BriefLoadingState />
                 ) : noEvidenceConnector ? (
                   <BriefNoConnectorState onConnect={() => goTo("connectors")} />
                 ) : (
