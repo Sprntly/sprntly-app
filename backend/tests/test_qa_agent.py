@@ -432,6 +432,231 @@ def test_answer_voc_request_falls_through_when_no_source(monkeypatch):
     assert out["_skill"] == "voice-of-customer-report"  # regex fast-path → skill route
 
 
+# ─── interception contest: a company's own skill may beat the call digest ────
+
+
+def _contest_out(slug, confidence, reason="fits"):
+    return _Result({
+        "reason": reason, "company_skill_id": slug, "confidence": confidence,
+    })
+
+
+def _no_digest(**k):  # pragma: no cover — asserted by not being called
+    raise AssertionError("call_digest.answer must not run")
+
+
+def test_a_company_skill_can_beat_the_digest_interception(monkeypatch):
+    """The reported bug: a company uploads its own churn method, asks the exact
+    question it exists for, and the deterministic interception answers instead
+    because the router never ran. With uploads present the interception is now
+    contested, and a confident company skill wins."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, 0.95)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill"] == CUSTOM_SKILL
+
+
+def test_the_contest_reports_the_skill_to_on_route(monkeypatch):
+    """Closes the observability gap that hid this bug: an intercepted turn used
+    to report routed_skill=None because interceptions never reach the hook."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, 0.9)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+    seen: list = []
+
+    qa.answer(
+        enterprise_id="ent", question="summarize the customer calls from last week",
+        dataset="acme", on_route=lambda sid, action: seen.append(sid),
+    )
+
+    assert seen == [CUSTOM_SKILL]
+
+
+def test_a_weak_contest_pick_leaves_the_digest_alone(monkeypatch):
+    """The bar to override a deterministic path that works is HIGHER than the
+    ordinary routing threshold — a marginal call must not steal the turn."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, qa._INTERCEPT_CONTEST_FLOOR - 0.01)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    assert qa._INTERCEPT_CONTEST_FLOOR > qa._LLM_ROUTE_THRESHOLD
+
+
+def test_a_none_verdict_leaves_the_digest_alone(monkeypatch):
+    """The control case: the company HAS uploads, but this question is ordinary
+    call analysis, so the built-in keeps it. 'none' is the common answer."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out("none", 0.0)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_company_with_no_uploads_never_pays_for_the_contest(monkeypatch):
+    """Cost gate, matching `_keyword_prior`'s: a tenant with no uploads must
+    reach the interception with no model call of any kind — same behaviour and
+    same latency as before this existed."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(custom_skills_db, "list_custom_skills", lambda cid: [])
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    calls: list = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    assert calls == []
+
+
+def test_the_cheap_call_index_listing_is_never_contested(monkeypatch):
+    """Control case that must not regress: the interceptions delivering DATA a
+    skill cannot obtain keep their turn. A listing is a ~4s table read — a
+    vaguely-related upload must not be allowed to steal it and turn it into a
+    minutes-long generation."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "is_listing_request", lambda q: True)
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index"},
+    )
+    calls: list = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="which calls did we have last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index"
+    assert calls == [], "the listing path must not run a contest"
+
+
+def test_a_contest_failure_keeps_the_built_in(monkeypatch):
+    """Fails CLOSED, the opposite of `_custom_skill_block`'s fail-open: the
+    fallback here is the interception that would have run anyway, so a gateway
+    hiccup costs the caller their override and nothing else."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+
+    def _boom(**k):
+        if k.get("purpose") == "intercept_contest":
+            raise RuntimeError("gateway down")
+        return _answer_out()
+
+    monkeypatch.setattr(qa, "llm_call", _boom)
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_foreign_slug_from_the_contest_is_refused(monkeypatch):
+    """The tenant boundary holds here too — a hallucinated or another company's
+    slug must never displace the built-in."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out("someone-elses-skill", 0.99)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_the_contest_runs_at_most_once_per_answer(monkeypatch):
+    """Memoized: the three digest entry points are checked in sequence, and a
+    question matching more than one must not pay for two model calls."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    contests: list = []
+
+    def _fake(**k):
+        if k.get("purpose") == "intercept_contest":
+            contests.append(k)
+            return _contest_out("none", 0.0)
+        return _answer_out()
+
+    monkeypatch.setattr(qa, "llm_call", _fake)
+
+    qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls and give me a voice of customer report",
+        dataset="acme",
+    )
+
+    assert len(contests) == 1
+
+
 def test_answer_pinned_skill_bypasses_call_digest(monkeypatch):
     _seed_custom_skill(monkeypatch)
     # A pinned follow-up wins even if the text looks like a call digest.

@@ -57,12 +57,60 @@ _BUG_THREAD = [
                 "through the whole promo flow."},
 ]
 
+# A thread whose TOPIC is named once, at the very start, and then buried under
+# enough unrelated-but-plausible discussion to overflow the char budget — so the
+# model only sees turn 1 because the head is preserved and the middle elided.
+# The closing message is bare ("okay, let's do it"), so the ONLY way to route it
+# is to resolve the deixis against that first turn. Under the old newest-first
+# budget turn 1 was the first thing discarded and this case was unroutable.
+_BURIED_TOPIC_THREAD = (
+    [
+        {"role": "user",
+         "content": "We need bulk seat management for enterprise admins — "
+                    "assigning and revoking licences across a whole org at once, "
+                    "instead of one user at a time."},
+        {"role": "assistant",
+         "content": "Understood — bulk seat assignment and revocation for "
+                    "enterprise admins."},
+    ]
+    + [
+        # Realistic filler: a long stretch of adjacent standup-ish chatter that
+        # never re-names the feature.
+        turn
+        for i in range(14)
+        for turn in (
+            {"role": "user",
+             "content": f"Also, unrelated: the billing page still shows stale "
+                        f"invoice totals for account batch {i}. " + (
+                            "Support has been re-running the reconciliation job by "
+                            "hand every morning and it takes about forty minutes. "
+                        ) * 12},
+            {"role": "assistant",
+             "content": f"Noted on batch {i} — that's the nightly reconciliation "
+                        "job lagging. " + (
+                            "It is tracked separately from what we were discussing "
+                            "and does not change the earlier requirements. "
+                        ) * 12},
+        )
+    ]
+    + [
+        {"role": "user", "content": "Right, let's get back to the main thing."},
+        {"role": "assistant",
+         "content": "Sure — shall I write that up properly so the team can "
+                    "estimate it?"},
+    ]
+)
+
 EVALS: list[tuple[str, str, list[dict], dict, str]] = [
     # The three reported acceptance phrases — keyword-free, context-only.
     ("draft-it-up", "okay, draft it up", _FEATURE_THREAD, {}, "generate_prd"),
     ("work-items", "break this into work items", _FEATURE_THREAD, _PRD_OPEN_CTX,
      "generate_tickets"),
     ("make-it-shorter", "make it shorter", [], _PRD_OPEN_CTX, "edit_prd"),
+    # Long thread: the topic is named ONLY at turn 1 and the closing message is
+    # bare. Routable only if the head of an over-budget thread survives.
+    ("buried-topic-long-thread", "okay, let's do it", _BURIED_TOPIC_THREAD, {},
+     "generate_prd"),
     # Position-in-thread: bare command at turn 1 is still a command.
     ("bare-command-turn1", "generate a PRD for usage-based pricing", [], {},
      "generate_prd"),
@@ -217,21 +265,61 @@ def test_history_is_clamped(monkeypatch):
     assert "x" * ci._HISTORY_TURN_CHARS in prompt
 
 
-def test_history_budget_keeps_the_newest_turns(monkeypatch):
-    """When the total budget overflows, the OLDEST turns fall off — never the
-    recent ones a deictic message resolves against."""
+def test_history_budget_compacts_the_middle_and_keeps_both_ends(monkeypatch):
+    """When the total budget overflows, the middle is elided — not the head.
+
+    This is the whole point of the change: "draft it up" at turn 60 resolves
+    against the FEATURE named at turn 1, and a newest-first budget discarded
+    exactly that turn. Both ends must survive, and the gap must be declared."""
     calls: list[dict] = []
     _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
                calls)
     filler = [
         {"role": "user", "content": f"old-{i} " + "y" * ci._HISTORY_TURN_CHARS}
-        for i in range(ci._HISTORY_TURNS - 1)
+        for i in range(60)
     ]
-    history = filler + [{"role": "user", "content": "NEWEST: ship the CSV export"}]
+    history = (
+        [{"role": "user", "content": "TOPIC: the CSV export of the weekly report"}]
+        + filler
+        + [{"role": "user", "content": "NEWEST: ship the CSV export"}]
+    )
     ci.resolve_chat_intent("ent-1", "draft it up", history)
     prompt = calls[0]["input"]
-    assert "NEWEST: ship the CSV export" in prompt
-    assert "old-0 " not in prompt  # the oldest filler fell off, not the newest
+
+    assert "TOPIC: the CSV export" in prompt, "the topic turn must survive"
+    assert "NEWEST: ship the CSV export" in prompt, "recency must survive"
+    assert "old-30 " not in prompt, "the middle is what goes"
+    assert "earlier turns from the middle" in prompt, "elision is declared"
+
+
+def test_a_short_thread_carries_every_turn_with_no_marker(monkeypatch):
+    """No regression for the common case: a thread inside the budget is
+    rendered whole, in order, with nothing elided."""
+    calls: list[dict] = []
+    _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
+               calls)
+    ci.resolve_chat_intent("ent-1", "draft it up", _FEATURE_THREAD)
+    prompt = calls[0]["input"]
+
+    assert "Conversation so far:\nUser: Users keep asking for CSV export" in prompt
+    for turn in _FEATURE_THREAD:
+        assert turn["content"][:40] in prompt
+    assert "omitted" not in prompt
+
+
+def test_a_thread_past_the_old_20_turn_window_is_fully_carried(monkeypatch):
+    """40 short turns overflow the OLD turn cap but not the byte budget, so
+    every one survives — the case the cap was silently truncating."""
+    calls: list[dict] = []
+    _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
+               calls)
+    history = [{"role": "user", "content": f"turn-{i:03d} detail"} for i in range(40)]
+    ci.resolve_chat_intent("ent-1", "draft it up", history)
+    prompt = calls[0]["input"]
+
+    for i in range(40):
+        assert f"turn-{i:03d}" in prompt
+    assert "omitted" not in prompt
 
 
 def test_valid_action_envelope_passes_through(monkeypatch):
@@ -369,6 +457,32 @@ def test_live_intent_accuracy(name, message, history, ctx, expected):
         f"{name}: expected {expected}, got {env['intent']} "
         f"(source={env['source']}, reason={env['reason']!r})"
     )
+
+
+def test_the_buried_topic_thread_really_does_overflow(monkeypatch):
+    """Guard for the live case above: if the fixture fit the budget, the eval
+    would prove nothing about head preservation — it would just be a normal
+    thread. Assert the elision actually fires and that turn 1 survives it."""
+    calls: list[dict] = []
+    _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
+               calls)
+    ci.resolve_chat_intent("ent-1", "okay, let's do it", _BURIED_TOPIC_THREAD)
+    prompt = calls[0]["input"]
+
+    assert "earlier turns from the middle" in prompt, "fixture must overflow"
+    assert "bulk seat management" in prompt, "turn 1 must survive the elision"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="needs live model")
+def test_live_task_from_a_buried_topic_names_the_feature():
+    """The deictic payoff: a bare closing message on a long thread must yield a
+    task naming the feature from turn 1, not a pronoun or the filler topic."""
+    env = ci.resolve_chat_intent("eval", "okay, let's do it", _BURIED_TOPIC_THREAD)
+    assert env["intent"] == "generate_prd", env
+    task = (env["task"] or "").lower()
+    assert "seat" in task or "licence" in task or "license" in task, task
+    assert "invoice" not in task and "reconciliation" not in task, task
 
 
 @pytest.mark.integration
