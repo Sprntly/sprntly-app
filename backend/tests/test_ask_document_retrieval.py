@@ -1193,16 +1193,39 @@ def test_decision_log_factors_carry_document_counts_only(isolated_settings, fake
     )
 
     rows = db.table("agent_decision_log").select("*").execute().data
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
-    if isinstance(factors, str):
-        factors = jsonmod.loads(factors)
+
+    def _factors(row):
+        f = row["factors"]
+        return jsonmod.loads(f) if isinstance(f, str) else f
+
+    # This path now writes TWO rows: its own `answer` row, and the shared
+    # `document_selection` row that document grounding writes from the callee
+    # both ask paths go through — the skill-routed path wrote nothing at all
+    # before, which is why a wrong topical selection there left no record.
+    # The count is asserted per decision_type rather than in total, so this
+    # keeps catching a stray extra write instead of being loosened to "some
+    # rows".
+    by_type = {}
+    for row in rows:
+        by_type.setdefault(row["decision_type"], []).append(row)
+    assert sorted(by_type) == ["answer", "document_selection"]
+    assert len(by_type["answer"]) == 1
+    assert len(by_type["document_selection"]) == 1
+
+    factors = _factors(by_type["answer"][0])
     assert factors["documents"] == 1
     assert factors["documents_loaded"] == 1
     assert isinstance(factors["documents"], int)
     assert isinstance(factors["documents_loaded"], int)
-    assert "Sprntly_vs_Productboard_Comparison.docx" not in jsonmod.dumps(factors)
-    assert "a body nobody should see in factors" not in jsonmod.dumps(factors)
+
+    # The actual invariant this test exists for, and it must hold for EVERY
+    # row the path writes: counts and enums only. A decision log that quoted a
+    # filename or a line of a document would put document content into an
+    # audit table that is not scoped like the documents are.
+    for row in rows:
+        blob = jsonmod.dumps(_factors(row))
+        assert "Sprntly_vs_Productboard_Comparison.docx" not in blob
+        assert "a body nobody should see in factors" not in blob
 
 
 def test_answer_single_shot_addendum_order_after_company_facts(isolated_settings, monkeypatch):
@@ -2377,3 +2400,276 @@ def test_uploads_and_connected_documents_share_one_index_cap(
     assert "Overflowed wiki page" not in block
     assert "PARTIAL" in block
     assert len(manifest) == MAX_INDEX_ENTRIES
+
+
+# ══════════ Topic ranking — the semantic channel, and what a topic match may
+#             be claimed for ══════════════════════════════════════════════════
+#
+# The incident these cover: topical ranking returned the NEWEST document
+# whatever was asked, and labelled it a topic match. Two independent causes.
+#
+# The lexical channel could not see filenames — Postgres reads
+# "Sprntly_vs_Productboard_Comparison.docx" as a single `host` token — so it
+# ranked on summary and topics alone, and a document whose summariser had not
+# run contributed nothing and was undiscoverable. And the semantic channel
+# never ran on the path most traffic takes, because
+# `qa_agent._answer_single_shot` calls `document_grounding` positionally and
+# left `question_embedding` at None. With both channels flat every candidate
+# tied and the SQL's last-resort `updated_at desc` picked the winner.
+#
+# The ranking itself is SQL and is verified against real Postgres (this repo
+# has no Postgres in either CI lane and standing one up is a shared-workflow
+# change). What is covered here is everything on the Python side of that
+# boundary: that the embedding reaches the RPC on both paths, that it is
+# computed once, and that nothing is presented as a topic match unless the
+# fused rank actually returned it.
+
+
+def _decision_rows(db, decision_type):
+    import json as jsonmod
+
+    out = []
+    for row in db.table("agent_decision_log").select("*").execute().data:
+        if row["decision_type"] != decision_type:
+            continue
+        factors = row["factors"]
+        if isinstance(factors, str):
+            factors = jsonmod.loads(factors)
+        out.append(factors)
+    return out
+
+
+# T3 — a summary-less document is not dressed up as a topic match.
+def test_zero_ranked_candidates_produce_no_topic_match(
+    isolated_settings, catalog_candidates
+):
+    """A document whose summariser never ran carries summary='' and topics={},
+    so before the title fix neither channel could rank it and the RPC returned
+    nothing. Returning nothing must mean nothing: no `match: "topic"` anywhere,
+    no falling back to "the most recent document" and calling that a topic
+    hit — which is exactly what the incident looked like from the outside.
+
+    The log has to say WHICH nothing it was, too: the catalog held a document
+    here, so this is a ranking miss, not an empty workspace."""
+    from app.ask_runner import TOPICAL_SEARCHED_NO_MATCH, document_grounding
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    _seed_file(
+        db, "f-summariless", src,
+        filename="Sprntly_vs_Productboard_Comparison.docx",
+        extracted_text="Body text that never got summarised.",
+        uploaded_at="2026-08-03T09:00:00+00:00",
+    )
+    _seed_catalog_row(
+        db, provider="uploads", external_id="f-summariless",
+        title="Sprntly_vs_Productboard_Comparison.docx",
+        summary="", topics=(),
+    )
+    # Both channels empty — what the RPC returns for a row it cannot rank.
+    catalog_candidates([])
+
+    _, manifest = document_grounding(_CID, "how do we compare on roadmapping")
+
+    assert [m["match"] for m in manifest] == [None]
+    assert [m["rank"] for m in manifest] == [None]
+    assert [m["loaded"] for m in manifest] == [False]
+
+    factors = _decision_rows(db, "document_selection")
+    assert len(factors) == 1
+    assert factors[0]["documents_topical"] == 0
+    assert factors[0]["catalog_size"] == 1
+    assert factors[0]["topical_candidates"] == 0
+    assert factors[0]["topical_outcome"] == TOPICAL_SEARCHED_NO_MATCH
+
+
+# T6 — the two kinds of "no documents came back".
+def test_empty_catalog_is_distinguishable_from_searched_and_no_match(
+    isolated_settings, catalog_candidates
+):
+    """"This workspace has nothing" and "we searched and ranked nothing" read
+    identically in an answer and mean opposite things: the first is an ingest
+    failure, the second a ranking one. They are separated in the log, from
+    `catalog_docs`, which grounding already holds — no second query."""
+    from app.ask_runner import (
+        TOPICAL_CATALOG_EMPTY,
+        TOPICAL_SEARCHED_NO_MATCH,
+        document_grounding,
+    )
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    # An upload with NO catalog row: the index has a document, the catalog is
+    # empty, so there was nothing for the ranking to search.
+    _seed_file(db, "f-uncatalogued", src, filename="notes.txt",
+               extracted_text="body")
+    catalog_candidates([])
+
+    document_grounding(_CID, "anything at all")
+    first = _decision_rows(db, "document_selection")
+    assert len(first) == 1
+    assert first[0]["catalog_size"] == 0
+    assert first[0]["topical_outcome"] == TOPICAL_CATALOG_EMPTY
+
+    # Now catalogue it. Same question, same empty RPC result — but this time
+    # the ranking really did look at something and come back with nothing.
+    _seed_catalog_row(
+        db, provider="uploads", external_id="f-uncatalogued",
+        title="notes.txt", summary="Some notes.",
+    )
+    document_grounding(_CID, "anything at all")
+    second = _decision_rows(db, "document_selection")
+    assert len(second) == 2
+    assert second[1]["catalog_size"] == 1
+    assert second[1]["topical_outcome"] == TOPICAL_SEARCHED_NO_MATCH
+
+
+def test_workspace_with_no_documents_at_all_is_recorded_not_silent(
+    isolated_settings, catalog_candidates
+):
+    """The earliest exit — no uploads, no attachments, nothing connected — is
+    logged too. Grounding returns ("", []) there, and without a row the case
+    is invisible in exactly the way that let this incident run for a day."""
+    from app.ask_runner import TOPICAL_NO_INDEX, document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    catalog_candidates([])
+
+    assert document_grounding(_CID, "anything") == ("", [])
+
+    factors = _decision_rows(db, "document_selection")
+    assert len(factors) == 1
+    assert factors[0]["topical_outcome"] == TOPICAL_NO_INDEX
+    assert factors[0]["documents"] == 0
+
+
+# T4 — the semantic channel reaches the skill path, without touching qa_agent.
+def test_skill_path_grounding_receives_the_embedding_via_contextvar(
+    isolated_settings, catalog_candidates
+):
+    """`qa_agent._answer_single_shot` calls `document_grounding(enterprise_id,
+    question)` positionally and is deliberately not edited, so the embedding
+    cannot arrive as an argument. It arrives on the request-scoped ContextVar
+    the Ask worker sets, the same route `conversation_id` already travels.
+
+    Asserted at the RPC boundary — what `document_find_candidates` was
+    actually called with — because that is the thing that was wrong in
+    production: the call was reaching Postgres with p_embedding => null."""
+    from tests._fake_supabase import FakeSupabaseClient
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="notes.txt", extracted_text="body")
+    _seed_catalog_row(db, provider="uploads", external_id="f1", title="notes.txt",
+                      summary="Some notes.")
+    catalog_candidates([])
+    vector = [0.25] * 1536
+
+    token = ask_runner.set_active_question_embedding(vector, False)
+    try:
+        # Positional, exactly as qa_agent._answer_single_shot calls it.
+        ask_runner.document_grounding(_CID, "what did we decide about pricing")
+    finally:
+        ask_runner.reset_active_question_embedding(token)
+
+    calls = [c for c in FakeSupabaseClient.rpc_calls if c[0] == _CANDIDATES_FN]
+    assert len(calls) == 1
+    assert calls[0][1]["p_embedding"] == vector
+
+
+def test_grounding_without_a_carried_embedding_still_ranks_lexically(
+    isolated_settings, catalog_candidates
+):
+    """No ContextVar set and no argument is still legitimate — it means the
+    caller genuinely had no vector. The RPC is called with a null embedding and
+    the lexical channel carries the ranking: degraded, not dead."""
+    from tests._fake_supabase import FakeSupabaseClient
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="notes.txt", extracted_text="body")
+    _seed_catalog_row(db, provider="uploads", external_id="f1", title="notes.txt",
+                      summary="Some notes.")
+    catalog_candidates([])
+
+    ask_runner.document_grounding(_CID, "what did we decide about pricing")
+
+    calls = [c for c in FakeSupabaseClient.rpc_calls if c[0] == _CANDIDATES_FN]
+    assert len(calls) == 1
+    assert calls[0][1]["p_embedding"] is None
+    assert _decision_rows(db, "document_selection")[0]["semantic_channel"] is False
+
+
+# T4/AC5 — one embedding per ask, however many consumers there are.
+def test_one_embedding_per_ask_shared_by_every_consumer(
+    isolated_settings, fake_llm, catalog_candidates, monkeypatch
+):
+    """The worker embeds once and publishes; `compose_ask_answer` reuses that
+    instead of computing its own. Two consumers, one embeddings call — if this
+    regresses, every ask silently pays twice."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-a")
+    _seed_file(db, "f1", src, filename="notes.txt", extracted_text="body")
+    catalog_candidates([])
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls: list[str] = []
+
+    def _counting_embed(texts, **kwargs):
+        calls.append(texts[0])
+        return [[0.5] * 1536]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _counting_embed)
+
+    # What ask_job_runner._run_sync does: embed once, publish, and let every
+    # downstream consumer read it off the context.
+    embedding, degraded = ask_runner._question_embedding(_CID, "a question")
+    token = ask_runner.set_active_question_embedding(embedding, degraded)
+    try:
+        ask_runner.compose_ask_answer("asurion", "a question", enterprise_id=_CID)
+        ask_runner.document_grounding(_CID, "a question")
+    finally:
+        ask_runner.reset_active_question_embedding(token)
+
+    assert len(calls) == 1
+
+
+def test_ask_worker_publishes_the_embedding_and_always_clears_it(
+    isolated_settings, monkeypatch
+):
+    """The worker's setter must be paired with a reset in a `finally`, exactly
+    as the conversation pair is: a vector left on the context outlives its own
+    request and would be read by whatever reuses that context next."""
+    from app import ask_job_runner, ask_runner
+
+    seen: dict = {}
+
+    monkeypatch.setattr(
+        ask_runner, "_question_embedding", lambda eid, q: ([0.75] * 1536, False)
+    )
+
+    def _boom(**kwargs):
+        seen["embedding"] = ask_runner._carried_question_embedding()
+        raise RuntimeError("answer failed")
+
+    monkeypatch.setattr(ask_job_runner.qa_agent, "answer", _boom)
+
+    with pytest.raises(RuntimeError):
+        ask_job_runner._run_sync(
+            1, _CID, "a question", "asurion", [], None, None, None,
+        )
+
+    # Visible to the answer call...
+    assert seen["embedding"] == ([0.75] * 1536, False)
+    # ...and gone once the call has returned, even though it raised.
+    assert ask_runner._carried_question_embedding() is None

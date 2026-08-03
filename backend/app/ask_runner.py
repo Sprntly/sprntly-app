@@ -369,6 +369,56 @@ def reset_active_conversation(tokens) -> None:
     _active_conversation_user_id.reset(token_user)
 
 
+# ── The question embedding, by the same request-scoped route ────────────────
+# Stage T's semantic channel was dead on the skill-routed path, which is the
+# path most of this traffic actually takes: `qa_agent._answer_single_shot`
+# calls `document_grounding(enterprise_id, question)` positionally, so
+# `question_embedding` stayed at its default of None and the catalog search ran
+# with `p_embedding => null`. Every candidate then scored on the lexical
+# channel alone, and where that channel ties, the SQL's last-resort ordering is
+# recency — so the newest document was returned for whatever was asked, and
+# labelled a topic match.
+#
+# Giving `answer()` an embedding parameter would mean threading it through
+# `answer() -> _answer_single_shot -> document_grounding`: the same four edits
+# inside qa_agent.py that the conversation pair above exists to avoid. So the
+# embedding rides the same request-scoped ContextVar route, set once per ask in
+# `ask_job_runner._run_sync` and read by whichever grounding call site runs.
+#
+# ONE ContextVar holding a `(vector, degraded)` tuple rather than a pair of
+# them, because "unset" and "set to None" mean different things here and must
+# stay distinguishable: None-because-nobody-set-it lets a caller compute its
+# own, whereas None-because-embedding-failed must NOT trigger a second attempt.
+# The sentinel is the tuple's presence, not the vector's value.
+_active_question_embedding: contextvars.ContextVar[
+    tuple[list[float] | None, bool] | None
+] = contextvars.ContextVar("ask_runner_active_question_embedding", default=None)
+
+
+def set_active_question_embedding(embedding: list[float] | None, degraded: bool):
+    """Record THIS ask's question embedding for every consumer on this thread's
+    context. Call from `ask_job_runner._run_sync` beside
+    `set_active_conversation`, and always undo in the same `finally`.
+
+    `degraded` is carried alongside so the consumer that logs can say WHY the
+    semantic channel was absent — a failed embedding and a caller that simply
+    had no vector look identical at the point of use.
+
+    Returns an opaque token for `reset_active_question_embedding`."""
+    return _active_question_embedding.set((embedding, degraded))
+
+
+def reset_active_question_embedding(token) -> None:
+    """Undo `set_active_question_embedding` — call from a `finally`."""
+    _active_question_embedding.reset(token)
+
+
+def _carried_question_embedding() -> tuple[list[float] | None, bool] | None:
+    """This ask's already-computed `(vector, degraded)`, or None if nothing set
+    one. Never computes — see `_resolve_question_embedding`."""
+    return _active_question_embedding.get()
+
+
 def _owned_conversation_attachments(
     enterprise_id: str, conversation_id: int | None, caller_user_id: str | None
 ) -> list[tuple[int, int, dict, str]]:
@@ -640,10 +690,18 @@ def document_grounding(
     `question_embedding` is computed ONCE per ask by the caller and threaded
     in, because this function runs BEFORE knowledge-graph retrieval and on
     PRD-grounded asks that retrieval never runs at all — so there is no
-    existing embedding here to reuse. Passing None is legitimate and means
-    Stage T ranks lexically only (see `_topical_candidates`); callers that
-    care about the degradation record it, since this function's two-value
-    return is fixed by its other call site.
+    existing embedding here to reuse. When it is left at its default — which
+    is what `qa_agent._answer_single_shot`'s positional call does, and that is
+    the path most traffic takes — it resolves from the request-scoped
+    ContextVar `ask_job_runner._run_sync` sets, exactly as `conversation_id`
+    above does. This function NEVER embeds on its own behalf: it uses what it
+    was handed or what the ask already computed, so an ask can only ever pay
+    for one embedding however many grounding calls it makes.
+
+    Passing None with no ContextVar set is still legitimate and means Stage T
+    ranks lexically only (see `_topical_candidates`) — but it now means a
+    caller genuinely had no vector, rather than a call site forgetting to pass
+    one.
 
     Returns ("", []) for every degradation path — no tenant, nothing to show
     (no uploaded files AND no conversation attachments), or any read failure
@@ -659,6 +717,15 @@ def document_grounding(
             enterprise_id, exc_info=True,
         )
         return "", []
+
+    # Same request-scoped route as the conversation pair below it. `degraded`
+    # is only meaningful when the ask computed the vector, so a caller that
+    # threaded one in explicitly is recorded as not-degraded.
+    embedding_degraded = False
+    if question_embedding is None:
+        carried = _carried_question_embedding()
+        if carried is not None:
+            question_embedding, embedding_degraded = carried
 
     if conversation_id is None:
         conversation_id = _active_conversation_id.get()
@@ -683,6 +750,19 @@ def document_grounding(
     connected.sort(key=lambda d: (d.doc_date or d.updated_at or ""), reverse=True)
 
     if not refs and not conv_attachments and not connected:
+        # Nothing to show — recorded rather than silent, so "this workspace has
+        # no documents" stays distinguishable from "selection found none of
+        # the documents it has" (AC7's two cases look identical in an answer).
+        _log_document_selection(
+            enterprise_id,
+            manifest=[],
+            catalog_size=len(catalog_docs),
+            topical_ran=False,
+            topical_candidates=0,
+            question_embedding=question_embedding,
+            embedding_degraded=embedding_degraded,
+            index_empty=True,
+        )
         return "", []
 
     total = len(refs) + len(connected)
@@ -739,53 +819,64 @@ def document_grounding(
     }
 
     # ── Stage T: fill whatever slots remain by fused rank.
+    #
+    # `match: "topic"` is set ONLY inside the loop below, once per candidate
+    # the fused rank actually returned. So a question that ranks nothing —
+    # both channels empty — produces no topic labels at all, and selection
+    # ends with whatever Stage N named. There is deliberately no fallback
+    # here: ordering the catalog by recency and calling the head of that list
+    # a topic match is how "the newest document, whatever you asked" came to
+    # be presented as a ranked answer, and it must not be reachable.
     by_ref_id = {ref.id: ref for ref in refs}
-    if len(selected) < MAX_SELECTED_DOCUMENTS:
-        for candidate in _topical_candidates(
+    topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
+    topical_candidates: list[dict] = []
+    if topical_ran:
+        topical_candidates = _topical_candidates(
             enterprise_id,
             question,
             question_embedding=question_embedding,
             conversation_id=conversation_id,
             user_id=caller_user_id,
             exclude_external_ids=set(match_by_id),
-        ):
-            if len(selected) >= MAX_SELECTED_DOCUMENTS:
-                break
-            # A chat attachment's text already reached the model through its
-            # own turn's folded history, so ranking one is informative but
-            # loading it again would duplicate it into the prompt. It is
-            # accounted for below, not re-rendered, and does not consume a
-            # body slot that a workspace document could use.
-            if candidate["provider"] == PROVIDER_CHAT_ATTACHMENT:
-                continue
-            external_id = candidate["external_id"]
-            if candidate["provider"] == PROVIDER_UPLOADS:
-                ref = by_ref_id.get(external_id)
-                # A catalog row whose upload has since been deleted (or is
-                # below the index cap) has no body to resolve — skip rather
-                # than render an entry with nothing behind it.
-                if ref is None or ref.id in match_by_id:
-                    continue
-                selected.append(_Chosen(
-                    key=ref.id, name=ref.filename,
-                    provider=PROVIDER_UPLOADS, ref=ref,
-                ))
-                match_by_id[ref.id] = ("topic", candidate["rank"])
-                continue
-            # A connected-source document. Same rule as above about the index
-            # cap: only rows that are actually RENDERED may be selected, so a
-            # body can never appear under "Contents loaded" for a document the
-            # Index does not list.
-            doc = connected_by_external_id.get(external_id)
-            if doc is None:
-                continue
-            key = _connected_key(doc)
-            if key in match_by_id:
+        )
+    for candidate in topical_candidates:
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        # A chat attachment's text already reached the model through its
+        # own turn's folded history, so ranking one is informative but
+        # loading it again would duplicate it into the prompt. It is
+        # accounted for below, not re-rendered, and does not consume a
+        # body slot that a workspace document could use.
+        if candidate["provider"] == PROVIDER_CHAT_ATTACHMENT:
+            continue
+        external_id = candidate["external_id"]
+        if candidate["provider"] == PROVIDER_UPLOADS:
+            ref = by_ref_id.get(external_id)
+            # A catalog row whose upload has since been deleted (or is
+            # below the index cap) has no body to resolve — skip rather
+            # than render an entry with nothing behind it.
+            if ref is None or ref.id in match_by_id:
                 continue
             selected.append(_Chosen(
-                key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+                key=ref.id, name=ref.filename,
+                provider=PROVIDER_UPLOADS, ref=ref,
             ))
-            match_by_id[key] = ("topic", candidate["rank"])
+            match_by_id[ref.id] = ("topic", candidate["rank"])
+            continue
+        # A connected-source document. Same rule as above about the index
+        # cap: only rows that are actually RENDERED may be selected, so a
+        # body can never appear under "Contents loaded" for a document the
+        # Index does not list.
+        doc = connected_by_external_id.get(external_id)
+        if doc is None:
+            continue
+        key = _connected_key(doc)
+        if key in match_by_id:
+            continue
+        selected.append(_Chosen(
+            key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+        ))
+        match_by_id[key] = ("topic", candidate["rank"])
 
     selected_ids = {chosen.key for chosen in selected}
 
@@ -937,7 +1028,119 @@ def document_grounding(
         }
         for doc in connected
     )
+    _log_document_selection(
+        enterprise_id,
+        manifest=manifest,
+        catalog_size=len(catalog_docs),
+        topical_ran=topical_ran,
+        topical_candidates=len(topical_candidates),
+        question_embedding=question_embedding,
+        embedding_degraded=embedding_degraded,
+    )
     return block, manifest
+
+
+#: How Stage T ended, as one value the audit spine can group by.
+#: `catalog_empty` — nothing to search; a selection miss here means the
+#:     document was never registered, which is an ingest problem.
+#: `searched_no_match` — the catalog held documents, both channels ran, and
+#:     neither ranked anything. A selection miss here is a ranking problem.
+#: These two are indistinguishable in an answer and mean opposite things, so
+#: they are recorded apart. `not_run` keeps them honest: Stage N had already
+#: filled every slot, so no absence of topical matches can be read from it.
+#: `no_documents_indexed` is the earlier exit still — the workspace has
+#: nothing to show at all, so grounding returned before either stage.
+TOPICAL_CATALOG_EMPTY = "catalog_empty"
+TOPICAL_SEARCHED_NO_MATCH = "searched_no_match"
+TOPICAL_RANKED = "ranked"
+TOPICAL_NOT_RUN = "not_run"
+TOPICAL_NO_INDEX = "no_documents_indexed"
+
+
+def _topical_outcome(
+    catalog_size: int,
+    topical_ran: bool,
+    topical_candidates: int,
+    *,
+    index_empty: bool = False,
+) -> str:
+    """Which Stage-T ending this ask hit. No new query: the caller already
+    holds `catalog_docs` for the index it just rendered."""
+    if index_empty:
+        return TOPICAL_NO_INDEX
+    if not topical_ran:
+        return TOPICAL_NOT_RUN
+    if catalog_size == 0:
+        return TOPICAL_CATALOG_EMPTY
+    return TOPICAL_RANKED if topical_candidates else TOPICAL_SEARCHED_NO_MATCH
+
+
+def _log_document_selection(
+    enterprise_id: str,
+    *,
+    manifest: list[dict],
+    catalog_size: int,
+    topical_ran: bool,
+    topical_candidates: int,
+    question_embedding: list[float] | None,
+    embedding_degraded: bool,
+    index_empty: bool = False,
+) -> None:
+    """Record how document selection went, from the ONE function both grounding
+    call sites share.
+
+    Written here rather than in `compose_ask_answer` because that is the direct
+    path only. The skill-routed path — `qa_agent._answer_single_shot`, which is
+    where most of this traffic goes — wrote none of this, so when topical
+    selection returned the wrong document there for a whole day, nothing in the
+    record said so. Putting the write in the shared callee is what gives both
+    paths the same visibility without touching qa_agent.py.
+
+    Costs one extra `agent_decision_log` row per ask, and on the direct path
+    some of these counts also appear on that path's own `answer` row. That
+    duplication is deliberate: the `answer` row is not written at all on the
+    skill path, so removing the overlap here would take the parity back out.
+
+    Counts and enums only — never a filename, a title, a summary or any
+    document text. Best-effort: an audit write must never break an answer."""
+    if not enterprise_id:
+        return
+    try:
+        from app.graph.decision_log import log_agent_decision
+
+        log_agent_decision(
+            enterprise_id=enterprise_id,
+            agent="ask",
+            decision_type="document_selection",
+            factors={
+                "documents": len(manifest),
+                "documents_loaded": sum(1 for d in manifest if d.get("loaded")),
+                "documents_named": sum(
+                    1 for d in manifest if d.get("match") == "named"
+                ),
+                "documents_topical": sum(
+                    1 for d in manifest if d.get("match") == "topic"
+                ),
+                # How many rows the catalog held for this caller, which is what
+                # separates "nothing to find" from "found nothing".
+                "catalog_size": catalog_size,
+                "topical_candidates": topical_candidates,
+                "topical_outcome": _topical_outcome(
+                    catalog_size, topical_ran, topical_candidates,
+                    index_empty=index_empty,
+                ),
+                # Whether the semantic channel ran at all this ask. False here
+                # with a non-empty catalog is the exact condition that made
+                # ranking query-independent, and it was invisible.
+                "semantic_channel": question_embedding is not None,
+                "retrieval_embedding_degraded": embedding_degraded,
+            },
+        )
+    except Exception:  # noqa: BLE001 — audit write must not block the answer
+        logger.exception(
+            "document selection decision-log write failed for enterprise=%s",
+            enterprise_id,
+        )
 
 
 # Prompt version stamped onto the Ask decision-log row so the §4d audit spine
@@ -1054,6 +1257,25 @@ def _question_embedding(
     return vec, False
 
 
+def _resolve_question_embedding(
+    enterprise_id: str | None, question: str
+) -> tuple[list[float] | None, bool]:
+    """This ask's `(vector, degraded)`, computing it only if nothing already
+    has.
+
+    `ask_job_runner._run_sync` embeds once per ask and publishes the result on
+    the request-scoped ContextVar, so on the worker path this returns that
+    value and issues no call. It falls through to `_question_embedding` for
+    callers that reach `compose_ask_answer` without the worker in front of them
+    — direct invocation, and the tests that do the same — which is what keeps
+    the embedding count at exactly one per ask on every path rather than one
+    per consumer."""
+    carried = _carried_question_embedding()
+    if carried is not None:
+        return carried
+    return _question_embedding(enterprise_id, question)
+
+
 def _retrieve_kg_bundle(
     enterprise_id: str | None,
     question: str,
@@ -1124,7 +1346,12 @@ def compose_ask_answer(
     # retrieval entirely, so there is no existing vector either could inherit
     # — computing it here is what stops this being two calls (or, on the PRD
     # branch, no semantic channel at all).
-    question_embedding, embedding_degraded = _question_embedding(
+    #
+    # The Ask worker now embeds one step earlier still (so the skill-routed
+    # path gets a semantic channel too), so this RESOLVES rather than computes:
+    # when the worker already published a vector this reuses it, and the ask
+    # pays for one embedding, not two.
+    question_embedding, embedding_degraded = _resolve_question_embedding(
         enterprise_id, question
     )
     # Computed once, beside `facts`, so it rides EVERY branch's cacheable
