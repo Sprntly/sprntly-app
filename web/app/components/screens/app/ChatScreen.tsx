@@ -1705,7 +1705,15 @@ export function ChatScreen() {
     // chat tab) reuses THAT tab, so the PRD lands beside the conversation that
     // motivated it. Otherwise fall back to the title-match reuse (a re-issued
     // command) or a fresh tab.
+    // Reuse order: the pinned tab, then the tab already HOLDING this PRD, then
+    // a title match. The prd-id pass matters for `load` — a `?prd=` deep link
+    // (and a reload of one) always arrives with the generic title "PRD", which
+    // never matches the real tab's "PRD · <name>", so title-matching alone
+    // spawned a SECOND tab for a PRD that was already open.
     const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
+      ?? (source.kind === "load"
+        ? tabsRef.current.find((t) => t.prdId === source.prdId)
+        : undefined)
       ?? tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",

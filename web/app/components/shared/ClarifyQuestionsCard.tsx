@@ -84,12 +84,17 @@ function ResolvedQuestions({
 }) {
   const byPrompt = new Map(resolution.answers.map((a) => [a.prompt, a.answer]))
   const answeredCount = resolution.answers.length
+  // Three distinct states — the "fell back" clause is only true when questions
+  // were actually left blank. Claiming it after a full answer set contradicts
+  // the per-question ✓ marks right below it.
   const summary =
     resolution.mode === "chat"
       ? "Answered in your reply below."
       : answeredCount === 0
         ? `Generated without these — each fell back to the assumption below.`
-        : `${answeredCount} of ${questions.length} answered — the rest fell back to their assumptions.`
+        : answeredCount >= questions.length
+          ? `All ${questions.length} answered.`
+          : `${answeredCount} of ${questions.length} answered — the rest fell back to their assumptions.`
 
   return (
     <div className="cqc-card cqc-card--resolved" data-testid="clarify-questions-resolved">

@@ -508,3 +508,70 @@ describe("ChatScreen — a brief-insight-opened PRD keeps its card at the top", 
     expect(firstTurn?.getAttribute("data-testid")).toBe("chat-insight-msg")
   })
 })
+
+// A `?prd=` deep link — and a plain RELOAD of one — reaches ChatScreen through
+// the very same openPrdTab path as every other PRD open, but carries the
+// generic title "PRD" rather than the tab's real "PRD · <name>". Tab reuse
+// matched on title alone, so the deep link never recognised the tab already
+// holding that PRD and spawned a second, bare "PRD" tab beside it. Reuse now
+// checks the prd id first for `load` sources.
+describe("ChatScreen — a PRD that is already open is focused, not duplicated", () => {
+  const OPEN_NAMED: PrdTabRequest = {
+    title: "PRD · Ready doc",
+    source: { kind: "ready", prd: { prd_id: 5, title: "Ready doc", metaLine: "", sections: [] } as never, meta: null },
+  }
+  const DEEP_LINK: PrdTabRequest = { title: "PRD", source: { kind: "load", prdId: 5, meta: null } }
+  const DEEP_LINK_OTHER: PrdTabRequest = { title: "PRD", source: { kind: "load", prdId: 99, meta: null } }
+
+  function TwoOpens({ second }: { second: PrdTabRequest }) {
+    const { openPrdTab } = useNavigation()
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement("button", { onClick: () => openPrdTab(OPEN_NAMED) }, "open-named"),
+      React.createElement("button", { onClick: () => openPrdTab(second) }, "open-deeplink"),
+      React.createElement(ChatScreen),
+    )
+  }
+
+  const renderTwo = (second: PrdTabRequest) =>
+    render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(ContentProvider, null, React.createElement(TwoOpens, { second })),
+      ),
+    )
+
+  const clickNamed = async () => {
+    await act(async () => { fireEvent.click(screen.getByText("open-named")) })
+  }
+  const clickDeepLink = async () => {
+    await act(async () => { fireEvent.click(screen.getByText("open-deeplink")) })
+  }
+
+  it("a ?prd= open for a PRD already in a tab reuses that tab, not a second bare 'PRD' one", async () => {
+    renderTwo(DEEP_LINK)
+    await clickNamed()
+    await waitFor(() => expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy())
+
+    await clickDeepLink()
+
+    // One tab, still under its real name — and no bare "PRD" chip beside it
+    // (getByText is exact, so "PRD · Ready doc" does not satisfy "PRD").
+    expect(tabBar().getAllByText("PRD · Ready doc")).toHaveLength(1)
+    expect(tabBar().queryByText("PRD")).toBeNull()
+  })
+
+  it("a ?prd= open for a DIFFERENT PRD still gets its own tab", async () => {
+    renderTwo(DEEP_LINK_OTHER)
+    await clickNamed()
+    await waitFor(() => expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy())
+
+    await clickDeepLink()
+
+    // Deduping on prd id must not collapse two genuinely different PRDs.
+    await waitFor(() => expect(tabBar().getByText("PRD")).toBeTruthy())
+    expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy()
+  })
+})
