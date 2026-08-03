@@ -1646,6 +1646,7 @@ export type GoogleDrivePickedFile = {
 export type GoogleDrivePickerToken = {
   access_token: string
   expires_in: number
+  app_id?: string
 }
 
 /** One document inside a named upload source (never the extracted text

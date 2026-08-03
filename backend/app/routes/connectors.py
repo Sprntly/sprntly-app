@@ -854,8 +854,19 @@ def google_drive_picker_token(
     to the owner's own browser grants them nothing they couldn't already do
     with their own Google account.
 
-    Returns ``{"access_token", "expires_in"}`` (seconds until expiry). 404 if
-    Drive isn't connected — matching how the other Drive routes signal that.
+    Also returns ``app_id``: the Google Cloud project number, required by the
+    Picker's ``setAppId()`` under the ``drive.file`` scope so a picked file is
+    bound to this app (without it Drive answers "File not found" for files
+    picked but never otherwise granted). Google OAuth client ids are shaped
+    ``<PROJECT_NUMBER>-<random>.apps.googleusercontent.com``, so we derive the
+    project number from ``settings.google_client_id`` rather than adding a new
+    config value that could drift from the OAuth client if it's ever rotated
+    into another project. Empty string if the client id is unset or
+    unexpectedly shaped (missing ``-``) — the route still returns 200.
+
+    Returns ``{"access_token", "expires_in", "app_id"}`` (seconds until
+    expiry). 404 if Drive isn't connected — matching how the other Drive
+    routes signal that.
     """
     _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
@@ -887,7 +898,10 @@ def google_drive_picker_token(
         if remaining > 0:
             expires_in = remaining
 
-    return {"access_token": creds.token, "expires_in": expires_in}
+    client_id = settings.google_client_id or ""
+    app_id = client_id.split("-", 1)[0] if "-" in client_id else ""
+
+    return {"access_token": creds.token, "expires_in": expires_in, "app_id": app_id}
 
 
 @router.delete("/google-drive")
