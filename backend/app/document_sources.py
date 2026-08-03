@@ -33,6 +33,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from app import document_catalog
 from app.db.client import require_client
 from app.ingest import convert
 
@@ -133,6 +134,11 @@ def add_document_file(
         "uploaded_at": uploaded_at,
     }
     require_client().table("document_source_file").insert(row).execute()
+    _register_in_catalog(
+        company_id, source_id,
+        file_id=file_id, filename=filename, extracted=extracted,
+        uploaded_at=uploaded_at,
+    )
     return DocumentSourceFile(
         id=file_id,
         source_id=source_id,
@@ -142,6 +148,54 @@ def add_document_file(
         extracted_text=extracted,
         uploaded_at=uploaded_at,
     )
+
+
+def _register_in_catalog(
+    company_id: str,
+    source_id: str,
+    *,
+    file_id: str,
+    filename: str,
+    extracted: str,
+    uploaded_at: str,
+) -> None:
+    """Catalog one freshly stored upload.
+
+    Two properties this call has to keep, both load-bearing:
+
+    1. It NEVER breaks the upload. Cataloguing is an enhancement over a store
+       that already succeeded — a failure here logs and returns.
+    2. Summarisation is BACKGROUNDED (`background=True`). The uploads route
+       stores up to UPLOAD_MAX_FILES_PER_REQUEST files sequentially inside the
+       request coroutine, so a synchronous model call per file would add a
+       round-trip each, serially, to a response that is near-instant today —
+       tens of seconds on a 20-file upload. The catalog ROW insert stays
+       synchronous: it is a cheap upsert, and it is what makes the document
+       discoverable at all.
+
+    `body_text` stays NULL: the body already lives in `document_source_file`
+    and resolves through `get_file_text`. A document's text is never stored
+    twice."""
+    try:
+        source = get_document_source(company_id, source_id)
+        document_catalog.register_document(
+            company_id,
+            provider=document_catalog.PROVIDER_UPLOADS,
+            external_id=file_id,
+            title=filename,
+            source_name=source.name if source else "",
+            description=source.description if source else "",
+            doc_date=uploaded_at,
+            content_hash=document_catalog.content_hash_for(extracted),
+            get_text=lambda: extracted,
+            background=True,
+        )
+    except Exception:  # noqa: BLE001 — cataloguing must never fail an upload
+        logger.warning(
+            "document catalog registration failed for %s/%s; the file is "
+            "stored and will be catalogued on the next registration",
+            company_id, file_id, exc_info=True,
+        )
 
 
 def get_document_source(company_id: str, source_id: str) -> Optional[DocumentSource]:
@@ -233,17 +287,41 @@ def list_source_files(company_id: str, source_id: str) -> list[DocumentSourceFil
     return out
 
 
+def _deregister_from_catalog(company_id: str, file_ids: list[str]) -> None:
+    """Drop catalog rows for deleted uploads. Never raises: a stale catalog
+    row is a smaller problem than a delete that fails halfway."""
+    for file_id in file_ids:
+        try:
+            document_catalog.deregister_document(
+                company_id, document_catalog.PROVIDER_UPLOADS, file_id
+            )
+        except Exception:  # noqa: BLE001 — deletion must complete regardless
+            logger.warning(
+                "document catalog deregistration failed for %s/%s",
+                company_id, file_id, exc_info=True,
+            )
+
+
 def delete_document_source(company_id: str, source_id: str) -> bool:
     """Drop a source and its files. False when the source wasn't this company's.
 
     The FK cascades in Postgres; we delete the children explicitly too so the
-    SQLite test mirror (foreign_keys pragma off by default) behaves the same."""
+    SQLite test mirror (foreign_keys pragma off by default) behaves the same.
+
+    The catalog has no `source_id` column — its rows are keyed on
+    (company, provider, external_id) — and this delete removes every file
+    under the source in ONE query without ever naming their ids. So the ids
+    are ENUMERATED FIRST and deregistered individually; doing it after the
+    delete would leave nothing to enumerate and strand a catalog row per file,
+    still summarised and still discoverable, for a document the user deleted."""
     if get_document_source(company_id, source_id) is None:
         return False
+    doomed = [f.id for f in list_source_files(company_id, source_id)]
     c = require_client()
     c.table("document_source_file").delete().eq("company_id", company_id).eq(
         "source_id", source_id
     ).execute()
+    _deregister_from_catalog(company_id, doomed)
     c.table("document_source").delete().eq("company_id", company_id).eq(
         "id", source_id
     ).execute()
@@ -264,7 +342,61 @@ def delete_document_file(company_id: str, source_id: str, file_id: str) -> bool:
         .eq("id", file_id)
         .execute()
     )
+    # Single known id — no enumeration needed, unlike the bulk path above.
+    _deregister_from_catalog(company_id, [file_id])
     return True
+
+
+def backfill_catalog(company_id: str, *, limit: Optional[int] = None) -> dict:
+    """Register every ALREADY-UPLOADED file for one company in the catalog.
+
+    Idempotent and re-runnable by construction rather than by bookkeeping:
+    `register_document` is keyed on the file's content hash, so a second run
+    finds each hash unchanged and returns without writing or paying for a
+    second summary. There is no ledger to keep in sync and no "already
+    backfilled" flag to get wrong.
+
+    Per-file error isolation: one unreadable row logs and the run continues,
+    so a single bad document can't strand a tenant's whole backfill.
+
+    Returns {registered, skipped, errors} — `skipped` counts files whose
+    catalog row was already current, which is what a second run reports for
+    everything."""
+    counts = {"registered": 0, "skipped": 0, "errors": 0}
+    for source in list_document_sources(company_id):
+        for f in list_source_files(company_id, source.id):
+            if limit is not None and counts["registered"] >= limit:
+                return counts
+            try:
+                existing = document_catalog.fetch_document(
+                    company_id, document_catalog.PROVIDER_UPLOADS, f.id
+                )
+                content_hash = document_catalog.content_hash_for(f.extracted_text)
+                if (
+                    existing is not None
+                    and existing.content_hash == content_hash
+                    and existing.summary
+                ):
+                    counts["skipped"] += 1
+                    continue
+                document_catalog.register_document(
+                    company_id,
+                    provider=document_catalog.PROVIDER_UPLOADS,
+                    external_id=f.id,
+                    title=f.filename,
+                    source_name=source.name,
+                    description=source.description,
+                    doc_date=f.uploaded_at,
+                    content_hash=content_hash,
+                    get_text=lambda text=f.extracted_text: text,
+                )
+                counts["registered"] += 1
+            except Exception:  # noqa: BLE001 — per-file isolation
+                logger.exception(
+                    "document catalog backfill failed for %s/%s", company_id, f.id
+                )
+                counts["errors"] += 1
+    return counts
 
 
 def has_document_sources(company_id: str) -> bool:

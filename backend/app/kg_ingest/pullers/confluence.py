@@ -47,6 +47,7 @@ from app.connectors.confluence_oauth import (
     next_cursor,
     sync_context,
 )
+from app import document_catalog
 from app.ingest import html_to_md
 from app.kg_ingest.types import RawRecord
 
@@ -191,12 +192,61 @@ def _to_record(
     if not page_id:
         return None
     title = item.get("title") or ""
-    text = _text_from_body(item.get("body"))[:_TEXT_CHARS]
+    # The FULL converted body, kept separately from the extraction slice
+    # below. Both legs want different things out of the same bytes and the
+    # difference is 4,000 chars vs 200,000 — see the registration comment.
+    full_text = _text_from_body(item.get("body"))
+    text = full_text[:_TEXT_CHARS]
     if not title.strip() and not text.strip():
         return None
 
     webui = ((item.get("_links") or {}).get("webui")) or ""
     version = item.get("version") or {}
+    url = f"{ctx.site_url}{webui}" if (ctx.site_url and webui) else None
+
+    # Catalog registration lives HERE, inside the puller, and uses `full_text`
+    # — NOT `text`, and NOT the generic runner's record loop.
+    #
+    # The runner only ever sees `RawRecord.text`, which is already sliced to
+    # _TEXT_CHARS for the extraction batch budget. Registering from there (the
+    # natural reading of "register during record processing") would summarise
+    # only the first 4,000 characters of a long spec, and — worse — take the
+    # content hash over that same truncated text, so two revisions of a long
+    # page differing only past the 4k mark would hash identically, the page
+    # would never re-summarise, and its catalog entry would be frozen at the
+    # first version forever. Nothing else in the system would report either
+    # fault.
+    #
+    # The extraction cap itself is unchanged and still correct: `text` below
+    # is what goes to the KG.
+    try:
+        document_catalog.register_document(
+            ctx.company_id,
+            provider=document_catalog.PROVIDER_CONFLUENCE,
+            external_id=str(page_id),
+            title=title,
+            source_name=space.get("name") or space.get("key") or "",
+            url=url,
+            doc_date=version.get("createdAt") or item.get("createdAt"),
+            # Over the FULL body, and this is the part that must not regress
+            # now that the body itself is not stored. Hashing the truncated
+            # text would make two revisions that differ only past the 4,000-
+            # char mark hash identically — the page would never re-summarise,
+            # freezing its catalog entry at the first version forever.
+            content_hash=document_catalog.content_hash_for(full_text),
+            # The summariser gets the full body; the catalog keeps only what
+            # it produces. No `body_text` — the catalog is a POINTER to a
+            # document (summary, topics, url), never a COPY of it, so Sprntly
+            # holds no duplicate of the customer's wiki at rest.
+            get_text=lambda: full_text,
+        )
+    except Exception:  # noqa: BLE001 — a sync that succeeds today must still
+        # succeed if cataloguing fails. (Drive is the deliberate exception —
+        # there a swallowed failure would strand the file permanently.)
+        logger.warning(
+            "confluence: catalog registration failed for page %s; the pull "
+            "continues", page_id, exc_info=True,
+        )
     return RawRecord(
         provider="confluence",
         kind=kind,

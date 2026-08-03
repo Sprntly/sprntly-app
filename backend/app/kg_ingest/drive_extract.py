@@ -33,7 +33,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 
-from app import db
+from app import db, document_catalog
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.graph.types import Source
@@ -50,6 +50,11 @@ _CHUNK_CHARS = 6000
 # Hard per-file cap: a 20MB PDF can convert to megabytes of markdown; beyond
 # this the tail is dropped (logged) rather than burning unbounded LLM calls.
 _MAX_KG_CHARS = 60_000
+
+#: Catalog `source_name` for Drive documents. Drive has no named bundle the
+#: way an uploads source does, so every Drive row carries the connector's own
+#: label — which is what a user would say ("the doc in Google Drive").
+_DRIVE_SOURCE_NAME = "Google Drive"
 
 _DRIVE_SOURCE_HINT = (
     "documents (Google Drive product docs — PRDs, specs, research notes, "
@@ -140,6 +145,41 @@ def extract_drive_docs(
                     "link": doc.link,
                 },
             ))
+            # Register in the document catalog, and DELIBERATELY WITHOUT a
+            # local try/except — the one call site in this change where a
+            # registration failure is allowed to fail its host operation.
+            #
+            # Everywhere else "log and continue" is right. Here it would be a
+            # data-loss bug: swallowing the error would let this file reach
+            # `ok` below, advance its `kg_file_mtime`, and — because Drive
+            # re-fetches a file only when its modifiedTime changes — leave it
+            # PERMANENTLY unregistered, never retried until a human edits it.
+            # Letting it propagate to the per-file handler below costs one
+            # re-extraction on the next sync. The other files in the batch
+            # still succeed, which is the isolation guarantee that matters.
+            #
+            # No `body_text`: the catalog is a POINTER to a document — its
+            # summary, topics and link — never a COPY of it. Drive content
+            # already has a home, written to the dataset corpus as markdown by
+            # google_drive_sync (datasets.ingest_file), so storing it here
+            # again would be duplicate storage of a customer's files.
+            document_catalog.register_document(
+                company_id,
+                provider=document_catalog.PROVIDER_GOOGLE_DRIVE,
+                external_id=doc.file_id,
+                title=doc.name,
+                source_name=_DRIVE_SOURCE_NAME,
+                url=doc.link or None,
+                doc_date=doc.modified or None,
+                # Over the FULL converted markdown, not the _MAX_KG_CHARS
+                # extraction slice: an edit past the truncation point must
+                # still re-hash, or the summary freezes at an old version.
+                content_hash=document_catalog.content_hash_for(doc.text),
+                # Already off the request path (kickoff_drive_extract's daemon
+                # thread, or the brief's inline seed), so summarisation runs
+                # inline here rather than spawning a thread per file.
+                get_text=lambda text=doc.text: text,
+            )
             ok[doc.file_id] = doc.modified
             totals["files"] += 1
         except Exception as e:  # noqa: BLE001 — error-isolation per file

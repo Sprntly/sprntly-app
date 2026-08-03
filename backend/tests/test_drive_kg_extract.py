@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.kg_ingest import drive_extract
 from app.kg_ingest.drive_extract import (
     DriveDoc,
@@ -18,6 +20,27 @@ from app.kg_ingest.drive_extract import (
     _record_kg_result,
     extract_drive_docs,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_registration(monkeypatch):
+    """Neutralise document-catalog registration for this file.
+
+    `extract_drive_docs` now also registers each extracted file in the
+    document catalog, which is a real DB write — and these tests deliberately
+    run with no Supabase at all, because they are about extraction mechanics
+    (chunking, truncation, provenance, per-file isolation), not cataloguing.
+    Without this the catalog's DB write would raise and — correctly, per the
+    Drive retry rule — take the whole file down with it, so every assertion
+    below would be measuring the wrong thing.
+
+    The registration call site has its own coverage, including the retry
+    semantics that make its failure deliberately un-swallowed, in
+    tests/test_drive_catalog_registration.py."""
+    monkeypatch.setattr(
+        drive_extract.document_catalog, "register_document",
+        lambda company_id, **kwargs: None,
+    )
 
 
 class FakeFacade:

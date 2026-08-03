@@ -1108,6 +1108,56 @@ CREATE TABLE document_source_file (
 CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
 CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
 
+-- Document catalog (mirrors 20260803120000_document_catalog.sql, SQLite-ized).
+-- One row per document-shaped item from ANY source, carrying an extractive
+-- summary + topics + a summary embedding, so a document can be found by what
+-- it is about. Both constraints that carry meaning are mirrored faithfully:
+-- the unique triple the registration upsert conflicts on, and the check that
+-- makes an ownerless session-scoped row unrepresentable.
+--
+-- NOT mirrored (no SQLite equivalent, and nothing under test needs them):
+-- `search_tsv` (a generated tsvector maintained by Postgres) and the
+-- ivfflat/GIN indexes. `embedding` and `topics` are JSON-encoded TEXT via the
+-- fake's _JSONB_COLUMNS map. `document_find_candidates` is a Postgres
+-- function; its tenancy filter is exercised against real Postgres, not here
+-- (the fake's rpc() returns whatever a test registers).
+CREATE TABLE document_catalog (
+    -- Postgres fills this with gen_random_uuid(); the registration upsert
+    -- deliberately never sends an `id` (sending one would rewrite the PK on
+    -- every re-registration), so the mirror needs its own uuid4 default.
+    id              TEXT PRIMARY KEY DEFAULT (
+                        lower(hex(randomblob(4))) || '-'
+                        || lower(hex(randomblob(2))) || '-4'
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || substr('89ab', abs(random()) % 4 + 1, 1)
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || lower(hex(randomblob(6)))
+                    ),
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    user_id         TEXT,
+    provider        TEXT NOT NULL,
+    external_id     TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    source_name     TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    doc_date        TEXT,
+    content_hash    TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    topics          TEXT NOT NULL DEFAULT '[]',
+    summary_model   TEXT,
+    summary_version TEXT,
+    embedding       TEXT,
+    body_text       TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider, external_id),
+    CONSTRAINT document_catalog_session_needs_owner
+        CHECK (conversation_id IS NULL OR user_id IS NOT NULL)
+);
+CREATE INDEX document_catalog_company_idx ON document_catalog (company_id);
+
 -- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
 -- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
 -- share one library; workspace_id records the uploading workspace only):

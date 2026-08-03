@@ -106,6 +106,8 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
     "conversation_turns":  {"attachments"},
+    # text[] + vector(1536) — JSON-encoded in the mirror.
+    "document_catalog":    {"topics", "embedding"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
     "pipeline_runs":          {"stages"},   # per-stage results JSONB
