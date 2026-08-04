@@ -8,7 +8,7 @@
  *   - Pre-connect API-key — paste-the-key form (Fireflies)
  *   - Connected           — "✓ Connected as alice@x.com" + provider-
  *                            specific config slot (Drive folder picker,
- *                            Slack channel picker) + Done button
+ *                            Slack sync-channel picker) + Done button
  *
  * Plus a "complete or restart" prompt that appears when the user
  * re-opens the modal after starting an OAuth flow without finishing
@@ -35,7 +35,6 @@ import { openOauthTab } from "../../lib/connectorsOauth"
 import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
-import { SlackChannelPicker } from "./SlackChannelPicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 /**
@@ -618,26 +617,18 @@ export function ConnectorConnectModal({
         />
       )
     } else if (providerId === "slack") {
-      // Both Slack roles get configured right at connect time: where the
-      // brief gets DELIVERED (channel/DM target — per-user, so hidden on
-      // the company's shared connection), and which channels the corpus
-      // sync PULLS from (company-wide, the customer-voice side).
+      // SYNC ONLY (2026-08-04) — mirrors ConfigureConnectorDrawer. Straight
+      // after connect is exactly when the pull-channel selection matters, and
+      // it is the only thing this surface asks: which channels the corpus sync
+      // reads. Where the Top Insights brief gets DELIVERED used to be stacked
+      // above it here; that is a per-user notification preference and now
+      // lives solely in Settings → Comms & Brief, so a PM finishing OAuth is
+      // asked one question instead of two unrelated ones.
       slot = (
-        <>
-          {connection.config?.company_connection ? null : (
-            <SlackChannelPicker
-              savedChannelId={connection.config?.channel_id as string | undefined}
-              savedChannelName={
-                connection.config?.channel_name as string | undefined
-              }
-              onSaved={onConnected}
-            />
-          )}
-          <SlackSyncChannelsPicker
-            savedChannelIds={connection.config?.sync_channel_ids}
-            onSaved={onConnected}
-          />
-        </>
+        <SlackSyncChannelsPicker
+          savedChannelIds={connection.config?.sync_channel_ids}
+          onSaved={onConnected}
+        />
       )
     } else if (providerId === "confluence") {
       // Straight after connect is exactly when the space selection matters:

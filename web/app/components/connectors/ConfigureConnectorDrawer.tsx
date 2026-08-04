@@ -32,7 +32,6 @@ import { ConnectorLogo } from "./ConnectorLogo"
 import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
-import { SlackChannelPicker } from "./SlackChannelPicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
@@ -494,32 +493,20 @@ export function ConfigureConnectorDrawer({
       />
     )
   } else if (providerId === "slack") {
-    // The delivery target is PER-USER config — on the company's shared
-    // connection (a member viewing the workspace install, no row of their
-    // own) there is nothing personal to configure, so the delivery picker
-    // is replaced by a hint. The pull-channel selection and sync are
-    // COMPANY-wide and render either way.
-    const isSharedCompanyConnection = Boolean(
-      connection?.config?.company_connection,
-    )
+    // SYNC ONLY (2026-08-04). This drawer used to stack two unrelated
+    // questions: where the Top Insights brief gets DELIVERED (a per-user
+    // notification preference) on top of which channels the corpus sync PULLS
+    // from (a company-wide data-source setting). Delivery has its own home in
+    // Settings → Comms & Brief, and asking for it here made Slack look like
+    // two connectors — so the drawer now answers exactly one question, the one
+    // a connector shelf is for: what do we read?
+    //
+    // Nothing per-user is left in this slot, so the old
+    // `company_connection` branch (which hid the delivery picker for members
+    // viewing the workspace's shared install) went with it — channel selection
+    // and sync are company-wide and render the same for everyone.
     slot = (
       <>
-        {isSharedCompanyConnection ? (
-          <p className="conn-slack-hint">
-            This is your workspace&apos;s shared Slack connection. To get the
-            brief delivered to your own Slack, connect Slack from
-            Settings → Notifications.
-          </p>
-        ) : (
-          <SlackChannelPicker
-            savedTargetType={
-              connection?.config?.target_type as "channel" | "dm" | undefined
-            }
-            savedChannelId={connection?.config?.channel_id as string | undefined}
-            savedChannelName={connection?.config?.channel_name as string | undefined}
-            onSaved={onDisconnected /* reuse the reload callback */}
-          />
-        )}
         <SlackSyncChannelsPicker
           savedChannelIds={connection?.config?.sync_channel_ids}
           onSaved={onDisconnected /* reuse the reload callback */}
