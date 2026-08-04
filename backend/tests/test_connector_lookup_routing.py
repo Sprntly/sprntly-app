@@ -345,6 +345,30 @@ def test_naming_a_connected_source_beats_the_topical_interceptors(monkeypatch):
         assert seen["hints"] == {"slack"}, question
 
 
+def test_naming_a_connected_marvin_stands_the_topical_interceptors_down(monkeypatch):
+    """Marvin joining LOOKUP_PROVIDERS is what makes the gate apply to it: the
+    same "customer feedback" phrasing the VoC interceptor owns now goes to the
+    research repository the user actually named. Marvin is not a call source, so
+    nothing about the Fireflies/Gong precedence changes."""
+    from app.connector_lookup import registry as reg
+
+    assert "marvin" not in qa._CALL_SOURCE_PROVIDERS
+    assert "marvin" in reg.LOOKUP_PROVIDERS
+
+    registry = _slack_connected(monkeypatch, providers=("marvin",))
+    _no_llm(monkeypatch)
+    _trap_call_paths(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(registry, "answer_for_hints",
+                        lambda **k: seen.update(k) or {"answer": "marvin",
+                                                       "_skill_source": "connector-lookup"})
+    out = qa.answer(enterprise_id="ent",
+                    question="what's the latest customer feedback in marvin",
+                    dataset="acme")
+    assert out["_skill_source"] == "connector-lookup"
+    assert seen["hints"] == {"marvin"}
+
+
 def test_an_unconnected_named_source_leaves_routing_exactly_as_it_was(monkeypatch):
     """The capability half of the gate. If Slack isn't connected, the lookup
     would only be able to say so — worse than the digest's answer — so the
