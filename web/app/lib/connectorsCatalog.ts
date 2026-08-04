@@ -90,6 +90,11 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
       { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
+      // Cloud-recording transcripts. ORG-WIDE: every Zoom scope Sprntly asks
+      // for is an `:admin` scope, so one connection covers every licensed
+      // host and connecting it requires a Zoom account admin — which the
+      // connect modal says before the OAuth tab opens.
+      { id: "zoom",       name: "Zoom",       logo: "Z", logoText: "Z", logoColor: "#0B5CFF", logoSvg: "/connectors/zoom.svg", oauth: true, types: ["meetings"] },
       // Dual-typed communication + customer-voice — the same item also sits
       // in the Communications category (see SLACK_ITEM above).
       SLACK_ITEM,

@@ -34,6 +34,7 @@ import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
+import { ZoomConfigSlot } from "./ZoomConfigSlot"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
 
@@ -376,6 +377,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectJira()
   } else if (providerId === "confluence") {
     await connectorsApi.disconnectConfluence()
+  } else if (providerId === "zoom") {
+    await connectorsApi.disconnectZoom()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
@@ -534,6 +537,16 @@ export function ConfigureConnectorDrawer({
     slot = (
       <ConfluenceSpacesPicker
         savedSpaceIds={connection?.config?.sync_space_ids}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "zoom") {
+    // The SAME component the post-connect modal mounts — the sync summary and
+    // the reconnect prompt have to say the same thing in both places, and two
+    // copies would drift the moment one of them was edited.
+    slot = (
+      <ZoomConfigSlot
+        connection={connection}
         onSaved={onDisconnected /* reuse the reload callback */}
       />
     )

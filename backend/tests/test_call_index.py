@@ -1157,3 +1157,368 @@ def test_the_index_routing_still_precedes_the_call_digest(monkeypatch):
     src = __import__("inspect").getsource(qa.answer)
     assert src.index("call_index.is_listing_request") < src.index("is_call_digest(routing_text)")
     assert src.index("call_index.is_single_call_request") < src.index("is_call_digest(routing_text)")
+
+
+# ── Zoom as a second source ──────────────────────────────────────────────────
+#
+# `call_index` was provider-agnostic in its SCHEMA and hardcoded to Fireflies in
+# its CODE. These pin the generalization, and above all the ISOLATION: two
+# sources share one table and one company, and neither may clobber the other's
+# rows or its watermark.
+
+
+class _ProviderTable:
+    """Records upserts/deletes with the filters applied, so a test can assert
+    WHICH provider a write or a wipe touched."""
+
+    def __init__(self, sink, name):
+        self.sink = sink
+        self.name = name
+        self.filters: dict = {}
+        self._deleting = False
+
+    def upsert(self, rows, **kw):
+        self.sink.append({"table": self.name, "rows": rows,
+                          "on_conflict": kw.get("on_conflict")})
+        return self
+
+    def delete(self):
+        self._deleting = True
+        return self
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, col, val):
+        self.filters[col] = val
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        if self._deleting:
+            self.sink.append({"table": self.name, "deleted": dict(self.filters)})
+        return type("R", (), {"data": [], "count": 0})()
+
+
+class _ProviderClient:
+    def __init__(self):
+        self.ops: list = []
+
+    def table(self, name):
+        return _ProviderTable(self.ops, name)
+
+
+class _Ctx:
+    """Stand-in for zoom_oauth.ZoomContext."""
+
+    def __init__(self, user_ids=(), user_names=None):
+        self.company_id = "ent-A"
+        self.access_token = "tok"
+        self.user_ids = list(user_ids)
+        self.user_names = dict(user_names or {})
+        self.last_synced_until = None
+
+
+def _zoom_meeting(uuid="zm-1", topic="Acme QBR", host="sam@acme.co"):
+    return {
+        "uuid": uuid,
+        "id": 99,
+        "topic": topic,
+        "start_time": "2026-07-20T10:00:00Z",
+        "duration": 42,
+        "host_email": host,
+    }
+
+
+def test_zoom_rows_carry_the_zoom_provider_and_the_shared_conflict_key(monkeypatch):
+    """Idempotency is the whole contract: rows upsert on
+    (company_id, provider, external_id), so a re-sync refreshes rather than
+    duplicating a company's entire call history."""
+    monkeypatch.setattr(ci, "_stamp_state", lambda *a, **k: None)
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+    client = _ProviderClient()
+
+    count = ci._sync_zoom_from_source(
+        "ent-A", _Ctx(user_ids=["u1"]), limit=500, since=None,
+        list_recordings=lambda *a, **k: [_zoom_meeting()],
+        client=client,
+    )
+
+    assert count >= 1
+    write = next(op for op in client.ops if op.get("rows"))
+    assert write["on_conflict"] == "company_id,provider,external_id"
+    row = write["rows"][0]
+    assert row["provider"] == "zoom"
+    assert row["external_id"] == "zm-1"
+    assert row["title"] == "Acme QBR"
+    assert row["duration_min"] == 42.0
+    assert (row["call_date"] or "").startswith("2026-07-20")
+
+
+def test_a_recurring_zoom_meeting_seen_in_two_windows_is_indexed_once(monkeypatch):
+    """Upsert would dedupe the ROW, but the same uuid twice in one batch is a
+    wasted write and a misleading count."""
+    monkeypatch.setattr(ci, "_stamp_state", lambda *a, **k: None)
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+
+    count = ci._sync_zoom_from_source(
+        "ent-A", _Ctx(user_ids=["u1"]), limit=500, since=None,
+        list_recordings=lambda *a, **k: [_zoom_meeting()],
+        client=_ProviderClient(),
+    )
+    assert count == 1
+
+
+def test_zoom_indexing_honours_the_host_selection(monkeypatch):
+    """The picker is not decoration — an unselected host is never fetched."""
+    monkeypatch.setattr(ci, "_stamp_state", lambda *a, **k: None)
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+    asked: list = []
+
+    def _list(_tok, user_id, **_k):
+        asked.append(str(user_id))
+        return [_zoom_meeting(uuid="m-" + str(user_id))]
+
+    ci._sync_zoom_from_source(
+        "ent-A", _Ctx(user_ids=["u2"], user_names={"u2": "kim@acme.co"}),
+        limit=500, since=None, list_recordings=_list, client=_ProviderClient(),
+    )
+    assert set(asked) == {"u2"}
+
+
+def test_zoom_indexing_never_asks_for_more_than_a_month(monkeypatch):
+    """Zoom SILENTLY CLAMPS a wider from/to, so an over-wide request returns a
+    month and looks like a quiet quarter."""
+    from datetime import date as _date
+
+    from app.connectors.zoom_oauth import MAX_WINDOW_DAYS
+
+    monkeypatch.setattr(ci, "_stamp_state", lambda *a, **k: None)
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+    windows: list = []
+
+    def _list(_tok, _uid, *, frm=None, to=None, **_k):
+        windows.append((frm, to))
+        return []
+
+    ci._sync_zoom_from_source(
+        "ent-A", _Ctx(user_ids=["u1"]), limit=500, since=None,
+        list_recordings=_list, client=_ProviderClient(),
+    )
+
+    assert windows
+    for frm, to in windows:
+        span = (_date.fromisoformat(to) - _date.fromisoformat(frm)).days
+        assert 0 <= span <= MAX_WINDOW_DAYS, (frm, to)
+
+
+def test_a_zoom_sync_stamps_only_the_zoom_watermark(monkeypatch):
+    """`call_index_sync` is keyed (company_id, provider). A Zoom sync writing
+    Fireflies' row would mark Fireflies fresh when it had not run — and a
+    listing would then state a count from stale data with no hedge."""
+    stamped: list = []
+    monkeypatch.setattr(
+        ci, "_write_sync_state",
+        lambda cid, patch, provider=ci.PROVIDER_FIREFLIES:
+            stamped.append((cid, provider, patch)),
+    )
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+
+    ci._sync_zoom_from_source(
+        "ent-A", _Ctx(user_ids=["u1"]), limit=500, since=None,
+        list_recordings=lambda *a, **k: [_zoom_meeting()],
+        client=_ProviderClient(),
+    )
+
+    assert stamped
+    assert all(provider == "zoom" for _cid, provider, _p in stamped)
+    assert stamped[0][2]["last_success_at"]
+    assert stamped[0][2]["call_count"] == 1
+
+
+def test_a_fireflies_sync_still_stamps_only_fireflies(monkeypatch):
+    """The other direction of the same isolation."""
+    stamped: list = []
+    monkeypatch.setattr(
+        ci, "_write_sync_state",
+        lambda cid, patch, provider=ci.PROVIDER_FIREFLIES:
+            stamped.append((cid, provider, patch)),
+    )
+    monkeypatch.setattr(ci, "_own_domains", lambda *a, **k: set())
+
+    ci._sync_from_source(
+        "ent-A", "key", limit=500, since=None,
+        post=lambda *a, **k: [], client=_FakeClient(),
+    )
+
+    assert stamped and all(p == "fireflies" for _c, p, _patch in stamped)
+
+
+def test_sync_all_sources_indexes_both_providers(monkeypatch):
+    """A company with Fireflies AND Zoom must get BOTH indexed in one pass."""
+    calls: list = []
+
+    def _sync(company_id, *, limit=None, since=None, provider=ci.PROVIDER_FIREFLIES):
+        calls.append(provider)
+        return 2
+
+    monkeypatch.setattr(ci, "sync_company", _sync)
+    total = ci.sync_all_sources("ent-A")
+
+    assert calls == list(ci.CALL_PROVIDERS)
+    assert total == 4
+
+
+def test_sync_all_sources_returns_none_when_nothing_is_connected(monkeypatch):
+    """None, not 0 — the distinction the entire freshness layer rests on."""
+    monkeypatch.setattr(ci, "sync_company", lambda *a, **k: None)
+    assert ci.sync_all_sources("ent-A") is None
+
+
+def test_one_source_failing_does_not_stop_the_other(monkeypatch):
+    """A partial index is strictly better than none, and the per-provider sync
+    state records exactly which half is stale."""
+    def _sync(company_id, *, limit=None, since=None, provider=ci.PROVIDER_FIREFLIES):
+        if provider == ci.PROVIDER_FIREFLIES:
+            raise RuntimeError("Fireflies GraphQL error")
+        return 3
+
+    monkeypatch.setattr(ci, "sync_company", _sync)
+    assert ci.sync_all_sources("ent-A") == 3
+
+
+def test_every_source_failing_re_raises(monkeypatch):
+    """A total failure must still reach the caller — a silent zero would look
+    like a company with no calls."""
+    def _sync(*_a, **_k):
+        raise RuntimeError("everything is down")
+
+    monkeypatch.setattr(ci, "sync_company", _sync)
+    with pytest.raises(RuntimeError):
+        ci.sync_all_sources("ent-A")
+
+
+def test_freshness_takes_the_STALEST_contributing_source(monkeypatch):
+    """`list_calls` reads across providers, so an answer is only as fresh as its
+    stalest contributor. Taking the newest would let a Zoom sync from a minute
+    ago vouch for day-old Fireflies rows — and answer_listing STATES A COUNT."""
+    old = datetime.now(timezone.utc) - timedelta(hours=20)
+    new = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        ci, "_state_for",
+        lambda cid, provider: {"last_success_at": new.isoformat()},
+    )
+    assert ci._oldest_success("ent-A", old) == old
+
+
+def test_a_zoom_only_company_is_fresh_on_zooms_own_watermark(monkeypatch):
+    """Fireflies never synced and never will here — gating on it would take a
+    full Zoom index permanently offline."""
+    zoom_at = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        ci, "_state_for",
+        lambda cid, provider: {"last_success_at": zoom_at.isoformat()},
+    )
+    assert ci._oldest_success("ent-A", None) == zoom_at
+
+
+def test_a_company_with_no_zoom_state_is_unaffected(monkeypatch):
+    """The Fireflies-only path must be exactly what it was — including its
+    cost, which is why this short-circuits before any connectivity lookup."""
+    ff = datetime.now(timezone.utc)
+    monkeypatch.setattr(ci, "_state_for", lambda cid, provider: None)
+    assert ci._oldest_success("ent-A", ff) == ff
+
+
+def test_a_connected_but_never_synced_source_does_not_blank_the_index(monkeypatch):
+    """A source that never succeeded has no rows in the index, so it has
+    nothing to be stale about. Its failure is reported on the connection row."""
+    ff = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        ci, "_state_for",
+        lambda cid, provider: {"last_success_at": None, "last_error": "boom"},
+    )
+    assert ci._oldest_success("ent-A", ff) == ff
+
+
+def test_has_source_accepts_zoom_alone(monkeypatch):
+    """Gating on Fireflies alone would report connected=False for a company
+    whose Zoom index is full, and every answer path would decline."""
+    monkeypatch.setattr(ci, "connected_call_providers", lambda cid: ["zoom"])
+    assert ci._has_source("ent-A") is True
+    monkeypatch.setattr(ci, "connected_call_providers", lambda cid: [])
+    assert ci._has_source("ent-A") is False
+
+
+def test_clearing_one_provider_leaves_the_others_index_alone(monkeypatch):
+    """Disconnecting Fireflies must not destroy a working Zoom index — the
+    customer disconnects one tool and loses another tool's call history, with
+    nothing anywhere to explain it."""
+    client = _ProviderClient()
+    monkeypatch.setattr("app.db.client.require_client", lambda: client)
+
+    ci.clear_company("ent-A", ci.PROVIDER_FIREFLIES)
+
+    deletes = [op for op in client.ops if "deleted" in op]
+    assert deletes, "nothing was deleted"
+    for op in deletes:
+        assert op["deleted"]["company_id"] == "ent-A"
+        assert op["deleted"]["provider"] == "fireflies"
+
+
+def test_an_unscoped_clear_still_wipes_everything(monkeypatch):
+    """Account-level teardown keeps its old behaviour."""
+    client = _ProviderClient()
+    monkeypatch.setattr("app.db.client.require_client", lambda: client)
+
+    ci.clear_company("ent-A")
+
+    deletes = [op for op in client.ops if "deleted" in op]
+    assert deletes
+    for op in deletes:
+        assert "provider" not in op["deleted"]
+
+
+def test_a_transcript_fetch_goes_to_the_source_that_minted_the_id(monkeypatch):
+    """An external_id only means something to its own provider — asking
+    Fireflies for a Zoom meeting uuid gets a confident nothing, and the answer
+    path falls through for a call we could have summarized."""
+    seen: dict = {}
+
+    def _zoom(cid, eid):
+        seen["zoom"] = eid
+        return {"sentences": []}
+
+    monkeypatch.setattr(ci, "_fetch_zoom_transcript", _zoom)
+    ci.fetch_transcript("ent-A", "zm-1", provider=ci.PROVIDER_ZOOM)
+    assert seen["zoom"] == "zm-1"
+
+
+def test_summarizing_dispatches_on_the_rows_provider(monkeypatch):
+    """The IndexedCall carries its provider precisely so this dispatch is
+    possible."""
+    asked: list = []
+
+    def _fetch(cid, eid, *, provider=ci.PROVIDER_FIREFLIES):
+        asked.append((eid, provider))
+        return None
+
+    monkeypatch.setattr(ci, "fetch_transcript", _fetch)
+    call = ci.IndexedCall(
+        external_id="zm-9", title="Acme QBR", call_date="2026-07-20T10:00:00Z",
+        duration_min=30.0, participants=[], account=None, summary="",
+        provider=ci.PROVIDER_ZOOM,
+    )
+    assert ci._summarize_calls("ent-A", "summarize the acme qbr", [call]) is None
+    assert asked == [("zm-9", "zoom")]
+
+
+def test_an_indexed_call_defaults_to_fireflies():
+    """Every pre-existing construction site is untouched."""
+    call = ci.IndexedCall(
+        external_id="ff-1", title="t", call_date=None, duration_min=None,
+        participants=[], account=None, summary="",
+    )
+    assert call.provider == "fireflies"

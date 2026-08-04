@@ -34,15 +34,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 44 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("totals 45 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(44)
-    // 43 distinct connectors — the extra row is dual-typed Slack's second
+    expect(total).toBe(45)
+    // 44 distinct connectors — the extra row is dual-typed Slack's second
     // placement, not a second connector.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(43)
+    expect(distinct.size).toBe(44)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -121,12 +121,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Zoom, Slack", () => {
     // Slack is dual-typed (communication + customer-voice) so its card sits
     // on this shelf too — same item, same connection as in Communications.
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Slack",
+      "Fireflies", "Gong", "Zoom", "Slack",
     ])
   })
 
@@ -189,7 +189,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "confluence", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr",
+        "hubspot", "jira", "slack", "sprinklr", "zoom",
       ].sort(),
     )
   })
@@ -227,6 +227,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -296,6 +297,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -309,7 +311,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Analytics")).toEqual(["superset"])
     // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "slack",
+      "sprinklr", "fireflies", "zoom", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
@@ -359,6 +361,27 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const before = CONNECTOR_CATALOG.flatMap((c) => c.items).length
     connectableCatalog()
     expect(CONNECTOR_CATALOG.flatMap((c) => c.items).length).toBe(before)
+  })
+})
+
+describe("Zoom", () => {
+  it("sits on the Voice shelf, OAuth-wired and typed as meetings", () => {
+    // The type is what makes it evidence-bearing (it mirrors catalog.py), so a
+    // drift here silently changes whether Zoom alone can drive a brief.
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const zoom = voice.items.find((i) => i.id === "zoom")!
+    expect(zoom).toBeTruthy()
+    expect(zoom.name).toBe("Zoom")
+    expect(zoom.oauth).toBe(true)
+    expect(zoom.types).toEqual(["meetings"])
+  })
+
+  it("bundles its mark locally rather than hotlinking the provider", () => {
+    const zoom = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "zoom",
+    )!
+    expect(zoom.logoSvg).toBe("/connectors/zoom.svg")
+    expect(zoom.logoSvg?.startsWith("http")).toBe(false)
   })
 })
 

@@ -208,6 +208,18 @@ class Settings(BaseSettings):
     confluence_client_secret: str = ""
     confluence_oauth_redirect_uri: str = ""
 
+    # Zoom connector (OAuth 2.0 authorization-code flow; ~1h access tokens and
+    # 90-day refresh tokens that ROTATE on every refresh). A General,
+    # ADMIN-MANAGED app in the Zoom Marketplace — a user-managed app cannot be
+    # granted the `:admin` scopes at all, and Server-to-Server apps cannot hold
+    # the granular cloud_recording scopes either. The scopes are admin-level
+    # (`…:admin`), so the person who clicks Connect must be a Zoom account
+    # owner/admin: the connection is org-wide, reading every host's cloud
+    # recordings, not just the connector's own.
+    zoom_client_id: str = ""
+    zoom_client_secret: str = ""
+    zoom_oauth_redirect_uri: str = ""
+
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
     hubspot_client_secret: str = ""

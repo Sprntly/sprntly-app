@@ -24,7 +24,7 @@ const SETTINGS_KEYWORDS: Partial<Record<SettingsSectionId, string[]>> = {
   "business-context": ["context", "lens", "strategy"],
   workspaces: ["workspace", "rename", "create workspace"],
   team: ["members", "roles", "invite", "permissions"],
-  connectors: ["integrations", "google drive", "github", "figma", "slack", "jira", "confluence", "clickup", "hubspot", "asana"],
+  connectors: ["integrations", "google drive", "github", "figma", "slack", "jira", "confluence", "clickup", "hubspot", "asana", "zoom"],
   mcp: ["token", "api", "model context protocol", "access"],
   billing: ["plan", "subscription", "payment", "invoice"],
   security: ["password", "sign out", "sessions"],
