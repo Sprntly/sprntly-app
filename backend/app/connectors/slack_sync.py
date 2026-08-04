@@ -620,3 +620,228 @@ def _update_sync_status(
         )
     except Exception:
         logger.warning("Failed to auto-enable slack input source", exc_info=True)
+
+
+# ───── Un-syncing a channel (the reverse of picking one) ─────
+#
+# Unticking a channel in the picker has to undo what ticking it did, and the
+# messages it already pulled are the half that used to survive forever. The
+# corpus doc is the layer where that is genuinely reversible per channel:
+# `channel_messages_to_markdown` writes one `## #<name>` section per channel
+# and `channels_summary_to_markdown` writes one table row per channel, so a
+# channel's content is a contiguous, addressable slice of slack_channels.md
+# rather than being interleaved with everything else.
+#
+# The KG is NOT reversible per channel and this module deliberately does not
+# pretend otherwise: `_seed_from_corpus` extracts slack_channels.md as ONE
+# document and stamps every signal with `provenance["doc"] = "slack_channels"`
+# — there is no per-channel key to select on, so signals from the removed
+# channel are indistinguishable from signals from the channels that were kept.
+# Callers therefore trim the corpus here and then kick the ordinary corpus
+# re-seed, which is exactly what a normal sync does; the removed channel stops
+# being re-extracted and its already-extracted signals age out on the usual
+# source_type window instead of being deleted. Expiring the whole slack doc's
+# signals to force the issue was rejected for the reason the Drive
+# file-removal commit gives: retiring evidence the user KEPT is materially
+# worse than briefly retaining evidence they dropped.
+
+_CHANNEL_HEADING_RE = re.compile(r"^## #(?P<name>.+?)\s*$")
+_SUMMARY_ROW_RE = re.compile(r"^\|\s*#(?P<name>[^|]+?)\s*\|")
+_TOTAL_CHANNELS_RE = re.compile(r"^\*\*Total channels synced:\*\*\s*\d+\s*$")
+_HEADER_COUNTS_RE = re.compile(
+    r"^\*\*Channels:\*\*\s*\d+\s*\|\s*\*\*Messages:\*\*\s*\d+\s*\|\s*"
+    r"\*\*Thread replies:\*\*\s*(?P<threads>\d+)\s*$"
+)
+
+
+def _summary_row_message_count(line: str) -> int:
+    """The "Messages Synced" cell of a summary-table row, 0 when unparseable.
+    Cells are `| #name | members | messages | topic |`."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 3:
+        return 0
+    try:
+        return int(cells[2])
+    except (TypeError, ValueError):
+        return 0
+
+
+def remove_channels_from_corpus(dataset: str, channel_names: list[str]) -> int:
+    """Strip the named channels out of `DATA_DIR/{dataset}/slack_channels.md`.
+
+    Removes each channel's `## #<name>` section AND its row in the Channels
+    Overview table, then rewrites the two count lines from what survives so
+    the doc doesn't claim more channels than it contains — an LLM reading
+    "Channels: 5" above four sections will happily reason about the fifth.
+    Channel count and message count are both recomputed exactly (the table
+    carries per-channel message counts); the thread-replies total is left
+    as-is because it is never broken down per channel anywhere in the doc,
+    and the next full sync rewrites the whole header regardless.
+
+    Returns the number of channel sections actually removed. A missing file,
+    a doc with no matching section, or an empty name list are all 0 — not
+    errors. Names are matched case-insensitively; Slack channel names are
+    already lowercase, but a stored display name may not be.
+
+    Deleting the file wholesale when nothing is left is deliberate: an empty
+    Slack doc still reads to the corpus loader as a Slack document and would
+    keep `slack` looking like a live evidence source with zero content.
+    """
+    wanted = {n.strip().lstrip("#").lower() for n in channel_names if n and n.strip()}
+    if not wanted:
+        return 0
+    path = settings.data_path / dataset / "slack_channels.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+    except OSError as exc:
+        logger.warning("slack un-sync: cannot read %s: %s", path, exc)
+        return 0
+
+    kept_lines: list[str] = []
+    removed = 0
+    kept_messages = 0
+    kept_channels = 0
+    dropping = False
+    for line in text.splitlines():
+        heading = _CHANNEL_HEADING_RE.match(line)
+        if heading:
+            dropping = heading.group("name").strip().lower() in wanted
+            if dropping:
+                removed += 1
+                continue
+        if dropping:
+            # ONLY a `## #<name>` heading closes a dropped section, not any
+            # `## ` line. Message text is written into the doc verbatim, so a
+            # Slack message whose body happens to be a markdown heading would
+            # otherwise end the drop early and leave half a removed channel's
+            # conversation in the corpus. Channel sections are the tail of the
+            # file (header, then Channels Overview, then `---`, then bodies),
+            # so there is no other heading down here to protect.
+            continue
+
+        row = _SUMMARY_ROW_RE.match(line)
+        if row:
+            if row.group("name").strip().lower() in wanted:
+                continue
+            kept_channels += 1
+            kept_messages += _summary_row_message_count(line)
+        kept_lines.append(line)
+
+    if not removed:
+        return 0
+
+    # Rewrite the counts from what survived the trim.
+    rewritten: list[str] = []
+    for line in kept_lines:
+        if _TOTAL_CHANNELS_RE.match(line):
+            rewritten.append(f"**Total channels synced:** {kept_channels}")
+            continue
+        counts = _HEADER_COUNTS_RE.match(line)
+        if counts:
+            rewritten.append(
+                f"**Channels:** {kept_channels} | "
+                f"**Messages:** {kept_messages} | "
+                f"**Thread replies:** {counts.group('threads')}"
+            )
+            continue
+        rewritten.append(line)
+
+    try:
+        if kept_channels == 0:
+            path.unlink()
+            logger.info(
+                "slack un-sync: removed the last %d channel(s) from %s — "
+                "deleted the empty corpus doc", removed, dataset,
+            )
+        else:
+            path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+            logger.info(
+                "slack un-sync: removed %d channel section(s) from %s "
+                "(%d channels / %d messages remain)",
+                removed, dataset, kept_channels, kept_messages,
+            )
+    except OSError as exc:
+        logger.warning("slack un-sync: cannot rewrite %s: %s", path, exc)
+        return 0
+    return removed
+
+
+def company_dataset_slugs(company_id: str) -> list[str]:
+    """Every dataset slug this company owns — the company's bare slug plus one
+    per workspace (`{company}--{workspace}`).
+
+    Every slug comes from the company's OWN rows; nothing here is derived from
+    request input, so this cannot be steered at another tenant's corpus
+    directory the way a client-supplied `dataset` could. Order is stable
+    (default first) and duplicates are collapsed, because the default
+    workspace's dataset IS the bare company slug.
+    """
+    from app.db.companies import slug_for_company_id
+    from app.db.workspaces import (
+        dataset_slug_for_workspace,
+        list_workspaces_for_company,
+    )
+
+    slugs: list[str] = []
+    try:
+        default = slug_for_company_id(company_id)
+        if default:
+            slugs.append(default)
+    except Exception:  # noqa: BLE001 — a missing company must not break cleanup
+        logger.warning("slack un-sync: no company slug for %s", company_id,
+                       exc_info=True)
+    try:
+        for ws in list_workspaces_for_company(company_id):
+            slug = dataset_slug_for_workspace(str(ws.get("id") or ""))
+            if slug:
+                slugs.append(slug)
+    except Exception:  # noqa: BLE001 — workspaces are optional
+        logger.warning("slack un-sync: workspace lookup failed for %s",
+                       company_id, exc_info=True)
+    return list(dict.fromkeys(s for s in slugs if s))
+
+
+def purge_channels_from_synced_data(
+    company_id: str, channel_names: list[str]
+) -> dict[str, Any]:
+    """Remove unticked channels' pulled messages from everywhere the company's
+    synced Slack data lives, then re-seed the KG the way a sync does.
+
+    Sweeps EVERY dataset the company owns, not just the default one: the
+    scheduled refresh writes to the company slug but the manual
+    /slack/sync-to-corpus route writes to whichever owned dataset the caller
+    passed, so a workspace dataset can hold its own slack_channels.md.
+
+    Returns {"datasets": [...], "sections_removed": N, "reseeded": [...]}.
+    Fully best-effort — this is cleanup behind a save that has already
+    committed, so any failure is logged and reported, never raised.
+    """
+    summary: dict[str, Any] = {
+        "datasets": [], "sections_removed": 0, "reseeded": [],
+    }
+    if not channel_names:
+        return summary
+
+    from app.kg_ingest.auto_sync import kickoff_corpus_seed
+
+    for slug in company_dataset_slugs(company_id):
+        summary["datasets"].append(slug)
+        try:
+            removed = remove_channels_from_corpus(slug, channel_names)
+        except Exception:  # noqa: BLE001 — one bad dataset never stops the rest
+            logger.exception("slack un-sync: corpus trim failed for %s", slug)
+            continue
+        if not removed:
+            continue
+        summary["sections_removed"] += removed
+        # Same refresh path a normal sync uses (see the section comment above):
+        # the trimmed doc is a new content hash, so it re-extracts, and the
+        # removed channel is simply never seen again.
+        try:
+            if kickoff_corpus_seed(company_id, slug):
+                summary["reseeded"].append(slug)
+        except Exception:  # noqa: BLE001 — a seed kickoff must never surface
+            logger.exception("slack un-sync: corpus re-seed failed for %s", slug)
+    return summary
