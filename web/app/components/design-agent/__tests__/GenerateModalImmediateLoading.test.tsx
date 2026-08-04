@@ -40,12 +40,14 @@ vi.mock("../DesignAgentDrawer", async (importOriginal) => {
 import { GenerateModal } from "../GenerateModal"
 import { runGenerateFlow } from "../DesignAgentDrawer"
 import {
+  ApiError,
   connectorsApi,
   designAgentApi,
   type ConnectionSummary,
   type GitHubRepo,
   type LocateResponse,
 } from "../../../lib/api"
+import type { DesignSourcePreference } from "../../../lib/onboarding/types"
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -524,6 +526,197 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
     expect(spy).toHaveBeenCalledTimes(1)
     // No auto-pick of the sub-threshold candidate — generation has NOT started.
     expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+})
+
+// ─── manual-flow regression: a locate failure never blanks the surface ───────
+//
+// The render-guard change for the undetermined-fallback is scoped entirely
+// inside `if (savedPreference && ...)` — this suite's flows never pass one.
+// This confirms that scoping actually holds: the ordinary manual failure →
+// error → Switch source recovery (unrelated to any saved preference) is
+// unaffected by the new machinery.
+
+describe("no regression: a manual locate failure never blanks the surface", () => {
+  it("T5 — locate failure → error → Switch source renders the config form again, never blank", async () => {
+    vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container } = render(React.createElement(GenerateModal, manualProps()))
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    expect(container.querySelector('[data-testid="locate-retry"]')).toBeTruthy()
+
+    const switchSource = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-error-switch-source"]',
+    )
+    expect(switchSource).toBeTruthy()
+    act(() => switchSource!.click())
+
+    // Back in config, never blank.
+    expect(
+      container.querySelector('[data-testid="generate-btn"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="locate-error-state"]'),
+    ).toBeNull()
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+})
+
+// ─── late arrival (AC9) ────────────────────────────────────────────────────
+//
+// The repo list resolving AFTER the undetermined fallback has already
+// rendered must be absorbed in place — repopulate, preserve the selection,
+// drop the notice — never replace the surface, never re-arm the auto-skip.
+// A late list that turns out NOT to contain the saved repo instead falls back
+// to the existing unhealthy-preference UI; no new state is invented for it.
+
+describe("T8 — late arrival: the repo list resolves after the undetermined fallback has rendered", () => {
+  function githubPref(): DesignSourcePreference {
+    return {
+      design_source: "github",
+      github_repo: SEL_REPO,
+      figma_file_key: null,
+      website_url: null,
+    }
+  }
+
+  function otherRepo(name: string): GitHubRepo {
+    return {
+      full_name: name,
+      name: name.split("/")[1] ?? name,
+      private: false,
+      html_url: `https://github.com/${name}`,
+      default_branch: "main",
+      description: null,
+      updated_at: "2024-01-01T00:00:00Z",
+      stargazers_count: 0,
+    }
+  }
+
+  it("positive: the list arrives late and contains the saved repo — repopulates, selection survives, notice drops, no auto-skip", async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveRepos: (r: { repositories: GitHubRepo[] }) => void = () => {}
+      vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+        new Promise((res) => {
+          resolveRepos = res
+        }),
+      )
+      const locateSpy = vi.spyOn(designAgentApi, "locate")
+
+      const { container } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: githubPref(),
+          _testConnections: GITHUB_CONN,
+        }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+
+      // The fallback is showing: notice present, select seeded with the
+      // single saved repo as both its option and its value.
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeTruthy()
+      let select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe(SEL_REPO)
+
+      const fullerList = [...REPOS, otherRepo("org/other-repo")]
+      await act(async () => {
+        resolveRepos({ repositories: fullerList })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // Repopulated with the full list; the selection is preserved; the
+      // notice is gone; the surface was never replaced (still the config
+      // form), and no auto-skip fired underneath the user.
+      select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe(SEL_REPO)
+      expect(select!.options.length).toBe(3) // "Pick repo…" + 2 repos
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeNull()
+      expect(
+        container.querySelector('[data-testid="generate-btn"]'),
+      ).toBeTruthy()
+      expect(locateSpy).not.toHaveBeenCalled()
+      expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("negative: the list arrives late and does NOT contain the saved repo — pre-selection clears, existing unhealthy behaviour applies, no new state", async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveRepos: (r: { repositories: GitHubRepo[] }) => void = () => {}
+      vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+        new Promise((res) => {
+          resolveRepos = res
+        }),
+      )
+
+      const { container } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: githubPref(),
+          _testConnections: GITHUB_CONN,
+        }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeTruthy()
+
+      await act(async () => {
+        resolveRepos({ repositories: [otherRepo("org/other-repo")] })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // Existing unhealthy-preference behaviour takes over — empty select,
+      // Generate disabled, the pre-existing footer helper. No new state.
+      const select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe("")
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeNull()
+      expect(
+        container.querySelector('[data-testid="codebase-no-repo-helper"]'),
+      ).toBeTruthy()
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn!.disabled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

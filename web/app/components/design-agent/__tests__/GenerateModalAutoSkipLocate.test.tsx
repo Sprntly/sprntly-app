@@ -776,3 +776,247 @@ describe("auto-skip locate failure surfaces the error state, never blank", () =>
     expect(container.querySelector('[data-testid="locate-error-state"]')).toBeNull()
   })
 })
+
+// ─── undetermined-fallback: the saved-preference decision never arrives ──────
+//
+// The render guard used to `return null` with no floor: a repo-list or
+// connector fetch that never settles left the modal permanently blank —
+// nothing (not the guard, not the auto-skip effect) could ever replace it.
+// These tests drive the two bounded-wait timers (300ms chrome-only, then a 5s
+// bound) with fake timers and assert the modal always reaches something
+// actionable rather than staying null forever.
+
+describe("undetermined-fallback: the saved-preference decision never arrives", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("T1 — RED today: a repo-list fetch that never settles still reaches an actionable state within 5s, not null", async () => {
+    vi.useFakeTimers()
+    // Never resolves — the concrete "stalls forever" path (a hung request or
+    // a persistent 401 both land here; T7 below drives the 401 variant
+    // specifically).
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        // No _testRepos — force the real (hanging) fetch.
+      }),
+    )
+
+    // Still inside the bound: nothing actionable yet.
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    expect(btn!.disabled).toBe(false)
+  })
+
+  it("T2 — the terminal state offers every other source and the proceed-anyway path (AC3)", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Proceeding anyway: Generate is enabled with the seeded repo.
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn?.disabled).toBe(false)
+
+    // Every other source is one click away — the pills are live, not stranded
+    // on the thing that stalled.
+    expect(container.querySelector('[data-val="figma"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="website"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="screenshot"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="github"]')).toBeTruthy()
+  })
+
+  it("T3 — a healthy saved preference still auto-skips with no form flash, even once the deciding window fully elapses (AC5)", async () => {
+    vi.useFakeTimers()
+    mockLocateResolves(makeLocate())
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+      }),
+    )
+
+    // Data was injected synchronously (healthy, decided well inside 300ms) —
+    // neither the form nor the checking row ever mounts.
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    expect(
+      container.querySelector('[data-testid="saved-source-check"]'),
+    ).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Even once the bound has fully elapsed, the healthy auto-skip already
+    // took over — the undetermined fallback never appears, and generation
+    // proceeded through the normal locate→generate sequence.
+    expect(
+      container.querySelector('[data-testid="saved-source-undetermined"]'),
+    ).toBeNull()
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+  })
+
+  it("T4 — connections stalling produces the same handled outcome on the Figma/Website branch (AC6)", async () => {
+    vi.useFakeTimers()
+    // Never resolves — connections can stall for a non-github saved source
+    // exactly as it can for github.
+    vi.spyOn(connectorsApi, "list").mockReturnValue(new Promise<never>(() => {}))
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: WEBSITE_PREF,
+        // No _testConnections — force the real (hanging) fetch.
+      }),
+    )
+
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    // Website needs no connector confirmation to proceed.
+    expect(btn!.disabled).toBe(false)
+  })
+
+  it("T6 — RED today, AC7 (the one most likely to be skipped): with the repo list undetermined and a saved github_repo, the recovered form seeds the select AND enables Generate, and submitting it works", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+    mockLocateResolves(makeLocate())
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // The load-bearing detail (AC7): the saved repo is BOTH the select's only
+    // option AND its value — not merely present somewhere on the page.
+    const select = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Select a repo"]',
+    )
+    expect(select).toBeTruthy()
+    expect(select!.value).toBe(SEL_REPO)
+    expect(
+      Array.from(select!.options).some((o) => o.value === SEL_REPO),
+    ).toBe(true)
+
+    // Falling through to the form alone is NOT what this asserts — the button
+    // state, not the form's presence, is the AC.
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn?.disabled).toBe(false)
+
+    act(() => btn!.click())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500)
+    })
+
+    // Submitting actually works: locate fired with the seeded repo and
+    // generation followed.
+    expect(designAgentApi.locate).toHaveBeenCalledWith({
+      prd_id: PRD_ID,
+      github_repo: SEL_REPO,
+    })
+    expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+  })
+
+  it("T7 — the 401-swallowing path specifically: withAuthRetry exhausts on a persistent 401, setRepos is never called, and the modal still reaches an actionable state within the bound", async () => {
+    vi.useFakeTimers()
+    const reposSpy = vi
+      .spyOn(connectorsApi, "listAccessibleGithubRepos")
+      .mockRejectedValue(new ApiError(401, { detail: "unauthorized" }))
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // The 401 is swallowed by design — setRepos/setReposError never fire, so
+    // `repos` truly stays null (this is the "repos" reason, not the
+    // "connections" reason: the connector row still reads Connected, not
+    // "Couldn't check").
+    expect(
+      container.querySelector('[data-testid="src-unverified"]'),
+    ).toBeNull()
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    expect(btn!.disabled).toBe(false)
+    // withAuthRetry's one shot + one retry, both swallowed 401s.
+    expect(reposSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
