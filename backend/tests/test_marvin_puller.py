@@ -436,6 +436,221 @@ def test_pull_requests_a_full_page_when_the_tool_offers_paging():
     assert by_tool["list_files"]["page_size"] == marvin._PAGE_SIZE
 
 
+# ─────────────────────────── paging ───────────────────────────
+#
+# A one-page pull is how a connector reports a workspace smaller than it is, and
+# nothing downstream can detect it: the KG receives the first hundred research
+# files and has no way to know a 300-file repository was cut at page one. These
+# pin the three bounds that replace it — the item cap, the page ceiling, and the
+# repeat-cursor guard — plus the argument-resolution trap that would send a page
+# token where a row count belongs.
+
+
+def _project_page(rows: list[dict], cursor: str | None = None) -> dict:
+    """A listing wrapped in an envelope, the way a paging server returns one."""
+    envelope: dict = {"results": rows}
+    if cursor:
+        envelope["nextCursor"] = cursor
+    return {"structuredContent": envelope}
+
+
+def _calls_to(session: _FakeSession, tool: str) -> list[dict]:
+    return [args for name, args in session.calls if name == tool]
+
+
+def test_paging_resolution_never_mistakes_a_page_size_for_a_page_number():
+    """THE resolution trap. `ToolSpec.param` falls back to substring matching
+    and "page" is a substring of "page_size", so a tool exposing only a row
+    count would have it resolved as its page NUMBER — and the second request
+    would ask for 2 rows instead of the next hundred."""
+    paging = marvin._resolve_paging(ToolSpec("list", {"properties": {"page_size": {}}}))
+    assert paging.size_param == "page_size"
+    assert paging.cursor_param is None
+    assert paging.style == ""
+
+
+def test_paging_resolution_reads_each_convention_for_what_it_means():
+    def paging(properties):
+        return marvin._resolve_paging(ToolSpec("list", {"properties": properties}))
+
+    assert paging({"limit": {}, "cursor": {}}).style == "cursor"
+    assert paging({"limit": {}, "starting_after": {}}).cursor_param == "starting_after"
+    assert paging({"limit": {}, "offset": {}}).style == "offset"
+    assert paging({"page_size": {}, "page": {}}).style == "page"
+    # A cursor is server-driven, so it needs no page size. Offset and page
+    # numbers advance BLIND — a short page is the only end-of-data signal, and
+    # it cannot be recognised without knowing how long a full page is.
+    assert paging({"cursor": {}}).style == "cursor"
+    assert paging({"offset": {}}).style == ""
+    assert paging({}).style == ""
+
+
+def test_pull_follows_a_cursor_until_the_server_stops_offering_one():
+    tools = [
+        _tool("list_projects", properties={"limit": {}, "cursor": {}}),
+        _tool("list_files"),
+    ]
+    pages = {
+        None: _project_page([{"id": "p1", "name": "A"}], cursor="c2"),
+        "c2": _project_page([{"id": "p2", "name": "B"}], cursor="c3"),
+        "c3": _project_page([{"id": "p3", "name": "C"}]),
+    }
+    session = _FakeSession(tools, {
+        "list_projects": lambda args: pages[args.get("cursor")],
+        "list_files": _structured([]),
+    })
+    records = _run(session)
+
+    assert [r.external_id for r in records] == [
+        "project:p1", "project:p2", "project:p3",
+    ]
+    assert [a.get("cursor") for a in _calls_to(session, "list_projects")] == [
+        None, "c2", "c3",
+    ]
+    # Every page still asks for a full one.
+    assert {a["limit"] for a in _calls_to(session, "list_projects")} == {
+        marvin._PAGE_SIZE,
+    }
+
+
+def test_pull_stops_at_the_page_ceiling_when_a_cursor_never_ends():
+    """A server that always offers a next page would otherwise spin the sync
+    thread forever — the same failure `mcp_client.list_tools` bounds."""
+    tools = [
+        _tool("list_projects", properties={"limit": {}, "cursor": {}}),
+        _tool("list_files"),
+    ]
+    served = {"n": 0}
+
+    def endless(_args):
+        served["n"] += 1
+        return _project_page(
+            [{"id": f"p{served['n']}", "name": "P"}], cursor=f"c{served['n']}",
+        )
+
+    session = _FakeSession(tools, {
+        "list_projects": endless, "list_files": _structured([]),
+    })
+    records = _run(session)
+    assert served["n"] == marvin._MAX_PAGES
+    assert len(records) == marvin._MAX_PAGES
+
+
+def test_pull_stops_when_a_server_repeats_the_same_cursor():
+    """The other shape of forever: a cursor that never advances. Without the
+    repeat guard this re-reads page one until the page ceiling."""
+    tools = [
+        _tool("list_projects", properties={"limit": {}, "cursor": {}}),
+        _tool("list_files"),
+    ]
+    session = _FakeSession(tools, {
+        "list_projects": lambda _a: _project_page(
+            [{"id": "p1", "name": "A"}], cursor="stuck",
+        ),
+        "list_files": _structured([]),
+    })
+    records = _run(session)
+    assert len(_calls_to(session, "list_projects")) == 2
+    assert [r.external_id for r in records] == ["project:p1"]
+
+
+def test_the_item_cap_beats_the_page_ceiling(monkeypatch):
+    """The caps are the product bound; the page ceiling is only the runaway
+    guard. Whichever binds first must be the item cap."""
+    monkeypatch.setattr(marvin, "_MAX_PROJECTS", 3)
+    tools = [
+        _tool("list_projects", properties={"limit": {}, "cursor": {}}),
+        _tool("list_files"),
+    ]
+    served = {"n": 0}
+
+    def two_per_page(_args):
+        served["n"] += 1
+        return _project_page(
+            [{"id": f"p{served['n']}-{i}", "name": "P"} for i in range(2)],
+            cursor=f"c{served['n']}",
+        )
+
+    session = _FakeSession(tools, {
+        "list_projects": two_per_page, "list_files": _structured([]),
+    })
+    records = _run(session)
+    assert served["n"] == 2                    # stopped as soon as 3 was passed
+    assert len([r for r in records if r.kind == "project"]) == 3
+
+
+def test_pull_follows_an_offset_until_a_short_page_ends_the_listing(monkeypatch):
+    monkeypatch.setattr(marvin, "_PAGE_SIZE", 2)
+    tools = [
+        _tool("list_projects", properties={"limit": {}, "offset": {}}),
+        _tool("list_files"),
+    ]
+
+    def by_offset(args):
+        offset = args.get("offset") or 0
+        count = 2 if offset == 0 else 1     # second page is short → exhausted
+        return _structured(
+            [{"id": f"p{offset + i}", "name": "P"} for i in range(count)]
+        )
+
+    session = _FakeSession(tools, {
+        "list_projects": by_offset, "list_files": _structured([]),
+    })
+    records = _run(session)
+    assert [a.get("offset") for a in _calls_to(session, "list_projects")] == [None, 2]
+    assert [r.external_id for r in records] == [
+        "project:p0", "project:p1", "project:p2",
+    ]
+
+
+def test_files_page_within_each_project_scope():
+    """Paging has to run per scope, not once: a workspace whose files are listed
+    per project pages inside every project."""
+    tools = [
+        _tool("list_projects"),
+        _tool("list_files", properties={"project_id": {}, "limit": {}, "cursor": {}}),
+    ]
+
+    def files(args):
+        project = args["project_id"]
+        if args.get("cursor"):
+            return _project_page([
+                {"id": f"{project}-b", "name": "S", "summary": "second page"},
+            ])
+        return _project_page(
+            [{"id": f"{project}-a", "name": "S", "summary": "first page"}],
+            cursor=f"{project}-next",
+        )
+
+    session = _FakeSession(tools, {
+        "list_projects": _structured([{"id": "p1", "name": "A"},
+                                      {"id": "p2", "name": "B"}]),
+        "list_files": files,
+    })
+    ids = {r.external_id for r in _run(session) if r.kind == "research_file"}
+    assert ids == {"file:p1-a", "file:p1-b", "file:p2-a", "file:p2-b"}
+
+
+def test_a_tool_serving_both_listings_does_not_double_every_record():
+    """A server may expose ONE listing tool — `list_projects_and_files` claims
+    `list_files` by name and `list_projects` by description, so the same rows
+    arrive down both paths. Both roles must keep working (nothing is dropped)
+    without the repository appearing twice in the graph."""
+    tools = [_tool("list_projects_and_files", "List all projects and files")]
+    session = _FakeSession(tools, {
+        "list_projects_and_files": _structured([
+            {"id": "p1", "name": "Onboarding research", "summary": "why teams stall"},
+            {"id": "f1", "name": "Interview — Dana", "summary": "could not invite"},
+        ]),
+    })
+    caps = resolve_capabilities(tools)
+    assert caps["list_files"].name == caps["list_projects"].name
+
+    records = _run(session)
+    assert [r.external_id for r in records] == ["project:p1", "project:f1"]
+    assert len({r.external_id for r in records}) == len(records)
+
+
 def test_pull_skips_records_with_no_id_or_no_analysis():
     tools = [_tool("list_projects"), _tool("list_files")]
     session = _FakeSession(tools, {

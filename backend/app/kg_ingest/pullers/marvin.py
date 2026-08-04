@@ -33,6 +33,7 @@ Auth: the packed (access_token, mcp_url) credential from marvin_oauth —
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -50,16 +51,37 @@ logger = logging.getLogger(__name__)
 
 PROVIDER = "marvin"
 
-# Pilot-scale caps, mirroring the other voice-of-customer pullers. A research
+# Item caps, mirroring the other voice-of-customer pullers. A research
 # repository is small by row count but heavy by document size, so the binding
 # constraint is characters, not pages.
-_MAX_PROJECTS = 50
-_MAX_FILES = 200
+#
+# These are the TRUE bound on a pull, and they are deliberately whole-workspace
+# rather than pilot-scale. The Fireflies puller made the same move for the same
+# reason: a cap sized for a demo silently truncates a real customer's corpus,
+# and a truncated corpus is indistinguishable from a small one once it reaches
+# the knowledge graph — nothing downstream can tell "these are all the studies"
+# from "these are the first fifty". A team that has run research for two years
+# has a few hundred files, so the cap has to sit above that or the KG quietly
+# answers from the oldest half of the repository.
+#
+# `_MAX_FILES` is the expensive one: each file costs an extra `get_file` round
+# trip for its analysis layer (see `_build_file_record`), so this is ~500 MCP
+# calls at the ceiling. That is acceptable in a background sync thread and is
+# why the FILE cap is raised less aggressively than the project cap, which
+# costs one listing call in total.
+_MAX_PROJECTS = 200
+_MAX_FILES = 500
 _MAX_TEXT = 4000
 _MAX_TITLE = 300
 #: Page size requested from list/search tools that accept one. Marvin's search
 #: documents a default of 20 and a maximum of 100.
 _PAGE_SIZE = 100
+#: Hard ceiling on pages followed for ONE listing, mirroring the identical bound
+#: in `mcp_client.list_tools`. A server that keeps handing back a cursor — or
+#: one whose paging argument we misread — would otherwise spin a sync thread
+#: indefinitely. Ten pages × `_PAGE_SIZE` is above both item caps, so in normal
+#: operation the item cap is what stops the loop and this never fires.
+_MAX_PAGES = 10
 
 
 # ── Capability resolution ───────────────────────────────────────────────────
@@ -292,10 +314,174 @@ def _call(session: McpSession, spec: ToolSpec, args: dict[str, Any]) -> dict[str
         return None
 
 
-def _paging_args(spec: ToolSpec) -> dict[str, Any]:
-    """Ask for a full page when the tool accepts a page-size parameter."""
-    param = spec.param("limit", "page_size", "per_page", "max_results", "count", "size")
-    return {param: _PAGE_SIZE} if param else {}
+# ── Paging ──────────────────────────────────────────────────────────────────
+#
+# Asking for one page of 100 and stopping is how a connector reports a workspace
+# smaller than it is. Nothing downstream can detect it: the KG receives 100
+# research files and has no way to know a 300-file repository was cut at the
+# first page, so a brief built on it reads as a complete picture of the
+# research. Following the pages is the only honest option, and the caps above
+# then bound the pull as an ITEM count rather than as an accident of page size.
+#
+# Marvin publishes no schema, so the paging argument is discovered the same way
+# every other argument is (`ToolSpec.param` against the tool's own inputSchema).
+# Three conventions exist in the wild and they mean different things, so they are
+# resolved as separate groups rather than one list — sending a page NUMBER where
+# an opaque cursor belongs silently re-reads page one forever.
+
+#: Opaque continuation token supplied by the previous response. The MCP-native
+#: shape (`tools/list` itself pages this way) and the safest, because we only
+#: ever send a value the server just gave us.
+_CURSOR_PARAMS = ("cursor", "next_cursor", "after")
+#: Count of items already read.
+_OFFSET_PARAMS = ("offset",)
+#: 1-based page number.
+_PAGE_PARAMS = ("page",)
+#: Where a server puts the token for the next page — checked on the `tools/call`
+#: result itself and on the object a server wrapped its rows in. Deliberately
+#: excludes a bare `cursor`: a server echoing the cursor we just SENT would page
+#: in a circle, and the repeat guard should not be the only thing catching it.
+_NEXT_CURSOR_FIELDS = (
+    "nextcursor", "nexttoken", "nextpagetoken", "endcursor", "continuationtoken",
+)
+
+
+@dataclass
+class Paging:
+    """How to ask one resolved tool for its next page.
+
+    `style` is "" when the tool exposes no usable paging argument, in which case
+    the single page it returns is all there is and the pull says so by simply
+    stopping.
+    """
+
+    size_param: str | None
+    cursor_param: str | None
+    style: str
+
+
+def _resolve_paging(spec: ToolSpec) -> Paging:
+    """Discover `spec`'s page-size and next-page arguments.
+
+    Two guards, both load-bearing:
+
+    `ToolSpec.param` falls back to SUBSTRING matching, and "page" is a substring
+    of "page_size". Without the collision check below, a tool exposing only
+    `page_size` would have its row-count argument resolved as its page NUMBER,
+    and the second request would ask for 2 rows instead of the next hundred.
+
+    Offset- and page-numbered paging is only used when a page SIZE is also known,
+    because those two styles advance blind — nothing in the response says
+    "there is more". A short page is the only available end-of-data signal (the
+    same test `fireflies.fetch_calls_with_quotes` uses), and a short page cannot
+    be recognised without knowing how long a full one is. Cursor paging has no
+    such requirement: it is driven entirely by what the server hands back.
+    """
+    size_param = spec.param(
+        "limit", "page_size", "per_page", "max_results", "count", "size"
+    )
+    for style, candidates in (
+        ("cursor", _CURSOR_PARAMS),
+        ("offset", _OFFSET_PARAMS),
+        ("page", _PAGE_PARAMS),
+    ):
+        if style != "cursor" and not size_param:
+            continue
+        param = spec.param(*candidates)
+        if param and param != size_param:
+            return Paging(size_param, param, style)
+    return Paging(size_param, None, "")
+
+
+def _envelope(result: dict[str, Any]) -> dict[str, Any]:
+    """The object a server wrapped its page in, if it wrapped it in one.
+
+    `records_from_result` throws the wrapper away — it wants the rows — but the
+    next-page token usually lives ON the wrapper, beside them.
+    """
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+    text = text_from_result(result).strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _next_cursor(result: dict[str, Any]) -> str:
+    """The continuation token this page carries, or "" when it is the last."""
+    for source in (result, _envelope(result)):
+        for key, value in source.items():
+            if not isinstance(key, str):
+                continue
+            if _normalize_key(key) not in _NEXT_CURSOR_FIELDS:
+                continue
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value)
+    return ""
+
+
+def _paged_records(
+    session: McpSession,
+    spec: ToolSpec,
+    base_args: dict[str, Any],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    """Rows from `spec`, following its own paging convention.
+
+    Bounded three ways, and all three are needed for different failures:
+    `max_items` is the product bound (the caps above), `_MAX_PAGES` bounds a
+    server that never stops offering a next page, and the repeat-cursor guard
+    catches one that offers the SAME next page forever. A page we cannot call,
+    or that fails, ends the listing with what we already have rather than losing
+    it — the same non-fatal treatment `_call` gives a single failed tool.
+    """
+    paging = _resolve_paging(spec)
+    rows: list[dict[str, Any]] = []
+    cursor = ""
+    seen_cursors: set[str] = set()
+
+    for page_number in range(_MAX_PAGES):
+        args = dict(base_args)
+        if paging.size_param:
+            args[paging.size_param] = _PAGE_SIZE
+        if page_number and paging.cursor_param:
+            if paging.style == "cursor":
+                args[paging.cursor_param] = cursor
+            elif paging.style == "offset":
+                args[paging.cursor_param] = len(rows)
+            else:
+                args[paging.cursor_param] = page_number + 1
+
+        result = _call(session, spec, args)
+        if result is None:
+            break
+        page = records_from_result(result)
+        rows.extend(page)
+        if len(rows) >= max_items or not paging.cursor_param:
+            break
+
+        if paging.style == "cursor":
+            cursor = _next_cursor(result)
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+        elif not page or len(page) < _PAGE_SIZE:
+            # Short page → the listing is exhausted. The only end signal an
+            # offset/page-numbered tool gives us.
+            break
+    else:
+        logger.info(
+            "marvin: stopped %s at the %s-page ceiling with %s rows",
+            spec.name, _MAX_PAGES, len(rows),
+        )
+    return rows[:max_items]
 
 
 # ── Sub-pulls ───────────────────────────────────────────────────────────────
@@ -313,17 +499,23 @@ def _pull_projects(
     spec = caps.get("list_projects")
     if not spec:
         return [], []
-    result = _call(session, spec, _paging_args(spec))
-    if result is None:
+    rows = _paged_records(session, spec, {}, max_items=_MAX_PROJECTS)
+    if not rows:
         return [], []
 
-    rows = records_from_result(result)[:_MAX_PROJECTS]
+    # Deduped by id, because paging makes an overlapping page possible in a way
+    # a single request never did: a server that repeats a cursor, or that
+    # re-orders rows between pages, hands the same project back twice. The file
+    # listing has always deduped for the same reason (a file can sit in several
+    # projects); this is the projects half of that guard.
     records: list[RawRecord] = []
+    seen: set[str] = set()
     for row in rows:
         project_id = _first_str(row, _ID_FIELDS)
         title = _first_str(row, _TITLE_FIELDS)
-        if not project_id or not title:
+        if not project_id or not title or project_id in seen:
             continue
+        seen.add(project_id)
         records.append(RawRecord(
             provider=PROVIDER,
             kind="project",
@@ -356,22 +548,38 @@ def _pull_files(
             project_id = _first_str(project, _ID_FIELDS)
             if project_id:
                 scopes.append((
-                    {**_paging_args(spec), project_param: project_id},
+                    {project_param: project_id},
                     _first_str(project, _TITLE_FIELDS),
                 ))
     else:
-        scopes = [(_paging_args(spec), "")]
+        scopes = [({}, "")]
 
+    # ONE tool can legitimately serve BOTH listing roles: a server exposing
+    # `list_projects_and_files` resolves to `list_files` on its name and to
+    # `list_projects` on its description, so the identical rows arrive down both
+    # paths. `_pull_projects` has already emitted them as `project:<id>`;
+    # emitting them again as `file:<id>` would duplicate the entire repository
+    # in the knowledge graph, with both copies looking like independent
+    # evidence. Seeding the dedup set with those ids is what makes the shared
+    # tool a single pull rather than a doubled one.
     seen: set[str] = set()
+    projects_spec = caps.get("list_projects")
+    if projects_spec and projects_spec.name == spec.name:
+        seen = {
+            pid for pid in (_first_str(p, _ID_FIELDS) for p in projects) if pid
+        }
+
+    kept = 0
     for args, project_title in scopes:
-        if len(seen) >= _MAX_FILES:
+        if kept >= _MAX_FILES:
             logger.info("marvin: hit the %s-file cap — stopping", _MAX_FILES)
             return
-        result = _call(session, spec, args)
-        if result is None:
-            continue
-        for row in records_from_result(result):
-            if len(seen) >= _MAX_FILES:
+        # The remaining budget, not the whole cap: a project-scoped listing that
+        # pages must not spend the entire file allowance before the later
+        # projects have been read at all.
+        rows = _paged_records(session, spec, args, max_items=_MAX_FILES - kept)
+        for row in rows:
+            if kept >= _MAX_FILES:
                 return
             file_id = _first_str(row, _ID_FIELDS)
             title = _first_str(row, _TITLE_FIELDS)
@@ -382,6 +590,7 @@ def _pull_files(
             if record:
                 if project_title and "project" not in record.properties:
                     record.properties["project"] = project_title
+                kept += 1
                 yield record
 
 
