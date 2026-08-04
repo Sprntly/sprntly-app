@@ -529,6 +529,64 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
   })
 })
 
+// ─── re-entry guard on the non-codebase (figma/website) manual path ──────────
+//
+// The codebase path's double-click guard above (`locateInFlightRef` inside
+// enterLoadingFlow) does not cover figma/website, which calls
+// runGenerateForRoute directly. These drive the guard independently of the
+// auto-generate effect (no savedPreference rerender involved, unlike the
+// GenerateModalAutoSkipLocate suite's T1/AC2) — a second handleGenerate
+// invocation before any re-render lands must still be refused, matching the
+// codebase branch's own re-entry guarantee (AC3).
+
+describe("re-entry guard on the manual non-codebase path (AC3)", () => {
+  it("T2 — a second submission fired before any re-render (in-flight) is refused, driven independently of the effect", async () => {
+    const onSavePreference = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
+      React.createElement(
+        GenerateModal,
+        manualProps({ _testInitSource: "figma", onSavePreference }),
+      ),
+    )
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+
+    // Both invocations happen inside the SAME synchronous act callback — no
+    // render lands between them, so `submitting` state cannot have flushed
+    // yet. Only a ref-based guard (not state) can catch this.
+    act(() => {
+      btn!.click()
+      btn!.click()
+    })
+
+    await waitFor(() =>
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
+    )
+    expect(onSavePreference).toHaveBeenCalledTimes(1)
+  })
+
+  it("T4 — rapid double-clicks on Generate (website source) produce one request", async () => {
+    const { container } = render(
+      React.createElement(GenerateModal, manualProps({ _testInitSource: "website" })),
+    )
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+
+    act(() => {
+      btn!.click()
+      btn!.click()
+    })
+
+    await waitFor(() =>
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
+    )
+  })
+})
+
 // ─── manual-flow regression: a locate failure never blanks the surface ───────
 //
 // The render-guard change for the undetermined-fallback is scoped entirely

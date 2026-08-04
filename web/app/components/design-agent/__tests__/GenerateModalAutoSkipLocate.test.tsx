@@ -376,6 +376,181 @@ describe("saved figma / website auto-skip never call locate (no regression)", ()
   })
 })
 
+// ─── manual figma submission must not double-fire via the auto-skip effect ───
+//
+// The double-generate mechanism: a manual Generate click on a figma/website
+// source calls onSavePreference (an async save-then-refresh round trip) and
+// then fires the FIRST generate. In the live app, onSavePreference resolving
+// hands a NEWLY-IDENTITY savedPreference prop back down (the parent's
+// workspace context re-renders after refresh()) — that prop is in the
+// auto-generate effect's dep array, so the effect re-runs. Before the fix,
+// nothing had latched autoSkipFiredRef for a manual (non-effect) submission,
+// so the effect finds the preference the click itself just saved newly
+// "healthy" and fires a SECOND generate through the unguarded figma/website
+// branch. This test simulates that round trip directly via `rerender` with a
+// fresh savedPreference object (matching the existing dep-churn simulation
+// pattern used elsewhere in this file) rather than a real network wait, since
+// the point is the request count, not the timing.
+
+// Under fake timers, a passive effect triggered by `rerender()` does not
+// always flush its `setTimeout(…, 0)` scheduling synchronously within the
+// SAME act() callback that called rerender — React can defer the passive
+// effect to act()'s own end-of-callback flush, which lands AFTER an
+// `advanceTimersByTimeAsync` called inside that same callback has already
+// finished. A second, separate flush after the act() block returns catches
+// anything scheduled at that late point. (Confirmed by direct instrumentation
+// during this ticket's investigation — a single advance under-counts.)
+async function flushTimers() {
+  await act(async () => {
+    await vi.runAllTimersAsync()
+  })
+  await act(async () => {
+    await vi.runAllTimersAsync()
+  })
+}
+
+describe("manual figma submission does not re-enter the auto-generate effect (AC1/AC2/AC3)", () => {
+  // Fake timers make the figma/website branch's `setTimeout(…, 0)` (the
+  // generate call) deterministic — no reliance on macrotask/wall-clock
+  // ordering — and each test explicitly unmounts so a stale scheduled timer
+  // can never fire during a LATER test and pollute its call count.
+  it("T1 — one manual Generate click on a figma source, with the preference save wired, issues exactly one generate call", async () => {
+    vi.useFakeTimers()
+    try {
+      const onSavePreference = vi.fn().mockResolvedValue(undefined)
+      const { container, rerender, unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: null,
+          onSavePreference,
+          _testConnections: FIGMA_CONN,
+          _testRepos: null,
+          _testInitSource: "figma" as const,
+        }),
+      )
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn).toBeTruthy()
+      act(() => btn!.click())
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      expect(onSavePreference).toHaveBeenCalledWith(
+        expect.objectContaining({ design_source: "figma" }),
+      )
+
+      // Simulate the save's refresh() landing: the parent hands down a NEW
+      // savedPreference object identity carrying exactly what the click
+      // itself just saved (matches onSavePreference's payload above).
+      act(() => {
+        rerender(
+          React.createElement(GenerateModal, {
+            open: true,
+            onClose: vi.fn(),
+            prdId: PRD_ID,
+            figmaFileKey: null,
+            savedPreference: FIGMA_PREF,
+            onSavePreference,
+            _testConnections: FIGMA_CONN,
+            _testRepos: null,
+            _testInitSource: "figma" as const,
+          }),
+        )
+      })
+      await flushTimers()
+
+      // Still exactly one — the effect must not have re-entered.
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("AC2 — the same re-entry is refused on a website source too", async () => {
+    vi.useFakeTimers()
+    try {
+      const onSavePreference = vi.fn().mockResolvedValue(undefined)
+      const { container, rerender, unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: null,
+          onSavePreference,
+          _testConnections: [],
+          _testRepos: null,
+          _testInitSource: "website" as const,
+        }),
+      )
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn).toBeTruthy()
+      act(() => btn!.click())
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+
+      act(() => {
+        rerender(
+          React.createElement(GenerateModal, {
+            open: true,
+            onClose: vi.fn(),
+            prdId: PRD_ID,
+            figmaFileKey: null,
+            savedPreference: WEBSITE_PREF,
+            onSavePreference,
+            _testConnections: [],
+            _testRepos: null,
+            _testInitSource: "website" as const,
+          }),
+        )
+      })
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("T3/AC4 — a returning user with a healthy saved figma source still auto-skips, exactly once", async () => {
+    // No manual click at all — this is the genuine returning-user path (the
+    // effect fires on mount). Must be unaffected by the handleGenerate latch
+    // change: only a MANUAL submission sets the latch pre-emptively; the
+    // effect's own mount-time fire still works exactly once.
+    vi.useFakeTimers()
+    try {
+      const { unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: FIGMA_PREF,
+          _testConnections: FIGMA_CONN,
+          _testRepos: null,
+        }),
+      )
+
+      await flushTimers()
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 // ─── github render-guard flash suppression ────────────────────────────────────
 //
 // The render-time guard (not the useEffect) must suppress the config form for
