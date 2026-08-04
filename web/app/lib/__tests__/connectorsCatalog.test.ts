@@ -46,15 +46,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(ids).not.toContain("msteams")
   })
 
-  it("totals 42 connector rows — one row per connector, nothing dual-placed", () => {
+  it("totals 43 connector rows — one row per connector, nothing dual-placed", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(42)
+    expect(total).toBe(43)
     // Rows === distinct connectors: Slack's second (Communications) placement
     // is gone, so no id appears on two shelves.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(42)
+    expect(distinct.size).toBe(43)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -133,12 +133,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Zoom, Slack", () => {
     // Slack's one and only card since 2026-08-04 — it is on this shelf because
     // what a PM connects it FOR is the customer signal in its channels.
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Slack",
+      "Fireflies", "Gong", "Zoom", "Slack",
     ])
   })
 
@@ -200,7 +200,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "confluence", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr",
+        "hubspot", "jira", "slack", "sprinklr", "zoom",
       ].sort(),
     )
   })
@@ -238,6 +238,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -305,6 +306,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -318,7 +320,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Analytics")).toEqual(["superset"])
     // Slack (OAuth-wired, dual-typed) is visible here and ONLY here.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "slack",
+      "sprinklr", "fireflies", "zoom", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
@@ -368,6 +370,27 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const before = CONNECTOR_CATALOG.flatMap((c) => c.items).length
     connectableCatalog()
     expect(CONNECTOR_CATALOG.flatMap((c) => c.items).length).toBe(before)
+  })
+})
+
+describe("Zoom", () => {
+  it("sits on the Voice shelf, OAuth-wired and typed as meetings", () => {
+    // The type is what makes it evidence-bearing (it mirrors catalog.py), so a
+    // drift here silently changes whether Zoom alone can drive a brief.
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const zoom = voice.items.find((i) => i.id === "zoom")!
+    expect(zoom).toBeTruthy()
+    expect(zoom.name).toBe("Zoom")
+    expect(zoom.oauth).toBe(true)
+    expect(zoom.types).toEqual(["meetings"])
+  })
+
+  it("bundles its mark locally rather than hotlinking the provider", () => {
+    const zoom = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "zoom",
+    )!
+    expect(zoom.logoSvg).toBe("/connectors/zoom.svg")
+    expect(zoom.logoSvg?.startsWith("http")).toBe(false)
   })
 })
 

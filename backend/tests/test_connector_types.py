@@ -28,7 +28,7 @@ def test_every_connectable_provider_is_classified():
     connector must be classified before it ships."""
     connectable = [
         "jira", "clickup", "google_drive", "hubspot",
-        "github", "figma", "slack", "fireflies", "confluence",
+        "github", "figma", "slack", "fireflies", "confluence", "zoom",
     ]
     for provider in connectable:
         assert types_for(provider), f"{provider} has no types"
@@ -72,6 +72,19 @@ def test_confluence_is_not_evidence():
     assert is_evidence_provider("google_drive") is False
     # The contrast that makes the rule legible: uploads IS an exception.
     assert is_evidence_provider("uploads") is True
+
+
+def test_zoom_is_a_meetings_source_and_bears_evidence():
+    """Cloud recordings and their transcripts sit with Fireflies and Gong: what
+    a customer actually said on a call is measured first-party signal, not
+    somebody's write-up of it — so unlike a wiki, Zoom alone CAN open the
+    brief's data-source gate."""
+    from app.connectors.catalog import MEETINGS
+
+    assert types_for("zoom") == [MEETINGS]
+    assert has_type("zoom", MEETINGS)
+    assert is_evidence_provider("zoom") is True
+    assert {"fireflies", "gong", "zoom"} <= set(providers_with_type(MEETINGS))
 
 
 def test_providers_with_type_and_has_type():

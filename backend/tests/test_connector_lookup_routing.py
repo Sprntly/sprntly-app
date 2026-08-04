@@ -74,6 +74,87 @@ def test_ambiguous_names_need_a_read_context():
     assert is_connector_lookup("i have no notion of what they meant") is None
 
 
+def test_zoom_the_verb_never_routes_to_zoom_the_connector():
+    """"Zoom in on the numbers" is ordinary product-analysis English, and it
+    arrives WITH a read verb ("see", "look at"), so the read-context gate alone
+    would not save it — the in/out veto is what does. A false positive here
+    costs a real analysis question, which is the expensive direction, so `zoom`
+    is ambiguous-tier rather than strong."""
+    for question in [
+        "zoom in on the churn numbers",
+        "let's zoom in and see what the drop-off looks like",
+        "can you zoom out and show me the whole quarter",
+        "zooming in on enterprise accounts, what changed",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
+def test_zoom_the_source_is_intercepted():
+    """A genuine ask about the recordings still has to reach the connector —
+    false negatives are the expensive failure on the other side."""
+    for question in [
+        "what did we record in zoom last week",
+        "check zoom for the call with acme",
+        "find the zoom meeting where we discussed pricing",
+    ]:
+        assert is_connector_lookup(question) == {"zoom"}, question
+
+
+def test_one_ambiguous_names_veto_does_not_suppress_the_others():
+    """REGRESSION. The ambiguous veto used to be one whole-message pattern
+    gating the entire loop, so any veto phrase dropped EVERY ambiguous provider.
+    Adding the zoom-verb veto therefore broke Linear: "zoom in on the linear
+    tickets for payments" plainly names Linear and plainly asks to read it, and
+    it started returning nothing. A veto says one PRODUCT NAME is being used as
+    ordinary English — it can only ever suppress that name."""
+    assert is_connector_lookup(
+        "zoom in on the linear tickets for payments") == {"linear"}
+    assert is_connector_lookup(
+        "lets zoom out and see which notion docs cover pricing") == {"notion"}
+    # The same latent flaw in the other direction: Linear's veto must not eat
+    # Notion, and Notion's must not eat Linear.
+    assert is_connector_lookup(
+        "we saw linear growth — which notion doc covers it") == {"notion"}
+    assert is_connector_lookup(
+        "i have no notion why — check what issues are in linear") == {"linear"}
+    # And a genuine two-source read still yields both.
+    assert is_connector_lookup(
+        "check linear and notion for the pricing decision") == {"linear", "notion"}
+
+
+def test_zoom_is_deferred_not_absent_in_the_lookup_registry():
+    """Zoom connects and (once the puller lands) syncs into the KG, but has no
+    live-read adapter — so the honest answer is "it syncs but I can't query it
+    live in chat yet", not "that isn't a Sprntly connector"."""
+    from app.connector_lookup.registry import (
+        DEFERRED,
+        LOOKUP_PROVIDERS,
+        NO_CONNECTOR,
+        display_name,
+    )
+
+    assert "zoom" in DEFERRED
+    assert "zoom" not in NO_CONNECTOR
+    assert "zoom" not in LOOKUP_PROVIDERS
+    assert display_name("zoom") == "Zoom"
+
+
+def test_zoom_recordings_still_belong_to_the_voice_of_customer_skill():
+    """`zoom recordings` is a VoC skill trigger and has been since before this
+    connector existed. The two do not fight: qa_agent.answer runs the VoC
+    interception BEFORE connector-lookup, exactly as it already does for
+    Fireflies and Gong, which are strong connector names AND VoC triggers."""
+    from app.skill_router import detect_intent
+
+    for question in [
+        "summarise our zoom recordings from last month",
+        "what feedback came out of the call recordings",
+    ]:
+        match = detect_intent(question)
+        assert match is not None, question
+        assert match.skill_id == "voice-of-customer-report", question
+
+
 def test_unnamed_questions_are_not_intercepted():
     for question in [
         "what are customers complaining about?",      # VoC owns this

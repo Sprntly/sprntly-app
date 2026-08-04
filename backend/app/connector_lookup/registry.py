@@ -39,6 +39,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "sprinklr": "Sprinklr",
     "fireflies": "Fireflies",
     "gong": "Gong",
+    "zoom": "Zoom",
     "github": "GitHub",
     "gitlab": "GitLab",
     "hubspot": "HubSpot",
@@ -109,6 +110,11 @@ DEFERRED: dict[str, str] = {
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
+    # Connects and (once the puller lands) syncs into the KG, but has no
+    # live-read adapter — so "what was said on yesterday's Zoom call" gets the
+    # honest "it syncs but I can't query it live in chat yet" rather than a
+    # KG-flavoured guess dressed up as a live read.
+    "zoom": "Zoom",
 }
 
 #: No Sprntly connector at all — catalog entries only (connectors/catalog.py).

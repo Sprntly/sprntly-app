@@ -47,6 +47,7 @@ from app.kg_ingest.auto_sync import (
     kickoff_slack_corpus_sync,
     kickoff_sync,
 )
+from app.call_index import CALL_PROVIDERS as CALL_INDEX_PROVIDERS
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,9 @@ def _refresh_all_company_connectors() -> None:
             )
             continue
         slack_kicked = False
+        # One call-index kick per company per cycle, however many call sources
+        # it has connected — see the branch below.
+        call_index_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
@@ -154,14 +158,23 @@ def _refresh_all_company_connectors() -> None:
                         company_id,
                     )
                 continue
-            # Fireflies: refresh the CALL INDEX alongside the KG pull below.
-            # They fill different things — kickoff_sync writes distilled
-            # summaries into the graph, this writes the per-call metadata chat
-            # answers listings from — and only the index can answer "which
-            # calls last week" without a 168-second corpus pass. Not `continue`:
-            # fireflies IS in PULLERS, so it must still fall through to the KG
-            # kickoff below.
-            if provider == "fireflies":
+            # A CALL SOURCE (fireflies or zoom): refresh the CALL INDEX
+            # alongside the KG pull below. They fill different things —
+            # kickoff_sync writes distilled summaries into the graph, this
+            # writes the per-call metadata chat answers listings from — and
+            # only the index can answer "which calls last week" without a
+            # 168-second corpus pass.
+            #
+            # Not `continue`: both providers ARE in PULLERS, so they must still
+            # fall through to the KG kickoff below.
+            #
+            # Kicked at most ONCE per company per cycle, whichever call sources
+            # it has. `sync_all_sources` walks every connected one in a single
+            # pass, so a company running both Fireflies AND Zoom gets both
+            # indexed by one kickoff — while two kickoffs would race two threads
+            # of the same name onto the same company and do the work twice.
+            if provider in CALL_INDEX_PROVIDERS and not call_index_kicked:
+                call_index_kicked = True
                 try:
                     kickoff_call_index_sync(company_id)
                 except Exception:

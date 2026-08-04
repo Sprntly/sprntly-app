@@ -16738,6 +16738,151 @@
     justify-content: flex-end;
   }
 
+  /* ─── Settings → Connectors: Zoom config slot ─── */
+  /* Sits beside the conn-slack-* chrome above and reuses it wherever the shape
+     is identical (checklist container, saved line, actions row, hint/empty
+     copy). Only the genuinely new pieces live here: a filter input, a two-line
+     host row, the sync summary, and the two notice variants. */
+
+  /* Host filter. Same box as .conn-slack-select — a Zoom account can carry
+     hundreds of hosts, and scrolling a 240px list to find one person is not a
+     way to find one person. */
+  .conn-zoom-filter {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink);
+    font-size: 14px;
+  }
+
+  .conn-zoom-filter:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* A host row is TWO lines (name, then email + recording count), so unlike
+     .conn-slack-check the checkbox aligns to the top rather than centring
+     against a block it is taller than. Verified down to ~380px, where the meta
+     line wraps under the name instead of clipping. */
+  .conn-zoom-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 9px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .conn-zoom-check:hover {
+    border-color: var(--ink-3);
+    background: var(--surface-2);
+  }
+
+  .conn-zoom-check:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .conn-zoom-check input {
+    accent-color: var(--accent);
+    margin: 2px 0 0;
+    width: 16px;
+    height: 16px;
+    flex: none;
+  }
+
+  /* A host the admin selected who is no longer in the live listing. Dimmed so
+     it reads as a leftover, but the checkbox stays enabled — deliberately
+     removing them is the only thing you can still do with the row. */
+  .conn-zoom-check--ghost {
+    opacity: 0.72;
+  }
+
+  .conn-zoom-check-meta {
+    display: block;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.45;
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
+
+  /* Sync summary — same key/value shape as .conn-config-meta*, mounted inside
+     the slot rather than the drawer header. */
+  .conn-zoom-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 13px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface-2);
+  }
+
+  .conn-zoom-summary-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    font-size: 12.5px;
+  }
+
+  .conn-zoom-summary-k {
+    color: var(--ink-2);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10.5px;
+    font-weight: 600;
+    flex: none;
+  }
+
+  .conn-zoom-summary-v {
+    color: var(--ink);
+    font-weight: 500;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  /* Notices: a warning the user can act on (transcription off in Zoom) and a
+     danger block (the connection stopped syncing). */
+  .conn-zoom-notice {
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 11px 13px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    margin: 0;
+  }
+
+  .conn-zoom-notice strong {
+    font-weight: 600;
+  }
+
+  .conn-zoom-notice--warn {
+    background: var(--warn-soft);
+    border-color: var(--warn);
+    color: var(--ink);
+  }
+
+  .conn-zoom-notice--danger {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    color: var(--danger-ink);
+  }
+
+  .conn-zoom-notice-actions {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 10px;
+  }
+
   /* ─── Configure drawer — Test connection block (commit K) ─── */
   /* Auto-checked connection status badge at the top of the Configure drawer
      (replaces the old manual "Test connection" button). */

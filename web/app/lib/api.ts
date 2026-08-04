@@ -1748,6 +1748,20 @@ export type ConnectionSummary = {
     cloud_id?: string
     sync_space_ids?: string[]
     sync_space_keys?: Record<string, string>
+    // Zoom — which hosts' cloud recordings the KG ingest reads. Empty/absent =
+    // every licensed host on the account. COMPANY-wide, admin-only to change.
+    // Names are stored alongside the ids so a host who has since been
+    // deactivated (and so is absent from the live listing) can still be shown
+    // by name rather than as an opaque Zoom user id.
+    sync_user_ids?: string[]
+    sync_user_names?: Record<string, string>
+    // …and the last run's counters. The GAP between them is the signal: a
+    // sync that found meetings but read no transcripts almost always means
+    // Audio transcript is switched off in the customer's Zoom account, which
+    // is a setting they can fix. Absent (undefined) means "never synced" —
+    // which is NOT the same as zero and must not be rendered as one.
+    last_sync_meetings?: number
+    last_sync_transcripts?: number
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1860,6 +1874,21 @@ export type ConfluenceSpace = {
   name: string | null
   /** "global" | "personal" — personal spaces are filtered out server-side. */
   type: string | null
+}
+
+export type ZoomUser = {
+  id: string
+  email: string
+  display_name: string
+  /** Only Licensed Zoom accounts can record to the cloud, so an unlicensed
+   *  host has nothing to sync. Surfaced rather than filtered so a user looking
+   *  for a colleague finds them with an explanation instead of an absence. */
+  licensed: boolean
+  /** How many recordings this host has. ALWAYS PRESENT, and null until the
+   *  count is cheap to compute — it needs one windowed recordings call per
+   *  host. Declared null rather than omitted so the UI renders its degraded
+   *  line from day one instead of gaining a field later. */
+  recording_count: number | null
 }
 
 // Multitenant: connector routes resolve the active company entirely
@@ -1975,6 +2004,41 @@ export const connectorsApi = {
     api.post<{ ok: true; config: ConnectionSummary["config"] }>(
       `/v1/connectors/confluence/spaces`,
       { spaces },
+    ),
+
+  // ---- Zoom ----------------------------------------------------------------
+  disconnectZoom: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/zoom`),
+
+  /** The active hosts on the connected Zoom account, plus the persisted
+   *  selection.
+   *
+   *  `total` is HOW MANY WE FETCHED, not how many exist on the account, and
+   *  `fetch_capped` says Zoom still had pages when the listing budget ran out
+   *  — the two together are what let the UI say "the first N" honestly instead
+   *  of asserting a number it cannot know.
+   *
+   *  `selected_names` matters because the listing is ACTIVE-ONLY: a selected
+   *  host who has since been deactivated is absent from `users`, and without
+   *  their stored name the picker could only show a bare id. */
+  listZoomUsers: () =>
+    api.get<{
+      users: ZoomUser[]
+      selected_ids: string[]
+      selected_names: Record<string, string>
+      total: number
+      fetch_capped: boolean
+      truncated: boolean
+    }>(`/v1/connectors/zoom/users`),
+
+  /** Choose which hosts' recordings the KG ingest pulls from (stored on the
+   *  company's Zoom connection config as sync_user_ids / sync_user_names). An
+   *  empty list clears the selection back to every licensed host.
+   *  Admin-only — a member gets 403 with the admin-gate message. */
+  setZoomSyncUsers: (users: { id: string; email?: string | null }[]) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/zoom/users`,
+      { users },
     ),
 
   // ---- ClickUp -------------------------------------------------------------

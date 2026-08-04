@@ -73,6 +73,11 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "sprinklr": [CUSTOMER_VOICE],
     "fireflies": [MEETINGS],
     "gong": [MEETINGS],
+    # Cloud recordings + their VTT transcripts. Typed `meetings` like Fireflies
+    # and Gong, and evidence-bearing for the same reason: what a customer
+    # actually said on a call is measured first-party signal, not somebody's
+    # write-up of it.
+    "zoom": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
     # Research
     # Marvin is a user-research repository (interviews, usability sessions,

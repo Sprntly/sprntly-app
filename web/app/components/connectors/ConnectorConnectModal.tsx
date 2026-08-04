@@ -36,6 +36,7 @@ import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
+import { ZoomConfigSlot } from "./ZoomConfigSlot"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -45,6 +46,32 @@ import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
  */
 const APIKEY_PAGE_URL: Record<string, string> = {
   fireflies: "https://app.fireflies.ai/integrations/custom/fireflies",
+}
+
+/**
+ * Provider-specific things a person needs to know BEFORE the OAuth tab opens,
+ * keyed by connector id. Rendered under the generic blurb.
+ *
+ * These exist to move a failure earlier. Zoom's three are each a dead end
+ * discovered on the provider's own consent screen otherwise: authorizing as a
+ * non-admin silently narrows the connection to one person's calls, a Free or
+ * Basic Zoom account has no cloud recordings at all, and an account that
+ * requires app pre-approval refuses before Sprntly is ever reached. Saying so
+ * here costs three lines; not saying it costs a support thread.
+ */
+const CONNECT_PREREQS: Record<string, string[]> = {
+  zoom: [
+    "Zoom connects once for your whole company. You'll need to authorize as a Zoom account admin.",
+    "Cloud recording is a paid Zoom feature — Free and Basic accounts have no cloud recordings for Sprntly to read.",
+    "If your Zoom account requires apps to be pre-approved, ask a Zoom admin to approve Sprntly on the Zoom Marketplace first.",
+  ],
+}
+
+/** What Sprntly will actually read once connected — the reassurance half,
+ *  shown under the prerequisites. */
+const CONNECT_SCOPE_NOTE: Record<string, string> = {
+  zoom:
+    "Sprntly reads the transcript and details of each cloud recording — never the video or audio. The first sync covers the last 3 months, then refreshes every 6 hours.",
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -301,6 +328,21 @@ export function ConnectorConnectModalView({
                 connection. Finish there, then come back to this tab — your
                 onboarding stays right where it is.
               </p>
+              {CONNECT_PREREQS[item.id] ? (
+                <div className="conn-modal-blurb">
+                  <strong>Before you connect</strong>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {CONNECT_PREREQS[item.id].map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {CONNECT_SCOPE_NOTE[item.id] ? (
+                <p className="conn-modal-blurb">
+                  {CONNECT_SCOPE_NOTE[item.id]}
+                </p>
+              ) : null}
               {oauthError ? (
                 <p className="conn-modal-error" role="alert">
                   {oauthError}
@@ -640,6 +682,12 @@ export function ConnectorConnectModal({
           onSaved={onConnected}
         />
       )
+    } else if (providerId === "zoom") {
+      // The SAME slot the Configure drawer mounts. Straight after connect is
+      // exactly when the host selection matters — with nothing chosen the
+      // puller reads every licensed host, so this is the user's chance to
+      // narrow it before the 3-month backfill runs.
+      slot = <ZoomConfigSlot connection={connection} onSaved={onConnected} />
     } else if (providerId === "github") {
       // Same picker the settings Configure drawer mounts — lets the
       // user manage which repos the agent can read right inside the

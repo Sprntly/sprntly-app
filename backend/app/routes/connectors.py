@@ -84,6 +84,7 @@ from app.connectors import (
     sprinklr_oauth,
     superset_auth,
     uploads,
+    zoom_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -416,6 +417,27 @@ def _build_post_oauth_redirect(payload: dict, provider: str) -> RedirectResponse
     return RedirectResponse(target)
 
 
+def _build_post_oauth_error_redirect(
+    payload: dict, provider: str, code: str
+) -> RedirectResponse:
+    """Same return-page redirect as above, but carrying a failure the user has
+    to act on rather than a new connection.
+
+    `code` is a STABLE SPRNTLY CODE (e.g. "zoom_app_not_approved"), never the
+    provider's own error string. Two reasons: a provider's wording changes
+    without notice and would leak straight onto a screen, and the copy for
+    "ask your Zoom admin to approve Sprntly" is the web layer's to write — the
+    backend's job is to say precisely which failure happened.
+    """
+    return_to = payload.get("return_to")
+    frontend = settings.frontend_url.rstrip("/")
+    params = {"provider": provider, "error": code}
+    if return_to and _is_safe_return_to(return_to):
+        params["return_to"] = return_to
+    target = f"{frontend}/connectors/return?{urlencode(params)}"
+    return RedirectResponse(target)
+
+
 class StartOauthIn(BaseModel):
     dataset: str | None = None
     # Optional relative path the callback redirects to instead of the
@@ -506,6 +528,16 @@ def start_oauth(
             raise HTTPException(500, "Confluence OAuth is not configured on the server")
         url = confluence_oauth.authorize_url(
             state=confluence_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == zoom_oauth.ZOOM_PROVIDER:
+        if not zoom_oauth.zoom_configured():
+            raise HTTPException(500, "Zoom OAuth is not configured on the server")
+        url = zoom_oauth.authorize_url(
+            state=zoom_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -1982,6 +2014,316 @@ def confluence_save_sync_spaces(
     # Pull the new selection now rather than waiting for the 6-hourly sweep —
     # the user just told us what they want ingested.
     kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    return {"ok": True, "config": config}
+
+
+# ─────────────────────── Zoom ───────────────────────
+#
+# Cloud recordings + transcripts. ORG-WIDE, not per-user: every scope is an
+# `:admin` scope so one connection reads every host's recordings, which is why
+# zoom is deliberately NOT in _PERSONAL_PROVIDERS and every mutating route here
+# goes through _require_admin_for_org_connector.
+#
+# CURRENT SCOPE: connect / disconnect / probe / host picker. No kg_ingest
+# puller yet, so a connected Zoom is healthy and ingests nothing.
+
+
+@router.get("/zoom/callback")
+def zoom_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Zoom's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Zoom calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state being replayed here.
+    """
+    payload = zoom_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. THREE different things end up here and
+    # they need three different sentences from the return page, so they get
+    # three stable codes rather than one catch-all:
+    #
+    #   access_denied         the user clicked Decline. Nothing is wrong; they
+    #                         just have to try again and accept. Telling them to
+    #                         "ask your Zoom admin to approve Sprntly" would
+    #                         send them to bother a colleague over their own
+    #                         click.
+    #   approval prose        a Zoom admin has not pre-approved the app
+    #                         (Marketplace → Manage → Approved Apps). This one
+    #                         genuinely does need another person.
+    #   anything else         honest generic failure.
+    #
+    # Zoom's own error string is never forwarded: it changes without notice and
+    # would land straight on a screen.
+    if error:
+        logger.warning(
+            "Zoom consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        if zoom_oauth.looks_like_app_not_approved(error, error_description):
+            code_out = "zoom_app_not_approved"
+        elif (error or "").strip().lower() == "access_denied":
+            code_out = "zoom_consent_declined"
+        else:
+            code_out = "zoom_oauth_failed"
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Zoom did not return an authorization code")
+
+    try:
+        token_json = zoom_oauth.exchange_code_for_token(code)
+    except zoom_oauth.ZoomAppNotApprovedError:
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, "zoom_app_not_approved",
+        )
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Zoom did not return an access_token")
+
+    # Best-effort label only. fetch_current_user answers on `user:read:user:admin`
+    # while everything this connector reads answers on the cloud_recording
+    # scopes, so a failure here says nothing about whether the connection works
+    # — it must not block the connect. The probe validates the read that
+    # matters.
+    user = zoom_oauth.fetch_current_user(access_token)
+    label = zoom_oauth.account_label_from(user)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed: the puller needs
+            # the picked hosts off connections.config, which a lone access token
+            # can't reach. See zoom_oauth.token_payload_to_store.
+            zoom_oauth.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect — which is not a rare event here:
+    # Zoom refresh tokens expire at 90 days, so every long-lived customer
+    # reconnects on a schedule. Writing a fresh `{"user": …}` would silently
+    # drop `sync_user_ids`, and an empty selection means EVERY HOST — so a
+    # workspace that deliberately narrowed sync to three sales hosts would
+    # quietly widen to the whole company every quarter, with no event to trace
+    # it to. Start from the existing config and only add.
+    existing = db.get_connection(company_id, zoom_oauth.ZOOM_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only three fields of the identity payload are kept — config_json is
+    # returned verbatim to every company member by GET /v1/connectors, and
+    # Zoom's user object carries the admin's personal meeting URL, phone number
+    # and department. `id` is the one that matters: it is the real userId the
+    # probe addresses instead of `me`. And an identity lookup that failed writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    if user:
+        config[zoom_oauth.CONFIG_USER] = zoom_oauth.identity_to_store(user)
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=zoom_oauth.ZOOM_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=zoom_oauth.ZOOM_SCOPES,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep — a first connect
+    # backfills three months of recordings, and a customer who just connected
+    # should see calls in the graph, not an empty one until this evening.
+    kickoff_sync(company_id, zoom_oauth.ZOOM_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, zoom_oauth.ZOOM_PROVIDER)
+
+
+@router.delete("/zoom")
+def zoom_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Zoom, revoking the grant on Zoom's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete: a
+    refresh token we merely forget stays valid on Zoom's side for the rest of
+    its 90 days, so forgetting without revoking leaves a live credential to this
+    customer's recordings in a token store we no longer show them. If the revoke
+    fails we still delete — the user asked to disconnect, and keeping our copy
+    would be the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        zoom_oauth.revoke_token(token_json.get("access_token") or "")
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Zoom revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    # Drop Zoom's half of the call index with the connection — same reasoning as
+    # the Fireflies disconnect: chat answering call questions from indexed Zoom
+    # rows while the connector list correctly reports Zoom as disconnected puts
+    # two contradictory claims in one answer. SCOPED, so a company that also
+    # runs Fireflies keeps its Fireflies index intact.
+    try:
+        from app import call_index
+
+        call_index.clear_company(company.company_id, call_index.PROVIDER_ZOOM)
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("zoom: could not clear call index for %s",
+                       company.company_id, exc_info=True)
+    return {"deleted": True, "provider": zoom_oauth.ZOOM_PROVIDER}
+
+
+#: How many hosts the picker will return. Zoom accounts run to thousands of
+#: users; past this a picker needs search rather than a longer scroll, and
+#: `truncated` is how the UI says so honestly instead of silently showing a
+#: prefix.
+_ZOOM_USER_PICKER_LIMIT = 500
+
+
+@router.get("/zoom/users")
+def zoom_list_users(
+    company: CompanyContext = Depends(require_company),
+):
+    """The hosts on the connected Zoom account, for the picker.
+
+    Readable by any member (mirrors confluence_list_spaces and
+    slack_list_channels) — seeing what COULD be synced is not a privileged
+    action; changing the selection is.
+
+    `recording_count` is present on every row and is null in this slice: the
+    count needs one windowed recordings call PER HOST, which is the puller's
+    job. It ships as a declared null rather than a missing key so the client
+    renders "—" from day one instead of gaining a new field later.
+
+    Three fields describe the size of the answer, and they mean different
+    things. `total` is HOW MANY WE FETCHED, not how many exist. `fetch_capped`
+    says Zoom still had more pages when the listing budget ran out — on a
+    5,000-host account that is the difference between an honest "showing the
+    first 500 of at least 1,200" and a flat lie about the customer's own org.
+    `truncated` says the response itself was cut to the picker limit.
+
+    `selected_names` returns the names stored WITH the selection rather than
+    only the ids. That is the entire reason they are persisted: a host who has
+    since been deactivated is gone from `users` (the listing is active-only), so
+    without their name the picker can only render a bare opaque id — or, worse,
+    silently show a shorter selection than the one actually in force.
+    """
+    try:
+        ctx = zoom_oauth.sync_context(company.company_id)
+        found, fetch_capped = zoom_oauth.list_users(ctx.access_token)
+    except zoom_oauth.ZoomNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    except zoom_oauth.ZoomAuthExpiredError as e:
+        # Must be caught. An escaping exception becomes an unhandled 500 with no
+        # CORS headers, which the browser reports as a bare "Failed to fetch" —
+        # the picker then shows a network error for what is really a reconnect
+        # prompt. That exact defect shipped on Confluence's space picker
+        # (a1e16c40); the likeliest trigger here is the same one: a token minted
+        # before a scope changed, or the connecting admin losing their admin role.
+        raise HTTPException(400, str(e)) from e
+    truncated = len(found) > _ZOOM_USER_PICKER_LIMIT
+    users = [
+        {**u, "recording_count": None} for u in found[:_ZOOM_USER_PICKER_LIMIT]
+    ]
+    return {
+        "users": users,
+        "selected_ids": ctx.user_ids,
+        "selected_names": ctx.user_names,
+        # Fetched, NOT the account's true user count — see the docstring.
+        "total": len(found),
+        "fetch_capped": fetch_capped,
+        "truncated": truncated,
+    }
+
+
+#: How many hosts one selection may name. Mirrors Confluence's 25-space cap and
+#: exists for the same reason: refuse a selection the puller could never honor
+#: rather than silently truncating one. Sized for Zoom's cost shape — the puller
+#: pays ONE windowed recordings call per selected host per sync window, so 100
+#: hosts is 100 calls a pass before a single transcript is read.
+_ZOOM_MAX_SYNC_USERS = 100
+
+
+class ZoomUserIn(BaseModel):
+    id: str
+    email: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("user id cannot be empty")
+
+
+class ZoomSyncUsersIn(BaseModel):
+    users: list[ZoomUserIn]
+
+    def model_post_init(self, _context) -> None:
+        if len(self.users) > _ZOOM_MAX_SYNC_USERS:
+            raise ValueError(
+                f"select at most {_ZOOM_MAX_SYNC_USERS} hosts — "
+                "leave the selection empty to sync every host instead"
+            )
+
+
+@router.post("/zoom/users")
+def zoom_save_sync_users(
+    body: ZoomSyncUsersIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which hosts' recordings the KG ingest pulls — COMPANY-WIDE.
+
+    An EMPTY list clears the selection, which means every host on the account
+    again. That is the backwards-compatible default (the same rule as
+    Confluence's spaces and Slack's channels): a connection made before this
+    picker existed has no stored selection and must keep working.
+
+    Emails are stored alongside the ids so a host who is later deactivated can
+    be reported BY NAME in the sync log rather than as an opaque Zoom user id.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    # Dedupe preserving order — the puller walks the selection in order, one
+    # windowed recordings call per host, so a duplicated id is a duplicated call.
+    ids = list(dict.fromkeys(u.id for u in body.users))
+    names = {
+        u.id: u.email.strip()
+        for u in body.users
+        if u.email and u.email.strip()
+    }
+    updated = db.patch_connection_config(
+        company.company_id,
+        zoom_oauth.ZOOM_PROVIDER,
+        {
+            zoom_oauth.CONFIG_SYNC_USER_IDS: ids,
+            zoom_oauth.CONFIG_SYNC_USER_NAMES: names,
+        },
+    )
+    try:
+        config = json.loads((updated or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    # Pull the new selection now rather than waiting for the next sweep — the
+    # user just told us what they want ingested.
+    kickoff_sync(company.company_id, zoom_oauth.ZOOM_PROVIDER)
     return {"ok": True, "config": config}
 
 
@@ -3475,7 +3817,12 @@ def fireflies_disconnect(
     try:
         from app import call_index
 
-        call_index.clear_company(company.company_id)
+        # SCOPED to Fireflies. An unscoped wipe would also destroy a working
+        # Zoom index — disconnect one tool, silently lose another tool's call
+        # history — now that two sources populate this table.
+        call_index.clear_company(
+            company.company_id, call_index.PROVIDER_FIREFLIES
+        )
     except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
         logger.warning("fireflies: could not clear call index for %s",
                        company.company_id, exc_info=True)
