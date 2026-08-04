@@ -172,6 +172,12 @@ from app.db.connections import (
     upsert_slack_connection,
 )
 
+# Self-registered OAuth clients (RFC 7591) — app-global, not per-company.
+from app.db.oauth_clients import (
+    get_oauth_client,
+    save_oauth_client,
+)
+
 # Enterprise input sources
 from app.db.input_sources import (
     delete_input_source,

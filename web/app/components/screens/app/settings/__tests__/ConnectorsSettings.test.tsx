@@ -540,10 +540,10 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // One rail tab per surviving category. 13 connectors are wired, but the
+    // One rail tab per surviving category. 14 connectors are wired, but the
     // `uploads` provider is never shown as a row (it's the document-source
     // list) while dual-typed Slack renders a row on BOTH its shelves (voice
-    // + comms), so 13 connector rows render across the panels.
+    // + comms), so 14 connector rows render across the panels.
     const one = render({ categories: keptCategories })
     expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
@@ -554,7 +554,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(13)
+    expect(rowsAcrossPanels).toBe(14)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(
@@ -568,15 +568,17 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     expect(one).not.toContain("powers On-Call Agent")
   })
 
-  it("keeps the Research panel — no connector rows, but its upload strip is live", () => {
+  it("keeps the Research panel — the Marvin row AND its upload strip", () => {
     const keptCategories = connectableCatalog()
     const research = keptCategories.find((c) => c.key === "research")
-    // Marvin is coming-soon, so the shelf survives only on `keepWhenEmpty`. It
-    // has to: the dropzone is the entire feature until Marvin is wired.
+    // The shelf used to survive only on `keepWhenEmpty` while Marvin was
+    // coming-soon; Marvin is wired now, so it renders a real row. The upload
+    // strip must stay regardless — a repository is not the only way to hand
+    // us research.
     expect(research).toBeTruthy()
     const html = render({ categories: keptCategories, selectedCategoryKey: "research" })
-    expect(countRows(html)).toBe(0)
-    expect(html).not.toContain("Marvin")
+    expect(countRows(html)).toBe(1)
+    expect(html).toContain("Marvin")
     expect(html).toContain('class="set-conn-upload"')
     // The rail still offers it as a tab, so the user can get to that dropzone.
     expect(render({ categories: keptCategories })).toContain("Research")

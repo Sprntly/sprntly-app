@@ -308,6 +308,23 @@ export interface ConnectorItemRow {
    * a source and uploading files, so Connect opens the upload modal.
    */
   authType?: "oauth" | "apikey" | "credentials" | "upload"
+  /**
+   * Regional deployments the user must choose between BEFORE the OAuth
+   * redirect. Present only for vendors that run several independent installs
+   * with their own authorization servers (Marvin: US and EU), where guessing
+   * would send the user to a consent screen for an account they don't have.
+   * When set, Connect opens RegionPromptModal instead of redirecting straight
+   * away; the chosen value rides along on start-OAuth. Order matters — the
+   * first entry is the default.
+   */
+  regions?: ConnectorRegion[]
+}
+
+export interface ConnectorRegion {
+  /** Value sent to the backend (e.g. "us"). */
+  value: string
+  /** Human label shown in the picker (e.g. "US / Global"). */
+  label: string
 }
 
 export interface ConnectorCategoryRow {

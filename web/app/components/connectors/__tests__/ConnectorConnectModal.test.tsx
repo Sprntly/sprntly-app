@@ -246,3 +246,57 @@ describe("ConnectorConnectModalView — in-flight prompt", () => {
     expect(html.toLowerCase()).not.toContain("start over")
   })
 })
+
+// ─────────────────── Multi-region providers (Marvin) ───────────────────
+//
+// Marvin's US and EU installs are separate deployments with separate
+// authorization servers, so the region has to be settled BEFORE the redirect
+// — guessing sends EU customers to a consent screen for an account they
+// don't have.
+
+const MARVIN_ITEM: ConnectorItemRow = {
+  id: "marvin",
+  name: "Marvin",
+  logo: "M",
+  logoText: "M",
+  logoColor: "#5B4BE1",
+  oauth: true,
+  types: ["customer-voice"],
+  regions: [
+    { value: "us", label: "US / Global" },
+    { value: "eu", label: "EU" },
+  ],
+}
+
+describe("ConnectorConnectModalView — region picker", () => {
+  it("renders a region select for a multi-deployment provider", () => {
+    const html = render({ item: MARVIN_ITEM })
+    expect(html).toContain('id="conn-modal-region"')
+    expect(html).toContain("Marvin region")
+    expect(html).toContain("US / Global")
+    expect(html).toContain("EU")
+  })
+
+  it("defaults to the catalog's first region when none is chosen", () => {
+    const html = render({ item: MARVIN_ITEM, region: "" })
+    expect(html).toContain('<option value="us" selected="">US / Global</option>')
+  })
+
+  it("reflects the chosen region", () => {
+    const html = render({ item: MARVIN_ITEM, region: "eu" })
+    expect(html).toContain('<option value="eu" selected="">EU</option>')
+  })
+
+  it("omits the picker entirely for single-deployment providers", () => {
+    expect(render({ item: FIGMA_ITEM })).not.toContain('id="conn-modal-region"')
+  })
+
+  it("does not show the picker once connected", () => {
+    const html = render({
+      item: MARVIN_ITEM,
+      connection: activeConn("marvin"),
+    })
+    expect(html).not.toContain('id="conn-modal-region"')
+    expect(html).toContain("Connected as")
+  })
+})

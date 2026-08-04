@@ -75,10 +75,16 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "gong": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
     # Research
-    # Marvin is a user-research repository (interviews, usability sessions,
-    # study readouts). Catalog-only for now — no auth module or puller yet, so
-    # it renders "Coming soon"; it is classified up-front because the Research
-    # category it anchors ships with the manual-upload path live.
+    # Marvin (heymarvin.com) is a user-research repository (interviews,
+    # usability sessions, study readouts) and anchors the Research category.
+    # It is now wired end to end — OAuth 2.1 over its MCP server, plus a
+    # puller — so it is no longer "Coming soon"; the classification it was
+    # given up-front (2026-08-02) is unchanged. RESEARCH is deliberately
+    # absent from NON_EVIDENCE_TYPES, so is_evidence_provider("marvin") is
+    # True and its studies still open the brief's data-source gate — which is
+    # what the connector was built for. The KG source_type its records land on
+    # is still `customer_voice` (see kg_ingest/runner.PULLERS), the same shape
+    # research-category uploads use.
     "marvin": [RESEARCH],
     "salesforce": [CRM],
     # Analytics

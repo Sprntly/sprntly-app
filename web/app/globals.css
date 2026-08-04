@@ -16059,6 +16059,36 @@
     opacity: 0.72;
   }
 
+  /* ─── Connector prerequisite callout (RegionPromptModal helpText) ─── */
+  /* The facts that decide whether a connect can succeed at all — plan tier,
+     an admin toggle on the provider's side — must not read as fine print. */
+
+  .conn-prereq {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--warn-border);
+    border-left: 3px solid var(--warn);
+    border-radius: 8px;
+    background: var(--warn-soft);
+    color: #4a3a1e;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  .conn-prereq strong {
+    font-weight: 700;
+    color: #3c2e13;
+  }
+
+  .conn-prereq ul {
+    margin: 6px 0 0;
+    padding-left: 18px;
+  }
+
+  .conn-prereq li + li {
+    margin-top: 4px;
+  }
+
   /* The other tile once one is answered: still live, just no longer competing
      for the eye. It comes back to full strength on hover or focus. */
   .skill-upload-tile.is-standby {

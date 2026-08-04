@@ -69,6 +69,22 @@ describe("connectorsApi.startOauth", () => {
     })
   })
 
+  it("POSTs the region in the body for multi-deployment providers (Marvin)", async () => {
+    // Marvin's US and EU installs have different authorization servers, so the
+    // choice has to reach start-oauth and get signed into the OAuth state.
+    await connectorsApi.startOauth("marvin", undefined, "/settings", "eu")
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/marvin/start-oauth`)
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      return_to: "/settings",
+      region: "eu",
+    })
+  })
+
+  it("omits region when not supplied", async () => {
+    await connectorsApi.startOauth("marvin")
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({})
+  })
+
   it("URL-encodes the provider segment", async () => {
     await connectorsApi.startOauth("weird/provider")
     expect(lastCall!.url).toBe(

@@ -97,11 +97,12 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   },
   {
     // User research — what the team deliberately went out and learned, as
-    // opposed to the unsolicited signal on the Voice shelf above. Today the
-    // shelf is carried entirely by its upload strip: Marvin is the only
-    // connector and it is still coming-soon, so `keepWhenEmpty` is what stops
-    // connectableCatalog() dropping the category (and with it the only way to
-    // hand us a research readout). Evidence-bearing — deliberately absent from
+    // opposed to the unsolicited signal on the Voice shelf above. The shelf is
+    // served by both its upload strip and, since Marvin was wired, a real
+    // connector. `keepWhenEmpty` is retained deliberately: it is what stopped
+    // connectableCatalog() dropping the category while Marvin was coming-soon,
+    // and it keeps the upload strip reachable if Marvin is ever gated off
+    // again. Evidence-bearing — deliberately absent from
     // NON_EVIDENCE_CATEGORIES, and mirrored by the backend's
     // EVIDENCE_UPLOAD_CATEGORIES["research"] so an uploaded transcript is
     // extracted as customer_voice with a research source hint rather than as a
@@ -112,10 +113,19 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      // Catalog-plumbing only — no OAuth/API-key backend yet, so this renders
-      // disabled with the "Coming soon" tooltip. Brand-color letter glyph;
-      // there is no bundled SVG mark for Marvin.
-      { id: "marvin", name: "Marvin", logo: "M", logoText: "M", logoColor: "#6C5CE7", oauth: false, types: ["research"] },
+      // Reads run over Marvin's MCP server (they publish no REST API), and
+      // their US and EU installs are separate deployments with separate
+      // authorization servers — hence `regions`, which makes Connect ask
+      // before redirecting. Brand-color letter glyph; there is no bundled SVG
+      // mark for Marvin.
+      {
+        id: "marvin", name: "Marvin", logo: "M", logoText: "M",
+        logoColor: "#6C5CE7", oauth: true, types: ["research"],
+        regions: [
+          { value: "us", label: "US / Global" },
+          { value: "eu", label: "EU" },
+        ],
+      },
     ],
   },
   {

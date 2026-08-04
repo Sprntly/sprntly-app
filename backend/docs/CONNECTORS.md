@@ -1,7 +1,7 @@
 # Third-party connectors
 
 How Sprntly registers and authenticates with Google Drive, Figma, GitHub,
-Jira, and Confluence. This is the operator guide — read it before clicking
+Jira, Confluence, and Marvin. This is the operator guide — read it before clicking
 through any provider's developer-settings UI.
 
 All connector tokens are stored Fernet-encrypted in the `connections`
@@ -580,3 +580,166 @@ look" are different answers.
 
 Connect, disconnect, health probe, KG ingest, space picker, live chat reads.
 No write path — Sprntly requests no Confluence write scope at all.
+
+---
+
+## Marvin
+
+Marvin (<https://heymarvin.com>) is a customer-insights / UX-research
+repository — interviews, surveys, tagged notes, and the synthesized
+Insight reports a research team writes on top of them. It is wired as a
+`customer-voice` connector, so it counts as evidence for the Top Insights
+brief.
+
+**There is nothing to register.** Marvin has no developer portal, and
+this is the only connector where an operator does not create an app by
+hand. Read the rest of this section before assuming anything transfers
+from the other providers.
+
+### Why MCP instead of a REST API
+
+Marvin publishes no REST API. Their marketing mentions an "open API" and
+an "Import API (coming soon)", but the Import API is *inbound* (pushing
+data into Marvin) and their help centre documents 33 integrations with no
+developer endpoints at all. Their **MCP server** is the only programmatic
+read surface that exists, so `kg_ingest/pullers/marvin.py` speaks Model
+Context Protocol over Streamable HTTP via `connectors/mcp_client.py`.
+
+Sprntly already *serves* MCP (the top-level `mcp/` package). This is the
+opposite direction and shares no code with it: the client here is ~300
+lines over `requests` rather than the official async `mcp` SDK, which
+would have been the only async dependency in the synchronous connector
+layer.
+
+### Two regions, two authorization servers
+
+Marvin runs independent US and EU deployments. A token — and a registered
+OAuth client — is valid at exactly one of them, so the user picks the
+region **before** the redirect (`RegionPromptModal` in Settings, a select
+in the onboarding modal) and it rides in the signed OAuth state.
+
+| | US / Global | EU |
+|---|---|---|
+| MCP resource | `https://mcp.heymarvin.com` | `https://mcp-eu.heymarvin.com` |
+| Authorization server | `https://app.heymarvin.com` | `https://app.eu.heymarvin.com` |
+
+Endpoints are **discovered** per RFC 8414 from
+`{issuer}/.well-known/oauth-authorization-server` rather than hardcoded,
+so a Marvin-side path change doesn't need a Sprntly deploy. The document
+is memoized per process.
+
+### Dynamic client registration (RFC 7591)
+
+Marvin's authorization server advertises a `registration_endpoint`, i.e.
+clients register themselves over the wire. On first connect per region,
+`marvin_oauth.ensure_client` POSTs a registration and persists the result
+in the `oauth_dynamic_clients` table (secret Fernet-encrypted under
+`TOKEN_ENCRYPTION_KEY`, like every connector token). Later connects reuse
+that row.
+
+Resolution order is: `MARVIN_CLIENT_ID`/`MARVIN_CLIENT_SECRET` env vars →
+stored registration → fresh registration.
+
+Two consequences worth knowing:
+
+- **Rotating `TOKEN_ENCRYPTION_KEY`** makes stored client secrets
+  undecryptable. That is handled: the read reports "no client" and the
+  next connect re-registers. Cost is one orphan client record on Marvin's
+  side, not a broken connector.
+- **A cold-start race** (two workers, first-ever connect) registers
+  twice and one row wins. Both credentials stay valid at Marvin, so this
+  is deliberately not locked.
+
+### Scope
+
+`mcp:read` — the only scope the server offers. The connection is
+read-only by construction; there is no write path to Marvin.
+
+### PKCE without server-side state
+
+The callback has no session and trusts only the signed `state` JWT. The
+PKCE verifier is **derived** from the state's nonce by HMAC under
+`JWT_SECRET` (`marvin_oauth.code_verifier_for`), so the callback
+recomputes it from the verified nonce. The verifier never travels over
+the wire — stronger than stashing it in the state parameter, and with no
+store to expire or garbage-collect.
+
+Authorize and token requests both carry `resource=` (RFC 8707), which the
+MCP spec requires: it pins the issued token to one MCP server.
+
+### Env vars
+
+| Var | Required | Notes |
+|---|---|---|
+| `MARVIN_OAUTH_REDIRECT_URI` | **yes** | `https://api.sprntly.ai/v1/connectors/marvin/callback`. The only genuinely required setting — it is also what gets registered as the client's redirect URI. |
+| `MARVIN_CLIENT_ID` | no | Override for a statically issued partner client, should Marvin ever grant one. Skips dynamic registration entirely. |
+| `MARVIN_CLIENT_SECRET` | no | Pairs with the above. |
+
+Changing `MARVIN_OAUTH_REDIRECT_URI` after a dynamic registration means
+the stored client's registered redirect no longer matches. Delete the
+provider's rows from `oauth_dynamic_clients` to force re-registration.
+
+### The customer-side prerequisite (the common support ticket)
+
+MCP is **off by default** and gated:
+
+- A Marvin **admin** must enable *Settings → Developer → Enable MCP*.
+- Enterprise plans get full access; Pro covers admins, full seats,
+  collaborators and viewers; guest/temporary users cannot connect at all.
+
+When the toggle is off, OAuth still succeeds and the MCP server then
+exposes no tools. Sprntly treats that as a **failed connect** (HTTP 400
+with the "ask a Marvin admin to enable MCP" message) rather than storing
+a connection that would silently sync zero records forever. The same
+check backs the health probe.
+
+### Tool discovery is heuristic, deliberately
+
+Marvin publishes no schema for its MCP tools, and `tools/list` needs a
+live token, so there is no correct set of names to hardcode. The puller
+resolves capabilities at sync time: it lists the tools, scores each one's
+name and description, then reads its `inputSchema` to learn what the
+arguments are called. Renames, added tools and per-plan tool subsets all
+survive this; a genuine capability removal surfaces as a clear sync
+error. `tests/test_marvin_puller.py` pins the behaviour against several
+plausible naming conventions.
+
+The capabilities consumed are: list projects, list files, get file
+content. Marvin's **Ask AI** tool is deliberately *not* used by the
+puller — it is nondeterministic and bills the customer's Marvin account.
+It is a better fit for the live connector-lookup adapters.
+
+### What actually gets ingested
+
+Projects (name + description + research questions) and research files,
+distilled to their **analysis** fields only — summary, key points,
+takeaways, highlights, findings, insights. Marvin holds full interview
+transcripts and those are **not** ingested: the field allow-list is the
+filter, and prose responses are capped at 4 000 characters. Same
+no-raw-dump contract as the Fireflies puller. Pull is bounded at 50
+projects / 200 files.
+
+### Token lifecycle
+
+Access tokens are short-lived with a `refresh_token` grant. Refresh
+happens in three places, all of which rebuild the whole stored payload
+(the puller's packed `marvin_credential` embeds the access token, so a
+partial merge would strand it): the auto-sync pre-flight
+(`kg_ingest/auto_sync.py`), the reactive 401/403 retry in the same
+module, and the health probe (`connector_probe.py`). A rejected refresh
+raises `MarvinAuthExpiredError` → the UI prompts a reconnect.
+
+### Caveats
+
+- **No identity.** MCP exposes no "who am I" call, so `account_label` is
+  the server name plus the deployment ("Marvin · EU"). There is nothing
+  truthful to put there beyond that, and inventing an email would be
+  worse than saying less.
+- **Double-counting.** Marvin is itself an aggregator (it imports
+  Zendesk, Intercom, Gong, Dscout, Qualtrics…). A customer running both
+  Sprntly and Marvin may see some evidence arrive twice by different
+  paths.
+- **Export fallback.** For workspaces that can't enable MCP, Marvin's
+  CSV/DOCX/PDF exports drop into the existing `uploads` connector-category
+  path — the `voice` category already maps to `customer_voice` with the
+  right extractor hint. No new code, and it covers Pro-tier customers.

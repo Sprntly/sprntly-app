@@ -351,14 +351,15 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Fireflies")).not.toBeNull()
     expect(screen.queryByText("Zendesk")).toBeNull()
     expect(screen.queryByText("Gong")).toBeNull()
-    // Advance to Research. It has NO visible connector at all (Marvin is
-    // coming-soon) yet the category still renders — its upload strip is what
-    // onboarding is asking for, so `keepWhenEmpty` keeps the shelf alive.
+    // Advance to Research. Marvin is OAuth-wired now, so the shelf shows one
+    // connector — but the upload strip stays, because that is what onboarding
+    // is really asking for (a PM has research long before they can connect a
+    // repository).
     fireEvent.click(footerContinue(container))
     const research = container.querySelector('.conn-step[data-conn="research"]')
     expect(research).not.toBeNull()
-    expect(screen.queryByText("Marvin")).toBeNull()
-    expect(research!.querySelectorAll(".conn").length).toBe(0)
+    expect(screen.getByText("Marvin")).not.toBeNull()
+    expect(research!.querySelectorAll(".conn").length).toBe(1)
     expect(research!.querySelector(".conn-upload")).not.toBeNull()
     // Advance to CRM: HubSpot (oauth) shows, the coming-soons don't.
     fireEvent.click(footerContinue(container))

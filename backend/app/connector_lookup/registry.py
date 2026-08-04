@@ -38,6 +38,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "zendesk": "Zendesk",
     "sprinklr": "Sprinklr",
     "fireflies": "Fireflies",
+    "marvin": "Marvin",
     "gong": "Gong",
     "github": "GitHub",
     "gitlab": "GitLab",
@@ -93,6 +94,10 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.confluence import PROVIDER
 
         return PROVIDER
+    if name == "marvin":
+        from app.connector_lookup.marvin import PROVIDER
+
+        return PROVIDER
     return None
 
 
@@ -100,7 +105,7 @@ def provider_for(name: str) -> LookupProvider | None:
 #: not-supported copy agree with what actually exists.
 LOOKUP_PROVIDERS: tuple[str, ...] = (
     "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
-    "confluence",
+    "confluence", "marvin",
 )
 
 #: Connected (they sync into the KG) but no live-read adapter yet.

@@ -386,6 +386,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectFireflies()
   } else if (providerId === "sprinklr") {
     await connectorsApi.disconnectSprinklr()
+  } else if (providerId === "marvin") {
+    await connectorsApi.disconnectMarvin()
   } else if (providerId === "asana") {
     await connectorsApi.disconnectAsana()
   } else if (providerId === "superset") {

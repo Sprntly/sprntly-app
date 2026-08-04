@@ -74,6 +74,38 @@ def test_ambiguous_names_need_a_read_context():
     assert is_connector_lookup("i have no notion of what they meant") is None
 
 
+def test_marvin_is_recognised_only_when_the_message_is_reading_it():
+    """Marvin (heymarvin.com) is a research repository AND a common first name,
+    so it is an AMBIGUOUS name: a read context in the same message is what
+    separates "check marvin for the interviews" from "marvin is on it".
+
+    Before this, naming Marvin in chat reached no connector path at all — the
+    question fell to the generic router, which answered from the KG's distilled
+    signals while the research it was asked about sat in a connected repository.
+    """
+    assert is_connector_lookup("check marvin for the onboarding interviews") == {
+        "marvin",
+    }
+    assert is_connector_lookup("what research is in marvin about pricing") == {
+        "marvin",
+    }
+    assert is_connector_lookup("find the marvin study on activation") == {"marvin"}
+    # A person, not a source. Neither of these is a request to open anything.
+    assert is_connector_lookup("marvin said hi in standup") is None
+    assert is_connector_lookup("what did marvin say about the pricing change") is None
+    assert is_connector_lookup("marvin is picking that up next sprint") is None
+
+
+def test_marvin_is_not_fuzzy_matched_on_a_typo():
+    """The ≥7-letter rule (_FUZZY_PROVIDER_WORDS) deliberately excludes short
+    names: at six letters "marvin" is one edit from "martin", "marlin" and
+    "margin", so a typo and a different word are the same thing."""
+    from app.skill_router import _FUZZY_PROVIDER_WORDS
+
+    assert "marvin" not in _FUZZY_PROVIDER_WORDS
+    assert is_connector_lookup("check martin for the interviews") is None
+
+
 def test_unnamed_questions_are_not_intercepted():
     for question in [
         "what are customers complaining about?",      # VoC owns this
@@ -311,6 +343,30 @@ def test_naming_a_connected_source_beats_the_topical_interceptors(monkeypatch):
         out = qa.answer(enterprise_id="ent", question=question, dataset="acme")
         assert out["_skill_source"] == "connector-lookup", question
         assert seen["hints"] == {"slack"}, question
+
+
+def test_naming_a_connected_marvin_stands_the_topical_interceptors_down(monkeypatch):
+    """Marvin joining LOOKUP_PROVIDERS is what makes the gate apply to it: the
+    same "customer feedback" phrasing the VoC interceptor owns now goes to the
+    research repository the user actually named. Marvin is not a call source, so
+    nothing about the Fireflies/Gong precedence changes."""
+    from app.connector_lookup import registry as reg
+
+    assert "marvin" not in qa._CALL_SOURCE_PROVIDERS
+    assert "marvin" in reg.LOOKUP_PROVIDERS
+
+    registry = _slack_connected(monkeypatch, providers=("marvin",))
+    _no_llm(monkeypatch)
+    _trap_call_paths(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(registry, "answer_for_hints",
+                        lambda **k: seen.update(k) or {"answer": "marvin",
+                                                       "_skill_source": "connector-lookup"})
+    out = qa.answer(enterprise_id="ent",
+                    question="what's the latest customer feedback in marvin",
+                    dataset="acme")
+    assert out["_skill_source"] == "connector-lookup"
+    assert seen["hints"] == {"marvin"}
 
 
 def test_an_unconnected_named_source_leaves_routing_exactly_as_it_was(monkeypatch):

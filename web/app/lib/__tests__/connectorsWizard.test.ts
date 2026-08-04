@@ -27,14 +27,17 @@ describe("wizard categories", () => {
     // then CRM (HubSpot). Revenue — the last settings-only category — never
     // appears; Company documentation now does, last, in catalog order.
     expect(cats[1].key).toBe("voice")
-    // Research follows Voice with NO connectors of its own (Marvin is still
-    // coming-soon) — it survives the empty-category drop on `keepWhenEmpty`
-    // because its upload strip is what onboarding is asking for.
+    // Research follows Voice, now offering Marvin (OAuth-wired over its MCP
+    // server). Its upload strip is still what onboarding is really asking for
+    // — a PM has research long before they can connect a repository — so the
+    // category would survive on `keepWhenEmpty` even if Marvin were pulled.
     expect(cats.map((c) => c.key)).toEqual([
       "analytics", "voice", "research", "crm", "pm", "design", "code", "comms",
       "docs",
     ])
-    expect(cats.find((c) => c.key === "research")!.items).toEqual([])
+    expect(cats.find((c) => c.key === "research")!.items.map((i) => i.id)).toEqual([
+      "marvin",
+    ])
     expect(cats.map((c) => c.key)).not.toContain("revenue")
   })
 

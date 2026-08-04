@@ -124,9 +124,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
   it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
     // Slack is dual-typed (communication + customer-voice) so its card sits
     // on this shelf too — same item, same connection as in Communications.
+    // Marvin is deliberately NOT here: it is a research repository and lives
+    // on the Research shelf (see below), which is evidence-bearing in its own
+    // right, so nothing about the brief gate depends on this placement.
     expect(items("Voice of Customer & Support")).toEqual([
-      "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Slack",
+      "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store",
+      "Sprinklr", "Fireflies", "Gong", "Slack",
     ])
   })
 
@@ -141,15 +144,27 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
   })
 
-  it("Research: Marvin (coming soon) — the shelf's live feature is its upload strip", () => {
+  it("Research: Marvin, now wired — the shelf keeps its upload strip alongside", () => {
     expect(items("Research")).toEqual(["Marvin"])
     const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
     expect(research.items[0].types).toEqual(["research"])
-    // Not wired yet, so the card renders "Coming soon"…
-    expect(isConnectableConnector(research.items[0])).toBe(false)
-    // …which is exactly why the category must not opt out of manual upload.
+    // Wired as of the Marvin MCP connector, so the card offers Connect rather
+    // than the "Coming soon" tooltip it carried when the shelf first shipped.
+    expect(isConnectableConnector(research.items[0])).toBe(true)
+    // A research repository is not the only way to hand us research, so the
+    // category must still not opt out of manual upload.
     expect(research.allowsManualUpload).not.toBe(false)
+    // Retained even though Research is no longer empty: it is what keeps the
+    // dropzone reachable if Marvin is ever gated off again.
     expect(research.keepWhenEmpty).toBe(true)
+  })
+
+  it("Marvin asks which region before redirecting (US and EU are separate deployments)", () => {
+    const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
+    const marvin = research.items.find((i) => i.id === "marvin")!
+    // Two Marvin installs, two authorization servers — a token is valid at
+    // exactly one, so the region has to be chosen before the OAuth redirect.
+    expect(marvin.regions?.map((r) => r.value)).toEqual(["us", "eu"])
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -189,7 +204,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "confluence", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr",
+        "hubspot", "jira", "marvin", "slack", "sprinklr",
       ].sort(),
     )
   })
@@ -223,6 +238,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "google_drive",
         "hubspot",
         "jira",
+        "marvin",
         "slack",
         "sprinklr",
         "superset",
@@ -262,8 +278,8 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Analytics",
       "Voice of Customer & Support",
-      // Research has no wired connector at all, but survives on keepWhenEmpty
-      // because its upload strip is the feature — see the test below.
+      // Research now has a wired connector of its own (Marvin), so it is kept
+      // on the ordinary rule rather than on keepWhenEmpty.
       "Research",
       "Customer Relationship (CRM)",
       "Project Management",
@@ -274,7 +290,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
+  it("shows only the 14 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
     // Set-dedup: Slack's card renders on two shelves but is one connector.
     const ids = [...new Set(
       connectableCatalog()
@@ -292,6 +308,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "google_drive",
         "hubspot",
         "jira",
+        "marvin",
         "slack",
         "sprinklr",
         "superset",
@@ -311,6 +328,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Voice of Customer & Support")).toEqual([
       "sprinklr", "fireflies", "slack",
     ])
+    expect(byTitle("Research")).toEqual(["marvin"])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Codebase")).toEqual(["github"])
@@ -320,25 +338,34 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
   })
 
-  it("keeps a keepWhenEmpty category (Research) with zero items instead of dropping it", () => {
+  it("keeps Research with its upload strip, and still drops equally-unwired Monitoring", () => {
     const research = connectableCatalog().find((c) => c.key === "research")
-    // Present, empty, and still carrying the upload strip metadata — the whole
-    // point of the flag: coming-soon Marvin is hidden, the dropzone survives.
+    // Research now carries a wired connector (Marvin), so it is retained on the
+    // ordinary rule and `keepWhenEmpty` is no longer what saves it — the flag
+    // stays as the backstop for the day Marvin is gated off. That does mean the
+    // real catalog no longer exercises the zero-item branch; the assertion below
+    // is deliberately about what a user sees, not about which rule kept it.
     expect(research).toBeTruthy()
-    expect(research!.items).toEqual([])
+    expect(research!.items.map((i) => i.id)).toEqual(["marvin"])
     expect(research!.uploadAccept).toBeTruthy()
     expect(research!.allowsManualUpload).not.toBe(false)
-    // The flag is narrow: Monitoring is equally unwired and still gets dropped.
+    // Monitoring has no wired connector and no flag, so it is still dropped.
     expect(
       connectableCatalog().find((c) => c.key === "monitoring"),
     ).toBeUndefined()
   })
 
-  it("shows Marvin on the Research shelf once it has a live connection", () => {
-    const research = connectableCatalog(new Set(["marvin"])).find(
-      (c) => c.key === "research",
+  it("surfaces an unwired connector that nonetheless has a live connection", () => {
+    // Marvin used to cover this branch while it was coming-soon. Dovetail is
+    // now the stand-in: unwired, so hidden by default, but never hidden from a
+    // company that already has a connection row for it.
+    const voice = connectableCatalog(new Set(["dovetail"])).find(
+      (c) => c.key === "voice",
     )!
-    expect(research.items.map((i) => i.id)).toEqual(["marvin"])
+    expect(voice.items.map((i) => i.id)).toContain("dovetail")
+    expect(
+      connectableCatalog().find((c) => c.key === "voice")!.items.map((i) => i.id),
+    ).not.toContain("dovetail")
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {
