@@ -170,8 +170,19 @@ export function GenerationLoadingScreen({
     onLiveTerminalRef.current = onLiveTerminal
   })
 
+  // Gated on `open` (in addition to prototypeId/mode) so the stream's
+  // liveness structurally CANNOT diverge from the overlay's visibility — the
+  // one prior source of a connect with no matching disconnect. This is not
+  // "coordinated" (two independent things kept in sync by convention); the
+  // connection literally cannot exist while `open` is false, because this is
+  // the only place that opens or closes it, and `open` is read directly. A
+  // reopen (same prototypeId, `open` false→true) gets a genuinely FRESH
+  // connection — the backend's in-process pub/sub has no history replay (see
+  // event_stream.py), so a reopen intentionally does not resume the closed
+  // run's prior steps; it renders live progress from that point forward
+  // rather than a frozen snapshot of the previous connection.
   useEffect(() => {
-    if (!prototypeId || mode !== "generate") {
+    if (!open || !prototypeId || mode !== "generate") {
       setLiveSteps([])
       setIsLiveDone(false)
       return
@@ -231,8 +242,8 @@ export function GenerationLoadingScreen({
         // browser-level auto-reconnect for transient network blips
         // (backgrounded tab, brief hiccup) — eagerly closing here defeated
         // reconnect for exactly the cases it exists for. The effect's own
-        // cleanup below still closes the connection on a genuine
-        // (prototypeId, mode) change or true unmount.
+        // cleanup below still closes the connection on `open` going false, a
+        // genuine (prototypeId, mode) change, or true unmount.
         es.onerror = () => {}
       } catch {
         // degrade to cosmetic if EventSource construction fails
@@ -248,7 +259,7 @@ export function GenerationLoadingScreen({
       setLiveSteps([])
       setIsLiveDone(false)
     }
-  }, [prototypeId, mode])
+  }, [open, prototypeId, mode])
 
   // ── onDone hook ────────────────────────────────────────────────────────────
   const prevOpen = useRef(open)

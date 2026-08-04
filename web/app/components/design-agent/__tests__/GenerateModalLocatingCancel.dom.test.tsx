@@ -123,3 +123,41 @@ describe("GenerateModal — locating phase Cancel control", () => {
     expect(onCancel).not.toHaveBeenCalled()
   })
 })
+
+describe("GenerateModal — flowPhase resets on close", () => {
+  it("test_flow_phase_resets_to_config_on_close_so_a_reopen_does_not_render_the_previous_runs_phase: a modal left in the 'generating' phase, closed, then reopened renders the config form again, not a frozen 'Generating your prototype…' from the run that already ended (or is still resolving in the background)", () => {
+    const { rerender } = render(
+      React.createElement(
+        GenerateModal,
+        baseProps({ open: true, _testFlowPhase: "generating" }),
+      ),
+    )
+    // Starts in the generating phase — the config form is NOT rendered.
+    expect(screen.getByTestId("generate-loading-state")).toBeTruthy()
+    expect(screen.queryByText("Platform")).toBeNull()
+
+    // Close (the modal stays mounted — `open` is a render guard, not an
+    // unmount — so `flowPhase` would otherwise survive untouched).
+    rerender(
+      React.createElement(
+        GenerateModal,
+        baseProps({ open: false, _testFlowPhase: "generating" }),
+      ),
+    )
+
+    // Reopen. A host with its OWN click-routing (e.g. a skipExistenceCheck
+    // host calling openGenerateModal() directly, not gated on this hook's cta
+    // state) can reach this even while a prior run is still resolving in the
+    // background.
+    rerender(
+      React.createElement(
+        GenerateModal,
+        baseProps({ open: true, _testFlowPhase: "generating" }),
+      ),
+    )
+
+    // The stale "generating" phase is gone — the config form renders fresh.
+    expect(screen.queryByTestId("generate-loading-state")).toBeNull()
+    expect(screen.getByText("Platform")).toBeTruthy()
+  })
+})

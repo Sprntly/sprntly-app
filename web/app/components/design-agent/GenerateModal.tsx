@@ -542,6 +542,19 @@ export function GenerateModal({
       // Re-arm the auto-skip one-shot so a fresh open evaluates the saved
       // preference again (a closed-then-reopened modal is a new flow).
       autoSkipFiredRef.current = false
+      // The modal stays mounted across a close (this is a `return null`, not
+      // an unmount — see the render guard below), so `flowPhase` would
+      // otherwise carry over whatever phase THIS run last left it in. A host
+      // that reopens with its own click-routing NOT gated on this hook's cta
+      // state (e.g. skipExistenceCheck hosts calling openGenerateModal()
+      // directly) can reopen while a prior run is still resolving in the
+      // background; without this reset that reopen renders a frozen "Generating
+      // your prototype…" (or whatever phase) from the PREVIOUS run — a stale
+      // render, not a live one, and (for a completed prior run) not even
+      // accurate. Reset to "config" so every open starts from a known-clean
+      // state; the auto-skip effect above re-evaluates the saved preference
+      // fresh if one applies.
+      setFlowPhase("config")
     } else {
       pollAbortedRef.current = false
     }
@@ -812,6 +825,13 @@ export function GenerateModal({
         onKickoff,
         onGenerated: (result) => onGenDone?.(result),
         prdTitle,
+        // This is the auto-skip path: `onClose()` above already fired BEFORE
+        // kickoff even starts, so a kickoff failure here has no "modal still
+        // open" signal to lean on — the overlay (driven entirely by
+        // onGenStart/onGenDone, independent of this modal's own open state)
+        // is the only thing a failure can reach. Route it through the same
+        // terminal-outcome handling a post-kickoff failure already gets.
+        onKickoffFailed: (message) => onGenDone?.({ ok: false, message }),
       }).catch(() => { onGenDone?.() })
     }, 0)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1035,8 +1055,10 @@ export function GenerateModal({
       // driven by onGenStart/onGenDone) provides all generation feedback for this
       // path, so the success toasts are redundant: notifyOnReady=false suppresses
       // the "Prototype ready" success toast, notifyOnKickoff=false suppresses the
-      // "Design Agent generating" kickoff toast. Failure surfacing is unchanged —
-      // runGenerateFlow still toasts "Generation failed" / "Generate failed".
+      // "Design Agent generating" kickoff toast. A post-kickoff failure still
+      // toasts "Generation failed" via onGenerated below; a kickoff-time failure
+      // now toasts through the SAME path via onKickoffFailed, not the raw
+      // "Generate failed" fallback.
       notifyOnReady: false,
       notifyOnKickoff: false,
       onKickoff,
@@ -1044,16 +1066,20 @@ export function GenerateModal({
       // failed/timeout) — that's the dismissal signal for the loading overlay.
       // Separate from the toasts above: suppressing the toasts does not touch
       // this callback. The flow's own 6-min timeout bounds it, so the overlay can
-      // never hang forever. If the kickoff itself throws, onGenerated never fires;
-      // the catch in runGenerateFlow toasts "Generate failed" but won't dismiss —
-      // covered below by a kickoff-failure fallback. The terminal RESULT is
-      // threaded through to onGenDone so ApproveModal can reveal the full-screen
-      // canvas on success and skip it on failure.
+      // never hang forever. The terminal RESULT is threaded through to onGenDone
+      // so ApproveModal can reveal the full-screen canvas on success and skip it
+      // on failure.
       onGenerated: (result) => onGenDone?.(result),
       prdTitle,
+      // If the kickoff itself throws (before onGenerated could ever fire), feed
+      // the failure into the SAME terminal-outcome handling a post-kickoff
+      // failure gets — the overlay dismisses with a real "Generation failed"
+      // toast instead of hanging on a guess-timer or a swallowed error.
+      onKickoffFailed: (message) => onGenDone?.({ ok: false, message }),
     }).catch(() => {
       // Defensive — if the whole flow rejects (shouldn't, runGenerateFlow
-      // swallows kickoff errors), still dismiss the overlay.
+      // swallows kickoff errors even with onKickoffFailed wired), still
+      // dismiss the overlay.
       onGenDone?.()
     })
   }
