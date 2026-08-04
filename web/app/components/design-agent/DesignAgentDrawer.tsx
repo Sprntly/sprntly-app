@@ -164,6 +164,19 @@ type GenerateFlowDeps = {
    *  ready-completion sub via `buildReadySub`. Optional — every existing
    *  caller that omits it keeps today's generic fallback copy. */
   prdTitle?: string | null
+  /** Fires when the kickoff POST itself throws (the `catch` block below),
+   *  i.e. before a `prototype_id` ever existed — distinct from `onGenerated`,
+   *  which only fires after a SUCCESSFUL kickoff once the background poll
+   *  settles. Callers that own an overlay lifecycle driven by `onGenStart` /
+   *  `onKickoff` (the GenerateModal call sites, via useGeneratePrototype) pass
+   *  this so a kickoff failure reaches the SAME terminal-outcome handling a
+   *  post-kickoff failure does, instead of leaving the overlay with no signal
+   *  to react to. When supplied, it REPLACES the raw `showToast("Generate
+   *  failed", message)` below — the caller owns showing the error via its own
+   *  curated path. Omit (as the legacy drawer does — it has no overlay to
+   *  signal into and already leaves itself open with this raw toast as its
+   *  only failure surface) to keep today's behaviour exactly. */
+  onKickoffFailed?: (message: string) => void
 }
 
 /**
@@ -269,6 +282,7 @@ export async function runGenerateFlow({
   onGenerated,
   onKickoff,
   prdTitle,
+  onKickoffFailed,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -322,7 +336,14 @@ export async function runGenerateFlow({
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error"
-    showToast("Generate failed", message)
+    if (onKickoffFailed) {
+      // The caller owns the overlay lifecycle and will surface its own
+      // curated error + dismiss it — do not ALSO raw-toast here, or a kickoff
+      // failure would show two failure toasts back to back.
+      onKickoffFailed(message)
+    } else {
+      showToast("Generate failed", message)
+    }
   } finally {
     setSubmitting(false)
   }
@@ -515,6 +536,13 @@ export function DesignAgentDrawerView({
       showToast,
       setSubmitting,
       notifyOnReady,
+      // Deliberately NOT wiring onKickoffFailed here: this view has zero
+      // production mounts (see the file-header status note) and, unlike the
+      // GenerateModal call sites, never introduces a full-screen overlay a
+      // failure signal needs to reach — on a failed kickoff it correctly
+      // stays open with the raw `showToast("Generate failed", …)` above as
+      // its only (and sufficient) failure surface. Considered and left
+      // unchanged deliberately, not by omission.
       onGenerated,
       onKickoff,
     })

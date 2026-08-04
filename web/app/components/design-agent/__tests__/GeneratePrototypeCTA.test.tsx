@@ -128,6 +128,42 @@ describe("GeneratePrototypeCTA — child mounts", () => {
   })
 })
 
+describe("GeneratePrototypeCTA — generating state is observable at kickoff", () => {
+  it("test_cta_reads_generating_prototype_the_moment_the_hook_reports_it: the render prop's cta/label reflect 'generating' as soon as the hook says so — this is now driven by the kickoff-time da:generating dispatch, not a separate timer-based inference", () => {
+    mockResult = makeResult({ cta: "generating", ctaLabel: "Generating Prototype" })
+    let captured: { label: string; cta: GeneratePrototypeCtaState } | undefined
+    render(
+      <GeneratePrototypeCTA
+        prdId={1}
+        listenForCrossSurfaceGenerating
+        render={(state) => {
+          captured = { label: state.label, cta: state.cta }
+          return <div data-testid="trigger">{state.label}</div>
+        }}
+      />,
+    )
+    expect(captured?.cta).toBe("generating")
+    expect(captured?.label).toBe("Generating Prototype")
+    expect(screen.getByTestId("trigger").textContent).toBe("Generating Prototype")
+  })
+
+  it("test_cta_not_disabled_while_generating: the trigger stays clickable (not disabled) while generating — only the in-flight existence check disables it", () => {
+    mockResult = makeResult({ cta: "generating", ctaLabel: "Generating Prototype", isLoadingExisting: false })
+    let capturedDisabled: boolean | undefined
+    render(
+      <GeneratePrototypeCTA
+        prdId={1}
+        listenForCrossSurfaceGenerating
+        render={(state) => {
+          capturedDisabled = state.disabled
+          return <div data-testid="trigger">{state.label}</div>
+        }}
+      />,
+    )
+    expect(capturedDisabled).toBe(false)
+  })
+})
+
 describe("GeneratePrototypeCTA — platform hint forwarding", () => {
   it("forwards the platformHint prop into the hook's options", () => {
     mockResult = makeResult({ cta: "generate" })
