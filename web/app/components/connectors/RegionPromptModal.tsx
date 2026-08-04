@@ -75,7 +75,10 @@ export function RegionPromptModalView({
           </button>
         </div>
         <div className="modal-body">
-          {helpText ? <p className="modal-sub">{helpText}</p> : null}
+          {/* div, not p: helpText is a ReactNode and Marvin's includes a
+              block-level prerequisite callout — a div inside a p is invalid
+              markup and React would warn. */}
+          {helpText ? <div className="modal-sub">{helpText}</div> : null}
           <label className="field-label" htmlFor="conn-region">
             {connectorName} region
           </label>

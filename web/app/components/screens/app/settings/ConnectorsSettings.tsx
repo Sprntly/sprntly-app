@@ -1272,9 +1272,30 @@ export function ConnectorsSettings() {
         connectorName={regionConnectingItem?.name ?? ""}
         regions={regionConnectingItem?.regions ?? []}
         helpText={
-          regionConnectingItem?.id === "marvin"
-            ? "Marvin runs separate US and EU workspaces. Pick the one your team uses — you'll authorize on that deployment. Reading research also requires a Marvin admin to have enabled Settings → Developer → Enable MCP."
-            : null
+          regionConnectingItem?.id === "marvin" ? (
+            <>
+              <p>
+                Marvin runs separate US and EU workspaces. Pick the one your
+                team uses — you&apos;ll authorize on that deployment.
+              </p>
+              {/* The two facts that decide whether the connect can work at
+                  all, and both live on Marvin's side — so they get a loud
+                  callout, not a mumbled sentence. */}
+              <div className="conn-prereq" role="note">
+                <strong>Before you connect, on Marvin&apos;s side:</strong>
+                <ul>
+                  <li>
+                    Your Marvin plan must be <strong>Pro or above</strong> —
+                    MCP access is not available on lower plans.
+                  </li>
+                  <li>
+                    A Marvin admin must turn on{" "}
+                    <strong>Settings → Developer → Enable MCP</strong>.
+                  </li>
+                </ul>
+              </div>
+            </>
+          ) : null
         }
         onConnect={async (region) => {
           if (!regionConnectingItem) return
