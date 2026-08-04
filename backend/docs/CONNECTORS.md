@@ -1,7 +1,7 @@
 # Third-party connectors
 
 How Sprntly registers and authenticates with Google Drive, Figma, GitHub,
-Jira, and Marvin. This is the operator guide — read it before clicking
+Jira, Confluence, and Marvin. This is the operator guide — read it before clicking
 through any provider's developer-settings UI.
 
 All connector tokens are stored Fernet-encrypted in the `connections`
@@ -375,6 +375,211 @@ calls then go to
   paragraphs on create/update.
 - `priority` is omitted when unmapped: not every project defines a
   priority field, and Jira 400s on unknown fields.
+
+---
+
+## Confluence
+
+Sprntly connects to Confluence Cloud via an **Atlassian OAuth 2.0 (3LO)**
+app — a **second, separate** integration from the Jira one. Register at
+<https://developer.atlassian.com/console/myapps/> → **Create** →
+**OAuth 2.0 integration**, named e.g. `Sprntly (Confluence)`.
+
+### Why a separate app (vs adding Confluence scopes to the Jira app)?
+
+- **One app, one callback URL.** An Atlassian 3LO integration carries
+  exactly one Callback URL. Sharing would force both connectors through a
+  single `/atlassian/callback` that disambiguates on the state JWT's
+  `provider` claim — and `jira_oauth.verify_oauth_state` deliberately
+  hard-rejects a state whose provider isn't `jira`. That is a refactor of
+  a shipped connector to enable a new one.
+- **Consent blast radius.** One app declaring both products' scopes means
+  a customer connecting only Jira is asked to grant
+  `read:confluence-content.all`. Over-broad, for zero benefit.
+- **Independent kill switch.** `confluence_configured()` returning False
+  disables Confluence without touching Jira.
+
+There is deliberately **no** `CONFLUENCE_CLIENT_ID or JIRA_CLIENT_ID`
+fallback in `config.py`: it would produce a silent misconfiguration where
+the consent screen 400s on undeclared scopes with no clue why.
+
+### App settings
+
+- **Name**: `Sprntly (Confluence)`
+- **Callback URL** (Authorization → OAuth 2.0 (3LO)):
+  `https://api.sprntly.ai/v1/connectors/confluence/callback` (production)
+  plus one localhost URL for dev, e.g.
+  `http://localhost:8000/v1/connectors/confluence/callback`.
+
+### Permissions (scopes) — read the v1/v2 trap first
+
+**Atlassian has two scope families and they are not interchangeable.**
+
+- **Classic** (`read:confluence-content.all`, `read:confluence-space.summary`, …)
+  serve the **v1** API under `/wiki/rest/api/...`
+- **Granular** (`read:space:confluence`, `read:page:confluence`, …) serve the
+  **v2** API under `/wiki/api/v2/...`
+
+Sprntly reads v2 for everything except the current-user lookup (v2 has no
+such route), so it needs **granular** scopes plus one classic one. Calling a
+v2 endpoint with classic scopes returns:
+
+```
+401 {"code":401,"message":"Unauthorized; scope does not match"}
+```
+
+which looks like a bad token but is really an authorization mismatch. If you
+see that, the scopes are wrong — not the credential.
+
+Add the **Confluence API** under *Permissions*. The console shows **Classic**
+and **Granular** as separate tabs on the same app; you need entries from
+both. Declared in `app/connectors/confluence_oauth.py::CONFLUENCE_SCOPES`;
+the app's declared scopes must be a superset or the consent screen 400s.
+
+| Scope | Tab | Why |
+|---|---|---|
+| `read:space:confluence` | Granular | `GET /wiki/api/v2/spaces` — the space picker |
+| `read:page:confluence` | Granular | `GET /wiki/api/v2/pages` (and blog posts) |
+| `read:blogpost:confluence` | Granular | Declared for safety — the scopes reference lists it while the endpoint doc claims `read:page` covers it |
+| `read:confluence-user` | Classic | `GET /wiki/rest/api/user/current` for the account label |
+| `search:confluence` | Classic | CQL search (`GET /wiki/rest/api/search`) — powers chat's live wiki search. v2 has no search endpoint |
+| `offline_access` | — | Get a **refresh token**; access tokens last ~1 h |
+
+As with Jira, `offline_access` plus `prompt=consent` on the authorize URL
+are what make Atlassian return a refresh token.
+
+**Scopes are baked into the token at consent.** Changing this list means
+every existing connection must **reconnect** — refreshing carries the old
+scope set forward, so a stale connection keeps 401ing until the user
+re-authorizes.
+
+The health probe calls `list_spaces(limit=1)` rather than the identity
+endpoint precisely because of this split: an identity-only probe answers on
+the classic scope and would report a connection healthy while every sync
+401s.
+
+### Env vars
+
+| Var | Source |
+|---|---|
+| `CONFLUENCE_CLIENT_ID` | App → Settings → *Client ID* |
+| `CONFLUENCE_CLIENT_SECRET` | App → Settings → *Secret* |
+| `CONFLUENCE_OAUTH_REDIRECT_URI` | matches the app's Callback URL exactly |
+
+### The cloud_id quirk
+
+Identical to Jira's (see above) with a different path suffix. REST calls go
+to `https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/api/v2/...`
+(v2) or `.../wiki/rest/api/...` (v1). We resolve `cloud_id` via
+`GET /oauth/token/accessible-resources` at connect time and cache it in
+`connections.config_json.cloud_id`.
+
+Note the current-user call uses the **v1** endpoint
+(`/wiki/rest/api/user/current`) on purpose: the v2 API has no current-user
+route.
+
+### Token lifecycle
+
+Same as Jira: ~1 h access tokens, **rotating** refresh tokens, so the whole
+payload is persisted on every refresh. Refresh happens in the health probe
+(`connector_probe.py`) and — once the ingest puller lands — before a KG
+sync. A rejected refresh raises `ConfluenceAuthExpiredError` → the UI
+prompts a reconnect.
+
+One Confluence-specific obligation: the encrypted token payload also
+carries **`company_id`**, because that is the credential the KG puller will
+be handed (it needs the connection's config, which a lone access token
+can't reach). Any code path that rewrites the token payload must preserve
+it — see `confluence_oauth.token_payload_to_store`.
+
+### Caveats
+
+- **We see exactly what the connecting user sees.** 3LO acts as that
+  person: space permissions and per-page restrictions are enforced by
+  Atlassian. There is no scope that widens this, and none that narrows it
+  to particular spaces. So coverage depends on *who clicked Connect*, and
+  it changes silently if their permissions change. This is the first thing
+  to check when a customer says "Sprntly is missing our X docs."
+- **No webhooks.** Confluence webhooks are a Connect/Forge descriptor
+  feature; a plain 3LO app cannot subscribe. Sync is poll-only, via the
+  scheduler's `refresh_connectors` job.
+- **Page bodies are never plain text** — `storage` (XHTML plus
+  `<ac:*>`/`<ri:*>` macro tags), `atlas_doc_format` (ADF, arriving as a
+  JSON *string*), or `view` (rendered HTML).
+- Typed `documents` in `connectors/catalog.py`, which makes it
+  **non-evidence**: like Notion and Google Docs, Confluence alone cannot
+  satisfy the Top Insights brief data-source gate. That is deliberate — a
+  page asserting a customer problem is the author's claim about it, not
+  measured proof.
+
+### Ingestion
+
+`app/kg_ingest/pullers/confluence.py`, registered in `runner.PULLERS`.
+Pages and blog posts, bodies included, from the selected spaces.
+
+The credential the puller is handed is the **company id**, not a token —
+`runner.token_for` passes exactly one field of the encrypted payload, and
+a Confluence pull also needs the site id and the space selection off
+`connections.config`. `confluence_oauth.sync_context()` resolves all of
+it (refreshing and persisting an expiring token on the way). The
+`uploads` puller uses the same trick.
+
+Caps, all in the puller module: 25 spaces, 250 pages per space per kind
+(5 pages of 50), 4 000 chars per record, and a global 500-record valve.
+The valve matters because the content-hash ledger makes *re-*syncs free
+but the **first** sync pays the LLM for everything.
+
+Signals carry `origin="connector"` **plus `channel="upload"`** (see
+`runner._DOCUMENT_PROVIDERS`). A wiki is the same evidentiary class as a
+manual upload, and without the channel stamp connecting Confluence would
+silently revoke the brief gate's upload-only relaxation — briefs would get
+*stricter* the moment a tenant added their wiki.
+
+No per-space watermark, deliberately: the ledger already makes an
+unchanged page cost zero LLM, `sort=-modified-date` keeps a truncated
+space fresh, and a watermark would blind us to pages *moved* into a space
+(old modified-date, never seen again).
+
+### Space selection
+
+`GET /v1/connectors/confluence/spaces` lists what the connected account
+can read (readable by any member); `POST` the same path saves the
+selection (admin-only). Stored on the connection config as
+`sync_space_ids` + `sync_space_keys` — keys kept so a space that later
+becomes unreadable is reported by name.
+
+**An empty selection means every readable space.** That is the
+backwards-compatible default, and it is what a connection made before the
+picker existed has. Personal spaces (`~accountid`) are always excluded.
+
+### Live chat reads
+
+`app/connector_lookup/confluence.py` over `app/connectors/confluence_fetch.py`.
+Four read-only tools: `confluence_search` (CQL), `confluence_list_pages`,
+`confluence_list_spaces`, `confluence_get_page`.
+
+**Two readers, on purpose.** The KG holds *extracted signals* — atomic facts
+the extractor pulled out of pages — not the pages. "What does our onboarding
+spec actually say" is a question about the document, and only a live read
+answers it. The sync answers "what does the company believe, across every
+source".
+
+Reads are bounded by the space selection *and* by the connecting user's own
+Confluence permissions. The adapter's system block tells the model to say so
+rather than conclude the wiki is silent on a topic.
+
+**Search degrades honestly.** CQL search needs the classic `search:confluence`
+scope, added after the first connections were made. A token without it makes
+`search_pages` return `available=False`, and the adapter tells the model
+search could not run and to fall back to listing. Reporting that 401 as an
+empty result set would have chat confidently state a wiki says nothing about
+something it documents thoroughly — "we found nothing" and "we could not
+look" are different answers.
+
+### Current scope
+
+Connect, disconnect, health probe, KG ingest, space picker, live chat reads.
+No write path — Sprntly requests no Confluence write scope at all.
 
 ---
 

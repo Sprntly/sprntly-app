@@ -102,10 +102,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -154,15 +154,22 @@ describe("ChatScreen — live answer streaming", () => {
 
     // The ask wires a live-preview callback…
     expect(ask.hasOnPartial()).toBe(true)
-    // …and until the first delta lands, the turn shows the thinking skeleton.
+    // …and until the first delta lands, the turn shows the waiting state.
+    // Rung 0: for the first 400ms there is deliberately NO indicator (an answer
+    // that lands in 300ms must not flash a spinner), so this waits for rung 1.
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
-    expect(document.querySelector(".assistant-thinking")).toBeTruthy()
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
+    // Rung 1's line is the one thing that is always true while a job generates.
+    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
 
-    // First delta: the skeleton yields to live markdown.
+    // First delta: the skeleton yields to live markdown, the phase line moves to
+    // "Writing the answer" (a delta provably arrived), and the status row STAYS
+    // — it used to be blown away entirely by the first token.
     await ask.partial("The **top churn driver**")
     const streaming = document.querySelector('[data-testid="ask-streaming-partial"]')
     expect(streaming).toBeTruthy()
     expect(streaming!.textContent).toContain("top churn driver")
+    expect(document.querySelector(".cw-phase")?.textContent).toBe("Writing the answer")
 
     // More text accumulates in place.
     await ask.partial("The **top churn driver** is onboarding")
@@ -186,8 +193,11 @@ describe("ChatScreen — live answer streaming", () => {
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
 
     // No deltas ever arrive (HTML report / script paths publish nothing).
-    expect(document.querySelector(".assistant-thinking")).toBeTruthy()
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
+    // A stream that publishes nothing must NOT be reported as a dropped preview:
+    // it is indistinguishable from a skill that simply doesn't stream.
+    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
 
     await ask.release(FINAL_REPLY)
     await waitFor(() =>

@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.stories.generate import Story
+
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID literal,
+# pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
 
 CID = "11111111-2222-3333-4444-555555555555"
 PROJ = "PROJ_GID"
@@ -379,10 +385,10 @@ def test_push_creates_then_updates_by_mapping():
     savemap2.assert_not_called()
 
 
-# ── Child issues → real native Asana subtasks (add-only, idempotent) ─────────
+# ── Child issues → real native Asana subtasks (full reconcile) ───────────────
 
 
-def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
+def test_sync_asana_subtasks_creates_each_missing_child_stripping_marker():
     """Every non-blank child becomes a real subtask; the '[P]' parallel marker
     is stripped and blank entries are skipped."""
     from app.stories import push as push_mod
@@ -395,8 +401,9 @@ def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
 
     with patch.object(push_mod, "get_asana_task_gid", return_value=None), \
          patch.object(push_mod, "save_asana_task_gid") as save, \
+         patch.object(push_mod, "list_asana_subtask_gids", return_value={}), \
          patch("app.connectors.asana_oauth.create_subtask", side_effect=_create):
-        push_mod.push_asana_subtasks(
+        push_mod.sync_asana_subtasks(
             CID, PROJ, "PARENT", "tid",
             ["Design API", "[P] Write tests", "   "], access_token="tok",
         )
@@ -404,19 +411,69 @@ def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
     assert save.call_count == 2
 
 
-def test_push_asana_subtasks_skips_already_created():
+def test_sync_asana_subtasks_skips_already_created():
     """A subtask already mapped (created on a prior pass) is not re-created —
-    add-only idempotency by content hash (mirrors the Jira sub-task push)."""
+    idempotency by content hash (mirrors the Jira sub-task sync)."""
     from app.stories import push as push_mod
 
+    sub_id = push_mod._sub_id("tid", "Design API")
     with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
          patch.object(push_mod, "save_asana_task_gid") as save, \
-         patch("app.connectors.asana_oauth.create_subtask") as create:
-        push_mod.push_asana_subtasks(
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={sub_id: "EXISTS"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.create_subtask") as create, \
+         patch("app.connectors.asana_oauth.delete_task") as delete:
+        push_mod.sync_asana_subtasks(
             CID, PROJ, "PARENT", "tid", ["Design API"], access_token="tok",
         )
     create.assert_not_called()
     save.assert_not_called()
+    delete.assert_not_called()
+    unmap.assert_not_called()
+
+
+def test_sync_asana_subtasks_deletes_a_child_removed_in_sprntly():
+    """A child issue removed in Sprntly is deleted in Asana and unmapped —
+    it used to be left behind, because the push was add-only."""
+    from app.stories import push as push_mod
+
+    stale = push_mod._sub_id("tid", "Design API")
+    keep = push_mod._sub_id("tid", "Write tests")
+    with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
+         patch.object(push_mod, "save_asana_task_gid"), \
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={stale: "S1", keep: "S2"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.create_subtask"), \
+         patch("app.connectors.asana_oauth.delete_task",
+               return_value=True) as delete:
+        push_mod.sync_asana_subtasks(
+            CID, PROJ, "PARENT", "tid", ["Write tests"], access_token="tok",
+        )
+    delete.assert_called_once_with("tok", "S1")
+    unmap.assert_called_once_with(CID, PROJ, stale)
+
+
+def test_sync_asana_subtasks_completes_when_delete_is_forbidden():
+    """No delete rights → mark the subtask complete, Asana's close, and treat
+    that as the removal having landed."""
+    from app.connectors.tracker_errors import TrackerDeleteForbiddenError
+    from app.stories import push as push_mod
+
+    stale = push_mod._sub_id("tid", "Design API")
+    with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={stale: "S1"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.delete_task",
+               side_effect=TrackerDeleteForbiddenError("nope")), \
+         patch("app.connectors.asana_oauth.update_task") as update:
+        push_mod.sync_asana_subtasks(
+            CID, PROJ, "PARENT", "tid", [], access_token="tok",
+        )
+    update.assert_called_once_with("tok", "S1", completed=True)
+    unmap.assert_called_once_with(CID, PROJ, stale)
 
 
 def test_push_story_with_subtasks_creates_native_subtasks_and_keeps_them_out_of_notes():

@@ -148,16 +148,16 @@ def test_discipline_length_within_bounds():
 # ─── AC6: version bumped ─────────────────────────────────────────────────────
 
 def test_template_version_bumped_to_5():
-    """DESIGN_AGENT_TEMPLATE_VERSION is an int, now 9 (bumped when the
-    mobile-capability platform directives landed)."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 9
+    """DESIGN_AGENT_TEMPLATE_VERSION is an int, now 10 (bumped when the
+    external-entry-point placeholder directive landed)."""
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 10
     assert isinstance(DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
 def test_scaffold_sync_green_at_new_version():
-    """The version-coupled scaffold-sync contract: version is an int equal to 9
-    (bumped to 9 when the mobile-capability platform directives landed)."""
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+    """The version-coupled scaffold-sync contract: version is an int equal to 10
+    (bumped to 10 when the external-entry-point placeholder directive landed)."""
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 10
 
 
 # ─── AC7: existing system prompts unchanged (append-only) ────────────────────

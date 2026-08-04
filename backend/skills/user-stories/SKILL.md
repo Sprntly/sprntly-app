@@ -159,11 +159,15 @@ Canonical → tool, with the real per-platform gotchas honored:
 Linear: priority int 0–4, `estimate`, cycles. Everything else → the generic
 adapter. ⚑ = nearest-container mapping, flagged to the user.
 
-## Visual references (ALWAYS consult before rendering)
+## Visual references — for maintainers, NOT for you
 
-An implementing agent must open these before producing any output — they are
-the source of truth for look, spacing, states, and both branches of the
-sizing gate:
+**You do not render anything.** Sprntly calls this skill as a forced-tool JSON
+call: you emit structured tickets and the product's own UI renders them. You
+have no filesystem, these files are not in your prompt, and no markup you wrote
+could reach a screen. Spend your output on ticket CONTENT — titles, the
+five-section description, acceptance criteria, sizing — and let the UI place it.
+
+The files below are the design contract for whoever builds or changes that UI:
 
 - `examples/sprntly-ticket-views.html` — the locked design reference: list
   view + full ticket detail (five-section description, AC checklist, details
@@ -175,16 +179,27 @@ sizing gate:
   tabs with working switching; gray backbone, green walking-skeleton band,
   release slices, gap notes.
 
-If a render disagrees with these files, the files win.
-
 ## Delivery format (locked to the Sprntly UI — colors are fixed, the skill never restyles)
 
-Design reference: `examples/sprntly-ticket-views.html` — the source of truth
-for layout, tokens, affordances, and states. An implementing agent must open
-it and align. Palette tokens (locked): ink `#1c1e21`, panel `#f7f7f5`, green
+The Sprntly UI owns layout, tokens, affordances and states — they are fixed in
+`examples/sprntly-ticket-views.html`, which the FRONTEND implements and which is
+not sent to you. Listed here so you know these are already decided and need none
+of your output. Palette tokens (locked): ink `#1c1e21`, panel `#f7f7f5`, green
 `#2e8a57` / title-green `#2f7d52` / tint `#e9f4ec`, urgent `#c63f35`/`#fcebe8`,
 high `#b57a21`/`#fbf1de`, chip `#f1f1ef`; Spectral (serif titles) + Inter
 (body) + IBM Plex Mono (keys).
+
+> **Who this section is for.** Everything below specifies the surface Sprntly
+> RENDERS — the Tickets view, built in the app from structured ticket data.
+> It is a spec for that view, never an instruction to emit markup. When this
+> skill answers **in chat** (the no-PRD path: the reader asked for tickets on
+> a report or an insight, so there is no ticket surface to open), the answer
+> is **plain markdown** — headings, bold, tables, lists. Do not emit `<div>`,
+> `<button>`, `style="…"`, or any hex color: a chat answer is drawn by a
+> markdown renderer, so markup arrives as literal tag text and a drawn button
+> does nothing when clicked. Say what the tickets are, and say that running
+> `prd-author` first is what puts them on the real Tickets surface with the
+> push and regenerate actions attached.
 
 - **Scope boundary:** the skill's output starts at the "Tickets from …" header
   block. The surrounding page chrome — the Evidence / PRD / Tickets tab bar,

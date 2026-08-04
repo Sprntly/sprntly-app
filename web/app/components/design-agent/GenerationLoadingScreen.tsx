@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, getAccessToken } from "../../lib/api"
-import { SCREEN_PATH } from "../../lib/routes"
 import { IconArrowRight } from "../shared/app-icons"
 import type { LocateConfirmCandidate } from "./ClarifyingQuestionSurface"
 import { GenerationCancelButton } from "./GenerationCancelButton"
@@ -132,27 +131,16 @@ export function GenerationLoadingScreen({
   const [doneCount, setDoneCount] = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const startedAtRef = useRef<number>(0)
-  // Part D (Treatment B) — the in-panel "You're set" confirmation replaces
-  // the notify button once armed. Reset alongside doneCount/elapsedMs so a
-  // fresh generation (a subsequent open) never starts pre-armed.
-  const [notifyArmed, setNotifyArmed] = useState(false)
-  const backToBriefsRef = useRef<HTMLAnchorElement>(null)
-
-  useEffect(() => {
-    if (notifyArmed) backToBriefsRef.current?.focus()
-  }, [notifyArmed])
 
   useEffect(() => {
     if (!open) {
       setDoneCount(0)
       setElapsedMs(0)
-      setNotifyArmed(false)
       return
     }
     startedAtRef.current = Date.now()
     setDoneCount(0)
     setElapsedMs(0)
-    setNotifyArmed(false)
     const tick = window.setInterval(
       () => setElapsedMs(Date.now() - startedAtRef.current),
       100,
@@ -269,15 +257,9 @@ export function GenerationLoadingScreen({
     prevOpen.current = open
   }, [open, onDone])
 
-  // Part D (Treatment B) — arms the in-panel confirmation ONLY. The REAL
-  // onNotifyWhenReady() hand-off (which flips the parent's genLoading false
-  // and closes this overlay) fires only when the user clicks "Back to
-  // Briefs" — calling it here would flip `open` false on the next render and
-  // the confirmation would never be visible. Safe specifically because Part C
-  // now closes the reload/navigate-away gap independently via sessionStorage.
   const handleNotifyClick = () => {
     if (!onNotifyWhenReady) return
-    setNotifyArmed(true)
+    onNotifyWhenReady()
   }
 
   const handleCancel = () => {
@@ -405,43 +387,21 @@ export function GenerationLoadingScreen({
             className={`proto-gen-footer${onNotifyWhenReady ? " proto-gen-footer--stacked" : ""}`}
           >
             {onNotifyWhenReady ? (
-              !notifyArmed ? (
-                <div className="proto-gen-notify-block">
-                  <p className="proto-gen-notify-copy">
-                    This takes a few minutes — we'll ping you when it's done.
-                  </p>
-                  <button
-                    type="button"
-                    className="btn btn-primary proto-gen-notify-btn"
-                    onClick={handleNotifyClick}
-                  >
-                    Notify me when ready
-                  </button>
-                  <div className="proto-gen-notify-cancel-row">
-                    <GenerationCancelButton onCancel={handleCancel} />
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="proto-gen-notify-armed"
-                  data-testid="proto-gen-notify-armed"
+              <div className="proto-gen-notify-block">
+                <p className="proto-gen-notify-copy">
+                  This takes a few minutes — we'll ping you when it's done.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-primary proto-gen-notify-btn"
+                  onClick={handleNotifyClick}
                 >
-                  <div className="proto-gen-notify-armed-title">You're set</div>
-                  <div className="proto-gen-notify-armed-sub">
-                    We'll notify you when it's ready — you're free to close
-                    this tab or carry on elsewhere.
-                  </div>
-                  <a
-                    href={SCREEN_PATH.ideation}
-                    ref={backToBriefsRef}
-                    className="btn proto-gen-notify-back-link"
-                    onClick={() => onNotifyWhenReady?.()}
-                  >
-                    Back to Ideation
-                    <IconArrowRight size={14} />
-                  </a>
+                  Notify me when ready
+                </button>
+                <div className="proto-gen-notify-cancel-row">
+                  <GenerationCancelButton onCancel={handleCancel} />
                 </div>
-              )
+              </div>
             ) : (
               onCancel && <GenerationCancelButton onCancel={handleCancel} />
             )}

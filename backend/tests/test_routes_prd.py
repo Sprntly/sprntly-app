@@ -115,6 +115,70 @@ def test_get_permissive_on_v1_rows(tenant_client, isolated_settings):
     assert body["payload_md"] == "# legacy v1 body"
 
 
+# ---- GET /v1/prd/by-public-id/{public_id} -----------------------------------
+# The one internal resolver useArtifactUrlSync.ts calls when a `?prd=` URL
+# carries the PRD's opaque public_id (2026-08-02 public_id migration) instead
+# of the raw sequential id — same ownership gate GET /{prd_id} already
+# enforces, just a different identifier shape in, the real int id out.
+
+def test_by_public_id_resolves_to_real_id(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    prd_id = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_prd(prd_id, title="t", md="# PRD body")
+    from app.db.client import require_client
+    import uuid
+
+    public_id = str(uuid.uuid4())
+    require_client().table("prds").update({"public_id": public_id}).eq("id", prd_id).execute()
+
+    resp = t.client.get(f"/v1/prd/by-public-id/{public_id}")
+    assert resp.status_code == 200
+    assert resp.json() == {"id": prd_id}
+
+
+def test_by_public_id_cross_tenant_returns_404(tenant_client, isolated_settings):
+    a = tenant_client.make(slug="company-a")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="company-a")
+    prd_id = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_prd(prd_id, title="t", md="# A's secret PRD")
+    from app.db.client import require_client
+    import uuid
+
+    public_id = str(uuid.uuid4())
+    require_client().table("prds").update({"public_id": public_id}).eq("id", prd_id).execute()
+
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.get(f"/v1/prd/by-public-id/{public_id}")
+    assert resp.status_code == 404
+    # Positive control — the owner still succeeds.
+    assert a.client.get(f"/v1/prd/by-public-id/{public_id}").status_code == 200
+
+
+def test_by_public_id_unknown_uuid_returns_404(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    import uuid
+
+    resp = t.client.get(f"/v1/prd/by-public-id/{uuid.uuid4()}")
+    assert resp.status_code == 404
+
+
+def test_by_public_id_malformed_value_returns_404_not_500(tenant_client, isolated_settings):
+    """Regression: a non-UUID string (e.g. a stale bare-integer ?prd= link
+    mistakenly routed here) must 404 cleanly, never a raw query-layer 500."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.get("/v1/prd/by-public-id/not-a-uuid-at-all")
+    assert resp.status_code == 404
+
+
 # ---- cross-tenant isolation -------------------------------------------------
 
 def test_get_prd_cross_tenant_returns_404(tenant_client, isolated_settings):
@@ -311,6 +375,19 @@ def test_generate_via_prd_author_skill_through_canonical_path(
         )
 
     monkeypatch.setattr(prd_runner, "llm_call", _capture)
+
+    # The route itself schedules `generate_prd_and_warm` as a fire-and-forget
+    # background task (asyncio.create_task) — whether that task gets a chance
+    # to run before this request returns is a scheduling race, not something
+    # this test controls. Neutralize it so the ONLY generation this test
+    # observes is the explicit `generate_prd` call below; otherwise the
+    # background task can ALSO invoke `llm_call` and double-count skills_seen.
+    from app.routes import prd as prd_routes
+
+    async def _noop_warm(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", _noop_warm)
 
     resp = t.client.post(
         "/v1/prd/generate",

@@ -31,7 +31,7 @@ from app.llm import (
     call_md,
 )
 from app.llm_telemetry import MODEL_PRICING
-from app.skills.loader import SkillSpec, get_skill
+from app.skills.loader import SkillSpec, UnknownSkillError, get_skill
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # accumulating the streamed text into the same return value. Behavior for all
 # other skills/callers is unchanged.
 _LONG_OUTPUT_SKILLS = frozenset(
-    {"prd-author", "implementation-spec", "evidence-brief"}
+    {"prd-author", "implementation-spec", "evidence-brief", "ideation-prioritize"}
 )
 
 
@@ -79,9 +79,27 @@ def _build_method_prefix(
     then a cache read on subsequent calls. `assets/*` (e.g. a render template)
     are deliberately NOT injected: the app renders from the structured payload,
     so the template is a downstream view, not a prompt input.
+
+    TOLERANT BY DESIGN when the id names no vendored directory. The vendored
+    library is now a small keep-list (nine skills), while a dozen-odd pipelines
+    still pass `skill=<id>` at their call site — those bindings are how the
+    decision log attributes a call, and several of them name a method we no
+    longer ship. Raising here would turn "this pipeline has no method doc" into
+    a 500 for a pipeline that is otherwise perfectly able to run on its own
+    prompt, so a missing directory degrades to running METHOD-LESS instead:
+    empty block, and `+bare` recorded in `prompt_version` so the audit spine can
+    tell a method-less run apart from a method-backed one.
+
+    NOT tolerant of an INJECTED spec (a company upload) — that path never
+    touches disk, so there is nothing to be missing.
     """
     injected = spec is not None
-    spec = spec if injected else get_skill(skill)
+    if not injected:
+        try:
+            spec = get_skill(skill)
+        except UnknownSkillError:
+            # Not vendored -> run method-less. See the docstring.
+            return "", "+bare"
     origin = ", company-uploaded" if injected else ""
     header = f"## METHOD (skill: {spec.id} @{spec.content_hash}{origin})\n"
     block = header + spec.method
@@ -177,10 +195,17 @@ def llm_call(
         # the json and md paths now share this: call_md gained a cacheable-prefix
         # parameter, so markdown skills (prd-author, implementation-spec,
         # evidence-brief) stop folding the method uncached into `system`.
-        user_cacheable_prefix = (
-            method_block if user_cacheable_prefix is None
-            else f"{method_block}\n{user_cacheable_prefix}"
-        )
+        #
+        # Guarded on `method_block` being non-empty: a method-less run (the
+        # skill id names no vendored dir — see _build_method_prefix) must leave
+        # the caller's prefix exactly as it was, and must NOT turn a `None`
+        # prefix into an empty string, which app.llm reads as "there is a
+        # cacheable prefix" and would emit as an empty cache-controlled block.
+        if method_block:
+            user_cacheable_prefix = (
+                method_block if user_cacheable_prefix is None
+                else f"{method_block}\n{user_cacheable_prefix}"
+            )
     # Long-output calls stream on the long read timeout so a large/slow
     # generation never trips the default per-request timeout. Triggered either by
     # a registered long-output skill (e.g. prd-author) OR an explicit
@@ -270,6 +295,12 @@ def llm_call(
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "cache_read_input_tokens": result.cache_read_input_tokens,
+                    # The write side of the cache, without which the read count
+                    # alone can't yield a hit rate from the audit spine —
+                    # `LLMResult` has carried it all along, it just never landed
+                    # in `factors`. Needed to measure whether the router's
+                    # cacheable menu prefix is actually being hit.
+                    "cache_creation_input_tokens": result.cache_creation_input_tokens,
                     "cost_usd": result.cost_usd,
                     "latency_ms": result.latency_ms,
                 },

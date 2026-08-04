@@ -431,3 +431,121 @@ def _seed_source(isolated_settings, *, name="Research", description=""):
             {"id": _CID, "slug": "uploads-test", "display_name": "Uploads Test"}
         ).execute()
     return create_document_source(_CID, name=name, description=description)
+
+
+# ─────────── Unreadable files never reach the extractor (cost guard) ───────────
+
+
+def test_puller_skips_the_unreadable_stub(isolated_settings):
+    """The real regression: a binary upload stores a ~150-char placeholder,
+    which is non-blank and so used to sail past the whitespace guard, get
+    emitted as a record, and burn an LLM call on its own apology text."""
+    from app.document_sources import add_document_file
+    from app.kg_ingest.pullers import uploads as uploads_puller
+
+    src = _seed_source(isolated_settings)
+    add_document_file(_CID, src.id, filename="legacy.doc", data=b"\xd0\xcf\x11\xe0binary")
+
+    # It IS stored (nothing is rejected) …
+    from app.document_sources import list_source_files
+    files = list_source_files(_CID, src.id)
+    assert len(files) == 1
+    from app.ingest import is_unparsed_stub
+    assert is_unparsed_stub(files[0].extracted_text)
+    # … but it never becomes an extraction record.
+    assert list(uploads_puller.pull(_CID)) == []
+
+
+def test_puller_still_emits_records_for_readable_files(isolated_settings):
+    """Guard against over-filtering: real content must still flow."""
+    from app.document_sources import add_document_file
+    from app.kg_ingest.pullers import uploads as uploads_puller
+
+    src = _seed_source(isolated_settings)
+    add_document_file(
+        _CID, src.id, filename="interview.txt",
+        data=b"The customer said onboarding takes three weeks.",
+    )
+    records = list(uploads_puller.pull(_CID))
+    assert len(records) == 1
+    assert "onboarding takes three weeks" in records[0].text
+
+
+# ─────────────────── .zip is a container, not a document ───────────────────
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, body in members.items():
+            zf.writestr(name, body)
+    return buf.getvalue()
+
+
+def test_uploaded_zip_is_expanded_into_its_members(uploads_env, monkeypatch):
+    """A .zip used to go through the converter itself — i.e. land as one
+    unreadable placeholder — so none of its contents ever reached the KG.
+    It must be expanded and each member stored as its own readable file."""
+    ctx = company_client(monkeypatch)
+
+    archive = _zip_bytes({
+        "interviews/acme.md": b"# Acme interview\nThey need SSO.",
+        "interviews/globex.txt": b"Globex churned over pricing.",
+        "__MACOSX/._acme.md": b"junk",          # macOS noise, skipped
+    })
+
+    r = ctx.client.post(
+        "/v1/connectors/uploads/sources",
+        data={"name": "Interview exports"},
+        files=[_file("research.zip", archive)],
+    )
+    assert r.status_code == 200, r.text
+    files = r.json()["source"]["files"]
+
+    # Members landed individually, basename-only (no path traversal), and the
+    # archive itself is NOT stored as a file.
+    assert {f["filename"] for f in files} == {"acme.md", "globex.txt"}
+    assert all(f["extracted_chars"] > 0 for f in files)
+
+    # And their text is real content, not a placeholder.
+    from app.ingest import is_unparsed_stub
+    from app.document_sources import list_document_sources, list_source_files
+
+    src = list_document_sources(ctx.company_id)[0]
+    for stored in list_source_files(ctx.company_id, src.id):
+        assert not is_unparsed_stub(stored.extracted_text)
+
+
+def test_uploaded_corrupt_zip_reports_an_error_not_a_crash(uploads_env, monkeypatch):
+    """A bad archive is a per-file error, never a 500. It leaves the source
+    with nothing stored, which the route already treats as a 400 + rollback."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/uploads/sources",
+        data={"name": "Broken"},
+        files=[_file("broken.zip", b"not really a zip")],
+    )
+    assert r.status_code == 400, r.text
+    assert "not a valid zip archive" in r.json()["detail"]
+
+
+def test_corrupt_zip_alongside_a_good_file_keeps_the_good_one(
+    uploads_env, monkeypatch
+):
+    """Partial success: one unreadable archive must not discard the rest of
+    the batch."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/uploads/sources",
+        data={"name": "Mixed"},
+        files=[
+            _file("broken.zip", b"not really a zip"),
+            _file("notes.md", b"# Real content"),
+        ],
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {f["filename"] for f in body["source"]["files"]} == {"notes.md"}
+    assert any("not a valid zip archive" in e["error"] for e in body["errors"])

@@ -31,10 +31,19 @@ import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
+import { useThreadReportsSync } from "../components/shared/useThreadReports"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
+import { useArtifactUrlSync } from "./hooks/useArtifactUrlSync"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useGenerationNotify()
+  // Shell-level, page-agnostic `?prd=`/`?evidence=`/`?ticket=` deep-link sync
+  // (both directions) — see the hook's doc comment for the full design.
+  useArtifactUrlSync()
+  // Single owner of the active thread's reports (mirrored into ContentContext),
+  // same shape as useBriefHydration below: the panel and ChatScreen both read
+  // that list, and neither should fetch it.
+  useThreadReportsSync()
   const auth = useAuth()
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()
@@ -82,6 +91,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // Skip until we have a signed-in session; the connectors route 401s
     // without a Bearer token (require_company → require_session).
     if (!workspace?.id) return
+    // `connectorsHydrated` is the "we've actually asked" flag. Until it flips,
+    // the default empty `connectedConnectorIds` means "unknown", not "none" —
+    // the Top Insights surface used to read that default as "no sources" and
+    // flash its dead-end connect page for a beat on every load. Cleared here so
+    // a workspace switch can't be judged against the previous workspace's list,
+    // and set on BOTH outcomes: a failed connectors call must still let the
+    // surface resolve rather than spin forever.
+    setContent({ connectorsHydrated: false })
     void connectorsApi
       .list()
       .then((r) => {
@@ -89,9 +106,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           connectedConnectorIds: r.connections
             .filter((c) => c.status === "active")
             .map((c) => c.provider),
+          connectorsHydrated: true,
         })
       })
-      .catch(() => {})
+      .catch(() => {
+        setContent({ connectorsHydrated: true })
+      })
   }, [setContent, workspace?.id])
 
   // The Top Insights filter is workspace-level: an admin picks the insight

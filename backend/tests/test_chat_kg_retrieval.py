@@ -252,6 +252,57 @@ def test_retrieve_context_folds_in_session_context(facade):
     assert bundle["empty"] is False
 
 
+def test_retrieve_context_enriches_ledger_entities_with_decision_chain(facade):
+    """A decision/outcome/hypothesis with a real decision-chain edge (the
+    hypothesis->decision->...->outcome->hypothesis loop `decision_chain.py`
+    writes) resolves into a `related` dict on the bundle entity, not just a
+    bare label — this is what lets `render_context_section` make the causal
+    chain explicit instead of three disconnected lists."""
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Entity, Relationship
+
+    hyp = Entity(
+        enterprise_id="ent-A", type="hypothesis",
+        canonical_label="SSO unblocks enterprise",
+    )
+    facade.create_entity("ent-A", hyp)
+    decision = Entity(
+        enterprise_id="ent-A", type="decision",
+        canonical_label="Prioritize SSO this quarter",
+        properties={"hypothesis_id": hyp.id, "prd_id": "prd-1"},
+    )
+    facade.create_entity("ent-A", decision)
+    facade.write_relationship("ent-A", Relationship(
+        enterprise_id="ent-A", type="PROMOTED_TO",
+        source_kind="entity", source_id=hyp.id,
+        target_kind="entity", target_id=decision.id,
+    ))
+    outcome = Entity(
+        enterprise_id="ent-A", type="outcome",
+        canonical_label="Churn down 4pts",
+        properties={"actual_impact": "4pt reduction"},
+    )
+    facade.create_entity("ent-A", outcome)
+    facade.write_relationship("ent-A", Relationship(
+        enterprise_id="ent-A", type="VALIDATES",
+        source_kind="entity", source_id=outcome.id,
+        target_kind="entity", target_id=hyp.id,
+    ))
+
+    with _patch_embed(), _patch_candidates([]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    [hyp_out] = bundle["hypotheses"]
+    [dec_out] = bundle["decisions"]
+    [out_out] = bundle["outcomes"]
+
+    assert dec_out["properties"]["prd_id"] == "prd-1"
+    assert dec_out["related"]["promoted_from_hypothesis"] == "SSO unblocks enterprise"
+    assert out_out["properties"]["actual_impact"] == "4pt reduction"
+    assert out_out["related"]["validates_hypothesis"] == "SSO unblocks enterprise"
+    assert hyp_out["related"]["validated_by_outcome"] == "Churn down 4pts"
+
+
 def test_retrieve_context_recent_signals_without_theme_match(facade):
     """No theme match (find_candidates → []) still surfaces recent non-stale
     signals — covers fresh connector data not yet wired to a theme."""
@@ -401,6 +452,81 @@ def test_render_context_section_includes_signals_and_provenance(facade):
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in text
     assert "Acme blocked on SSO" in text
     assert "revenue" in text  # source_type surfaced for citation
+
+
+def test_render_context_section_renders_ledger_properties_and_causal_chain():
+    """Given a bundle with a populated decisions/outcomes entity (properties +
+    a resolvable edge), the rendered text includes the properties AND the
+    causal-chain text (e.g. "validates hypothesis: ..."), not just the bare
+    label — the actual regression: a staging chat answer said an outcome
+    hadn't been reached despite the outcome entity existing, because the old
+    render only ever emitted `- {label}`."""
+    from app.graph.retrieval import render_context_section
+
+    bundle = {
+        "empty": False,
+        "signals": [],
+        "themes": [],
+        "hypotheses": [
+            {
+                "entity_id": "hyp-1",
+                "label": "SSO unblocks enterprise",
+                "properties": {},
+                "related": {"validated_by_outcome": "Churn down 4pts"},
+            },
+        ],
+        "decisions": [
+            {
+                "entity_id": "dec-1",
+                "label": "Prioritize SSO this quarter",
+                "properties": {"prd_id": "prd-1"},
+                "related": {"promoted_from_hypothesis": "SSO unblocks enterprise"},
+            },
+        ],
+        "outcomes": [
+            {
+                "entity_id": "out-1",
+                "label": "Churn down 4pts",
+                "properties": {"actual_impact": "4pt reduction"},
+                "related": {"validates_hypothesis": "SSO unblocks enterprise"},
+            },
+        ],
+        "kg_refs": [],
+    }
+
+    text = render_context_section(bundle)
+
+    # Properties surfaced, not discarded.
+    assert "prd_id=prd-1" in text
+    assert "actual_impact=4pt reduction" in text
+    # The causal chain is explicit text, not just parallel unconnected lists.
+    assert "validates hypothesis: SSO unblocks enterprise" in text
+    assert "promotes hypothesis: SSO unblocks enterprise" in text
+    assert "validated by outcome: Churn down 4pts" in text
+    # Bare labels alone are no longer the whole story for these entities.
+    assert text.count("- Churn down 4pts") == 1  # only the outcome line, once
+
+
+def test_render_context_section_ledger_entity_without_related_edge_still_renders():
+    """An entity with no resolvable chain edge (e.g. a still-open hypothesis)
+    degrades to label + properties only — no crash, no phantom chain text."""
+    from app.graph.retrieval import render_context_section
+
+    bundle = {
+        "empty": False,
+        "signals": [],
+        "themes": [],
+        "hypotheses": [
+            {"entity_id": "hyp-2", "label": "Unvalidated idea", "properties": {}},
+        ],
+        "decisions": [],
+        "outcomes": [],
+        "kg_refs": [],
+    }
+
+    text = render_context_section(bundle)
+    assert "Unvalidated idea" in text
+    assert "not yet validated by a measured outcome" in text
 
 
 def test_render_context_section_empty_bundle_is_blank():
@@ -589,6 +715,227 @@ def test_compose_ask_answer_prd_prefix_stable_across_turns(
         == block
     )
     assert first["user"] != second["user"]
+
+
+# ────────────────────── compose_ask_answer × workspace configuration ────────
+
+
+def _seed_company_with_config(
+    db, company_id, *, website="https://sprntly.ai", display_name="Sprntly",
+    product_name="Sprntly",
+):
+    """A companies row + its primary product row — the two reads
+    `company_facts_block` composes into the answer-prompt configuration
+    block."""
+    db.table("companies").insert(
+        {"id": company_id, "slug": f"slug-{company_id}", "display_name": display_name}
+    ).execute()
+    db.table("products").insert(
+        {
+            "id": f"prod-{company_id}",
+            "company_id": company_id,
+            "name": product_name,
+            "website": website,
+            "is_primary": 1,
+        }
+    ).execute()
+
+
+def test_compose_ask_answer_prompt_carries_company_domain(
+    isolated_settings, fake_llm
+):
+    """Regression: the incident tenant's own domain must ride the prompt so it
+    can outrank a wrong domain elsewhere. Fails on unfixed code — the domain
+    appears nowhere in the assembled prompt when no workspace configuration is
+    wired in. (AC7, AC12)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "What's our domain?", enterprise_id="co-1")
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER in prefix
+    assert "https://sprntly.ai" in prefix
+
+
+def test_compose_ask_answer_puts_company_facts_in_cacheable_prefix_not_user(
+    isolated_settings, fake_llm
+):
+    """The config block rides the CACHEABLE prefix, never the uncached `user`
+    turn, and the precedence addendum lands in `system`. (AC7)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+    from app.prompts import ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-1")
+
+    call = fake_llm["calls"][0]
+    assert WORKSPACE_CONFIG_HEADER in call["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER not in call["user"]
+    assert ASK_SYSTEM_COMPANY_FACTS_ADDENDUM in call["system"]
+
+
+def test_compose_ask_answer_kg_branch_carries_company_facts(
+    isolated_settings, fake_llm, facade
+):
+    """The config block rides alongside a KG-grounded answer too — the two
+    conditions are independent (config can be present with no KG bundle and
+    vice versa). (AC7)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "grounded", "key_points": [], "citations": [], "confidence": 0.7,
+        "unanswered": "",
+    }
+    theme, _sigs = _seed_theme_with_signals(
+        facade, "co-1", "Pipeline",
+        [("revenue", "deal_blocker", "Acme blocked on SSO", {}, 0)],
+    )
+
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        ask_runner.compose_ask_answer("asurion", "How is pipeline?", enterprise_id="co-1")
+
+    call = fake_llm["calls"][0]
+    assert WORKSPACE_CONFIG_HEADER in call["kwargs"]["user_cacheable_prefix"]
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in call["user"]
+
+
+def test_compose_ask_answer_prd_branch_prefixes_company_facts(
+    isolated_settings, fake_llm
+):
+    """PRD-grounded branch: the composed prefix is exactly
+    `facts + "\\n\\n---\\n\\n" + prd_context`. (AC9)"""
+    from app import ask_runner
+    from app.ask_runner import company_facts_block
+
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    facts = company_facts_block("co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+    block = "=== CURRENT PRD CONTEXT ===\nThe open PRD body."
+
+    ask_runner.compose_ask_answer(
+        "asurion", "q?", enterprise_id="co-1", prd_context=block,
+    )
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix == f"{facts}\n\n---\n\n{block}"
+
+
+def test_compose_ask_answer_prd_prefix_stable_across_turns_with_company_facts(
+    isolated_settings, fake_llm
+):
+    """Two consecutive calls, same tenant + same PRD, produce byte-identical
+    prefixes even with the per-tenant config block riding it. (AC9)"""
+    from app import ask_runner
+
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+    block = "=== CURRENT PRD CONTEXT ===\nSame PRD content."
+
+    ask_runner.compose_ask_answer(
+        "asurion", "first question", enterprise_id="co-1", prd_context=block
+    )
+    ask_runner.compose_ask_answer(
+        "asurion", "second question", enterprise_id="co-1", prd_context=block
+    )
+
+    first, second = fake_llm["calls"]
+    assert (
+        first["kwargs"]["user_cacheable_prefix"]
+        == second["kwargs"]["user_cacheable_prefix"]
+    )
+
+
+def test_compose_ask_answer_unchanged_when_no_workspace_config(
+    isolated_settings, fake_llm
+):
+    """No product row at all (2 of the 21-tenant population) → prefix/system
+    stay byte-identical to the pre-fix composition — never an error. (AC6)"""
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-no-doc")
+
+    call = fake_llm["calls"][0]
+    assert call["kwargs"]["user_cacheable_prefix"] == (
+        "Source material:\n\n<<< SOURCE: a >>>\nlegacy corpus body\n<<< END SOURCE >>>"
+    )
+    assert "WORKSPACE CONFIGURATION" not in call["system"]
+
+
+def test_compose_ask_answer_prefix_none_when_no_corpus_and_no_facts(
+    isolated_settings, fake_llm
+):
+    """Empty dataset + no product row → user_cacheable_prefix is None, exactly
+    as before this ticket. (AC6)"""
+    from app import ask_runner
+
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-empty-no-doc")
+
+    assert fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"] is None
+
+
+def test_compose_ask_answer_guarded_website_is_omitted(
+    isolated_settings, fake_llm
+):
+    """A preview-deploy website (`*.vercel.app`) is guarded out of the block —
+    the company name still renders, the website line does not."""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    _seed_company_with_config(
+        isolated_settings["supabase"], "co-preview",
+        website="https://my-app-git-main.vercel.app",
+    )
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-preview")
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER in prefix
+    assert "vercel.app" not in prefix
 
 
 # ─────────────────────────── route: POST /v1/ask ───────────────────────────

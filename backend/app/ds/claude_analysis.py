@@ -105,6 +105,19 @@ _MAX_PAUSE_RESUMES = 5
 # Wall clock for the whole analysis. The ask-job poll surface tolerates minutes
 # (the public-feedback report runs ~7), but an unbounded loop must not sit on an
 # LLM concurrency slot forever.
+#
+# MEASURED, not estimated: a full open-ended sweep took ~3.5-4 min on staging
+# (2026-07-30 QA) — the pre-merge "1-3 min" guess was wrong. Deliberately NOT
+# tightened in response: at 300s the budget never fired for that run, and pulling
+# it below ~4 min would start truncating analyses that were about to finish,
+# which is a quality regression traded for a latency number nobody asked for. A
+# pointed question is far cheaper (one or two executions, well under a minute) —
+# the slow case is the full battery, and the honest fix there is expectation, not
+# a shorter leash.
+#
+# Note the real ceiling is `_WALL_CLOCK_BUDGET_S` PLUS the turn in flight: the
+# deadline is only testable between turns, because interrupting a streamed
+# messages.create means discarding the work it already did.
 _WALL_CLOCK_BUDGET_S = 300.0
 
 # Chart embedding budget. The binding constraint is NOT the response size — it is
@@ -476,6 +489,7 @@ def _run(
         staged=staged,
         report=report,
         usage=usage,
+        charts_rendered=len(charts),
     )
     return _payload(html_report, confidence=0.8)
 
@@ -557,10 +571,13 @@ def _shrink_png(raw: bytes) -> tuple[bytes, str]:
     """Try to bring an oversized PNG under budget; never make it bigger.
 
     Downscales to `_CHART_MAX_WIDTH_PX` and returns whichever of {original,
-    re-encoded PNG, JPEG} is smallest, with its media type. Pillow is present in
-    the deployed image but is NOT a declared requirement, so it is imported here
-    and its absence is not an error — the caller simply drops a chart it cannot
-    shrink. Returns the original bytes on any failure.
+    re-encoded PNG, JPEG} is smallest, with its media type.
+
+    Pillow is a declared requirement (added once staging QA showed this path was
+    relying on it being present transitively — inert on a clean install). The
+    import stays local and guarded anyway: it keeps an undecodable or malformed
+    image from turning into an exception on the answer path, and degrades to
+    "chart dropped, narrative intact" rather than a failed analysis.
     """
     try:
         import io
@@ -645,7 +662,18 @@ def _loop(
     from app.llm import _create_with_retries
 
     messages: list[dict] = [{"role": "user", "content": _user_content(question, history, file_ids)}]
-    system = [{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    # The date rides in a SEPARATE, uncached block. Appending it to the cached
+    # prefix would change those bytes every day and throw away the prompt-cache
+    # hit on every DS run; as its own trailing block the cached prefix stays
+    # byte-identical. Without it the engine cannot resolve "last week" and will
+    # answer from whatever period the uploaded data happens to cover — which is
+    # exactly how a question asked in August was answered with January data.
+    from app.prompts import today_line
+
+    system = [
+        {"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": today_line()},
+    ]
 
     while True:
         if report.turns >= _MAX_TURNS:
@@ -811,6 +839,15 @@ li{margin:5px 0;font-size:16px}
 strong{font-weight:600}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;background:#f4f2ec;
 padding:1px 5px;border-radius:4px}
+hr{border:0;border-top:1px solid var(--rule);margin:26px 0}
+blockquote{margin:14px 0;padding:2px 16px;border-left:3px solid var(--accent);color:var(--ink2);
+background:#faf8f3;border-radius:0 6px 6px 0}
+blockquote p{margin:8px 0}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-family:var(--sans);font-size:13.5px}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+thead th{border-bottom:2px solid var(--accent);color:var(--accent);font-weight:700;
+text-transform:uppercase;letter-spacing:.06em;font-size:11.5px;white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
 figure{margin:20px 0;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fff}
 figure img{display:block;width:100%;height:auto;border-radius:4px}
 .note{font-family:var(--sans);font-size:13px;color:var(--ink2);background:#faf8f3;
@@ -864,6 +901,15 @@ _CODE_RE = re.compile(r"`([^`]+)`")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*)$")
 _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
 _HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.*)$")
+# A thematic break: --- / *** / ___ (3+), alone on its line. Checked before the
+# bullet rule, which needs whitespace after its marker and so can't match these.
+_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_QUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
+_ALIGN_CELL_RE = re.compile(r"^(:?)-{1,}(:?)$")
+# Split on unescaped pipes so a `\|` inside a cell stays literal.
+_PIPE_SPLIT_RE = re.compile(r"(?<!\\)\|")
+
+_MAX_QUOTE_DEPTH = 3
 
 
 def _inline(text: str) -> str:
@@ -871,17 +917,72 @@ def _inline(text: str) -> str:
     out = html.escape(text)
     out = _CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", out)
     out = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", out)
+    return out.replace("\\|", "|")
+
+
+def _split_row(line: str) -> list[str]:
+    """`| a | b |` → ["a", "b"] (leading/trailing pipe optional)."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith("\\|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in _PIPE_SPLIT_RE.split(stripped)]
+
+
+def _row_alignments(line: str) -> list[str] | None:
+    """Alignments from a delimiter row (`|---|:--:|`), or None if not one."""
+    cells = _split_row(line)
+    if not cells or any(not _ALIGN_CELL_RE.match(c) for c in cells):
+        return None
+    out: list[str] = []
+    for cell in cells:
+        left, right = _ALIGN_CELL_RE.match(cell).groups()
+        out.append(
+            "center" if left and right else "right" if right else "left" if left else ""
+        )
     return out
 
 
-def _md_to_html(md: str) -> str:
-    """The narrow markdown subset the model writes → HTML.
+def _looks_like_row(line: str) -> bool:
+    return "|" in line and bool(_PIPE_SPLIT_RE.search(line.strip()))
 
-    Deliberately hand-rolled and escape-first (there is no markdown dependency in
-    the backend, and this output goes into a document): headings, bullet and
-    numbered lists, paragraphs, bold, inline code. Anything else degrades to a
+
+def _render_table(header: str, delimiter: str, body: list[str]) -> str:
+    aligns = _row_alignments(delimiter) or []
+
+    def cells(line: str, tag: str) -> str:
+        out = []
+        for i, cell in enumerate(_split_row(line)):
+            align = aligns[i] if i < len(aligns) else ""
+            style = f' style="text-align:{align}"' if align else ""
+            out.append(f"<{tag}{style}>{_inline(cell)}</{tag}>")
+        return "".join(out)
+
+    rows = "".join(f"<tr>{cells(line, 'td')}</tr>" for line in body)
+    return (
+        f"<table><thead><tr>{cells(header, 'th')}</tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
+def _md_to_html(md: str, _depth: int = 0) -> str:
+    """The markdown subset the model writes → HTML.
+
+    Deliberately hand-rolled and ESCAPE-FIRST (there is no markdown dependency in
+    the backend, and this output goes into a document that renders in an iframe):
+    every cell, item and line is `html.escape`d before the handful of supported
+    constructs are re-applied, so the model can never emit markup.
+
+    Supported: headings, bullet/numbered lists, pipe tables, horizontal rules,
+    blockquotes, paragraphs, bold, inline code. Anything else degrades to a
     paragraph of escaped text — never to raw markup.
+
+    Tables, rules and quotes were added after staging QA found them leaking into
+    the report as literal `---`, raw `| a | b |` rows and stray `>` markers: the
+    model writes a ranked TL;DR as a table often enough that "the model just
+    won't use them" was not a safe assumption.
     """
+    lines = md.splitlines()
     parts: list[str] = []
     list_tag: str | None = None
     para: list[str] = []
@@ -897,18 +998,69 @@ def _md_to_html(md: str) -> str:
             parts.append(f"</{list_tag}>")
             list_tag = None
 
-    for line in md.splitlines():
+    def flush_all() -> None:
+        flush_para()
+        flush_list()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         if not line.strip():
-            flush_para()
-            flush_list()
+            flush_all()
+            i += 1
             continue
+
+        if _HR_RE.match(line):
+            flush_all()
+            parts.append("<hr>")
+            i += 1
+            continue
+
         heading = _HEADING_RE.match(line)
         if heading:
-            flush_para()
-            flush_list()
+            flush_all()
             level = min(max(len(heading.group(1)), 2), 3)
             parts.append(f"<h{level}>{_inline(heading.group(2).strip())}</h{level}>")
+            i += 1
             continue
+
+        # A table is a header row followed by a delimiter row; without the
+        # delimiter the line is just prose that happens to contain a pipe.
+        if (
+            _looks_like_row(line)
+            and i + 1 < len(lines)
+            and _row_alignments(lines[i + 1]) is not None
+        ):
+            flush_all()
+            body: list[str] = []
+            j = i + 2
+            while j < len(lines) and lines[j].strip() and _looks_like_row(lines[j]):
+                body.append(lines[j])
+                j += 1
+            parts.append(_render_table(line, lines[i + 1], body))
+            i = j
+            continue
+
+        quote = _QUOTE_RE.match(line)
+        if quote:
+            flush_all()
+            block = [quote.group(1)]
+            j = i + 1
+            while j < len(lines):
+                nxt = _QUOTE_RE.match(lines[j])
+                if not nxt:
+                    break
+                block.append(nxt.group(1))
+                j += 1
+            inner = (
+                _md_to_html("\n".join(block), _depth + 1)
+                if _depth < _MAX_QUOTE_DEPTH
+                else f"<p>{_inline(' '.join(block))}</p>"
+            )
+            parts.append(f"<blockquote>{inner}</blockquote>")
+            i = j
+            continue
+
         bullet = _BULLET_RE.match(line)
         numbered = None if bullet else _NUMBERED_RE.match(line)
         if bullet or numbered:
@@ -920,12 +1072,14 @@ def _md_to_html(md: str) -> str:
                 parts.append(f"<{want}>")
             item = (bullet or numbered).group(1).strip()
             parts.append(f"<li>{_inline(item)}</li>")
+            i += 1
             continue
+
         flush_list()
         para.append(line.strip())
+        i += 1
 
-    flush_para()
-    flush_list()
+    flush_all()
     return "".join(parts)
 
 
@@ -938,13 +1092,24 @@ def _log_run(
     staged: list[str],
     report: _Report,
     usage: Any,
+    charts_rendered: int,
 ) -> None:
     """Best-effort decision-log row, mirroring chat_analysis._log_run.
 
     The gateway logs the rows for calls made through `llm_call`; this path calls
     `app.llm` directly, so the audit row is written here. Token usage is the sum
     across every turn of the loop.
+
+    Charts are logged as TWO numbers, not one. The old single `charts` field
+    counted what the model produced, while the report header counts what survived
+    the embed budget — so a run that dropped an oversized figure logged 3 and
+    displayed 2, and the log looked wrong when it was merely measuring something
+    else (staging QA, 2026-07-30). `charts_rendered` now matches the header
+    exactly and `charts_dropped` is the budget's own signal: a non-zero value
+    there means figures are coming back too big, which is the number to watch
+    before touching the budget constants.
     """
+    produced = len(report.chart_file_ids)
     try:
         from app.graph.decision_log import log_agent_decision
 
@@ -956,7 +1121,8 @@ def _log_run(
                 "files": len(staged),
                 "turns": report.turns,
                 "pause_resumes": report.pause_resumes,
-                "charts": len(report.chart_file_ids),
+                "charts_rendered": charts_rendered,
+                "charts_dropped": max(0, produced - charts_rendered),
                 "stopped_reason": report.stopped_reason,
                 "input_tokens": getattr(usage, "input_tokens", 0),
                 "output_tokens": getattr(usage, "output_tokens", 0),

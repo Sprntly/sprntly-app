@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.graph.facade import GraphFacade
-from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal
+from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,101 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // _CHARS_PER_TOKEN)
 
 
+# ── §2 ledger spine (hypothesis/decision/outcome) causal-chain resolution ──
+#
+# `decision_chain.py` writes the closed-loop edges (hypothesis --PROMOTED_TO-->
+# decision --RESULTED_IN--> artifact --REALIZES--> outcome --VALIDATES-->
+# hypothesis) whenever a PRD is generated/finalized or an idea reaches
+# status='done'. `load_session_context` fetches the ledger entities themselves
+# but not these edges, so a rendered decision/hypothesis/outcome used to be a
+# bare label with no indication it's actually connected to the rest of the
+# chain. The helpers below walk the SAME edge primitives `retrieve_context`
+# already uses elsewhere (`facade.edges_to`/`edges_from`) to resolve that
+# chain into plain labels `render_context_section` can weave into the text.
+
+
+def _resolve_label(
+    facade: GraphFacade, enterprise_id: str, entity_id: Optional[str],
+    label_cache: dict[str, Optional[str]],
+) -> Optional[str]:
+    """Best-effort entity_id -> canonical_label lookup, memoized per-call so a
+    hypothesis/decision/outcome referenced by multiple edges only costs one
+    round-trip. Never raises; a failed or missing lookup just yields None so
+    the caller renders the entity without that piece of the chain."""
+    if not entity_id:
+        return None
+    if entity_id in label_cache:
+        return label_cache[entity_id]
+    label: Optional[str] = None
+    try:
+        ent = facade.get_entity(enterprise_id, entity_id)
+        label = ent.canonical_label if ent else None
+    except Exception as exc:  # noqa: BLE001 — ledger enrichment is best-effort
+        logger.info("Ask KG retrieval: get_entity(%s) failed (%s)", entity_id, exc)
+    label_cache[entity_id] = label
+    return label
+
+
+def _ledger_entities(
+    facade: GraphFacade, enterprise_id: str, rows: list, *, kind: str,
+    label_cache: dict[str, Optional[str]],
+) -> list[dict]:
+    """Flatten `hypothesis`/`decision`/`outcome` Entity rows into the bundle
+    shape, carrying `properties` (already on the entity, previously never
+    rendered) plus a best-effort `related` dict resolving the decision-chain
+    edge(s) that touch this entity, so the render step can make the causal
+    link explicit instead of three disconnected lists:
+      - decision:   PROMOTED_TO-in  -> promoted_from_hypothesis
+                    RESULTED_IN-out -> resulted_in_artifact
+      - hypothesis: VALIDATES-in    -> validated_by_outcome
+      - outcome:    VALIDATES-out   -> validates_hypothesis
+    A failed edge read for one entity never breaks the others or raises;
+    `related` is simply omitted (the caller falls back to label+properties)."""
+    out: list[dict] = []
+    for e in rows:
+        entry: dict[str, Any] = {
+            "entity_id": e.id, "label": e.canonical_label, "properties": e.properties or {},
+        }
+        related: dict[str, str] = {}
+        try:
+            if kind == "decision":
+                for edge in facade.edges_to(enterprise_id, e.id, type="PROMOTED_TO"):
+                    if edge.source_kind != "entity":
+                        continue
+                    label = _resolve_label(facade, enterprise_id, edge.source_id, label_cache)
+                    if label:
+                        related["promoted_from_hypothesis"] = label
+                for edge in facade.edges_from(enterprise_id, e.id, type="RESULTED_IN"):
+                    if edge.target_kind != "entity":
+                        continue
+                    label = _resolve_label(facade, enterprise_id, edge.target_id, label_cache)
+                    if label:
+                        related["resulted_in_artifact"] = label
+            elif kind == "hypothesis":
+                for edge in facade.edges_to(enterprise_id, e.id, type="VALIDATES"):
+                    if edge.source_kind != "entity":
+                        continue
+                    label = _resolve_label(facade, enterprise_id, edge.source_id, label_cache)
+                    if label:
+                        related["validated_by_outcome"] = label
+            elif kind == "outcome":
+                for edge in facade.edges_from(enterprise_id, e.id, type="VALIDATES"):
+                    if edge.target_kind != "entity":
+                        continue
+                    label = _resolve_label(facade, enterprise_id, edge.target_id, label_cache)
+                    if label:
+                        related["validates_hypothesis"] = label
+        except Exception as exc:  # noqa: BLE001 — ledger enrichment is best-effort
+            logger.info(
+                "Ask KG retrieval: ledger chain resolution failed kind=%s id=%s (%s)",
+                kind, e.id, exc,
+            )
+        if related:
+            entry["related"] = related
+        out.append(entry)
+    return out
+
+
 def retrieve_context(
     facade: GraphFacade,
     enterprise_id: str,
@@ -94,6 +189,7 @@ def retrieve_context(
     *,
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    question_embedding: Optional[list[float]] = None,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
 
@@ -108,16 +204,23 @@ def retrieve_context(
          yet wired to a resolved theme), without a theme boost.
       5. Dedupe by signal id, rank by (evidence weight × recency + theme
          boost), and cap the serialized content to `token_budget`.
-      6. Attach `load_session_context` (hypotheses / decisions / outcomes).
+      6. Attach `load_session_context` (hypotheses / decisions / outcomes),
+         each enriched with its decision-chain edges (`_ledger_entities`) so
+         the causal link between them is resolvable, not just three parallel
+         lists of bare labels.
 
     Returns a dict:
       {
         "signals":   [ {signal_id, content, kind, source_type, provenance,
                         theme, confidence, rank}, ... ],   # ranked, capped
         "themes":    [ {entity_id, label, score}, ... ],   # matched themes
-        "decisions": [ {entity_id, label, properties}, ... ],  # recent
-        "hypotheses":[ {entity_id, label, properties}, ... ],
-        "outcomes":  [ {entity_id, label, properties}, ... ],
+        "decisions": [ {entity_id, label, properties, related?}, ... ],  # recent
+        "hypotheses":[ {entity_id, label, properties, related?}, ... ],
+        "outcomes":  [ {entity_id, label, properties, related?}, ... ],
+        # `related` (present only when a chain edge resolved) is one of:
+        #   decision:   {promoted_from_hypothesis?, resulted_in_artifact?}
+        #   hypothesis: {validated_by_outcome?}
+        #   outcome:    {validates_hypothesis?}
         "kg_refs":   [ ...signal+entity ids used... ],     # for the decision log
         "token_estimate": <int>,
         "empty": <bool>,
@@ -131,13 +234,21 @@ def retrieve_context(
 
     # 1) Embed the question. Embeddings can be unconfigured (no OPENAI key) or
     #    the call can fail; either way we still return recent signals.
-    qvec: Optional[list[float]] = None
+    #
+    #    `question_embedding`, when the caller supplies it, is used as-is and
+    #    no embedding call is made here. The ask path computes the question's
+    #    vector once and shares it with document selection, which runs before
+    #    this does — without that sharing the same question would be embedded
+    #    twice per ask. A caller that passes nothing keeps the original
+    #    self-contained behaviour, which is what every other caller relies on.
+    qvec: Optional[list[float]] = question_embedding
     try:
-        from app.graph.embeddings import embed_texts
+        if qvec is None:
+            from app.graph.embeddings import embed_texts
 
-        vecs = embed_texts([question], enterprise_id=enterprise_id,
-                           purpose="kg_retrieval")
-        qvec = vecs[0] if vecs else None
+            vecs = embed_texts([question], enterprise_id=enterprise_id,
+                               purpose="kg_retrieval")
+            qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
 
@@ -186,7 +297,7 @@ def retrieve_context(
         kept = 0
         for sid in edge_ids:
             sig = signals_by_id.get(sid)
-            if sig is None or (sig.properties or {}).get("superseded_by"):
+            if sig is None or signal_is_retired(sig.properties):
                 continue
             rank = _signal_rank(sig, now, boost)
             payload = _signal_payload(sig, theme_label=theme.canonical_label, rank=rank)
@@ -206,7 +317,7 @@ def retrieve_context(
         recent = []
     recent.sort(key=lambda s: s.transaction_at, reverse=True)
     for sig in recent[:_RECENT_SIGNALS]:
-        if (sig.properties or {}).get("superseded_by"):
+        if signal_is_retired(sig.properties):
             continue
         if sig.id in by_id:
             continue
@@ -234,15 +345,19 @@ def retrieve_context(
         logger.info("Ask KG retrieval: load_session_context failed (%s)", exc)
         ctx = {}
 
-    def _entities(rows: list) -> list[dict]:
-        return [
-            {"entity_id": e.id, "label": e.canonical_label, "properties": e.properties or {}}
-            for e in rows
-        ]
-
-    decisions_out = _entities(ctx.get("recent_decisions") or [])
-    hypotheses_out = _entities(ctx.get("active_hypotheses") or [])
-    outcomes_out = _entities(ctx.get("recent_outcomes") or [])
+    label_cache: dict[str, Optional[str]] = {}
+    decisions_out = _ledger_entities(
+        facade, enterprise_id, ctx.get("recent_decisions") or [], kind="decision",
+        label_cache=label_cache,
+    )
+    hypotheses_out = _ledger_entities(
+        facade, enterprise_id, ctx.get("active_hypotheses") or [], kind="hypothesis",
+        label_cache=label_cache,
+    )
+    outcomes_out = _ledger_entities(
+        facade, enterprise_id, ctx.get("recent_outcomes") or [], kind="outcome",
+        label_cache=label_cache,
+    )
 
     # kg_refs: every node id that fed the answer — signals surfaced + themes
     # matched + ledger entities. Drives the decision log's kg_refs column.
@@ -436,7 +551,7 @@ def insight_evidence_trail(
     #    hypothesis. These are the strongest evidence for the insight.
     for sid in support_ids:
         sig = signals_by_id.get(sid)
-        if sig is None or (sig.properties or {}).get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         by_id[sig.id] = _trail_signal_payload(sig, edge_type="SUPPORTS")
 
@@ -446,7 +561,7 @@ def insight_evidence_trail(
     kept = 0
     for sid in theme_edge_ids:
         sig = signals_by_id.get(sid)
-        if sig is None or (sig.properties or {}).get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         if sig.id not in by_id:
             by_id[sig.id] = _trail_signal_payload(sig, edge_type="theme")
@@ -551,6 +666,15 @@ def render_evidence_trail_section(trail: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_ledger_properties(properties: dict[str, Any]) -> str:
+    """Render a hypothesis/decision/outcome entity's `properties` dict as
+    inline `key=value` pairs (e.g. `prd_id=..., actual_impact=...`), skipping
+    unset keys. `properties` already reaches the bundle (`_ledger_entities`)
+    but was previously discarded entirely at render time."""
+    parts = [f"{k}={v}" for k, v in properties.items() if v is not None]
+    return ", ".join(parts)
+
+
 def render_context_section(bundle: dict[str, Any]) -> str:
     """Render a retrieval bundle into the markdown block injected into the Ask
     prompt under a "LIVE CONTEXT FROM CONNECTED SOURCES" header. Empty bundle →
@@ -588,22 +712,62 @@ def render_context_section(bundle: dict[str, Any]) -> str:
                 f"- [{s['source_type']}/{s['kind']}]{theme}{prov_txt}: {s['content']}"
             )
 
+    # Hypotheses/decisions/outcomes render the §2 ledger spine. Beyond the
+    # bare label, each line surfaces the entity's real properties and — when
+    # a decision-chain edge resolved (`_ledger_entities` in retrieve_context)
+    # — the causal link to the entity it was promoted from / resulted in /
+    # validates, so this reads as a connected chain rather than three
+    # parallel, unconnected lists a model can't relate to each other.
     hyps = bundle.get("hypotheses") or []
     if hyps:
-        lines.append("\n## Open hypotheses")
+        lines.append(
+            "\n## Hypotheses (status — validated/still open — is stated per entry below)"
+        )
         for h in hyps:
-            lines.append(f"- {h['label']}")
+            props_txt = _format_ledger_properties(h.get("properties") or {})
+            related = h.get("related") or {}
+            outcome_label = related.get("validated_by_outcome")
+            line = f"- {h['label']}"
+            if props_txt:
+                line += f" ({props_txt})"
+            if outcome_label:
+                line += f" — validated by outcome: {outcome_label}"
+            else:
+                line += " — not yet validated by a measured outcome"
+            lines.append(line)
 
     decisions = bundle.get("decisions") or []
     if decisions:
-        lines.append("\n## Recent decisions")
+        lines.append("\n## Decisions (already made, not merely proposed)")
         for d in decisions:
-            lines.append(f"- {d['label']}")
+            props_txt = _format_ledger_properties(d.get("properties") or {})
+            related = d.get("related") or {}
+            hyp_label = related.get("promoted_from_hypothesis")
+            artifact_label = related.get("resulted_in_artifact")
+            line = f"- {d['label']}"
+            if props_txt:
+                line += f" ({props_txt})"
+            if hyp_label:
+                line += f" — promotes hypothesis: {hyp_label}"
+            if artifact_label:
+                line += f"; resulted in artifact: {artifact_label}"
+            lines.append(line)
 
     outcomes = bundle.get("outcomes") or []
     if outcomes:
-        lines.append("\n## Measured outcomes")
+        lines.append(
+            "\n## Measured outcomes (work that shipped and was measured — "
+            "not open/in-progress items)"
+        )
         for o in outcomes:
-            lines.append(f"- {o['label']}")
+            props_txt = _format_ledger_properties(o.get("properties") or {})
+            related = o.get("related") or {}
+            hyp_label = related.get("validates_hypothesis")
+            line = f"- {o['label']}"
+            if props_txt:
+                line += f" ({props_txt})"
+            if hyp_label:
+                line += f" — validates hypothesis: {hyp_label} (this hypothesis's loop has closed)"
+            lines.append(line)
 
     return "\n".join(lines)

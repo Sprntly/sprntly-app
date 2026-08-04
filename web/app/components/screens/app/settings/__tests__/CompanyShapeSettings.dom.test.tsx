@@ -23,6 +23,7 @@ vi.mock("../../../../../lib/onboarding/store", () => ({
 }))
 
 import { CompanyShapeSettings } from "../BusinessContextSettings"
+import { INDUSTRIES } from "../../../../../lib/onboarding/types"
 
 function makeWorkspace(over: Record<string, unknown> = {}) {
   return {
@@ -124,5 +125,382 @@ describe("CompanyShapeSettings (Settings → Business Context)", () => {
       '[data-field="industry"] select',
     ) as HTMLSelectElement
     expect(industry.disabled).toBe(true)
+  })
+
+  // ── business-context refresh trigger (fires on an actual change only) ──────
+  describe("onShapeSavedWithChange — the business-context refresh trigger", () => {
+    async function save() {
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+    }
+
+    it("fires after a save that changes industry", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace(),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const industry = document.querySelector(
+        '[data-field="industry"] select',
+      ) as HTMLSelectElement
+      fireEvent.change(industry, { target: { value: "Healthcare" } })
+      await save()
+
+      expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
+      expect(onShapeSavedWithChange).toHaveBeenCalledTimes(1)
+    })
+
+    it("fires after a save that changes only tech_stack", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({ tech_stack: [] }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const chip = document.querySelector(
+        '[data-field="techStack"] .metric-chip',
+      ) as HTMLButtonElement
+      fireEvent.click(chip)
+      await save()
+
+      expect(onShapeSavedWithChange).toHaveBeenCalledTimes(1)
+    })
+
+    it("does NOT fire on a no-op resave of identical values — real money must not be spent on nothing", async () => {
+      const ws = makeWorkspace()
+      useWorkspaceMock.mockReturnValue({
+        workspace: ws,
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(ws)
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      // Save immediately, with no field edits — every value round-trips
+      // identical to what the workspace already has.
+      await save()
+
+      expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)  // the save itself still happens
+      expect(onShapeSavedWithChange).not.toHaveBeenCalled()
+    })
+
+    it("does NOT fire when tech_stack is re-saved in a different order (order-independent compare)", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({ tech_stack: ["Web", "Mobile (iOS)"] }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      // Toggle Mobile (iOS) off then back on — same SET, different
+      // construction order, no net change.
+      const chips = Array.from(
+        document.querySelectorAll('[data-field="techStack"] .metric-chip'),
+      ) as HTMLButtonElement[]
+      const iosChip = chips.find((c) => c.textContent === "Mobile (iOS)")!
+      expect(iosChip).toBeDefined()
+      fireEvent.click(iosChip)  // off
+      fireEvent.click(iosChip)  // back on
+      await save()
+
+      expect(onShapeSavedWithChange).not.toHaveBeenCalled()
+    })
+
+    it("does not require the prop — a missing callback is a silent no-op, not a crash", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace(),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+
+      await act(async () => {
+        render(React.createElement(CompanyShapeSettings, { canEdit: true }))
+      })
+
+      const industry = document.querySelector(
+        '[data-field="industry"] select',
+      ) as HTMLSelectElement
+      fireEvent.change(industry, { target: { value: "Healthcare" } })
+      await save()  // must not throw despite no onShapeSavedWithChange prop
+
+      expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ── off-list company-shape round-trip (industry/business_type absent from
+  // the option lists — onboarding free text, an import, or an older list) ──
+  describe("off-list industry / business type", () => {
+    // ── Regression (RED on origin/main before the fix) ──────────────────────
+    it("an off-list industry round-trips through a company shape save unchanged", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({ industry: "Software / Product Management Tooling" }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+
+      await act(async () => {
+        render(React.createElement(CompanyShapeSettings, { canEdit: true }))
+      })
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Record<string, unknown>]
+      expect(patch.industry).toBe("Software / Product Management Tooling")
+    })
+
+    it("an off-list business type round-trips through a company shape save unchanged", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({ business_type: "Agentic PM Platform" }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+
+      await act(async () => {
+        render(React.createElement(CompanyShapeSettings, { canEdit: true }))
+      })
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Record<string, unknown>]
+      expect(patch.business_type).toBe("Agentic PM Platform")
+    })
+
+    it("an off-list shape save with no edits does not signal a change", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({
+          industry: "Software / Product Management Tooling",
+          business_type: "Agentic PM Platform",
+        }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      expect(onShapeSavedWithChange).not.toHaveBeenCalled()
+    })
+
+    it("hydrates both selects with the stored off-list values unchanged", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({
+          industry: "Software / Product Management Tooling",
+          business_type: "Agentic PM Platform",
+        }),
+        loading: false,
+        refresh: refreshMock,
+      })
+
+      await act(async () => {
+        render(React.createElement(CompanyShapeSettings, { canEdit: true }))
+      })
+
+      const industry = document.querySelector(
+        '[data-field="industry"] select',
+      ) as HTMLSelectElement
+      const bizType = document.querySelector(
+        '[data-field="businessType"] select',
+      ) as HTMLSelectElement
+      expect(industry.value).toBe("Software / Product Management Tooling")
+      expect(bizType.value).toBe("Agentic PM Platform")
+    })
+
+    it("toggling a tech chip still signals a change and preserves the off-list values on save", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({
+          industry: "Software / Product Management Tooling",
+          business_type: "Agentic PM Platform",
+          tech_stack: [],
+        }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const chip = document.querySelector(
+        '[data-field="techStack"] .metric-chip',
+      ) as HTMLButtonElement
+      fireEvent.click(chip)
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      expect(onShapeSavedWithChange).toHaveBeenCalledTimes(1)
+      const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Record<string, unknown>]
+      expect(patch.industry).toBe("Software / Product Management Tooling")
+      expect(patch.business_type).toBe("Agentic PM Platform")
+    })
+
+    it("falls back to INDUSTRIES[0] for an empty stored industry and does not signal a change on an untouched save", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace({ industry: "" }),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace({ industry: "" }))
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const industry = document.querySelector(
+        '[data-field="industry"] select',
+      ) as HTMLSelectElement
+      expect(industry.value).toBe(INDUSTRIES[0])
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      expect(onShapeSavedWithChange).not.toHaveBeenCalled()
+    })
+
+    it("still hydrates and saves listed values unchanged (Fintech / Marketplace)", async () => {
+      useWorkspaceMock.mockReturnValue({
+        workspace: makeWorkspace(),
+        loading: false,
+        refresh: refreshMock,
+      })
+      updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+      refreshMock.mockResolvedValue(undefined)
+      const onShapeSavedWithChange = vi.fn()
+
+      await act(async () => {
+        render(
+          React.createElement(CompanyShapeSettings, {
+            canEdit: true,
+            onShapeSavedWithChange,
+          }),
+        )
+      })
+
+      const industry = document.querySelector(
+        '[data-field="industry"] select',
+      ) as HTMLSelectElement
+      const bizType = document.querySelector(
+        '[data-field="businessType"] select',
+      ) as HTMLSelectElement
+      expect(industry.value).toBe("Fintech")
+      expect(bizType.value).toBe("Marketplace")
+
+      const saveBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /save company shape/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement
+      await act(async () => {
+        saveBtn.click()
+      })
+
+      expect(onShapeSavedWithChange).not.toHaveBeenCalled()
+      const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Record<string, unknown>]
+      expect(patch.industry).toBe("Fintech")
+      expect(patch.business_type).toBe("Marketplace")
+    })
   })
 })

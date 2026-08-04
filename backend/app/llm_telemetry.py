@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 # Per-model pricing ($/token; derived from /MTok in agent-build-research.md §3.1).
 # When a new model is approved (e.g. an Anthropic refresh), append a row here;
 # call sites already passing `model=` Just Work after the addition.
+#
+# KNOWN NAMING MISMATCH — read before adding a row. The `cache_write_1h` key is
+# named for the 1-hour cache-write tier (2x base input), and the sonnet/opus rows
+# below carry that 2x rate. But `_build_base_kwargs` (app/llm.py) only ever sends
+# `cache_control: {"type": "ephemeral"}` with no `ttl`, which is the 5-MINUTE
+# tier at 1.25x. So those two rows over-report cache-write spend by 1.6x
+# (2 / 1.25) on every call this repo actually makes. Left as-is deliberately
+# rather than silently corrected: `est_cost_usd` feeds `should_wrap_up` /
+# `should_abort`, so re-rating sonnet and opus would move the design agent's live
+# budget-cap thresholds and make new decision-log rows incomparable to years of
+# historical ones. That is its own change with its own blast radius. The
+# claude-haiku-4-5 row below is rated at the 1.25x the code's own request shape
+# earns, so at least the newest row is right; correcting the other two (and
+# renaming the key to `cache_write`) is the follow-up.
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-6": {
         "input":          3.0 / 1_000_000,
@@ -40,6 +54,21 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_write_1h": 10.0 / 1_000_000,
         "cache_read":     0.5 / 1_000_000,
         "output":         25.0 / 1_000_000,
+    },
+    # haiku tier — ROUTER_MODEL (app.qa_agent) and app.prd_command. Missing since
+    # the router shipped, and `gateway._est_cost` fails OPEN on an unpriced model
+    # (`MODEL_PRICING.get(model)` → `return 0.0`, unlike RunUsage.est_cost_usd
+    # which raises UnknownModelError), so every qa-router row in
+    # `agent_decision_log` recorded cost_usd=0.0 — router spend was invisible, not
+    # cheap. Rates from Anthropic's pricing page (2026-08): $1/MTok input,
+    # $5/MTok output, $0.10/MTok cache hits. cache_write is the 5-MINUTE tier
+    # (1.25x base = $1.25/MTok) because that is the only tier this code can bill —
+    # see the naming-mismatch note above.
+    "claude-haiku-4-5": {
+        "input":          1.0 / 1_000_000,
+        "cache_write_1h": 1.25 / 1_000_000,
+        "cache_read":     0.1 / 1_000_000,
+        "output":         5.0 / 1_000_000,
     },
     # OpenAI embeddings (KG signal/theme vectors — app.graph.embeddings). Anthropic
     # has no embeddings API, so this is the one non-Anthropic priced model. Billed

@@ -285,12 +285,28 @@ def test_notify_message_carries_title_and_deep_link(env, slack_spy):
     call = slack_spy[0]
     assert "Checkout Flow" in call["text"]
     assert f"/prototype?pid={pid}" in call["text"]
-    # One section block carrying the same copy + link.
-    assert len(call["blocks"]) == 1
-    block_text = call["blocks"][0]["text"]["text"]
+    # Two blocks: a plain-copy section (no link inlined) + an actions block.
+    assert len(call["blocks"]) == 2
     assert call["blocks"][0]["type"] == "section"
+    assert call["blocks"][1]["type"] == "actions"
+    block_text = call["blocks"][0]["text"]["text"]
     assert "Checkout Flow" in block_text
-    assert f"/prototype?pid={pid}" in block_text
+    assert f"/prototype?pid={pid}" not in block_text
+
+
+def test_notify_button_carries_deep_link_and_style(env, slack_spy):
+    prd_id = _seed_prd(env.db, title="Checkout Flow")
+    _seed_slack_connection(env, user_id="user-a", authed_user_id="U-AAA")
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+
+    env.notify.notify_prototype_ready(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+
+    call = slack_spy[0]
+    button = call["blocks"][1]["elements"][0]
+    assert button["type"] == "button"
+    assert button["text"]["text"] == "Open prototype"
+    assert button["url"] == env.notify._prototype_deep_link(pid)
+    assert button["style"] == "primary"
 
 
 def test_notify_disabled_reason(env, slack_spy, monkeypatch):

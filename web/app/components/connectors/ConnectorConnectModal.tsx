@@ -32,6 +32,7 @@ import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
 import type { CredentialsValues } from "./CredentialsPromptModal"
 import { openOauthTab } from "../../lib/connectorsOauth"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
@@ -650,6 +651,7 @@ export function ConnectorConnectModal({
         <GoogleDrivePicker
           dataset={activeCompany}
           savedFiles={connection.config?.files}
+          folderContents={connection.config?.folder_contents}
           onSaved={onConnected}
         />
       )
@@ -674,6 +676,16 @@ export function ConnectorConnectModal({
             onSaved={onConnected}
           />
         </>
+      )
+    } else if (providerId === "confluence") {
+      // Straight after connect is exactly when the space selection matters:
+      // with nothing chosen the puller reads every readable space, so this
+      // is the user's chance to narrow it before the first sync.
+      slot = (
+        <ConfluenceSpacesPicker
+          savedSpaceIds={connection.config?.sync_space_ids}
+          onSaved={onConnected}
+        />
       )
     } else if (providerId === "github") {
       // Same picker the settings Configure drawer mounts — lets the

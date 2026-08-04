@@ -18,12 +18,17 @@ check must hold against direct API calls.
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
 400, oversize → 413, unparseable content → 400, over-limit parsed content
-(characters) → 413, company-duplicate slug → 409.
+(characters) → 413, name already used by another CUSTOM skill → 409.
 
-Shadowing a BUILT-IN skill id is allowed (PRD 1854 override): the company's
-upload replaces the built-in at invocation time (resolver checks the company
-library first), and the 201/list payloads carry `overrides_builtin` so the UI
-tells the uploader they're replacing a Sprntly skill with their own.
+Sharing a BUILT-IN skill's name is allowed and does NOT override it: both
+skills stay in the library and both stay invocable, so the upload takes the
+next free trigger in the `<slug>`, `<slug>-2`, `<slug>-3` series
+(skills.custom.available_slug). The display name is whatever the user typed;
+only the trigger is disambiguated, and the 201/list payloads carry
+`name_conflict` so the UI can say "the name was taken — here's your trigger".
+Two CUSTOM skills with the same name are still refused with a 409: within one
+company library a repeated name is a mistake worth surfacing, not something
+to silently renumber.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ from app.skills.custom import (
     MAX_NAME_CHARS,
     MAX_SKILL_CONTENT_CHARS,
     SkillParseError,
+    available_slug,
     content_chars,
     content_hash_for,
     parse_upload,
@@ -51,10 +57,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/skills", tags=["skills"])
 
 
-def _skill_payload(row: dict, builtin_ids: set[str]) -> dict:
+def _skill_payload(row: dict) -> dict:
     """Row → API shape shared by POST (201 body) and GET (list items).
-    `overrides_builtin`: this slug shadows a vendored skill id, so the custom
-    skill wins at invocation — the UI uses the flag to say so."""
+
+    `name_conflict`: this skill's name was already taken when it was uploaded,
+    so its trigger was disambiguated away from the name's plain slug. Derived
+    rather than stored — the stored slug differing from slugify(name) IS the
+    record of the collision, and it stays correct however the built-in library
+    changes afterwards."""
     return {
         "id": row["id"],
         "slug": row["slug"],
@@ -64,7 +74,7 @@ def _skill_payload(row: dict, builtin_ids: set[str]) -> dict:
         "uploader_name": row.get("uploader_name") or "",
         "created_at": row.get("created_at"),
         "has_file": bool(row.get("storage_key")),
-        "overrides_builtin": row["slug"] in builtin_ids,
+        "name_conflict": row["slug"] != slugify(row["name"]),
     }
 
 
@@ -119,13 +129,23 @@ async def upload_skill(
             "limit. Please trim the skill text and try again.",
         )
 
-    slug = slugify(name)
-    if not slug:
+    base = slugify(name)
+    if not base:
         raise HTTPException(422, "Skill name must contain at least one letter or number.")
-    # Shadowing a vendored built-in id is deliberately NOT rejected: the
-    # custom skill replaces the built-in for this company (resolver looks the
-    # company library up first). The payload's overrides_builtin flag is how
-    # the uploader learns they're replacing a Sprntly skill.
+
+    # One read of the company library serves both name checks below.
+    existing = db.list_custom_skills(company.company_id)
+    # Within the company's OWN library a repeated name is refused outright —
+    # two identical entries in one library help nobody, and the uploader can
+    # rename or delete the old one. (Sharing a BUILT-IN's name is fine; that's
+    # the case the trigger series below exists for.)
+    if any(slugify(r.get("name") or "") == base for r in existing):
+        raise HTTPException(409, "A skill with this name already exists in your company.")
+    # Sharing a vendored built-in's name is deliberately NOT rejected and no
+    # longer overrides it: the built-in keeps its own trigger and this upload
+    # takes the next free one, so chat can offer BOTH (their descriptions are
+    # what tells them apart).
+    slug = available_slug(base, set(list_skills()) | {r["slug"] for r in existing})
 
     key = await skills_storage.stage_skill_file(
         company_id=company.company_id, data=data, ext=ext
@@ -146,8 +166,10 @@ async def upload_skill(
             uploader_name=company.user_name or company.user_email or "",
         )
     except db.DuplicateSkillSlug:
-        # Roll back the staged object so the rejected upload leaves nothing
-        # behind (no orphaned file without a metadata row).
+        # Backstop for the race the pre-check above can't close (two concurrent
+        # uploads picking the same free slug). Roll back the staged object so
+        # the rejected upload leaves nothing behind (no orphaned file without a
+        # metadata row).
         await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
         raise HTTPException(
             409, "A skill with this name already exists in your company."
@@ -156,12 +178,11 @@ async def upload_skill(
         await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
         raise
 
-    builtin_ids = set(list_skills())
     logger.info(
-        "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s overrides_builtin=%s",
-        bool(company.company_id), slug, len(data), ext, slug in builtin_ids,
+        "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s name_conflict=%s",
+        bool(company.company_id), slug, len(data), ext, slug != base,
     )
-    return _skill_payload(row, builtin_ids)
+    return _skill_payload(row)
 
 
 @router.get("")
@@ -169,8 +190,7 @@ def list_skills_route(company: WorkspaceContext = Depends(require_workspace)):
     """The COMPANY's custom skills, newest first (metadata only) — shared
     across all of the company's workspaces."""
     rows = db.list_custom_skills(company.company_id)
-    builtin_ids = set(list_skills())  # one scan for the whole list
-    return {"skills": [_skill_payload(r, builtin_ids) for r in rows]}
+    return {"skills": [_skill_payload(r) for r in rows]}
 
 
 @router.get("/{skill_id}/file")

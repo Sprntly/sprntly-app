@@ -103,7 +103,11 @@ async function _pollEvidenceLoop(
   if (doc.status !== "ready") {
     return { ok: false, message: "Timed out waiting for evidence" }
   }
-  return { ok: true, evidence: markdownToEvidenceState(doc.payload_md), evidenceId }
+  return {
+    ok: true,
+    evidence: { ...markdownToEvidenceState(doc.payload_md), question: doc.question },
+    evidenceId,
+  }
 }
 
 /** Polls until the Evidence Page is ready, then parses the markdown with
@@ -132,7 +136,7 @@ export async function runEvidenceGeneration(
     if (rec && rec.status === "ready" && rec.payload_md) {
       return {
         ok: true,
-        evidence: markdownToEvidenceState(rec.payload_md),
+        evidence: { ...markdownToEvidenceState(rec.payload_md), question: rec.question },
         evidenceId: rec.id,
         existing: true,
       }
@@ -176,5 +180,5 @@ export async function loadEvidenceByInsight(
 ): Promise<PrdContent | null> {
   const rec = await evidenceApi.byInsight(briefId, insightIndex)
   if (!rec || rec.status !== "ready" || !rec.payload_md) return null
-  return markdownToEvidenceState(rec.payload_md)
+  return { ...markdownToEvidenceState(rec.payload_md), question: rec.question }
 }

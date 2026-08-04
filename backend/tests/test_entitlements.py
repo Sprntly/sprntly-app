@@ -17,6 +17,7 @@ import pytest
 
 from app.entitlements import (
     agents_enabled,
+    ds_claude_analysis_enabled,
     feature_flags_for_company,
     top_insights_enabled,
 )
@@ -127,3 +128,90 @@ def test_feature_flags_for_company_read_failure_is_empty(monkeypatch):
 
     monkeypatch.setattr(client_mod, "require_client", _boom)
     assert feature_flags_for_company("whatever") == {}
+
+
+# ---- ds_claude_analysis_enabled matrix --------------------------------------
+# DEFAULT ON since 2026-07-30 (Apurva): a missing key is ON, matching the
+# chat_intent_envelope grandfather pattern, and named customers opt out with an
+# explicit false. The one divergence from every sibling resolver: an UNKNOWN
+# flag state is OFF, because this flag gates whether a tenant's raw uploaded
+# CSVs leave the box for the Anthropic Files API — see the resolver docstring.
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        # Grandfathering: no key of ours → ON.
+        ({}, True),
+        ({"agents": True, "top_insights": False}, True),
+        # The exact payload the onboarding insert writes (DEFAULT_FEATURE_FLAGS).
+        (
+            {
+                "agents": True, "top_insights": True, "chat_intent_envelope": True,
+                "on_demand_analysis": True, "auto_prd_generation": True,
+                "engineer_agent": False, "research_agent": False,
+                "on_call_agent": False, "claude_code_handoff": False,
+            },
+            True,
+        ),
+        # Explicit values win in both directions.
+        ({"ds_claude_analysis": True}, True),
+        ({"ds_claude_analysis": False}, False),
+        # Truthiness of stored junk, same as the sibling resolvers.
+        ({"ds_claude_analysis": 0}, False),
+        ({"ds_claude_analysis": 1}, True),
+        ({"ds_claude_analysis": None}, False),
+        # UNKNOWN state → OFF. This is the deliberate asymmetry.
+        (None, False),
+        ("not-a-dict", False),
+        (42, False),
+    ],
+)
+def test_ds_claude_analysis_enabled_matrix(flags, expected):
+    assert ds_claude_analysis_enabled(flags) is expected
+
+
+def test_ds_claude_analysis_default_differs_from_its_siblings_on_unknown():
+    """Pin the divergence itself, so a future 'consistency' cleanup has to argue
+    with a test: the module gates fail OPEN on an unknown state, this one closed."""
+    assert agents_enabled(None) is True
+    assert top_insights_enabled(None) is True
+    assert ds_claude_analysis_enabled(None) is False
+
+
+# ---- read_feature_flags: the strict reader ----------------------------------
+
+def test_read_feature_flags_distinguishes_empty_from_failed(fake_llm, monkeypatch):
+    """`{}` (row exists, no flags) vs `None` (read never reached the row) — the
+    distinction `feature_flags_for_company` collapses and the DS gate needs."""
+    import uuid
+
+    import app.db.client as client_mod
+    from app.db.client import require_client
+    from app.entitlements import read_feature_flags
+
+    cid = uuid.uuid4().hex
+    require_client().table("companies").insert(
+        {"id": cid, "slug": "strict-co", "display_name": "Strict Co", "feature_flags": {}}
+    ).execute()
+
+    assert read_feature_flags(cid) == {}          # row exists, genuinely empty
+    assert read_feature_flags("no-such-co") == {}  # no row: not a failure
+
+    def _boom():
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(client_mod, "require_client", _boom)
+    assert read_feature_flags("whatever") is None  # the read itself failed
+
+
+def test_feature_flags_for_company_contract_is_unchanged(monkeypatch):
+    """The lenient reader still collapses a failed read to {} — every existing
+    module gate depends on that fail-open behaviour."""
+    import app.db.client as client_mod
+
+    def _boom():
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(client_mod, "require_client", _boom)
+    assert feature_flags_for_company("whatever") == {}
+    assert agents_enabled(feature_flags_for_company("whatever")) is True

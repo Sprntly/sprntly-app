@@ -61,6 +61,99 @@ def test_relationship_validates_node_kinds(isolated_settings):
                      source_id="a", target_kind="entity", target_id="b")
 
 
+# ---------- typed field promotion (skill_id/origin/channel/evidence_eligible) ----------
+
+def test_signal_typed_fields_default_none_and_evidence_eligible_computed(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c")
+    assert s.skill_id is None
+    assert s.origin is None
+    assert s.channel is None
+    # revenue is a CONNECTED_SOURCE_TYPES member and origin is None (not a
+    # NON_EVIDENCE_ORIGIN) → eligible by default.
+    assert s.evidence_eligible is True
+
+
+def test_signal_typed_fields_fall_back_to_provenance_dict(isolated_settings):
+    """A caller that only sets the informal provenance dict (every
+    pre-existing construction site) still gets the typed fields populated —
+    the transition-safety fallback in __post_init__."""
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              provenance={"skill_id": "jira-extraction", "origin": "connector",
+                          "channel": "upload"})
+    assert s.skill_id == "jira-extraction"
+    assert s.origin == "connector"
+    assert s.channel == "upload"
+
+
+def test_signal_typed_kwarg_wins_over_provenance_dict(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              provenance={"origin": "connector"}, origin="upload")
+    assert s.origin == "upload"
+
+
+def test_signal_evidence_eligible_explicit_kwarg_wins(isolated_settings):
+    from app.graph.types import Signal
+    s = Signal(enterprise_id="e", source_type="revenue", kind="x", content="c",
+              evidence_eligible=False)
+    assert s.evidence_eligible is False
+
+
+def test_row_to_signal_falls_back_to_provenance_dict_for_pre_migration_rows(isolated_settings):
+    """A pre-migration row (typed columns null in the DB, values only in the
+    provenance dict) reconstructs with the typed fields populated from the
+    dict — GraphFacade._row_to_signal's read-side fallback."""
+    import uuid
+    from app.graph import GraphFacade
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    sig_id = str(uuid.uuid4())
+    isolated_settings["supabase"].table("kg_signal").insert({
+        "id": sig_id, "enterprise_id": "ent-A", "source_type": "revenue",
+        "kind": "finding", "content": "pre-migration row", "properties": {},
+        "valid_at": now, "transaction_at": now, "provenance": {
+            "skill_id": "hubspot-extraction", "origin": "connector",
+            "channel": "upload",
+        },
+        # typed columns left unset → null, exactly like a real pre-migration row
+    }).execute()
+
+    facade = GraphFacade()
+    sig = facade.get_signal("ent-A", sig_id)
+    assert sig is not None
+    assert sig.skill_id == "hubspot-extraction"
+    assert sig.origin == "connector"
+    assert sig.channel == "upload"
+    # evidence_eligible column also null → computed on the fly from
+    # source_type + origin (same policy as a fresh Signal would apply).
+    assert sig.evidence_eligible is True
+
+
+def test_row_to_signal_prefers_typed_column_over_provenance_dict(isolated_settings):
+    """When both are present (post-migration row), the typed DB column wins —
+    it's the more authoritative source once it exists."""
+    import uuid
+    from app.graph import GraphFacade
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    sig_id = str(uuid.uuid4())
+    isolated_settings["supabase"].table("kg_signal").insert({
+        "id": sig_id, "enterprise_id": "ent-A", "source_type": "revenue",
+        "kind": "finding", "content": "post-migration row", "properties": {},
+        "valid_at": now, "transaction_at": now,
+        "provenance": {"origin": "upload"},  # stale/mismatched dict value
+        "origin": "connector",               # the typed column is authoritative
+    }).execute()
+
+    facade = GraphFacade()
+    sig = facade.get_signal("ent-A", sig_id)
+    assert sig.origin == "connector"
+
+
 # ---------- facade ----------
 
 @pytest.fixture
@@ -351,3 +444,121 @@ def test_create_source_is_idempotent_on_duplicate_id(facade):
     assert len(rows) == 1                      # one row, not two
     assert rows[0].id == "fixed-source-id"
     assert rows[0].label == "doc-1-relabeled"  # upsert applied the new values
+
+
+# ---------- ensure_company_entity (tenant root anchor) ----------
+
+def test_ensure_company_entity_creates_once(facade):
+    from app.graph.types import COMPANY_ENTITY_TYPE
+
+    company_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent is not None
+    assert ent.type == COMPANY_ENTITY_TYPE
+    assert ent.canonical_label == "Acme Inc"
+
+    all_company = facade.query_entities("ent-A", type=COMPANY_ENTITY_TYPE)
+    assert len(all_company) == 1
+
+
+def test_ensure_company_entity_is_idempotent_and_does_not_rename(facade):
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    # A second call (e.g. a different label the second time) finds the
+    # existing node rather than creating a duplicate or renaming it.
+    second_id = facade.ensure_company_entity("ent-A", label="A Different Name")
+    assert second_id == first_id
+
+    ent = facade.get_entity("ent-A", first_id)
+    assert ent.canonical_label == "Acme Inc"  # unchanged
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+
+
+def _raw_kg_entity(facade, enterprise_id: str, entity_id: str) -> dict:
+    """Entity has no `updated_at` field — read the raw row for it."""
+    r = (
+        facade._tbl("kg_entity")
+        .select("canonical_label, created_at, updated_at")
+        .eq("enterprise_id", enterprise_id)
+        .eq("id", entity_id)
+        .execute()
+    )
+    return r.data[0]
+
+
+def test_ensure_company_entity_relabel_true_renames_existing(facade):
+    """`relabel=True` (opt-in) DOES rename an already-existing company entity
+    when a truthy, different label is supplied — the fix for a root created
+    via a non-business-context path first (e.g. roadmap upload) that would
+    otherwise stay stuck with its fallback label forever."""
+    first_id = facade.ensure_company_entity("ent-A", label="ent-A")  # UUID-fallback-style
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    second_id = facade.ensure_company_entity("ent-A", label="Acme Inc", relabel=True)
+    assert second_id == first_id  # still the same node, never duplicated
+
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+    # updated_at actually bumped (never equal to what it was pre-relabel).
+    assert after["updated_at"] != before["updated_at"]
+
+
+def test_ensure_company_entity_relabel_true_is_a_noop_without_a_real_label(facade):
+    """`relabel=True` with no label (or an unknown/empty one) must never
+    overwrite the existing label with a fallback — it only fires when a real
+    name is actually available."""
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    same_id = facade.ensure_company_entity("ent-A", label=None, relabel=True)
+    assert same_id == first_id
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert after["updated_at"] == before["updated_at"]  # no write happened
+
+
+def test_ensure_company_entity_relabel_true_is_idempotent_on_unchanged_label(facade):
+    """Re-running with the SAME label + relabel=True must not write (no
+    spurious updated_at bump on every idempotent refresh re-run)."""
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    facade.ensure_company_entity("ent-A", label="Acme Inc", relabel=True)
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert after["updated_at"] == before["updated_at"]
+
+
+def test_ensure_company_entity_falls_back_to_display_name(facade, isolated_settings):
+    """No label passed, but a `companies` row with a display_name exists for
+    this enterprise → the created entity's canonical_label is the
+    display_name, not the raw enterprise_id."""
+    isolated_settings["supabase"].table("companies").insert(
+        {"id": "ent-A", "slug": "acme", "display_name": "Acme Inc"}
+    ).execute()
+
+    company_id = facade.ensure_company_entity("ent-A")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent.canonical_label == "Acme Inc"
+
+
+def test_ensure_company_entity_falls_back_to_enterprise_id_label_as_last_resort(facade):
+    """No label passed AND no `companies` row for this enterprise (e.g. a
+    legacy/demo dataset with no tenant row) → falls all the way back to the
+    raw enterprise_id, same as before this fallback was improved.
+
+    (`companies.display_name` is a NOT NULL column per the schema — a
+    `companies` row existing with a null/empty display_name isn't a state
+    the real DB can produce, so "no row at all" is the only realistic
+    last-resort case worth covering here.)"""
+    company_id = facade.ensure_company_entity("ent-A")
+    ent = facade.get_entity("ent-A", company_id)
+    assert ent.canonical_label == "ent-A"
+
+
+def test_ensure_company_entity_is_tenant_scoped(facade):
+    a_id = facade.ensure_company_entity("ent-A", label="Acme")
+    b_id = facade.ensure_company_entity("ent-B", label="Beta")
+    assert a_id != b_id
+    assert facade.get_entity("ent-B", a_id) is None
+    assert facade.get_entity("ent-A", b_id) is None

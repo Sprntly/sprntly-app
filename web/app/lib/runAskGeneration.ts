@@ -18,6 +18,23 @@ import { subscribeToGenerationStream } from "./streamGeneration"
  *  Progressive display only — the poll's final payload stays authoritative. */
 export type OnAskPartial = (markdown: string) => void
 
+/**
+ * Fired when the SSE preview channel drops AFTER it had already delivered at
+ * least one delta, while the poll is still running.
+ *
+ * This is a DISPLAY signal, never an error: the poll remains authoritative and
+ * still resolves the finished answer. Its only job is to let the waiting surface
+ * say "the live preview dropped out, the answer is still generating" instead of
+ * freezing a half-sentence under a blinking cursor with no explanation — which
+ * is what a dropped EventSource looked like before.
+ *
+ * The "at least one delta" gate matters: most skills publish nothing on this
+ * channel, so `onerror` fires immediately on those runs. Firing then would put a
+ * "the preview dropped out" note on every non-streaming answer, which is exactly
+ * the kind of claim-without-a-signal this surface exists to avoid.
+ */
+export type OnAskStreamDrop = () => void
+
 // Answer deltas re-render a markdown bubble (much cheaper than the PRD's
 // iframe, but still a full remark parse) — cap preview updates to ~7/s.
 const PARTIAL_THROTTLE_MS = 150
@@ -71,6 +88,17 @@ export function getPendingAsk(company: string, tabId: string): PendingJob | null
 class AskFailedError extends Error {}
 
 /**
+ * The 12-minute wall-clock budget expired while the job was still `generating`.
+ *
+ * NOT a failure: the server job may yet finish, which is why the persisted
+ * ask_id is deliberately left in place so a reload re-attaches. Split out from
+ * the generic failure so the chat can render the honest "still running on our
+ * side — reload and it will pick up where it left off" state instead of the
+ * red "that answer didn't come through" bubble.
+ */
+export class AskTimeoutError extends AskFailedError {}
+
+/**
  * Thrown when the poll is cancelled mid-flight because the chat UI went away
  * (ChatScreen unmounted — the user navigated to another screen). Unlike a
  * failure, this is NOT surfaced as an error: the pending ask_id is deliberately
@@ -118,6 +146,7 @@ async function pollAskToResult(
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
   onPartial?: OnAskPartial,
+  onStreamDrop?: OnAskStreamDrop,
 ): Promise<AskResponse> {
   const scope = askScope(tabId)
   // `onPartial` opens an SSE token stream ALONGSIDE the poll and forwards the
@@ -127,9 +156,20 @@ async function pollAskToResult(
   // publishes nothing) just means no preview — never an error. Always torn
   // down before returning, so a late frame can't touch a settled turn.
   const throttled = onPartial ? throttlePartial(onPartial, PARTIAL_THROTTLE_MS) : null
+  // A preview that was RUNNING and then died is the one stream event worth
+  // telling the user about (see OnAskStreamDrop). One that never produced a
+  // delta is indistinguishable from a skill that simply doesn't stream, so it
+  // stays invisible.
+  let sawDelta = false
   const stopStream = throttled
     ? subscribeToGenerationStream((t) => askApi.streamUrl(askId, t), {
-        onDelta: (full) => throttled.push(full),
+        onDelta: (full) => {
+          sawDelta = true
+          throttled.push(full)
+        },
+        onError: () => {
+          if (sawDelta) onStreamDrop?.()
+        },
       })
     : () => {}
   try {
@@ -140,6 +180,28 @@ async function pollAskToResult(
   }
 }
 
+/**
+ * Console trace of what a question routed to. Debug aid, not product UI.
+ *
+ * Until this existed there was NO way — for a user or an engineer — to see
+ * which skill answered a plain (no-slash) question: the composer only ever
+ * shows a chip when you type the trigger yourself, so automatic selection was
+ * completely opaque. That is why a router bug survived unnoticed; you cannot
+ * report "it picked the wrong skill" when nothing tells you what it picked.
+ *
+ * `routed_skill` is null when the router deliberately chose no skill, which is
+ * a real outcome and is logged as such rather than skipped — "answered
+ * directly" is exactly the case worth seeing when a skill was expected.
+ */
+function logAskRoute(askId: number, s: AskStatusResponse): void {
+  const skill = s.routed_skill ?? null
+  // eslint-disable-next-line no-console
+  console.info(
+    `[ask:route] #${askId} ${s.status} → ${skill ?? "(no skill — answered directly)"}`,
+    { skill, action: s.routed_skill_action ?? null, status: s.status },
+  )
+}
+
 async function _pollAskLoop(
   askId: number,
   company: string,
@@ -147,10 +209,24 @@ async function _pollAskLoop(
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
 ): Promise<AskResponse> {
+  // Log the routing decision ONCE, the first poll that reveals it — the column
+  // is populated the moment `route()` returns, so this fires while the answer
+  // is still generating rather than after it lands. Repeating it every poll
+  // would bury the one line that matters under a dozen identical ones.
+  let loggedRoute = false
   const final = await pollUntil<AskStatusResponse>({
     // A single transient "Failed to fetch" during polling must not kill an ask
     // whose server-side job is still running fine — retry the status read.
-    fetchStatus: () => withTransientRetry(() => askApi.get(askId)),
+    fetchStatus: () =>
+      withTransientRetry(() => askApi.get(askId)).then((s) => {
+        // Terminal states always log, even if the route never appeared, so a
+        // failed or skill-less ask still produces exactly one trace line.
+        if (!loggedRoute && (s.routed_skill != null || s.status !== "generating")) {
+          loggedRoute = true
+          logAskRoute(askId, s)
+        }
+        return s
+      }),
     isDone: (v) => v.status !== "generating",
     maxMs: MAX_MS,
     intervalMs: POLL_INTERVAL_MS,
@@ -171,7 +247,7 @@ async function _pollAskLoop(
   // id and picks the answer up (this is what the timeout message promises).
   // Clearing here used to orphan every answer that outlived the budget.
   if (final.status === "generating") {
-    throw new AskFailedError("Timed out waiting for the answer")
+    throw new AskTimeoutError("Timed out waiting for the answer")
   }
   clearPendingJob("ask", company, scope)
   if (final.status === "ready") return toAskResponse(final)
@@ -205,6 +281,7 @@ export async function runAskGeneration(
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial
+    onStreamDrop?: OnAskStreamDrop
   },
 ): Promise<AskResponse> {
   // A POST failure (4xx/5xx) propagates as-is so the route's error detail
@@ -216,7 +293,9 @@ export async function runAskGeneration(
   // A cache hit comes back immediately-`ready` — there is no generation to
   // stream, so don't open an EventSource that would only ever see silence.
   const onPartial = start.status === "generating" ? opts?.onPartial : undefined
-  return pollAskToResult(start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped, onPartial)
+  return pollAskToResult(
+    start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped, onPartial, opts?.onStreamDrop,
+  )
 }
 
 /**
@@ -231,8 +310,9 @@ export async function resumeAskGeneration(
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
   onPartial?: OnAskPartial,
+  onStreamDrop?: OnAskStreamDrop,
 ): Promise<AskResponse> {
   // A resume re-attaches mid-generation: the stream's replay frame catches the
   // preview up with everything emitted before this mount, then live deltas.
-  return pollAskToResult(askId, company, tabId, isCancelled, isStopped, onPartial)
+  return pollAskToResult(askId, company, tabId, isCancelled, isStopped, onPartial, onStreamDrop)
 }

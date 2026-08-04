@@ -1,19 +1,38 @@
-"""Intent detection + skill routing for the Ask endpoint.
+"""Intent detection + PIPELINE routing for the Ask endpoint.
 
-Given a user question, determines which skill (if any) should handle it.
-Falls back to general Ask (corpus + KG) when no skill matches.
+Given a user question, determines which dedicated PIPELINE (if any) should
+handle it. Everything else falls back to the general Ask answer (corpus + KG) —
+which is now the default, not the fallback.
 
-The router uses keyword matching first (fast, no LLM call), then an optional
-LLM classifier for ambiguous queries. The keyword rules are deliberately
-broad — false positives are cheap (the skill produces a structured answer),
-false negatives are expensive (the user gets a generic response when a
-specialized one was available).
+WHAT THIS MODULE STOPPED DOING. It used to pick one of ~78 vendored `SKILL.md`
+methods for a chat turn. That layer is gone: chat answers on the default model
+with no method injected. What survives here is the small set of rules whose
+match selects a piece of REAL MACHINERY the answer model cannot substitute for —
+a live call fetch, a web-search sweep, a tracker read, the DS engine. Those are
+capabilities, not prose styles, so keyword routing still earns its keep for
+them.
+
+The rules that only chose a METHOD were deleted, and two of them were live bugs:
+a bare `\\bprototype\\b` and `\\bprd\\b …\\b(for|about|from)\\b` sent "did the
+prototype ship last week?" and "what's in the PRD for onboarding?" to
+`prd-author` — a long-output document generator — so an ordinary question came
+back as a full PRD. Those rules were terminal (no LLM tier could override them
+for a tenant with no uploaded skills), which is exactly why removing them is the
+fix rather than a re-tune.
+
+The rules are still deliberately broad within their narrow subject: a false
+positive costs a pipeline run, a false negative costs the user an answer only
+that pipeline can give.
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
+
+# The same "this turn is a document, not prose" sniff the prompt-fold uses, so
+# thread detection and history clamping agree on what a report turn is.
+from app.prompt_history import looks_like_html
 
 logger = logging.getLogger(__name__)
 
@@ -25,65 +44,127 @@ class SkillMatch:
     action: str        # human-readable label for the frontend
 
 
-# Keyword patterns → skill mapping. Order matters: first match wins.
-# Each entry: (compiled regex, skill_id, action_label, base_confidence)
+# ── Competitive-intelligence report intent (narrowed) ────────────────────────
+# The CIR skill is the heaviest thing we ship: a multi-minute staged web-research
+# sweep. It must fast-path only when the user is asking for the REPORT, not
+# merely mentioning competitors. Two ingredients, and a shape needs both:
+#   * a competitor SUBJECT ("competitors", "competition", "competitive",
+#     "rivals", "market"), and
+#   * a report/comparison INTENT (report, analysis, review, scan, landscape,
+#     benchmark, intelligence, "where do we stand", "how do we compare",
+#     "what are they shipping").
+_CIR_SUBJECT = r"(?:competitors?|competition|competitive|rivals?|market)"
+# "market" is the loose one: it names our category as often as our rivals, so it
+# is admitted only where the surrounding shape is unambiguous ("market
+# landscape", "benchmark us against the market", "how do we compare to the
+# market"). Shapes where a bare "the market" reads as a general question —
+# "what is the market doing today?", "run a study on the market" — use the
+# STRICT subject instead and defer to the haiku router.
+_CIR_SUBJECT_STRICT = r"(?:competitors?|competition|competitive|rivals?)"
+_CIR_REPORT_NOUN = (
+    r"(?:report|analys[ie]s|review|scan|landscape|benchmark(?:ing|s)?|"
+    r"intelligence|study|teardown|round-?up|deep[\s-]?dive|pulse|briefing)"
+)
+
+
+def _near(a: str, b: str, gap: int = 45) -> str:
+    """Either order, within `gap` characters."""
+    return rf"(?:{a}.{{0,{gap}}}{b}|{b}.{{0,{gap}}}{a})"
+
+
+# Named sub-patterns, bound before the f-strings below: an f-string EXPRESSION
+# cannot contain a backslash before Python 3.12, and CI runs 3.11.
+_CIR_SUBJECT_B = rf"\b{_CIR_SUBJECT}\b"
+_CIR_STANDING = r"\bwhere\s+do\s+we\s+stand\b"
+_CIR_COMPARE = r"\bhow\s+do\s+we\s+(?:compare|stack\s+up|measure\s+up)\b"
+_CIR_BENCHMARK = r"\bbenchmark\b"
+
+_CIR_REPORT_RULE_SRC = (
+    # "competitive intelligence", "competitor report", "competitive analysis",
+    # "market landscape", "monthly competitor scan", "quarterly competitive
+    # review", "competitor deep dive". Up to two filler words between the two.
+    rf"\b{_CIR_SUBJECT}\s+(?:\w+\s+){{0,2}}{_CIR_REPORT_NOUN}\b"
+    # "review of the competition", "teardown of our rivals". STRICT subject:
+    # "run a study on the market" is a general research ask, not a report ask.
+    rf"|\b{_CIR_REPORT_NOUN}\s+(?:of|on|for|across|against|vs\.?|versus)\s+"
+    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_CIR_SUBJECT_STRICT}\b"
+    # "where do we stand vs competitors" / "vs the competition, where do we stand"
+    rf"|{_near(_CIR_STANDING, _CIR_SUBJECT_B)}"
+    # "how do we compare to the market" / "how do we stack up against rivals"
+    rf"|{_near(_CIR_COMPARE, _CIR_SUBJECT_B)}"
+    # "what are our competitors shipping/launching/doing/been up to". STRICT
+    # subject: "what is the market doing today?" is a general question.
+    rf"|\bwhat\s+(?:are|is|has|have)\b.{{0,30}}\b{_CIR_SUBJECT_STRICT}\b.{{0,30}}"
+    r"\b(?:ship(?:ping|ped)?|launch(?:ing|ed)?|releas\w+|doing|building|"
+    r"been\s+up\s+to|up\s+to)\b"
+    # "benchmark us against the market"
+    rf"|{_near(_CIR_BENCHMARK, _CIR_SUBJECT_B)}"
+)
+
+# Sibling strategy skills whose asks read competitor-ish but belong elsewhere,
+# plus asks about the user's OWN uploaded data. Vetoing them keeps the fast-path
+# honest instead of widening the regex further and then apologising for it.
+#
+# The uploaded-data veto exists because the DS engine's own trigger
+# (`is_data_analysis_request`) requires an analyze-VERB, and "deep dive" is not
+# one — so "do a deep dive on the market data I uploaded" fell past DS and was
+# claimed by CIR's `market … deep dive` shape, buying a web sweep for a question
+# about a spreadsheet. Anything naming the user's own data defers.
+#
+# TAM/SAM/SOM is matched CASE-SENSITIVELY via `(?-i:…)`: under re.I the `sam`
+# alternative also matched the NAME Sam, so "competitive analysis of Sam's Club
+# vs Costco" lost its fast path to a market-sizing veto.
+_CIR_VETO = re.compile(
+    r"\bmarket\s+structure\b|\bfive\s+forces\b|\bporter'?s\b"
+    r"|\bmarket\s+siz\w+\b|(?-i:\b(?:TAM|SAM|SOM)\b)"
+    r"|\bpositioning\s+statement\b|\bbattle\s?cards?\b"
+    r"|\btraffic\s+lights?\b|\bbeachhead\b"
+    # …the user's own data, not the public web.
+    r"|\buploaded?\b|\b(?:my|our)\s+data\b|\bthe\s+data\b"
+    r"|\b(?:csvs?|spreadsheets?|excel|xlsx?)\b",
+    re.I,
+)
+
+# skill_id → veto pattern. When a rule matches but its veto also matches, the
+# fast-path DEFERS (falls through to the remaining rules, then the haiku router)
+# rather than claiming a question that belongs to a sibling skill.
+_RULE_VETOES: dict[str, re.Pattern] = {
+    "competitive-intelligence-review": _CIR_VETO,
+}
+
+
+def is_competitive_report_request(question: str) -> bool:
+    """True when the question asks for the competitive-intelligence REPORT.
+
+    The predicate behind the CIR fast-path rule, exported because the Slack
+    surface needs the same judgement BEFORE running anything: a report ask has
+    to be acknowledged with its duration up front, since the run itself takes
+    minutes.
+    """
+    q = question or ""
+    if _CIR_VETO.search(q):
+        return False
+    return bool(re.search(_CIR_REPORT_RULE_SRC, q, re.I))
+
+
+# Keyword patterns → PIPELINE mapping. Order matters: first match wins.
+# Each entry: (compiled regex, pipeline_id, action_label, base_confidence)
+#
+# Every id below names a dedicated module in `app/` that does something the
+# answer model cannot do for itself — a paid web-search sweep, a live call
+# fetch. That is the ONLY admission test now. Rules that merely picked a
+# `SKILL.md` method (prd-author, prioritize, user-stories, ideation-prioritize,
+# decision-memo, interview-synthesis, feedback-synthesis, incident-runbook,
+# fact-check, sales-battlecard, "prototype", "deep dive") were deleted with the
+# built-in skill layer: those questions now reach the ordinary answer, which is
+# the point of the change, not a casualty of it.
+#
+# `sales-battlecard`'s rule is gone but the behaviour it protected is NOT: it
+# sat above the CIR rule to stop "sell against Acme" / "build a battlecard"
+# buying a multi-minute web sweep. That veto lives in `_CIR_VETO` (which matches
+# `battle ?cards?`), which is where it always actually was — the rule ordering
+# was belt-and-braces.
 _RULES: list[tuple[re.Pattern, str, str, float]] = [
-    # PRD generation. Verb + noun lists mirror the web command rule
-    # (BriefChat.isPrdCommand) — "give me a prd for X" was a real user miss
-    # under the old generate/create/write/draft-only list, and users also say
-    # "product brief" / "product spec(ification)" / "product requirements
-    # document" for the same artifact. Gap widened to 40 chars for multi-word
-    # fillers ("put together a quick one-page prd").
-    (re.compile(
-        r"\b(generate|create|write|draft|make|build|prepare|produce|compose"
-        r"|develop|author|give|need|want|put\s+together)\b.{0,40}"
-        r"\b(prd|product\s+requirements?\s+doc(?:ument)?|product\s+brief"
-        r"|product\s+spec(?:ification)?)s?\b", re.I),
-     "prd-author", "Generate PRD", 0.95),
-    # "spec this/it out (for X)" — same command, no artifact noun.
-    (re.compile(r"\bspec\s+(this|that|it)\s+out\b", re.I),
-     "prd-author", "Generate PRD", 0.90),
-    (re.compile(r"\bprd\b.{0,20}\b(for|about|from)\b", re.I),
-     "prd-author", "Generate PRD", 0.90),
-
-    # Prioritization
-    (re.compile(r"\b(prioriti[sz]e|rank|rice|wsjf|ice\s+score|moscow)\b", re.I),
-     "prioritize", "Prioritize ideas", 0.90),
-    (re.compile(r"\b(re-?prioriti[sz]e|re-?rank|re-?sequence)\b", re.I),
-     "prioritize", "Re-prioritize ideas", 0.90),
-
-    # User stories / tickets
-    (re.compile(r"\b(create|generate|write)\b.{0,20}\b(ticket|story|stories|task)\b", re.I),
-     "user-stories", "Generate user stories", 0.90),
-    (re.compile(r"\b(user\s+stor|acceptance\s+criteria|ac\s+for)\b", re.I),
-     "user-stories", "Generate user stories", 0.85),
-
-    # Ideation prioritize ("backlog" kept as a chat alias for the old name)
-    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate|prioriti[sz]e).{0,20}\b(ideation|ideas|backlog)\b", re.I),
-     "ideation-prioritize", "Prioritize ideation", 0.85),
-
-    # Decision memo
-    (re.compile(r"\b(decision|build\s+vs?\s+buy|pivot|persevere|trade-?off)\b", re.I),
-     "decision-memo", "Draft decision memo", 0.80),
-
-    # Interview synthesis (qualitative research: 1:1s, focus groups, usability,
-    # win/loss & churn-exit interviews → themes). Before feedback-synthesis; the
-    # two share no keywords.
-    (re.compile(r"\b(synthes\w*|analyz\w*|theme).{0,25}\b(interviews?|user\s+research|usability\s+(?:test|session)s?|focus\s+groups?|roundtables?)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.85),
-    (re.compile(r"\b(interviews?|usability\s+(?:test|session)s?|focus\s+groups?|user\s+research|win[\s/-]?loss|churn[\s-]?exit).{0,30}\b(synthes|analyz|theme|learn|insight|takeaway)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.85),
-    (re.compile(r"\binterview\s+(notes?|transcripts?)\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.80),
-    (re.compile(r"\bwhat.{0,20}\b(learn|hear|find).{0,25}\b(call|interview|session|conversation)s?\b", re.I),
-     "interview-synthesis", "Synthesize interviews", 0.80),
-
-    # Feedback synthesis (quick thematic pass over a pile of feedback)
-    (re.compile(r"\b(feedback|nps|csat|survey|sentiment).{0,20}\b(synthe|analyz|review|summary)\b", re.I),
-     "feedback-synthesis", "Synthesize feedback", 0.85),
-    (re.compile(r"\b(synthe|analyz|review).{0,20}\b(feedback|nps|csat|survey)\b", re.I),
-     "feedback-synthesis", "Synthesize feedback", 0.85),
-
     # Public feedback report (external reviews & social: App Store, Google Play,
     # Reddit, G2, X; "what are people saying about us online")
     (re.compile(r"\b(review\s+mining|online\s+reputation|public\s+sentiment|public\s+feedback|public\s+standings?|app[\s-]?store|google\s+play|trustpilot|capterra|\bg2\b|reddit)\b", re.I),
@@ -107,26 +188,66 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(customer|support).{0,20}\b(ticket|review|complaint|issue)s?\b", re.I),
      "voice-of-customer-report", "Analyze customer feedback", 0.80),
 
-    # Competitive intelligence
-    (re.compile(r"\b(competit|competitor|competitive\s+analysis|market\s+position)\b", re.I),
-     "competitive-intelligence-review", "Competitive analysis", 0.85),
+    # Deep company research — research OUR OWN company on the public web
+    # (products, positioning, pricing, market, recent news) → KG signals.
+    # Deliberately ABOVE the competitive-intelligence rule so "research our
+    # market" is an inward ask.
+    #
+    # NB (routing narrowing, this stack): a bare "market position(ing)" no
+    # longer falls through to CIR — the CIR rule below is report-intent only, so
+    # a positioning question with no report noun goes to the haiku router (which
+    # reads it as `positioning`). Nothing here depends on that fall-through; the
+    # first-person guard below is what keeps these rules from hijacking outward
+    # asks.
+    #
+    # Both patterns require a FIRST-PERSON possessive (our|my) — never "the".
+    # "the" would hijack outward asks: "research the pricing of Salesforce",
+    # "can you research the company Datadog", "research the positioning of our
+    # top competitor" (which would have beaten CIR from up here), and "run deep
+    # research on the market leaders". The noun list also omits "competitors",
+    # so "research our competitors" falls through as well.
+    (re.compile(r"\b(?:deep\s+)?research\b.{0,30}\b(our|my)\s+"
+                r"(compan(?:y|ies)|product|market|pricing|positioning)\b", re.I),
+     "company-research", "Deep company research", 0.85),
+    (re.compile(r"\bwhat\s+do(?:es)?\s+(we|our\s+(?:company|product))\b.{0,20}"
+                r"\b(offer|sell|charge)\b", re.I),
+     "company-research", "Deep company research", 0.85),
 
-    # Incident runbook
-    (re.compile(r"\b(incident|runbook|post-?mortem|sev-?\d|on-?call|outage)\b", re.I),
-     "incident-runbook", "Generate incident runbook", 0.80),
-
-    # Fact check
-    (re.compile(r"\b(fact.?check|verify|is\s+it\s+true|source.?check)\b", re.I),
-     "fact-check", "Fact-check claims", 0.85),
-
-    # Prototype
-    (re.compile(r"\b(prototype|generate\s+prototype|design\s+prototype)\b", re.I),
-     "prd-author", "Generate prototype", 0.80),
-
-    # Evidence / deep dive
-    (re.compile(r"\b(evidence|deep\s*dive|root\s*cause|investigate)\b", re.I),
-     "feedback-synthesis", "Deep dive analysis", 0.70),
+    # Competitive intelligence — REPORT-INTENT shapes only.
+    #
+    # This rule used to be `\b(competit|competitor|competitive analysis|market
+    # position)\b`, which meant ANY sentence containing the word "competitor"
+    # fast-pathed into the heaviest skill we ship: "the PRD should mention our
+    # competitors", "customers keep comparing us to a competitor", "who are our
+    # competitors?" all bought a multi-minute web-research review nobody asked
+    # for. Intent-first convention (#925): the regex tier is a zero-latency
+    # fast-path for UNAMBIGUOUS report asks, and everything else is the haiku
+    # router's job — phrasings live as test data in
+    # tests/test_cir_routing_phrases.py, not as ever-growing regexes.
+    (re.compile(_CIR_REPORT_RULE_SRC, re.I),
+     "competitive-intelligence-review", "Competitive intelligence report", 0.85),
 ]
+
+
+# The ids `_RULES` may emit, and the complete set of ids a CHAT TURN can be
+# routed to that is not one of the company's own uploads.
+#
+# This is the contract that replaced "is it a vendored skill and not
+# NON_ROUTABLE". Each id keys a dispatch branch in `qa_agent.answer` that hands
+# the turn to a dedicated module, and each of those modules is reachable ONLY
+# through one of these ids — so a name that drops out of here silently
+# un-ships a capability rather than degrading it. `test_skill_router.py` pins
+# the set against the rules and against qa_agent's dispatch.
+#
+# All four have rules above; the set is stated separately because `pinned_skill`
+# (Slack's `/competitive` command) and the classifier can also name one without
+# a rule firing.
+PIPELINE_SKILLS: frozenset[str] = frozenset({
+    "voice-of-customer-report",
+    "public-feedback-report",
+    "company-research",
+    "competitive-intelligence-review",
+})
 
 
 # ── Call-digest intent ──────────────────────────────────────────────────────
@@ -324,6 +445,33 @@ _JIRA_WRITE_VERB = re.compile(
 # A genuine pivot ("prioritize these features", "what's our churn rate?") trips
 # the pivot veto and falls through to normal routing.
 _JIRA_THREAD_MARKER = re.compile(r"\bjira\b|view in jira|issue key|workflow status", re.I)
+# The subset strong enough to survive appearing inside QUOTED SOURCE CONTENT.
+# These are tracker-UI vocabulary — nothing else produces them. The bare word
+# "jira" is not: Atlassian's own stock Confluence page template ships the line
+# "Add Jira work item links or other relevant project links here", so a wiki
+# read that quotes a template quotes the word too.
+_JIRA_THREAD_MARKER_STRONG = re.compile(r"view in jira|issue key|workflow status", re.I)
+
+#: Live-read sources whose answers QUOTE documents and messages verbatim. An
+#: assistant turn that is one of these answers is a document in the same sense a
+#: generated report is — see _in_tracker_thread.
+_QUOTING_SOURCE_PROVIDERS = (
+    "confluence", "google_drive", "slack", "github", "hubspot", "fireflies",
+)
+
+
+def _reads_as_another_sources_answer(text: str) -> bool:
+    """True when this turn is an answer ABOUT a non-tracker source.
+
+    Deliberately reuses _CONNECTOR_STRONG_NAMES (defined further down; resolved
+    at call time) so this list can never drift from the names the connector
+    router recognises.
+    """
+    for provider in _QUOTING_SOURCE_PROVIDERS:
+        pattern = _CONNECTOR_STRONG_NAMES.get(provider)
+        if pattern is not None and pattern.search(text):
+            return True
+    return False
 _JIRA_FILTER = re.compile(
     r"\b(to[\s-]?do|in[\s-]?progress|in\s+review|done|open|closed|blocked|"
     r"backlog|status|project|board|sprint|epic|tickets?|issues?|bugs?|"
@@ -440,16 +588,54 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
       ("get me ticket about cars"). This is what carries a thread whose answer
       happened to name no key ("no matching issues", a plain prose reply) into
       the next turn, and it's why the follow-up is read against every recent
-      question the user asked, not just the one they just sent."""
+      question the user asked, not just the one they just sent.
+
+    A generated REPORT turn is neither. It is a document the assistant produced,
+    persisted verbatim as its conversation turn, and it quotes whatever record
+    ids its sources use — a VoC report cites "TKT-48766" (Zendesk) and
+    "CALL-9875" (Talkdesk), both shaped exactly like a Jira key, and its Sources
+    line may name Jira as one connector among several. Reading that as tracker
+    evidence made every report thread a tracker thread, so the next follow-up
+    that happened to say "more" / "details" / "expand" was answered by the
+    tracker path with "no tracker is connected — connect Jira or ClickUp"
+    instead of by the report. Reported live against a Voice of Customer report.
+    A tracker thread is established by what was SAID, never by a document.
+
+    A LIVE SOURCE READ is a document by the same argument, and the HTML check
+    above does not catch it because those answers are markdown. Reported
+    2026-08-03: "give me all information on confluence" listed the wiki, one
+    listed page was Atlassian's stock product-requirements template, and that
+    template's body says "Add Jira work item links or other relevant project
+    links here". The quoted word made the next turn a tracker thread, so "tell
+    me more about ChoisBits Decision Making" — `more` matches _TRACKER_DETAIL —
+    was answered "no tracker is connected, connect Jira or ClickUp" about a
+    Confluence page the assistant had just read. The user had to type "so check
+    confluence" to get back to the thread they were already in.
+
+    So an assistant turn that reads as ANOTHER source's answer needs a tracker
+    signal that could not have come from the quoted material: an issue key, or
+    tracker-UI vocabulary. Its own clarifying questions ("which Jira project?")
+    are unaffected — they name no other source."""
     if not history:
         return False
     for turn in history[-_TRACKER_THREAD_WINDOW:]:
         content = turn.get("content") or ""
         if not content:
             continue
+        if looks_like_html(content):
+            continue
+        role = turn.get("role") or "user"
+        if role == "assistant" and _reads_as_another_sources_answer(content):
+            # Quoted content: only an unmistakable tracker signal counts.
+            if (
+                _JIRA_THREAD_MARKER_STRONG.search(content)
+                or _JIRA_ISSUE_KEY.search(content)
+            ):
+                return True
+            continue
         if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
             return True
-        if (turn.get("role") or "user") == "user" and _stateless_tracker_lookup(content):
+        if role == "user" and _stateless_tracker_lookup(content):
             return True
     return False
 
@@ -466,6 +652,28 @@ _TRACKER_AFFIRMATIVE = re.compile(
     r"that'?s?\s+right)\b[\s.!,]*$",
     re.I,
 )
+
+
+def _last_answer_was_report(history: list[dict] | None) -> bool:
+    """True when the most recent assistant turn is a generated REPORT document.
+
+    The sticky branches of the tracker and connector routers exist to carry an
+    anaphoric follow-up ("more detail on that one") back to the source the
+    thread was already reading. When the thing sitting directly above the
+    follow-up is a REPORT, that inference is wrong: "explain more on
+    recommendations point 1" is about the document, not a reason to re-read a
+    tracker or a connector. Those paths answer such a question with "no tracker
+    is connected" or "nothing found in Slack" — the reported bug — while the
+    normal answer path can read the report itself.
+
+    Only the LATEST answer counts. A report earlier in the thread must not stop
+    a later, genuine tracker/connector thread from going sticky.
+    """
+    for turn in reversed(history or []):
+        if (turn.get("role") or "user") != "assistant":
+            continue
+        return looks_like_html(turn.get("content") or "")
+    return False
 
 
 def _answers_tracker_question(question: str, history: list[dict] | None) -> bool:
@@ -536,6 +744,12 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     if _stateless_tracker_lookup(question):
         return True
     if _vetoed_as_creation(question):
+        return False
+    # The turn above this one is a report — the follow-up is about that
+    # document, not a reason to go looking in a tracker. Stateless matches are
+    # already through (a follow-up that really does name an issue key still
+    # routes here), so only the ambiguous, thread-carried ones stand down.
+    if _last_answer_was_report(history):
         return False
     if not _in_tracker_thread(history):
         return False
@@ -627,6 +841,474 @@ def is_ticket_update(question: str, history: list[dict] | None = None) -> bool:
     return True
 
 
+# ── Connector-lookup intent (live reads beyond the tracker) ──────────────────
+#
+# "check slack for what was said about the pricing change", "what changed in the
+# repo this week", "which deals in hubspot mention onboarding" — questions whose
+# answer lives in a connected TOOL, read live, rather than in the periodic KG
+# snapshot the generic router answers from (app/connector_lookup/).
+#
+# The trigger is deliberately narrow: the question must NAME a source (or be a
+# follow-up inside a thread that named one). Two reasons.
+#   1. Anti-hallucination cuts both ways. Naming a source we can't read must
+#      reach the honest "that isn't connectable yet" answer instead of a
+#      KG-flavoured guess — so unsupported names (Zendesk, Gong, …) are matched
+#      here on purpose, and the registry answers them without fetching anything.
+#   2. False-positive routing is the biggest UX risk on this path: stealing
+#      "what are customers complaining about" from the VoC/DS paths would be a
+#      visible regression, and those interceptions run BEFORE this one in
+#      qa_agent.answer precisely so ordering — not regex cleverness — decides.
+# The plan's second, wider trigger (provider-specific NOUNS plus that provider
+# being connected) needs the tenant's connection list, which this module has no
+# access to by design; it is deliberately left for a follow-up.
+#
+# Unambiguous product names. A mention is enough — "in slack", "from hubspot",
+# "the github repo".
+_CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
+    "slack": re.compile(r"\bslack\b", re.I),
+    "jira": re.compile(r"\b(jira|atlassian)\b", re.I),
+    # Unambiguous product name, so a bare mention is enough. Naming it
+    # alongside "atlassian" simply puts BOTH providers in the returned set —
+    # this function answers with a set, not a first match.
+    "confluence": re.compile(r"\bconfluence\b", re.I),
+    "clickup": re.compile(r"\bclick\s?up\b", re.I),
+    "github": re.compile(r"\bgit\s?hub\b", re.I),
+    "hubspot": re.compile(r"\bhub\s?spot\b", re.I),
+    "fireflies": re.compile(r"\bfireflies\b", re.I),
+    "google_drive": re.compile(
+        r"\b(google\s+drive|g\s?drive|my\s+drive|drive\s+(?:files?|docs?|folder)|"
+        r"google\s+docs?)\b", re.I,
+    ),
+    "asana": re.compile(r"\basana\b", re.I),
+    "zendesk": re.compile(r"\bzen\s?desk\b", re.I),
+    "gong": re.compile(r"\bgong\b", re.I),
+    "amplitude": re.compile(r"\bamplitude\b", re.I),
+    "mixpanel": re.compile(r"\bmixpanel\b", re.I),
+    "sprinklr": re.compile(r"\bsprinklr\b", re.I),
+    "superset": re.compile(r"\bsuperset\b", re.I),
+    "figma": re.compile(r"\bfigma\b", re.I),
+    "intercom": re.compile(r"\bintercom\b", re.I),
+    "gitlab": re.compile(r"\bgit\s?lab\b", re.I),
+    "sentry": re.compile(r"\bsentry\b", re.I),
+    "stripe": re.compile(r"\bstripe\b", re.I),
+}
+# Names that are ordinary English too, so they need a data-read context in the
+# same message ("in linear", "the notion doc") — never "linear growth", "I have
+# no notion of it".
+_CONNECTOR_AMBIGUOUS_NAMES: dict[str, re.Pattern] = {
+    "linear": re.compile(r"\blinear\b", re.I),
+    "notion": re.compile(r"\bnotion\b", re.I),
+}
+_CONNECTOR_AMBIGUOUS_VETO = re.compile(
+    r"\blinear\s+(?:growth|regression|scale|relationship|model|algebra|time)\b|"
+    r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b",
+    re.I,
+)
+# A read context: the tracker read verbs, plus the verbs people use for tools
+# ("check", "search", "look in", "what did … say").
+_CONNECTOR_READ_CONTEXT = re.compile(
+    r"\b(check|search|look\s*(?:in|up|at)|read|see|list|what'?s?|which|who|"
+    r"any|find|get|fetch|show|pull|summari[sz]e|"
+    r"tickets?|issues?|docs?|documents?|pages?|messages?|channels?|threads?|"
+    r"deals?|contacts?|companies|records?|calls?|meetings?|commits?|prs?|"
+    r"pull\s+requests?|repos?|files?)\b",
+    re.I,
+)
+# A Slack channel reference — "#general", "in #product-eng". Two-plus chars and
+# a leading letter so "#1" or a markdown heading never counts.
+_SLACK_CHANNEL_REF = re.compile(r"(?<![\w/])#[a-z][a-z0-9._-]{1,60}\b", re.I)
+# We can READ. A command to WRITE to a tool ("post this in slack", "send a
+# message to #general", "create a hubspot deal") is not a lookup: it falls
+# through to normal routing, which explains what Sprntly does, instead of a read
+# path implying it posted something.
+#
+# Anchored at the START of the message (optionally behind "please"/"can you"),
+# because that is what makes it a COMMAND. Matching these verbs anywhere would
+# swallow plain reads — "what did they share in slack", "did anyone post in
+# #general" are questions about the past, not instructions.
+_CONNECTOR_WRITE_VETO = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|i\s+want\s+you\s+to\s+|"
+    r"let'?s\s+|go\s+ahead\s+and\s+)*"
+    r"(post|send|dm|notify|announce|publish|schedule|invite|upload|create|add|"
+    r"delete|remove|archive|push|sync|share|reply|respond)\b",
+    re.I,
+)
+
+
+# What a follow-up inside a connector thread asks FOR. The tracker's equivalent
+# (_TRACKER_DETAIL) is issue-shaped ("assignee", "priority"); these are the nouns
+# of a conversation or a document — "what's the full thread", "any more context".
+_CONNECTOR_FOLLOWUP_DETAIL = re.compile(
+    r"\b(threads?|messages?|channels?|conversation|quotes?|verbatim|transcript|"
+    r"full|rest|context|commits?|diff|files?)\b",
+    re.I,
+)
+
+
+# NAMING a tool is not always asking to read it. A competitive-intelligence
+# request lists products as SUBJECTS ("competitive analysis of Linear, Jira and
+# Asana", "how does our roadmap compare to Jira?"), and the same veto guards
+# "what are the alternatives to Zendesk". is_jira_lookup already refuses these
+# for exactly this reason (see its own negative fixtures); the connector router
+# has to refuse them too or it would steal every CIR that names a tool.
+_CONNECTOR_MENTION_VETO = re.compile(
+    r"\b(competitive|competitors?|competing|compare[ds]?|comparison|comparing|"
+    r"versus|vs\.?|alternatives?|instead\s+of|migrat(?:e|ing|ion)|"
+    r"market\s+(?:landscape|leaders?)|better\s+than|switch(?:ing)?\s+(?:to|from))\b",
+    re.I,
+)
+
+
+# The OTHER way a tool name is a subject: as a possessed artifact — "the Stripe
+# integration", "our Figma plugin", "the Google Drive connector". The tool named
+# there is the thing being BUILT or evaluated, not a source to open, so these are
+# ordinary product questions and belong to the skill router.
+#
+# The veto above only covers competitive/comparison framing (dff83902), which
+# leaves this whole family exposed: "should we prioritise the stripe integration
+# or the notion one" matched `stripe`, and because only 8 of the 22 recognised
+# providers have a live adapter, the user's PRIORITISATION question was answered
+# "Stripe isn't a Sprntly connector yet" — a dead end, with the skill that does
+# answer it never reached. Reported 2026-08-02. Customers who BUILD integrations
+# ask this shape constantly, so it is their core subject matter that was losing
+# skill routing.
+#
+# Whole-message, matching the veto above rather than dropping only the offending
+# provider, and that is deliberate: the elliptical second half ("...or the notion
+# ONE") carries no artifact noun of its own, so a per-provider rule would veto
+# `stripe`, keep `notion`, and dead-end anyway. The cost is that a genuine read
+# sharing a sentence with an artifact mention ("check slack for what was said
+# about the stripe integration") falls through to the generic path — a softer
+# failure than today's confident "not connectable", and the same trade the
+# comparison veto already makes.
+#
+# Nouns kept deliberately narrow: `integration|connector|plugin|extension|add-on`
+# are unambiguously "a thing we built or might build". `app`, `api`, `bot` and
+# `sdk` are NOT included — "the slack app" and "the stripe api" are read as often
+# as they are built, and vetoing those would cost real lookups.
+_CONNECTOR_ARTIFACT_VETO = re.compile(
+    r"\b(?:our|the|a|an|this|that|their|your)\s+[\w-]+(?:\s+[\w-]+)?\s+"
+    r"(?:integrations?|connectors?|plugins?|extensions?|add-?ons?)\b",
+    re.I,
+)
+
+
+#: Product names long enough that a ONE-character slip is unambiguous. Reported
+#: twice on 2026-08-03: "conflunece just added something new, check and tell me
+#: what the content is" named the source, meant it, and was answered "I cannot
+#: perform a live, real-time pull of your Confluence space" — because the
+#: transposed `ne` missed \bconfluence\b and the question fell to the generic
+#: path. A typo in the source name is the one case where the user could not have
+#: been clearer about intent.
+#:
+#: Short names are deliberately excluded. One edit from `slack` is `black`, from
+#: `jira` is `jars`; at five letters a typo and a different word are the same
+#: thing. Seven-plus letters is where a single slip stops being ambiguous.
+_FUZZY_PROVIDER_WORDS: dict[str, str] = {
+    "confluence": "confluence",
+    "fireflies": "fireflies",
+    "amplitude": "amplitude",
+    "sprinklr": "sprinklr",
+    "mixpanel": "mixpanel",
+    "intercom": "intercom",
+    "superset": "superset",
+    "clickup": "clickup",
+    "hubspot": "hubspot",
+    "zendesk": "zendesk",
+}
+_FUZZY_MIN_LEN = min(len(w) for w in _FUZZY_PROVIDER_WORDS.values()) - 1
+_WORD_TOKEN = re.compile(r"[a-z]+")
+
+
+def _within_one_edit(word: str, target: str) -> bool:
+    """True when `word` is `target` give or take ONE edit.
+
+    Damerau-Levenshtein ≤ 1 — substitution, insertion, deletion, or a
+    transposition of two ADJACENT characters. The transposition case is the
+    reason this is not plain Levenshtein: swapped letters are the most common
+    way a product name gets mistyped, and it is exactly what "conflunece" is.
+
+    Distance 1 rather than a similarity ratio, because the boundary has to be
+    sharp: "confluence" → "conflunece" is one transposition, while
+    "confidence" → "confluence" is two substitutions. A ratio puts those within
+    ~0.1 of each other and would eventually route "confidence interval" into a
+    wiki lookup.
+    """
+    if word == target:
+        return True
+    la, lb = len(word), len(target)
+    if abs(la - lb) > 1:
+        return False
+    i = 0
+    while i < min(la, lb) and word[i] == target[i]:
+        i += 1
+    if i == min(la, lb):
+        return True  # one trailing insert/delete
+    if la == lb:
+        if word[i + 1:] == target[i + 1:]:
+            return True  # substitution
+        return (
+            i + 1 < la
+            and word[i] == target[i + 1]
+            and word[i + 1] == target[i]
+            and word[i + 2:] == target[i + 2:]
+        )  # adjacent transposition
+    if la > lb:
+        return word[i + 1:] == target[i:]  # extra character
+    return word[i:] == target[i + 1:]  # missing character
+
+
+def _misspelled_connector_providers(text: str) -> set[str]:
+    """Providers named with a single typo. Runs only when exact matching found
+    nothing, so a correctly-spelled message never pays for it."""
+    found: set[str] = set()
+    for token in _WORD_TOKEN.findall(text.lower()):
+        if len(token) < _FUZZY_MIN_LEN:
+            continue
+        for provider, word in _FUZZY_PROVIDER_WORDS.items():
+            if _within_one_edit(token, word):
+                found.add(provider)
+                break
+    return found
+
+
+def _named_connector_providers(text: str) -> set[str]:
+    """Provider keys explicitly named in one message."""
+    if _CONNECTOR_MENTION_VETO.search(text) or _CONNECTOR_ARTIFACT_VETO.search(text):
+        return set()
+    found: set[str] = set()
+    for provider, pattern in _CONNECTOR_STRONG_NAMES.items():
+        if pattern.search(text):
+            found.add(provider)
+    if not found:
+        found |= _misspelled_connector_providers(text)
+    if _SLACK_CHANNEL_REF.search(text):
+        found.add("slack")
+    if not _CONNECTOR_AMBIGUOUS_VETO.search(text) and _CONNECTOR_READ_CONTEXT.search(text):
+        for provider, pattern in _CONNECTOR_AMBIGUOUS_NAMES.items():
+            if pattern.search(text):
+                found.add(provider)
+    return found
+
+
+def is_connector_lookup(
+    question: str, history: list[dict] | None = None
+) -> set[str] | None:
+    """The provider keys an ad-hoc connector lookup should cover, or None.
+
+    A set (not a bool) because the answer needs to know WHICH sources to open —
+    and because a question may name two ("check slack and jira for the pricing
+    decision"). Includes providers we cannot read live: the registry turns those
+    into an honest not-supported answer, which is the whole point of intercepting
+    them here rather than letting the generic path guess.
+
+    Returns None for write requests, creation phrasings, and anything that names
+    no source at all.
+    """
+    q = question or ""
+    if _CONNECTOR_WRITE_VETO.search(q) or _vetoed_as_creation(q):
+        return None
+    named = _named_connector_providers(q)
+    if named:
+        return named
+    # Sticky thread: "who said that?" right after a Slack read names nothing at
+    # all. Same two-signal shape as the tracker thread — the thread named a
+    # source, and this message continues it rather than pivoting away.
+    #
+    # …unless the turn above is a REPORT, in which case the follow-up is about
+    # the document. That case reaches here loaded: the report ITSELF lists its
+    # sources ("Support tickets (Zendesk), Sales/CS field notes (Salesforce
+    # CRM)"), and the request that produced it usually named one too ("what are
+    # customers saying on slack?"). Every one of those looks like a source this
+    # thread was reading, so "explain more on recommendations point 1" would be
+    # answered by re-reading Slack instead of by the report it names.
+    if not history or _TRACKER_PIVOT.search(q) or _last_answer_was_report(history):
+        return None
+    if not (
+        _TRACKER_ANAPHORA.search(q)
+        or _TRACKER_DETAIL.search(q)
+        or _CONNECTOR_FOLLOWUP_DETAIL.search(q)
+    ):
+        return None
+    # The USER's own words decide what the thread is about, and the assistant's
+    # turns are only a fallback for when they said nothing nameable.
+    #
+    # Both are scanned because a thread can be established either way, but they
+    # are not equal evidence: an answer QUOTES its source material, so a wiki
+    # read that reproduces a page saying "Add Jira work item links" names Jira
+    # without the thread being about Jira. Merging the two sets sent the
+    # follow-up to Confluence AND Jira, and the ≤2 provider cap meant that extra
+    # source was paid for on every turn of the thread. Same 2026-08-03 report as
+    # the _in_tracker_thread narrowing; same root cause, one layer along.
+    user_named: set[str] = set()
+    any_named: set[str] = set()
+    for turn in history[-_TRACKER_THREAD_WINDOW:]:
+        content = turn.get("content") or ""
+        # A report DOCUMENT names its sources as provenance, not as a source
+        # this thread is reading live — see _in_tracker_thread for the same
+        # exclusion on the tracker side.
+        if not content or looks_like_html(content):
+            continue
+        found = _named_connector_providers(content)
+        if not found:
+            continue
+        any_named |= found
+        if (turn.get("role") or "user") == "user":
+            user_named |= found
+    return user_named or any_named or None
+
+
+# ── Document intent: a wiki question that names no source ────────────────────
+#
+# is_connector_lookup above requires the message to NAME a source. That is the
+# right bar for Slack and HubSpot — you say "check slack" because the tool IS
+# the subject — and the wrong one for a wiki. Nobody asks "what does Confluence
+# say about the onboarding spec"; they ask "what does our onboarding spec say".
+# You name the tool when you talk about a chat app, and you name the DOCUMENT
+# when you talk about a wiki.
+#
+# The asymmetry was visible sitting next to Jira, which has never needed its own
+# name: _stateless_tracker_lookup fires on a read verb over a PM noun ("get me
+# the open tickets"), so the tracker already answers questions phrased the way
+# people actually phrase them. Confluence had no equivalent, so every document
+# question fell through to the generic path and was answered out of KG signals —
+# the atomic facts the extractor lifted OUT of pages — while the page itself sat
+# unread. The adapter (connector_lookup/confluence.py) could have answered it
+# the whole time; nothing routed to it.
+#
+# This is the "provider-specific NOUNS plus that provider being connected"
+# trigger the block above deferred. The connection half cannot live in this
+# module — it takes no enterprise_id by design — so this returns CANDIDATES and
+# qa_agent intersects them with the company's real connections. That intersection
+# is what makes a trigger this broad safe: a company with no wiki connected is
+# untouched by every regex below, and the ones that do have it lose nothing but
+# a KG paraphrase of a page we can now quote.
+#
+# Deliberately Confluence-only for now. Google Drive is the same shape and is its
+# own PR — a doc noun maps to both, and shipping them together would make a
+# false positive twice as hard to attribute.
+_DOCUMENT_NOUN = re.compile(
+    r"\b(spec|specs|specification|specifications|"
+    r"docs?|documents?|documented|documentation|"
+    r"wikis?|"
+    r"runbooks?|playbooks?|handbooks?|"
+    r"rfcs?|adrs?|"
+    r"one[\s-]?pagers?|"
+    r"charter|sop)\b",
+    re.I,
+)
+# Nouns deliberately NOT in that list, because each one costs more than it wins:
+# `page` ("the pricing page", "landing page"), `guide` ("guide me through this"),
+# `notes` (a meeting artifact — Fireflies' subject, not the wiki's), and `report`
+# (see the subject veto below).
+
+# The read half. Kept separate from _CONNECTOR_READ_CONTEXT on purpose: that one
+# folds the nouns INTO the verb alternation, so a bare "the spec" would satisfy
+# both halves of an AND and the trigger would fire on a passing mention.
+_DOCUMENT_READ_VERB = re.compile(
+    r"\b(what'?s?|what\s+do(?:es)?|which|where|who|why|how\s+do(?:es)?|"
+    r"find|get|fetch|show|pull|open|read|check|search|look\s*(?:in|up|at|for)|"
+    r"summari[sz]e|summary|explain|describe|walk\s+me\s+through|"
+    # "brief me on the company documents" — the shape that reported this gap.
+    # `brief` is also one of Sprntly's own surfaces, so only the VERB form (with
+    # its object pronoun) counts here; the subject veto below still owns the
+    # noun. Same for the other ways people ask to be told about a thing without
+    # using an interrogative.
+    r"brief\s+(?:me|us)|tell\s+(?:me|us)\s+about|catch\s+(?:me|us)\s+up|"
+    r"run\s?down|overview\s+of|"
+    r"do\s+we\s+have|have\s+we\s+got|is\s+there|are\s+there|anything|any)\b",
+    re.I,
+)
+
+# Sprntly's OWN surfaces, which share this vocabulary and must keep their
+# routing. A PRD, a brief, Top Insights, a persona, a report and a prototype are
+# things Sprntly GENERATES; answering "summarise the PRD" by searching a customer
+# wiki would break the product's core loop to serve an edge case. `roadmap` is
+# here for the same reason it is in _TRACKER_PIVOT.
+#
+# The cost is real and accepted: a customer whose PRDs genuinely live in
+# Confluence has to name Confluence to get them. That is one extra word, and the
+# named path (is_connector_lookup) has always handled it. The reverse mistake —
+# a generated-PRD request silently answered from a wiki page — has no such
+# escape hatch.
+#
+# `brief` carries a lookahead because it is the one word here that is also a
+# VERB people use to ask for exactly this ("brief me on the company documents",
+# the phrasing that reported the gap). The noun — "the weekly brief" — keeps the
+# veto; "brief me" / "brief us" does not.
+_DOCUMENT_SUBJECT_VETO = re.compile(
+    r"\b(prds?|briefs?\b(?!\s+(?:me|us)\b)|top\s+insights?|insights?|reports?|"
+    r"personas?|roadmaps?|prototypes?|user\s+stor(?:y|ies))\b",
+    re.I,
+)
+
+
+# A document already IN the conversation — "summarize this document", "what does
+# the attached spec say", "rewrite this one-pager". The subject is content the
+# user pasted, uploaded or is looking at, not a page to go and find, and
+# test_connector_lookup_routing has asserted since the named path shipped that
+# "summarize this document" is not a source lookup.
+#
+# One optional adjective of slack ("this design doc") and no more: widening it
+# lets an unrelated determiner reach across a clause ("this quarter the spec we
+# wrote…") and veto a genuine read.
+_DOCUMENT_DEICTIC_VETO = re.compile(
+    r"\b(?:this|that|these|those|attached|pasted|uploaded|the\s+above|the\s+below)\s+"
+    r"(?:[\w-]+\s+)?"
+    r"(?:spec|specs|specification|specifications|docs?|documents?|documentation|"
+    r"wikis?|runbooks?|playbooks?|handbooks?|rfcs?|adrs?|one[\s-]?pagers?|"
+    r"charter|sop)\b",
+    re.I,
+)
+
+
+def _vetoed_as_document_creation(question: str) -> bool:
+    """True when a create verb GOVERNS the document rather than describing it.
+
+    Same rule, and the same reasoning, as _vetoed_as_creation — position decides,
+    not presence — but anchored on the DOCUMENT noun instead of the PM noun.
+    Reusing that function directly would mis-veto "get me the spec for the
+    checkout build": `build` is a creation verb sitting at the END of the thing
+    being searched for, and with no PM noun anywhere in the sentence that
+    function treats a trailing verb as a command.
+    """
+    m_veto = _JIRA_LOOKUP_VETO.search(question)
+    if m_veto is None:
+        return False
+    m_noun = _DOCUMENT_NOUN.search(question)
+    return m_noun is None or m_veto.start() < m_noun.start()
+
+
+def document_lookup_candidates(question: str) -> set[str]:
+    """Providers that could answer a document question which names no source.
+
+    Returns CANDIDATES, not a decision. The caller must intersect the result with
+    the company's connected providers before acting on it — see the block comment
+    above for why the connection check cannot live in this module.
+
+    Returns an empty set for write requests, for Sprntly's own generated
+    surfaces, and for any message that already names a source (the named path
+    owns those, and it reaches sources this one deliberately does not).
+    """
+    q = question or ""
+    if _CONNECTOR_WRITE_VETO.search(q) or _vetoed_as_document_creation(q):
+        return set()
+    # A tool named as a SUBJECT rather than a source — "our confluence
+    # integration", "confluence vs notion". Same two vetoes the named path runs,
+    # for the same reason: these are product questions about a tool, and the
+    # skill router answers them.
+    if _CONNECTOR_MENTION_VETO.search(q) or _CONNECTOR_ARTIFACT_VETO.search(q):
+        return set()
+    if _DOCUMENT_SUBJECT_VETO.search(q) or _DOCUMENT_DEICTIC_VETO.search(q):
+        return set()
+    # Already names a source → is_connector_lookup ran first and owns it.
+    if _named_connector_providers(q):
+        return set()
+    if not (_DOCUMENT_NOUN.search(q) and _DOCUMENT_READ_VERB.search(q)):
+        return set()
+    return {"confluence"}
+
+
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
     """True when the message only means something as a continuation of the
     thread — its subject lives in an earlier turn, not in its own words ("can you
@@ -639,33 +1321,63 @@ def is_context_dependent_followup(question: str, history: list[dict] | None = No
 
 
 def detect_intent(question: str) -> SkillMatch | None:
-    """Match a user question to a skill via keyword rules.
+    """Match a user question to a PIPELINE via keyword rules.
 
-    Returns the best SkillMatch, or None if no skill matches (→ general Ask).
+    Returns the best SkillMatch, or None if no pipeline matches (→ general Ask,
+    which is now the default answer rather than a fallback).
+
+    A rule with a `_RULE_VETOES` entry defers when its veto also matches, so a
+    question that belongs elsewhere keeps falling through instead of being
+    claimed by a broader rule.
     """
     for pattern, skill_id, action, confidence in _RULES:
-        if pattern.search(question):
-            return SkillMatch(skill_id=skill_id, confidence=confidence, action=action)
+        if not pattern.search(question):
+            continue
+        veto = _RULE_VETOES.get(skill_id)
+        if veto is not None and veto.search(question):
+            continue
+        return SkillMatch(skill_id=skill_id, confidence=confidence, action=action)
     return None
 
 
-def list_available_skills() -> list[dict]:
-    """Return the routable skills for the chat composer UI, grouped-ready.
+def list_available_skills(enterprise_id: str | None = None) -> list[dict]:
+    """The company's OWN uploaded skills, for the chat composer's palette.
 
-    Computed from the vendored catalog (`backend/skills/`) — not a hand-list —
-    so installing a skill folder surfaces it automatically. Non-routable skills
-    (business-context, fact-check) are excluded; the UI shape stays
-    {id, label, trigger, description, category}.
+    This used to be the vendored built-in catalog, filtered to what the router
+    could pick. Both halves of that are gone: the library is down to nine
+    method docs bound by name from their own pipelines, and of those exactly
+    three were ever routable — so the endpoint would have advertised three
+    triggers the router can no longer select. A palette that offers a skill
+    nothing will honour is worse than an empty one, so it now offers only the
+    library the user themselves built, which IS still selectable (the LLM
+    router's per-company block, and the composer's own trigger chip).
+
+    Shape is unchanged — {id, label, trigger, description, category} — so the
+    composer, the Skills screen and the command palette need no new contract;
+    `category` is always "Custom" now, which is the honest grouping.
+
+    Fails OPEN to [] on any error and on a missing tenant: this backs a picker,
+    and a picker that 500s is worse than a picker that is empty.
     """
-    from app.skills.catalog import routable_manifest
+    if not enterprise_id:
+        return []
+    try:
+        from app.db.custom_skills import list_custom_skills
 
-    return [
-        {
-            "id": s["id"],
-            "label": s["label"],
-            "trigger": s["trigger"],
-            "description": s["description"],
-            "category": s["category"],
-        }
-        for s in routable_manifest()
-    ]
+        rows = list_custom_skills(enterprise_id) or []
+    except Exception:  # noqa: BLE001 — a palette must never break the app
+        logger.warning("custom-skill palette lookup failed", exc_info=True)
+        return []
+    out: list[dict] = []
+    for row in rows:
+        slug = (row.get("slug") or "").strip()
+        if not slug:
+            continue
+        out.append({
+            "id": slug,
+            "label": (row.get("name") or slug).strip(),
+            "trigger": f"/{slug}",
+            "description": (row.get("description") or "").strip(),
+            "category": "Custom",
+        })
+    return out

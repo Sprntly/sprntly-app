@@ -14,6 +14,9 @@ import {
 const EXPECTED_CATEGORIES = [
   "Analytics",
   "Voice of Customer & Support",
+  // Research sits beside Voice (2026-08-02): both carry what users told us —
+  // Voice unsolicited, Research deliberately gathered.
+  "Research",
   "Customer Relationship (CRM)",
   "Project Management",
   "Monitoring & Reliability",
@@ -27,19 +30,19 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 10 categories, in v6 order (Uploaded documents merged into Company documentation; revenue appended)", () => {
+  it("has exactly the 11 categories, in v6 order (Research added; Uploaded documents merged into Company documentation; revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("totals 44 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43)
-    // 42 distinct connectors — the extra row is dual-typed Slack's second
+    expect(total).toBe(44)
+    // 43 distinct connectors — the extra row is dual-typed Slack's second
     // placement, not a second connector.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(42)
+    expect(distinct.size).toBe(43)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -112,17 +115,20 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Company documentation: Uploaded documents, Notion, Google Docs", () => {
+  it("Company documentation: Uploaded documents, Notion, Google Docs, Confluence", () => {
     expect(items("Company documentation")).toEqual([
-      "Uploaded documents", "Notion", "Google Docs",
+      "Uploaded documents", "Notion", "Google Docs", "Confluence",
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, Marvin, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
     // Slack is dual-typed (communication + customer-voice) so its card sits
     // on this shelf too — same item, same connection as in Communications.
+    // Marvin is deliberately NOT here: it is a research repository and lives
+    // on the Research shelf (see below), which is evidence-bearing in its own
+    // right, so nothing about the brief gate depends on this placement.
     expect(items("Voice of Customer & Support")).toEqual([
-      "Zendesk", "Intercom", "Dovetail", "Marvin", "App Store", "Play Store",
+      "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store",
       "Sprinklr", "Fireflies", "Gong", "Slack",
     ])
   })
@@ -136,6 +142,29 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(voiceSlack).toBeDefined()
     expect(voiceSlack).toBe(commsSlack)
     expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
+  })
+
+  it("Research: Marvin, now wired — the shelf keeps its upload strip alongside", () => {
+    expect(items("Research")).toEqual(["Marvin"])
+    const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
+    expect(research.items[0].types).toEqual(["research"])
+    // Wired as of the Marvin MCP connector, so the card offers Connect rather
+    // than the "Coming soon" tooltip it carried when the shelf first shipped.
+    expect(isConnectableConnector(research.items[0])).toBe(true)
+    // A research repository is not the only way to hand us research, so the
+    // category must still not opt out of manual upload.
+    expect(research.allowsManualUpload).not.toBe(false)
+    // Retained even though Research is no longer empty: it is what keeps the
+    // dropzone reachable if Marvin is ever gated off again.
+    expect(research.keepWhenEmpty).toBe(true)
+  })
+
+  it("Marvin asks which region before redirecting (US and EU are separate deployments)", () => {
+    const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
+    const marvin = research.items.find((i) => i.id === "marvin")!
+    // Two Marvin installs, two authorization servers — a token is valid at
+    // exactly one, so the region has to be chosen before the OAuth redirect.
+    expect(marvin.regions?.map((r) => r.value)).toEqual(["us", "eu"])
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -174,7 +203,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
-        "asana", "clickup", "figma", "github", "google_drive",
+        "asana", "clickup", "confluence", "figma", "github", "google_drive",
         "hubspot", "jira", "marvin", "slack", "sprinklr",
       ].sort(),
     )
@@ -202,6 +231,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -230,7 +260,7 @@ describe("Google Docs uses the existing google_drive OAuth backend", () => {
 describe("Company documentation category", () => {
   it("merges Uploaded documents with Notion + Google Docs; docs tools stay out of Project Management", () => {
     const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
-    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive"])
+    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive", "confluence"])
     const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
     const pmIds = pm.items.map((i) => i.id)
     expect(pmIds).not.toContain("notion")
@@ -248,6 +278,9 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Analytics",
       "Voice of Customer & Support",
+      // Research now has a wired connector of its own (Marvin), so it is kept
+      // on the ordinary rule rather than on keepWhenEmpty.
+      "Research",
       "Customer Relationship (CRM)",
       "Project Management",
       "Design",
@@ -257,7 +290,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
+  it("shows only the 14 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
     // Set-dedup: Slack's card renders on two shelves but is one connector.
     const ids = [...new Set(
       connectableCatalog()
@@ -268,6 +301,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
       [
         "asana",
         "clickup",
+        "confluence",
         "figma",
         "fireflies",
         "github",
@@ -292,15 +326,46 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Analytics")).toEqual(["superset"])
     // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "marvin", "sprinklr", "fireflies", "slack",
+      "sprinklr", "fireflies", "slack",
     ])
+    expect(byTitle("Research")).toEqual(["marvin"])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Codebase")).toEqual(["github"])
     expect(byTitle("Communications")).toEqual(["slack"])
     // Merged category keeps only its WIRED rows (Notion isn't wired yet):
     // Uploaded documents (upload) + Google Docs (google_drive OAuth).
-    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive"])
+    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
+  })
+
+  it("keeps Research with its upload strip, and still drops equally-unwired Monitoring", () => {
+    const research = connectableCatalog().find((c) => c.key === "research")
+    // Research now carries a wired connector (Marvin), so it is retained on the
+    // ordinary rule and `keepWhenEmpty` is no longer what saves it — the flag
+    // stays as the backstop for the day Marvin is gated off. That does mean the
+    // real catalog no longer exercises the zero-item branch; the assertion below
+    // is deliberately about what a user sees, not about which rule kept it.
+    expect(research).toBeTruthy()
+    expect(research!.items.map((i) => i.id)).toEqual(["marvin"])
+    expect(research!.uploadAccept).toBeTruthy()
+    expect(research!.allowsManualUpload).not.toBe(false)
+    // Monitoring has no wired connector and no flag, so it is still dropped.
+    expect(
+      connectableCatalog().find((c) => c.key === "monitoring"),
+    ).toBeUndefined()
+  })
+
+  it("surfaces an unwired connector that nonetheless has a live connection", () => {
+    // Marvin used to cover this branch while it was coming-soon. Dovetail is
+    // now the stand-in: unwired, so hidden by default, but never hidden from a
+    // company that already has a connection row for it.
+    const voice = connectableCatalog(new Set(["dovetail"])).find(
+      (c) => c.key === "voice",
+    )!
+    expect(voice.items.map((i) => i.id)).toContain("dovetail")
+    expect(
+      connectableCatalog().find((c) => c.key === "voice")!.items.map((i) => i.id),
+    ).not.toContain("dovetail")
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

@@ -246,6 +246,62 @@ def _is_zip_junk(name: str) -> bool:
     )
 
 
+def expand_zip_members(
+    filename: str, data: bytes, *, per_member_max_bytes: int
+) -> tuple[list[tuple[str, bytes]], list[dict]]:
+    """Expand a .zip to (basename, bytes) pairs under the same guards as
+    `ingest_zip`: directories and macOS junk skipped, nested archives never
+    recursed, basename-only paths (no traversal), per-member and total
+    uncompressed caps, and a member-count cap.
+
+    This is the DATASET-FREE half of `ingest_zip`, for callers that store
+    members somewhere other than a dataset directory — the document-source
+    upload route, where a .zip previously landed as an unreadable stub.
+    `ingest_zip` deliberately keeps its own loop rather than delegating here:
+    its member cap counts successfully INGESTED files, and re-pointing it at a
+    cap over extracted members would quietly change behavior its tests pin.
+
+    Raises DatasetError only for an unreadable archive; every other problem is
+    a per-member error so partial success survives.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DatasetError(f"{Path(filename).name!r} is not a valid zip archive") from exc
+
+    members: list[tuple[str, bytes]] = []
+    errors: list[dict] = []
+    total_uncompressed = 0
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir() or _is_zip_junk(info.filename):
+                continue
+            base = Path(info.filename).name  # basename only → no path traversal
+            if Path(base).suffix.lower() == ".zip":
+                errors.append({"filename": base, "error": "Nested zip skipped"})
+                continue
+            if info.file_size > per_member_max_bytes:
+                errors.append({
+                    "filename": base,
+                    "error": f"Member exceeds {per_member_max_bytes // (1024*1024)}MB limit",
+                })
+                continue
+            total_uncompressed += info.file_size
+            if total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+                errors.append({"filename": base,
+                               "error": "Archive too large (uncompressed cap exceeded)"})
+                break
+            if len(members) >= _ZIP_MAX_MEMBERS:
+                errors.append({"filename": base, "error": "Too many files in archive"})
+                break
+            try:
+                members.append((base, zf.read(info)))
+            except Exception as exc:  # noqa: BLE001 — one bad member, not the archive
+                logger.exception("Zip member read failed for %s", base)
+                errors.append({"filename": base, "error": f"Could not read: {exc}"})
+    return members, errors
+
+
 def ingest_zip(
     slug: str, filename: str, data: bytes, *, per_member_max_bytes: int
 ) -> tuple[list[IngestedFile], list[dict]]:

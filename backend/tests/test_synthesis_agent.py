@@ -234,7 +234,10 @@ def test_extractor_writes_signals_themes_edges(facade):
          patch.object(extractor, "embed_texts",
                       side_effect=lambda texts, **k: [[0.1] * 4 for _ in texts]):
         r = extractor.extract_document(facade, "ent-A", doc_name="doc1", text="...")
-    assert r == {"signals": 2, "themes": 1, "skipped": 0}
+    assert {k: r[k] for k in ("signals", "themes", "skipped")} == {
+        "signals": 2, "themes": 1, "skipped": 0}
+    # Additive key (roadmap replace semantics): the ids this doc asserts.
+    assert len(r["signal_ids"]) == 2
     themes = facade.query_entities("ent-A", type="theme")
     assert len(themes) == 1 and themes[0].canonical_label == "SSO"
     edges = facade.edges_to("ent-A", themes[0].id)
@@ -1797,15 +1800,20 @@ def test_skill_is_installed_and_loadable():
     assert "weekly" in spec.description.lower() or "brief" in spec.description.lower()
 
 
-def test_skill_registered_non_routable_in_catalog():
-    """top-insights is installed + categorized but NOT offered to the Q&A router
-    (it's the synthesis agent's brief composer, bound by name)."""
-    from app.skills.catalog import NON_ROUTABLE, build_manifest
+def test_skill_is_vendored_but_not_chat_invocable():
+    """top-insights is installed but NOT reachable from a chat turn — it is the
+    synthesis agent's brief composer, bound by name from `synthesis/agent.py`.
 
-    assert "top-insights" in NON_ROUTABLE
-    entry = next(e for e in build_manifest() if e["id"] == "top-insights")
-    assert entry["routable"] is False
-    assert entry["category"]
+    Was `test_skill_registered_non_routable_in_catalog`, asserting membership of
+    `NON_ROUTABLE` in the (deleted) skills catalog. That list was a per-skill
+    opt-out of a router menu that offered every other built-in; with the menu
+    gone the property is unconditional, so it is asserted directly instead."""
+    import app.qa_agent as qa
+    from app.skills.loader import list_skills
+
+    assert "top-insights" in list_skills()
+    assert qa._routable("top-insights", "co-1") is False
+    assert qa._invocable("top-insights", "co-1") is False
 
 
 def test_run_synthesis_empty_compose_raises_and_persists_nothing(facade, isolated_settings):

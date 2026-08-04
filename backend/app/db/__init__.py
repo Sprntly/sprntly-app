@@ -79,10 +79,37 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Competitive-intelligence runs (state + captured records + rendered reports)
+from app.db.competitive_intel_runs import (
+    claim_competitive_intel_run,
+    complete_competitive_intel_run,
+    latest_competitive_intel_run,
+    save_competitive_intel_run,
+)
+
 # Public-feedback runs (captured record sets + rendered reports)
 from app.db.public_feedback_runs import (
     latest_public_feedback_run,
     save_public_feedback_run,
+)
+
+# Reports (captured skill-generated HTML report documents)
+from app.db.reports import (
+    find_report_by_share_token,
+    get_report,
+    list_reports_for_conversation,
+    save_report,
+    set_report_share_config,
+)
+
+# Deep company-research runs (onboarding kick + chat ask)
+from app.db.company_research_runs import (
+    company_research_run_in_flight,
+    complete_company_research_run,
+    fail_company_research_run,
+    fail_orphan_company_research_runs,
+    latest_company_research_run,
+    start_company_research_run,
 )
 
 # Website-analysis jobs (onboarding, fire-and-forget)
@@ -91,6 +118,17 @@ from app.db.website_analysis import (
     fail_analysis_job,
     get_analysis_job,
     start_analysis_job,
+)
+
+# Async business-context refresh status (singleton per tenant, columns on
+# companies — see app/db/business_context_refresh.py)
+from app.db.business_context_refresh import (
+    business_context_refresh_state,
+    complete_business_context_refresh,
+    fail_business_context_refresh,
+    fail_orphan_business_context_refreshes,
+    start_business_context_refresh,
+    touch_business_context_refresh,
 )
 
 # Datasets
@@ -238,11 +276,31 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # reports (captured HTML report documents)
+    "find_report_by_share_token",
+    "get_report",
+    "list_reports_for_conversation",
+    "save_report",
+    "set_report_share_config",
+    # deep company-research runs
+    "company_research_run_in_flight",
+    "complete_company_research_run",
+    "fail_company_research_run",
+    "fail_orphan_company_research_runs",
+    "latest_company_research_run",
+    "start_company_research_run",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",
     "get_analysis_job",
     "start_analysis_job",
+    # async business-context refresh status
+    "business_context_refresh_state",
+    "complete_business_context_refresh",
+    "fail_business_context_refresh",
+    "fail_orphan_business_context_refreshes",
+    "start_business_context_refresh",
+    "touch_business_context_refresh",
     # datasets
     "dataset_exists",
     "delete_dataset",

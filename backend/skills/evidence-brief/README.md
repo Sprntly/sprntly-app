@@ -2,7 +2,7 @@
 
 > **Read this first.** This folder is a self-contained Agent Skill. It contains everything
 > needed to understand, invoke, and reproduce an *evidence brief*: the behavior spec
-> (`SKILL.md`), this guide, and five worked examples (`examples/`). It is written so an
+> (`SKILL.md`), this guide, and five worked examples (`references/`, injected into the prompt). It is written so an
 > LLM or a developer can pick it up with no other context and know **what the skill is,
 > when to call it, what it needs, what it outputs, and what that output is used for.**
 
@@ -89,17 +89,17 @@ fabricate quotes. Missing numbers are omitted or named as a gap.
 | Multiple independent signals agreeing | convergence diagram |
 
 ## 7. Reference examples (read these to learn the pattern)
-Five worked briefs live in `examples/`. They hold the **structure constant** while varying the
+Five worked briefs live in `references/`, which the gateway folds into the model's prompt. They hold the **structure constant** while varying the
 business, chart types, available signals, and convergence strength — so you can see what stays
 fixed and what flexes. **Open them in a browser to view; read the source to copy the pattern.**
 
 | File | Business | Signals / convergence | Charts | What it teaches |
 |---|---|---|---|---|
-| `examples/01-lyra-language-app.html` | Consumer language app | 5 signals, strong | line + paired bars, h-bar, matrix, convergence diagram | the full, high-confidence case |
-| `examples/02-northwind-pay.html` | B2B invoicing SaaS | 3 signals, moderate-high | funnel, paired bars, line, 3-node convergence | fewer signals; confidence stated honestly |
-| `examples/03-trailhead-fitness.html` | Consumer fitness | 2 signals that conflict | scatter, sentiment stacked bar | NOT forcing convergence; a guarded low-confidence hypothesis |
-| `examples/04-cartwheel-marketplace.html` | Resale marketplace | 1 signal (data only), no VoC | conversion bar, distribution histogram | graceful degradation; naming one signal honestly |
-| `examples/05-aperture-analytics.html` | B2B analytics SaaS | 4 signals, market-led | area trend, matrix, request bar, convergence diagram | an opportunity that starts outside the company |
+| `references/01-lyra-language-app.html` | Consumer language app | 5 signals, strong | line + paired bars, h-bar, matrix, convergence diagram | the full, high-confidence case |
+| `references/02-northwind-pay.html` | B2B invoicing SaaS | 3 signals, moderate-high | funnel, paired bars, line, 3-node convergence | fewer signals; confidence stated honestly |
+| `references/03-trailhead-fitness.html` | Consumer fitness | 2 signals that conflict | scatter, sentiment stacked bar | NOT forcing convergence; a guarded low-confidence hypothesis |
+| `references/04-cartwheel-marketplace.html` | Resale marketplace | 1 signal (data only), no VoC | conversion bar, distribution histogram | graceful degradation; naming one signal honestly |
+| `references/05-aperture-analytics.html` | B2B analytics SaaS | 4 signals, market-led | area trend, matrix, request bar, convergence diagram | an opportunity that starts outside the company |
 
 **How to use the examples when generating a new brief:**
 1. Pick the example whose **signal situation** matches yours (many strong signals -> 01/05; few -> 02; conflicting -> 03; single -> 04).
@@ -134,12 +134,13 @@ run skill "evidence-brief" with {
 evidence-brief/
 |-- SKILL.md                          # authoritative behavior spec (triggers + method + output + quality bar)
 |-- README.md                         # this guide
-`-- examples/
+`-- references/
     |-- 01-lyra-language-app.html     # 5 signals, strong convergence
     |-- 02-northwind-pay.html         # 3 signals, moderate-high
     |-- 03-trailhead-fitness.html     # 2 signals, conflicting (weak — honest)
     |-- 04-cartwheel-marketplace.html # 1 signal, no VoC (degradation)
     `-- 05-aperture-analytics.html    # 4 signals, market-led
 ```
-`SKILL.md` is authoritative for behavior; this README is the orientation layer; `examples/` are
-the calibration set. An agent should read `SKILL.md` to act and skim `examples/` to calibrate.
+`SKILL.md` is authoritative for behavior; this README is the orientation layer; `references/`
+are the calibration set. An agent should read `SKILL.md` to act and skim `references/` to
+calibrate — both arrive in its prompt; this README does not.

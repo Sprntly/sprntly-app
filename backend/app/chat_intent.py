@@ -45,6 +45,7 @@ import logging
 from typing import Optional
 
 from app.graph.gateway import llm_call
+from app.prompt_history import render_history_block
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +54,14 @@ _AGENT = "chat"
 # routing tier; matches the model-tiering policy's sonnet default).
 _MODEL = "claude-sonnet-4-6"
 
-# Context budget for the envelope decision. Wider than the qa router's
-# 6-turn window — the reported failures are precisely the ones where the
-# referent lives many turns back. Per-turn clamp keeps one giant assistant
-# answer (a VoC HTML report, a long analysis) from eating the whole budget.
-_HISTORY_TURNS = 20
+# Context budget for the envelope decision. There is no TURN cap: the reported
+# failures are precisely the ones where the referent lives many turns back, and
+# a 20-turn window silently deletes turn 2 of a 40-turn thread — the turn that
+# named the feature "draft it up" refers to. All turns are considered; if they
+# overflow the byte budget the middle is elided with a marker
+# (`prompt_history.render_history_block`). The per-turn clamp still keeps one
+# giant assistant answer (a VoC HTML report, a long analysis) from eating the
+# whole budget on its own.
 _HISTORY_TURN_CHARS = 1_500
 _HISTORY_CHAR_BUDGET = 24_000
 
@@ -114,10 +118,13 @@ the message yourself.
 Actions:
 
 - generate_prd — the user wants a PRD (product requirements document / \
-product spec / product brief / requirements doc) produced. This includes \
+product spec / product brief / requirements doc) produced FOR A CHANGE TO THE \
+PRODUCT: a new capability, an improvement to an existing one, or a fix. What \
+the document would be ABOUT is what selects this action — not the noun the \
+user gives the document, and not the verb they ask with. This includes \
 keyword-free phrasings whose meaning lives in the thread — "draft it up", \
 "spec this out", "write this up as a doc", "put that together" — when the \
-conversation has been converging on a feature, idea, or problem. \
+conversation has been converging on a feature, idea, or problem to solve. \
 task: a SELF-CONTAINED brief for the document author, composed from the \
 whole conversation: the topic plus EVERY requirement, constraint, and detail \
 the user gave, kept verbatim where possible — never summarize away \
@@ -136,7 +143,10 @@ items: "create tickets", "break this into work items", "turn that into \
 stories", "split this up for the team".
 
 - generate_prototype — an interactive prototype / mockup of the PRD: \
-"prototype this", "mock it up", "can I see it working".
+"prototype this", "mock it up", "can I see it working". The same subject test \
+applies: a prototype shows a PRODUCT CHANGE working, so a request to lay out \
+or visualize existing information — a report, a summary, a deck, a one-pager \
+— is answer, not a prototype.
 
 - answer — everything else: questions (including questions ABOUT PRDs or \
 tickets — "what's in the PRD for onboarding?", "what makes a good PRD?"), \
@@ -151,6 +161,20 @@ discussing a feature mean "generate a PRD for THAT feature" (task = the \
 discussed feature, fully specified from the thread).
 - Mentioning an artifact is not requesting it. Asking about, criticizing, \
 or referencing a PRD or ticket is answer.
+- SUBJECT MATTER decides generate_prd, never document shape. A PRD specifies \
+a change to the product — something to build, improve, or fix. When the user \
+instead wants information they already have gathered, explained, compared, \
+summarized or reformatted — a report, a summary, a one-pager, an exec update, \
+a briefing, a recap, a status write-up — that is answer, however \
+document-shaped the request sounds ("put together a one-pager on our \
+pricing", "write up the top issues in a formatted doc", "draft an exec update \
+on this quarter", "summarize last week's calls into a document"). There is no \
+report or summary action here; the answer path writes those documents itself. \
+The two cases part cleanly on what the document is about, not on how it is \
+phrased: after a thread about a checkout bug, "put that together" is \
+generate_prd — the thing being written up is a product change; "put together \
+a one-pager on our pricing" is answer — the thing being written up is \
+information that already exists.
 - generate_prd vs edit_prd: no PRD exists yet in this tab/thread → \
 generate_prd; one exists and the message asks to change it → edit_prd. \
 "Redo it with X" aimed at an existing PRD is still edit_prd.
@@ -166,34 +190,25 @@ answer.
 - confidence: your 0..1 belief in the chosen intent given the full context."""
 
 
-def _clamp(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + " …"
-
-
 def _render_history(history: Optional[list[dict]]) -> str:
-    """Last-N turns, rendered oldest→newest, per-turn and total clamped.
+    """EVERY turn, oldest→newest, per-turn clamped and middle-elided if long.
 
-    The total budget is spent NEWEST-FIRST: when a long thread overflows it,
-    the oldest turns fall off — a deictic message ("draft it up") resolves
-    against what was just discussed, so recency must win the budget."""
-    if not history:
-        return ""
-    rows: list[str] = []
-    total = 0
-    for turn in reversed(history[-_HISTORY_TURNS:]):
-        role = (turn.get("role") or "user").capitalize()
-        content = _clamp((turn.get("content") or "").strip(), _HISTORY_TURN_CHARS)
-        if not content:
-            continue
-        row = f"{role}: {content}"
-        total += len(row)
-        if total > _HISTORY_CHAR_BUDGET:
-            break
-        rows.append(row)
-    if not rows:
-        return ""
-    rows.reverse()
-    return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
+    The whole thread is considered. When it exceeds the byte budget the head and
+    the tail are kept and the middle is replaced by an explicit marker naming
+    how many turns went — the head carries the topic a deictic message points
+    at, the tail carries what it points *with*, and the marker tells the model
+    the thread is partial instead of letting it read a gap as continuity.
+
+    Per-turn clamping runs through `clamp_turn_text`, which strips `data:` URIs
+    and reduces an HTML document to its narrative BEFORE the char cap: the cap
+    alone keeps the bytes safe but happily spends them on raw base64 when the
+    turn is a report with embedded charts, leaving the router to classify intent
+    against ~1.5k of image payload instead of the prose."""
+    return render_history_block(
+        history,
+        turn_chars=_HISTORY_TURN_CHARS,
+        char_budget=_HISTORY_CHAR_BUDGET,
+    )
 
 
 def _render_context(
@@ -248,7 +263,7 @@ def resolve_chat_intent(
                 + _render_history(history)
                 + f"Newest message: {message}"
             ),
-            prompt_version="chat-intent-v1",
+            prompt_version="chat-intent-v2",
             json_schema=_SCHEMA,
             # The task field echoes requirement details verbatim from a long
             # thread — give it room.

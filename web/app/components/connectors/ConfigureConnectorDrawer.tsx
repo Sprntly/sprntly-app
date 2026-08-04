@@ -29,6 +29,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
@@ -373,6 +374,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectGithub()
   } else if (providerId === "jira") {
     await connectorsApi.disconnectJira()
+  } else if (providerId === "confluence") {
+    await connectorsApi.disconnectConfluence()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
@@ -481,6 +484,7 @@ export function ConfigureConnectorDrawer({
       <GoogleDrivePicker
         dataset={activeCompany}
         savedFiles={connection?.config?.files}
+        folderContents={connection?.config?.folder_contents}
         onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
@@ -527,6 +531,13 @@ export function ConfigureConnectorDrawer({
           onSynced={onDisconnected /* reuse the reload callback */}
         />
       </>
+    )
+  } else if (providerId === "confluence") {
+    slot = (
+      <ConfluenceSpacesPicker
+        savedSpaceIds={connection?.config?.sync_space_ids}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
     )
   } else if (providerId === "github") {
     slot = <GithubInstallsSlot onChanged={onDisconnected} />

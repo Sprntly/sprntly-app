@@ -1,9 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
+import { Suspense, useCallback, useEffect, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { getSupabase, isSupabaseConfigured } from "../lib/supabase/client"
+import { useAuth } from "../lib/auth"
 import { validatePassword } from "../lib/auth-validation"
 import {
   ResetPasswordView,
@@ -14,20 +15,28 @@ import {
  * Reset-password landing page.
  *
  * The flow:
- *   1. User clicks the recovery link in the email
- *   2. /auth/callback exchanges the code for a session (signs them in
- *      with a transient recovery session) and detects type=recovery
- *      → routes here
+ *   1. /sign-in "forgot password" sends the recovery email and routes here
+ *      with ?email=…
+ *   2. The email carries a 6-digit code (supabase/templates/recovery.html),
+ *      entered here → verifyOtp({type:"recovery"}) mints the recovery session
  *   3. User picks a new password → supabase.auth.updateUser({ password })
  *   4. Success → router.replace("/")
  *
- * If the page is opened without an active session (link expired, direct
- * navigation, etc.) we render the "no-session" state with a back-to-
- * sign-in link instead of failing silently.
+ * Arriving with a session already in hand skips straight to step 3 — that's
+ * the /auth/confirm?type=recovery path, still live for recovery links sent
+ * before the switch to codes. Landing with neither a session nor an ?email to
+ * verify against renders the no-session state rather than failing silently.
  */
-export default function ResetPasswordPage() {
+function ResetPasswordContent() {
+  const auth = useAuth()
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const emailParam = searchParams.get("email") ?? ""
+
   const [mode, setMode] = useState<ResetPasswordMode>("form")
+  const [code, setCode] = useState("")
+  const [message, setMessage] = useState<string | null>(null)
+  const [resendCooldown, setResendCooldown] = useState(0)
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
@@ -35,10 +44,9 @@ export default function ResetPasswordPage() {
   const [error, setError] = useState<string | null>(null)
   const [checkedSession, setCheckedSession] = useState(false)
 
-  // Verify we actually have a session to act on. Recovery links produce
-  // a session via /auth/callback's exchangeCodeForSession; without one,
-  // updateUser will just return an auth error and the user will be
-  // confused. Render the no-session state instead.
+  // Decide the entry mode once: an existing session goes straight to the
+  // password form, otherwise we need the emailed code (and an address to
+  // verify it against).
   useEffect(() => {
     if (!isSupabaseConfigured()) {
       setMode("no-session")
@@ -47,10 +55,54 @@ export default function ResetPasswordPage() {
     }
     const supabase = getSupabase()
     void supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) setMode("no-session")
+      if (!session) setMode(emailParam ? "code" : "no-session")
       setCheckedSession(true)
     })
-  }, [])
+  }, [emailParam])
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return
+    const id = setInterval(() => setResendCooldown((s) => Math.max(0, s - 1)), 1000)
+    return () => clearInterval(id)
+  }, [resendCooldown])
+
+  const onCodeSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      if (submitting || code.length < 6) return
+      setError(null)
+      setMessage(null)
+      setSubmitting(true)
+      try {
+        await auth.verifyPasswordResetOtp(emailParam, code)
+        setMode("form")
+      } catch (err) {
+        setCode("")
+        setError(
+          err instanceof AuthApiError && /expired/i.test(err.message)
+            ? "That code has expired. Request a new one below."
+            : "That code isn't right. Check the email and try again.",
+        )
+      } finally {
+        setSubmitting(false)
+      }
+    },
+    [auth, code, emailParam, submitting],
+  )
+
+  const onResend = useCallback(async () => {
+    if (!emailParam || resendCooldown > 0) return
+    setError(null)
+    setMessage(null)
+    try {
+      await auth.resetPassword(emailParam)
+    } catch {
+      // Swallow: never reveal whether the address is registered.
+    }
+    setCode("")
+    setMessage("New code sent.")
+    setResendCooldown(60)
+  }, [auth, emailParam, resendCooldown])
 
   const onSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -104,6 +156,22 @@ export default function ResetPasswordPage() {
       onConfirmPasswordChange={setConfirmPassword}
       onToggleShowPassword={() => setShowPassword((s) => !s)}
       onSubmit={onSubmit}
+      email={emailParam}
+      code={code}
+      message={message}
+      resendCooldown={resendCooldown}
+      canResend={!!emailParam && resendCooldown <= 0 && !submitting}
+      onCodeChange={setCode}
+      onCodeSubmit={onCodeSubmit}
+      onResend={onResend}
     />
+  )
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={<div className="auth-shell">Loading…</div>}>
+      <ResetPasswordContent />
+    </Suspense>
   )
 }

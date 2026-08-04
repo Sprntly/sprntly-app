@@ -135,10 +135,15 @@ def test_answer_malformed_file_does_not_crash(workspace):
     assert isinstance(out["answer"], str) and out["answer"]
 
 
-def test_qa_agent_routes_to_ds(monkeypatch):
-    """qa_agent.answer intercepts a data-analysis ask before generic routing."""
+def test_qa_agent_routes_to_ds(workspace, monkeypatch):
+    """qa_agent.answer intercepts a data-analysis ask before generic routing.
+
+    Tabular data must actually exist for the interceptor to claim the turn
+    at all (Part 3 capability gate, AC10) — `workspace` provides a real
+    raw/ dir; a file must be in it too."""
     import app.qa_agent as qa
 
+    _plant_users_csv(workspace, n=10)
     sentinel = {"answer": "ds!", "key_points": [], "citations": [],
                 "confidence": 0.9, "unanswered": "", "_skill": "ds-agent"}
     monkeypatch.setattr(ca, "answer", lambda **kw: sentinel)

@@ -53,6 +53,10 @@ from app.db.prds import (
     set_prd_impl_spec,
     start_prd,
 )
+from app.graph.decision_chain import (
+    create_artifact_from_decision,
+    promote_hypothesis_to_decision,
+)
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -161,6 +165,10 @@ Do NOT include an Implementation Spec. Start your output at `<!DOCTYPE html>`.""
 # it as "the TEMPLATE provided above".
 _TEMPLATE_PREFIX = """\
 TEMPLATE (the HTML skeleton + design system — produce a filled copy as your output):
+{template}"""
+
+_TEMPLATE_PREFIX_B = """\
+TEMPLATE (the normative B0–B9 skeleton — produce a filled copy as your output):
 {template}"""
 
 _USER_TEMPLATE = """\
@@ -615,6 +623,20 @@ def _load_part_a_template() -> str:
     return get_skill(_SKILL).templates["prd-template.html"]
 
 
+def _load_part_b_template() -> str:
+    """The implementation-spec skill's B0–B9 markdown skeleton.
+
+    Its SKILL.md calls this skeleton NORMATIVE ("Output spec (B0-B9 — normative;
+    skeleton in `templates/implementation-spec-template.md`)") — but the gateway
+    injects only SKILL.md, `modules/` and `references/`, never `templates/`, so
+    until this function existed the model was told to conform to a skeleton it
+    was never shown and had to reconstruct B0-B9 from the prose description
+    alone. Part A never had that problem: `_load_part_a_template` has always fed
+    prd-author its template. This is the same treatment for Part B.
+    """
+    return get_skill(_SKILL_B).templates["implementation-spec-template.md"]
+
+
 def _exemplars_block(ctx: dict) -> str:
     """The FORMAT/STYLE EXEMPLARS block for a prompt, or '' when no templates."""
     exemplars = ctx.get("exemplars") or ""
@@ -671,6 +693,11 @@ def _call_impl_spec(ctx: dict, human_prd: str, background: bool = False):
         evidence=ctx["evidence"],
         exemplars=_exemplars_block(ctx),
     )
+    # The B0-B9 skeleton rides the cacheable prefix, exactly as Part A's HTML
+    # template does: the gateway prepends the skill METHOD, so METHOD+skeleton
+    # become one globally-identical cached block and only the per-PRD input
+    # stays uncached. ~500 tokens, written once per method version.
+    template_prefix = _TEMPLATE_PREFIX_B.format(template=_load_part_b_template())
     return llm_call(
         enterprise_id=ctx["company_id"] or ctx["dataset"],
         agent=_AGENT,
@@ -678,9 +705,46 @@ def _call_impl_spec(ctx: dict, human_prd: str, background: bool = False):
         prompt_version=PROMPT_VERSION_B,
         system=_SYSTEM_B,
         input=user,
+        user_cacheable_prefix=template_prefix,
         skill=_SKILL_B,
         background=background,
     )
+
+
+def _advance_decision_chain(
+    company_id: str, hyp_ref: dict, prd_id: int, brief_id: int, insight_index: int,
+    title: str,
+) -> None:
+    """Hypothesis → Decision → Artifact (`graph.decision_chain`) — the two
+    triggers this PRD flow owns. `hyp_ref` is the trail's resolved hypothesis
+    ({entity_id, label, properties}, see `graph.retrieval.insight_evidence_
+    trail`).
+
+    Best-effort: the human PRD is already generated and persisted (status=
+    'ready') by the time this runs, so a KG write failure here must never turn
+    a finished PRD into a failed one — matches every other KG write on this
+    path (log_agent_decision below is similarly best-effort in spirit, though
+    it doesn't currently swallow errors; this one explicitly does because it
+    fires on every successful PRD generation, not just once)."""
+    try:
+        facade = GraphFacade()
+        decision = promote_hypothesis_to_decision(
+            facade, company_id, hyp_ref["entity_id"], label=title,
+            properties={
+                "prd_id": prd_id, "brief_id": brief_id, "insight_index": insight_index,
+            },
+            provenance={"agent": _AGENT, "trigger": "generate_prd"},
+        )
+        create_artifact_from_decision(
+            facade, company_id, decision.id, label=title,
+            properties={"prd_id": prd_id},
+            provenance={"agent": _AGENT, "trigger": "prd_ready"},
+        )
+    except Exception:  # noqa: BLE001 — chain write is best-effort
+        logger.exception(
+            "decision-chain write failed prd_id=%s hypothesis=%s",
+            prd_id, hyp_ref.get("entity_id"),
+        )
 
 
 def _finalize_part_a(
@@ -709,6 +773,18 @@ def _finalize_part_a(
     trail = ctx["trail"]
     company_id = ctx["company_id"]
     kg_refs = (trail or {}).get("kg_refs") or []
+
+    # Decision → Artifact chain: Hypothesis --PROMOTED_TO--> Decision
+    # --RESULTED_IN--> Artifact. Both triggers fire HERE, together — "Generate
+    # PRD" resolving a real hypothesis AND that PRD reaching status='ready'
+    # (just above, via complete_prd) are the same moment in this flow. Only
+    # fires on the tier-1 evidence trail (trail["hypothesis"] is only ever
+    # populated by `insight_evidence_trail`'s `resolve_insight_hypothesis`
+    # call) — the topic-retrieval and corpus fallback tiers carry no
+    # hypothesis to promote.
+    if company_id and trail is not None and trail.get("hypothesis"):
+        _advance_decision_chain(company_id, trail["hypothesis"], prd_id, brief_id, insight_index, title)
+
     if company_id:
         factors = {
             "prd_id": prd_id,

@@ -85,6 +85,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
+    "company_research_runs": {"stages", "records"},
     "llm_context_jobs":     {"result"},
     "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
     "products":             {"surfaces", "personas", "monetization"},
@@ -105,6 +106,8 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
     "conversation_turns":  {"attachments"},
+    # text[] + vector(1536) — JSON-encoded in the mirror.
+    "document_catalog":    {"topics", "embedding"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
     "pipeline_runs":          {"stages"},   # per-stage results JSONB
@@ -120,6 +123,7 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "workspaces":           {"is_default"},
     "products":             {"is_primary"},
     "ideation_items":       {"shortlisted"},
+    "kg_signal":            {"evidence_eligible"},
 }
 
 
@@ -233,6 +237,13 @@ class _Query:
     def lt(self, col: str, val: Any) -> "_Query":
         """`col < ?` — used by the map-cache expiry sweep."""
         self._raw_where.append(f"{col} < ?")
+        self._raw_args.append(val)
+        return self
+
+    def gt(self, col: str, val: Any) -> "_Query":
+        """`col > ?` — used by the company-research in-flight guard (a
+        'running' row YOUNGER than the orphan cutoff)."""
+        self._raw_where.append(f"{col} > ?")
         self._raw_args.append(val)
         return self
 

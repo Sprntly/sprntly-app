@@ -77,6 +77,21 @@ export type PrdTabRequest = {
     | { kind: "evidence"; meta: PrdTabMeta; detail: DetailState | null }
 }
 
+/** The right-side content panel's tabs. Evidence → PRD → Tickets are the PRD
+ *  pipeline; Reports is the thread's captured report documents, which hang off
+ *  the conversation rather than off a PRD. */
+export type ContentPanelTab = "evidence" | "prd" | "tickets" | "reports"
+
+/** A request to open a captured report in the thread it was generated in.
+ *
+ *  A report's home is its chat: clicking one in Artifacts should land you in that
+ *  conversation with the panel's Reports tab open on the document, not float a
+ *  standalone drawer over the library. The caller writes the ordinary
+ *  `sprntly_resume_conv` hand-off (the same one ChatsScreen and the command
+ *  palette use to reopen a chat) and fills this; ChatScreen consumes it once the
+ *  resumed tab is actually active, then opens the panel on that report. */
+export type ReportFocusRequest = { conversationId: number; reportId: number }
+
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
 export const AI_PANEL_WIDTH_DEFAULT = 380
@@ -102,15 +117,25 @@ interface NavigationContextType {
    *  doesn't re-trigger. Works whether the surface is freshly mounted or already
    *  on screen (the search-param change re-runs the consume effect). */
   goToNewChat: () => void
+  /** Open the WORKBENCH: the home surface restored to the tab the user was last
+   *  on, EXCLUDING the pinned Top Insights tab. The sidebar has two doors into
+   *  the same tabbed surface — "Top Insights" always lands on the pinned first
+   *  tab, "Workbench" always lands on your open work. Pushes `/?tab=last`;
+   *  ChatScreen consumes the one-shot param (then strips it), activating the
+   *  remembered chat tab, or falling back to a fresh chat when none is open.
+   *  Same one-shot-param shape as `goToNewChat` so it works whether the surface
+   *  is freshly mounted or already on screen. */
+  goToWorkbench: () => void
 
   // Drawer state
   activeDrawer: "claude" | "ticket" | "design-agent" | null
   openDrawer: (drawer: "claude" | "ticket" | "design-agent") => void
   closeDrawers: () => void
 
-  // Content panel (Evidence / PRD / Tickets — opens in-place instead of navigating)
-  contentPanelTab: "evidence" | "prd" | "tickets" | null
-  openContentPanel: (tab: "evidence" | "prd" | "tickets") => void
+  // Content panel (Evidence / PRD / Tickets / Reports — opens in-place instead
+  // of navigating). Every artifact of the active thread reads in here.
+  contentPanelTab: ContentPanelTab | null
+  openContentPanel: (tab: ContentPanelTab) => void
   closeContentPanel: () => void
 
   // Modal state
@@ -159,6 +184,17 @@ interface NavigationContextType {
    *  opens in a new chat". */
   openPrdTab: (request: PrdTabRequest) => void
 
+  /** Filled by `openReportTab`; consumed once by ChatScreen, which opens the
+   *  panel's Reports tab on that document as soon as the report's own thread is
+   *  the active tab. */
+  pendingReportFocus: ReportFocusRequest | null
+  setPendingReportFocus: (value: ReportFocusRequest | null) => void
+  /** Open a captured report in the chat thread it belongs to. The CALLER must
+   *  already have written the `sprntly_resume_conv` hand-off for that
+   *  conversation (ChatScreen's resume path spawns/refocuses the tab); this
+   *  routes to the chat surface and says which report to land on. */
+  openReportTab: (request: ReportFocusRequest) => void
+
   /** Global search / command palette (⌘K). Rendered once by AppShell; the
    *  sidebar trigger and the global hotkey both drive this shared state. */
   paletteOpen: boolean
@@ -187,7 +223,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const currentScreen = useMemo(() => screenIdFromPathname(pathname), [pathname])
 
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | "design-agent" | null>(null)
-  const [contentPanelTab, setContentPanelTab] = useState<"evidence" | "prd" | "tickets" | null>(null)
+  const [contentPanelTab, setContentPanelTab] = useState<ContentPanelTab | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | "generate" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
@@ -197,6 +233,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
+  const [pendingReportFocus, setPendingReportFocus] = useState<ReportFocusRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
@@ -374,6 +411,19 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const goToWorkbench = useCallback(() => {
+    setActiveDrawer(null)
+    setActiveModal(null)
+    setShareMenuOpen(false)
+    setReviewPastOpen(false)
+    setPendingOndemandDraft(null)
+    // `/?tab=last` — the one-shot "restore my last non-brief tab" signal
+    // ChatScreen consumes (then strips). Without the param, `/` defaults to the
+    // pinned brief tab, which is precisely the tab this nav must NOT land on.
+    router.push("/?tab=last")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openPrdTab = useCallback((request: PrdTabRequest) => {
     setPendingPrdTab(request)
     // This navigation to `/` is *for* opening the PRD panel — tell the
@@ -384,6 +434,15 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     // opening the panel. Harmless when already on `/` (the state change alone
     // drives consumption). ChatScreen defers the panel-open past the route
     // change so the pathname-driven panel-close doesn't swallow it.
+    router.push("/")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
+  const openReportTab = useCallback((request: ReportFocusRequest) => {
+    setPendingReportFocus(request)
+    // Same posture as openPrdTab: this navigation to `/` exists to OPEN the
+    // panel, so the route-change effect above must not close it on arrival.
+    skipPanelCloseOnNavRef.current = true
     router.push("/")
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
@@ -400,7 +459,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setActiveDrawer(null)
   }, [])
 
-  const openContentPanel = useCallback((tab: "evidence" | "prd" | "tickets") => {
+  const openContentPanel = useCallback((tab: ContentPanelTab) => {
     setContentPanelTab(tab)
   }, [])
 
@@ -433,6 +492,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         currentScreen,
         goTo,
         goToNewChat,
+        goToWorkbench,
         activeDrawer,
         openDrawer,
         closeDrawers,
@@ -460,6 +520,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingPrdTab,
         setPendingPrdTab,
         openPrdTab,
+        pendingReportFocus,
+        setPendingReportFocus,
+        openReportTab,
         paletteOpen,
         openPalette,
         closePalette,

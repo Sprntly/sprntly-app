@@ -676,13 +676,15 @@ function IdeaDetailModal({
   onClose,
   onGenerateBrief,
   onGeneratePrototype,
+  onMarkDone,
   busy,
 }: {
   idea: IdeationIdea
   onClose: () => void
   onGenerateBrief: (idea: IdeationIdea, detail: IdeationDetail | null) => void
   onGeneratePrototype: (idea: IdeationIdea) => void
-  busy: null | "prd" | "prototype"
+  onMarkDone: (idea: IdeationIdea) => void
+  busy: null | "prd" | "prototype" | "done"
 }) {
   const [detail, setDetail] = useState<IdeationDetail | null>(null)
   const [load, setLoad] = useState<LoadState>("loading")
@@ -809,6 +811,15 @@ function IdeaDetailModal({
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               {busy === "prototype" ? "Preparing prototype…" : "Generate prototype"}
             </button>
+            <button
+              type="button"
+              className="bl-detail-btn bl-detail-btn--ghost"
+              disabled={busy !== null}
+              onClick={() => onMarkDone(idea)}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="20 6 9 17 4 12" /></svg>
+              {busy === "done" ? "Marking done…" : "Mark done"}
+            </button>
           </div>
           <p className="bl-modal-hint">
             Opens a chat thread and drafts a PRD you can turn into tickets and a
@@ -842,7 +853,7 @@ export function IdeationScreen() {
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
   const [reloadKey, setReloadKey]           = useState(0)
-  const [busy, setBusy]                     = useState<null | "prd" | "prototype">(null)
+  const [busy, setBusy]                     = useState<null | "prd" | "prototype" | "done">(null)
   const [chatValue, setChatValue]           = useState("")
   const [selectedIdea, setSelectedIdea]     = useState<IdeationIdea | null>(null)
   const textareaRef                         = useRef<HTMLTextAreaElement>(null)
@@ -907,6 +918,24 @@ export function IdeationScreen() {
       setBusy(null)
     }
   }, [router, showToast])
+
+  // Mark an idea done: persists the status transition (which, on the backend,
+  // also creates the outcome-entity + VALIDATES edge closing the decision
+  // chain), then closes the modal and re-fetches the Proposed list so the now-
+  // done idea drops out of view (list_visible_ideation_items excludes done).
+  const handleMarkDone = useCallback(async (idea: IdeationIdea) => {
+    setBusy("done")
+    try {
+      await ideationApi.setStatus(idea.id, "done")
+      showToast("Marked done", `"${idea.title}" moved to Completed initiatives.`)
+      setSelectedIdea(null)
+      setReloadKey((k) => k + 1)
+    } catch (err) {
+      showToast("Couldn't mark done", err instanceof Error ? err.message : "Please try again.")
+    } finally {
+      setBusy(null)
+    }
+  }, [showToast])
 
   const handleChat = (e: React.FormEvent) => {
     e.preventDefault()
@@ -978,6 +1007,7 @@ export function IdeationScreen() {
               onClose={() => setSelectedIdea(null)}
               onGenerateBrief={handleGenerateBrief}
               onGeneratePrototype={handleGeneratePrototype}
+              onMarkDone={handleMarkDone}
               busy={busy}
             />
           )}

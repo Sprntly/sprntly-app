@@ -51,6 +51,7 @@ from app.db.prds import (
     latest_prd_for_dataset,
     list_prd_generations,
     list_prd_versions,
+    resolve_prd_id_by_public_id,
     restore_prd_version,
     save_prd_version,
     update_prd_content,
@@ -389,6 +390,12 @@ async def generate_from_task(
         variant=PRD_VARIANT,
         source="chat",
         theme_id=theme_id,
+        # The originating-question linkage (mirrors db/reports.py's `question`):
+        # this is the ONE PRD-generation path with a genuine user-typed question
+        # behind it — brief/ideation/import PRDs have no chat question, so they
+        # leave this NULL. No ask_id: this command runs outside the ask_jobs
+        # pipeline (no ask row exists to reference).
+        question=task_text,
     )
     # No _record_prd_action: there is no real theme to advance in the lifecycle.
 
@@ -418,10 +425,15 @@ async def generate_from_task(
 
     # In parallel: the Evidence artifact, generated from semantic KG retrieval
     # over the task — skipped inside (no row) when the KG has no backing signals.
+    # Same originating question/conversation linkage as the PRD above.
     ev_task = asyncio.create_task(
         generate_task_evidence(
             brief_id, insight, theme_id,
             template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+            question=task_text,
+            conversation_id=body.conversation_id,
+            company_id=company.company_id,
+            user_id=company.user_id,
         )
     )
     _inflight_tasks.add(ev_task)
@@ -629,6 +641,26 @@ def get(
     return row
 
 
+@router.get("/by-public-id/{public_id}")
+def get_id_by_public_id(
+    public_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Resolve a PRD's opaque `public_id` (the only identifier
+    `useArtifactUrlSync.ts` puts in the URL) to its real internal `id`, for
+    the caller's OWN internal navigation — e.g. opening a `?prd={public_id}`
+    deep-link. Same ownership check GET /{prd_id} already enforces; a
+    foreign-tenant or malformed public_id 404s identically to a foreign
+    integer id, so this grants no new access, only a different identifier
+    shape. Returns `{"id": <int>}` — callers hand that straight to the same
+    `openPrdTab`/`GET /{prd_id}` path every other PRD-open already uses."""
+    resolved_id = resolve_prd_id_by_public_id(public_id)
+    if resolved_id is None:
+        raise HTTPException(404, "PRD not found")
+    require_owned_prd(resolved_id, company.company_id, company.workspace_id)
+    return {"id": resolved_id}
+
+
 @router.get("/{prd_id}/stream")
 async def stream_prd_generation(
     prd_id: int,
@@ -688,6 +720,18 @@ def generate_impl_spec(
 
 # ── PRD editing + version control ──────────────────────────────────────
 
+def _actor(company: WorkspaceContext) -> str:
+    """Who to record on a version snapshot.
+
+    `prd_versions.saved_by` used to be the literal string "auto" on every
+    automatic snapshot, so version history recorded WHAT made the snapshot and
+    never WHO — which made a two-user editing report impossible to confirm from
+    the data alone. The column is free text rendered straight into the history
+    list ("Edit · {saved_by} · {date}"), so an address needs no schema or
+    frontend change; rows written before this stay "auto" and still render.
+    """
+    return company.user_email or company.user_id or "auto"
+
 
 class PrdUpdateIn(BaseModel):
     title: str = Field(..., min_length=1)
@@ -704,7 +748,7 @@ def update(
     row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     # Save current content as a version before overwriting
     try:
-        save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
+        save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by=_actor(company))
     except Exception:
         # Non-blocking: a failed snapshot must not fail the save. But don't
         # swallow it silently — a lost auto-version is the user's undo point
@@ -872,7 +916,7 @@ def answer_input_question(
 
     # Snapshot the pre-edit content so the change is undoable (mirrors PUT /{id}).
     try:
-        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
     except Exception:
         logger.warning(
             "auto-version snapshot failed for prd_id=%s before input-answer edit "
@@ -934,7 +978,7 @@ def chat_edit(
         # Snapshot the pre-edit content so the change is undoable (mirrors
         # PUT /{id} and the input-answer path).
         try:
-            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
         except Exception:
             logger.warning(
                 "auto-version snapshot failed for prd_id=%s before chat edit "

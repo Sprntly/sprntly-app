@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse } from "../lib/api"
+import type { AskResponse, GeneratedStory, ReportSummary } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -265,6 +265,11 @@ export type ConnectorType =
   | "code"
   | "monitoring"
   | "design"
+  // User research — interview/usability repositories (Marvin) and the research
+  // artifacts a team uploads by hand. Distinct from "customer-voice" (inbound,
+  // unsolicited) and "meetings" (sales/CSM calls): research is deliberately
+  // gathered evidence about users. Mirrors backend catalog.py RESEARCH.
+  | "research"
 
 export interface ConnectorItemRow {
   id: string
@@ -359,6 +364,18 @@ export interface ConnectorCategoryRow {
    * the field) to restore the dropzone.
    */
   allowsManualUpload?: boolean
+  /**
+   * Keep this category visible in `connectableCatalog()` even when none of its
+   * connectors is wired yet. Defaults to FALSE: normally an all-"Coming soon"
+   * category is dropped so we never show a shelf the user can't act on.
+   *
+   * Set only for Research, where the manual upload strip — not the connector
+   * grid — is the feature: Marvin is still coming-soon, so without this the
+   * whole shelf (and the only way to hand us research) would vanish from
+   * Settings AND the onboarding wizard. A category setting this must therefore
+   * allow manual upload; a shelf with neither connectors nor uploads is empty.
+   */
+  keepWhenEmpty?: boolean
 }
 
 export interface DetailQuoteRow {
@@ -586,6 +603,12 @@ export interface PrdContent {
    * for `:::block` PRDs/evidence.
    */
   html?: string
+  /** The originating chat question (`EvidenceRecord.question`) — set only for
+   *  a chat-task Evidence doc; null/undefined otherwise (brief-insight docs,
+   *  and any doc generated before this column existed). Mirrors
+   *  `PrdState.question`; lives here (not on `PrdState`) so Evidence — which
+   *  has no `PrdState` of its own — carries it too. */
+  question?: string | null
 }
 
 /**
@@ -597,6 +620,14 @@ export interface PrdContent {
 export interface PrdState extends PrdContent {
   /** DB id of the loaded PRD (`PrdRecord.id`). Always present once a PRD is loaded. */
   prd_id: number
+  /** Opaque, unguessable external identifier (`PrdRecord.public_id`) —
+   *  what `useArtifactUrlSync` reflects onto the `?prd=` URL instead of the
+   *  sequential `prd_id`, so a copied/bookmarked link never discloses a
+   *  blind-enumerable id. Optional: absent on any PrdState built before this
+   *  field existed (none currently — every load path sets it — kept
+   *  optional so a future load path that forgets it fails soft, not a type
+   *  error blocking an unrelated build). */
+  public_id?: string
   /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
   figma_file_key?: string | null
   /** Part B — the implementation-spec markdown (`PrdRecord.llm_part`). Rendered
@@ -614,6 +645,12 @@ export interface PrdState extends PrdContent {
    *  have none, so the right-panel Evidence tab is hidden for them. Absent on
    *  legacy rows — treat missing as `'brief'` (show the tab). */
   source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
+  /** When this PRD was written (`PrdRecord.generated_at`). Used to order it
+   *  against the thread's other artifacts — the tab strip's reopen button opens
+   *  whichever was created LAST. Absent on paths that build a PrdState without a
+   *  record behind it (a streaming draft), which read as "no timestamp" rather
+   *  than as oldest. */
+  generatedAt?: string
 }
 
 export interface AppContentState {
@@ -669,6 +706,15 @@ export interface AppContentState {
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a
    *  `prd_id`, so it is typed `PrdContent`, not `PrdState`. */
   evidence: PrdContent | null
+  /** The `evidences` row id behind `content.evidence`, when the setter knows
+   *  it (the Artifacts library's explicit open-by-id, and the `?evidence=`
+   *  URL deep link). Used ONLY to reflect the artifact-link URL param back
+   *  onto the address bar while the Evidence tab is showing this doc — NOT
+   *  populated by every path that sets `evidence` (the brief/insight
+   *  generate-or-resolve flows in ChatScreen/ContentPanel do not thread an id
+   *  through), so a null here while `evidence` is set just means the URL
+   *  won't carry `?evidence=` for that particular open — never an error. */
+  evidenceId: number | null
   /** True while evidence is being generated from the chat flow (ChatScreen),
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */
@@ -680,16 +726,62 @@ export interface AppContentState {
    *  previous run's preview can never bleed into a new one. Mirrors
    *  `prdPartialHtml`. */
   evidencePartialHtml: string | null
-  /** A self-contained HTML report answer (e.g. the voice-of-customer-report
-   *  skill's fixed-template document) currently open in the right panel's
-   *  Report tab. Chat surfaces set this instead of rendering the document
-   *  inline, so the user keeps chatting on the left while reading it on the
-   *  right. `null` = no Report tab shown. */
-  report: { html: string; title: string } | null
+  /** The active chat tab's conversation id, mirrored here by ChatScreen so the
+   *  content panel knows which THREAD it is showing. The Reports tab lists this
+   *  conversation's captured reports; null (a brand-new chat with nothing
+   *  persisted yet, or the brief tab) means there is no thread to list. */
+  conversationId: number | null
+  /** A specific report to open in the Reports tab, set when the user arrived by
+   *  clicking that exact document (e.g. an Artifacts row). The tab consumes it
+   *  once — selecting the report and clearing this — so the user lands on what
+   *  they clicked instead of a list they must search. */
+  reportFocusId: number | null
+  /** True when `reportFocusId` points at a report that has NO thread behind it —
+   *  the Artifacts row for a report whose chat was deleted, which reads in the
+   *  panel without a list under it.
+   *
+   *  Stated rather than inferred from `conversationId == null`, because a
+   *  brand-new chat tab also has a null conversation id (a tab has none until its
+   *  first ask persists). Reading that null as "standalone" is what used to
+   *  render the PREVIOUS thread's document inside an empty new chat. */
+  reportFocusStandalone: boolean
+  /** The active thread's captured reports, newest first. Owned by
+   *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
+   *  and ChatScreen — see that hook for why there is exactly one fetcher. */
+  threadReports: ReportSummary[]
+  /** The conversation `threadReports` was fetched FOR.
+   *
+   *  The list lives in shared content but the panel is global, so "which thread
+   *  do these rows describe" cannot be inferred from the fact that they exist.
+   *  React flushes ChatScreen's (child) effects before AppShell's (parent) ones,
+   *  so on the commit where the active tab changes, the list is still the
+   *  PREVIOUS thread's — which is how a brand-new chat came to auto-open the
+   *  panel on another thread's report.
+   *
+   *  Every reader compares this against `conversationId` and treats a mismatch as
+   *  "this thread's list hasn't landed yet", never as "this thread has none".
+   *  Null = no thread in scope. */
+  threadReportsConversationId: number | null
+  /** Lifecycle of `threadReports`, because an empty list means different things:
+   *   idle    — no thread in scope (nothing was ever asked for)
+   *   loading — in flight; empty is "not yet", not "none"
+   *   ready   — authoritative; empty genuinely means this chat has no reports
+   *   error   — the fetch failed; empty says nothing at all
+   *  The Reports tab hides only on a KNOWN-empty thread, so a failed load never
+   *  makes the tab vanish. */
+  threadReportsStatus: "idle" | "loading" | "ready" | "error"
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
   connectedConnectorIds: string[]
+  /** Whether `connectedConnectorIds` has actually been answered by the backend
+   *  yet. It starts `[]`, which is indistinguishable from "this workspace has
+   *  no connectors" — and the Top Insights surface turns that into a dead-end
+   *  "connect a source" page. Surfaces that branch on the connector list must
+   *  wait for this flag instead of reading the default. Set (to `true`) by
+   *  AppShell on both success and failure of the connectors fetch, and reset to
+   *  `false` on a workspace switch. */
+  connectorsHydrated: boolean
   /** The workspace's Top Insights filter (companies.notification_settings.
    *  brief_insight_types), loaded once by AppShell. The Top Insights tab shows
    *  the findings whose types intersect it; empty/absent = surface everything
@@ -701,6 +793,11 @@ export interface AppContentState {
   sidebarConvCount: number | null
   /** Override default AI chips per screen id; empty array = no chips */
   aiScreenChips: Partial<Record<string, string[]>>
+  /** A guest session's pre-fetched ticket set (GuestArtifactViewer populates
+   *  this directly from the artifact-share content endpoint) — the Tickets
+   *  tab renders these instead of calling storiesApi when useGuestSession()
+   *  is non-null. `null`/absent for every non-guest render. */
+  guestTickets?: GeneratedStory[] | null
 }
 
 export function isBriefEmpty(b: BriefState): boolean {

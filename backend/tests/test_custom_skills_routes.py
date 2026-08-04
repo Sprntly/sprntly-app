@@ -9,9 +9,10 @@ Covered:
 - the server-side validation ladder: missing/over-limit metadata (422), bad
   extension (422), empty file (400), oversize (413), unparseable content
   (400), over-limit parsed content in characters (413)
-- slug conflicts: company duplicates (409) with the staged object rolled
-  back; shadowing a BUILT-IN id is allowed and flagged (overrides_builtin —
-  PRD 1854 override: the custom skill replaces the built-in)
+- name conflicts: a repeat of the company's OWN skill name is a 409 with the
+  staged object rolled back; sharing a BUILT-IN skill's name is allowed and
+  overrides nothing — the upload takes the next free trigger and reports it
+  via `trigger` + `name_conflict`
 - list: newest-first metadata, company-isolated
 - file links: signed/fallback URLs for owned skills; foreign ids 404
 - delete: removes the row and the staged original, frees the slug for
@@ -81,7 +82,7 @@ def test_upload_md_creates_skill(tenant_client):
     # minted test token carries neither, so it may be empty, never client-set).
     assert "uploader_name" in body
     assert body["has_file"] is True
-    assert body["overrides_builtin"] is False
+    assert body["name_conflict"] is False
     # The original bytes are staged under the workspace prefix.
     assert len(_staged_files()) == 1
 
@@ -221,28 +222,41 @@ def test_symbol_only_name_422(tenant_client):
     assert _upload(t.client, name="!!!").status_code == 422
 
 
-# ─── slug conflicts + rollback ───────────────────────────────────────────────
+# ─── name conflicts + rollback ───────────────────────────────────────────────
 
 
-def test_builtin_shadowing_allowed_and_flagged(tenant_client, monkeypatch):
+def test_builtin_name_taken_gets_its_own_trigger(tenant_client, monkeypatch):
     import app.routes.custom_skills as mod
 
     t = tenant_client.make(slug="acme")
     monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
-    # Shadowing a built-in id is a normal upload (PRD 1854 override — the
-    # custom skill replaces the built-in), flagged so the UI can say so.
+    # Sharing a built-in's name is a normal upload and overrides NOTHING: the
+    # built-in keeps /prd-author, so this one takes the next free trigger.
     resp = _upload(t.client, name="PRD Author")
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    assert body["slug"] == "prd-author"
-    assert body["overrides_builtin"] is True
+    assert body["name"] == "PRD Author"  # the typed name is never rewritten
+    assert body["slug"] == "prd-author-2"
+    assert body["trigger"] == "/prd-author-2"
+    assert body["name_conflict"] is True
     assert len(_staged_files()) == 1
 
-    # The list carries the flag too; non-shadowing skills stay False.
+    # The list carries the flag too; skills with a free name stay False.
     assert _upload(t.client, name="Own Thing").status_code == 201
     skills = {s["slug"]: s for s in t.client.get("/v1/skills").json()["skills"]}
-    assert skills["prd-author"]["overrides_builtin"] is True
-    assert skills["own-thing"]["overrides_builtin"] is False
+    assert skills["prd-author-2"]["name_conflict"] is True
+    assert skills["own-thing"]["name_conflict"] is False
+
+
+def test_trigger_series_skips_slugs_already_handed_out(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # A skill legitimately named "PRD Author 2" occupies /prd-author-2 …
+    assert _upload(t.client, name="PRD Author 2").json()["slug"] == "prd-author-2"
+    # … so the one colliding with the built-in has to skip past it.
+    assert _upload(t.client, name="PRD Author").json()["slug"] == "prd-author-3"
 
 
 def test_company_duplicate_409_rolls_back_staged_file(tenant_client):
@@ -250,10 +264,25 @@ def test_company_duplicate_409_rolls_back_staged_file(tenant_client):
     assert _upload(t.client).status_code == 201
     assert len(_staged_files()) == 1
 
-    resp = _upload(t.client)  # same name → same slug → unique violation
+    # A repeat of the company's OWN skill name is still refused — only a
+    # BUILT-IN's name gets the renumbered trigger.
+    resp = _upload(t.client)
     assert resp.status_code == 409
     assert "already exists" in resp.json()["detail"]
     # The duplicate's staged object was rolled back — only the first remains.
+    assert len(_staged_files()) == 1
+
+
+def test_company_duplicate_409_matches_on_name_not_stored_slug(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # This one is stored under /prd-author-2, so the duplicate check has to
+    # compare NAMES — matching on the stored slug would let it through.
+    assert _upload(t.client, name="PRD Author").status_code == 201
+    resp = _upload(t.client, name="PRD  author!")  # same name once slugified
+    assert resp.status_code == 409
     assert len(_staged_files()) == 1
 
 

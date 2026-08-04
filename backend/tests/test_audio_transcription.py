@@ -136,7 +136,7 @@ def test_ingest_audio_wires_transcript_into_extractor(isolated_settings):
 
     captured = {}
 
-    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None):
+    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None, **kw):
         captured["doc_name"] = doc_name
         captured["text"] = text
         captured["agent"] = agent
@@ -171,7 +171,7 @@ def test_ingest_audio_idempotent_doc_name(isolated_settings):
 
     names = []
 
-    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None):
+    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None, **kw):
         names.append(doc_name)
         return {"signals": 1, "themes": 0, "skipped": 0}
 

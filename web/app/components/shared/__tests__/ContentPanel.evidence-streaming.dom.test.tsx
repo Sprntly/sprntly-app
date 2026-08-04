@@ -87,6 +87,13 @@ describe("ContentPanel Evidence tab — live streaming preview", () => {
 
     expect(screen.getByText("Generating evidence…")).toBeTruthy()
     expect(screen.queryByTestId("evidence-streaming")).toBeNull()
+
+    // The wait is a real working state, not a bare spinner: a live phase line,
+    // a moving bar, and prose-shaped placeholders (the shared GeneratingPane).
+    const wip = screen.getByTestId("evidence-generating")
+    expect(screen.getByText(/Pulling the signals behind this finding/i)).toBeTruthy()
+    expect(wip.querySelectorAll(".gwip-skel--doc").length).toBeGreaterThan(0)
+    expect(wip.querySelector(".gwip-bar-pill")).toBeTruthy()
   })
 
   it("ignores a stale partial once generation is over (no preview)", async () => {

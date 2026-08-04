@@ -195,7 +195,7 @@ def test_callback_stores_the_connection_with_region_and_label(marvin_env, monkey
     assert len(rows) == 1
     row = rows[0]
     assert row["account_label"] == "Marvin · EU"
-    assert row["types"] == ["customer-voice"]
+    assert row["types"] == ["research"]
     assert row["scopes"] == "mcp:read"
     assert row["config"]["region"] == "eu"
     assert row["config"]["mcp_url"] == "https://mcp-eu.heymarvin.com"
@@ -449,10 +449,16 @@ def test_probe_surfaces_a_dead_refresh_token_as_a_rejection(marvin_env, monkeypa
 # ─────────────────────── catalog + ingest wiring ───────────────────────
 
 
-def test_marvin_is_an_evidence_bearing_customer_voice_provider(marvin_env):
-    from app.connectors.catalog import is_evidence_provider, types_for
+def test_marvin_is_an_evidence_bearing_research_provider(marvin_env):
+    """Marvin is typed `research`, the category it anchors (added on main
+    2026-08-02 while this connector was still being built). RESEARCH is
+    deliberately absent from NON_EVIDENCE_TYPES, so a Marvin study opens the
+    brief's data-source gate on its own — which is the whole point of wiring
+    it. Its KG records still land on the `customer_voice` source_type (see
+    kg_ingest.runner.PULLERS), the same shape research-category uploads use."""
+    from app.connectors.catalog import RESEARCH, is_evidence_provider, types_for
 
-    assert types_for("marvin") == ["customer-voice"]
+    assert types_for("marvin") == [RESEARCH]
     assert is_evidence_provider("marvin") is True
 
 
@@ -469,4 +475,4 @@ def test_connector_status_reports_marvin_as_ingestable(marvin_env, monkeypatch):
     statuses = ctx.client.get("/v1/connectors/status").json()["statuses"]
     marvin_status = next(s for s in statuses if s["provider"] == "marvin")
     assert marvin_status["ingestable"] is True
-    assert marvin_status["types"] == ["customer-voice"]
+    assert marvin_status["types"] == ["research"]

@@ -341,6 +341,195 @@ def test_get_ask_foreign_job_returns_404(tenant_client, isolated_settings, fake_
     assert resp.status_code == 404
 
 
+# ---- routed skill, readable WHILE the answer is still generating ------------
+# The router picks a skill in the first second or two, but that choice used to
+# reach the client only inside `response`, which complete_ask_job writes at the
+# END of the run — so the chat could not name what it was waiting for until the
+# wait was over. `ask_jobs.routed_skill` is written at routing time and surfaced
+# from `generating` onwards.
+
+
+def test_get_ask_surfaces_routed_skill_while_generating(
+    tenant_client, isolated_settings
+):
+    """The whole point: a still-generating job names its skill."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question="run a competitive review"
+    )
+    set_ask_job_route(
+        ask_id, "competitive-intelligence-review", "Competitive intelligence"
+    )
+
+    body = t.client.get(f"/v1/ask/{ask_id}").json()
+    assert body["status"] == "generating"
+    assert body["routed_skill"] == "competitive-intelligence-review"
+    assert body["routed_skill_action"] == "Competitive intelligence"
+    # ...and nothing else has been decided yet — the answer body is still empty.
+    assert body["answer"] == ""
+
+
+def test_get_ask_routed_skill_is_null_when_nothing_was_routed(
+    tenant_client, isolated_settings
+):
+    """A direct answer / out-of-scope refusal routes no skill. The fields must
+    be null — the UI renders no chip rather than inventing a fallback label."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question="what happened last week?"
+    )
+    body = t.client.get(f"/v1/ask/{ask_id}").json()
+    assert body["routed_skill"] is None
+    assert body["routed_skill_action"] is None
+
+
+def test_set_ask_job_route_writes_nothing_for_a_skill_less_decision(
+    tenant_client, isolated_settings
+):
+    """qa_agent still calls the hook on the direct path (skill_id=None); the
+    writer must treat that as "record nothing", not as a row to stamp."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    set_ask_job_route(ask_id, None, "")
+    row = db.get_ask_job(ask_id)
+    assert row["routed_skill"] is None
+    assert row["routed_skill_action"] is None
+
+
+def test_routed_skill_write_does_not_touch_a_cancelled_job(
+    tenant_client, isolated_settings
+):
+    """Guarded on status == 'generating', like the heartbeat: a route write
+    landing after the user's Stop must not resurrect or annotate the row."""
+    from app.db.asks import set_ask_job_route
+
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    assert db.cancel_ask_job(ask_id) == "cancelled"
+    set_ask_job_route(ask_id, "prd-author", "PRD")
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"
+    assert row["routed_skill"] is None
+
+
+def test_foreign_generating_job_with_a_routed_skill_still_404s(
+    tenant_client, isolated_settings
+):
+    """The new field must not become a new disclosure channel: another
+    company's ask is 404 (not 403), and the skill never crosses the boundary."""
+    from app.db.asks import set_ask_job_route
+
+    a = tenant_client.make(slug="company-a")
+    ask_id = db.start_ask_job(
+        company_id=a.company_id, dataset="company-a", question="A's private question?"
+    )
+    set_ask_job_route(ask_id, "competitive-intelligence-review", "Competitive intelligence")
+
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.get(f"/v1/ask/{ask_id}")
+    assert resp.status_code == 404
+    assert "competitive-intelligence-review" not in resp.text
+
+
+def test_worker_records_the_routed_skill_before_the_answer_lands(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """End to end through the worker: by the time qa_agent is inside the answer
+    call, the job row already carries the skill.
+
+    The QUESTION changed, the guarantee did not. This used to drive "write user
+    stories for checkout", which the keyword tier routed to the `user-stories`
+    built-in; a chat turn cannot be routed to a built-in any more, so that
+    question now reaches the ordinary answer — `_answer_single_shot` is never
+    called, the spy never fires, and the test failed on `KeyError: 'row'` rather
+    than on anything to do with the hook. A competitive-intelligence ask is the
+    equivalent that still routes, so the mid-run write is exercised again.
+    """
+    import app.qa_agent as qa_agent_mod
+
+    question = "run a competitive intelligence report"
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question=question
+    )
+    seen: dict = {}
+
+    # The CIR pipeline declines (no company profile in this fixture), which is
+    # what hands the turn on to the single-shot answer the spy sits in.
+    import app.competitive_intel as ci
+    monkeypatch.setattr(ci, "answer", lambda **k: None)
+
+    def _fake_single_shot(decision, *a, **k):  # noqa: ARG001
+        # Read the row from INSIDE the answer step — mid-run, by construction.
+        seen["row"] = db.get_ask_job(ask_id)
+        return {"answer": "review", "key_points": [], "citations": [],
+                "confidence": 0.9, "unanswered": ""}
+
+    monkeypatch.setattr(qa_agent_mod, "_answer_single_shot", _fake_single_shot)
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question=question,
+        dataset="acme",
+    ))
+
+    routed = "competitive-intelligence-review"
+    assert seen["row"]["status"] == "generating"
+    assert seen["row"]["routed_skill"] == routed
+    # It survives completion, so a client that only polls after the fact sees it.
+    assert db.get_ask_job(ask_id)["routed_skill"] == routed
+    assert t.client.get(f"/v1/ask/{ask_id}").json()["routed_skill"] == routed
+
+
+def test_worker_records_nothing_when_no_skill_is_routed(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """The other half of the hook's contract, and now the COMMON case.
+
+    `on_route` still fires on the direct path — it carries None, and
+    `set_ask_job_route` no-ops on a falsy id so the columns stay NULL. That NULL
+    is what the UI reads as "render no chip" rather than inventing a default.
+    Worth pinning explicitly now that most questions take this path: a
+    regression here would show up as a phantom skill chip on every ordinary
+    answer, not as an error.
+    """
+    import app.qa_agent as qa_agent_mod
+
+    question = "what happened in our business last week?"
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(
+        company_id=t.company_id, dataset="acme", question=question
+    )
+
+    routes: list = []
+    real_route = qa_agent_mod.route
+    monkeypatch.setattr(
+        qa_agent_mod, "route",
+        lambda *a, **k: routes.append(1) or real_route(*a, **k),
+    )
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question=question,
+        dataset="acme",
+    ))
+
+    assert routes, "the router really did run (so the hook really did fire)"
+    assert db.get_ask_job(ask_id)["routed_skill"] is None
+
+
 # ---- POST /v1/ask/extract-file ----------------------------------------------
 # Parses a binary chat attachment (pptx/pdf/docx/…) to markdown so the composer
 # can inline it as [Attached files] context — the fix for pptx attachments
@@ -453,6 +642,135 @@ def test_ask_accepts_question_with_inlined_attachment_block(tenant_client, isola
     assert resp.status_code == 200, resp.text
     body = _poll_ask(t.client, resp.json()["ask_id"])
     assert body["status"] == "ready"
+
+
+# ---- conversation attachment history fold ------------------------------
+# A user attaches a document to turn 1; by turn 3 the per-turn history clamp
+# has erased every trace of it because `_load_history` never selected the
+# `attachments` column at all. `_load_history` now folds each turn's OWN
+# attachment text onto that turn's `content` before returning it, so the
+# text survives the clamp on every later turn — without qa_agent.py's
+# `_render_history` / `clamp_turn_text` changing at all.
+
+def test_load_history_folds_attachment_text_and_survives_to_turn_three(
+    tenant_client, isolated_settings
+):
+    """T1 — the actual reproduction: an attachment's extracted text must
+    still be readable by the REAL, unmodified `qa_agent._render_history` on
+    turn 3, not just turn 1 (where it happened to ride inside the question
+    string the composer built client-side). Calls the real `_load_history`
+    against a REAL seeded `conversation_turns` row via the conversations API
+    — not a hand-built list."""
+    from app.qa_agent import _render_history
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-attach-survive")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+
+    unique_body = " ".join(
+        ["Sprntly ships faster PRD-to-prototype cycles than Productboard on turnaround time."] * 5
+    )
+    resp1 = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={
+            "role": "user",
+            "content": "give me a summary of the document that compares us to Productboard",
+            "attachments": [
+                {"name": "Sprntly_vs_Productboard_Comparison.docx", "content": unique_body},
+            ],
+        },
+    )
+    assert resp1.status_code == 200, resp1.text
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "assistant", "content": "Here is a summary of the document."},
+    )
+    resp3 = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "user", "content": "which source did you find this information in"},
+    )
+    assert resp3.status_code == 200, resp3.text
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+    assert len(history) == 3
+    rendered = _render_history(history)
+
+    assert unique_body in rendered
+
+
+def test_load_history_no_attachments_is_byte_identical_to_today(
+    tenant_client, isolated_settings
+):
+    """A4 / T2 — a turn with no attachments produces history BYTE-IDENTICAL
+    to today: exactly `{role, content}` (no leaked `attachments` key), and the
+    same rendered string `qa_agent._render_history` has always produced for
+    it — captured by hand from a real run, not derived via `git show`."""
+    from app.qa_agent import _render_history
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-no-attach")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "user", "content": "plain question, no attachment"},
+    )
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+
+    assert len(history) == 1
+    assert list(history[0].keys()) == ["role", "content"]
+    assert history[0]["content"] == "plain question, no attachment"
+
+    rendered = _render_history(history)
+    assert rendered == "Conversation so far:\nUser: plain question, no attachment\n\n"
+
+
+def test_load_history_empty_attachment_content_is_skipped(tenant_client, isolated_settings):
+    """A1/A2 — a PRD-import turn persists a name-only attachment chip
+    (`content == ""`, per TurnAttachment's docstring: the file BECAME the
+    PRD, not this turn's context). Folding must tolerate that rather than
+    appending an empty `[Attached: name]` stub."""
+    from app.routes.ask import _load_history
+
+    t = tenant_client.make(slug="acme-empty-attach")
+    conv = t.client.post("/v1/conversations", json={"title": "c"}).json()
+    conv_id = conv["id"]
+    t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={
+            "role": "user", "content": "generate a PRD from this",
+            "attachments": [{"name": "spec.docx", "content": ""}],
+        },
+    )
+
+    history = _load_history(conv_id, t.company_id, t.user_id)
+
+    assert history[0]["content"] == "generate a PRD from this"
+    assert "[Attached:" not in history[0]["content"]
+
+
+def test_load_history_foreign_conversation_returns_empty_no_attachment_leak(
+    tenant_client, isolated_settings
+):
+    """A5 / T3 — the existing ownership guard is untouched: a conversation not
+    owned by the caller (company AND user) still returns [], attachments
+    included."""
+    from app.routes.ask import _load_history
+
+    a = tenant_client.make(slug="acme-foreign-attach")
+    b = tenant_client.make(slug="acme-foreign-attach", user_id="user-b-foreign-attach")
+    conv = a.client.post("/v1/conversations", json={"title": "A's chat"}).json()
+    a.client.post(
+        f"/v1/conversations/{conv['id']}/turns",
+        json={
+            "role": "user", "content": "q",
+            "attachments": [{"name": "secret.docx", "content": "PRIVATE ATTACHMENT BODY"}],
+        },
+    )
+
+    assert _load_history(conv["id"], b.company_id, b.user_id) == []
 
 
 def test_find_cached_ask_skips_oversized_question_without_hitting_the_client():

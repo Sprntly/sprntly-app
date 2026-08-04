@@ -396,10 +396,14 @@ function InTabCanvas({
     },
   })
 
-  // The single fixed entry the composer and both Apply paths call.
+  // The single fixed entry the composer and both Apply paths call. Returns the
+  // shared runner's outcome (true = a run started, false = rejected — e.g. a
+  // second submit while one is already in flight) so every caller can await it
+  // and only proceed with its own optimistic UI update when a run actually
+  // started, instead of assuming success the instant it is called.
   const runCanvasIterate = useCallback(
     (instruction: string, appliedCommentId?: number | null) => {
-      void iterateRun.runIterate(instruction, appliedCommentId)
+      return iterateRun.runIterate(instruction, appliedCommentId)
     },
     [iterateRun],
   )
@@ -408,7 +412,7 @@ function InTabCanvas({
   // comment id. The agent decides applicability; the client fabricates no change.
   const runCommentIterate = useCallback(
     (comment: CommentRecord) => {
-      runCanvasIterate(comment.body, comment.id)
+      return runCanvasIterate(comment.body, comment.id)
     },
     [runCanvasIterate],
   )
@@ -898,10 +902,9 @@ export function PrototypeRoute() {
   // "Notify me when ready" — dismiss the full-screen loading overlay, show a
   // processing toast, signal the shell's PrototypeGeneratingCard (da:generating),
   // hand off the completion poll to the shell owner (da:notify-generation), and
-  // navigate away so the user can keep working. Guarded: no-op when no in-flight
-  // prototype id exists yet (the generate POST hasn't returned). On navigate, prefer
-  // history.back(); fall back to the bare prototype path when there is no history
-  // entry to return to (fresh tab / direct open).
+  // navigate straight to Top Insights so the user can keep working. Guarded:
+  // no-op when no in-flight prototype id exists yet (the generate POST
+  // hasn't returned).
   const handleNotifyWhenReady = useCallback(() => {
     if (genProtoId == null) return
     showToast("Prototype is processing", "We'll let you know when it's ready.")
@@ -909,12 +912,8 @@ export function PrototypeRoute() {
     if (prdId != null) {
       window.dispatchEvent(new CustomEvent("da:notify-generation", { detail: { prototypeId: genProtoId, prdId } }))
     }
-    if (window.history.length > 1) {
-      router.back()
-    } else {
-      router.push(prototypePath(prdId!))
-    }
-  }, [showToast, genProtoId, prdId, router])
+    goTo("brief")
+  }, [showToast, genProtoId, prdId, goTo])
 
   // Mounted unconditionally, BEFORE the early-return chain below — this is
   // the entire point. This route's own GenerationLoadingScreen instance sits

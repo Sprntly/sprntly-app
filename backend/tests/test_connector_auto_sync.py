@@ -362,6 +362,9 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
     calls = []
     monkeypatch.setattr(conn_route, "kickoff_sync",
                         lambda cid, prov: calls.append((cid, prov)))
+    index_calls = []
+    monkeypatch.setattr(conn_route, "kickoff_call_index_sync",
+                        lambda cid: index_calls.append(cid))
 
     require_company = conn_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
@@ -373,6 +376,69 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
         main_mod.app.dependency_overrides.pop(require_company, None)
     assert r.status_code == 200
     assert calls == [("co-X", "fireflies")]
+    # And the CALL INDEX, which kickoff_sync does not fill. Without this the
+    # index stays empty until the next 6-hourly cycle, and an empty index is a
+    # SILENT failure: every interception in qa_agent returns None and the
+    # question degrades to the ~168s path with nothing reporting a problem.
+    assert index_calls == ["co-X"]
+
+
+def test_fireflies_disconnect_clears_the_call_index(isolated_settings, monkeypatch):
+    """Leaving the index behind is not harmless.
+
+    Chat would keep answering call questions from indexed rows while
+    prompts.connected_sources_line correctly reports no transcript source is
+    connected — two contradictory claims in one answer, with no way for the
+    reader to tell which half is wrong.
+    """
+    import app.main as main_mod
+    from app.auth import CompanyContext
+    import app.call_index as ci
+    import app.routes.connectors as conn_route
+
+    monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
+    monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
+    cleared = []
+    monkeypatch.setattr(ci, "clear_company", lambda cid: cleared.append(cid))
+
+    require_company = conn_route.require_company
+    main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
+        company_id="co-X", role="admin", user_id="u1")
+    try:
+        client = TestClient(main_mod.app)
+        r = client.delete("/v1/connectors/fireflies")
+    finally:
+        main_mod.app.dependency_overrides.pop(require_company, None)
+    assert r.status_code == 200
+    assert cleared == ["co-X"]
+
+
+def test_disconnect_survives_a_failed_index_clear(isolated_settings, monkeypatch):
+    """A cleanup failure must not fail a disconnect the user actually made —
+    ensure_fresh independently refuses to serve once the source is gone, so this
+    degrades to "no answer from the index" rather than to a stale one."""
+    import app.main as main_mod
+    from app.auth import CompanyContext
+    import app.call_index as ci
+    import app.routes.connectors as conn_route
+
+    monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
+    monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
+
+    def _boom(_cid):
+        raise RuntimeError("PostgREST down")
+
+    monkeypatch.setattr(ci, "clear_company", _boom)
+
+    require_company = conn_route.require_company
+    main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
+        company_id="co-X", role="admin", user_id="u1")
+    try:
+        client = TestClient(main_mod.app)
+        r = client.delete("/v1/connectors/fireflies")
+    finally:
+        main_mod.app.dependency_overrides.pop(require_company, None)
+    assert r.status_code == 200
 
 
 def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):
@@ -402,6 +468,76 @@ def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):
     r = client.get("/v1/connectors/github/callback?code=abc&state=signed")
     assert r.status_code in (302, 307)
     assert calls == [("co-G", "github")]
+
+
+def _stub_slack_callback(conn_route, monkeypatch):
+    """Mock everything the Slack callback touches except the kickoff, so a test
+    can drive /v1/connectors/slack/callback end-to-end offline."""
+    monkeypatch.setattr(conn_route.slack_oauth, "verify_oauth_state",
+                        lambda state: {"company_id": "co-S", "user_id": "u-1",
+                                       "return_to": None})
+    monkeypatch.setattr(conn_route.slack_oauth, "exchange_code_for_token",
+                        lambda code: {"ok": True, "access_token": "xoxb-x",
+                                      "bot_user_id": "B1", "scope": "channels:read",
+                                      "team": {"id": "T1", "name": "Meridian"}})
+    monkeypatch.setattr(conn_route.slack_oauth, "fetch_auth_test",
+                        lambda tok: {"user": "sprntly"})
+    monkeypatch.setattr(conn_route.slack_oauth, "token_payload_to_store",
+                        lambda tj: "{}")
+    monkeypatch.setattr(conn_route, "encrypt_token_json", lambda payload: "enc")
+    monkeypatch.setattr(conn_route.db, "upsert_slack_connection",
+                        lambda **kw: {"id": "c1"})
+
+
+def test_slack_callback_kicks_off_company_corpus_sync(isolated_settings, monkeypatch):
+    """Connecting Slack must populate the KG now, not on the next 6-hourly
+    scheduler pass.
+
+    Slack has no kg_ingest puller, so the callback's kickoff is the
+    company-level corpus sync (sync_slack → corpus → seed), called with the
+    company_id off the signed state — never a per-user variant, matching
+    scheduler._refresh_all_company_connectors and the manual Sync route.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync",
+                        lambda cid: calls.append(cid))
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
+    assert calls == ["co-S"]
+
+
+def test_slack_callback_still_redirects_when_kickoff_raises(isolated_settings,
+                                                            monkeypatch):
+    """A kickoff failure must never break the OAuth redirect.
+
+    The connection row is already committed by the time the kickoff runs, so a
+    raise here would 500 a connect that actually succeeded — the user would see
+    an error page with Slack connected behind it. kickoff_slack_corpus_sync
+    swallows its own errors, but its lazy slack_company import sits outside that
+    guard, so the callback guards the call itself.
+    """
+    import app.main as main_mod
+    import app.routes.connectors as conn_route
+
+    _stub_slack_callback(conn_route, monkeypatch)
+
+    def _boom(_cid):
+        raise RuntimeError("slack_company import blew up")
+
+    monkeypatch.setattr(conn_route, "kickoff_slack_corpus_sync", _boom)
+
+    client = TestClient(main_mod.app, follow_redirects=False)
+    r = client.get("/v1/connectors/slack/callback?code=abc&state=signed")
+    assert r.status_code in (302, 307)
+    assert "connected=slack" in r.headers["location"]
 
 
 # ---------- status endpoint ----------

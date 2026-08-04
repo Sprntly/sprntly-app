@@ -357,3 +357,106 @@ def test_picker_token_not_connected_returns_404(google_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.get("/v1/connectors/google-drive/picker-token")
     assert r.status_code == 404
+
+
+def test_picker_token_app_id_derived_from_client_id_project_prefix(
+    google_env, monkeypatch
+):
+    # google_env defaults GOOGLE_CLIENT_ID to "test-client-id", which isn't
+    # shaped like a real OAuth client id and wouldn't exercise the
+    # project-number-prefix split. Override it here with a realistically
+    # shaped id and reload the same chain the fixture itself reloads.
+    monkeypatch.setenv(
+        "GOOGLE_CLIENT_ID",
+        "393002598266-abc.apps.googleusercontent.com",
+    )
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.google_oauth",
+        "app.routes.connectors",
+    ):
+        importlib.reload(sys.modules[name])
+
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    from datetime import datetime, timedelta, timezone
+
+    import app.routes.connectors as routes_mod
+
+    fake_creds = MagicMock()
+    fake_creds.token = "ya29.fresh-access-token"
+    fake_creds.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=1800
+    )
+
+    with patch.object(routes_mod, "_refresh_credentials", return_value=fake_creds):
+        r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["app_id"] == "393002598266"
+    assert body["access_token"] == "ya29.fresh-access-token"
+
+
+def test_picker_token_app_id_empty_when_client_id_unset(google_env, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "")
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.google_oauth",
+        "app.routes.connectors",
+    ):
+        importlib.reload(sys.modules[name])
+
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    from datetime import datetime, timedelta, timezone
+
+    import app.routes.connectors as routes_mod
+
+    fake_creds = MagicMock()
+    fake_creds.token = "ya29.fresh-access-token"
+    fake_creds.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=1800
+    )
+
+    with patch.object(routes_mod, "_refresh_credentials", return_value=fake_creds):
+        r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["app_id"] == ""
+    assert body["access_token"] == "ya29.fresh-access-token"
+
+
+def test_picker_token_app_id_empty_when_client_id_malformed(google_env, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "noHyphenClientId")
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.google_oauth",
+        "app.routes.connectors",
+    ):
+        importlib.reload(sys.modules[name])
+
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    from datetime import datetime, timedelta, timezone
+
+    import app.routes.connectors as routes_mod
+
+    fake_creds = MagicMock()
+    fake_creds.token = "ya29.fresh-access-token"
+    fake_creds.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=1800
+    )
+
+    with patch.object(routes_mod, "_refresh_credentials", return_value=fake_creds):
+        r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["app_id"] == ""

@@ -156,6 +156,36 @@ def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
     assert rows[0]["score"] >= rows[1]["score"]
 
 
+def test_sequence_prioritize_call_is_registered_long_output(facade, isolated_settings):
+    """PRIORITIZE_POOL (60) themes can batch into a single large json_schema
+    call — on a first-run/high-volume tenant this tripped the gateway's
+    default 120s non-streamed httpx.ReadTimeout 3x live on staging in one
+    session (2026-08-01), same failure mode `_LONG_OUTPUT_SKILLS` exists to
+    prevent for prd-author/implementation-spec/evidence-brief. Pins both that
+    sequence_ideation's llm_call is bound to PRIORITIZE_SKILL and that the
+    skill is on the long-output allowlist, so a future edit dropping either
+    silently reintroduces the timeout instead of failing CI."""
+    from app.graph.gateway import _LONG_OUTPUT_SKILLS
+    from app.synthesis import ideation as bl
+
+    _seed_company(isolated_settings["supabase"], "ent-A")
+    theme = _seed_theme_with_signals(facade, "ent-A", "solo", [
+        ("revenue", "deal_blocker", {}, 0),
+    ])
+
+    captured: dict = {}
+
+    def fake_llm_call(**kw):
+        captured.update(kw)
+        return _llm_result(_triage_for(theme.id))
+
+    with patch.object(bl, "llm_call", fake_llm_call):
+        bl.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
+
+    assert captured.get("skill") == bl.PRIORITIZE_SKILL
+    assert bl.PRIORITIZE_SKILL in _LONG_OUTPUT_SKILLS  # → gateway streams it
+
+
 # ─────────────────────────── dedup (_drop_duplicates unit) ───────────────────────
 
 class _Cand:
@@ -446,12 +476,43 @@ def test_sequence_binds_backlog_triage_skill(facade, isolated_settings):
     assert captured["purpose"] == "sequence_ideation"
 
 
-def test_ideation_prioritize_skill_is_vendored():
-    from app.skills.loader import get_skill
-    spec = get_skill("ideation-prioritize")
-    assert spec.id == "ideation-prioritize"
-    assert "Ideation Prioritize" in spec.method
-    assert spec.content_hash   # fingerprinted
+def test_ideation_prioritize_binding_survives_the_skill_being_unvendored():
+    """`ideation-prioritize` is no longer vendored, and the pipeline must still
+    RUN — method-less, not raising.
+
+    This asserted the skill loaded off disk (`get_skill(...).method` contained
+    "Ideation Prioritize"). It was one of ~78 chat-routable methods and is not
+    on the nine-skill keep-list, so its directory is gone. What it was really
+    protecting is upstream of the file: that `sequence_ideation`'s
+    `skill=PRIORITIZE_SKILL` binding resolves to something rather than blowing
+    up. `synthesis/ideation.py` still carries that binding — the test directly
+    above pins it — and `gateway._build_method_prefix` answers a missing
+    directory with an empty method block plus a `+bare` version suffix.
+
+    So the ranking is model-shaped rather than method-shaped now (the accepted
+    degradation), and the failure mode that would NOT be acceptable — a 500 on
+    every ideation sequence — is what this asserts against.
+    """
+    from app.graph.gateway import _build_method_prefix
+    from app.skills.loader import UnknownSkillError, get_skill, list_skills
+    from app.synthesis.ideation import PRIORITIZE_SKILL
+
+    assert PRIORITIZE_SKILL == "ideation-prioritize"
+    assert PRIORITIZE_SKILL not in list_skills()
+
+    # The loader still raises — that is deliberate, and scoped to the loader.
+    try:
+        get_skill(PRIORITIZE_SKILL)
+    except UnknownSkillError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected UnknownSkillError from the loader")
+
+    # ...and the gateway, which is what the pipeline actually goes through,
+    # degrades instead.
+    block, suffix = _build_method_prefix(PRIORITIZE_SKILL, None)
+    assert block == ""
+    assert suffix == "+bare"
 
 
 # ─────────────────────── synthesis hook (resilience) ───────────────────────
@@ -700,6 +761,171 @@ def test_patch_ideation_tenant_isolation(isolated_settings, _override_company):
     # The other tenant's item is untouched.
     row = db.table("ideation_items").select("*").eq("id", other_item).execute().data[0]
     assert row["status"] == "proposed"
+
+
+# ────────── decision chain: Artifact -REALIZES-> Outcome -VALIDATES-> Hypothesis ──────────
+# Trigger: an idea moving to status='done' (PATCH /v1/ideation/{id}).
+
+
+def _seed_hypothesis_decision_artifact(facade, cid, *, theme_label, insight_title):
+    """Seed theme + hypothesis (ADDRESSES edge) + decision (PROMOTED_TO) +
+    artifact (RESULTED_IN) — the state Generate PRD (triggers 1+2) would have
+    already produced by the time an idea reaches status='done'."""
+    from app.graph.decision_chain import (
+        create_artifact_from_decision,
+        promote_hypothesis_to_decision,
+    )
+    from app.graph.types import Entity, Relationship
+
+    theme = Entity(enterprise_id=cid, type="theme", canonical_label=theme_label)
+    facade.create_entity(cid, theme)
+    hyp = Entity(
+        enterprise_id=cid, type="hypothesis", canonical_label=insight_title[:200],
+        properties={"claim": "ship it", "tag": "something_new", "theme_id": theme.id},
+    )
+    facade.create_entity(cid, hyp)
+    facade.write_relationship(cid, Relationship(
+        enterprise_id=cid, type="ADDRESSES", source_kind="entity",
+        source_id=hyp.id, target_kind="entity", target_id=theme.id))
+    decision = promote_hypothesis_to_decision(facade, cid, hyp.id, label=insight_title)
+    artifact = create_artifact_from_decision(facade, cid, decision.id, label=insight_title)
+    return theme, hyp, decision, artifact
+
+
+def test_patch_ideation_done_writes_artifact_to_outcome_chain(
+    isolated_settings, _override_company, facade,
+):
+    """Marking an idea 'done' whose theme resolves to a hypothesis that
+    already has a decision/artifact (i.e. its PRD was generated) creates an
+    `outcome` Entity + REALIZES edge from the artifact, and a VALIDATES edge
+    back to the originating hypothesis with `actual_impact=None` (no live
+    analytics connector — the ticket's manual/PM-annotatable path)."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Checkout broken", insight_title="Fix checkout")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "Fix checkout"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    realized = facade.edges_from(cid, artifact.id, type="REALIZES")
+    assert len(realized) == 1
+    assert realized[0].source_kind == "entity" and realized[0].source_id == artifact.id
+    outcome = facade.get_entity(cid, realized[0].target_id)
+    assert outcome is not None
+    assert outcome.type == "outcome"
+    assert outcome.properties["artifact_id"] == artifact.id
+    assert outcome.properties.get("actual_impact") is None
+
+    validates = facade.edges_from(cid, outcome.id, type="VALIDATES")
+    assert len(validates) == 1
+    assert validates[0].source_id == outcome.id
+    assert validates[0].target_id == hyp.id
+
+
+def test_patch_ideation_done_without_prd_writes_no_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """An idea marked 'done' whose hypothesis never had a PRD generated (no
+    decision/artifact in the chain) has nothing to link an outcome to — the
+    write is skipped, not an error, and the status update still succeeds."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.graph.types import Entity, Relationship
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme = Entity(enterprise_id=cid, type="theme", canonical_label="No PRD yet")
+    facade.create_entity(cid, theme)
+    hyp = Entity(
+        enterprise_id=cid, type="hypothesis", canonical_label="No PRD yet",
+        properties={"theme_id": theme.id},
+    )
+    facade.create_entity(cid, hyp)
+    facade.write_relationship(cid, Relationship(
+        enterprise_id=cid, type="ADDRESSES", source_kind="entity",
+        source_id=hyp.id, target_kind="entity", target_id=theme.id))
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "No PRD yet"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    assert db.table("kg_entity").select("id").eq("enterprise_id", cid) \
+        .eq("type", "outcome").execute().data == []
+
+
+def test_patch_ideation_done_twice_does_not_duplicate_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """The trigger only fires on the ACTUAL transition into 'done' — a
+    re-PATCH of an already-'done' item must not write a duplicate
+    outcome/edge pair."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Onboarding slow", insight_title="Fix onboarding")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="in_progress")
+    db.table("ideation_items").update({"title": "Fix onboarding"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    assert client.patch(f"/v1/ideation/{iid}", json={"status": "done"}).status_code == 200
+    assert client.patch(f"/v1/ideation/{iid}", json={"status": "done"}).status_code == 200
+
+    assert len(facade.edges_from(cid, artifact.id, type="REALIZES")) == 1
+
+
+def test_patch_ideation_in_progress_does_not_trigger_outcome(
+    isolated_settings, _override_company, facade,
+):
+    """Only a transition INTO 'done' fires the chain — 'in_progress' must not."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    theme, hyp, decision, artifact = _seed_hypothesis_decision_artifact(
+        facade, cid, theme_label="Search slow", insight_title="Fix search")
+    iid = _seed_item(db, cid, theme.id, rank=1, score=0.9, status="proposed")
+    db.table("ideation_items").update({"title": "Fix search"}).eq("id", iid).execute()
+
+    client = TestClient(main_mod.app)
+    r = client.patch(f"/v1/ideation/{iid}", json={"status": "in_progress"})
+    assert r.status_code == 200, r.text
+
+    assert facade.edges_from(cid, artifact.id, type="REALIZES") == []
+
+
+def test_patch_ideation_done_manual_item_skips_chain(
+    isolated_settings, _override_company, facade,
+):
+    """A manual "+ Add idea" item has no KG theme behind it (synthetic
+    ``manual:`` theme_id) — marking it done must not attempt (and fail) a KG
+    walk; it's skipped like the detail-popup's evidence trail is."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.db.ideation import create_manual_ideation_item
+
+    cid = _override_company
+    client = TestClient(main_mod.app)
+    created = create_manual_ideation_item(cid, title="Manual idea")
+
+    r = client.patch(f"/v1/ideation/{created['id']}", json={"status": "done"})
+    assert r.status_code == 200, r.text
+
+    db = isolated_settings["supabase"]
+    assert db.table("kg_entity").select("id").eq("enterprise_id", cid) \
+        .eq("type", "outcome").execute().data == []
 
 
 # ─────────────────── replace-not-append (prune stale) ───────────────────

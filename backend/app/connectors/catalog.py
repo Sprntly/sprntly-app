@@ -31,6 +31,12 @@ CRM = "crm"
 CODE = "code"
 MONITORING = "monitoring"
 DESIGN = "design"
+#: User research: interview/usability repositories and the research artifacts a
+#: team uploads by hand (transcripts, study readouts, survey results). Distinct
+#: from CUSTOMER_VOICE (inbound, unsolicited — tickets, reviews, NPS) and from
+#: MEETINGS (sales/CSM call recordings): research is deliberately gathered
+#: evidence about users, so it is evidence-bearing like both of those.
+RESEARCH = "research"
 
 #: provider → its types (see cardinality note above).
 #: Covers every provider the backend has an auth module or puller for, plus
@@ -54,6 +60,11 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     # Documentation
     "google_drive": [DOCUMENTS],
     "notion": [DOCUMENTS],
+    # A team wiki: specs, decision records, runbooks, handbooks. Typed
+    # `documents` like Notion/Drive and NOT an evidence exception — a page
+    # asserting a customer problem is the author's claim about it, not
+    # measured proof, so Confluence alone must not open the brief gate.
+    "confluence": [DOCUMENTS],
     # The user's OWN documents, uploaded into a named source. A documentation
     # tool by type, but an evidence source by intent — see the exceptions below.
     "uploads": [DOCUMENTS],
@@ -63,10 +74,18 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "fireflies": [MEETINGS],
     "gong": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
-    # Research repository (heymarvin.com) — interview/survey studies and the
-    # team's synthesized insight reports. Evidence about what customers said,
-    # so it sits in the Voice of Customer shelf alongside Dovetail.
-    "marvin": [CUSTOMER_VOICE],
+    # Research
+    # Marvin (heymarvin.com) is a user-research repository (interviews,
+    # usability sessions, study readouts) and anchors the Research category.
+    # It is now wired end to end — OAuth 2.1 over its MCP server, plus a
+    # puller — so it is no longer "Coming soon"; the classification it was
+    # given up-front (2026-08-02) is unchanged. RESEARCH is deliberately
+    # absent from NON_EVIDENCE_TYPES, so is_evidence_provider("marvin") is
+    # True and its studies still open the brief's data-source gate — which is
+    # what the connector was built for. The KG source_type its records land on
+    # is still `customer_voice` (see kg_ingest/runner.PULLERS), the same shape
+    # research-category uploads use.
+    "marvin": [RESEARCH],
     "salesforce": [CRM],
     # Analytics
     "mixpanel": [ANALYTICS],
@@ -113,8 +132,10 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 #                    that shapes a brief, not customer/product evidence.
 #
 # Everything else (analytics, customer-voice, meetings, crm, revenue,
-# monitoring) is evidence and can drive a brief. A multi-type provider is
-# evidence iff ANY of its types is evidence-bearing.
+# monitoring, research) is evidence and can drive a brief. A multi-type provider
+# is evidence iff ANY of its types is evidence-bearing. `research` is
+# deliberately absent from the set below: a study readout or interview
+# transcript is gathered evidence about real users, not internal documentation.
 NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
     {TASK_MANAGEMENT, CODE, DESIGN, COMMUNICATION, DOCUMENTS}
 )
@@ -190,4 +211,15 @@ EVIDENCE_UPLOAD_CATEGORIES: dict[str, tuple[str, str]] = {
     "monitoring": ("analytics",
                    "analytics (user-uploaded monitoring/reliability exports: "
                    "incident reports, error/uptime data)"),
+    # The Research category's upload strip is its PRIMARY path today (Marvin,
+    # the only connector on that shelf, is still coming-soon) — so this entry is
+    # what makes hand-uploaded research real evidence rather than a plain
+    # document drop. There is no `research` member of SIGNAL_SOURCE_TYPES (a new
+    # one would mean altering the signals CHECK constraint on live data), so
+    # research defaults to the closest KG type, `customer_voice`, and the hint
+    # carries the real context to the extractor — same shape as monitoring/crm.
+    "research": ("customer_voice",
+                 "customer_voice (user-uploaded user-research artifacts: "
+                 "interview transcripts and notes, usability test findings, "
+                 "survey results, discovery/research reports, personas)"),
 }

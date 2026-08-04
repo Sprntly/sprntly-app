@@ -1,10 +1,11 @@
 """Aggregated artifact listing for the All-Chats "Artifacts" tab.
 
-A read-only fan-out over the three generated-artifact tables — PRDs, prototypes,
-and evidence — unified into one recency-sorted list for a single company.
+A read-only fan-out over the four generated-artifact tables — PRDs, prototypes,
+evidence, and reports — unified into one recency-sorted list for a single
+company.
 
-Tenant scoping is split because the two surfaces key off the tenant
-differently (verified against the existing queries):
+Tenant scoping is split because the surfaces key off the tenant differently
+(verified against the existing queries):
 
   - PRDs / evidences are scoped by the BRIEF's `dataset` slug:
     briefs.dataset = <company slug>  →  briefs.id  →  prds/evidences.brief_id.
@@ -15,12 +16,17 @@ differently (verified against the existing queries):
     (`workspace_id = company.company_id`) and db/prototypes.py. So prototypes
     are filtered by the company UUID, NOT the slug.
 
-The route passes BOTH (the slug for PRDs/evidence, the UUID for prototypes) so
-each surface is scoped the way its own writers scoped it. Joins are done in
-Python (fetch brief ids for the dataset → prds/evidences by brief_id IN (...);
-prototypes by workspace_id; then map prd_id → title for prototype titles)
-because the PostgREST client makes multi-table SQL joins awkward — the same
-in-code-join posture db/prds.latest_prd_for_dataset already uses.
+  - Reports are scoped by `company_id` (the company UUID) — captured that way by
+    app/report_capture.py so every workspace in a company shares one report
+    library (the db/custom_skills.py posture).
+
+The route passes BOTH (the slug for PRDs/evidence, the UUID for prototypes and
+reports) so each surface is scoped the way its own writers scoped it. Joins are
+done in Python (fetch brief ids for the dataset → prds/evidences by brief_id IN
+(...); prototypes and reports by the company UUID; then map prd_id → title for
+prototype titles and report attachments, and conversation_id → title for report
+attachments) because the PostgREST client makes multi-table SQL joins awkward —
+the same in-code-join posture db/prds.latest_prd_for_dataset already uses.
 """
 from __future__ import annotations
 
@@ -60,6 +66,20 @@ def _prd_family_key(row: dict) -> tuple:
     if row.get("source") == "upload":
         return (row["brief_id"], "upload", row["id"])
     return (row["brief_id"], "insight", row.get("insight_index"))
+
+
+def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
+    """prd_id → title for the ids given (empty dict for an empty list).
+
+    Shared by the prototype rows (a prototype has no title of its own) and the
+    report rows (a report attached to a PRD names it in its source line).
+    """
+    if not prd_ids:
+        return {}
+    rows = (
+        c.table("prds").select("id, title").in_("id", prd_ids).execute().data or []
+    )
+    return {r["id"]: r.get("title") for r in rows}
 
 
 @retry_on_disconnect
@@ -180,17 +200,7 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     )
     if proto_rows:
         prd_ids = sorted({r["prd_id"] for r in proto_rows if r.get("prd_id") is not None})
-        prd_title_by_id: dict[int, str] = {}
-        if prd_ids:
-            title_rows = (
-                c.table("prds")
-                .select("id, title")
-                .in_("id", prd_ids)
-                .execute()
-                .data
-                or []
-            )
-            prd_title_by_id = {r["id"]: r.get("title") for r in title_rows}
+        prd_title_by_id = _prd_titles(c, prd_ids)
         for r in proto_rows:
             pid = r.get("prd_id")
             prd_title = prd_title_by_id.get(pid) or "Untitled PRD"
@@ -214,6 +224,76 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                     "prototype_id": r["id"],
                     "prd_id": pid,
                 },
+            })
+
+    # ── Reports (company_id = company UUID). The captured HTML documents from
+    #    the report skills — see app/report_capture.py. `html` is deliberately
+    #    NOT selected: a listing must not carry N full documents, so the viewer
+    #    fetches the body by id (GET /v1/reports/{id}).
+    #
+    #    A report has no lifecycle — capture happens after the answer is complete
+    #    — so `status` is always empty rather than a state the UI must interpret.
+    report_rows = (
+        c.table("reports")
+        .select(
+            "id, skill, title, question, created_at, conversation_id, prd_id, "
+            "share_mode"
+        )
+        .eq("company_id", company_id)
+        .order("id", desc=True)
+        .limit(_LIST_CAP)
+        .execute()
+        .data
+        or []
+    )
+    if report_rows:
+        # The ATTACHMENT's human names: the chat room and/or PRD each report was
+        # generated in (report_capture.py copies both from the originating ask).
+        # A missing id means the report stands alone; a present id with no row
+        # means the chat/PRD was deleted (`on delete set null` fires, so this is
+        # the transient in-flight case) and the label degrades to nothing rather
+        # than inventing one.
+        rep_prd_titles = _prd_titles(
+            c, sorted({r["prd_id"] for r in report_rows if r.get("prd_id") is not None})
+        )
+        convo_ids = sorted(
+            {r["conversation_id"] for r in report_rows if r.get("conversation_id") is not None}
+        )
+        convo_title_by_id: dict[int, str] = {}
+        if convo_ids:
+            convo_rows = (
+                c.table("conversations")
+                .select("id, title")
+                .in_("id", convo_ids)
+                .execute()
+                .data
+                or []
+            )
+            convo_title_by_id = {r["id"]: r.get("title") for r in convo_rows}
+        for r in report_rows:
+            cid, pid = r.get("conversation_id"), r.get("prd_id")
+            items.append({
+                "type": "report",
+                "id": r["id"],
+                "title": r.get("title") or "Untitled report",
+                "status": "",
+                "created_at": r.get("created_at"),
+                # The report KIND (skill id, e.g. 'voice-of-customer-report').
+                # The row's badge sub-label and what a per-kind filter keys off.
+                "skill": r.get("skill") or "",
+                # Whether a link exists for this report, so the row can mark
+                # itself shared. The TOKEN is deliberately not in the listing —
+                # only the share dialog fetches it.
+                "share_mode": r.get("share_mode") or "private",
+                "source": {
+                    "skill": r.get("skill") or "",
+                    "question": r.get("question") or "",
+                    "conversation_id": cid,
+                    "conversation_title": convo_title_by_id.get(cid) if cid else None,
+                    "prd_id": pid,
+                    "prd_title": rep_prd_titles.get(pid) if pid else None,
+                },
+                "open": {"report_id": r["id"]},
             })
 
     # Recency sort (newest first). created_at is an ISO-8601 string; lexical

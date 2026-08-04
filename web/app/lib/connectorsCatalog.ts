@@ -13,10 +13,26 @@ import type { ConnectorCategoryRow, ConnectorItemRow, ConnectorType } from "../t
 import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 // Category order follows the v6 onboarding screenshot spec (2026-07-17):
-// Analytics → Voice → CRM → Project Management → Monitoring → Design →
-// Codebase → Communications, with the settings-only extras (docs, revenue)
-// appended. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
-// (lib/onboarding/connectorsWizard.ts).
+// Analytics → Voice → Research → CRM → Project Management → Monitoring →
+// Design → Codebase → Communications, with Company documentation and the
+// settings-only Revenue appended. Research was added 2026-08-02 and sits
+// next to Voice because both carry what users told us — Voice unsolicited,
+// Research deliberately gathered. The onboarding wizard shows only
+// ONBOARDING_CONNECTOR_CATEGORIES (lib/onboarding/connectorsWizard.ts);
+// Company documentation joined that list 2026-08-03, so Revenue is now the
+// only settings-only category.
+
+/**
+ * Provider id of the "upload your own documents" connector — the user's own
+ * named document sources rather than a third-party integration.
+ *
+ * Lives here (not in ConnectorsSettings, where it used to) because the
+ * onboarding wizard needs it too, and a pure catalog module must not import a
+ * settings screen. Both surfaces exclude it from their connector grids: it has
+ * no auth flow to open, only the "Add a document source" picker that Settings
+ * renders and onboarding does not.
+ */
+export const UPLOADS_PROVIDER_ID = "uploads"
 
 // Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
 // communication tool (brief delivery target) AND a customer-voice source —
@@ -66,19 +82,6 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
       { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
-      // Research repository. Reads run over Marvin's MCP server (they publish
-      // no REST API), and their US and EU installs are separate deployments
-      // with separate authorization servers — hence `regions`, which makes
-      // Connect ask before redirecting. No bundled SVG mark yet, so it keeps
-      // the brand-color letter glyph.
-      {
-        id: "marvin", name: "Marvin", logo: "M", logoText: "M",
-        logoColor: "#5B4BE1", oauth: true, types: ["customer-voice"],
-        regions: [
-          { value: "us", label: "US / Global" },
-          { value: "eu", label: "EU" },
-        ],
-      },
       { id: "app_store",  name: "App Store",  logo: "A", logoText: "A", logoColor: "#0D96F6", oauth: false, types: ["customer-voice"] },
       { id: "play_store", name: "Play Store", logo: "P", logoText: "P", logoColor: "#01875F", oauth: false, types: ["customer-voice"] },
       // No bundled SVG mark yet — brand-color letter glyph like Fireflies.
@@ -90,6 +93,39 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // Dual-typed communication + customer-voice — the same item also sits
       // in the Communications category (see SLACK_ITEM above).
       SLACK_ITEM,
+    ],
+  },
+  {
+    // User research — what the team deliberately went out and learned, as
+    // opposed to the unsolicited signal on the Voice shelf above. The shelf is
+    // served by both its upload strip and, since Marvin was wired, a real
+    // connector. `keepWhenEmpty` is retained deliberately: it is what stopped
+    // connectableCatalog() dropping the category while Marvin was coming-soon,
+    // and it keeps the upload strip reachable if Marvin is ever gated off
+    // again. Evidence-bearing — deliberately absent from
+    // NON_EVIDENCE_CATEGORIES, and mirrored by the backend's
+    // EVIDENCE_UPLOAD_CATEGORIES["research"] so an uploaded transcript is
+    // extracted as customer_voice with a research source hint rather than as a
+    // plain company document.
+    key: "research",
+    title: "Research",
+    keepWhenEmpty: true,
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      // Reads run over Marvin's MCP server (they publish no REST API), and
+      // their US and EU installs are separate deployments with separate
+      // authorization servers — hence `regions`, which makes Connect ask
+      // before redirecting. Brand-color letter glyph; there is no bundled SVG
+      // mark for Marvin.
+      {
+        id: "marvin", name: "Marvin", logo: "M", logoText: "M",
+        logoColor: "#6C5CE7", oauth: true, types: ["research"],
+        regions: [
+          { value: "us", label: "US / Global" },
+          { value: "eu", label: "EU" },
+        ],
+      },
     ],
   },
   {
@@ -188,8 +224,13 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     // in NON_EVIDENCE_CATEGORIES (Notion / Google Docs are context, not
     // customer/product evidence on their own), while the `uploads` provider is
     // an explicit evidence exception (see EVIDENCE_PROVIDER_EXCEPTIONS) —
-    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS. Settings-only (not an
-    // onboarding wizard category since v6).
+    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS.
+    //
+    // An onboarding wizard category again since 2026-08-03: Confluence and
+    // Google Docs are both OAuth-wired, and a PM's wiki is the richest product
+    // context we can read on day one, so asking for it during onboarding beats
+    // waiting for them to find Settings. The `uploads` provider is excluded
+    // there (see wizardCategories) — same reason Settings excludes it.
     key: "docs",
     title: "Company documentation",
     // One upload path only: the named-source picker ("Add a document source",
@@ -199,12 +240,13 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "uploads",      name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
+      { id: UPLOADS_PROVIDER_ID, name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
       { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
+      { id: "confluence",   name: "Confluence", logo: "C", logoText: "C", logoColor: "#172B4D", logoSvg: "/connectors/confluence.svg", oauth: true, types: ["documents"] },
     ],
   },
   {
@@ -273,6 +315,10 @@ export function isConnectableConnector(item: ConnectorItemRow): boolean {
  * Providers in `alsoKeepIds` — e.g. any with a live connection — are never
  * hidden even if not yet OAuth/API-key wired; a category kept alive by such a
  * provider is therefore retained too.
+ *
+ * A category flagged `keepWhenEmpty` survives with zero connectors: Research's
+ * feature IS its upload strip, so dropping the shelf for having no wired
+ * connector would remove the only way to give us research at all.
  */
 export function connectableCatalog(
   alsoKeepIds: ReadonlySet<string> = new Set(),
@@ -282,7 +328,7 @@ export function connectableCatalog(
     items: cat.items.filter(
       (i) => isConnectableConnector(i) || alsoKeepIds.has(i.id),
     ),
-  })).filter((cat) => cat.items.length > 0)
+  })).filter((cat) => cat.items.length > 0 || cat.keepWhenEmpty === true)
 }
 
 // ── Information-gathering connectors ─────────────────────────────────────────
@@ -306,8 +352,11 @@ export function connectableCatalog(
 //   docs   Notion / Google Docs — internal documentation; context that shapes
 //                           a brief, not customer/product evidence on its own.
 //
-// Everything else (analytics, voice = support/calls/feedback, crm, monitoring,
-// revenue) is a data source and feeds the brief. Defined as a deny-list
+// Everything else (analytics, voice = support/calls/feedback, research, crm,
+// monitoring, revenue) is a data source and feeds the brief. Research is
+// deliberately NOT listed above: a study readout or interview transcript is
+// gathered evidence about real users, so an uploaded research file alone can
+// open the brief's data-source gate. Defined as a deny-list
 // of category keys rather than an allow-list so a new evidence category added
 // to CONNECTOR_CATALOG counts automatically. Note this is CATEGORY-based, so
 // Intercom (category `voice`, though its type is `communication`) correctly
@@ -396,6 +445,7 @@ export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
   code: "Code",
   monitoring: "Monitoring",
   design: "Design",
+  research: "Research",
 }
 
 const ALL_ITEMS: ConnectorItemRow[] = CONNECTOR_CATALOG.flatMap((c) => c.items)

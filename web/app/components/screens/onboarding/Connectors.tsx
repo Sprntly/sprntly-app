@@ -52,8 +52,13 @@ import {
  * Reviewed categories stay re-openable. Categories + connectors come from
  * CONNECTOR_CATALOG so this page tracks Settings automatically (the design
  * kit's hardcoded grid is NOT the source of truth) — which is why the counter
- * says "of M", not "of 8": wizardCategories hides any category with no
- * connectable provider.
+ * says "of M" rather than a literal: wizardCategories hides any category with
+ * no connectable provider, so the total moves as connectors get wired.
+ *
+ * Company documentation is the last category (added 2026-08-03) — Confluence
+ * and Google Docs. It is the one category with no upload strip AND no
+ * onboarding-side upload alternative: its named-source picker ("Add a document
+ * source") is a Settings-only surface, so here it is connectors only.
  *
  * Every connector is OPTIONAL: leaving is never gated on having a live
  * connection, and a reviewed category reads "Connected" whether or not
@@ -79,6 +84,7 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   pm: "Roadmap, sprints, capacity",
   docs: "Specs, docs & wikis — product context the agent can read",
   voice: "Tickets, transcripts, reviews, NPS, CSAT",
+  research: "Interviews, usability studies, surveys — upload what you already have",
   crm: "Accounts, pipeline, lifecycle & revenue signals",
   revenue: "Billing & subscription data — ties work to revenue",
   code: "Repos & PRs — so the agent reads real code and ships fixes",
@@ -122,6 +128,15 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
   voice: (p) => (
     <svg {...iconProps(p)}>
       <path d="M3 20l1.3-3.9A8 8 0 1 1 7.9 19z" />
+    </svg>
+  ),
+  // Magnifier over a document — research, not the speech bubble Voice uses.
+  research: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M19 12V8l-5-5H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+      <circle cx="16.5" cy="17.5" r="3.5" />
+      <path d="M21 22l-2-2" />
     </svg>
   ),
   crm: (p) => (

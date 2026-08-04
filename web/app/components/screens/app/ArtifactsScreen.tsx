@@ -12,7 +12,9 @@ import {
   type ArtifactItem,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
+import { evidenceOpenScopePatch } from "../../../lib/panelPrdScope"
 import { prototypePath } from "../../../lib/routes"
+import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
@@ -23,19 +25,31 @@ import { EmptyPane } from "../../shared/EmptyPane"
 // History holds only chats and Artifacts is the browsable library of durable
 // outputs (PRDs, prototypes, evidence).
 
-type ArtifactFilter = "all" | "prd" | "prototype" | "evidence"
+type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report"
 
 const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "all", label: "All" },
+  { id: "report", label: "Reports" },
   { id: "prd", label: "PRDs" },
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
 ]
 
+// The "+ New report" picker is GONE, not hidden. It was already dark behind
+// `SHOW_NEW_REPORT_BUTTON = false` — reports are asked for in chat, where the
+// answer and the document live together — and the fixed report FORMATS it
+// picked between (Voice of Customer / Competitor Analysis / Public Feedback,
+// server-listed by the deleted `GET /v1/reports/kinds`) no longer exist. There
+// is nothing left for a picker to pick, so nothing user-facing changed here.
+// Browsing and opening captured reports is untouched: the "Reports" filter, the
+// REPORT badge, and `reportKindLabel` all still work on rows already in the
+// library.
+
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
   prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
   prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence:  { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
+  report:    { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
 }
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
@@ -75,6 +89,20 @@ function artifactSourceLine(a: ArtifactItem): string {
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
+  if (a.type === "report") {
+    // A report's provenance is its ATTACHMENT: the chat room and/or PRD it was
+    // generated in. Each part appears only when that attachment exists AND its
+    // title resolved — a deleted chat/PRD leaves the id but no name, and an
+    // unattached report simply reads as its kind. Never a fabricated label.
+    const parts = [`${reportKindLabel(a.skill)} report`]
+    if (a.source.conversation_title) parts.push(`from ${a.source.conversation_title}`)
+    if (a.source.prd_title) parts.push(`on PRD ${a.source.prd_title}`)
+    // A live share link is worth seeing without opening the report — this
+    // document is reachable by anyone holding the URL.
+    if (a.share_mode !== "private") parts.push("Shared")
+    if (rel) parts.push(rel)
+    return parts.join(" · ")
+  }
   // prd | evidence
   const week = a.source.week_label || "brief"
   const parts = [`from Brief ${week}`]
@@ -103,6 +131,20 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
       <div style={wrap}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      </div>
+    )
+  }
+  if (type === "report") {
+    // A bar-chart glyph: these documents lead with charts and sized themes,
+    // which is what distinguishes them from the text-document PRD icon.
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <line x1="4" y1="20" x2="20" y2="20" />
+          <rect x="6" y="11" width="3.4" height="6" rx="1" />
+          <rect x="11.4" y="7" width="3.4" height="10" rx="1" />
+          <rect x="16.8" y="13" width="3.4" height="4" rx="1" />
         </svg>
       </div>
     )
@@ -254,7 +296,7 @@ export function ArtifactsView({
       {!loading && filtered.length === 0 && (
         <EmptyPane
           title="No artifacts yet"
-          hint="Upload a PRD, or generate a PRD, prototype, or evidence from a brief finding."
+          hint="Upload a PRD, generate a PRD, prototype, or evidence from a brief finding, or ask for a report in chat."
           placeholders={2}
         />
       )}
@@ -325,7 +367,7 @@ export function ArtifactsView({
 // ── Screen ──
 
 export function ArtifactsScreen() {
-  const { openContentPanel, openPrdTab, showToast, contentPanelTab } = useNavigation()
+  const { openContentPanel, openPrdTab, openReportTab, showToast, contentPanelTab } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
   const router = useRouter()
@@ -366,6 +408,10 @@ export function ArtifactsScreen() {
   //  - prd      → openPrdTab (kind:"load") — a chat tab + the PRD panel over
   //               it, exactly like the brief's "View PRD" (never a bare panel
   //               floating over the artifacts list)
+  //  - report   → the chat thread it was generated in + the panel's Reports tab
+  //               on that document (openReportTab). Every artifact opens over
+  //               its thread; only a report with no surviving chat falls back to
+  //               the standalone drawer.
   //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
   //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
   //
@@ -374,6 +420,13 @@ export function ArtifactsScreen() {
   // it in — the click never sits silent while the network round-trip runs.
   const openArtifact = useCallback(async (a: ArtifactItem) => {
     try {
+      // Opening anything that ISN'T a report retires the standalone-report
+      // pointer. It is the panel's reason to keep showing a Reports tab, so left
+      // set it followed the reader onto the next artifact — a Reports tab over an
+      // evidence document, still pointing at the report they had finished with.
+      if (a.type !== "report") {
+        setContent({ reportFocusId: null, reportFocusStandalone: false })
+      }
       if (a.type === "prd") {
         // ChatScreen consumes the request: spawns the chat tab, loads the PRD
         // by id (with its own loading state), and slides the panel open.
@@ -389,12 +442,65 @@ export function ArtifactsScreen() {
       }
       if (a.type === "evidence") {
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ evidence: null, evidenceGenerating: true })
+        // Retires whatever PRD was cached from a previous artifact — this
+        // fetch cannot attribute the evidence document to it, so no
+        // PRD-acting control (Share, header, prototype CTA) may stay armed
+        // on it. See lib/panelPrdScope.ts.
+        setContent({ evidence: null, evidenceGenerating: true, ...evidenceOpenScopePatch() })
         openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
         // renders the loaded doc without re-generating.
-        setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
+        setContent({
+          evidence: { ...markdownToEvidenceState(rec.payload_md), question: rec.question },
+          evidenceId: rec.id,
+          evidenceGenerating: false,
+        })
+        return
+      }
+      if (a.type === "report") {
+        // A report's home is the chat it was generated in, so opening one opens
+        // THAT THREAD with the panel's Reports tab on the document — the same
+        // posture as a PRD row, and the reason the whole thread's other reports
+        // are one click away once you're there.
+        //
+        // `conversation_title` is what the resumed tab is keyed by, and a null
+        // title means the chat row is gone (`on delete set null` hasn't fired /
+        // the conversation was deleted) — there is no thread left to open, so
+        // those fall through to the standalone drawer below.
+        if (a.source.conversation_id != null && a.source.conversation_title) {
+          // The ordinary "reopen this chat" hand-off — the same payload
+          // ChatsScreen and the command palette write. ChatScreen's checkResume
+          // spawns the tab and hydrates its turns in the background.
+          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+            dbId: a.source.conversation_id,
+            title: a.source.conversation_title,
+            fallbackTurns: [],
+            prdId: a.source.prd_id ?? null,
+          }))
+          openReportTab({
+            conversationId: a.source.conversation_id,
+            reportId: a.open.report_id,
+          })
+          return
+        }
+        // An UNATTACHED report (no chat, or the chat was deleted) has no thread
+        // to open — so it reads in the SAME panel, on the same Reports tab, just
+        // without a thread's list behind it. Same posture as evidence above: the
+        // panel opens immediately and the tab fetches the document by id, so the
+        // click is never silent while it comes over the wire.
+        setActiveArtifactKey(`${a.type}-${a.id}`)
+        // `reportFocusStandalone` is what tells the Reports tab to trust this
+        // pointer despite there being no conversation to check it against. It used
+        // to infer that from `conversationId == null` — but a brand-new chat tab
+        // also has a null conversation id, so a stale pointer read as standalone
+        // and opened the previous thread's document inside an empty chat.
+        setContent({
+          conversationId: null,
+          reportFocusId: a.open.report_id,
+          reportFocusStandalone: true,
+        })
+        openContentPanel("reports")
         return
       }
       // prototype — open the in-tab canvas for its parent PRD.
@@ -405,7 +511,7 @@ export function ArtifactsScreen() {
       setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, openPrdTab, router, showToast])
+  }, [setContent, openContentPanel, openPrdTab, openReportTab, router, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning

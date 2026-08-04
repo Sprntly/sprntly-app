@@ -45,6 +45,7 @@ from app.kpi_tree import (
     load_kpi_tree,
     save_kpi_tree,
 )
+from app.kg_ingest.auto_sync import kickoff_roadmap_ingest
 from app.roadmap_doc import load_roadmap_doc, save_roadmap_doc
 from app.routes.team import _require_admin
 
@@ -148,6 +149,12 @@ async def post_roadmap_doc(
         content_type=file.content_type,
         workspace_id=company.workspace_id,
     )
+    # Push the roadmap into the knowledge graph in the background so the
+    # company's stated bets are visible to convergence / Ask / PRD evidence
+    # within seconds. Fire-and-forget: it never blocks or fails this response,
+    # and synthesis_brief.seed_incremental re-runs the same (ledger-deduped)
+    # ingest on the next brief, which is both the retry and the grandfather path.
+    kickoff_roadmap_ingest(company.company_id, company.workspace_id)
     return {
         "ok": True,
         "filename": doc.filename,

@@ -14,10 +14,16 @@
  *     only (zip content is parsed server-side), on submit
  *   - name + description: required, non-whitespace — the submit gates on them
  *     and empty-but-touched fields are highlighted (aria-invalid + field-error)
- * A name that slugifies to a built-in Sprntly skill id shows a NON-BLOCKING
- * warning (the upload replaces the built-in for the whole company — PRD 1854
- * override); the server's overrides_builtin flag on the 201 stays the
- * authoritative signal, since the client only knows the routable catalog.
+ * A name that's already taken shows a NON-BLOCKING notice as the user types:
+ *   - taken by a BUILT-IN Sprntly skill → the upload is accepted and nothing
+ *     is replaced; both skills stay invocable, so this one gets the next free
+ *     trigger (/prd-author-2). The notice previews that trigger.
+ *   - taken by one of the company's OWN custom skills → the server refuses it
+ *     with a 409, so the notice says to rename it.
+ * Both are advisory: the client only knows the ROUTABLE built-in catalog (the
+ * server also guards the non-routable ids) and its custom list can be stale,
+ * so submit stays enabled and the server's `trigger` / `name_conflict` / 409
+ * `detail` are the authoritative answers.
  * On a server rejection the modal keeps every input intact so the user fixes
  * and retries (the failure ACs across the PRD's validation tickets).
  */
@@ -59,6 +65,18 @@ export function slugifyName(name: string): string {
     .replace(/-{2,}/g, "-")
 }
 
+/** Client mirror of skills.custom.available_slug — the first free id in the
+ *  `base`, `base-2`, `base-3` series, given the ids already spoken for. Used
+ *  only to PREVIEW the trigger a colliding name will get; the server picks the
+ *  real one against the live library. */
+export function availableSlug(base: string, taken: string[]): string {
+  const used = new Set(taken)
+  if (!used.has(base)) return base
+  let n = 2
+  while (used.has(`${base}-${n}`)) n += 1
+  return `${base}-${n}`
+}
+
 /** Client-side mirror of the accepted upload formats. */
 export function skillFileError(file: File): string | null {
   const ext = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : ""
@@ -83,9 +101,11 @@ export type UploadSkillModalViewProps = {
   submitting: boolean
   /** Inline error — client pre-check or server `detail`. */
   error: string | null
-  /** Non-blocking: the typed name matches a built-in Sprntly skill, which
-   *  this upload will replace for the whole company (PRD 1854 override). */
-  overrideWarning: string | null
+  /** Non-blocking: the typed name is already taken. `blocking` marks the case
+   *  the server will refuse (the company's own library already has the name)
+   *  so it reads as an alert rather than an FYI — submit stays enabled either
+   *  way, since the server is the authority on both. */
+  nameNotice: { text: string; blocking: boolean } | null
   /** Marks empty required fields once the user has interacted with them. */
   touched: { name: boolean; description: boolean }
   onNameChange: (next: string) => void
@@ -102,7 +122,7 @@ export function UploadSkillModalView({
   file,
   submitting,
   error,
-  overrideWarning,
+  nameNotice,
   touched,
   onNameChange,
   onDescriptionChange,
@@ -166,10 +186,14 @@ export function UploadSkillModalView({
               Skill name is required.
             </p>
           ) : null}
-          {overrideWarning ? (
-            // role="status", not alert: informational — the upload proceeds.
-            <p className="settings-msg settings-warning" role="status">
-              {overrideWarning}
+          {nameNotice ? (
+            // role="status" for the FYI (the upload proceeds, it just gets its
+            // own trigger); role="alert" when the server will refuse the name.
+            <p
+              className="settings-msg settings-warning"
+              role={nameNotice.blocking ? "alert" : "status"}
+            >
+              {nameNotice.text}
             </p>
           ) : null}
 
@@ -250,15 +274,28 @@ type Props = {
   onUpload: (file: File, name: string, description: string) => Promise<void>
   onClose: () => void
   /**
-   * Built-in Sprntly skill ids, for the live "you're replacing a Sprntly
-   * skill" warning as the user types a name. The caller passes the routable
-   * catalog it already fetched; the server's overrides_builtin flag on the
-   * 201 stays authoritative (it also knows the non-routable ids).
+   * Built-in Sprntly skill ids, for the live "that name is taken" notice as
+   * the user types. The caller passes the routable catalog it already
+   * fetched; the server knows the non-routable ids too, so its 201 stays
+   * authoritative about the trigger actually assigned.
    */
   builtinSlugs?: string[]
+  /**
+   * The company's existing custom skills. `name` catches the duplicate the
+   * server 409s on (compared slugified, since that's the equivalence the
+   * server uses); `slug` keeps the previewed trigger clear of one already
+   * handed out.
+   */
+  customSkills?: { slug: string; name: string }[]
 }
 
-export function UploadSkillModal({ open, onUpload, onClose, builtinSlugs }: Props) {
+export function UploadSkillModal({
+  open,
+  onUpload,
+  onClose,
+  builtinSlugs,
+  customSkills,
+}: Props) {
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [file, setFile] = useState<File | null>(null)
@@ -305,14 +342,30 @@ export function UploadSkillModal({ open, onUpload, onClose, builtinSlugs }: Prop
     }
   }
 
-  // Live override warning: the typed name slugifies to a built-in skill id.
-  // Informational only — submit stays enabled; uploading really does replace
-  // the built-in for the whole company (PRD 1854 override).
-  const slug = slugifyName(name)
-  const overrideWarning =
-    slug && (builtinSlugs ?? []).includes(slug)
-      ? `“${name.trim()}” matches the built-in Sprntly skill /${slug}. Uploading will replace it with your skill for your whole company.`
-      : null
+  // Live "that name is taken" notice, recomputed as the user types. Two very
+  // different cases behind one message slot: the company's own library refuses
+  // a repeat (409), while a built-in's name is fine — nothing is replaced, the
+  // upload just gets the next free trigger, which we preview here.
+  const base = slugifyName(name)
+  const mine = customSkills ?? []
+  const nameNotice = !base
+    ? null
+    : mine.some((s) => slugifyName(s.name) === base)
+      ? {
+          text: `You already have a skill named “${name.trim()}”. Rename this one to upload it.`,
+          blocking: true,
+        }
+      : (builtinSlugs ?? []).includes(base)
+        ? {
+            text:
+              `“${name.trim()}” is also the name of a built-in Sprntly skill. ` +
+              `Both stay in your library — yours is invoked with /${availableSlug(base, [
+                ...(builtinSlugs ?? []),
+                ...mine.map((s) => s.slug),
+              ])}.`,
+            blocking: false,
+          }
+        : null
 
   return (
     <UploadSkillModalView
@@ -322,7 +375,7 @@ export function UploadSkillModal({ open, onUpload, onClose, builtinSlugs }: Prop
       file={file}
       submitting={submitting}
       error={error}
-      overrideWarning={overrideWarning}
+      nameNotice={nameNotice}
       touched={touched}
       onNameChange={(v) => {
         setName(v)

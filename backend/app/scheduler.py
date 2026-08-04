@@ -42,7 +42,11 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
+from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -150,6 +154,21 @@ def _refresh_all_company_connectors() -> None:
                         company_id,
                     )
                 continue
+            # Fireflies: refresh the CALL INDEX alongside the KG pull below.
+            # They fill different things — kickoff_sync writes distilled
+            # summaries into the graph, this writes the per-call metadata chat
+            # answers listings from — and only the index can answer "which
+            # calls last week" without a 168-second corpus pass. Not `continue`:
+            # fireflies IS in PULLERS, so it must still fall through to the KG
+            # kickoff below.
+            if provider == "fireflies":
+                try:
+                    kickoff_call_index_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: call-index kickoff raised for %s",
+                        company_id,
+                    )
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).
@@ -566,7 +585,13 @@ def _run_orphan_ask_job_sweep() -> None:
     failure here never affects other jobs. Also sweeps `pipeline_runs` rows
     abandoned in 'running' (a deploy restart mid-regenerate kills the owning
     task silently — same shared-Supabase age-gating rationale, see
-    db/pipeline_runs.fail_orphan_running_runs)."""
+    db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
+    abandoned the same way (a stale 'running' row there also wedges the
+    double-trigger guard, so healing it is what lets a retry through), and
+    business-context refreshes abandoned in 'generating' (companies.
+    business_context_refresh_status) the same way — a stale row there would
+    otherwise wedge the "Save Company Shape" trigger's start-guard until this
+    sweep or a restart heals it."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -584,6 +609,29 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned pipeline run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan pipeline-run sweep failed")
+    try:
+        from app.db.company_research_runs import (
+            fail_orphan_company_research_runs,
+        )
+
+        n = fail_orphan_company_research_runs()
+        if n:
+            logger.info(
+                "Failed %d abandoned company-research run(s) stuck in running", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan company-research sweep failed")
+    try:
+        from app.db.business_context_refresh import (
+            fail_orphan_business_context_refreshes,
+        )
+
+        n = fail_orphan_business_context_refreshes()
+        if n:
+            logger.info(
+                "Failed %d abandoned business-context refresh(es) stuck in "
+                "generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan business-context refresh sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -599,6 +647,31 @@ def _run_jira_personal_data_report() -> None:
         jira_personal_data.run_report_cycle()
     except Exception:  # noqa: BLE001 — compliance job must never crash the scheduler
         logger.exception("jira personal-data report cycle failed")
+
+
+def _run_extraction_eval_cycle() -> None:
+    """Extraction evals (app/graph/evals.py): sample recent extraction
+    output per skill_id, across every company, and check it against the
+    expected shape its producing skill declares. Read-only, sampled, and
+    off the request/ingestion path by construction — this job is the only
+    caller of `run_scheduled_eval_cycle` in this codebase. Fully isolated —
+    a failure here never affects other jobs; per-(company, skill) failures
+    are already isolated inside `run_scheduled_eval_cycle` itself."""
+    try:
+        from app.config import settings
+        from app.graph.evals import run_scheduled_eval_cycle
+
+        totals = run_scheduled_eval_cycle(
+            sample_size=settings.extraction_eval_sample_size
+        )
+        logger.info(
+            "extraction-eval cycle done: companies=%s skills=%s sampled=%s "
+            "findings=%s",
+            totals.get("companies"), totals.get("skills"),
+            totals.get("sampled"), totals.get("findings"),
+        )
+    except Exception:  # noqa: BLE001 — eval job must never crash the scheduler
+        logger.exception("extraction-eval cycle failed")
 
 
 def start_scheduler() -> None:
@@ -732,6 +805,19 @@ def start_scheduler() -> None:
             name=f"Ticket tracker two-way sync (every {ts_mins}m)",
             replace_existing=True,
         )
+
+    # Extraction evals: sampled structural check of recent extraction output
+    # against each vendored connector-extraction skill's declared shape
+    # contract. Read-only + sampled, own cadence decoupled from the connector
+    # refresh interval above.
+    eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+    _scheduler.add_job(
+        _run_extraction_eval_cycle,
+        trigger=IntervalTrigger(hours=eval_hours),
+        id="extraction_eval",
+        name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
+        replace_existing=True,
+    )
 
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and

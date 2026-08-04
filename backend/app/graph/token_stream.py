@@ -116,6 +116,31 @@ def delta_sink(
     return _on_delta
 
 
+def phase_sink(
+    loop: asyncio.AbstractEventLoop, channel: str
+) -> Callable[[str], None]:
+    """Build an `on_phase(label)` that publishes `{"kind":"phase","label":…}` to
+    `channel` from the worker thread.
+
+    A phase frame says which LEG of a long generation is running (the ask
+    pipeline's retrieval/writing steps, the competitive sweep's capture and
+    synthesis). It is deliberately NOT a delta: `publish` only accumulates
+    `kind == "delta"` into the replay buffer, so phases never enter the text a
+    late joiner is caught up with — a phase frame can't corrupt the answer.
+
+    The flip side, accepted rather than worked around: a client that joins
+    mid-generation (reload, remount) replays no phase at all and sees only
+    whatever leg starts NEXT. Sticky phase replay would mean re-publishing a
+    label whose leg may already be over, which is the kind of unbacked claim
+    this whole surface exists to remove; the client falls back to its generic
+    resumed copy instead. Empty labels are skipped.
+    """
+    def _on_phase(label: str) -> None:
+        if label:
+            publish_threadsafe(loop, channel, {"kind": "phase", "label": label})
+    return _on_phase
+
+
 async def subscribe(channel: str) -> AsyncIterator[dict[str, Any]]:
     """Yield frames for `channel` until a terminal (kind=done/error) frame.
 

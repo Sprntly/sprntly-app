@@ -32,11 +32,17 @@ class Settings(BaseSettings):
     design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
     # Process-wide cap on concurrent in-flight Anthropic streams; calls beyond
-    # this QUEUE instead of piling on. The default is conservative for a small
-    # box; raise it (env LLM_MAX_CONCURRENCY) on hosts with RAM headroom —
-    # measured: 6 concurrent streams used ~80 MB on the 3.8 GB prod box. Values
-    # <= 0 fall back to the default (never 0, which would deadlock).
-    llm_max_concurrency: int = 3
+    # this QUEUE instead of piling on. Raised from 3 to 6 once a real caller
+    # (competitive_intel's per-competitor capture fan-out) started dispatching
+    # several of its own calls concurrently — measured: 6 concurrent streams
+    # used ~80 MB on the 3.8 GB prod box, so 6 is not a new, untested number.
+    # This gate is shared by EVERY interactive LLM call in the app. Raise
+    # further (env LLM_MAX_CONCURRENCY) on hosts with more RAM headroom. Values
+    # <= 0 fall back to the default (never 0, which would deadlock). MUST stay
+    # in sync with app.llm._DEFAULT_MAX_CONCURRENCY, which this value shadows
+    # whenever the env var is unset (this field's own default always wins over
+    # that module constant — see app.llm._resolve_max_concurrency).
+    llm_max_concurrency: int = 6
     # How many of those slots BACKGROUND (warm / pre-generation) calls may hold
     # at once. Bounds warm parallelism while leaving (capacity - bg_cap) slots
     # interactive callers can always reach, so a user's click is never queued
@@ -191,6 +197,16 @@ class Settings(BaseSettings):
     jira_client_id: str = ""
     jira_client_secret: str = ""
     jira_oauth_redirect_uri: str = ""
+
+    # Confluence connector (Atlassian OAuth 2.0 3LO with ROTATING refresh
+    # tokens). A SEPARATE console app from Jira, not a shared one: an
+    # Atlassian 3LO integration carries exactly one callback URL, and one app
+    # declaring both products' scopes would ask a Jira-only customer to grant
+    # Confluence reads. Deliberately no fallback to the jira_* values — a
+    # silent misconfiguration there 400s on the consent screen with no clue why.
+    confluence_client_id: str = ""
+    confluence_client_secret: str = ""
+    confluence_oauth_redirect_uri: str = ""
 
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
@@ -377,6 +393,16 @@ class Settings(BaseSettings):
     # Per-company overrides in companies.notification_settings["drip"] win over
     # this (see app/drip_email.py:resolve_cadence).
     drip_cadence_days: str = ""
+    # Upper bound on a step's send window, in days: a step is only sent while
+    # day_offset <= age_days <= day_offset + grace. Past that it is recorded
+    # as "skipped" and never fires. Without this, a member older than the whole
+    # ladder receives every unsent step at once. Empty → DEFAULT_GRACE_DAYS in
+    # app/drip_email.py. Per-company overrides in
+    # companies.notification_settings["drip"]["grace_days"] win over this
+    # (see app/drip_email.py:resolve_grace_days). Kept a str (not an int) so an
+    # unparseable value falls back to the default instead of failing boot on an
+    # email path.
+    drip_grace_days: str = ""
     # How often the drip job runs. Hourly+ is fine: a step fires the first
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
@@ -416,6 +442,18 @@ class Settings(BaseSettings):
     # From: header for invite reminder emails. Empty → brief_email_from (the
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
+
+    # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
+    # check of recent extraction output per skill_id against the expected
+    # shape each vendored connector-extraction skill declares in its own
+    # references/expected-signal-shape.md. Read-only + sampled by design —
+    # never runs on a live ingestion or request path. Runs unconditionally on
+    # its own cadence.
+    extraction_eval_interval_hours: int = 24
+    # How many of an enterprise+skill's most recent signals one eval pass
+    # samples.
+    extraction_eval_sample_size: int = 25
+
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
@@ -440,6 +478,16 @@ class Settings(BaseSettings):
     # (mint + validate both refuse) when this is empty — never serve with an
     # unsigned/forgeable grant.
     design_agent_token_secret: str = ""
+
+    # Artifact share-grant token secret. A DISTINCT secret from jwt_secret AND
+    # from design_agent_token_secret — never reuse either. Provisioned now
+    # (harmless, currently unused) so a future revocation/rotation ticket that
+    # wants HMAC-signed short-lived view grants (mirroring da_view_grant) has
+    # the secret already reviewed. The share primitive itself is DB-row-token-
+    # backed (an opaque uuid4 looked up by exact match, like
+    # prototypes.share_token) — a bare DB-token lookup needs no secret, so
+    # nothing in this ticket signs or verifies an HMAC with this value.
+    artifact_share_token_secret: str = ""
 
     # Bundle-proxy public origin (Decision 2 — same-origin serving). The prototype
     # bundle is served from the APP origin (e.g. https://app.sprntly.ai) via an

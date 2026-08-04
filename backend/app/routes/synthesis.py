@@ -55,7 +55,11 @@ def seed_from_corpus(company: WorkspaceContext = Depends(require_workspace)):
     for doc in corpus.docs:
         try:
             r = extract_document(
-                facade, company.company_id, doc_name=doc.name, text=doc.text
+                facade, company.company_id, doc_name=doc.name, text=doc.text,
+                # Haiku relevance + category triage ahead of every corpus doc
+                # — this is a raw, uncategorized upload with no
+                # prior knowledge of its content.
+                triage=True,
             )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]

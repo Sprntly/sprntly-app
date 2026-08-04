@@ -4,9 +4,11 @@ import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
-import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { validatePassword, validateShareDomainEmail, validateWorkEmail } from "../lib/auth-validation"
 import { signupApi } from "../lib/api"
 import { publicPath } from "../lib/public-path"
+import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
+import { prdAccessApi } from "../lib/prdAccessApi"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
 
@@ -29,6 +31,74 @@ function SignUpForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const prefillEmail = searchParams.get("email") ?? ""
+  const shareToken = searchParams.get("share")
+  // A bare `?prd=` visit (no `share=` token) — the "full parity" bare-link
+  // scope (2026-08-02): same domain-gated sign-up experience, keyed by the
+  // PRD's opaque public_id instead of a share row (never the raw sequential
+  // id). Only meaningful when there's no share token (share always wins if
+  // somehow both are present).
+  const prdParam = searchParams.get("prd")
+  const prdPublicId = !shareToken && prdParam ? prdParam : null
+  const [shareMeta, setShareMeta] = useState<ArtifactShareMetadata | null>(null)
+  const [prdMeta, setPrdMeta] = useState<{
+    title: string
+    owning_company_name: string
+    required_email_domain: string | null
+  } | null>(null)
+
+  // Fetch once on mount — the entry gate already resolved this same
+  // token/prd_id, but a direct /sign-up?share=/?prd= visit (no
+  // EntryGateScreen hop) needs its own read. Best-effort: an invalid/expired
+  // token or unresolvable prd_id here just means no strip renders — sign-up
+  // itself is never blocked by it (ArtifactShareGate/postLoginPath own the
+  // actual deny after account creation).
+  useEffect(() => {
+    if (!shareToken) return
+    let cancelled = false
+    artifactShareApi
+      .getMetadata(shareToken)
+      .then((meta) => {
+        if (!cancelled) setShareMeta(meta)
+      })
+      .catch(() => {
+        /* no strip — not a sign-up blocker */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [shareToken])
+
+  useEffect(() => {
+    if (!prdPublicId) return
+    let cancelled = false
+    prdAccessApi
+      .getMetadata(prdPublicId)
+      .then((meta) => {
+        if (!cancelled) setPrdMeta(meta)
+      })
+      .catch(() => {
+        /* no strip — not a sign-up blocker */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [prdPublicId])
+
+  const shareContext = shareMeta
+    ? {
+        title: shareMeta.title || "a document",
+        sharerName: shareMeta.sharer_name,
+        requiredDomain: shareMeta.required_email_domain,
+      }
+    : prdMeta
+      ? {
+          title: prdMeta.title || "a document",
+          // No sharer for a bare-link session — the company name is the
+          // closest honest "who is this from" this screen can show.
+          sharerName: prdMeta.owning_company_name,
+          requiredDomain: prdMeta.required_email_domain,
+        }
+      : undefined
 
   // Two-step sign-up matching v4 pages 02 (credentials) + 03 (about you).
   // Everything is collected in React state across both steps; the single
@@ -44,6 +114,9 @@ function SignUpForm() {
   const [role, setRole] = useState("Product Manager")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // Separate from `submitting` because the Google button owns its own label,
+  // and it is never cleared — the OAuth redirect takes the tab away.
+  const [googleSubmitting, setGoogleSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -59,6 +132,16 @@ function SignUpForm() {
     const emailErr = validateWorkEmail(email)
     if (emailErr) {
       setError(emailErr)
+      return
+    }
+    // Domain-gated share signup: block BEFORE any signup attempt (including
+    // the duplicate-email check below) on a mismatched domain — no Supabase
+    // signUp() call is ever made for a doomed signup. A pure client-side
+    // check; the real backstop stays server-side (see
+    // validateShareDomainEmail's docstring).
+    const domainErr = validateShareDomainEmail(email, shareContext?.requiredDomain)
+    if (domainErr) {
+      setError(domainErr)
       return
     }
     const pwErr = validatePassword(password)
@@ -89,11 +172,16 @@ function SignUpForm() {
   }
 
   async function onGoogle() {
+    if (submitting || googleSubmitting) return
     setError(null)
+    setGoogleSubmitting(true)
     try {
       await auth.signInWithGoogle()
+      // No reset on success: the call ends in a full-page redirect to Google,
+      // so the button stays busy until this document is gone.
     } catch {
       setError("Couldn't start Google sign-up. Try again.")
+      setGoogleSubmitting(false)
     }
   }
 
@@ -118,17 +206,29 @@ function SignUpForm() {
         role,
         // The company/personal split is retired (v6) — every signup is company.
         accountType: "company",
+        // Persisted into user_metadata so postLoginPath() can resolve this
+        // share on ANY device/session, even one that never saw this tab.
+        ...(shareToken ? { pendingShareToken: shareToken } : {}),
+        ...(prdPublicId ? { pendingPrdPublicId: prdPublicId } : {}),
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
         setStep(1)
+        setSubmitting(false)
         return
       }
       if (result === "confirm_email") {
-        router.replace(`/verify-email?email=${encodeURIComponent(email)}`)
+        const verifyParams = new URLSearchParams({ email })
+        if (shareToken) verifyParams.set("share", shareToken)
+        else if (prdPublicId) verifyParams.set("prd", prdPublicId)
+        router.replace(`/verify-email?${verifyParams.toString()}`)
       } else {
         router.replace(await auth.postLoginPath())
       }
+      // Deliberately no reset on the success paths. router.replace() is
+      // asynchronous and this component stays mounted while the next route
+      // loads; clearing `submitting` here flipped the button back to
+      // "Continue" mid-navigation, which read as "nothing happened".
     } catch (e) {
       if (e instanceof AuthApiError && e.message.toLowerCase().includes("registered")) {
         setError("An account with this email already exists. Try signing in.")
@@ -136,7 +236,6 @@ function SignUpForm() {
       } else {
         setError("Couldn't create your account. Try again in a moment.")
       }
-    } finally {
       setSubmitting(false)
     }
   }
@@ -176,6 +275,8 @@ function SignUpForm() {
       password={password}
       confirmPassword={confirmPassword}
       showPassword={showPassword}
+      submitting={submitting}
+      googleSubmitting={googleSubmitting}
       error={error}
       termsHref={publicPath("/terms")}
       privacyHref={publicPath("/privacy")}
@@ -185,6 +286,7 @@ function SignUpForm() {
       onToggleShowPassword={() => setShowPassword((v) => !v)}
       onSubmit={(e) => void onStep1(e)}
       onGoogle={onGoogle}
+      shareContext={shareContext}
     />
   )
 }

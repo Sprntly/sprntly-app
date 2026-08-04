@@ -415,6 +415,78 @@ describe("StaffAdminScreen organizations", () => {
       agents: false,
     })
   })
+
+  it("turning Chat Intent Envelope off writes an explicit false — never a deleted key", async () => {
+    // The flag is DEFAULT ON, so an ABSENT key reads back as ON. If the kill
+    // switch removed the key instead of writing `false`, the checkbox would
+    // pop straight back to checked on reload and chat would keep routing
+    // through the envelope — a switch that looks broken because it is.
+    const grandfathered = {
+      ...ACME,
+      id: "co-3",
+      display_name: "Grandfathered Corp",
+      // No chat_intent_envelope key at all — 17 of 33 companies at the flip.
+      feature_flags: { agents: true, top_insights: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [grandfathered] })
+    listInvites.mockResolvedValue({ invites: [] })
+    updateCompany.mockResolvedValue(grandfathered)
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+    const box = () =>
+      screen.getByLabelText(/^Chat Intent Envelope/) as HTMLInputElement
+    // Absent key → the panel already reports ON, matching what chat does.
+    expect(box().checked).toBe(true)
+    fireEvent.click(box())
+    expect(box().checked).toBe(false)
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save changes"))
+    })
+
+    const patch = updateCompany.mock.calls[0][1] as {
+      feature_flags: Record<string, boolean>
+    }
+    expect(patch.feature_flags).toEqual({
+      agents: true,
+      top_insights: true,
+      chat_intent_envelope: false,
+    })
+    // Explicit, and explicitly false — not merely absent.
+    expect("chat_intent_envelope" in patch.feature_flags).toBe(true)
+    expect(patch.feature_flags.chat_intent_envelope).toBe(false)
+  })
+
+  it("turning it back on writes an explicit true, and the panel agrees", async () => {
+    const killed = {
+      ...ACME,
+      id: "co-4",
+      display_name: "Opted Out Corp",
+      feature_flags: { agents: true, chat_intent_envelope: false },
+    }
+    listCompanies.mockResolvedValue({ companies: [killed] })
+    listInvites.mockResolvedValue({ invites: [] })
+    updateCompany.mockResolvedValue(killed)
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+    const box = () =>
+      screen.getByLabelText(/^Chat Intent Envelope/) as HTMLInputElement
+    // Explicit false is the ONE state that reports off.
+    expect(box().checked).toBe(false)
+    fireEvent.click(box())
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save changes"))
+    })
+
+    const patch = updateCompany.mock.calls[0][1] as {
+      feature_flags: Record<string, boolean>
+    }
+    expect(patch.feature_flags).toEqual({
+      agents: true,
+      chat_intent_envelope: true,
+    })
+  })
 })
 
 describe("StaffAdminScreen invites", () => {

@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
+import { Suspense, useEffect, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { useAuth } from "../lib/auth"
 import {
   authLockoutRemainingMs,
@@ -11,26 +11,76 @@ import {
   validateWorkEmail,
 } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
+import { artifactShareApi } from "../lib/artifactShareApi"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignInView } from "../components/auth/SignInView"
 
 export default function SignInPage() {
+  return (
+    <Suspense
+      fallback={
+        <AuthShell tag="Sign in">
+          <div className="auth-sub">Loading…</div>
+        </AuthShell>
+      }
+    >
+      <SignInForm />
+    </Suspense>
+  )
+}
+
+function SignInForm() {
   const auth = useAuth()
   const router = useRouter()
+  const searchParams = useSearchParams()
+  // An existing account signing in via a shared-artifact link carries the
+  // token on the URL, not in user_metadata — postLoginPath()'s own pending-
+  // share resolution only fires for a token set at SIGN-UP time (a fresh
+  // signup, per the artifact-share flow's other entry point), so it never
+  // sees this one. Resolving it here is the sibling case for a RETURNING
+  // user: same outcome-to-path mapping, applied on top of whatever
+  // postLoginPath() would otherwise return.
+  const shareToken = searchParams.get("share")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forgotMode, setForgotMode] = useState(false)
-  const [forgotSent, setForgotSent] = useState(false)
   const [lockoutMs, setLockoutMs] = useState(0)
+
+  // Best-effort: an invalid/expired token, or any resolve failure, falls
+  // through to the caller's own default path — never strands the user on a
+  // blank screen, and never re-derives the deny reason differently from the
+  // server's own resolve() outcome.
+  async function withShareResolved(defaultPath: string): Promise<string> {
+    if (!shareToken) return defaultPath
+    try {
+      const outcome = await artifactShareApi.resolve(shareToken)
+      if (outcome.outcome === "guest_view") {
+        // public_id (never artifact_id, the raw sequential id) — see the
+        // prds.public_id migration's own comment.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}&share=${shareToken}`
+      }
+      if (outcome.outcome === "blocked") {
+        return `/not-authorized?share=${shareToken}&reason=${outcome.reason}`
+      }
+    } catch {
+      /* resolve failed — fall through to defaultPath */
+    }
+    return defaultPath
+  }
 
   useEffect(() => {
     if (auth.kind === "authed") {
-      void auth.postLoginPath().then((path) => router.replace(path))
+      void auth
+        .postLoginPath()
+        .then((path) => withShareResolved(path))
+        .then((path) => router.replace(path))
     }
-  }, [auth, router])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth, router, shareToken])
 
   useEffect(() => {
     setLockoutMs(authLockoutRemainingMs())
@@ -51,7 +101,8 @@ export default function SignInPage() {
     try {
       await auth.signInWithPassword(email, password)
       clearSignInAttempts()
-      router.replace(await auth.postLoginPath())
+      const defaultPath = await auth.postLoginPath()
+      router.replace(await withShareResolved(defaultPath))
       // Stay in the submitting state — the button keeps its loading label
       // until navigation unmounts this page.
     } catch (e) {
@@ -76,12 +127,11 @@ export default function SignInPage() {
     setSubmitting(true)
     try {
       await auth.resetPassword(email)
-      setForgotSent(true)
     } catch {
-      setForgotSent(true)
-    } finally {
-      setSubmitting(false)
+      // Swallow either way — never reveal whether the address is registered.
     }
+    // The recovery email carries a 6-digit code; /reset-password collects it.
+    router.push(`/reset-password?email=${encodeURIComponent(email)}`)
   }
 
   async function onGoogle() {
@@ -109,28 +159,6 @@ export default function SignInPage() {
       <AuthShell tag="Sign in">
         <div className="auth-h">Sign-in <em>not configured.</em></div>
         <div className="auth-sub">Set Supabase env vars in web/.env.local</div>
-      </AuthShell>
-    )
-  }
-
-  if (forgotSent) {
-    return (
-      <AuthShell tag="Reset password">
-        <div className="auth-h">Check your <em>email.</em></div>
-        <div className="auth-sub">
-          If an account exists for <strong>{email}</strong>, you&apos;ll receive a reset link
-          shortly.
-        </div>
-        <button
-          type="button"
-          className="btn btn-brand btn-block"
-          onClick={() => {
-            setForgotMode(false)
-            setForgotSent(false)
-          }}
-        >
-          Back to sign in
-        </button>
       </AuthShell>
     )
   }

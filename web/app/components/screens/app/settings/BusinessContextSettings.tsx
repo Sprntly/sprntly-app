@@ -19,6 +19,7 @@ import {
 import { profileDisplayName } from "../../../../context/WorkspaceContext"
 import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { LlmContextImportCard } from "../../../connectors/LlmContextImportCard"
+import { runBusinessContextRefresh } from "../../../../lib/runBusinessContextRefresh"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 /** The doc form's id — the pane bar's Save submits it from outside the form. */
@@ -277,11 +278,16 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
         title="Company lens"
         sub={
           canEdit
-            ? "Edit any field below — your edits are marked as authoritative and won't be overwritten by the agent. Regenerate to re-run the research agent."
-            : "Read-only. Only admins can edit or regenerate the business context."
+            ? "Edit any field below — a field you change is marked as yours and the research agent will not overwrite it. Fields you leave alone stay agent-maintained and can change on the next refresh; clearing a field hands it back to the agent. Saving a change to Company shape below re-runs the research agent."
+            : "Read-only. Only admins can edit or update the business context."
         }
       >
         <form id={BC_FORM_ID} onSubmit={onSave}>
+          {refreshing && (
+            <p className="settings-row-sub" role="status">
+              Regenerating business context…
+            </p>
+          )}
           {refreshError && <SettingsMessage kind="error">{refreshError}</SettingsMessage>}
 
           {layers.map((layer) => (
@@ -405,7 +411,7 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
             onChange={(e) => onChangeIndustry(e.target.value)}
             disabled={!canEdit}
           >
-            {INDUSTRIES.map((i) => (
+            {withCurrentOption(INDUSTRIES, industry).map((i) => (
               <option key={i}>{i}</option>
             ))}
           </select>
@@ -421,7 +427,7 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
             onChange={(e) => onChangeBusinessType(e.target.value)}
             disabled={!canEdit}
           >
-            {BUSINESS_TYPES.map((b) => (
+            {withCurrentOption(BUSINESS_TYPES, businessType).map((b) => (
               <option key={b}>{b}</option>
             ))}
           </select>
@@ -455,9 +461,43 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
   )
 }
 
+/** True if the two tech-stack sets differ (order-independent — the chip
+ *  toggles can rebuild the array in a different order than it was loaded). */
+function techStackChanged(next: string[], prev: string[]): boolean {
+  if (next.length !== prev.length) return true
+  const a = [...next].sort()
+  const b = [...prev].sort()
+  return a.some((v, i) => v !== b[i])
+}
+
+/** The option list, with `current` prepended when it isn't one of the listed
+ *  options — a React <select> whose value matches no <option> renders blank
+ *  and reports value === "", so the next save would write "" over a real
+ *  stored value. Injecting the option is what makes the round-trip exact. */
+export function withCurrentOption(
+  options: readonly string[],
+  current: string,
+): string[] {
+  return current && !options.includes(current) ? [current, ...options] : [...options]
+}
+
 /** Container for the company-shape section. Reads the workspace company-shape
- *  fields and persists edits via updateWorkspace. */
-export function CompanyShapeSettings({ canEdit }: { canEdit: boolean }) {
+ *  fields and persists edits via updateWorkspace.
+ *
+ *  `onShapeSavedWithChange` fires AFTER a successful save that actually
+ *  changed industry/business_type/tech_stack from what was already
+ *  persisted — never on a no-op resave of identical values (that would
+ *  trigger a real, billed business-context refresh for nothing). Fire-and-
+ *  forget from this component's perspective: it does not await whatever the
+ *  callback does, so a slow/failing refresh never blocks or fails the
+ *  (fast, free) Company Shape save UX. */
+export function CompanyShapeSettings({
+  canEdit,
+  onShapeSavedWithChange,
+}: {
+  canEdit: boolean
+  onShapeSavedWithChange?: () => void
+}) {
   const { workspace, loading, refresh } = useWorkspace()
   const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
   const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
@@ -468,20 +508,12 @@ export function CompanyShapeSettings({ canEdit }: { canEdit: boolean }) {
 
   useEffect(() => {
     if (!workspace) return
-    const ind = workspace.industry
-    setIndustry(
-      ind && INDUSTRIES.includes(ind as (typeof INDUSTRIES)[number])
-        ? ind
-        : ind
-          ? "Other"
-          : INDUSTRIES[0],
-    )
-    const bt = workspace.business_type
-    setBusinessType(
-      bt && BUSINESS_TYPES.includes(bt as (typeof BUSINESS_TYPES)[number])
-        ? bt
-        : BUSINESS_TYPES[0],
-    )
+    // Values outside the option lists (onboarding free text, an import, or an
+    // older list) are kept verbatim. Coercing them here silently rewrote the
+    // stored value on the next save and registered a phantom change, which
+    // then spent real money on a research refresh nobody asked for.
+    setIndustry(workspace.industry || INDUSTRIES[0])
+    setBusinessType(workspace.business_type || BUSINESS_TYPES[0])
     setTechStack(workspace.tech_stack ?? [])
   }, [workspace])
 
@@ -491,6 +523,14 @@ export function CompanyShapeSettings({ canEdit }: { canEdit: boolean }) {
     setSaving(true)
     setError(null)
     setSaved(false)
+    // Compare against what's ALREADY persisted (not the post-save workspace,
+    // which won't reflect the new values until `refresh()` below completes)
+    // — a no-op resave of identical values must not spend real money on a
+    // business-context refresh.
+    const changed =
+      industry !== (workspace.industry || INDUSTRIES[0]) ||
+      businessType !== (workspace.business_type || BUSINESS_TYPES[0]) ||
+      techStackChanged(techStack, workspace.tech_stack ?? [])
     try {
       await updateWorkspace(workspace.id, {
         industry,
@@ -499,6 +539,7 @@ export function CompanyShapeSettings({ canEdit }: { canEdit: boolean }) {
       })
       await refresh()
       setSaved(true)
+      if (changed) onShapeSavedWithChange?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save company shape")
     } finally {
@@ -684,14 +725,22 @@ export function BusinessContextSettings() {
     }
   }
 
-  function onRefresh() {
+  // Shared by the (still-existing) first-generation button below AND the
+  // Company Shape save trigger — one place owns the refreshing/refreshError
+  // state, per the "reuse it, don't invent new state" instruction. The
+  // refresh is async server-side (runBusinessContextRefresh POSTs then polls
+  // GET .../refresh-status until it leaves 'generating'), so this awaits the
+  // FULL round trip even though the kick-off itself returns fast — callers
+  // that must not block on it (the Company Shape save) call this WITHOUT
+  // awaiting it themselves.
+  const runRefresh = useCallback(() => {
     if (!canEdit) return
     void (async () => {
       setRefreshing(true)
       setRefreshError(null)
       setSaved(false)
       try {
-        await businessContextApi.refresh()
+        await runBusinessContextRefresh()
         await load()
       } catch (err) {
         setRefreshError(
@@ -701,6 +750,10 @@ export function BusinessContextSettings() {
         setRefreshing(false)
       }
     })()
+  }, [canEdit, load])
+
+  function onRefresh() {
+    runRefresh()
   }
 
   const view = useMemo(
@@ -776,8 +829,14 @@ export function BusinessContextSettings() {
         />
         {/* Company-shape fields (Industry / Business type / Tech stack) — moved
             here from the onboarding business-context step (now narrative-only).
-            Keeps its own inline save: it persists separately from the doc. */}
-        <CompanyShapeSettings canEdit={view.canEdit} />
+            Keeps its own inline save: it persists separately from the doc.
+            A save that actually CHANGES industry/business_type/tech_stack
+            fires a business-context refresh as a side effect (no separate
+            Regenerate button) — see CompanyShapeSettings' onSave. The
+            resulting generating/done/error state surfaces above, in this
+            same Business Context section, via the shared refreshing/
+            refreshError state. */}
+        <CompanyShapeSettings canEdit={view.canEdit} onShapeSavedWithChange={runRefresh} />
       </div>
     </div>
   )

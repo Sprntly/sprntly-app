@@ -58,15 +58,17 @@ def _maybe_refresh_token(
     not configured) logs a WARNING and returns the input unchanged, so the
     caller's sync surfaces the usual 401 → "reconnect required".
 
-    Jira (Atlassian) is handled alongside github: its access tokens expire ~1h
-    and its refresh tokens ROTATE, so — like github — we persist the whole new
-    payload on every refresh.
+    Jira and Confluence (Atlassian) are handled alongside github: their access
+    tokens expire ~1h and their refresh tokens ROTATE, so — like github — we
+    persist the whole new payload on every refresh. Confluence additionally
+    requires company_id to survive the rewrite, because that is the credential
+    its puller is handed (see confluence_oauth.token_payload_to_store).
 
-    Marvin is the third: its OAuth 2.1 access tokens are short-lived, and its
+    Marvin is the fourth: its OAuth 2.1 access tokens are short-lived, and its
     stored payload has to be rebuilt (not just merged) on refresh because the
     puller's packed `marvin_credential` embeds the access token — see
     marvin_oauth.token_payload_to_store."""
-    if provider not in ("github", "jira", "marvin"):
+    if provider not in ("github", "jira", "confluence", "marvin"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -76,7 +78,17 @@ def _maybe_refresh_token(
     try:
         from app.connectors.tokens import encrypt_token_json
 
-        if provider == "jira":
+        if provider == "confluence":
+            from app.connectors import confluence_oauth
+
+            new_json_str = confluence_oauth.token_payload_to_store(
+                confluence_oauth.refresh_access_token(refresh_token),
+                # Dropping this here breaks the NEXT sync, not this refresh:
+                # token_for("confluence", ...) reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "jira":
             from app.connectors import jira_oauth
 
             new_json_str = jira_oauth.token_payload_to_store(
@@ -382,4 +394,121 @@ def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
     except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
         logger.exception("corpus-seed: failed to start thread for %s (slug=%s)",
                          company_id, slug)
+        return False
+
+
+# ── Roadmap → KG on upload ──────────────────────────────────────────────────
+# The workspace roadmap has its own one-per-workspace, replace-semantics ingest
+# (kg_ingest.roadmap) rather than riding the corpus path — it's a priorities
+# anchor, not corpus evidence. Same shape as kickoff_corpus_seed above: a daemon
+# thread so the onboarding strategy step's upload response never waits on an
+# extraction, per-company lock so a burst of replaces serializes, and total error
+# isolation because synthesis_brief.seed_incremental re-runs it on the next brief
+# anyway (it doubles as the retry + grandfather path).
+
+def _roadmap_ingest_lock(company_id: str) -> "threading.RLock":
+    """The per-company roadmap-ingest lock.
+
+    Owned by kg_ingest.roadmap so EVERY entry point serializes on the same
+    object — this kickoff AND synthesis_brief's seed leg, which calls
+    ingest_roadmap directly. A lock private to this module would leave the seed
+    leg racing the upload. Reentrant, so holding it here and re-acquiring inside
+    ingest_roadmap is safe."""
+    from app.kg_ingest.roadmap import ingest_lock
+
+    return ingest_lock(company_id)
+
+
+def _run_roadmap_ingest(company_id: str, workspace_id: str | None) -> None:
+    """Blocking roadmap extraction — runs inside the daemon thread.
+
+    Fully isolated: any failure is logged, never raised. Serialized per company
+    so two quick replaces don't race each other's expiry pass; the queued run
+    reads whatever roadmap_doc holds at that point, and the content-hash ledger
+    makes a redundant run free."""
+    from app.kg_ingest.roadmap import ingest_roadmap
+
+    with _roadmap_ingest_lock(company_id):
+        try:
+            result = ingest_roadmap(company_id, workspace_id,
+                                    facade=GraphFacade())
+            logger.info("roadmap-ingest done: %s (ws=%s) %s",
+                        company_id, workspace_id, result)
+        except Exception:  # noqa: BLE001 — fully isolated
+            logger.exception("roadmap-ingest failed for %s (ws=%s)",
+                             company_id, workspace_id)
+
+
+def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
+    """Fire-and-forget: extract a just-uploaded roadmap into the KG.
+
+    Called right after POST /v1/company/roadmap-doc stores the file so the
+    company's stated bets reach the graph in seconds instead of waiting for the
+    next brief. Never blocks the upload response; never raises into the request
+    flow. A dropped kickoff self-heals — seed_incremental ingests the same
+    roadmap on the next brief generation."""
+    try:
+        t = threading.Thread(
+            target=_run_roadmap_ingest, args=(company_id, workspace_id),
+            name="roadmap-ingest", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
+        logger.exception("roadmap-ingest: failed to start thread for %s (ws=%s)",
+                         company_id, workspace_id)
+        return False
+
+
+# ── Call index refresh ──────────────────────────────────────────────────────
+#
+# The call index (app/call_index.py) holds cheap metadata for every call in a
+# connected transcript source, so a listing question is a DB read instead of a
+# 168-second corpus pass. It is only worth anything if it is POPULATED, and an
+# index nobody fills fails in the quietest possible way: every interception in
+# qa_agent returns None, the question degrades to the old expensive path, and
+# nothing anywhere reports a problem.
+#
+# So it gets the same two triggers every other connector has — the moment it
+# connects, and every scheduler cycle thereafter — plus a third the others do
+# not need: `call_index.ensure_fresh` tops it up inline on the read path when a
+# call may have landed since the last cycle. This is the same gap Fortune's
+# d30ca7ee closed for Slack ("sync the moment it's connected, not six hours
+# later"), with the read-path top-up added because a 6-hour-old call list is
+# not merely incomplete — `answer_listing` states a COUNT, so it is WRONG.
+
+def _run_call_index_sync(company_id: str) -> None:
+    """Blocking call-index refresh — runs inside the daemon thread. Fully
+    isolated: `call_index.sync_company` already stamps its own failure on
+    `call_index_sync` (which is what makes the failure visible to the read
+    path), so this only has to keep it out of the caller's flow."""
+    from app import call_index
+
+    try:
+        written = call_index.sync_company(company_id)
+        if written is None:
+            logger.info("call-index: no transcript source for %s — nothing to do",
+                        company_id)
+            return
+        logger.info("call-index refresh done: %s calls=%s", company_id, written)
+    except Exception:  # noqa: BLE001 — fully isolated; already stamped
+        logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
+
+
+def kickoff_call_index_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh this company's call index.
+
+    Called from the Fireflies connect route and from the scheduled connector
+    refresh. Returns False when nothing was started. Never blocks; never raises
+    into the caller's flow."""
+    try:
+        t = threading.Thread(
+            target=_run_call_index_sync, args=(company_id,),
+            name="call-index-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break connect
+        logger.exception("call-index: failed to start refresh thread for %s",
+                         company_id)
         return False

@@ -11,6 +11,12 @@
  * (which carries `:::name` JSON fences that do not export readably).
  */
 import type { PrdContent, PrdSection } from "../types/content"
+import {
+  stampPdfWatermark,
+  watermarkDocxFooter,
+  watermarkDocxHeader,
+  watermarkWordHtml,
+} from "./watermark"
 
 /** A generic, render-target-agnostic export block. */
 export type ExportBlock =
@@ -199,6 +205,9 @@ export async function downloadPrdPdf(prd: PrdContent): Promise<void> {
     }
   }
 
+  // After the flow, so getNumberOfPages() covers the whole document.
+  stampPdfWatermark(doc)
+
   const blob = doc.output("blob") as Blob
   await saveBlob(blob, `${slugifyTitle(prd.title)}.pdf`)
 }
@@ -248,50 +257,27 @@ export async function downloadPrdDocx(prd: PrdContent): Promise<void> {
     }
   }
 
-  const document = new Document({ sections: [{ children }] })
+  // A real OOXML watermark: a floating image in the page header, behind the
+  // text, plus a real page footer. The header is null only where there is no
+  // canvas to rasterise it on (SSR/jsdom) — the export still ships rather than
+  // failing on the mark. The footer is plain text and always available.
+  const watermark = await watermarkDocxHeader(docx)
+  const document = new Document({
+    sections: [{
+      children,
+      ...(watermark ? { headers: { default: watermark } } : {}),
+      footers: { default: watermarkDocxFooter(docx) },
+    }],
+  })
   const blob = await Packer.toBlob(document)
   await saveBlob(blob, `${slugifyTitle(prd.title)}.docx`)
 }
 
 // ── v3 HTML PRD export ───────────────────────────────────────────────────────
 // The v4.2 PRD is a self-contained HTML page with a print stylesheet that
-// strips the editing chrome, so export is the page itself — printed to PDF or
-// handed to Word — rather than the (empty) parsed-section path above.
-
-/**
- * Print the HTML PRD page (browser Print → "Save as PDF"). Opens the document
- * in a hidden same-origin iframe, prints it, then removes the iframe. Throws if
- * the iframe can't be created so the caller can surface a failure toast.
- */
-export function printPrdHtml(prd: PrdContent): void {
-  const html = prd.html
-  if (!html) throw new Error("no HTML PRD to print")
-  const frame = document.createElement("iframe")
-  frame.style.position = "fixed"
-  frame.style.right = "0"
-  frame.style.bottom = "0"
-  frame.style.width = "0"
-  frame.style.height = "0"
-  frame.style.border = "0"
-  document.body.appendChild(frame)
-  const cdoc = frame.contentDocument
-  const cwin = frame.contentWindow
-  if (!cdoc || !cwin) {
-    frame.remove()
-    throw new Error("could not open a print frame")
-  }
-  cdoc.open()
-  cdoc.write(html)
-  cdoc.close()
-  const cleanup = () => setTimeout(() => frame.remove(), 1000)
-  cwin.addEventListener("afterprint", cleanup)
-  // Give the browser a tick to lay out (fonts/styles) before printing.
-  setTimeout(() => {
-    cwin.focus()
-    cwin.print()
-    cleanup()
-  }, 250)
-}
+// strips the editing chrome, so export is the page itself rather than the
+// (empty) parsed-section path above. PDF goes through the server renderer
+// (`documentsApi.downloadPdf`, called from ContentPanel); Word is below.
 
 /**
  * Download the HTML PRD page as a Word document (`<slug>.doc`). Word opens
@@ -301,6 +287,8 @@ export function printPrdHtml(prd: PrdContent): void {
 export async function downloadPrdHtmlDoc(prd: PrdContent): Promise<void> {
   const html = prd.html
   if (!html) throw new Error("no HTML PRD to export")
-  const blob = new Blob([html], { type: "application/msword" })
+  // Word's own watermark mechanism (VML in a page header) — the CSS overlay the
+  // print path uses would land inline here. See lib/watermark.ts.
+  const blob = new Blob([watermarkWordHtml(html)], { type: "application/msword" })
   await saveBlob(blob, `${slugifyTitle(prd.title)}.doc`)
 }

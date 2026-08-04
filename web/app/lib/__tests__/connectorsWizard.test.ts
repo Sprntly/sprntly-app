@@ -13,7 +13,7 @@ import {
   toggleSelection,
   wizardCategories,
 } from "../onboarding/connectorsWizard"
-import { CONNECTOR_CATALOG } from "../connectorsCatalog"
+import { CONNECTOR_CATALOG, UPLOADS_PROVIDER_ID } from "../connectorsCatalog"
 
 describe("wizard categories", () => {
   it("exposes only supported categories, in catalog order", () => {
@@ -24,11 +24,44 @@ describe("wizard categories", () => {
     expect(cats[0].key).toBe(REQUIRED_CATEGORY_KEY)
     expect(cats[0].items.map((i) => i.id)).toEqual(["superset"])
     // v6 order: Voice follows (Sprinklr OAuth + Fireflies API-key wired),
-    // then CRM (HubSpot). Settings-only extras (docs, revenue) never appear.
+    // then CRM (HubSpot). Revenue — the last settings-only category — never
+    // appears; Company documentation now does, last, in catalog order.
     expect(cats[1].key).toBe("voice")
+    // Research follows Voice, now offering Marvin (OAuth-wired over its MCP
+    // server). Its upload strip is still what onboarding is really asking for
+    // — a PM has research long before they can connect a repository — so the
+    // category would survive on `keepWhenEmpty` even if Marvin were pulled.
     expect(cats.map((c) => c.key)).toEqual([
-      "analytics", "voice", "crm", "pm", "design", "code", "comms",
+      "analytics", "voice", "research", "crm", "pm", "design", "code", "comms",
+      "docs",
     ])
+    expect(cats.find((c) => c.key === "research")!.items.map((i) => i.id)).toEqual([
+      "marvin",
+    ])
+    expect(cats.map((c) => c.key)).not.toContain("revenue")
+  })
+
+  it("offers Confluence + Google Docs under Company documentation", () => {
+    const docs = wizardCategories().find((c) => c.key === "docs")
+    expect(docs).toBeTruthy()
+    // Both are OAuth-wired; Notion is still coming-soon so it drops out.
+    expect(docs!.items.map((i) => i.id)).toEqual(["google_drive", "confluence"])
+    expect(docs!.items.map((i) => i.id)).not.toContain("notion")
+  })
+
+  it("never offers `uploads` as a wizard connector tile", () => {
+    // It has no auth flow for the connect modal to open — its "Add a document
+    // source" picker is a Settings-only surface. Mirrors ConnectorsSettings,
+    // which excludes it from its connector rows for the same reason.
+    const ids = wizardCategories().flatMap((c) => c.items.map((i) => i.id))
+    expect(ids).not.toContain(UPLOADS_PROVIDER_ID)
+    // Even a live `uploads` connection must not resurrect the tile.
+    const withLive = wizardCategories(new Set([UPLOADS_PROVIDER_ID]))
+    expect(
+      withLive.flatMap((c) => c.items.map((i) => i.id)),
+    ).not.toContain(UPLOADS_PROVIDER_ID)
+    // ...and Company documentation survives on its real connectors.
+    expect(withLive.find((c) => c.key === "docs")!.items.length).toBe(2)
   })
 
   it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {

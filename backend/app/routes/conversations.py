@@ -219,6 +219,39 @@ def get_conversation_by_prd(
     return {"conversation": conversation, "turns": turns.data or []}
 
 
+@router.get("/by-evidence/{evidence_id}")
+def get_conversation_by_evidence(
+    evidence_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the CALLER'S most recent conversation for an Evidence doc (plus
+    its turns) — the Evidence mirror of GET /by-prd/{prd_id}. Same per-user
+    scoping and same "empty (not 404) when the caller has no saved conversation
+    for it yet" contract; see get_conversation_by_prd for the full rationale."""
+    c = require_client()
+    conv = (
+        c.table("conversations")
+        .select("*")
+        .eq("company_id", company.company_id)
+        .eq("evidence_id", evidence_id)
+        .eq("user_id", company.user_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    conversation = conv.data[0] if conv.data else None
+    if conversation is None:
+        return {"conversation": None, "turns": []}
+    turns = (
+        c.table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", conversation["id"])
+        .order("created_at")
+        .execute()
+    )
+    return {"conversation": conversation, "turns": turns.data or []}
+
+
 @router.patch("/{conversation_id}")
 def update_conversation(
     conversation_id: int,
@@ -319,6 +352,57 @@ def list_turns(
     return {"turns": resp.data or []}
 
 
+def _catalog_turn_attachments(
+    turn: dict[str, Any], body: TurnIn, company: CompanyContext
+) -> None:
+    """Register this turn's attachments in the document catalog, session-scoped.
+
+    Chat attachments are PRIVATE to their conversation, so each row carries
+    `conversation_id` + `user_id` (both from the verified CompanyContext, never
+    from the request body) and is only readable back by that same triple.
+
+    `external_id` is the synthetic `turn:{turn_id}:attachment:{index}` id the
+    ask path's document manifest already uses, so the catalog and the manifest
+    name the same document the same way.
+
+    `body_text` stays NULL: the extracted text is already on the turn row and
+    reaches the model through folded history. A document's text is never
+    stored twice.
+
+    Never raises. A turn that saves today must still save if cataloguing
+    fails — this runs after the turn is already persisted, and its failure is
+    logged and dropped."""
+    turn_id = turn.get("id")
+    if not turn_id or not body.attachments:
+        return
+    try:
+        from app import document_catalog
+    except Exception:  # noqa: BLE001 — never break a turn save on an import
+        logger.warning("document catalog unavailable; turn not catalogued",
+                       exc_info=True)
+        return
+    for index, attachment in enumerate(body.attachments):
+        content = attachment.content or ""
+        try:
+            document_catalog.register_document(
+                company.company_id,
+                provider=document_catalog.PROVIDER_CHAT_ATTACHMENT,
+                external_id=f"turn:{turn_id}:attachment:{index}",
+                title=attachment.name,
+                content_hash=document_catalog.content_hash_for(content),
+                doc_date=turn.get("created_at"),
+                conversation_id=turn.get("conversation_id"),
+                user_id=company.user_id,
+                get_text=lambda text=content: text,
+                background=True,
+            )
+        except Exception:  # noqa: BLE001 — cataloguing must never fail a turn save
+            logger.warning(
+                "document catalog registration failed for turn %s attachment %s",
+                turn_id, index, exc_info=True,
+            )
+
+
 @router.post("/{conversation_id}/turns")
 def add_turn(
     conversation_id: int,
@@ -339,6 +423,8 @@ def add_turn(
         # stays {name, content}; key/mime/size appear only when a file was stored.
         row["attachments"] = [a.model_dump(exclude_none=True) for a in body.attachments]
     resp = c.table("conversation_turns").insert(row).execute()
+    turn = resp.data[0] if resp.data else {}
+    _catalog_turn_attachments(turn, body, company)
     # Update conversation preview + timestamp. Only overwrite preview on user
     # turns — assistant turns should NOT blank out the last user message shown
     # in the chat-history list (ChatsScreen).

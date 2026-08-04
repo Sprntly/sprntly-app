@@ -234,7 +234,8 @@ def test_happy_path_renders_html_report_with_embedded_chart(workspace, logged, m
     assert row["decision_type"] == "chat_data_analysis_claude"
     assert row["model"] == "claude-sonnet-4-6"
     assert row["factors"]["files"] == 2
-    assert row["factors"]["charts"] == 1
+    assert row["factors"]["charts_rendered"] == 1
+    assert row["factors"]["charts_dropped"] == 0
     assert row["factors"]["turns"] == 1
     assert row["factors"]["input_tokens"] == 10
     assert row["factors"]["output_tokens"] == 20
@@ -304,7 +305,7 @@ def test_tool_error_result_yields_no_chart(workspace, logged, monkeypatch):
 
     out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
 
-    assert logged[0]["factors"]["charts"] == 0
+    assert logged[0]["factors"]["charts_rendered"] == 0
     assert "data:image/png" not in out["answer"]
 
 
@@ -704,6 +705,49 @@ def test_followup_ask_folds_a_chart_report_into_a_small_history(
     assert len(prompt) < 12_000, f"follow-up prompt is {len(prompt)} chars"
 
 
+# ── the decision log must count the same charts the report shows ─────────────
+# Staging QA (2026-07-30): header said "2 charts", two rendered, the log said 3.
+# The log was counting what the model PRODUCED; the header counts what survived
+# the embed budget. Two explicit fields now, so neither number is ambiguous.
+
+def test_decision_log_splits_rendered_from_dropped_charts(workspace, logged, monkeypatch):
+    _csv(workspace)
+    # Three produced; each ~53KB of base64, so the 100KB total budget embeds two.
+    _client(
+        monkeypatch,
+        _message([
+            _exec_result(file_ids=("c1", "c2", "c3")),
+            _text("findings"),
+        ]),
+        download_bytes=PNG + b"\x00" * 40_000,
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    rendered = out["answer"].count("<figure>")
+    factors = logged[0]["factors"]
+    assert factors["charts_rendered"] == rendered, "log must match what was shown"
+    assert factors["charts_dropped"] == 3 - rendered
+    assert factors["charts_rendered"] + factors["charts_dropped"] == 3
+    # and the header the reader sees agrees with the log
+    assert f"{rendered} chart" in out["answer"]
+
+
+def test_decision_log_reports_zero_dropped_when_all_charts_fit(
+    workspace, logged, monkeypatch
+):
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_exec_result(file_ids=("c1", "c2")), _text("findings")]),
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    assert logged[0]["factors"]["charts_rendered"] == 2 == out["answer"].count("<figure>")
+    assert logged[0]["factors"]["charts_dropped"] == 0
+
+
 # ── truncation is never rendered as a finished report ────────────────────────
 
 def test_max_tokens_stop_is_flagged_in_the_report(workspace, logged, monkeypatch):
@@ -718,6 +762,104 @@ def test_max_tokens_stop_is_flagged_in_the_report(workspace, logged, monkeypatch
 
     assert "cut off" in out["answer"], "a truncated report must say so"
     assert logged[0]["factors"]["stopped_reason"] == "max_tokens"
+
+
+# ── markdown the model actually writes must not leak as literal text ─────────
+# Staging QA (2026-07-30) found three constructs rendering raw in the report:
+# pipe tables (the model writes its ranked TL;DR as one), `---` rules, and `>`
+# blockquotes. The fixtures below are the exact strings from that report.
+
+BUG_TABLE = (
+    "| # | Finding | Confidence | Action |\n"
+    "|---|---------|------------|--------|\n"
+    "| 2 | **Satisfaction predicts…** | HIGH | … |\n"
+)
+
+
+def test_pipe_table_renders_as_a_table_not_literal_text():
+    out = ca._md_to_html(BUG_TABLE)
+
+    assert "<table>" in out and "<thead>" in out and "<tbody>" in out
+    # the exact row from the bug must not survive as literal pipes
+    assert "| 2 | **Satisfaction predicts" not in out
+    assert "|---" not in out
+    assert "<th>Confidence</th>" in out
+    assert "<td>2</td>" in out
+    assert "<strong>Satisfaction predicts…</strong>" in out, "inline md still applies"
+    assert "<td>HIGH</td>" in out
+
+
+def test_table_alignment_row_is_honoured():
+    out = ca._md_to_html("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n")
+    assert 'style="text-align:left"' in out
+    assert 'style="text-align:center"' in out
+    assert 'style="text-align:right"' in out
+
+
+def test_horizontal_rule_renders_as_hr():
+    for rule in ("---", "***", "___", "-----"):
+        out = ca._md_to_html(f"before\n\n{rule}\n\nafter")
+        assert "<hr>" in out, rule
+        assert rule not in out, f"{rule} leaked as literal text"
+
+
+def test_blockquote_renders_as_blockquote():
+    out = ca._md_to_html("> Caveat: the sample is small.\n> Treat as early signal.")
+
+    assert "<blockquote>" in out
+    assert "&gt;" not in out and ">" in out  # markers consumed, tags emitted
+    assert "Caveat: the sample is small." in out
+    assert "Treat as early signal." in out
+
+
+def test_blockquote_can_hold_a_list():
+    out = ca._md_to_html("> Caveats:\n> - small n\n> - one week only")
+    assert "<blockquote>" in out and "<ul>" in out
+    assert "<li>small n</li>" in out
+
+
+def test_prose_with_a_pipe_is_not_mistaken_for_a_table():
+    """No delimiter row → it's a sentence, not a table."""
+    out = ca._md_to_html("Revenue | cost split was not available in the export.")
+    assert "<table>" not in out
+    assert "Revenue | cost split" in out
+
+
+def test_table_cells_are_still_escaped():
+    """Escape-first discipline is unchanged by the new constructs."""
+    out = ca._md_to_html("| col |\n|---|\n| <script>alert(1)</script> |\n")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_blockquote_and_hr_content_is_escaped():
+    out = ca._md_to_html("> <img src=x onerror=alert(1)>\n\n---\n")
+    assert "<img" not in out
+    assert "&lt;img" in out
+
+
+def test_escaped_pipe_stays_literal_inside_a_cell():
+    out = ca._md_to_html("| expr |\n|---|\n| a \\| b |\n")
+    assert "<td>a | b</td>" in out
+
+
+def test_full_report_renders_the_bug_constructs(workspace, logged, monkeypatch):
+    """End to end: the same three constructs inside a real analysis answer."""
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_text(
+            "## TL;DR\n\n"
+            + BUG_TABLE
+            + "\n---\n\n> Caveat: one week of data only.\n"
+        )]),
+    )
+
+    answer = ca.answer(enterprise_id=COMPANY, question="analyze my data")["answer"]
+
+    assert "<table>" in answer and "<hr>" in answer and "<blockquote>" in answer
+    for leaked in ("| 2 |", "|---|", "> Caveat"):
+        assert leaked not in answer, f"{leaked!r} leaked into the rendered report"
 
 
 # ── 9. routing negatives stay negative ───────────────────────────────────────
@@ -789,11 +931,13 @@ def test_decision_log_failure_never_breaks_the_answer(workspace, monkeypatch):
 
 # ── 1. flag gate + fallback in qa_agent ──────────────────────────────────────
 
+def _flags(monkeypatch, flags) -> None:
+    """Patch the STRICT reader the gate uses. `None` = the read itself failed."""
+    monkeypatch.setattr("app.entitlements.read_feature_flags", lambda cid: flags)
+
+
 def _flag(monkeypatch, value: bool) -> None:
-    monkeypatch.setattr(
-        "app.entitlements.feature_flags_for_company",
-        lambda cid: {"ds_claude_analysis": value},
-    )
+    _flags(monkeypatch, {"ds_claude_analysis": value})
 
 
 LEGACY_SENTINEL = {"answer": "v5.8", "key_points": [], "citations": [],
@@ -804,26 +948,72 @@ CLAUDE_SENTINEL = {"answer": "<!doctype html><div>claude</div>", "key_points": [
                    "_skill": "ds-agent", "_skill_source": "ds-claude"}
 
 
-def test_flag_off_uses_the_deterministic_engine(monkeypatch):
+def test_explicit_false_uses_the_deterministic_engine(workspace, monkeypatch):
+    """The named opt-outs (Freezing Point LLC, Chaostrack Inc.) are stored as an
+    explicit false — the ONLY thing that turns the engine off now."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, False)
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
-        ca, "answer", lambda **kw: pytest.fail("Claude path ran with the flag OFF")
+        ca, "answer", lambda **kw: pytest.fail("Claude path ran for an opted-out company")
     )
 
     out = qa.answer(enterprise_id=COMPANY, question="analyze my data", dataset="acme")
     assert out is LEGACY_SENTINEL
 
 
-def test_absent_flag_defaults_off(monkeypatch):
+def test_absent_flag_defaults_on(workspace, monkeypatch):
+    """DEFAULT ON (Apurva, 2026-07-30): a company whose flags never mention the
+    key — grandfathered or freshly onboarded — gets the Claude engine."""
     import app.qa_agent as qa
 
-    monkeypatch.setattr("app.entitlements.feature_flags_for_company", lambda cid: {})
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
+    _flags(monkeypatch, {})
+    monkeypatch.setattr(ca, "answer", lambda **kw: CLAUDE_SENTINEL)
+    monkeypatch.setattr(
+        legacy, "answer", lambda **kw: pytest.fail("legacy ran for a default-ON company")
+    )
+
+    assert qa.answer(
+        enterprise_id=COMPANY, question="analyze my data", dataset="acme"
+    ) is CLAUDE_SENTINEL
+
+
+def test_other_flags_present_but_ours_absent_still_defaults_on(workspace, monkeypatch):
+    """A real grandfathered row: full DEFAULT_FEATURE_FLAGS payload, no key of
+    ours. The onboarding insert writes exactly this shape."""
+    import app.qa_agent as qa
+
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
+    _flags(monkeypatch, {
+        "agents": True, "top_insights": True, "chat_intent_envelope": True,
+        "on_demand_analysis": True, "auto_prd_generation": True,
+        "engineer_agent": False, "research_agent": False,
+        "on_call_agent": False, "claude_code_handoff": False,
+    })
+    monkeypatch.setattr(ca, "answer", lambda **kw: CLAUDE_SENTINEL)
+    monkeypatch.setattr(
+        legacy, "answer", lambda **kw: pytest.fail("legacy ran for a default-ON company")
+    )
+
+    assert qa.answer(
+        enterprise_id=COMPANY, question="analyze my data", dataset="acme"
+    ) is CLAUDE_SENTINEL
+
+
+def test_flag_read_failure_still_defaults_off(workspace, monkeypatch):
+    """Deliberately NOT symmetric with the missing-key default. An unknown flag
+    state must not ship a tenant's CSVs to the Files API — unlike #893, which
+    fails open because it only picks a routing strategy."""
+    import app.qa_agent as qa
+
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
+    _flags(monkeypatch, None)  # read_feature_flags signals failure with None
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
-        ca, "answer", lambda **kw: pytest.fail("Claude path ran without an explicit flag")
+        ca, "answer", lambda **kw: pytest.fail("Claude path ran on an unknown flag state")
     )
 
     assert qa.answer(
@@ -831,13 +1021,17 @@ def test_absent_flag_defaults_off(monkeypatch):
     ) is LEGACY_SENTINEL
 
 
-def test_flag_read_failure_defaults_off(monkeypatch):
+def test_flag_read_raising_defaults_off(workspace, monkeypatch):
+    """Belt to the None braces: even if the reader raises instead of returning
+    None, the gate resolves OFF rather than propagating."""
     import app.qa_agent as qa
+
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
 
     def _boom(cid):  # noqa: ARG001
         raise RuntimeError("flags column missing")
 
-    monkeypatch.setattr("app.entitlements.feature_flags_for_company", _boom)
+    monkeypatch.setattr("app.entitlements.read_feature_flags", _boom)
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
 
     assert qa.answer(
@@ -845,9 +1039,10 @@ def test_flag_read_failure_defaults_off(monkeypatch):
     ) is LEGACY_SENTINEL
 
 
-def test_flag_on_uses_the_claude_engine(monkeypatch):
+def test_flag_on_uses_the_claude_engine(workspace, monkeypatch):
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     seen: dict = {}
 
@@ -866,9 +1061,10 @@ def test_flag_on_uses_the_claude_engine(monkeypatch):
     assert "is_cancelled" in seen, "cancellation must reach the loop"
 
 
-def test_flag_on_but_claude_raises_falls_back_and_never_500s(monkeypatch):
+def test_flag_on_but_claude_raises_falls_back_and_never_500s(workspace, monkeypatch):
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     monkeypatch.setattr(
         ca, "answer",
@@ -883,10 +1079,11 @@ def test_flag_on_but_claude_raises_falls_back_and_never_500s(monkeypatch):
         assert field in out
 
 
-def test_cancellation_is_not_swallowed_by_the_fallback(monkeypatch):
+def test_cancellation_is_not_swallowed_by_the_fallback(workspace, monkeypatch):
     """A user Stop must abandon the ask, not spend a second full run."""
     import app.qa_agent as qa
 
+    _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist
     _flag(monkeypatch, True)
     monkeypatch.setattr(
         ca, "answer", lambda **kw: (_ for _ in ()).throw(AskCancelled())

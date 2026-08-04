@@ -31,6 +31,7 @@ import {
   type StaffCompany,
   type StaffEntitlementsPatch,
 } from "../../../lib/api"
+import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 
 // The module toggles stored in companies.feature_flags — mirrors the
 // FeatureFlags keys in lib/onboarding/types.ts. The Modules group shows
@@ -75,16 +76,19 @@ export function topInsightsEnabled(flags: Record<string, boolean>): boolean {
   return true
 }
 
-/** Whether action-envelope chat dispatch is on — DEFAULT ON (2026-07-26): a
- *  missing key counts as ON, matching DEFAULT_FEATURE_FLAGS and the app-side
- *  gate (parseFeatureFlags fills the default). Only an explicit false — the
- *  staff kill switch — turns it off. Display-level only — never written
- *  back. */
+/** Whether action-envelope chat dispatch is on — DEFAULT ON: a missing key
+ *  counts as ON, matching DEFAULT_FEATURE_FLAGS and the app-side gate. Only an
+ *  explicit false — this checkbox, the kill switch — turns it off.
+ *
+ *  Delegates to the SAME predicate ChatScreen and BriefChat gate on, so what
+ *  this panel reports can never disagree with what chat actually does.
+ *  Display-level only — never written back. Toggling the checkbox writes an
+ *  explicit boolean (see flagCheckbox); it must never DELETE the key, which
+ *  under default-on would read back as ON and make the switch look broken. */
 export function chatIntentEnvelopeEnabled(
   flags: Record<string, boolean>,
 ): boolean {
-  if ("chat_intent_envelope" in flags) return !!flags.chat_intent_envelope
-  return true
+  return chatIntentEnvelopeOn(flags)
 }
 
 // Effective-state resolvers per flag-backed module. Both the org-row chips

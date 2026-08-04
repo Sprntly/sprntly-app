@@ -214,12 +214,30 @@ def test_get_job_is_tenant_scoped(isolated_settings, monkeypatch):
     assert getattr(ei2.value, "status_code", None) == 404
 
 
+async def _fake_warm(prd_id, ctx=None):
+    """`stories.generate` schedules `warm_impl_spec` as its own fire-and-forget
+    `asyncio.create_task` once a run with a `prd_id` completes — real
+    `warm_impl_spec` runs `asyncio.to_thread(ensure_impl_spec, ...)`, a REAL OS
+    thread that `asyncio.run()`'s task-cancellation cleanup cannot actually
+    interrupt once it's mid-flight (cancelling the asyncio-level future does
+    not stop an already-running executor thread). Left unstubbed, that thread
+    can outlive `asyncio.run(_flow())` entirely and later touch the shared
+    fake DB via `require_client()` on uncontrolled timing — the exact hazard
+    `tests/_fake_supabase.py`'s module docstring names. Tests here that only
+    care about the dedup/job-lifecycle behavior stub it out; the one test that
+    exists to verify the warm's OWN deferred-timing contract
+    (`test_impl_spec_warm_deferred_until_generation_completes`) uses its own
+    local variant to assert on."""
+    return None
+
+
 def test_inflight_generate_dedupes_by_prd(isolated_settings, monkeypatch):
     """A rapid second /generate for the same PRD while the first is still
     running re-attaches to that job (same id, one LLM run) — this is the fix for
     the Tickets tab re-kicking generation on every remount/tab-switch."""
     calls = {"n": 0}
     release = threading.Event()
+    monkeypatch.setattr(stories, "warm_impl_spec", _fake_warm)
 
     def _slow(cid, prd_id=None, insight=None, **kw):
         calls["n"] += 1
@@ -249,6 +267,7 @@ def test_inflight_generate_dedupes_by_prd(isolated_settings, monkeypatch):
 def test_generate_after_completion_starts_fresh_job(isolated_settings, monkeypatch):
     """Dedup is in-flight only: once a run finishes, a later /generate for the
     same PRD (e.g. the PRD changed → stale cache) starts a brand-new job."""
+    monkeypatch.setattr(stories, "warm_impl_spec", _fake_warm)
     monkeypatch.setattr(
         stories, "generate_user_stories",
         lambda cid, prd_id=None, insight=None, **kw: [Story(title="T", body="b")],
@@ -269,6 +288,7 @@ def test_inflight_dedupe_is_tenant_scoped(isolated_settings, monkeypatch):
     """Two companies generating the same prd_id concurrently get distinct jobs —
     dedup keys on (company, prd_id), never collapses across tenants."""
     release = threading.Event()
+    monkeypatch.setattr(stories, "warm_impl_spec", _fake_warm)
     monkeypatch.setattr(
         stories, "generate_user_stories",
         lambda cid, prd_id=None, insight=None, **kw: (release.wait(2), [Story(title="T", body="b")])[1],

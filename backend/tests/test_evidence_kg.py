@@ -338,11 +338,15 @@ def test_build_binds_evidence_brief_skill(facade, isolated_settings, monkeypatch
     evidence_kg.build_evidence_kg(facade, "ent-A", insight)
 
     assert captured["skill"] == "evidence-brief"
-    # The skill is real + installed + non-routable (bound by name, not chat).
-    from app.skills.catalog import NON_ROUTABLE
+    # The skill is real + installed + unreachable from chat (bound by name
+    # here, never routed). It used to be listed in NON_ROUTABLE — a per-skill
+    # opt-out of a router menu that offered every OTHER built-in. With the
+    # built-in menu gone the guarantee is stronger and needs no allow-list:
+    # NO vendored id is invocable from a chat turn.
+    import app.qa_agent as qa
     from app.skills.loader import get_skill
 
-    assert "evidence-brief" in NON_ROUTABLE
+    assert qa._invocable("evidence-brief", "co-1") is False
     assert get_skill("evidence-brief").method.strip()  # SKILL.md present
 
 

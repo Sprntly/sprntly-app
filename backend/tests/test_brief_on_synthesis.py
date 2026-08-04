@@ -820,3 +820,47 @@ def test_warm_synthesis_drilldowns_noop_without_brief(isolated_settings):
          patch.object(brief_runner, "_warm_drilldowns") as warm:
         brief_runner.warm_synthesis_drilldowns("acme")
     warm.assert_not_called()
+
+
+def test_seed_skips_unreadable_stub_docs_without_recording_them(isolated_settings):
+    """A placeholder for a file we could not read is not content.
+
+    Two costs it used to incur: it consumed a MAX_SEED_DOCS slot and a full
+    LLM call to mine signals out of its own apology text, and it was then
+    recorded as permanently ingested — so if a parser for that file type
+    shipped later, the file was never retried. It must be skipped AND left
+    unrecorded.
+    """
+    from app.graph.facade import GraphFacade
+    from app.ingest import convert
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    # A real stub, produced by the converter rather than hand-written.
+    stub = convert("legacy.doc", b"\xd0\xcf\x11\xe0binary payload")
+
+    class _Corpus:
+        docs = [_Doc("legacy", stub), _Doc("interview", "customers want SSO")]
+
+    extracted: list[str] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    # Only the readable doc costs an extraction.
+    assert extracted == ["interview"]
+    assert out["unreadable"] == 1
+    assert out["docs"] == 1
+    # And the stub is NOT recorded as ingested, so a future parser can retry it.
+    labels = {
+        s.label for s in facade.list_sources("co-1", source_type="corpus_doc")
+    }
+    assert "legacy" not in labels
+    assert "interview" in labels

@@ -38,6 +38,7 @@ from app.brief_gate import (
 )
 from app.connectors.catalog import EVIDENCE_UPLOAD_CATEGORIES
 from app.corpus import load_corpus
+from app.ingest import is_unparsed_stub
 from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
 from app.graph.extractor import _NS, extract_document
@@ -134,7 +135,8 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     successful extract, so a failed doc retries on the next run. Missing corpus
     is not fatal — a company might be connector-only.
     """
-    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0}
+    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0,
+              "unreadable": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
@@ -160,6 +162,14 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
 
     extracted = 0
     for doc in corpus.docs:
+        # A placeholder for a file we couldn't read is not content: extracting
+        # it spends an LLM call on the words "its content is not included in
+        # analysis yet", and recording it would mark the file permanently
+        # ingested so a future parser never gets to retry it. Skip WITHOUT
+        # recording, so it re-enters the moment we can read its type.
+        if is_unparsed_stub(doc.text):
+            totals["unreadable"] += 1
+            continue
         sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
         if sha in existing:
             totals["unchanged"] += 1
@@ -177,11 +187,18 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
                     origin="connector", source_hint=hint,
                     source_type_default=source_type,
                     provenance_extra={"channel": "upload", "category": category},
+                    # Haiku relevance + category triage ahead of every corpus
+                    # doc. This is separate from `category` above
+                    # (the user-picked upload category / evidence bucket) —
+                    # triage's own classification lands as
+                    # provenance["triage_category"].
+                    triage=True,
                 )
             else:
                 r = extract_document(
                     facade, company_id, doc_name=doc.name, text=doc.text,
                     origin="upload",
+                    triage=True,
                 )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
@@ -254,23 +271,79 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
     return totals
 
 
+def _workspace_id_for_slug(company_id: str, slug: str) -> str | None:
+    """Which workspace's roadmap does this brief slug refer to?
+
+    Additional workspaces own a '{company_slug}--{workspace_slug}' dataset, so
+    the dataset→workspace binding answers directly. A bare company slug is the
+    DEFAULT workspace's dataset, whose binding predates workspace scoping for
+    older tenants — fall back to the company's default workspace. None means we
+    couldn't resolve one (legacy/unbound dataset): ingest_roadmap then reads the
+    company's no-workspace roadmap row, which is the same row the synthesis
+    agent's company-keyed load_roadmap_doc reads.
+    """
+    from app.db.workspaces import default_workspace_for_company, workspace_for_dataset_slug
+
+    try:
+        binding = workspace_for_dataset_slug(slug)
+        if binding and binding.get("workspace_id"):
+            return str(binding["workspace_id"])
+        ws = default_workspace_for_company(company_id)
+        return str(ws["id"]) if ws else None
+    except Exception:  # noqa: BLE001 — best-effort resolution, never fatal
+        logger.exception("seed: could not resolve workspace for slug %s", slug)
+        return None
+
+
+def _seed_from_roadmap(facade: GraphFacade, company_id: str, slug: str) -> dict:
+    """Grandfather + retry leg: make sure the workspace's uploaded roadmap is in
+    the KG before synthesis reads it.
+
+    The roadmap upload endpoint already kicks this off (auto_sync.
+    kickoff_roadmap_ingest), so on the happy path this is a ledger no-op costing
+    one kg_source read. It exists for the two paths the kickoff can't cover:
+    every roadmap uploaded BEFORE roadmap→KG ingest shipped (backfilled on the
+    next brief, no migration needed), and any kickoff that failed or lost its
+    thread. Error-isolated — a roadmap problem must never block a brief.
+
+    Concurrency: ingest_roadmap takes the per-company roadmap lock itself (the
+    same object auto_sync's kickoff uses), so this leg cannot interleave with an
+    in-flight upload ingest and expire the current roadmap's signals.
+    """
+    from app.kg_ingest.roadmap import ingest_roadmap
+
+    try:
+        return ingest_roadmap(
+            company_id, _workspace_id_for_slug(company_id, slug), facade=facade
+        )
+    except Exception:  # noqa: BLE001 — error-isolation, mirrors the corpus leg
+        logger.exception("seed: roadmap ingest failed for %s (slug=%s)",
+                         company_id, slug)
+        return {"status": "error"}
+
+
 def seed_incremental(facade: GraphFacade, company_id: str, slug: str) -> dict:
     """Populate the KG before synthesis, incrementally.
 
     The corpus seed ALWAYS runs (extracting only docs not already ingested),
-    so a doc uploaded after the first brief reaches the graph. Connectors are
-    pulled ONLY on a first-ever (empty) KG — they have their own ongoing sync
-    path, so we don't re-pull them on every brief regen.
+    so a doc uploaded after the first brief reaches the graph. The roadmap leg
+    ALSO always runs, ledger-deduped to a no-op when the current roadmap version
+    is already in the graph. Connectors are pulled ONLY on a first-ever (empty)
+    KG — they have their own ongoing sync path, so we don't re-pull them on every
+    brief regen.
 
-    Returns {"corpus": <totals>, "connectors": <totals>|None, "was_empty": bool}.
+    Returns {"corpus": <totals>, "roadmap": <status>, "connectors":
+    <totals>|None, "was_empty": bool}.
     """
     was_empty = _kg_is_empty(facade, company_id)
     if was_empty:
         logger.info("KG empty for company=%s (slug=%s) — first-time seed "
                     "(corpus + connectors) before synthesis", company_id, slug)
     corpus = _seed_from_corpus(facade, company_id, slug)
+    roadmap = _seed_from_roadmap(facade, company_id, slug)
     connectors = _seed_from_connectors(facade, company_id) if was_empty else None
-    return {"corpus": corpus, "connectors": connectors, "was_empty": was_empty}
+    return {"corpus": corpus, "roadmap": roadmap, "connectors": connectors,
+            "was_empty": was_empty}
 
 
 def generate_all_synthesis_briefs() -> None:
