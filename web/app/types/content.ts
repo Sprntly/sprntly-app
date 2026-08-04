@@ -340,9 +340,11 @@ export interface ConnectorCategoryRow {
    * categories that explicitly set `false` hide the strip.
    *
    * Turned off for categories whose data should only ever arrive through the
-   * real integration (Communications, Codebase, Project Management): a hand-
-   * uploaded Slack/GitHub/Jira export has no sync, no permissions model, and
-   * no incremental updates, so it produces stale, misleading sources.
+   * real integration (Codebase, Project Management): a hand-uploaded
+   * GitHub/Jira export has no sync, no permissions model, and no incremental
+   * updates, so it produces stale, misleading sources. Company documentation
+   * also opts out, for a different reason: it takes uploads through its own
+   * named-source picker rather than the generic per-category strip.
    * The backend upload path is untouched — flip this back to `true` (or drop
    * the field) to restore the dropzone.
    */
