@@ -550,14 +550,36 @@ async def generate(
     this workspace + template_version (mirrors routes/prd.py's find_existing
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
-    _require_feature_enabled()
-    _require_company_prototype_enabled(company.company_id)
+    # Kickoff timing: one structured line on every exit below, raises included
+    # — the <200ms claim above was previously asserted, never measured. Three
+    # outcome shapes (dedupe / worker-enqueued / in-process insert) have
+    # materially different costs and are kept distinguishable rather than
+    # averaged into one number; every early rejection shares "rejected" since
+    # they carry no outcome to distinguish.
+    _kickoff_start = time.monotonic()
+
+    def _log_kickoff(outcome: str) -> None:
+        logger.info(
+            "design_agent_generate_kickoff company_id=%s prd_id=%s outcome=%s elapsed_ms=%.1f",
+            company.company_id,
+            body.prd_id,
+            outcome,
+            (time.monotonic() - _kickoff_start) * 1000,
+        )
+
+    try:
+        _require_feature_enabled()
+        _require_company_prototype_enabled(company.company_id)
+    except HTTPException:
+        _log_kickoff("rejected")
+        raise
     # Tier 0: while the process is draining on SIGTERM, reject new work
     # cleanly rather than start a task a pending SIGKILL would abandon mid-run.
     # 503 is the retry signal the frontend retry self-heals on (the next
     # boot accepts it). Checked after the feature gate so the feature stays
     # invisible (404) when off.
     if _shutting_down:
+        _log_kickoff("rejected")
         raise HTTPException(
             status_code=503,
             detail="service is draining, retry shortly",
@@ -577,12 +599,14 @@ async def generate(
     # source rather than letting the key persist and fail only at read time.
     if body.screenshot_keys:
         if len(body.screenshot_keys) > 10:
+            _log_kickoff("rejected")
             raise HTTPException(
                 status_code=422,
                 detail={"error": "too_many_screenshots", "max": 10},
             )
         for key in body.screenshot_keys:
             if not key.startswith(f"uploads/{workspace_id}/") or ".." in key.split("/"):
+                _log_kickoff("rejected")
                 raise HTTPException(
                     status_code=403, detail={"error": "screenshot_key_forbidden"}
                 )
@@ -595,6 +619,7 @@ async def generate(
         variant=_VARIANT,
     )
     if existing:
+        _log_kickoff("dedupe")
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
     # Connected-repo identifier the user chose as the existing codebase to match.
@@ -740,6 +765,7 @@ async def generate(
                 "design_agent_generation_enqueued prototype_id=%s job_id=%s",
                 prototype_id, job.get("id"),
             )
+            _log_kickoff("worker_enqueued")
             return GenerateResponse(prototype_id=prototype_id, status="generating")
         # enqueue failed (table missing / DB error) — fall through to in-process.
         logger.warning(
@@ -774,6 +800,7 @@ async def generate(
 
     task.add_done_callback(_clear_generation_entry)
 
+    _log_kickoff("in_process")
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
 
