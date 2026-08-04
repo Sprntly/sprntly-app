@@ -15929,6 +15929,400 @@
     color: #aab2ac;
   }
 
+  /* ─── Upload-a-skill modal ─── */
+  /* One vertical rhythm for the whole modal body. Both sources render their
+     body into this panel, so the chip row, the intro, the pickers and the
+     fields that appear after a pick all sit on the same beat — the old form
+     leaned on each element's own margin and drifted a few pixels at every
+     step. Every direct child is a STEP; a label and its control are wrapped in
+     .skill-field so they count as one. */
+
+  .skill-src-row {
+    padding-bottom: 14px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .skill-upload-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .skill-field {
+    display: block;
+  }
+
+  .skill-field > .settings-msg,
+  .skill-field > .settings-warning {
+    margin: 8px 0 0;
+  }
+
+  .skill-upload-panel > .settings-msg {
+    margin-bottom: 0;
+  }
+
+  .skill-upload-panel > .settings-warning {
+    margin-top: 0;
+  }
+
+  /* Tiles rather than strips because the pick is the FIRST decision in the
+     modal — what gets picked decides which fields render below it. */
+
+  .skill-upload-choices {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 0;
+    align-items: stretch;
+  }
+
+  .skill-upload-tile {
+    position: relative;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+    gap: 7px;
+    margin-top: 0;
+    padding: 18px 12px;
+    min-height: 104px;
+    border-width: 1.5px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease,
+      opacity 0.15s ease;
+  }
+
+  /* Focusable rather than display:none, so the pickers are reachable by
+     keyboard — the tile itself shows the focus ring on the tile's behalf. */
+  .skill-upload-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  /* :focus-visible, not :focus-within — a mouse click on a file input focuses
+     it, and a plain focus ring would then stay stuck on the tile you just
+     picked. Keyboard focus still rings the tile. */
+  .skill-upload-tile:has(.skill-upload-input:focus-visible) {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* Hover in the same green family as the picked state, so the two tiles read
+     as one control family (the picked one stays apart by being SOLID). */
+  .skill-upload-tile:hover {
+    border-color: var(--accent-2);
+    background: var(--accent-muted);
+    color: var(--accent-ink);
+  }
+
+  .skill-upload-icon {
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .skill-upload-tile-label {
+    font-weight: 500;
+    color: var(--ink-2);
+  }
+
+  .skill-upload-tile:hover .skill-upload-tile-label {
+    color: inherit;
+  }
+
+  .skill-upload-tile .file-name {
+    font-weight: 600;
+    font-size: 13px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .skill-upload-tile .muted {
+    margin-left: 0;
+    line-height: 1.35;
+  }
+
+  /* Loaded, not merely highlighted: solid frame, tinted fill, filled check. */
+  .skill-upload-tile.is-picked {
+    border-style: solid;
+    border-color: var(--accent-2);
+    background: var(--accent-muted);
+    color: var(--accent-ink);
+  }
+
+  .skill-upload-tile.is-picked .muted {
+    color: var(--accent-ink);
+    opacity: 0.72;
+  }
+
+  /* The other tile once one is answered: still live, just no longer competing
+     for the eye. It comes back to full strength on hover or focus. */
+  .skill-upload-tile.is-standby {
+    opacity: 0.6;
+  }
+
+  .skill-upload-tile.is-standby:hover,
+  .skill-upload-tile.is-standby:focus-within {
+    opacity: 1;
+  }
+
+  /* The name/description block a bare .md brings with it. Ruled off from the
+     pickers so its arrival reads as the next step, not as the dialog growing. */
+  .skill-upload-fields {
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    animation: skill-fields-in 0.18s var(--ease) both;
+  }
+
+  @keyframes skill-fields-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+
+  /* The archive's "each skill names itself" line: a tinted confirmation of what
+     the pick means, rather than another grey paragraph under a green tile. */
+  .skill-upload-note {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    color: var(--accent-ink);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  /* ─── Upload-a-skill modal: the GitHub source ─── */
+
+  .skill-gh-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .skill-gh-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Accent-tinted, not filled: "Find skills" is the step that makes the panel
+     useful, but the modal's one filled button is still Import. */
+  .btn.skill-gh-find {
+    background: var(--accent-muted);
+    border-color: var(--accent-2);
+    color: var(--accent-ink);
+    font-weight: 500;
+  }
+
+  .btn.skill-gh-find:hover:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+
+  .skill-gh-searching {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+
+  .skill-gh-found-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 7px;
+    font-size: 12px;
+  }
+
+  .skill-gh-found-count {
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+
+  .skill-gh-found-head .muted {
+    font-size: 11.5px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .skill-gh-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    overflow-x: hidden;
+    /* A repo can hold dozens of skills; the list scrolls rather than pushing
+       the footer buttons off the dialog. */
+    overflow-y: auto;
+    max-height: 232px;
+  }
+
+  .skill-gh-item + .skill-gh-item {
+    border-top: 1px solid var(--line);
+  }
+
+  /* Selected wins over hover — a ticked row must not go paler when the pointer
+     crosses it. */
+  .skill-gh-item:hover:not(.is-invalid):not(.is-on) {
+    background: var(--accent-alpha-05);
+  }
+
+  .skill-gh-item.is-on {
+    background: var(--accent-muted);
+  }
+
+  .skill-gh-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 11px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--ink);
+  }
+
+  .skill-gh-item.is-invalid .skill-gh-row {
+    cursor: not-allowed;
+    color: var(--ink-3);
+  }
+
+  .skill-gh-check {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: inherit;
+    margin: 0;
+  }
+
+  /* The name takes the slack so the trigger and the badge keep their place on
+     the row; a long name ellipses rather than shoving the badge onto its own
+     line, which is exactly what the old bulleted list did. */
+  .skill-gh-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .skill-gh-trigger {
+    flex-shrink: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-3);
+    background: var(--surface-3);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .skill-gh-badge {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .skill-gh-reason {
+    margin: 0;
+    padding: 0 11px 9px 35px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--warn);
+  }
+
+  .skill-gh-selected {
+    margin: 7px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  /* ─── Upload-a-skill modal: what the import created ─── */
+  /* Deliberately block rows, not flex: each line is "Name — /trigger" as a
+     single sentence, and splitting the name into its own box would break that
+     reading (and the row's plain-text identity). */
+
+  .skill-result-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+
+  .skill-result-row {
+    padding: 9px 11px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .skill-result-row + .skill-result-row {
+    border-top: 1px solid var(--line);
+  }
+
+  /* The warning line above it already carries the gap. */
+  .skill-result-list--skipped {
+    margin-top: 0;
+    border-color: var(--warn-border);
+    background: var(--warn-soft);
+  }
+
+  .skill-result-list--skipped .skill-result-row {
+    color: var(--ink-2);
+  }
+
+  .skill-result-list--skipped .skill-result-row + .skill-result-row {
+    border-top-color: var(--warn-border);
+  }
+
+  /* The dialog is 92vw below ~520px, so under this width two columns leave the
+     tiles too narrow for their hint line and the branch/folder inputs too
+     narrow to read a ref in. Stack them. */
+  @media (max-width: 430px) {
+    .skill-upload-choices,
+    .skill-gh-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .skill-upload-tile {
+      min-height: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skill-upload-fields {
+      animation: none;
+    }
+
+    .skill-upload-tile {
+      transition: none;
+    }
+
+    /* The button's own "Looking…" label and its live region carry the wait —
+       the spinner doesn't have to move to say it. */
+    .skill-gh-find .icon-spin {
+      animation: none;
+    }
+  }
+
   /* Import-from-your-AI strip (Settings → Connectors → Documents). Shares the
      upload strip's frame but holds two buttons and a status line, so it wraps
      rather than staying on one row, and it is not itself clickable — the
@@ -20830,15 +21224,21 @@
 }
 .skl-by svg { color: var(--accent); }
 
-/* Custom-skill cards: invoke card + a hover/focus-revealed delete affordance.
-   The wrapper exists because the card is itself a <button> — the delete
-   control must be an absolutely-positioned sibling, not a nested button. */
+/* Custom-skill cards: invoke card + a hover/focus-revealed edit/delete pair.
+   The wrapper exists because the card is itself a <button> — those controls
+   must be absolutely-positioned siblings, not nested buttons. Edit sits left
+   of delete so the destructive one keeps the corner it has always had. */
 .skl-card-wrap { position: relative; display: flex; }
 .skl-card-wrap .skl-card { flex: 1; }
-.skl-card-del {
+.skl-card-actions {
   position: absolute;
   top: 10px;
   right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.skl-card-act {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -20852,8 +21252,13 @@
   opacity: 0;
   transition: opacity 0.12s ease;
 }
-.skl-card-wrap:hover .skl-card-del,
-.skl-card-del:focus-visible { opacity: 1; }
+.skl-card-wrap:hover .skl-card-act,
+.skl-card-act:focus-visible { opacity: 1; }
+.skl-card-act:hover {
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+}
 .skl-card-del:hover {
   color: var(--danger);
   border-color: var(--danger-border);
@@ -20884,6 +21289,30 @@
   border: 2px solid var(--accent-soft);
   border-top-color: var(--accent);
   animation: onbSpin 0.9s linear infinite;
+}
+
+/* Edit-skill modal. The method textarea holds a whole SKILL.md, so the body
+   scrolls rather than growing the dialog past the viewport. */
+.skl-edit-body {
+  max-height: 68vh;
+  overflow-y: auto;
+}
+.skl-edit-method {
+  min-height: 200px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+/* Footer confirm for the destructive rename — same two-step shape as the
+   card's delete confirm, laid out inline in the modal foot. */
+.skl-edit-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--ink-3);
 }
 
 /* ── Top-insights skill design — 8-type taxonomy accents ──────────────────────

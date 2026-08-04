@@ -729,8 +729,17 @@ def _actor(company: WorkspaceContext) -> str:
     the data alone. The column is free text rendered straight into the history
     list ("Edit · {saved_by} · {date}"), so an address needs no schema or
     frontend change; rows written before this stay "auto" and still render.
+
+    Total by construction — it resolves an identity or returns "auto", and
+    never raises. Every call site sits INSIDE the `try` that guards the
+    snapshot write, so an actor lookup that raised would be caught by that
+    `except` and cost the user their undo point: the snapshot would never be
+    attempted, while the log claimed it "failed". The label is metadata; the
+    snapshot is the recovery point, and metadata must never cost the recovery
+    point. Same discipline as `profile_name_for_user` in app/auth.py, which is
+    best-effort precisely so name resolution can't fail the request.
     """
-    return company.user_email or company.user_id or "auto"
+    return getattr(company, "user_email", None) or getattr(company, "user_id", None) or "auto"
 
 
 class PrdUpdateIn(BaseModel):

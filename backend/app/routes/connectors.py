@@ -3219,6 +3219,50 @@ class SlackSyncChannelsIn(BaseModel):
             raise ValueError("select at most 50 channels")
 
 
+def _slack_delivery_channel_ids(company_id: str) -> set[str] | None:
+    """Every channel this company currently DELIVERS to over Slack, or None
+    when the lookup itself failed.
+
+    Delivery is per-user (each member picks their own target — see
+    connectors/slack_company.py), so this reads every member's Slack row, not
+    just the company sync row. A channel in this set must never be left even
+    when it is unticked in the pull picker: the bot has to stay a member to
+    post there, and `post_to_target` only re-joins PUBLIC channels — walking
+    out of a private delivery channel would silently break that member's
+    briefs, nudges and design-agent notifications with no way back but a
+    manual /invite.
+
+    Matches `slack_oauth.post_to_target`'s own reading of the config, including
+    its default: an absent `target_type` means "channel", so a row carrying
+    only `channel_id` still counts.
+
+    Returns None — NOT an empty set — when the connection lookup blows up. The
+    two mean opposite things to the caller: empty is "nothing is a delivery
+    target, every leave is safe", None is "we don't know", and the only safe
+    response to not knowing is to leave nothing at all. An empty set here would
+    turn a transient DB hiccup into a silently broken brief channel.
+    """
+    from app.connectors.slack_company import row_config
+
+    targets: set[str] = set()
+    try:
+        rows = db.list_slack_connections(company_id)
+    except Exception:  # noqa: BLE001 — unknown targets ⇒ skip every leave
+        logger.exception("slack delivery-target lookup failed for %s", company_id)
+        return None
+    for row in rows:
+        cfg = row_config(row)
+        target_type = (
+            cfg.get("target_type") or slack_oauth.TARGET_CHANNEL
+        ).strip()
+        if target_type != slack_oauth.TARGET_CHANNEL:
+            continue
+        channel_id = str(cfg.get("channel_id") or "").strip()
+        if channel_id:
+            targets.add(channel_id)
+    return targets
+
+
 @router.post("/slack/sync-channels")
 def slack_save_sync_channels(
     body: SlackSyncChannelsIn,
@@ -3233,7 +3277,23 @@ def slack_save_sync_channels(
     every channel the bot is a member of). Selected public channels are
     best-effort self-joined right away (idempotent, `channels:join`) so the
     first sync doesn't skip them as not_in_channel; private channels can't
-    be self-joined and need a manual /invite."""
+    be self-joined and need a manual /invite.
+
+    UNTICKING REVERSES TICKING. A channel dropped from the selection is
+    diffed out of the PREVIOUS selection and then undone in both directions
+    ticking it went: the bot leaves the channel in Slack
+    (`slack_oauth.leave_channel`), and the messages that channel already
+    contributed are stripped out of the company's synced corpus
+    (`slack_sync.purge_channels_from_synced_data`), which then re-seeds the KG
+    the way an ordinary sync does. Two rules bound that:
+
+      * A channel that is somebody's DELIVERY target is never left, only
+        purged — see `_slack_delivery_channel_ids`.
+      * Every leave and every purge is best-effort. The selection write above
+        them is the source of truth and has already committed; cleanup that
+        fails is logged and reported in the response, never turned into an
+        error the admin's save disappears into.
+    """
     from app.connectors.slack_company import (
         CompanySlackError,
         company_slack_token,
@@ -3243,6 +3303,7 @@ def slack_save_sync_channels(
     from app.connectors.slack_sync import (
         CONFIG_SYNC_CHANNEL_IDS,
         CONFIG_SYNC_CHANNEL_NAMES,
+        purge_channels_from_synced_data,
     )
 
     # Company-wide config → org-connector RBAC, even though the underlying
@@ -3256,6 +3317,20 @@ def slack_save_sync_channels(
     row = resolve_company_slack_row(company.company_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
+    # Snapshot the OUTGOING selection before the patch overwrites it — this is
+    # the only moment both halves of the diff exist. The names map matters as
+    # much as the ids: the corpus keys its per-channel sections by channel NAME
+    # (`## #support`), and the new payload no longer carries a name for a
+    # channel that was just unticked.
+    previous = row_config(row)
+    previous_ids = [
+        str(cid) for cid in (previous.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
+    ]
+    previous_names = previous.get(CONFIG_SYNC_CHANNEL_NAMES)
+    if not isinstance(previous_names, dict):
+        # A hand-edited or pre-picker config can carry anything here; a bad
+        # names map must degrade to "no name known", not to a 500 on save.
+        previous_names = {}
     # Dedupe preserving order — the sync pulls in selection order.
     ids = list(dict.fromkeys(c.id for c in body.channels))
     names = {
@@ -3285,7 +3360,99 @@ def slack_save_sync_channels(
             logger.exception("slack auto-join on sync-channels save failed")
         except Exception:  # noqa: BLE001 — join must never block the save
             logger.exception("slack auto-join on sync-channels save failed")
-    return {"ok": True, "config": config, "joined": joined}
+
+    # ── Unticked channels: leave in Slack, then un-sync their messages ──
+    #
+    # An empty incoming list is "clear the selection back to every bot-member
+    # channel", NOT "unsubscribe from everything the bot is in" — clearing
+    # widens what the sync reads, so nothing is removed and nothing is left.
+    selected = set(ids)
+    removed_ids = (
+        [cid for cid in previous_ids if cid not in selected] if ids else []
+    )
+    left: list[str] = []
+    leave_failed: list[str] = []
+    delivery_skipped: list[str] = []
+    purged: dict = {"datasets": [], "sections_removed": 0, "reseeded": []}
+
+    if removed_ids:
+        delivery_targets = _slack_delivery_channel_ids(company.company_id)
+        if delivery_targets is None:
+            # Couldn't establish which channels deliver — skip every leave
+            # rather than risk walking out of a brief channel.
+            delivery_skipped = list(removed_ids)
+            logger.warning(
+                "slack un-sync: delivery targets unknown for company=%s — "
+                "skipping all %d leave(s); data purge still runs",
+                company.company_id, len(removed_ids),
+            )
+        else:
+            try:
+                resolved = company_slack_token(company.company_id)
+            except CompanySlackError:
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            except Exception:  # noqa: BLE001 — never block the save
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            if resolved:
+                bot_token, _leave_row = resolved
+                for cid in removed_ids:
+                    if cid in delivery_targets:
+                        # Still purged below — the guard protects DELIVERY, not
+                        # the corpus. The admin asked for this channel's
+                        # messages to stop being read; the bot just has to stay
+                        # in the room to keep posting there.
+                        delivery_skipped.append(cid)
+                        logger.info(
+                            "slack un-sync: keeping bot in %s — it is a Slack "
+                            "delivery target for this company", cid,
+                        )
+                        continue
+                    try:
+                        if slack_oauth.leave_channel(bot_token, cid):
+                            left.append(cid)
+                        else:
+                            leave_failed.append(cid)
+                    except Exception:  # noqa: BLE001 — per-channel isolation
+                        leave_failed.append(cid)
+                        logger.exception("slack leave failed for %s", cid)
+            else:
+                leave_failed = list(removed_ids)
+
+        # Purge every removed channel's pulled messages, delivery targets
+        # included. Names come from the OUTGOING map; a channel we never
+        # stored a name for has no addressable corpus section, so it is
+        # reported rather than guessed at.
+        removed_names = [
+            str(previous_names.get(cid) or "").strip() for cid in removed_ids
+        ]
+        purge_names = [n for n in removed_names if n]
+        if len(purge_names) < len(removed_ids):
+            logger.warning(
+                "slack un-sync: %d of %d removed channels had no stored name — "
+                "their corpus sections cannot be located and are left for the "
+                "next full sync to overwrite",
+                len(removed_ids) - len(purge_names), len(removed_ids),
+            )
+        try:
+            purged = purge_channels_from_synced_data(
+                company.company_id, purge_names
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "slack un-sync: purge failed for company=%s", company.company_id
+            )
+
+    return {
+        "ok": True,
+        "config": config,
+        "joined": joined,
+        "left": left,
+        "leave_failed": leave_failed,
+        "delivery_skipped": delivery_skipped,
+        "purged": purged,
+    }
 
 
 class SlackSyncCorpusIn(BaseModel):
