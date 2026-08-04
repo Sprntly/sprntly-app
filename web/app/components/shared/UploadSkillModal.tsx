@@ -41,9 +41,17 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import {
+  IconCircleCheckFilled,
+  IconFolderOpen,
+  IconLoader2,
+  IconSearch,
+  IconUpload,
+} from "@tabler/icons-react"
 import { connectorsApi } from "../../lib/api"
 import type { GithubSkillDiscovery, MultiSkillUploadResult } from "../../lib/api"
 import { getGenerateConnectorRowState } from "../../lib/generateConnectorRowState"
+import { zipFolderFiles } from "../../lib/skillFolderZip"
 import { SourceConnectHint } from "../design-agent/SourceConnectHint"
 
 /** 20 MB — mirrors skills_storage.MAX_SKILL_UPLOAD_BYTES (the PRD cap). */
@@ -139,6 +147,10 @@ export type UploadSkillModalViewProps = {
   onNameChange: (next: string) => void
   onDescriptionChange: (next: string) => void
   onFileChange: (next: File | null) => void
+  /** A whole folder was picked (`webkitdirectory`): the wrapper packs its
+   *  .md files into a zip client-side and the upload proceeds as if that zip
+   *  had been chosen — same server path, same guards. */
+  onFolderFiles: (files: File[]) => void
   onSubmit: () => void
   onClose: () => void
 }
@@ -185,18 +197,25 @@ export function UploadSkillModalView({
   onNameChange,
   onDescriptionChange,
   onFileChange,
+  onFolderFiles,
   onSubmit,
   onClose,
 }: UploadSkillModalViewProps) {
   if (!open) return null
   if (result) return <MultiSkillResult result={result} onClose={onClose} />
+  // A bare .md is the only pick that needs the form to name it; an archive
+  // (.zip, or a folder packed into one) names every skill from its own
+  // content. So the modal opens with just the two pickers, and what gets
+  // picked decides what renders below: .md → the name/description fields,
+  // archive → a one-line "skills name themselves" note.
+  const isMd = file != null && file.name.toLowerCase().endsWith(".md")
+  const needsIdentity = isMd
   const nameMissing = touched.name && name.trim().length === 0
   const descriptionMissing = touched.description && description.trim().length === 0
   const canSubmit =
     file != null &&
-    name.trim().length > 0 &&
-    description.trim().length > 0 &&
-    !submitting
+    !submitting &&
+    (!isMd || (name.trim().length > 0 && description.trim().length > 0))
   return (
     <div
       className="modal-overlay open"
@@ -222,7 +241,11 @@ export function UploadSkillModalView({
           {/* Where the skill comes from. Two sources, one modal: the file
               branch below is untouched, and GitHub swaps the body for a repo
               picker rather than opening a second dialog to learn. */}
-          <div className="ob-chip-row" role="group" aria-label="Skill source">
+          <div
+            className="ob-chip-row skill-src-row"
+            role="group"
+            aria-label="Skill source"
+          >
             <button
               type="button"
               className={`btn btn-sm${source === "file" ? " btn-primary" : ""}`}
@@ -244,13 +267,89 @@ export function UploadSkillModalView({
           {source === "github" ? (
             <GithubSkillPanel {...github} />
           ) : (
-          <>
+          // One column, one rhythm: every direct child of the panel is a step
+          // (intro → pick → name it), evenly spaced by the panel's own gap so
+          // the fields that appear after a .md pick land on the same beat as
+          // everything above them.
+          <div className="skill-upload-panel">
           <p className="modal-sub">
-            Encode your own workflow as a Markdown skill file and invoke it from
-            chat like any built-in — a .md file, or a .zip with a SKILL.md plus
-            supporting files.
+            Encode your own workflow as Markdown and invoke it from chat like
+            any built-in skill.
           </p>
 
+          {/* The pick comes FIRST: what was picked decides the rest of the
+              form. A bare .md can't name itself, so it brings up the name and
+              description fields below; an archive names every skill from its
+              own content, so for a .zip or a folder no fields appear. */}
+          <div className="skill-upload-choices">
+            <label
+              className={`set-conn-upload skill-upload-tile${file ? " is-picked" : ""}`}
+              title={file ? `${file.name} — choose a different file` : "Choose a skill file"}
+            >
+              {/* Picked reads as LOADED, not just tinted: the cloud becomes a
+                  filled check, the filename takes the tile's headline slot,
+                  and the format hint becomes the way back out of the pick. */}
+              {file ? (
+                <IconCircleCheckFilled size={22} className="skill-upload-icon" aria-hidden />
+              ) : (
+                <IconUpload size={22} stroke={1.6} className="skill-upload-icon" aria-hidden />
+              )}
+              {file ? (
+                <span className="file-name">{file.name}</span>
+              ) : (
+                <span className="skill-upload-tile-label">Choose a skill file</span>
+              )}
+              <span className="muted">
+                {file ? "Click to choose a different file" : ".md or .zip · up to 20 MB"}
+              </span>
+              <input
+                type="file"
+                accept=".md,.zip"
+                disabled={submitting}
+                className="skill-upload-input"
+                aria-label="Choose a skill file (.md or .zip)"
+                onChange={(e) => {
+                  const picked = e.target.files?.[0] ?? null
+                  if (picked) onFileChange(picked)
+                  // Reset so the same file can be picked again after a failed run.
+                  e.target.value = ""
+                }}
+              />
+            </label>
+
+            {/* Dimmed once a file is picked — still a live choice (it swaps the
+                pick), just no longer the one in play, so the two tiles stop
+                carrying equal weight the moment one of them is answered. */}
+            <label
+              className={`set-conn-upload skill-upload-tile${file ? " is-standby" : ""}`}
+              title="Choose a folder of skills"
+            >
+              <IconFolderOpen size={22} stroke={1.6} className="skill-upload-icon" aria-hidden />
+              <span className="skill-upload-tile-label">Choose a folder</span>
+              <span className="muted">every .md inside becomes a skill</span>
+              <input
+                type="file"
+                disabled={submitting}
+                className="skill-upload-input"
+                aria-label="Choose a folder of skills"
+                // Non-standard but universal: makes the browser's picker select a
+                // directory and report every file inside with its relative path.
+                {...({ webkitdirectory: "" } as Record<string, string>)}
+                onChange={(e) => {
+                  const picked = Array.from(e.target.files ?? [])
+                  if (picked.length > 0) onFolderFiles(picked)
+                  e.target.value = ""
+                }}
+              />
+            </label>
+          </div>
+
+          {needsIdentity ? (
+          // The fields arrive as their own block, ruled off from the pick above
+          // it, so their appearance reads as the next step rather than as the
+          // modal suddenly growing.
+          <div className="skill-upload-fields">
+          <div className="skill-field">
           <label className="field-label" htmlFor="upload-skill-name">
             Skill name <span aria-hidden>*</span>
           </label>
@@ -282,7 +381,9 @@ export function UploadSkillModalView({
               {nameNotice.text}
             </p>
           ) : null}
+          </div>
 
+          <div className="skill-field">
           <label className="field-label" htmlFor="upload-skill-desc">
             What does this skill do? <span aria-hidden>*</span>
           </label>
@@ -302,35 +403,25 @@ export function UploadSkillModalView({
               Skill description is required.
             </p>
           ) : null}
-          <p className="modal-sub">
+          <p className="field-hint">
             Teammates see this in the skill library and the / picker, so say
             when to reach for it.
           </p>
-
-          <label className="set-conn-upload" title="Choose a skill file">
-            <i className="ti ti-cloud-upload" aria-hidden />
-            {file ? file.name : "Choose a skill file"}
-            <span className="muted">.md or .zip · up to 20 MB · up to 50,000 characters</span>
-            <input
-              type="file"
-              accept=".md,.zip"
-              disabled={submitting}
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const picked = e.target.files?.[0] ?? null
-                if (picked) onFileChange(picked)
-                // Reset so the same file can be picked again after a failed run.
-                e.target.value = ""
-              }}
-            />
-          </label>
+          </div>
+          </div>
+          ) : file != null ? (
+          <p className="skill-upload-note">
+            Each skill names itself — from its own frontmatter, or its
+            filename. You can edit any of them afterwards.
+          </p>
+          ) : null}
 
           {error ? (
             <p className="settings-msg settings-msg-error" role="alert">
               {error}
             </p>
           ) : null}
-          </>
+          </div>
           )}
         </div>
         <div className="modal-foot">
@@ -402,6 +493,8 @@ function GithubSkillPanel({
   onToggle,
 }: GithubPanelProps) {
   if (connected === false) {
+    // Not the stretch-everything panel: the connect hint is a natural-width
+    // button, and a column flex parent would blow it out to full width.
     return (
       <div className="field">
         <p className="modal-sub">
@@ -413,76 +506,104 @@ function GithubSkillPanel({
     )
   }
   return (
-    <>
+    <div className="skill-upload-panel">
       <p className="modal-sub">
-        Point Sprntly at a repo and it imports every skill folder it finds —
-        one skill per SKILL.md, named from that file.
+        Point Sprntly at a repo and it lists every Markdown skill it finds —
+        each .md file is a skill, and a folder with a SKILL.md comes in with
+        its supporting files. Pick the ones you want.
       </p>
 
-      <label className="field-label" htmlFor="skill-github-repo">
-        Repository
-      </label>
-      <select
-        id="skill-github-repo"
-        className="input"
-        value={repo}
-        onChange={(e) => onRepoChange(e.target.value)}
-        disabled={connected === null || repos === null || repos.length === 0}
-      >
-        {connected === null || repos === null ? (
-          <option value="">Loading repos…</option>
-        ) : repos.length === 0 ? (
-          <option value="">
-            {reposError ? "Couldn’t load repos" : "No repos — install the Sprntly App"}
-          </option>
-        ) : (
-          <>
-            <option value="">Pick a repo…</option>
-            {[...repos]
-              .sort((a, b) => a.full_name.localeCompare(b.full_name))
-              .map((r) => (
-                <option key={r.full_name} value={r.full_name}>
-                  {r.full_name}
-                </option>
-              ))}
-          </>
-        )}
-      </select>
+      <div className="skill-field">
+        <label className="field-label" htmlFor="skill-github-repo">
+          Repository
+        </label>
+        <select
+          id="skill-github-repo"
+          className="input"
+          value={repo}
+          onChange={(e) => onRepoChange(e.target.value)}
+          disabled={connected === null || repos === null || repos.length === 0}
+        >
+          {connected === null || repos === null ? (
+            <option value="">Loading repos…</option>
+          ) : repos.length === 0 ? (
+            <option value="">
+              {reposError ? "Couldn’t load repos" : "No repos — install the Sprntly App"}
+            </option>
+          ) : (
+            <>
+              <option value="">Pick a repo…</option>
+              {[...repos]
+                .sort((a, b) => a.full_name.localeCompare(b.full_name))
+                .map((r) => (
+                  <option key={r.full_name} value={r.full_name}>
+                    {r.full_name}
+                  </option>
+                ))}
+            </>
+          )}
+        </select>
+      </div>
 
-      <label className="field-label" htmlFor="skill-github-branch">
-        Branch
-      </label>
-      <input
-        id="skill-github-branch"
-        type="text"
-        className="input"
-        value={branch}
-        onChange={(e) => onBranchChange(e.target.value)}
-        placeholder="main"
-        autoComplete="off"
-      />
+      {/* Branch and folder are both short, both optional to think about, and
+          both narrow the same lookup — one row, so the form is three steps
+          deep instead of four. */}
+      <div className="skill-gh-grid">
+        <div className="skill-field">
+          <label className="field-label" htmlFor="skill-github-branch">
+            Branch
+          </label>
+          <input
+            id="skill-github-branch"
+            type="text"
+            className="input"
+            value={branch}
+            onChange={(e) => onBranchChange(e.target.value)}
+            placeholder="main"
+            autoComplete="off"
+          />
+        </div>
 
-      <label className="field-label" htmlFor="skill-github-folder">
-        Folder <span className="muted">(optional)</span>
-      </label>
-      <input
-        id="skill-github-folder"
-        type="text"
-        className="input"
-        value={folder}
-        onChange={(e) => onFolderChange(e.target.value)}
-        placeholder="e.g. skills"
-        autoComplete="off"
-      />
+        <div className="skill-field">
+          <label className="field-label" htmlFor="skill-github-folder">
+            Folder <span className="muted">(optional)</span>
+          </label>
+          <input
+            id="skill-github-folder"
+            type="text"
+            className="input"
+            value={folder}
+            onChange={(e) => onFolderChange(e.target.value)}
+            placeholder="e.g. skills"
+            autoComplete="off"
+          />
+        </div>
+      </div>
 
-      <button
-        type="button"
-        className="btn btn-sm"
-        disabled={!repo || searching || importing}
-        onClick={onSearch}
-      >
-        {searching ? "Looking…" : "Find skills"}
-      </button>
+      <div className="skill-gh-actions">
+        <button
+          type="button"
+          className="btn btn-sm skill-gh-find"
+          disabled={!repo || searching || importing}
+          onClick={onSearch}
+          aria-busy={searching || undefined}
+        >
+          {searching ? (
+            <IconLoader2 size={14} className="icon-spin" aria-hidden />
+          ) : (
+            <IconSearch size={14} stroke={1.8} aria-hidden />
+          )}
+          {searching ? "Looking…" : "Find skills"}
+        </button>
+      </div>
+
+      {/* The search clears the previous results, so without this the panel
+          just goes blank for the length of a tree walk. */}
+      {searching ? (
+        <p className="skill-gh-searching" aria-live="polite">
+          Reading {repo} for Markdown skills…
+        </p>
+      ) : null}
 
       {discovery?.notes?.map((note) => (
         <p className="settings-msg settings-warning" role="status" key={note}>
@@ -498,34 +619,57 @@ function GithubSkillPanel({
       ) : null}
 
       {discovery && discovery.skills.length > 0 ? (
-        <ul className="modal-sub" role="group" aria-label="Skills found">
-          {discovery.skills.map((s) => {
-            const invalid = s.status === "invalid"
-            return (
-              <li key={s.path}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(s.path)}
-                    disabled={invalid || importing}
-                    onChange={() => onToggle(s.path)}
-                  />{" "}
-                  {s.name || s.path}{" "}
-                  {invalid ? null : <code>{s.trigger_preview}</code>}{" "}
-                  {s.status === "replaces" ? (
-                    <span className="tag tag-double">replaces yours</span>
+        <div className="skill-gh-found">
+          <div className="skill-gh-found-head">
+            <span className="skill-gh-found-count">
+              {discovery.skills.length}{" "}
+              {discovery.skills.length === 1 ? "skill" : "skills"} found
+            </span>
+            <span className="muted">
+              {discovery.repo} · {discovery.ref}
+            </span>
+          </div>
+          {/* One row per skill, everything on one line: the badge is pinned to
+              the row's end so it can never orphan-wrap onto a line of its own,
+              and a long name ellipses instead of pushing it there. */}
+          <ul className="skill-gh-list" role="group" aria-label="Skills found">
+            {discovery.skills.map((s) => {
+              const invalid = s.status === "invalid"
+              const on = selected.includes(s.path)
+              return (
+                <li
+                  key={s.path}
+                  className={`skill-gh-item${invalid ? " is-invalid" : on ? " is-on" : ""}`}
+                >
+                  <label className="skill-gh-row">
+                    <input
+                      type="checkbox"
+                      className="skill-gh-check"
+                      checked={on}
+                      disabled={invalid || importing}
+                      onChange={() => onToggle(s.path)}
+                    />
+                    <span className="skill-gh-name">{s.name || s.path}</span>
+                    {invalid ? null : (
+                      <code className="skill-gh-trigger">{s.trigger_preview}</code>
+                    )}
+                    {s.status === "replaces" ? (
+                      <span className="tag tag-double skill-gh-badge">replaces yours</span>
+                    ) : null}
+                  </label>
+                  {invalid ? (
+                    <p className="skill-gh-reason">Can’t import — {s.reason}</p>
                   ) : null}
-                </label>
-                {invalid ? (
-                  <span className="settings-msg settings-warning">
-                    {" "}
-                    Can’t import — {s.reason}
-                  </span>
-                ) : null}
-              </li>
-            )
-          })}
-        </ul>
+                </li>
+              )
+            })}
+          </ul>
+          <p className="skill-gh-selected" aria-live="polite">
+            {selected.length === 0
+              ? "Nothing selected yet — tick the skills you want."
+              : `${selected.length} selected.`}
+          </p>
+        </div>
       ) : null}
 
       {error ? (
@@ -533,7 +677,7 @@ function GithubSkillPanel({
           {error}
         </p>
       ) : null}
-    </>
+    </div>
   )
 }
 
@@ -571,18 +715,22 @@ function MultiSkillResult({
         <div className="modal-body">
           <p className="modal-sub" role="status">
             {countLine(added.length, updated.length)} That archive held more than
-            one skill, so each one was named from its own SKILL.md — the name and
-            description you typed were not used.
+            one skill, so each one was named from its own SKILL.md. You can edit
+            any of them afterwards.
           </p>
-          <ul className="modal-sub">
+          {/* Same row treatment as the GitHub picker's list, so "what you
+              chose" and "what you got" read as the same kind of thing. The
+              name stays a bare text node beside its trigger — one line, one
+              skill. */}
+          <ul className="skill-result-list">
             {result.skills.map((s) => (
-              <li key={s.id}>
-                {s.name} — <code>{s.trigger}</code>{" "}
+              <li key={s.id} className="skill-result-row">
+                {s.name} — <code className="skill-gh-trigger">{s.trigger}</code>{" "}
                 {s.replaced === true ? (
-                  <span className="tag tag-double">updated</span>
+                  <span className="tag tag-double skill-gh-badge">updated</span>
                 ) : null}
                 {s.name_conflict ? (
-                  <span className="tag tag-impact">new trigger</span>
+                  <span className="tag tag-impact skill-gh-badge">new trigger</span>
                 ) : null}
               </li>
             ))}
@@ -594,9 +742,9 @@ function MultiSkillResult({
                   ? "One folder wasn’t imported:"
                   : `${result.skipped.length} folders weren’t imported:`}
               </p>
-              <ul className="modal-sub">
+              <ul className="skill-result-list skill-result-list--skipped">
                 {result.skipped.map((s) => (
-                  <li key={s.path || s.name}>
+                  <li key={s.path || s.name} className="skill-result-row">
                     {s.name || s.path || "A skill"} — {s.reason}
                   </li>
                 ))}
@@ -831,7 +979,15 @@ export function UploadSkillModal({
     setSubmitting(true)
     setError(null)
     try {
-      const uploaded = await onUpload(file, name.trim(), description.trim())
+      // Only a bare .md is named by the form. For an archive the fields are
+      // hidden — send nothing, so a name typed BEFORE picking the zip can't
+      // invisibly rename what's inside it.
+      const isMd = file.name.toLowerCase().endsWith(".md")
+      const uploaded = await onUpload(
+        file,
+        isMd ? name.trim() : "",
+        isMd ? description.trim() : "",
+      )
       if (uploaded && Array.isArray(uploaded.skills)) {
         // A multi-skill archive: hold the modal open on its outcome. The
         // library behind it is already updated — this is the report, not a
@@ -927,6 +1083,18 @@ export function UploadSkillModal({
         // Surface a bad pick immediately (wrong type / oversize) rather than
         // waiting for a submit attempt.
         setError(f ? skillFileError(f) : null)
+      }}
+      onFolderFiles={(picked) => {
+        void (async () => {
+          const packed = await zipFolderFiles(picked)
+          if ("error" in packed) {
+            setFile(null)
+            setError(packed.error)
+            return
+          }
+          setFile(packed.file)
+          setError(null)
+        })()
       }}
       onSubmit={() => void (source === "github" ? handleImport() : handleSubmit())}
       onClose={() => {

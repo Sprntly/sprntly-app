@@ -232,18 +232,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "PRD Author" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -276,18 +276,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method v2"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "Estimation helper" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours, v2." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method v2"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -564,18 +564,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "Estimation helper" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Scores features by reach × confidence." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -623,12 +623,8 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Bundle" } })
-      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
-        target: { value: "Ignored for an archive." },
-      })
-    })
+    // An archive shows no name/description fields — the pick alone arms the
+    // upload.
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
     await act(async () => {
       fireEvent.change(fileInput, {

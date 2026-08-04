@@ -113,6 +113,10 @@ describe("UploadSkillModal", () => {
         builtinSlugs: ["prd-author"],
       }),
     )
+    // The pick comes first: only a .md brings up the name/description fields.
+    await act(async () => {
+      pickFile(container, MD_FILE())
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "PRD Author" },
@@ -128,7 +132,6 @@ describe("UploadSkillModal", () => {
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Our own PRD flow." },
       })
-      pickFile(container, MD_FILE())
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
@@ -136,8 +139,75 @@ describe("UploadSkillModal", () => {
     await waitFor(() => expect(onUpload).toHaveBeenCalled())
   })
 
+  it("packs a picked folder into a zip and uploads it through the same path", async () => {
+    const onUpload = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload,
+        onClose: vi.fn(),
+      }),
+    )
+    const folderInput = container.querySelectorAll(
+      'input[type="file"]',
+    )[1] as HTMLInputElement
+    // The folder input is the directory picker, not a second plain file pick.
+    expect(folderInput.hasAttribute("webkitdirectory")).toBe(true)
+
+    const md = new File(["# Gov"], "governance-skill.md", { type: "text/markdown" })
+    Object.defineProperty(md, "webkitRelativePath", {
+      value: "My Skills/governance-skill.md",
+    })
+    await act(async () => {
+      fireEvent.change(folderInput, { target: { files: [md] } })
+    })
+    // The packed zip takes the file slot, named after the folder itself.
+    await screen.findByText("My Skills.zip")
+
+    // An archive names its skills from their own content, so the name and
+    // description fields leave the form — no fields to fill, straight to
+    // upload.
+    expect(screen.queryByLabelText(/skill name/i)).toBeNull()
+    expect(screen.queryByLabelText(/what does this skill do/i)).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
+    })
+    await waitFor(() => expect(onUpload).toHaveBeenCalled())
+    const [sent, sentName, sentDescription] = onUpload.mock.calls[0] as [
+      File,
+      string,
+      string,
+    ]
+    expect(sent.name).toBe("My Skills.zip")
+    expect(sent.type).toBe("application/zip")
+    // Nothing typed can shadow the archive's own naming.
+    expect(sentName).toBe("")
+    expect(sentDescription).toBe("")
+  })
+
+  it("keeps the folder pick inside the picker: no .md files is an inline error", async () => {
+    const { container } = render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    )
+    const folderInput = container.querySelectorAll(
+      'input[type="file"]',
+    )[1] as HTMLInputElement
+    const png = new File(["png"], "logo.png", { type: "image/png" })
+    await act(async () => {
+      fireEvent.change(folderInput, { target: { files: [png] } })
+    })
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toMatch(/no \.md files/),
+    )
+  })
+
   it("previewed trigger skips a slug the company already handed out", async () => {
-    render(
+    const { container } = render(
       React.createElement(UploadSkillModal, {
         open: true,
         onUpload: vi.fn(),
@@ -146,6 +216,9 @@ describe("UploadSkillModal", () => {
         customSkills: [{ slug: "prd-author-2", name: "PRD Author 2" }],
       }),
     )
+    await act(async () => {
+      pickFile(container, MD_FILE())
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "PRD Author" },
@@ -165,6 +238,9 @@ describe("UploadSkillModal", () => {
       }),
     )
     await act(async () => {
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
       // Same name once slugified — the equivalence the server replaces on.
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "estimation  helper!" },
@@ -182,7 +258,6 @@ describe("UploadSkillModal", () => {
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours, v2." },
       })
-      pickFile(container, MD_FILE())
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
@@ -191,7 +266,7 @@ describe("UploadSkillModal", () => {
   })
 
   it("shows no name notice for a free name", async () => {
-    render(
+    const { container } = render(
       React.createElement(UploadSkillModal, {
         open: true,
         onUpload: vi.fn(),
@@ -201,6 +276,9 @@ describe("UploadSkillModal", () => {
       }),
     )
     await act(async () => {
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "My Own Skill" },
       })
@@ -209,12 +287,37 @@ describe("UploadSkillModal", () => {
     expect(screen.queryByRole("alert")).toBeNull()
   })
 
-  it("gates submit until file, name, and description are all present", async () => {
+  it("opens with just the pickers — the fields wait for a .md pick", async () => {
+    const { container } = render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    )
+    // Nothing picked: no name, no description — the pick is the first step.
+    expect(screen.queryByLabelText(/skill name/i)).toBeNull()
+    expect(screen.queryByLabelText(/what does this skill do/i)).toBeNull()
+
+    await act(async () => {
+      pickFile(container, MD_FILE())
+    })
+    // A bare .md can't name itself, so now the fields appear.
+    expect(screen.getByLabelText(/skill name/i)).toBeTruthy()
+    expect(screen.getByLabelText(/what does this skill do/i)).toBeTruthy()
+  })
+
+  it("gates submit until the .md pick has a name and description", async () => {
     const onUpload = vi.fn().mockResolvedValue(undefined)
     const { container } = render(
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
     )
     const submit = screen.getByRole("button", { name: /upload skill/i }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+
+    await act(async () => {
+      pickFile(container, MD_FILE())
+    })
     expect(submit.disabled).toBe(true)
 
     await act(async () => {
@@ -227,22 +330,33 @@ describe("UploadSkillModal", () => {
         target: { value: "Does things." },
       })
     })
-    expect(submit.disabled).toBe(true)
+    expect(submit.disabled).toBe(false)
+  })
 
+  it("a zip pick needs no fields: submit is ready at once", async () => {
+    const { container } = render(
+      React.createElement(UploadSkillModal, { open: true, onUpload: vi.fn(), onClose: vi.fn() }),
+    )
     await act(async () => {
-      pickFile(container, MD_FILE())
+      pickFile(container, new File(["zip"], "skills.zip", { type: "application/zip" }))
     })
+    // The archive names its skills itself — no fields, nothing to fill.
+    expect(screen.queryByLabelText(/skill name/i)).toBeNull()
+    const submit = screen.getByRole("button", { name: /upload skill/i }) as HTMLButtonElement
     expect(submit.disabled).toBe(false)
   })
 
   it("highlights a required field that was touched and left empty", async () => {
-    render(
+    const { container } = render(
       React.createElement(UploadSkillModal, {
         open: true,
         onUpload: vi.fn(),
         onClose: vi.fn(),
       }),
     )
+    await act(async () => {
+      pickFile(container, MD_FILE())
+    })
     const name = screen.getByLabelText(/skill name/i)
     await act(async () => {
       fireEvent.change(name, { target: { value: "x" } })
@@ -268,16 +382,18 @@ describe("UploadSkillModal", () => {
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
     )
     await act(async () => {
-      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Big" } })
-      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
-        target: { value: "Desc" },
-      })
       pickFile(
         container,
         new File(["x".repeat(MAX_SKILL_CONTENT_CHARS + 1)], "big.md", {
           type: "text/markdown",
         }),
       )
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Big" } })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Desc" },
+      })
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
@@ -298,16 +414,18 @@ describe("UploadSkillModal", () => {
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
     )
     await act(async () => {
-      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "At cap" } })
-      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
-        target: { value: "Desc" },
-      })
       pickFile(
         container,
         new File(["x".repeat(MAX_SKILL_CONTENT_CHARS)], "atcap.md", {
           type: "text/markdown",
         }),
       )
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "At cap" } })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Desc" },
+      })
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
@@ -326,11 +444,13 @@ describe("UploadSkillModal", () => {
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
     )
     await act(async () => {
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Dupe" } })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Desc" },
       })
-      pickFile(container, MD_FILE())
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
@@ -374,11 +494,8 @@ describe("UploadSkillModal", () => {
       const { container } = render(
         React.createElement(UploadSkillModal, { open: true, onUpload, onClose }),
       )
+      // A zip shows no name/description fields at all — pick and go.
       await act(async () => {
-        fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Bundle" } })
-        fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
-          target: { value: "Ignored." },
-        })
         pickFile(container, new File(["zip"], "skills.zip", { type: "application/zip" }))
       })
       await act(async () => {
@@ -609,11 +726,13 @@ describe("UploadSkillModal", () => {
       )
       // The file source is the default, and nothing about it moved.
       await act(async () => {
+        pickFile(container, MD_FILE())
+      })
+      await act(async () => {
         fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Good" } })
         fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
           target: { value: "Desc" },
         })
-        pickFile(container, MD_FILE())
       })
       await act(async () => {
         fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
@@ -634,11 +753,13 @@ describe("UploadSkillModal", () => {
       React.createElement(UploadSkillModal, { open: true, onUpload, onClose }),
     )
     await act(async () => {
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Good" } })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Desc" },
       })
-      pickFile(container, MD_FILE())
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
