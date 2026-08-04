@@ -200,6 +200,27 @@ describe("ClarifyQuestionsCard — the settled record", () => {
     expect(screen.getByTestId("clarify-questions-resolved").textContent).toContain("2 of 3 answered")
   })
 
+  it("does not claim a fallback when every question was answered", () => {
+    answered("card", [
+      { prompt: "Who are the target users?", answer: "Admins" },
+      { prompt: "How will you measure success?", answer: "p95 under 2s" },
+      { prompt: "What is in scope for v1?", answer: "Everything" },
+    ])
+    const summary = screen.getByTestId("clarify-questions-resolved").textContent ?? ""
+    // The old copy read "3 of 3 answered — the rest fell back to their
+    // assumptions", contradicting the three ✓ marks directly below it.
+    expect(summary).toContain("All 3 answered")
+    expect(summary).not.toContain("fell back")
+    expect(screen.queryByTestId("clarify-answer-skipped")).toBeNull()
+  })
+
+  it("still names the fallback when only some were answered", () => {
+    answered("card", [{ prompt: "Who are the target users?", answer: "Admins" }])
+    const summary = screen.getByTestId("clarify-questions-resolved").textContent ?? ""
+    expect(summary).toContain("1 of 3 answered")
+    expect(summary).toContain("fell back")
+  })
+
   it("names the assumption a blank question fell back to, rather than showing a gap", () => {
     answered("card", [{ prompt: "How will you measure success?", answer: "p95 under 2s" }])
     const skipped = screen.getAllByTestId("clarify-answer-skipped").map((n) => n.textContent)

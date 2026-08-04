@@ -30,10 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import uuid
 from dataclasses import dataclass
 
-from app import db, document_catalog
+from app import db, document_bodies, document_catalog
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.graph.types import Source
@@ -41,8 +40,6 @@ from app.graph.types import Source
 logger = logging.getLogger(__name__)
 
 GOOGLE_DRIVE_PROVIDER = "google_drive"
-
-_NS = uuid.UUID("c0ffee00-0000-4000-8000-00000000d21e")
 
 # Matches the runner's per-extraction char budget — one extract_document call
 # per ~6k chars keeps the LLM focused and the output schema within caps.
@@ -65,13 +62,22 @@ _DRIVE_SOURCE_HINT = (
 
 @dataclass
 class DriveDoc:
-    """One changed Drive file, converted to markdown, ready for extraction."""
+    """One changed Drive file, converted to markdown, ready for extraction.
+
+    `dataset` + `md_file` say WHERE that markdown was written in the corpus.
+    They travel with the doc rather than being recomputed here because only
+    the sync knows them: `datasets.ingest_file` normalises the name and
+    suffixes collisions (`.1.md`), so the path it returns is the only record
+    of which file took which name. Both are empty for a file whose markdown
+    this pass did not (re-)write — see the sync's KG-only refresh branch."""
     file_id: str
     name: str
     modified: str
     text: str
     mime: str = ""
     link: str = ""
+    dataset: str = ""
+    md_file: str = ""
 
 
 def _chunks(text: str) -> list[str]:
@@ -133,8 +139,37 @@ def extract_drive_docs(
             # File-level provenance in the source registry — upserted on a
             # stable per-file id, so re-extracting a new version updates the
             # same row instead of accumulating one row per edit.
+            #
+            # This row is also WHERE THE FILE'S TEXT CAN BE FOUND. The
+            # converted markdown lives in the dataset corpus under a name
+            # nothing could reconstruct (md_filename normalises the stem, and
+            # a collision appends `.1.md`), so the location the sync actually
+            # wrote to is recorded here, keyed by the same Drive file id the
+            # catalog row carries as its external_id. Without it a Drive
+            # document can be indexed, summarised and ranked and still have no
+            # readable body — catalogued but unquotable.
+            #
+            # NO LOCAL try/except, and that is the point. A failure to persist
+            # this must take the file down with it: swallowing it would let
+            # the file reach `ok` below, advance its `kg_file_mtime`, and —
+            # because Drive re-fetches a file only when its modifiedTime
+            # changes — leave it permanently unresolvable until a human edits
+            # it in Drive. Letting it propagate to the per-file handler costs
+            # one re-extraction on the next sync.
+            #
+            # When this pass did not write the markdown (the KG-only refresh
+            # path, where the corpus copy is already current) the location is
+            # carried forward off the existing row instead of being blanked:
+            # `create_source` upserts the WHOLE row, so a retry that knows
+            # less than its predecessor would otherwise erase what the first
+            # sync learned.
+            location = document_bodies.markdown_location(doc.dataset, doc.md_file)
+            if not location:
+                location = document_bodies.stored_markdown_location(
+                    facade, company_id, doc.file_id
+                )
             facade.create_source(company_id, Source(
-                id=str(uuid.uuid5(_NS, f"gdrive-file|{company_id}|{doc.file_id}")),
+                id=document_bodies.drive_source_id(company_id, doc.file_id),
                 enterprise_id=company_id,
                 source_type=GOOGLE_DRIVE_PROVIDER,
                 label=doc.name[:200],
@@ -143,6 +178,7 @@ def extract_drive_docs(
                     "modified": doc.modified,
                     "mime": doc.mime,
                     "link": doc.link,
+                    **location,
                 },
             ))
             # Register in the document catalog, and DELIBERATELY WITHOUT a

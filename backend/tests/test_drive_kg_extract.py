@@ -44,12 +44,25 @@ def _no_catalog_registration(monkeypatch):
 
 
 class FakeFacade:
+    """Enough of GraphFacade for the extractor — see the twin in
+    tests/test_drive_catalog_registration.py for why `get_source` has to be
+    here rather than being an unused convenience."""
+
     def __init__(self):
         self.sources = []
 
     def create_source(self, enterprise_id, source):
+        # Kept as an append LOG rather than a dict, because several tests
+        # assert on the sequence of writes. `get_source` reads the newest
+        # matching entry, which is what the real upsert leaves behind.
         self.sources.append(source)
         return source
+
+    def get_source(self, enterprise_id, source_id):
+        for source in reversed(self.sources):
+            if source.id == source_id and source.enterprise_id == enterprise_id:
+                return source
+        return None
 
 
 def _doc(**kw):
