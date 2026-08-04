@@ -321,13 +321,13 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
 
   it("hides the upload fallback on categories that opt out in the catalog", () => {
     const { container } = mountLoaded()
-    // Communications (comms) sets allowsManualUpload: false — a one-off export
-    // has no channel/permission model to sync against.
+    // Company documentation (docs) is the wizard's last step and sets
+    // allowsManualUpload: false — its uploads go through the named-source
+    // picker in Settings, not this generic strip.
     advanceToLastCategory(container)
     const open = container.querySelector(".conn-step.open") as HTMLElement
-    if (open.getAttribute("data-conn") === "comms") {
-      expect(open.querySelector(".conn-upload")).toBeNull()
-    }
+    expect(open.getAttribute("data-conn")).toBe("docs")
+    expect(open.querySelector(".conn-upload")).toBeNull()
   })
 
   it("hides unsupported connectors and empty categories", () => {
@@ -338,7 +338,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Superset")).not.toBeNull()
     expect(screen.queryByText("Mixpanel")).toBeNull()
     expect(screen.queryByText("PostHog")).toBeNull()
-    // MS Teams (coming soon) never renders anywhere in the wizard.
+    // MS Teams left the catalog with the Communications category (2026-08-04),
+    // so it can't render anywhere in the wizard.
     expect(screen.queryByText("MS Teams")).toBeNull()
     // Monitoring has no supported connector today → the whole category is
     // dropped from the catalog, so it never appears however far you walk.
@@ -351,6 +352,9 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Fireflies")).not.toBeNull()
     expect(screen.queryByText("Zendesk")).toBeNull()
     expect(screen.queryByText("Gong")).toBeNull()
+    // Slack is offered HERE, and only here: the Communications step that used
+    // to ask for it a second time was removed with its category (2026-08-04).
+    expect(screen.getAllByText("Slack").length).toBe(1)
     // Advance to Research. It has NO visible connector at all (Marvin is
     // coming-soon) yet the category still renders — its upload strip is what
     // onboarding is asking for, so `keepWhenEmpty` keeps the shelf alive.
@@ -367,11 +371,16 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     // Design-kit-only names never appear.
     expect(screen.queryByText("Segment")).toBeNull()
     expect(screen.queryByText("Trello")).toBeNull()
-    // Communications (Slack is OAuth-wired) is a real category — it appears
-    // once walked to, and monitoring still never does.
+    // Walk to the end: there is no Communications step (removed 2026-08-04 —
+    // Slack was already offered on the Voice shelf above), and monitoring
+    // still never appears.
     advanceToLastCategory(container)
-    expect(container.querySelector('.conn-step[data-conn="comms"]')).not.toBeNull()
+    expect(container.querySelector('.conn-step[data-conn="comms"]')).toBeNull()
     expect(container.querySelector('.conn-step[data-conn="monitoring"]')).toBeNull()
+    // Walking to the end never turns up a second Slack tile — a reviewed
+    // category collapses to a "Connected" row, so no connector grid but also
+    // no Communications step waiting at the bottom.
+    expect(screen.queryByText("Slack")).toBeNull()
   })
 
   it("does not render a category until it is reached", () => {

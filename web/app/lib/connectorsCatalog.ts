@@ -14,13 +14,19 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 // Category order follows the v6 onboarding screenshot spec (2026-07-17):
 // Analytics → Voice → Research → CRM → Project Management → Monitoring →
-// Design → Codebase → Communications, with Company documentation and the
-// settings-only Revenue appended. Research was added 2026-08-02 and sits
-// next to Voice because both carry what users told us — Voice unsolicited,
-// Research deliberately gathered. The onboarding wizard shows only
-// ONBOARDING_CONNECTOR_CATEGORIES (lib/onboarding/connectorsWizard.ts);
-// Company documentation joined that list 2026-08-03, so Revenue is now the
-// only settings-only category.
+// Design → Codebase, with Company documentation and the settings-only Revenue
+// appended. Research was added 2026-08-02 and sits next to Voice because both
+// carry what users told us — Voice unsolicited, Research deliberately
+// gathered. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
+// (lib/onboarding/connectorsWizard.ts); Company documentation joined that list
+// 2026-08-03, so Revenue is now the only settings-only category.
+//
+// There is no Communications category (removed 2026-08-04). It existed to
+// carry Slack's second, delivery-side card and coming-soon MS Teams, but where
+// the brief gets DELIVERED is not something you connect a data source for — it
+// is configured in Settings → Comms & Brief. Slack now has exactly one card,
+// on the Voice shelf, and it means one thing there: a place we read customer
+// signal from.
 
 /**
  * Provider id of the "upload your own documents" connector — the user's own
@@ -33,26 +39,6 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
  * renders and onboarding does not.
  */
 export const UPLOADS_PROVIDER_ID = "uploads"
-
-// Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
-// communication tool (brief delivery target) AND a customer-voice source —
-// the corpus sync pulls the channels the user selects. Multi-type connectors
-// render a card in EVERY category they belong to (same id, same underlying
-// connection — connect from either shelf and both show Connected), so this
-// one item object is shared by the `voice` and `comms` categories below.
-// Mirrors backend/app/connectors/catalog.py.
-const SLACK_ITEM: ConnectorItemRow = {
-  // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
-  // (Slack Marketplace requires OAuth install, not a pasted bot token).
-  id: "slack",
-  name: "Slack",
-  logo: "S",
-  logoText: "S",
-  logoColor: "#4A154B",
-  logoSvg: "/connectors/slack.svg",
-  oauth: true,
-  types: ["communication", "customer-voice"],
-}
 
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
@@ -95,9 +81,28 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // host and connecting it requires a Zoom account admin — which the
       // connect modal says before the OAuth tab opens.
       { id: "zoom",       name: "Zoom",       logo: "Z", logoText: "Z", logoColor: "#0B5CFF", logoSvg: "/connectors/zoom.svg", oauth: true, types: ["meetings"] },
-      // Dual-typed communication + customer-voice — the same item also sits
-      // in the Communications category (see SLACK_ITEM above).
-      SLACK_ITEM,
+      // Slack is MULTI-TYPE (product decision 2026-07-30): a communication
+      // tool AND a customer-voice source — the corpus sync pulls the channels
+      // the user selects. Both types stay (they mirror
+      // backend/app/connectors/catalog.py and drive feature lookups like
+      // connectorsWithType), but it renders exactly ONE card, here: the reason
+      // a PM connects Slack from this screen is to let us read customer
+      // signal out of it. Its communication half — where the Top Insights
+      // brief gets delivered — is configured in Settings → Comms & Brief,
+      // which is a notification preference, not a connector shelf.
+      //
+      // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
+      // (Slack Marketplace requires OAuth install, not a pasted bot token).
+      {
+        id: "slack",
+        name: "Slack",
+        logo: "S",
+        logoText: "S",
+        logoColor: "#4A154B",
+        logoSvg: "/connectors/slack.svg",
+        oauth: true,
+        types: ["communication", "customer-voice"],
+      },
     ],
   },
   {
@@ -192,21 +197,6 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true, types: ["code"] },
       { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false, types: ["code"] },
       { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", logoSvg: "/connectors/bitbucket.svg", oauth: false, types: ["code"] },
-    ],
-  },
-  {
-    key: "comms",
-    title: "Communications",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    // Messages must come from the live Slack/Teams integration — an exported
-    // transcript has no channel/permission model. See `allowsManualUpload`.
-    allowsManualUpload: false,
-    items: [
-      // Dual-typed — the same item also sits under Voice of Customer &
-      // Support above (see SLACK_ITEM).
-      SLACK_ITEM,
-      { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false, types: ["communication"] },
     ],
   },
   {
@@ -329,17 +319,10 @@ export function connectableCatalog(
 // ── Information-gathering connectors ─────────────────────────────────────────
 //
 // The Top Insights brief is synthesized from connectors that BRING IN evidence
-// about the product and its customers — the "data sources". Five categories
+// about the product and its customers — the "data sources". Four categories
 // don't do that, so they can't satisfy the brief on their own and don't count
 // as a data source:
 //
-//   comms  MS Teams       — a DELIVERY target (where the brief gets posted),
-//                           not a source of findings. (Email is a delivery
-//                           destination too, not a connector at all.) Slack
-//                           ALSO sits in this category but DOES count: it is
-//                           dual-typed communication + customer-voice and
-//                           listed in the evidence-bearing `voice` category,
-//                           which is what feeds EVIDENCE_PROVIDER_IDS.
 //   pm     Jira / ClickUp / Asana — where work is TRACKED once decided; the
 //                           brief's output flows to them, not from them.
 //   code   GitHub         — what was BUILT, not what users need.
@@ -355,9 +338,16 @@ export function connectableCatalog(
 // of category keys rather than an allow-list so a new evidence category added
 // to CONNECTOR_CATALOG counts automatically. Note this is CATEGORY-based, so
 // Intercom (category `voice`, though its type is `communication`) correctly
-// counts as customer-support evidence.
+// counts as customer-support evidence — and so does Slack, which sits on the
+// `voice` shelf and nowhere else since the Communications category was removed
+// (2026-08-04). Its synced channels are real customer signal; the brief
+// DELIVERY it also performs is a Comms & Brief setting, not a catalog entry.
+//
+// The backend's equivalent (NON_EVIDENCE_TYPES in
+// backend/app/connectors/catalog.py) is keyed on connector TYPE rather than
+// category, so it still excludes bare `communication` tools without needing a
+// category here to agree with.
 export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
-  "comms",
   "pm",
   "code",
   "design",
@@ -405,7 +395,7 @@ export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
  * evidence-bearing connector (see NON_EVIDENCE_CATEGORIES). This is the gate for
  * whether onboarding kicks the first brief: a real data source (analytics,
  * customer support/calls/feedback, CRM, revenue, monitoring) must be
- * connected before we generate. Teams/Email, Jira & PM tools, GitHub,
+ * connected before we generate. Email delivery, Jira & PM tools, GitHub,
  * Figma, and docs tools (Notion / Google Docs) do NOT count — but Slack DOES
  * (dual-typed communication + customer-voice since 2026-07-30; its synced
  * channels are evidence). Onboarding info alone never produces a brief.
@@ -424,8 +414,11 @@ export function hasDataSourceConnection(
 // backend authority (backend/app/connectors/catalog.py). Features read these
 // instead of hardcoding provider ids. Multi-type is allowed per-entry with
 // product sign-off (2026-07-30) — Slack is the first (communication +
-// customer-voice); a multi-type connector's card renders in every category
-// it belongs to.
+// customer-voice). Types are independent of shelving: a connector's types say
+// what it IS, its single catalog placement says where a user goes to connect
+// it. Slack carries both types but sits only under Voice (2026-08-04), because
+// its communication half is a delivery preference configured in
+// Settings → Comms & Brief rather than something you connect here.
 
 /** Human labels for the type chips shown on connector cards. */
 export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
@@ -451,8 +444,8 @@ export function connectorTypes(id: string): ConnectorType[] {
 }
 
 /** Every catalog connector carrying `type` (e.g. all task-management tools).
- *  Deduped by id — a multi-type connector is listed in several categories
- *  but is still ONE connector. */
+ *  Deduped by id — no connector is dual-placed today, but the guard is cheap
+ *  and keeps the helper honest if one ever is again. */
 export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
   const seen = new Set<string>()
   return ALL_ITEMS.filter((i) => {
