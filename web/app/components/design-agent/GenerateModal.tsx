@@ -1684,6 +1684,27 @@ export function GenerateModal({
       return
     }
 
+    // Flow-level guard for the non-codebase (figma/website/screenshot) path,
+    // reusing the SAME one-shot latch the auto-generate effect checks
+    // (autoSkipFiredRef — see :515 and the effect below) rather than adding a
+    // second ref. A manual submission here commits this open to ONE flow the
+    // same way a saved-preference auto-skip does: onSavePreference below is
+    // async (a save-then-refresh round trip), and once it resolves the parent
+    // hands down a NEW savedPreference object identity, which is in the
+    // auto-generate effect's dep array — without this latch the effect would
+    // re-run, find the preference newly "healthy" (the source and key/url this
+    // click itself just saved), and fire a SECOND generate through the
+    // unguarded branch below. Setting the ref (not state) also closes a
+    // synchronous double-invoke — refs are visible to the very next call
+    // without waiting on a re-render, matching how locateInFlightRef protects
+    // enterLoadingFlow above. Codebase mode does not need this: it already
+    // gets equivalent protection from enterLoadingFlow's own
+    // locateInFlightRef + phase gate, and (unlike this branch) a github locate
+    // failure legitimately returns the user to this same config form to retry
+    // manually — checking the latch there would wrongly block that retry.
+    if (autoSkipFiredRef.current) return
+    autoSkipFiredRef.current = true
+
     // Non-codebase path — runs as before, chosenScreenRoute is null.
     // Screenshot is per-run context, never a durable preference (locked
     // decision): the saved-preference union stays untouched, so the next open
