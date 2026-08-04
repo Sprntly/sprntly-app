@@ -18,6 +18,14 @@
 // (UploadSkillModal → POST /v1/skills); a created skill appears here
 // immediately, byline = uploader.
 //
+// ONE upload can create SEVERAL cards: a .zip with a folder per SKILL.md
+// imports as one skill per folder, so the 201 comes back as a list and every
+// skill in it is merged under the same replaced-vs-new rule (mergeUploadedSkills).
+// The modal stays open on that result — the per-skill triggers and the folders
+// it couldn't import are more than a toast can carry — and the toast here just
+// counts what happened. Importing from a connected GitHub repo lands in exactly
+// the same place: the same per-skill payloads, the same merge, the same panel.
+//
 // Each card carries a hover-revealed pencil and trash pair. The pencil opens
 // EditSkillModal, which fetches the skill's method text (GET /v1/skills/{id} —
 // the list is metadata-only) and PATCHes name/description/method back. Two
@@ -39,10 +47,11 @@ import {
   IconWand,
 } from "@tabler/icons-react"
 import { AppLayout } from "./AppLayout"
-import { UploadSkillModal } from "../../shared/UploadSkillModal"
+import { UploadSkillModal, countLine } from "../../shared/UploadSkillModal"
 import { EditSkillModal } from "../../shared/EditSkillModal"
 import { useNavigation } from "../../../context/NavigationContext"
 import {
+  isMultiSkillUpload,
   skillsApi,
   type CustomSkillDetail,
   type CustomSkillInfo,
@@ -58,6 +67,28 @@ export function skillBlurb(description: string, label: string): string {
   const head = useWhen > 0 ? d.slice(0, useWhen) : d
   const sentence = head.match(/^[^.!?]*[.!?]/)
   return (sentence ? sentence[0] : head).trim().replace(/[.!?]+$/, "")
+}
+
+/** Fold the skills one upload created into the library on screen.
+ *
+ *  The same rule a single upload has always used, applied N times: a skill
+ *  whose id is already listed REPLACED that row (same id, same trigger, new
+ *  content) and swaps in place, because prepending would render one id twice;
+ *  anything else is new and goes to the front. Prepending in arrival order
+ *  leaves the last-created skill first, which is the newest-first order the
+ *  list endpoint returns on the next load — so the grid does not reshuffle
+ *  when the user refreshes. Pure → testable without the API. */
+export function mergeUploadedSkills(
+  prev: CustomSkillInfo[],
+  created: CustomSkillInfo[],
+): CustomSkillInfo[] {
+  let next = prev
+  for (const skill of created) {
+    next = next.some((s) => s.id === skill.id)
+      ? next.map((s) => (s.id === skill.id ? skill : s))
+      : [skill, ...next]
+  }
+  return next
 }
 
 /** Pure presentational view — all state arrives as props, so it renders
@@ -410,6 +441,32 @@ function SkillsScreenContent() {
     )
   }
 
+  // Import skills straight out of a connected repo. The server re-runs its own
+  // discovery and imports only what it finds there, so `paths` is a filter, not
+  // a fetch list; the answer is the same per-skill payload an upload returns,
+  // which means the same merge and the same counting toast.
+  async function onImportGithub(req: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) {
+    const result = await skillsApi.importGithub(req)
+    setCustomSkills((prev) => mergeUploadedSkills(prev, result.imported))
+    const updated = result.imported.filter((s) => s.replaced === true).length
+    const skipped = result.skipped.length
+    showToast(
+      "Skills imported",
+      countLine(result.imported.length - updated, updated) +
+        (skipped > 0
+          ? ` ${skipped} ${skipped === 1 ? "skill" : "skills"} couldn’t be imported — see the details in the dialog.`
+          : ""),
+    )
+    // Reshaped to the upload result the modal already reports, so one panel
+    // covers both routes into the library.
+    return { skills: result.imported, skipped: result.skipped }
+  }
+
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
   //
@@ -419,7 +476,25 @@ function SkillsScreenContent() {
   // back on the 201; the id check is the belt-and-braces version for a list
   // that predates the field.
   async function onUpload(file: File, name: string, description: string) {
-    const created = await skillsApi.upload(file, name, description)
+    const uploaded = await skillsApi.upload(file, name, description)
+    // A .zip holding a folder per SKILL.md imports as several skills at once.
+    // Every one of them lands in the grid under the same replaced-vs-new rule
+    // a single upload uses, and the result object goes back to the modal,
+    // which reports the per-skill triggers and anything it couldn't import.
+    if (isMultiSkillUpload(uploaded)) {
+      setCustomSkills((prev) => mergeUploadedSkills(prev, uploaded.skills))
+      const updated = uploaded.skills.filter((s) => s.replaced === true).length
+      const skipped = uploaded.skipped.length
+      showToast(
+        "Skills imported",
+        countLine(uploaded.skills.length - updated, updated) +
+          (skipped > 0
+            ? ` ${skipped} ${skipped === 1 ? "folder" : "folders"} couldn’t be imported — see the details in the dialog.`
+            : ""),
+      )
+      return uploaded
+    }
+    const created = uploaded
     const wasReplaced =
       created.replaced === true || customSkills.some((s) => s.id === created.id)
     setCustomSkills((prev) =>
@@ -485,6 +560,8 @@ function SkillsScreenContent() {
         // place) is driven by `customSkills` below and is unaffected, and the
         // server's 201 remains authoritative about the trigger assigned.
         customSkills={customSkills}
+        onDiscoverGithub={(repo, opts) => skillsApi.discoverGithub(repo, opts)}
+        onImportGithub={onImportGithub}
       />
     </AppLayout>
   )

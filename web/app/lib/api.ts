@@ -680,6 +680,80 @@ export type CustomSkillEditResult = CustomSkillDetail & {
   replaced_skill_id: string | null
 }
 
+/** A skill folder inside a multi-skill archive that could NOT be imported.
+ *  `path` is the folder it sat in ("" for the archive root), `name` whatever
+ *  name we could derive, and `reason` is written for a person to act on
+ *  (a missing `description:`, an over-cap method). */
+export type SkippedSkill = {
+  path: string
+  name: string
+  reason: string
+}
+
+/** POST /v1/skills when the uploaded .zip held SEVERAL skills — one folder per
+ *  skill, the layout a zipped `skills/` directory has. Each one became its own
+ *  row with its own trigger, named from its own SKILL.md frontmatter rather
+ *  than from the form (which can only name one), so the answer is a LIST
+ *  instead of the single object. Folders that couldn't be imported are in
+ *  `skipped` with a reason and cost the others nothing; an archive that
+ *  yielded no skills at all fails the request instead. */
+export type MultiSkillUploadResult = {
+  skills: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+}
+
+/** What an upload answers: one skill, or the multi-skill archive result. */
+export type SkillUploadResult = CustomSkillInfo | MultiSkillUploadResult
+
+/** One skill found in a connected GitHub repo, as the picker needs it.
+ *
+ *  `status` is the server's verdict, computed against the company's own
+ *  library with the same rules the write path uses — never guessed here:
+ *    - `new`      → imports as a new skill at `trigger_preview`
+ *    - `replaces` → the company already has this name; importing updates that
+ *                   skill in place and keeps its trigger
+ *    - `invalid`  → cannot be imported; `reason` says why (no description, a
+ *                   file over GitHub's 1 MB text ceiling, over the 50k cap) */
+export type GithubSkillPreview = {
+  path: string
+  name: string
+  description: string
+  slug_preview: string
+  trigger_preview: string
+  file_count: number
+  char_count: number
+  status: "new" | "replaces" | "invalid"
+  reason: string
+}
+
+/** GET /v1/skills/github/discover — read-only; writes nothing.
+ *  `truncated` + `notes` report anything the repo was too big to show. */
+export type GithubSkillDiscovery = {
+  repo: string
+  ref: string
+  commit_sha: string
+  truncated: boolean
+  notes: string[]
+  skills: GithubSkillPreview[]
+}
+
+/** POST /v1/skills/github/import — the same per-skill payloads an upload
+ *  returns (each with `replaced`), plus what it couldn't import. */
+export type GithubSkillImportResult = {
+  imported: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+  commit_sha: string
+  ref: string
+}
+
+/** Discriminates the two upload bodies by shape (the multi one has no `id`).
+ *  Exported because every caller has to branch on it. */
+export function isMultiSkillUpload(
+  result: SkillUploadResult,
+): result is MultiSkillUploadResult {
+  return Array.isArray((result as MultiSkillUploadResult).skills)
+}
+
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
@@ -712,14 +786,47 @@ export const skillsApi = {
    *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
    *  report the disambiguated trigger); a name already used by one of the
    *  company's OWN custom skills REPLACES that skill in place — same id, same
-   *  trigger, new content — and the 201 comes back with `replaced: true`. */
+   *  trigger, new content — and the 201 comes back with `replaced: true`.
+   *
+   *  A .zip holding SEVERAL SKILL.md files imports as several skills and
+   *  answers `{skills, skipped}` instead of the single object — branch with
+   *  `isMultiSkillUpload`. The name and description sent here apply to a
+   *  single skill only; a multi-skill archive names each skill from its own
+   *  SKILL.md, and the per-skill collision rules (replace-in-place, the `-2`
+   *  built-in series) apply to each of them independently. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("name", name)
     form.append("description", description)
-    return api.post<CustomSkillInfo>("/v1/skills", form)
+    return api.post<SkillUploadResult>("/v1/skills", form)
   },
+  /** The skills a CONNECTED GitHub repo holds, at `ref` (default branch when
+   *  omitted), optionally scoped to one folder. Read-only — it writes nothing,
+   *  so it is safe to call as the user types a branch.
+   *
+   *  The repo's installation is resolved server-side from the caller's company;
+   *  a repo this company hasn't connected 404s (never 403 — that would confirm
+   *  someone else connected it). A GitHub outage is a 502, a missing branch a
+   *  404, both with a readable `detail`. */
+  discoverGithub: (repo: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ repo })
+    if (opts?.ref) params.set("ref", opts.ref)
+    if (opts?.path) params.set("path", opts.path)
+    return api.get<GithubSkillDiscovery>(`/v1/skills/github/discover?${params}`)
+  },
+  /** Import the selected skills from that repo. `paths` FILTER the server's
+   *  own re-run of discovery — they are never fetch targets, so a path that
+   *  isn't a skill in that repo imports nothing rather than reading a file.
+   *  Each imported skill follows the upload rules: a name the company already
+   *  used replaces that skill in place, a built-in's name takes the next free
+   *  trigger. Per-skill failures come back in `skipped`. */
+  importGithub: (body: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(

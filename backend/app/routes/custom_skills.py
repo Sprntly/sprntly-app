@@ -1,11 +1,20 @@
 """Custom skill endpoints — upload, list, edit, and original-file links (PRD 1854).
 
-  POST   /v1/skills               -> upload a .md/.zip skill with name+description
-  GET    /v1/skills               -> list the company's custom skills (metadata)
-  GET    /v1/skills/{id}          -> one skill WITH its method text (the edit form's source)
-  PATCH  /v1/skills/{id}          -> edit name/description/method in place
-  GET    /v1/skills/{id}/file     -> signed view/download URLs for the original upload
-  DELETE /v1/skills/{id}          -> delete a skill (row + original file)
+  POST   /v1/skills                 -> upload a .md/.zip skill with name+description
+  GET    /v1/skills                 -> list the company's custom skills (metadata)
+  GET    /v1/skills/github/discover -> list the skills a connected repo holds (read-only)
+  POST   /v1/skills/github/import   -> import selected skills from that repo
+  GET    /v1/skills/{id}            -> one skill WITH its method text (the edit form's source)
+  PATCH  /v1/skills/{id}            -> edit name/description/method in place
+  GET    /v1/skills/{id}/file       -> signed view/download URLs for the original upload
+  DELETE /v1/skills/{id}            -> delete a skill (row + original file)
+
+The two `/github/*` routes are declared ABOVE the `/{skill_id}` family, since
+FastAPI matches in declaration order and the catch-all would otherwise answer
+"Skill not found." for them. They read a repo through the GitHub App
+INSTALLATION token, resolved from the caller's company and the repo name —
+never from a client-supplied installation id — and a repo this company hasn't
+connected is a 404, never a 403 (a 403 would confirm that someone else has).
 
 Custom skills are COMPANY-SCOPED for now — all workspaces in a company share
 one skill library, so reads filter by company_id. The uploading workspace is
@@ -16,6 +25,17 @@ payload the invocation path reads) and the ORIGINAL bytes in Supabase Storage
 under custom-skills/{company_id}/ (skills_storage.py). Validation here is
 the server-side gate — the Skills screen mirrors it client-side, but every
 check must hold against direct API calls.
+
+A .zip carrying MORE THAN ONE SKILL.md is imported as more than one skill —
+one row, one trigger and one stored file each — rather than being flattened
+into a single row that silently loses everything after the first skill. That
+archive is what a zipped `skills/` directory is, so it is the shape people
+actually have. The form's name/description cannot name N skills, so a
+multi-skill import names each one from its own SKILL.md frontmatter and the
+201 answers with `{skills: [...], skipped: [...]}` instead of the single
+object. A skill folder we can't name, can't describe, or can't fit under the
+character cap lands in `skipped` with a reason and costs the others nothing;
+importing NOTHING is the only case that fails the request (400).
 
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
@@ -74,15 +94,27 @@ from app.skills.custom import (
     MAX_DESCRIPTION_CHARS,
     MAX_NAME_CHARS,
     MAX_SKILL_CONTENT_CHARS,
+    MultiSkillArchive,
     ParsedSkill,
     SkillParseError,
     available_slug,
+    build_skill_archive,
     content_chars,
     content_hash_for,
+    derive_identity,
+    parse_multi_upload,
     parse_upload,
     slugify,
 )
+from app.skills import github_source
 from app.skills.loader import list_skills
+from app.skills.store import (
+    SkillContentTooLarge,
+    SkillNameUnusable,
+    SkillSlugTaken,
+    SkillStoreError,
+    store_skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,13 +202,13 @@ async def upload_skill(
 
     Both outcomes answer 201 with the same body plus `replaced`; a replace
     keeps the skill's id and trigger, so nothing a team has learned or linked
-    to changes underneath them."""
+    to changes underneath them.
+
+    A .zip holding SEVERAL skills is imported as several skills — see
+    `_upload_multi` for that body and why the form's name/description stop
+    applying there."""
     name = (name or "").strip()
     description = (description or "").strip()
-    if not name:
-        raise HTTPException(422, "Skill name is required.")
-    if not description:
-        raise HTTPException(422, "Skill description is required.")
     if len(name) > MAX_NAME_CHARS:
         raise HTTPException(422, f"Skill name must be {MAX_NAME_CHARS} characters or fewer.")
     if len(description) > MAX_DESCRIPTION_CHARS:
@@ -190,131 +222,153 @@ async def upload_skill(
             422, "Only .md files and .zip archives are accepted. "
                  "Please try again with the correct format."
         )
+    # A bare .md has no way to name itself, so the form fields are required
+    # for it — but an archive names its skills from their own content
+    # (frontmatter, else the folder/filename), so the modal hides the fields
+    # for a .zip or a folder and this route derives what wasn't sent.
+    if ext == "md":
+        if not name:
+            raise HTTPException(422, "Skill name is required.")
+        if not description:
+            raise HTTPException(422, "Skill description is required.")
     data = await file.read()
     if not data:
         raise HTTPException(400, "Uploaded file is empty.")
     if len(data) > skills_storage.MAX_SKILL_UPLOAD_BYTES:
         raise HTTPException(413, "File size exceeds the 20 MB limit. Please upload a smaller file.")
 
+    filename = file.filename or f"skill.{ext}"
+    # An archive holding more than one SKILL.md is N skills, not one — and it
+    # is parsed and stored down its own path, because none of the single-skill
+    # contract (the form's name, one row, one 201 object) survives contact with
+    # it. Everything below this branch is the original one-skill path.
     try:
-        parsed = parse_upload(file.filename or f"skill.{ext}", data)
+        multi = parse_multi_upload(filename, data)
     except SkillParseError as e:
         raise HTTPException(400, str(e))
-    # Character cap on the PARSED text, after the byte cap on the raw file: a
-    # zip can pass 20 MB compressed yet expand into far more prompt text than
-    # any invocation should carry.
-    if content_chars(parsed) > MAX_SKILL_CONTENT_CHARS:
-        raise HTTPException(
-            413,
-            f"Skill content exceeds the {MAX_SKILL_CONTENT_CHARS:,} character "
-            "limit. Please trim the skill text and try again.",
-        )
-
-    base = slugify(name)
-    if not base:
-        raise HTTPException(422, "Skill name must contain at least one letter or number.")
-
-    # One read of the company library serves both the replace match and the
-    # trigger series below. It is company-scoped by construction
-    # (list_custom_skills filters on company_id), and that filter is the only
-    # thing keeping a replace inside one tenant — another company's skill of
-    # the same name is never in this list, so it can never be the row we write.
-    existing = db.list_custom_skills(company.company_id)
-    # Re-using one of the company's OWN skill names is a NEW VERSION of that
-    # skill, not a second entry: update the row in place. Matched on the
-    # slugified name — the same equivalence the old 409 used — because the
-    # stored slug may have been disambiguated away from it by a built-in
-    # collision ("PRD Author" living at /prd-author-2 still gets replaced).
-    # The list is newest-first, so a legacy library that somehow holds two
-    # rows under one name updates the most recent of them.
-    replacing = next(
-        (r for r in existing if slugify(r.get("name") or "") == base), None
-    )
-
-    key = await skills_storage.stage_skill_file(
-        company_id=company.company_id, data=data, ext=ext
-    )
-
-    if replacing is not None:
-        try:
-            row = db.update_custom_skill(
-                company_id=company.company_id,
-                skill_id=replacing["id"],
-                workspace_id=company.workspace_id,
-                name=name,
-                description=description,
-                method=parsed.method,
-                modules=parsed.modules,
-                references=parsed.references,
-                content_hash=content_hash_for(parsed),
-                storage_key=key,
-                uploader_id=company.user_id,
-                uploader_name=company.user_name or company.user_email or "",
-            )
-        except Exception:
-            await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
-            raise
-        if row is not None:
-            # The row points at the new file now, so the previous original is
-            # unreferenced — drop it (best-effort; delete_skill_file never
-            # raises) rather than leaving every version's bytes behind.
-            old_key = replacing.get("storage_key")
-            if old_key and old_key != key:
-                await skills_storage.delete_skill_file(
-                    company_id=company.company_id, key=old_key
-                )
-            logger.info(
-                "custom_skill_replaced company_present=%s slug=%s size_bytes=%s ext=%s",
-                bool(company.company_id), row["slug"], len(data), ext,
-            )
-            return _skill_payload(row, replaced=True)
-        # The row vanished between the list read and the update (a concurrent
-        # delete). Fall through and create the skill fresh, without counting
-        # the gone row's slug as taken.
-        existing = [r for r in existing if r["id"] != replacing["id"]]
-
-    # Sharing a vendored built-in's name is deliberately NOT rejected and does
-    # not override it: the built-in keeps its own trigger and this upload takes
-    # the next free one, so chat can offer BOTH (their descriptions are what
-    # tells them apart).
-    slug = available_slug(base, set(list_skills()) | {r["slug"] for r in existing})
+    if multi is not None:
+        return await _upload_multi(multi, company=company)
 
     try:
-        row = db.insert_custom_skill(
+        parsed = parse_upload(filename, data)
+    except SkillParseError as e:
+        raise HTTPException(400, str(e))
+
+    if not name or not description:
+        # A single-skill zip uploaded without the form fields: name it the way
+        # the multi path and the GitHub import already do — its frontmatter
+        # first, the zip's own filename as the fallback.
+        stem = filename.rsplit("/", 1)[-1]
+        stem = stem[: -len(f".{ext}")] if stem.lower().endswith(f".{ext}") else stem
+        derived_name, derived_description = derive_identity(parsed.method, stem)
+        name = name or derived_name
+        description = description or derived_description
+        if not name or not slugify(name):
+            raise HTTPException(
+                422, "We couldn't work out a name for this skill — add `name:` "
+                     "to its SKILL.md, or upload it with a name."
+            )
+        if not description:
+            raise HTTPException(
+                422, "We couldn't work out a description for this skill — add "
+                     "`description:` to its SKILL.md, or upload it with one."
+            )
+
+    try:
+        stored = await store_skill(
             company_id=company.company_id,
             workspace_id=company.workspace_id,
-            slug=slug,
-            name=name,
-            description=description,
-            method=parsed.method,
-            modules=parsed.modules,
-            references=parsed.references,
-            content_hash=content_hash_for(parsed),
-            storage_key=key,
             uploader_id=company.user_id,
             uploader_name=company.user_name or company.user_email or "",
+            name=name,
+            description=description,
+            parsed=parsed,
+            data=data,
+            ext=ext,
+            # Resolved HERE, from this module's globals, so the whole ladder
+            # (and the suite's monkeypatches of both) stays owned by the route.
+            builtin_slugs=set(list_skills()),
+            max_content_chars=MAX_SKILL_CONTENT_CHARS,
         )
-    except db.DuplicateSkillSlug:
-        # Backstop for the race the library read above can't close: two
-        # concurrent uploads of the same new name both find nothing to replace
-        # and both compute the same free slug. Only a genuine collision reaches
-        # here now (a repeated name is a replace), so the message says to retry
-        # rather than to rename. Roll back the staged object so the rejected
-        # upload leaves nothing behind (no orphaned file without a row).
-        await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
-        raise HTTPException(
-            409,
-            "Another upload just took this skill's trigger. Please try again.",
-        )
-    except Exception:
-        await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
-        raise
+    except SkillStoreError as e:
+        raise HTTPException(_store_error_status(e), str(e))
+    return _skill_payload(stored.row, replaced=stored.replaced)
 
+
+def _store_error_status(exc: SkillStoreError) -> int:
+    """The status each store refusal has always answered with, kept in one
+    place now that two callers raise them."""
+    if isinstance(exc, SkillContentTooLarge):
+        return 413
+    if isinstance(exc, SkillNameUnusable):
+        return 422
+    if isinstance(exc, SkillSlugTaken):
+        return 409
+    return 400
+
+
+async def _upload_multi(
+    multi: MultiSkillArchive, *, company: WorkspaceContext
+) -> dict:
+    """Import every skill an archive holds, one row and one stored file each.
+
+    The form's name and description do not apply here — they can name one
+    skill, and this archive holds several — so each skill was named from its
+    own SKILL.md frontmatter during parsing. The body says so by shape: a list
+    under `skills` instead of the single object, so a client can tell the two
+    apart without a flag.
+
+    Per-skill failures are RECORDED, not raised. A 12-skill export where one
+    method blew past the character cap should import eleven skills and say
+    which one it couldn't; failing the request would leave the user with
+    nothing to show for a valid archive. `skipped` carries the folder, the
+    name we managed to derive, and a reason written for a person. The one case
+    that IS an error is importing nothing at all — there is no 201 to give.
+
+    Each skill is stored with a standalone copy of itself (build_skill_archive)
+    rather than the uploaded bundle: rows own their storage object one-to-one,
+    so sharing the bundle would make the first DELETE strip the file out from
+    under every other row it created.
+    """
+    created: list[dict] = []
+    skipped: list[dict] = [
+        {"path": s.path, "name": s.name, "reason": s.reason} for s in multi.skipped
+    ]
+    for skill in multi.skills:
+        data, ext = build_skill_archive(skill.parsed)
+        try:
+            stored = await store_skill(
+                company_id=company.company_id,
+                workspace_id=company.workspace_id,
+                uploader_id=company.user_id,
+                uploader_name=company.user_name or company.user_email or "",
+                name=skill.name,
+                description=skill.description,
+                parsed=skill.parsed,
+                data=data,
+                ext=ext,
+                builtin_slugs=set(list_skills()),
+                max_content_chars=MAX_SKILL_CONTENT_CHARS,
+            )
+        except SkillStoreError as e:
+            skipped.append({"path": skill.path, "name": skill.name, "reason": str(e)})
+            continue
+        created.append(_skill_payload(stored.row, replaced=stored.replaced))
+
+    if not created:
+        # Nothing was created, so 201 would be a lie. One readable line rather
+        # than a structured body: the modal renders `detail` verbatim, and the
+        # reasons are what the user has to act on.
+        raise HTTPException(
+            400,
+            "No skills could be imported from this archive. "
+            + " ".join(f"{s['name'] or s['path'] or 'A skill'}: {s['reason']}." for s in skipped),
+        )
     logger.info(
-        "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s name_conflict=%s",
-        bool(company.company_id), slug, len(data), ext, slug != base,
+        "custom_skills_bulk_created company_present=%s created=%s skipped=%s",
+        bool(company.company_id), len(created), len(skipped),
     )
-    return _skill_payload(row, replaced=False)
+    return {"skills": created, "skipped": skipped}
 
 
 @router.get("")
@@ -323,6 +377,205 @@ def list_skills_route(company: WorkspaceContext = Depends(require_workspace)):
     across all of the company's workspaces."""
     rows = db.list_custom_skills(company.company_id)
     return {"skills": [_skill_payload(r) for r in rows]}
+
+
+# ─── GitHub import ───────────────────────────────────────────────────────────
+#
+# Declared ABOVE the `/{skill_id}` routes below: FastAPI matches in declaration
+# order, so `/github/discover` under them would be swallowed by the catch-all
+# and answer "Skill not found." for a path that has nothing to do with an id.
+
+
+def _installation_for(repo: str, company: WorkspaceContext) -> int:
+    """The caller company's GitHub installation for `repo`, or 404.
+
+    The installation is resolved from the CALLER'S COMPANY and the repo name —
+    it is never accepted from the client, because an installation id is all it
+    would take to read a repo belonging to somebody else entirely.
+    `find_github_installation_for_repo` is company-filtered, so a repo another
+    company connected simply does not resolve here.
+
+    404 and NOT 403 on a miss, like every other ownership check in this repo: a
+    403 would confirm that the repo exists and is connected to Sprntly by
+    someone, which is exactly the fact a foreign tenant must not learn."""
+    if not repo or "/" not in repo:
+        raise HTTPException(422, "Repository must be in owner/name form.")
+    install = db.find_github_installation_for_repo(repo, company.company_id)
+    if not install or not install.get("installation_id"):
+        raise HTTPException(
+            404,
+            "That repository isn't connected to Sprntly. Connect it from "
+            "Settings → Connectors and try again.",
+        )
+    return int(install["installation_id"])
+
+
+def _discover(repo: str, ref: str, path: str, company: WorkspaceContext):
+    """Shared discovery + its error ladder (both routes run it — the import
+    re-runs it rather than trusting the client's list)."""
+    installation_id = _installation_for(repo, company)
+    try:
+        return github_source.discover_skills(
+            installation_id, repo, ref or None, subpath=path or ""
+        )
+    except github_source.GithubRefNotFound as e:
+        raise HTTPException(404, str(e)) from e
+    except github_source.GithubSourceError as e:
+        # A GitHub-side failure is not the caller's fault and not ours — 502,
+        # the same posture ingest.github_deep_read takes.
+        logger.warning("skills_github_discover_failed repo_present=%s", bool(repo))
+        raise HTTPException(502, str(e)) from e
+
+
+def _preview(skill: github_source.GithubSkill, *, taken: set[str], by_name: dict[str, dict]) -> dict:
+    """One discovered skill as the picker needs it.
+
+    `status` is computed with the SAME slugify/available_slug the write path
+    uses, against the same company library, so the preview and the outcome
+    cannot disagree: "replaces" means this name is already one of the company's
+    skills (the import updates that row in place, keeping its trigger), "new"
+    means it lands on the trigger shown here."""
+    base = slugify(skill.name)
+    replacing = by_name.get(base)
+    if not skill.importable:
+        status, slug = "invalid", base
+    elif replacing is not None:
+        status, slug = "replaces", replacing["slug"]
+    else:
+        status, slug = "new", available_slug(base, taken) if base else ""
+    return {
+        "path": skill.path,
+        "name": skill.name,
+        "description": skill.description,
+        "slug_preview": slug,
+        "trigger_preview": f"/{slug}" if slug else "",
+        "file_count": skill.file_count,
+        "char_count": skill.char_count,
+        "status": status,
+        "reason": skill.reason,
+    }
+
+
+@router.get("/github/discover")
+def discover_github_skills(
+    repo: str,
+    ref: str = "",
+    path: str = "",
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """List the skills a connected repo holds — read-only, writes nothing.
+
+    Two questions the picker has to answer before anyone commits to an import,
+    and both need the company's own library: which trigger each skill would get,
+    and which of them would REPLACE a skill the team already has. Both are
+    computed here rather than in the browser, because the client's copy of the
+    library can be stale and the built-in catalog is not fully public.
+    """
+    result = _discover(repo, ref, path, company)
+    existing = db.list_custom_skills(company.company_id)
+    taken = set(list_skills()) | {r["slug"] for r in existing}
+    by_name = {slugify(r.get("name") or ""): r for r in existing}
+    return {
+        "repo": repo,
+        "ref": result.branch,
+        "commit_sha": result.commit_sha,
+        "truncated": result.truncated,
+        "notes": result.notes,
+        "skills": [_preview(s, taken=taken, by_name=by_name) for s in result.skills],
+    }
+
+
+class GithubImportIn(BaseModel):
+    """POST body — which skills, out of which repo at which ref."""
+
+    repo: str = ""
+    ref: str = ""
+    path: str = ""
+    #: Repo-relative skill folders, exactly as `discover` returned them.
+    paths: list[str] = []
+
+
+@router.post(
+    "/github/import",
+    status_code=201,
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def import_github_skills(
+    body: GithubImportIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Import the selected skills from a connected repo into the library.
+
+    Discovery is re-run SERVER-SIDE and only skills present in that result are
+    imported. The client's `paths` are a filter over what we found, never fetch
+    targets — accepting a path to read would turn this route into "fetch any
+    file from any repo this company has connected", which is not what it is.
+
+    Everything after that is the multi-skill upload path: each skill is stored
+    through the same `store_skill`, so the collision rules (replace the
+    company's own same-named skill in place, take the next free trigger past a
+    built-in's) and the per-row stored original are identical whether a skill
+    arrived in a zip or from a repo. Per-skill failures land in `skipped` and
+    the rest still import.
+    """
+    repo = (body.repo or "").strip()
+    wanted = {p.strip() for p in (body.paths or [])}
+    if not wanted:
+        raise HTTPException(422, "Select at least one skill to import.")
+
+    result = _discover(repo, (body.ref or "").strip(), (body.path or "").strip(), company)
+    selected = [s for s in result.skills if s.path in wanted]
+    if not selected:
+        raise HTTPException(
+            404,
+            "We couldn't find those skills in the repository any more — "
+            "search again and retry.",
+        )
+
+    imported: list[dict] = []
+    skipped: list[dict] = []
+    for skill in selected:
+        if not skill.importable:
+            skipped.append(
+                {"path": skill.path, "name": skill.name, "reason": skill.reason}
+            )
+            continue
+        data, ext = build_skill_archive(skill.parsed)
+        try:
+            stored = await store_skill(
+                company_id=company.company_id,
+                workspace_id=company.workspace_id,
+                uploader_id=company.user_id,
+                uploader_name=company.user_name or company.user_email or "",
+                name=skill.name,
+                description=skill.description,
+                parsed=skill.parsed,
+                data=data,
+                ext=ext,
+                builtin_slugs=set(list_skills()),
+                max_content_chars=MAX_SKILL_CONTENT_CHARS,
+            )
+        except SkillStoreError as e:
+            skipped.append({"path": skill.path, "name": skill.name, "reason": str(e)})
+            continue
+        imported.append(_skill_payload(stored.row, replaced=stored.replaced))
+
+    if not imported:
+        raise HTTPException(
+            400,
+            "No skills could be imported. "
+            + " ".join(f"{s['name'] or s['path'] or 'A skill'}: {s['reason']}." for s in skipped),
+        )
+    logger.info(
+        "custom_skills_github_imported company_present=%s imported=%s skipped=%s",
+        bool(company.company_id), len(imported), len(skipped),
+    )
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "commit_sha": result.commit_sha,
+        "ref": result.branch,
+    }
 
 
 @router.get("/{skill_id}")

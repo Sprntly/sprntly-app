@@ -122,6 +122,43 @@ def test_upload_zip_creates_skill_with_modules(tenant_client):
     assert full["modules"] == {"extra.md": "more"}
 
 
+def test_upload_zip_without_form_fields_names_itself(tenant_client):
+    # The modal hides name/description for archives — a zip names its skill
+    # the way the multi path and the GitHub import do: frontmatter first.
+    t = tenant_client.make(slug="acme")
+    md = b"---\nname: ticket-breakdown\ndescription: Breaks work into tickets.\n---\n\nBody.\n"
+    data = _zip_bytes({"SKILL.md": md})
+    resp = _upload(t.client, name="", description="", filename="anything.zip", data=data)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["name"] == "Ticket Breakdown"
+    assert body["description"] == "Breaks work into tickets."
+    assert body["trigger"] == "/ticket-breakdown"
+
+
+def test_upload_zip_without_frontmatter_falls_back_to_the_zip_name(tenant_client):
+    t = tenant_client.make(slug="acme")
+    data = _zip_bytes({"SKILL.md": b"# Method\n\nScores features by reach.\n"})
+    resp = _upload(t.client, name="", description="", filename="estimation-helper.zip", data=data)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["name"] == "Estimation Helper"
+    assert body["description"] == "Scores features by reach."
+
+
+def test_upload_zip_with_form_fields_still_honours_them(tenant_client):
+    # Backwards compatibility: a caller that DOES send the fields (an older
+    # client, a script) keeps naming the skill itself.
+    t = tenant_client.make(slug="acme")
+    md = b"---\nname: from-frontmatter\ndescription: Content name.\n---\n\nBody.\n"
+    data = _zip_bytes({"SKILL.md": md})
+    resp = _upload(t.client, name="Typed Name", description="Typed description.",
+                   filename="s.zip", data=data)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["name"] == "Typed Name"
+    assert resp.json()["description"] == "Typed description."
+
+
 def test_uploader_identity_comes_from_session(tenant_client):
     t = tenant_client.make(slug="acme", user_id="user-fortune")
     resp = _upload(t.client)

@@ -23,6 +23,10 @@ const customUploadMock = vi.fn()
 const customRemoveMock = vi.fn()
 const customGetMock = vi.fn()
 const customUpdateMock = vi.fn()
+const githubDiscoverMock = vi.fn()
+const githubImportMock = vi.fn()
+const connectorsListMock = vi.fn()
+const githubReposMock = vi.fn()
 const goToMock = vi.fn()
 const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
@@ -34,7 +38,19 @@ vi.mock("../../../../lib/api", () => ({
     remove: (...a: unknown[]) => customRemoveMock(...a),
     get: (...a: unknown[]) => customGetMock(...a),
     update: (...a: unknown[]) => customUpdateMock(...a),
+    discoverGithub: (...a: unknown[]) => githubDiscoverMock(...a),
+    importGithub: (...a: unknown[]) => githubImportMock(...a),
   },
+  // The upload modal's GitHub source checks the connector itself (same
+  // pattern DesignSourceSettings uses for its repo picker).
+  connectorsApi: {
+    list: (...a: unknown[]) => connectorsListMock(...a),
+    listAccessibleGithubRepos: (...a: unknown[]) => githubReposMock(...a),
+  },
+  // The upload body's discriminator: a multi-skill archive answers with a
+  // `skills` list instead of the single object. Mirrors the real guard, which
+  // has its own test in app/lib/__tests__/skillsUploadResult.test.ts.
+  isMultiSkillUpload: (r: { skills?: unknown }) => Array.isArray(r?.skills),
 }))
 
 vi.mock("../../../../context/NavigationContext", () => ({
@@ -52,13 +68,23 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => searchParamsMock,
 }))
 
+vi.mock("../../../../lib/generateConnectorRowState", () => ({
+  getGenerateConnectorRowState: (c: { status?: string } | undefined) => ({
+    connected: c?.status === "connected",
+  }),
+}))
+vi.mock("../../../design-agent/SourceConnectHint", () => ({
+  SourceConnectHint: () =>
+    React.createElement("button", { type: "button" }, "Connect a repo →"),
+}))
+
 // AppLayout drags in app contexts; the screen logic under test doesn't need it.
 vi.mock("../AppLayout", () => ({
   AppLayout: ({ children }: { children: React.ReactNode }) =>
     React.createElement("div", null, children),
 }))
 
-import { SkillsScreen, skillBlurb } from "../SkillsScreen"
+import { SkillsScreen, mergeUploadedSkills, skillBlurb } from "../SkillsScreen"
 
 const CUSTOM_SKILL = {
   id: "b8f3a1c2-0000-0000-0000-000000000001",
@@ -97,6 +123,12 @@ const CUSTOM_SKILL_DETAIL = {
 beforeEach(() => {
   customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
   customGetMock.mockResolvedValue(CUSTOM_SKILL_DETAIL)
+  connectorsListMock.mockResolvedValue({
+    connections: [{ provider: "github", status: "connected" }],
+  })
+  githubReposMock.mockResolvedValue({
+    repositories: [{ full_name: "octocat/methods", default_branch: "main" }],
+  })
   searchParamsMock = new URLSearchParams()
 })
 
@@ -200,18 +232,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "PRD Author" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -244,18 +276,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method v2"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "Estimation helper" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours, v2." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method v2"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -532,18 +564,18 @@ describe("SkillsScreen", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
         target: { value: "Estimation helper" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Scores features by reach × confidence." },
-      })
-    })
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
       })
     })
     await act(async () => {
@@ -563,6 +595,145 @@ describe("SkillsScreen", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     expect(showToastMock).toHaveBeenCalled()
     expect(screen.getByText("Fortune Tede")).toBeTruthy()
+  })
+
+  it("adds every skill a multi-skill archive created, and counts them in the toast", async () => {
+    // One .zip, three skills: two new, one a re-upload of a skill already in
+    // the library (same id — it must swap in place, not appear twice).
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    customUploadMock.mockResolvedValue({
+      skills: [
+        { ...CUSTOM_SKILL, description: "Scores features, v2.", replaced: true },
+        { ...OTHER_SKILL, replaced: false },
+        {
+          ...CUSTOM_SKILL,
+          id: "b8f3a1c2-0000-0000-0000-000000000009",
+          slug: "raci-builder",
+          trigger: "/raci-builder",
+          name: "RACI builder",
+          description: "Builds a RACI grid.",
+          replaced: false,
+        },
+      ],
+      skipped: [{ path: "bloated", name: "Bloated", reason: "over the limit" }],
+    })
+    const { container } = render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    // An archive shows no name/description fields — the pick alone arms the
+    // upload.
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["zip"], "skills.zip", { type: "application/zip" })] },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+    })
+
+    await waitFor(() => expect(customUploadMock).toHaveBeenCalled())
+    // Two added, one updated — and the skipped folder is named, not hidden.
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skills imported",
+        expect.stringContaining("2 skills added, 1 updated."),
+      ),
+    )
+    expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/1 folder couldn’t be imported/)
+
+    // Every created skill is in the grid, and the replaced one is there ONCE,
+    // showing its new description.
+    expect(screen.getAllByText("Estimation helper").length).toBe(1)
+    expect(screen.getByText("Scores features, v2")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
+    expect(screen.getByText("RACI builder")).toBeTruthy()
+    // The modal stays open on its report — it is where the triggers and the
+    // skipped reason live.
+    expect(screen.getByRole("dialog", { name: /skills imported/i })).toBeTruthy()
+  })
+
+  it("imports skills from a connected repo and folds them into the library", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    githubDiscoverMock.mockResolvedValue({
+      repo: "octocat/methods",
+      ref: "main",
+      commit_sha: "c0ffee",
+      truncated: false,
+      notes: [],
+      skills: [
+        {
+          path: "skills/journey-mapper", name: "Journey mapper",
+          description: "Maps a journey.", slug_preview: "journey-mapper",
+          trigger_preview: "/journey-mapper", file_count: 1, char_count: 100,
+          status: "new", reason: "",
+        },
+        {
+          path: "skills/estimation-helper", name: "Estimation helper",
+          description: "Scores features.", slug_preview: "estimation-helper",
+          trigger_preview: "/estimation-helper", file_count: 1, char_count: 100,
+          status: "replaces", reason: "",
+        },
+      ],
+    })
+    githubImportMock.mockResolvedValue({
+      imported: [
+        { ...OTHER_SKILL, replaced: false },
+        { ...CUSTOM_SKILL, description: "Scores features, from the repo.", replaced: true },
+      ],
+      skipped: [{ path: "skills/bare", name: "Bare", reason: "no description" }],
+      commit_sha: "c0ffee",
+      ref: "main",
+    })
+    render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /from github/i }))
+    })
+    await waitFor(() => expect(githubReposMock).toHaveBeenCalled())
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/repository/i), {
+        target: { value: "octocat/methods" },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /find skills/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: /journey mapper/i }))
+      fireEvent.click(screen.getByRole("checkbox", { name: /estimation helper/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /import 2 skills/i }))
+    })
+
+    await waitFor(() =>
+      expect(githubImportMock).toHaveBeenCalledWith({
+        repo: "octocat/methods",
+        ref: "main",
+        path: "",
+        paths: ["skills/journey-mapper", "skills/estimation-helper"],
+      }),
+    )
+    // One added, one updated — the same merge and the same counting sentence a
+    // multi-skill zip gets, plus what couldn't be imported.
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skills imported",
+        expect.stringContaining("1 skill added, 1 updated."),
+      ),
+    )
+    expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/1 skill couldn’t be imported/)
+    expect(screen.getAllByText("Estimation helper").length).toBe(1)
+    expect(screen.getByText("Scores features, from the repo")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
   })
 
   it("filters cards by search query, over name / trigger / description", async () => {
@@ -625,6 +796,29 @@ describe("SkillsScreen", () => {
     )
   })
 
+})
+
+describe("mergeUploadedSkills", () => {
+  it("swaps a replaced skill in place and prepends the new ones newest-first", () => {
+    const merged = mergeUploadedSkills(
+      [CUSTOM_SKILL, OTHER_SKILL],
+      [
+        { ...CUSTOM_SKILL, description: "v2" },
+        { ...OTHER_SKILL, id: "new-a", slug: "a", name: "A" },
+        { ...OTHER_SKILL, id: "new-b", slug: "b", name: "B" },
+      ],
+    )
+    // No duplicate id for the replaced one, and the last skill created sits
+    // first — the order the list endpoint returns on the next load.
+    expect(merged.map((s) => s.id)).toEqual([
+      "new-b", "new-a", CUSTOM_SKILL.id, OTHER_SKILL.id,
+    ])
+    expect(merged.find((s) => s.id === CUSTOM_SKILL.id)?.description).toBe("v2")
+  })
+
+  it("leaves the library alone when nothing was created", () => {
+    expect(mergeUploadedSkills([CUSTOM_SKILL], [])).toEqual([CUSTOM_SKILL])
+  })
 })
 
 describe("skillBlurb", () => {
