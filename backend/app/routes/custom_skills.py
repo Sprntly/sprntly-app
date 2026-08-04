@@ -101,6 +101,7 @@ from app.skills.custom import (
     build_skill_archive,
     content_chars,
     content_hash_for,
+    derive_identity,
     parse_multi_upload,
     parse_upload,
     slugify,
@@ -208,10 +209,6 @@ async def upload_skill(
     applying there."""
     name = (name or "").strip()
     description = (description or "").strip()
-    if not name:
-        raise HTTPException(422, "Skill name is required.")
-    if not description:
-        raise HTTPException(422, "Skill description is required.")
     if len(name) > MAX_NAME_CHARS:
         raise HTTPException(422, f"Skill name must be {MAX_NAME_CHARS} characters or fewer.")
     if len(description) > MAX_DESCRIPTION_CHARS:
@@ -225,6 +222,15 @@ async def upload_skill(
             422, "Only .md files and .zip archives are accepted. "
                  "Please try again with the correct format."
         )
+    # A bare .md has no way to name itself, so the form fields are required
+    # for it — but an archive names its skills from their own content
+    # (frontmatter, else the folder/filename), so the modal hides the fields
+    # for a .zip or a folder and this route derives what wasn't sent.
+    if ext == "md":
+        if not name:
+            raise HTTPException(422, "Skill name is required.")
+        if not description:
+            raise HTTPException(422, "Skill description is required.")
     data = await file.read()
     if not data:
         raise HTTPException(400, "Uploaded file is empty.")
@@ -247,6 +253,26 @@ async def upload_skill(
         parsed = parse_upload(filename, data)
     except SkillParseError as e:
         raise HTTPException(400, str(e))
+
+    if not name or not description:
+        # A single-skill zip uploaded without the form fields: name it the way
+        # the multi path and the GitHub import already do — its frontmatter
+        # first, the zip's own filename as the fallback.
+        stem = filename.rsplit("/", 1)[-1]
+        stem = stem[: -len(f".{ext}")] if stem.lower().endswith(f".{ext}") else stem
+        derived_name, derived_description = derive_identity(parsed.method, stem)
+        name = name or derived_name
+        description = description or derived_description
+        if not name or not slugify(name):
+            raise HTTPException(
+                422, "We couldn't work out a name for this skill — add `name:` "
+                     "to its SKILL.md, or upload it with a name."
+            )
+        if not description:
+            raise HTTPException(
+                422, "We couldn't work out a description for this skill — add "
+                     "`description:` to its SKILL.md, or upload it with one."
+            )
 
     try:
         stored = await store_skill(
