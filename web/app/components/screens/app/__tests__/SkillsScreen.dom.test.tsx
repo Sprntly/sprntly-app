@@ -35,6 +35,10 @@ vi.mock("../../../../lib/api", () => ({
     get: (...a: unknown[]) => customGetMock(...a),
     update: (...a: unknown[]) => customUpdateMock(...a),
   },
+  // The upload body's discriminator: a multi-skill archive answers with a
+  // `skills` list instead of the single object. Mirrors the real guard, which
+  // has its own test in app/lib/__tests__/skillsUploadResult.test.ts.
+  isMultiSkillUpload: (r: { skills?: unknown }) => Array.isArray(r?.skills),
 }))
 
 vi.mock("../../../../context/NavigationContext", () => ({
@@ -58,7 +62,7 @@ vi.mock("../AppLayout", () => ({
     React.createElement("div", null, children),
 }))
 
-import { SkillsScreen, skillBlurb } from "../SkillsScreen"
+import { SkillsScreen, mergeUploadedSkills, skillBlurb } from "../SkillsScreen"
 
 const CUSTOM_SKILL = {
   id: "b8f3a1c2-0000-0000-0000-000000000001",
@@ -565,6 +569,69 @@ describe("SkillsScreen", () => {
     expect(screen.getByText("Fortune Tede")).toBeTruthy()
   })
 
+  it("adds every skill a multi-skill archive created, and counts them in the toast", async () => {
+    // One .zip, three skills: two new, one a re-upload of a skill already in
+    // the library (same id — it must swap in place, not appear twice).
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    customUploadMock.mockResolvedValue({
+      skills: [
+        { ...CUSTOM_SKILL, description: "Scores features, v2.", replaced: true },
+        { ...OTHER_SKILL, replaced: false },
+        {
+          ...CUSTOM_SKILL,
+          id: "b8f3a1c2-0000-0000-0000-000000000009",
+          slug: "raci-builder",
+          trigger: "/raci-builder",
+          name: "RACI builder",
+          description: "Builds a RACI grid.",
+          replaced: false,
+        },
+      ],
+      skipped: [{ path: "bloated", name: "Bloated", reason: "over the limit" }],
+    })
+    const { container } = render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Bundle" } })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Ignored for an archive." },
+      })
+    })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["zip"], "skills.zip", { type: "application/zip" })] },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+    })
+
+    await waitFor(() => expect(customUploadMock).toHaveBeenCalled())
+    // Two added, one updated — and the skipped folder is named, not hidden.
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skills imported",
+        expect.stringContaining("2 skills added, 1 updated."),
+      ),
+    )
+    expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/1 folder couldn’t be imported/)
+
+    // Every created skill is in the grid, and the replaced one is there ONCE,
+    // showing its new description.
+    expect(screen.getAllByText("Estimation helper").length).toBe(1)
+    expect(screen.getByText("Scores features, v2")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
+    expect(screen.getByText("RACI builder")).toBeTruthy()
+    // The modal stays open on its report — it is where the triggers and the
+    // skipped reason live.
+    expect(screen.getByRole("dialog", { name: /skills imported/i })).toBeTruthy()
+  })
+
   it("filters cards by search query, over name / trigger / description", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
@@ -625,6 +692,29 @@ describe("SkillsScreen", () => {
     )
   })
 
+})
+
+describe("mergeUploadedSkills", () => {
+  it("swaps a replaced skill in place and prepends the new ones newest-first", () => {
+    const merged = mergeUploadedSkills(
+      [CUSTOM_SKILL, OTHER_SKILL],
+      [
+        { ...CUSTOM_SKILL, description: "v2" },
+        { ...OTHER_SKILL, id: "new-a", slug: "a", name: "A" },
+        { ...OTHER_SKILL, id: "new-b", slug: "b", name: "B" },
+      ],
+    )
+    // No duplicate id for the replaced one, and the last skill created sits
+    // first — the order the list endpoint returns on the next load.
+    expect(merged.map((s) => s.id)).toEqual([
+      "new-b", "new-a", CUSTOM_SKILL.id, OTHER_SKILL.id,
+    ])
+    expect(merged.find((s) => s.id === CUSTOM_SKILL.id)?.description).toBe("v2")
+  })
+
+  it("leaves the library alone when nothing was created", () => {
+    expect(mergeUploadedSkills([CUSTOM_SKILL], [])).toEqual([CUSTOM_SKILL])
+  })
 })
 
 describe("skillBlurb", () => {

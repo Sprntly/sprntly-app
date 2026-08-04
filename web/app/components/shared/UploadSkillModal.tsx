@@ -29,10 +29,19 @@
  * authoritative answers.
  * On a server rejection the modal keeps every input intact so the user fixes
  * and retries (the failure ACs across the PRD's validation tickets).
+ *
+ * ONE upload can create SEVERAL skills: a .zip holding a folder per SKILL.md
+ * imports as one skill per folder. The form cannot name N skills, so the
+ * server names each from its own SKILL.md and answers with a list — which the
+ * modal has to show rather than close on, because the outcome (what got
+ * created, under which trigger, what was updated rather than added, and what
+ * it couldn't import) is not something a toast can carry. The single-skill
+ * flow is untouched: it still closes the moment the upload succeeds.
  */
 "use client"
 
 import { useState } from "react"
+import type { MultiSkillUploadResult } from "../../lib/api"
 
 /** 20 MB — mirrors skills_storage.MAX_SKILL_UPLOAD_BYTES (the PRD cap). */
 export const MAX_SKILL_FILE_BYTES = 20 * 1024 * 1024
@@ -112,6 +121,11 @@ export type UploadSkillModalViewProps = {
   nameNotice: { text: string; assertive: boolean } | null
   /** Marks empty required fields once the user has interacted with them. */
   touched: { name: boolean; description: boolean }
+  /** Set once a MULTI-skill archive has been imported: the modal switches
+   *  from the form to the outcome, because one archive can create, update and
+   *  skip skills all in the same upload. Null for every single-skill upload,
+   *  which closes on success as it always has. */
+  result: MultiSkillUploadResult | null
   onNameChange: (next: string) => void
   onDescriptionChange: (next: string) => void
   onFileChange: (next: File | null) => void
@@ -128,6 +142,7 @@ export function UploadSkillModalView({
   error,
   nameNotice,
   touched,
+  result,
   onNameChange,
   onDescriptionChange,
   onFileChange,
@@ -135,6 +150,7 @@ export function UploadSkillModalView({
   onClose,
 }: UploadSkillModalViewProps) {
   if (!open) return null
+  if (result) return <MultiSkillResult result={result} onClose={onClose} />
   const nameMissing = touched.name && name.trim().length === 0
   const descriptionMissing = touched.description && description.trim().length === 0
   const canSubmit =
@@ -268,6 +284,94 @@ export function UploadSkillModalView({
   )
 }
 
+/** The outcome of a MULTI-skill archive: what was added, what was updated
+ *  instead of added (a name the company already used replaces that skill), and
+ *  what couldn't be imported and why.
+ *
+ *  Every skipped folder is listed, never summarised as a count — the reason is
+ *  the only thing telling the user which SKILL.md to fix. Pure and prop-driven
+ *  like the form it replaces, so it renders in a markup test with no hooks. */
+function MultiSkillResult({
+  result,
+  onClose,
+}: {
+  result: MultiSkillUploadResult
+  onClose: () => void
+}) {
+  const added = result.skills.filter((s) => s.replaced !== true)
+  const updated = result.skills.filter((s) => s.replaced === true)
+  return (
+    <div
+      className="modal-overlay open"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+      aria-hidden={false}
+    >
+      <div className="modal modal-sm" role="dialog" aria-label="Skills imported">
+        <div className="modal-head">
+          <h2 className="modal-title">Skills imported</h2>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-sub" role="status">
+            {countLine(added.length, updated.length)} That archive held more than
+            one skill, so each one was named from its own SKILL.md — the name and
+            description you typed were not used.
+          </p>
+          <ul className="modal-sub">
+            {result.skills.map((s) => (
+              <li key={s.id}>
+                {s.name} — <code>{s.trigger}</code>{" "}
+                {s.replaced === true ? (
+                  <span className="tag tag-double">updated</span>
+                ) : null}
+                {s.name_conflict ? (
+                  <span className="tag tag-impact">new trigger</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {result.skipped.length > 0 ? (
+            <>
+              <p className="settings-msg settings-warning" role="alert">
+                {result.skipped.length === 1
+                  ? "One folder wasn’t imported:"
+                  : `${result.skipped.length} folders weren’t imported:`}
+              </p>
+              <ul className="modal-sub">
+                {result.skipped.map((s) => (
+                  <li key={s.path || s.name}>
+                    {s.name || s.path || "A skill"} — {s.reason}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </div>
+        <div className="modal-foot">
+          <button type="button" className="btn btn-sm btn-primary" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** "4 skills added, 1 updated." — the same sentence the screen's toast uses,
+ *  so the modal and the toast never disagree about what just happened. */
+export function countLine(added: number, updated: number): string {
+  const parts: string[] = []
+  if (added > 0) parts.push(`${added} ${added === 1 ? "skill" : "skills"} added`)
+  if (updated > 0) parts.push(`${updated} updated`)
+  // Both zero is only reachable when every folder was skipped, which the
+  // server answers as an error — but the copy still has to say something.
+  return parts.length > 0 ? `${parts.join(", ")}.` : "No skills were imported."
+}
+
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
 type Props = {
@@ -275,8 +379,17 @@ type Props = {
   /**
    * Performs the upload. Throws or rejects on failure — the modal catches and
    * shows the message inline, keeping the user's inputs so they can retry.
+   *
+   * Resolving with a MultiSkillUploadResult means the archive held several
+   * skills: the modal stays open on the outcome instead of closing, because
+   * the per-skill triggers and the skipped reasons have nowhere else to go.
+   * Resolving with nothing is the single-skill success it always was.
    */
-  onUpload: (file: File, name: string, description: string) => Promise<void>
+  onUpload: (
+    file: File,
+    name: string,
+    description: string,
+  ) => Promise<MultiSkillUploadResult | void>
   onClose: () => void
   /**
    * Built-in Sprntly skill ids, for the live "that name is taken" notice as
@@ -307,6 +420,7 @@ export function UploadSkillModal({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState({ name: false, description: false })
+  const [result, setResult] = useState<MultiSkillUploadResult | null>(null)
 
   function reset() {
     setName("")
@@ -314,6 +428,7 @@ export function UploadSkillModal({
     setFile(null)
     setError(null)
     setTouched({ name: false, description: false })
+    setResult(null)
   }
 
   async function handleSubmit() {
@@ -337,7 +452,14 @@ export function UploadSkillModal({
     setSubmitting(true)
     setError(null)
     try {
-      await onUpload(file, name.trim(), description.trim())
+      const uploaded = await onUpload(file, name.trim(), description.trim())
+      if (uploaded && Array.isArray(uploaded.skills)) {
+        // A multi-skill archive: hold the modal open on its outcome. The
+        // library behind it is already updated — this is the report, not a
+        // pending step, so the only action left is Done.
+        setResult(uploaded)
+        return
+      }
       reset()
       onClose()
     } catch (e) {
@@ -386,6 +508,7 @@ export function UploadSkillModal({
       error={error}
       nameNotice={nameNotice}
       touched={touched}
+      result={result}
       onNameChange={(v) => {
         setName(v)
         setTouched((t) => ({ ...t, name: true }))

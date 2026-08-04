@@ -680,6 +680,39 @@ export type CustomSkillEditResult = CustomSkillDetail & {
   replaced_skill_id: string | null
 }
 
+/** A skill folder inside a multi-skill archive that could NOT be imported.
+ *  `path` is the folder it sat in ("" for the archive root), `name` whatever
+ *  name we could derive, and `reason` is written for a person to act on
+ *  (a missing `description:`, an over-cap method). */
+export type SkippedSkill = {
+  path: string
+  name: string
+  reason: string
+}
+
+/** POST /v1/skills when the uploaded .zip held SEVERAL skills — one folder per
+ *  skill, the layout a zipped `skills/` directory has. Each one became its own
+ *  row with its own trigger, named from its own SKILL.md frontmatter rather
+ *  than from the form (which can only name one), so the answer is a LIST
+ *  instead of the single object. Folders that couldn't be imported are in
+ *  `skipped` with a reason and cost the others nothing; an archive that
+ *  yielded no skills at all fails the request instead. */
+export type MultiSkillUploadResult = {
+  skills: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+}
+
+/** What an upload answers: one skill, or the multi-skill archive result. */
+export type SkillUploadResult = CustomSkillInfo | MultiSkillUploadResult
+
+/** Discriminates the two upload bodies by shape (the multi one has no `id`).
+ *  Exported because every caller has to branch on it. */
+export function isMultiSkillUpload(
+  result: SkillUploadResult,
+): result is MultiSkillUploadResult {
+  return Array.isArray((result as MultiSkillUploadResult).skills)
+}
+
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
@@ -712,13 +745,20 @@ export const skillsApi = {
    *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
    *  report the disambiguated trigger); a name already used by one of the
    *  company's OWN custom skills REPLACES that skill in place — same id, same
-   *  trigger, new content — and the 201 comes back with `replaced: true`. */
+   *  trigger, new content — and the 201 comes back with `replaced: true`.
+   *
+   *  A .zip holding SEVERAL SKILL.md files imports as several skills and
+   *  answers `{skills, skipped}` instead of the single object — branch with
+   *  `isMultiSkillUpload`. The name and description sent here apply to a
+   *  single skill only; a multi-skill archive names each skill from its own
+   *  SKILL.md, and the per-skill collision rules (replace-in-place, the `-2`
+   *  built-in series) apply to each of them independently. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("name", name)
     form.append("description", description)
-    return api.post<CustomSkillInfo>("/v1/skills", form)
+    return api.post<SkillUploadResult>("/v1/skills", form)
   },
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
