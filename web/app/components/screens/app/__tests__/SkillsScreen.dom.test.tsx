@@ -21,6 +21,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const customListMock = vi.fn()
 const customUploadMock = vi.fn()
 const customRemoveMock = vi.fn()
+const customGetMock = vi.fn()
+const customUpdateMock = vi.fn()
 const goToMock = vi.fn()
 const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
@@ -30,6 +32,8 @@ vi.mock("../../../../lib/api", () => ({
     list: (...a: unknown[]) => customListMock(...a),
     upload: (...a: unknown[]) => customUploadMock(...a),
     remove: (...a: unknown[]) => customRemoveMock(...a),
+    get: (...a: unknown[]) => customGetMock(...a),
+    update: (...a: unknown[]) => customUpdateMock(...a),
   },
 }))
 
@@ -80,8 +84,19 @@ const OTHER_SKILL = {
   uploader_name: "Ada Lovelace",
 }
 
+/** GET /v1/skills/{id} — the list is metadata-only, so the edit form's method
+ *  text comes from the detail route. */
+const CUSTOM_SKILL_DETAIL = {
+  ...CUSTOM_SKILL,
+  method: "# Estimation method\nScore by reach x confidence.\n",
+  modules: [] as string[],
+  references: [] as string[],
+  attached_chars: 0,
+}
+
 beforeEach(() => {
   customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
+  customGetMock.mockResolvedValue(CUSTOM_SKILL_DETAIL)
   searchParamsMock = new URLSearchParams()
 })
 
@@ -343,6 +358,151 @@ describe("SkillsScreen", () => {
         "Skill not found.",
       ),
     )
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+  })
+
+  it("opens the edit modal from the card's pencil, pre-filled from the detail route", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    // Every custom card carries the pencil, paired with the delete icon.
+    expect(screen.getByRole("button", { name: "Delete Estimation helper" })).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Estimation helper" }))
+    })
+
+    // Opening the editor invokes nothing and deletes nothing.
+    expect(goToMock).not.toHaveBeenCalled()
+    expect(customRemoveMock).not.toHaveBeenCalled()
+    expect(customGetMock).toHaveBeenCalledWith(CUSTOM_SKILL.id)
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText(/^method/i) as HTMLTextAreaElement).value,
+      ).toBe(CUSTOM_SKILL_DETAIL.method),
+    )
+    expect((screen.getByLabelText(/skill name/i) as HTMLInputElement).value).toBe(
+      "Estimation helper",
+    )
+  })
+
+  it("saves an edit and updates the card in place, with the new trigger", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
+    // A rename: the server re-derives the trigger, and its answer is what the
+    // card must show — not anything the client guessed.
+    customUpdateMock.mockResolvedValue({
+      ...CUSTOM_SKILL_DETAIL,
+      name: "Sizing guide",
+      slug: "sizing-guide",
+      trigger: "/sizing-guide",
+      description: "Sizes work against our template.",
+      replaced_skill_id: null,
+    })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Estimation helper" }))
+    })
+    await waitFor(() => expect(screen.getByLabelText(/^method/i)).toBeTruthy())
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "Sizing guide" },
+      })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Sizes work against our template." },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }))
+    })
+
+    await waitFor(() =>
+      expect(customUpdateMock).toHaveBeenCalledWith(CUSTOM_SKILL.id, {
+        name: "Sizing guide",
+        description: "Sizes work against our template.",
+        method: CUSTOM_SKILL_DETAIL.method,
+      }),
+    )
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    // The card is the same one, renamed — the other skill is untouched.
+    expect(screen.getByText("Sizing guide")).toBeTruthy()
+    expect(screen.queryByText("Estimation helper")).toBeNull()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
+    expect(screen.getByTitle(/^\/sizing-guide —/)).toBeTruthy()
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Skill updated",
+      expect.stringContaining("/sizing-guide"),
+    )
+  })
+
+  it("drops the replaced card when a rename absorbed another skill", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
+    customUpdateMock.mockResolvedValue({
+      ...CUSTOM_SKILL_DETAIL,
+      name: "Journey mapper",
+      slug: "journey-mapper",
+      trigger: "/journey-mapper",
+      replaced_skill_id: OTHER_SKILL.id,
+    })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Journey mapper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Estimation helper" }))
+    })
+    await waitFor(() => expect(screen.getByLabelText(/^method/i)).toBeTruthy())
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "Journey mapper" },
+      })
+    })
+
+    // Destructive: the first click only arms the confirm.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }))
+    })
+    expect(customUpdateMock).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /replace and save/i }))
+    })
+
+    await waitFor(() => expect(customUpdateMock).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    // One card left: the edited one, under the absorbed skill's name and
+    // trigger. The replaced row is gone server-side, so its card goes too.
+    expect(screen.getAllByText("Journey mapper").length).toBe(1)
+    expect(screen.queryByText("Estimation helper")).toBeNull()
+    expect(screen.queryByText("Ada Lovelace")).toBeNull()
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Skill updated",
+      expect.stringContaining("replaced your other skill of the same name"),
+    )
+  })
+
+  it("shows the failure in the modal when the skill's detail can't be loaded", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    customGetMock.mockRejectedValue(new Error("Skill not found."))
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Estimation helper" }))
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog", { name: /edit skill/i })).toBeTruthy(),
+    )
+    expect(screen.getByRole("alert").textContent).toBe("Skill not found.")
+    // The card is still there, unchanged — nothing was written.
     expect(screen.getByText("Estimation helper")).toBeTruthy()
   })
 

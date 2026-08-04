@@ -15,6 +15,14 @@ Covered:
   overrides nothing — the upload takes the next free trigger and reports it
   via `trigger` + `name_conflict`. Replacement matches within one company only
 - list: newest-first metadata, company-isolated
+- detail: one skill WITH its method text (the edit form's source); foreign ids
+  404 indistinguishably
+- edit (PATCH): name/description/method updated in place on the same row; a
+  rename re-derives the trigger through the same built-in deconfliction; a
+  rename onto another of the company's skills replaces (deletes) that one; the
+  validation ladder and the 50k content cap mirror upload's; a .zip skill keeps
+  its modules and gets a fresh content_hash; foreign ids 404 and leave the
+  other tenant's identically named skill untouched
 - file links: signed/fallback URLs for owned skills; foreign ids 404
 - delete: removes the row and the staged original, frees the slug for
   re-upload; foreign/missing ids 404 indistinguishably
@@ -57,6 +65,14 @@ def _upload(client, *, name="Estimation Helper", description="Scores features",
         "/v1/skills",
         files={"file": (filename, data, "text/markdown")},
         data={"name": name, "description": description},
+    )
+
+
+def _edit(client, skill_id, *, name="Estimation Helper", description="Scores features",
+          method="# Estimation method\nEdited in place.\n"):
+    return client.patch(
+        f"/v1/skills/{skill_id}",
+        json={"name": name, "description": description, "method": method},
     )
 
 
@@ -428,6 +444,378 @@ def test_list_is_company_isolated(tenant_client):
     assert _upload(a.client).status_code == 201
 
     assert b.client.get("/v1/skills").json()["skills"] == []
+
+
+# ─── detail (the edit form's source) ─────────────────────────────────────────
+
+
+def test_detail_returns_the_method_text(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+
+    resp = t.client.get(f"/v1/skills/{skill_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Everything the list carries, plus the text the edit form pre-fills with.
+    assert body["id"] == skill_id
+    assert body["slug"] == "estimation-helper"
+    assert body["name"] == "Estimation Helper"
+    assert body["method"] == _MD.decode()
+    assert body["modules"] == []
+    assert body["references"] == []
+    assert body["attached_chars"] == 0
+
+
+def test_detail_names_attached_files_without_shipping_their_text(tenant_client):
+    t = tenant_client.make(slug="acme")
+    data = _zip_bytes({
+        "SKILL.md": _MD,
+        "modules/extra.md": b"more",
+        "references/src.md": b"cited",
+    })
+    skill_id = _upload(t.client, filename="s.zip", data=data).json()["id"]
+
+    body = t.client.get(f"/v1/skills/{skill_id}").json()
+    # Filenames only — the form edits the method, so the supporting files are
+    # something to REPORT ("these stay attached"), not something to ship.
+    assert body["modules"] == ["extra.md"]
+    assert body["references"] == ["src.md"]
+    assert "more" not in str(body["modules"])
+    # …but their size is reported, so the client can mirror the content cap
+    # (which is on the TOTAL parsed text, not the method alone).
+    assert body["attached_chars"] == len("more") + len("cited")
+
+
+def test_detail_foreign_id_404(tenant_client):
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    skill_id = _upload(a.client).json()["id"]
+
+    assert b.client.get(f"/v1/skills/{skill_id}").status_code == 404
+
+
+def test_detail_unknown_id_404(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert t.client.get("/v1/skills/not-a-real-id").status_code == 404
+
+
+# ─── edit in place ───────────────────────────────────────────────────────────
+
+
+def test_edit_updates_all_three_fields_on_the_same_row(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    first = _upload(t.client).json()
+
+    resp = _edit(
+        t.client,
+        first["id"],
+        name="Sizing Guide",
+        description="Sizes work against our template",
+        method="# Sizing\nEdited by hand.\n",
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Same row — an edit is not a delete-and-recreate, so links, history and
+    # the card's place in the library all survive.
+    assert body["id"] == first["id"]
+    assert body["name"] == "Sizing Guide"
+    assert body["description"] == "Sizes work against our template"
+    assert body["method"] == "# Sizing\nEdited by hand.\n"
+    assert body["replaced_skill_id"] is None
+
+    listed = t.client.get("/v1/skills").json()["skills"]
+    assert [s["id"] for s in listed] == [first["id"]]
+    assert db.get_custom_skill(t.company_id, "sizing-guide")["method"] == (
+        "# Sizing\nEdited by hand.\n"
+    )
+
+
+def test_edit_without_a_rename_leaves_the_trigger_alone(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # This skill was handed /prd-author-2 because the built-in owns the plain
+    # slug. Fixing its description must not move it — the trigger a team has
+    # learned only changes when the NAME changes.
+    first = _upload(t.client, name="PRD Author").json()
+    assert first["slug"] == "prd-author-2"
+
+    body = _edit(t.client, first["id"], name="PRD Author", description="Ours, v2").json()
+    assert body["slug"] == "prd-author-2"
+    assert body["trigger"] == "/prd-author-2"
+    assert body["description"] == "Ours, v2"
+    assert body["name_conflict"] is True
+
+
+def test_edit_renaming_rederives_the_trigger(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    first = _upload(t.client).json()
+    assert first["slug"] == "estimation-helper"
+
+    body = _edit(t.client, first["id"], name="Sizing Guide").json()
+    assert body["slug"] == "sizing-guide"
+    assert body["trigger"] == "/sizing-guide"
+    # The old trigger stops resolving — accepted consequence of a rename.
+    assert db.get_custom_skill(t.company_id, "estimation-helper") is None
+    assert db.get_custom_skill(t.company_id, "sizing-guide")["id"] == first["id"]
+
+
+def test_edit_renaming_onto_a_builtin_takes_the_next_free_trigger(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    first = _upload(t.client).json()
+
+    # Renaming a skill to a BUILT-IN's name goes through exactly the same
+    # deconfliction an upload does (2026-07-30: a custom skill never overrides
+    # a built-in), so it lands on the `-2` series.
+    body = _edit(t.client, first["id"], name="PRD Author").json()
+    assert body["slug"] == "prd-author-2"
+    assert body["name"] == "PRD Author"
+    assert body["name_conflict"] is True
+    # The vendored trigger is untouched: nothing custom now answers to it.
+    assert db.get_custom_skill(t.company_id, "prd-author") is None
+
+
+def test_edit_renaming_skips_a_trigger_already_handed_out(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    assert _upload(t.client, name="PRD Author 2").json()["slug"] == "prd-author-2"
+    mine = _upload(t.client, name="Own Thing").json()
+
+    # /prd-author is the built-in's and /prd-author-2 is already a sibling's,
+    # so the rename has to skip both. (Different NAMES — "PRD Author 2" does
+    # not slugify to "prd-author" — so this is a trigger clash, not a replace.)
+    assert _edit(t.client, mine["id"], name="PRD Author").json()["slug"] == "prd-author-3"
+
+
+def test_edit_renaming_onto_our_own_skill_replaces_it(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    victim = _upload(t.client, name="Journey Mapper", description="Maps journeys").json()
+    mine = _upload(t.client, name="Estimation Helper").json()
+    assert len(_staged_files()) == 2
+
+    # Renaming onto a name the company already uses REPLACES that skill: the
+    # edited row survives (same id) under the new name and takes over its
+    # trigger; the other row is gone. The UI confirms this before sending.
+    resp = _edit(t.client, mine["id"], name="Journey Mapper")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == mine["id"]
+    assert body["name"] == "Journey Mapper"
+    assert body["slug"] == "journey-mapper"
+    assert body["replaced_skill_id"] == victim["id"]
+
+    listed = t.client.get("/v1/skills").json()["skills"]
+    assert [s["id"] for s in listed] == [mine["id"]]
+    assert db.get_custom_skill(t.company_id, "estimation-helper") is None
+    assert db.get_custom_skill(t.company_id, "journey-mapper")["id"] == mine["id"]
+    # Both originals are cleaned up: the replaced skill's (it has no row now)
+    # and the edited skill's (its text is no longer what the file holds).
+    assert _staged_files() == []
+
+
+def test_edit_replacement_matches_the_name_not_the_stored_slug(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # Stored at /prd-author-2 because the built-in owns the plain slug…
+    victim = _upload(t.client, name="PRD Author").json()
+    assert victim["slug"] == "prd-author-2"
+    mine = _upload(t.client, name="Own Thing").json()
+
+    # …so matching on the stored slug would miss it and leave two skills named
+    # "PRD Author". Matching is on slugify(name), like the re-upload replace.
+    body = _edit(t.client, mine["id"], name="PRD  author!").json()
+    assert body["replaced_skill_id"] == victim["id"]
+    assert body["id"] == mine["id"]
+    assert body["name"] == "PRD  author!"
+    # It takes over the freed trigger rather than inventing /prd-author-3.
+    assert body["slug"] == "prd-author-2"
+    assert [s["id"] for s in t.client.get("/v1/skills").json()["skills"]] == [mine["id"]]
+
+
+def test_edit_never_reaches_another_companys_skill(tenant_client):
+    from app import db
+
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    theirs = _upload(a.client).json()
+    ours = _upload(b.client, name="Own Thing", data=b"# Globex method\n").json()
+
+    # Globex renaming its skill to a name ACME uses is not a replacement of
+    # anything: the library read behind the match is company-filtered, so
+    # Acme's row is never a candidate.
+    body = _edit(b.client, ours["id"], name="Estimation Helper").json()
+    assert body["replaced_skill_id"] is None
+    assert body["slug"] == "estimation-helper"  # the same slug, in another company
+
+    a_row = db.get_custom_skill(a.company_id, "estimation-helper")
+    assert a_row["id"] == theirs["id"]
+    assert a_row["method"] == _MD.decode()
+    assert [s["id"] for s in a.client.get("/v1/skills").json()["skills"]] == [theirs["id"]]
+
+
+def test_edit_foreign_id_404_and_leaves_the_skill_untouched(tenant_client):
+    from app import db
+
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    skill_id = _upload(a.client).json()["id"]
+
+    # 404, never 403 — a foreign tenant must not learn the id exists.
+    assert _edit(b.client, skill_id, name="Hijacked").status_code == 404
+    row = db.get_custom_skill(a.company_id, "estimation-helper")
+    assert row["id"] == skill_id
+    assert row["name"] == "Estimation Helper"
+    assert row["method"] == _MD.decode()
+    assert len(_staged_files()) == 1
+
+
+def test_edit_unknown_id_404(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _edit(t.client, "not-a-real-id").status_code == 404
+
+
+def test_edit_keeps_zip_modules_and_refreshes_the_content_hash(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    data = _zip_bytes({"SKILL.md": _MD, "modules/extra.md": b"more"})
+    first = _upload(t.client, filename="s.zip", data=data).json()
+    before = db.get_custom_skill(t.company_id, "estimation-helper")["content_hash"]
+
+    # Editing the method swaps the MAIN text only — the archive's supporting
+    # files are not something the form shows, so it must not silently drop them
+    # (the re-upload path replaces wholesale; this one does not).
+    assert _edit(t.client, first["id"], method="# Estimation\nBy hand.\n").status_code == 200
+    row = db.get_custom_skill(t.company_id, "estimation-helper")
+    assert row["method"] == "# Estimation\nBy hand.\n"
+    assert row["modules"] == {"extra.md": "more"}
+    # content_hash is content-derived, so it moves — prompt_version carries it,
+    # and a stale hash would misreport which method text actually answered.
+    assert row["content_hash"] and row["content_hash"] != before
+
+
+def test_edit_drops_the_stored_original(tenant_client):
+    t = tenant_client.make(slug="acme")
+    first = _upload(t.client).json()
+    assert first["has_file"] is True
+    assert len(_staged_files()) == 1
+
+    body = _edit(t.client, first["id"], method="# Nothing like the file\n").json()
+    # The uploaded bytes no longer describe this skill, so the row stops
+    # pointing at them and the object is dropped rather than served as a
+    # download that contradicts the method.
+    assert body["has_file"] is False
+    assert _staged_files() == []
+    assert t.client.get(f"/v1/skills/{first['id']}/file").status_code == 404
+    # The skill itself is fine — only its downloadable original is gone.
+    assert t.client.get(f"/v1/skills/{first['id']}").json()["method"] == (
+        "# Nothing like the file\n"
+    )
+
+
+def test_edit_keeps_the_skills_place_in_the_library(tenant_client):
+    t = tenant_client.make(slug="acme")
+    first = _upload(t.client, name="First Skill").json()
+    assert _upload(t.client, name="Second Skill").status_code == 201
+
+    # Editing refreshes content, not created_at: the library must not reshuffle
+    # because someone fixed a typo (same rule the re-upload path follows).
+    assert _edit(t.client, first["id"], name="First Skill", method="# v2\n").status_code == 200
+    listed = t.client.get("/v1/skills").json()["skills"]
+    assert [s["slug"] for s in listed] == ["second-skill", "first-skill"]
+
+
+# ─── edit: validation ladder ─────────────────────────────────────────────────
+
+
+def test_edit_missing_name_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    resp = _edit(t.client, skill_id, name="   ")
+    assert resp.status_code == 422
+    assert "name" in resp.json()["detail"].lower()
+
+
+def test_edit_missing_description_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    resp = _edit(t.client, skill_id, description="")
+    assert resp.status_code == 422
+    assert "description" in resp.json()["detail"].lower()
+
+
+def test_edit_over_limit_metadata_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    assert _edit(t.client, skill_id, name="x" * 65).status_code == 422
+    assert _edit(t.client, skill_id, description="x" * 1025).status_code == 422
+
+
+def test_edit_symbol_only_name_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    assert _edit(t.client, skill_id, name="!!!").status_code == 422
+
+
+def test_edit_empty_method_400(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    resp = _edit(t.client, skill_id, method="   \n")
+    assert resp.status_code == 400
+    assert "method" in resp.json()["detail"].lower()
+    # Nothing was written — a rejected edit leaves the skill exactly as it was.
+    assert db.get_custom_skill(t.company_id, "estimation-helper")["method"] == _MD.decode()
+
+
+def test_edit_over_the_content_cap_413(tenant_client):
+    from app import db
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+
+    # Exactly at the cap is accepted (inclusive, like upload's boundary)…
+    assert _edit(t.client, skill_id, method="a" * MAX_SKILL_CONTENT_CHARS).status_code == 200
+    # …one character over is rejected, with upload's message verbatim.
+    resp = _edit(t.client, skill_id, method="a" * (MAX_SKILL_CONTENT_CHARS + 1))
+    assert resp.status_code == 413
+    assert f"{MAX_SKILL_CONTENT_CHARS:,} character" in resp.json()["detail"]
+    # The over-cap text never landed.
+    assert len(db.get_custom_skill(t.company_id, "estimation-helper")["method"]) == (
+        MAX_SKILL_CONTENT_CHARS
+    )
+
+
+def test_edit_content_cap_counts_the_attached_files_too(tenant_client):
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    half = b"a" * (MAX_SKILL_CONTENT_CHARS // 2)
+    data = _zip_bytes({"SKILL.md": b"# small\n", "modules/big.md": half})
+    skill_id = _upload(t.client, filename="s.zip", data=data).json()["id"]
+
+    # The module the archive carried still counts against the cap, because it
+    # is still part of the prompt this skill injects.
+    resp = _edit(t.client, skill_id, method="a" * (MAX_SKILL_CONTENT_CHARS // 2 + 1))
+    assert resp.status_code == 413
+    assert "character" in resp.json()["detail"]
 
 
 # ─── original-file links ─────────────────────────────────────────────────────

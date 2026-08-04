@@ -18,12 +18,21 @@
 // (UploadSkillModal → POST /v1/skills); a created skill appears here
 // immediately, byline = uploader.
 //
+// Each card carries a hover-revealed pencil and trash pair. The pencil opens
+// EditSkillModal, which fetches the skill's method text (GET /v1/skills/{id} —
+// the list is metadata-only) and PATCHes name/description/method back. Two
+// outcomes of a save need handling here rather than in the modal: a rename
+// re-derives the trigger, so the response's `slug`/`trigger` replace the
+// card's, and a rename onto another of the company's skill names DELETES that
+// skill server-side, so `replaced_skill_id` takes its card out of the grid.
+//
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
 
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import {
+  IconPencil,
   IconPlus,
   IconTrash,
   IconUser,
@@ -31,9 +40,11 @@ import {
 } from "@tabler/icons-react"
 import { AppLayout } from "./AppLayout"
 import { UploadSkillModal } from "../../shared/UploadSkillModal"
+import { EditSkillModal } from "../../shared/EditSkillModal"
 import { useNavigation } from "../../../context/NavigationContext"
 import {
   skillsApi,
+  type CustomSkillDetail,
   type CustomSkillInfo,
 } from "../../../lib/api"
 
@@ -64,6 +75,7 @@ export function SkillsView({
   deletingId,
   onDeleteRequest,
   onDeleteConfirm,
+  onEditRequest,
 }: {
   /** The company's uploaded skills (already search-filtered by the caller). */
   customSkills: CustomSkillInfo[]
@@ -83,6 +95,9 @@ export function SkillsView({
   onDeleteRequest: (id: string | null) => void
   /** Actually delete — reachable only through the armed confirm. */
   onDeleteConfirm: (id: string) => void
+  /** Open the edit modal for a skill. Non-destructive on its own — the modal
+   *  loads the method text and owns every confirm from there. */
+  onEditRequest: (id: string) => void
 }) {
   return (
     <div className="skl-wrap">
@@ -143,8 +158,9 @@ export function SkillsView({
             </div>
             <div className="skl-grid">
               {customSkills.map((s) => (
-                // Wrapper div: the card is itself a <button>, so the delete
-                // affordance must be a sibling — nested buttons are invalid.
+                // Wrapper div: the card is itself a <button>, so the edit and
+                // delete affordances must be siblings — nested buttons are
+                // invalid.
                 <div key={s.id} className="skl-card-wrap">
                   <button
                     type="button"
@@ -192,15 +208,29 @@ export function SkillsView({
                       </button>
                     </span>
                   ) : (
-                    <button
-                      type="button"
-                      className="skl-card-del"
-                      aria-label={`Delete ${s.name}`}
-                      title="Delete this skill"
-                      onClick={() => onDeleteRequest(s.id)}
-                    >
-                      <IconTrash size={13} />
-                    </button>
+                    // Edit and delete are one hover-revealed pair; the pencil
+                    // sits left of the trash so the destructive one stays in
+                    // the corner it has always been in.
+                    <span className="skl-card-actions">
+                      <button
+                        type="button"
+                        className="skl-card-act"
+                        aria-label={`Edit ${s.name}`}
+                        title="Edit this skill"
+                        onClick={() => onEditRequest(s.id)}
+                      >
+                        <IconPencil size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        className="skl-card-act skl-card-del"
+                        aria-label={`Delete ${s.name}`}
+                        title="Delete this skill"
+                        onClick={() => onDeleteRequest(s.id)}
+                      >
+                        <IconTrash size={13} />
+                      </button>
+                    </span>
                   )}
                 </div>
               ))}
@@ -230,6 +260,12 @@ function SkillsScreenContent() {
   const [deletePendingId, setDeletePendingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
+  // Edit modal: the id opens it immediately (so the dialog is on screen while
+  // the method text loads), the detail arrives from GET /v1/skills/{id}.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editSkill, setEditSkill] = useState<CustomSkillDetail | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // `?q=` seeds the filter so the global search palette can deep-link a
@@ -319,6 +355,61 @@ function SkillsScreenContent() {
     }
   }
 
+  // Open the edit modal for a skill. The library list is metadata-only, so the
+  // method text has to be fetched before the form can pre-fill — the dialog
+  // opens straight away and shows its own loading state rather than leaving the
+  // pencil looking dead while the request is in flight.
+  function onEditRequest(id: string) {
+    setEditingId(id)
+    setEditSkill(null)
+    setEditError(null)
+    setEditLoading(true)
+    skillsApi
+      .get(id)
+      .then((detail) => {
+        setEditSkill(detail)
+      })
+      .catch((e) => {
+        setEditError(
+          e instanceof Error ? e.message : "Could not load this skill.",
+        )
+      })
+      .finally(() => {
+        setEditLoading(false)
+      })
+  }
+
+  function closeEdit() {
+    setEditingId(null)
+    setEditSkill(null)
+    setEditError(null)
+    setEditLoading(false)
+  }
+
+  // Save an edit. The server answers with the edited skill (its `slug` and
+  // `trigger` are authoritative — a rename re-derives them) plus, when the new
+  // name was already one of the company's, the id of the skill it replaced.
+  // That row is gone server-side, so its card has to leave the grid with it.
+  async function onEditSave(
+    id: string,
+    patch: { name: string; description: string; method: string },
+  ) {
+    const updated = await skillsApi.update(id, patch)
+    setCustomSkills((prev) =>
+      prev
+        .filter((s) => s.id !== updated.replaced_skill_id)
+        .map((s) => (s.id === updated.id ? { ...s, ...updated } : s)),
+    )
+    showToast(
+      "Skill updated",
+      updated.replaced_skill_id != null
+        // A replacing rename always ends with two skills sharing one name, so
+        // naming the removed one would just repeat the new one back.
+        ? `${updated.name} is saved and replaced your other skill of the same name — invoke it with ${updated.trigger} in chat.`
+        : `${updated.name} is saved — invoke it with ${updated.trigger} in chat.`,
+    )
+  }
+
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
   //
@@ -368,6 +459,20 @@ function SkillsScreenContent() {
         deletingId={deletingId}
         onDeleteRequest={setDeletePendingId}
         onDeleteConfirm={onDeleteConfirm}
+        onEditRequest={onEditRequest}
+      />
+      <EditSkillModal
+        open={editingId != null}
+        skill={editSkill}
+        loading={editLoading}
+        loadError={editError}
+        // The skill being edited is excluded: renaming it to its own name is
+        // not a replacement, and passing it would warn about replacing itself.
+        // Off the full library, not the search-filtered view — a collision with
+        // a skill the query happens to hide is still a collision.
+        others={customSkills.filter((s) => s.id !== editingId)}
+        onSave={(patch) => onEditSave(editingId as string, patch)}
+        onClose={closeEdit}
       />
       <UploadSkillModal
         open={uploadOpen}
