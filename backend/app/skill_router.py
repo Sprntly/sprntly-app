@@ -898,10 +898,23 @@ _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
 _CONNECTOR_AMBIGUOUS_NAMES: dict[str, re.Pattern] = {
     "linear": re.compile(r"\blinear\b", re.I),
     "notion": re.compile(r"\bnotion\b", re.I),
+    # Marvin (heymarvin.com) is a research repository, and also one of the more
+    # common first names a colleague has. It belongs HERE and not in the strong
+    # list for that reason alone: "check marvin for the onboarding interviews"
+    # names the source, "marvin is picking that up" names a person, and only the
+    # read context in the same message separates them.
+    "marvin": re.compile(r"\bmarvin\b", re.I),
 }
 _CONNECTOR_AMBIGUOUS_VETO = re.compile(
     r"\blinear\s+(?:growth|regression|scale|relationship|model|algebra|time)\b|"
-    r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b",
+    r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b|"
+    # A verb of SPEECH or opinion right after the name is a person talking, and
+    # a question about what a person said is not a request to open a research
+    # repository. The read context alone does not catch these — "what did marvin
+    # say about pricing" matches `what`, and answering it "Marvin isn't
+    # connected" is the same dead end the artifact veto below was added to stop.
+    r"\bmarvin\s+(?:said|says|say|thinks?|thought|mentioned|asked|told|wrote|"
+    r"suggested|wants?|reckons?)\b",
     re.I,
 )
 # A read context: the tracker read verbs, plus the verbs people use for tools

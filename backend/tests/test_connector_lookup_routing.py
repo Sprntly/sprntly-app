@@ -74,6 +74,38 @@ def test_ambiguous_names_need_a_read_context():
     assert is_connector_lookup("i have no notion of what they meant") is None
 
 
+def test_marvin_is_recognised_only_when_the_message_is_reading_it():
+    """Marvin (heymarvin.com) is a research repository AND a common first name,
+    so it is an AMBIGUOUS name: a read context in the same message is what
+    separates "check marvin for the interviews" from "marvin is on it".
+
+    Before this, naming Marvin in chat reached no connector path at all — the
+    question fell to the generic router, which answered from the KG's distilled
+    signals while the research it was asked about sat in a connected repository.
+    """
+    assert is_connector_lookup("check marvin for the onboarding interviews") == {
+        "marvin",
+    }
+    assert is_connector_lookup("what research is in marvin about pricing") == {
+        "marvin",
+    }
+    assert is_connector_lookup("find the marvin study on activation") == {"marvin"}
+    # A person, not a source. Neither of these is a request to open anything.
+    assert is_connector_lookup("marvin said hi in standup") is None
+    assert is_connector_lookup("what did marvin say about the pricing change") is None
+    assert is_connector_lookup("marvin is picking that up next sprint") is None
+
+
+def test_marvin_is_not_fuzzy_matched_on_a_typo():
+    """The ≥7-letter rule (_FUZZY_PROVIDER_WORDS) deliberately excludes short
+    names: at six letters "marvin" is one edit from "martin", "marlin" and
+    "margin", so a typo and a different word are the same thing."""
+    from app.skill_router import _FUZZY_PROVIDER_WORDS
+
+    assert "marvin" not in _FUZZY_PROVIDER_WORDS
+    assert is_connector_lookup("check martin for the interviews") is None
+
+
 def test_unnamed_questions_are_not_intercepted():
     for question in [
         "what are customers complaining about?",      # VoC owns this

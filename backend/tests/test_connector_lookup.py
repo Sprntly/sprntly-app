@@ -515,6 +515,16 @@ def test_deferred_source_says_it_syncs_but_cannot_be_queried_live():
     assert "can't query it live in chat yet" in out["answer"]
 
 
+def test_marvin_is_a_known_connector_never_an_absent_one():
+    """Marvin has a puller and a connect flow, so the one answer chat must never
+    give is "Marvin isn't a Sprntly connector" — that is the copy reserved for
+    catalog-only names, and it would send a user to build an integration that
+    already exists."""
+    assert registry.display_name("marvin") == "Marvin"
+    assert "marvin" not in registry.NO_CONNECTOR
+    assert "marvin" in registry.DISPLAY_NAMES
+
+
 def test_supported_hint_runs_the_loop_with_that_provider(monkeypatch):
     seen = {}
     monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})

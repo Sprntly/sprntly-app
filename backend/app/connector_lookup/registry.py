@@ -38,6 +38,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "zendesk": "Zendesk",
     "sprinklr": "Sprinklr",
     "fireflies": "Fireflies",
+    "marvin": "Marvin",
     "gong": "Gong",
     "github": "GitHub",
     "gitlab": "GitLab",
@@ -106,6 +107,7 @@ LOOKUP_PROVIDERS: tuple[str, ...] = (
 #: Connected (they sync into the KG) but no live-read adapter yet.
 DEFERRED: dict[str, str] = {
     "asana": "Asana",
+    "marvin": "Marvin",
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
