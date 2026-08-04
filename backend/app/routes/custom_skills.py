@@ -18,7 +18,7 @@ check must hold against direct API calls.
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
 400, oversize → 413, unparseable content → 400, over-limit parsed content
-(characters) → 413, name already used by another CUSTOM skill → 409.
+(characters) → 413.
 
 Sharing a BUILT-IN skill's name is allowed and does NOT override it: both
 skills stay in the library and both stay invocable, so the upload takes the
@@ -26,9 +26,19 @@ next free trigger in the `<slug>`, `<slug>-2`, `<slug>-3` series
 (skills.custom.available_slug). The display name is whatever the user typed;
 only the trigger is disambiguated, and the 201/list payloads carry
 `name_conflict` so the UI can say "the name was taken — here's your trigger".
-Two CUSTOM skills with the same name are still refused with a 409: within one
-company library a repeated name is a mistake worth surfacing, not something
-to silently renumber.
+
+Re-using one of the COMPANY'S OWN skill names REPLACES that skill (product
+decision 2026-08-03, superseding the 409 this used to return): a re-upload is
+how you ship a new version of your own method, and refusing it forced people
+to delete-then-upload, which changed the trigger their team had learned and
+dropped the skill's history. The matching row is updated in place — same id,
+same `slug`/trigger, same position in the library — with the new content,
+content_hash, description, and uploader; the previous original file is removed
+from storage once the row points at the new one. "Same name" is the same
+equivalence the 409 used: `slugify(name)`, so "PRD  author!" replaces
+"PRD Author". Matching is company-scoped, so another tenant's identically
+named skill is never touched. The 201 body carries `replaced` so the UI can
+say "updated" rather than "uploaded".
 """
 from __future__ import annotations
 
@@ -57,15 +67,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/skills", tags=["skills"])
 
 
-def _skill_payload(row: dict) -> dict:
+def _skill_payload(row: dict, *, replaced: bool | None = None) -> dict:
     """Row → API shape shared by POST (201 body) and GET (list items).
+
+    `replaced` is POST-only: True when this upload updated a skill the company
+    already had under the same name rather than creating a new one. Omitted
+    from the list payload, where it would mean nothing.
 
     `name_conflict`: this skill's name was already taken when it was uploaded,
     so its trigger was disambiguated away from the name's plain slug. Derived
     rather than stored — the stored slug differing from slugify(name) IS the
     record of the collision, and it stays correct however the built-in library
     changes afterwards."""
-    return {
+    payload = {
         "id": row["id"],
         "slug": row["slug"],
         "trigger": f"/{row['slug']}",
@@ -76,6 +90,9 @@ def _skill_payload(row: dict) -> dict:
         "has_file": bool(row.get("storage_key")),
         "name_conflict": row["slug"] != slugify(row["name"]),
     }
+    if replaced is not None:
+        payload["replaced"] = replaced
+    return payload
 
 
 @router.post(
@@ -89,7 +106,12 @@ async def upload_skill(
     description: str = Form(""),
     company: WorkspaceContext = Depends(require_workspace),
 ):
-    """Create a custom skill from an uploaded .md or .zip (≤ 20 MB)."""
+    """Create a custom skill from an uploaded .md or .zip (≤ 20 MB), or
+    replace the company's existing skill of the same name with this version.
+
+    Both outcomes answer 201 with the same body plus `replaced`; a replace
+    keeps the skill's id and trigger, so nothing a team has learned or linked
+    to changes underneath them."""
     name = (name or "").strip()
     description = (description or "").strip()
     if not name:
@@ -133,23 +155,71 @@ async def upload_skill(
     if not base:
         raise HTTPException(422, "Skill name must contain at least one letter or number.")
 
-    # One read of the company library serves both name checks below.
+    # One read of the company library serves both the replace match and the
+    # trigger series below. It is company-scoped by construction
+    # (list_custom_skills filters on company_id), and that filter is the only
+    # thing keeping a replace inside one tenant — another company's skill of
+    # the same name is never in this list, so it can never be the row we write.
     existing = db.list_custom_skills(company.company_id)
-    # Within the company's OWN library a repeated name is refused outright —
-    # two identical entries in one library help nobody, and the uploader can
-    # rename or delete the old one. (Sharing a BUILT-IN's name is fine; that's
-    # the case the trigger series below exists for.)
-    if any(slugify(r.get("name") or "") == base for r in existing):
-        raise HTTPException(409, "A skill with this name already exists in your company.")
-    # Sharing a vendored built-in's name is deliberately NOT rejected and no
-    # longer overrides it: the built-in keeps its own trigger and this upload
-    # takes the next free one, so chat can offer BOTH (their descriptions are
-    # what tells them apart).
-    slug = available_slug(base, set(list_skills()) | {r["slug"] for r in existing})
+    # Re-using one of the company's OWN skill names is a NEW VERSION of that
+    # skill, not a second entry: update the row in place. Matched on the
+    # slugified name — the same equivalence the old 409 used — because the
+    # stored slug may have been disambiguated away from it by a built-in
+    # collision ("PRD Author" living at /prd-author-2 still gets replaced).
+    # The list is newest-first, so a legacy library that somehow holds two
+    # rows under one name updates the most recent of them.
+    replacing = next(
+        (r for r in existing if slugify(r.get("name") or "") == base), None
+    )
 
     key = await skills_storage.stage_skill_file(
         company_id=company.company_id, data=data, ext=ext
     )
+
+    if replacing is not None:
+        try:
+            row = db.update_custom_skill(
+                company_id=company.company_id,
+                skill_id=replacing["id"],
+                workspace_id=company.workspace_id,
+                name=name,
+                description=description,
+                method=parsed.method,
+                modules=parsed.modules,
+                references=parsed.references,
+                content_hash=content_hash_for(parsed),
+                storage_key=key,
+                uploader_id=company.user_id,
+                uploader_name=company.user_name or company.user_email or "",
+            )
+        except Exception:
+            await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
+            raise
+        if row is not None:
+            # The row points at the new file now, so the previous original is
+            # unreferenced — drop it (best-effort; delete_skill_file never
+            # raises) rather than leaving every version's bytes behind.
+            old_key = replacing.get("storage_key")
+            if old_key and old_key != key:
+                await skills_storage.delete_skill_file(
+                    company_id=company.company_id, key=old_key
+                )
+            logger.info(
+                "custom_skill_replaced company_present=%s slug=%s size_bytes=%s ext=%s",
+                bool(company.company_id), row["slug"], len(data), ext,
+            )
+            return _skill_payload(row, replaced=True)
+        # The row vanished between the list read and the update (a concurrent
+        # delete). Fall through and create the skill fresh, without counting
+        # the gone row's slug as taken.
+        existing = [r for r in existing if r["id"] != replacing["id"]]
+
+    # Sharing a vendored built-in's name is deliberately NOT rejected and does
+    # not override it: the built-in keeps its own trigger and this upload takes
+    # the next free one, so chat can offer BOTH (their descriptions are what
+    # tells them apart).
+    slug = available_slug(base, set(list_skills()) | {r["slug"] for r in existing})
+
     try:
         row = db.insert_custom_skill(
             company_id=company.company_id,
@@ -166,13 +236,16 @@ async def upload_skill(
             uploader_name=company.user_name or company.user_email or "",
         )
     except db.DuplicateSkillSlug:
-        # Backstop for the race the pre-check above can't close (two concurrent
-        # uploads picking the same free slug). Roll back the staged object so
-        # the rejected upload leaves nothing behind (no orphaned file without a
-        # metadata row).
+        # Backstop for the race the library read above can't close: two
+        # concurrent uploads of the same new name both find nothing to replace
+        # and both compute the same free slug. Only a genuine collision reaches
+        # here now (a repeated name is a replace), so the message says to retry
+        # rather than to rename. Roll back the staged object so the rejected
+        # upload leaves nothing behind (no orphaned file without a row).
         await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
         raise HTTPException(
-            409, "A skill with this name already exists in your company."
+            409,
+            "Another upload just took this skill's trigger. Please try again.",
         )
     except Exception:
         await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
@@ -182,7 +255,7 @@ async def upload_skill(
         "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s name_conflict=%s",
         bool(company.company_id), slug, len(data), ext, slug != base,
     )
-    return _skill_payload(row)
+    return _skill_payload(row, replaced=False)
 
 
 @router.get("")

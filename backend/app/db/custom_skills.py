@@ -161,6 +161,67 @@ def get_custom_skill_by_id(company_id: str, skill_id: str) -> dict | None:
     return _decode(resp.data[0]) if resp.data else None
 
 
+def update_custom_skill(
+    *,
+    company_id: str,
+    skill_id: str,
+    workspace_id: str,
+    name: str,
+    description: str,
+    method: str,
+    modules: dict[str, str],
+    references: dict[str, str],
+    content_hash: str,
+    storage_key: str | None,
+    uploader_id: str,
+    uploader_name: str,
+) -> dict | None:
+    """Replace one company-owned skill's content and metadata in place; returns
+    the decoded row, or None when the id is missing or belongs to another
+    company (indistinguishable, like the by-id lookup).
+
+    This is the re-upload path: a company uploading a skill under a name it has
+    already used updates that row instead of getting a second entry. `slug` and
+    `created_at` are deliberately NOT in the patch — the trigger has to survive
+    a re-upload (`/estimation-helper` keeps working, and the router keeps
+    offering the same id), and the library's newest-first order should not
+    reshuffle because someone refreshed a skill's text. `workspace_id` and the
+    uploader fields ARE refreshed: the row describes the version it now holds,
+    so it records who last uploaded it and from where.
+
+    Both the existence check and the update are company-filtered, so a racing
+    caller can never write a foreign row. No DuplicateSkillSlug path: the slug
+    is untouched, so the (company_id, slug) unique constraint cannot trip."""
+    row = get_custom_skill_by_id(company_id, skill_id)
+    if row is None:
+        return None
+    patch = {
+        "workspace_id": workspace_id,
+        "name": name,
+        "description": description,
+        "method": method,
+        "modules": json.dumps(modules or {}),
+        "refs": json.dumps(references or {}),
+        "content_hash": content_hash,
+        "storage_key": storage_key,
+        "uploader_id": uploader_id,
+        "uploader_name": uploader_name,
+    }
+    c = require_client()
+    resp = (
+        c.table("custom_skills")
+        .update(patch)
+        .eq("company_id", company_id)
+        .eq("id", skill_id)
+        .execute()
+    )
+    # PostgREST returns the updated representation; fall back to the row we
+    # already read merged with the patch rather than reporting a failed update
+    # (the caller reads None as "the row is gone" and would then create a
+    # second entry under the same name — exactly what this path prevents).
+    return _decode(resp.data[0] if resp.data else {**row, **patch})
+
+
 def delete_custom_skill(company_id: str, skill_id: str) -> dict | None:
     """Delete one company-owned skill row; returns the decoded deleted row
     (the route needs storage_key to clean up the original file), or None when

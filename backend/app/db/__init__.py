@@ -149,6 +149,7 @@ from app.db.custom_skills import (
     get_custom_skill_by_id,
     insert_custom_skill,
     list_custom_skills,
+    update_custom_skill,
 )
 
 # Connections (OAuth)
@@ -309,6 +310,7 @@ __all__ = [
     "get_custom_skill_by_id",
     "insert_custom_skill",
     "list_custom_skills",
+    "update_custom_skill",
     # input sources
     "delete_input_source",
     "list_input_sources",

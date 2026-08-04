@@ -168,11 +168,16 @@ describe("SkillsScreen", () => {
   })
 
   it("toasts the assigned trigger when the uploaded name was taken", async () => {
+    // A BUILT-IN's name: nothing is replaced, so this is a NEW skill with its
+    // own id and a disambiguated trigger.
     customUploadMock.mockResolvedValue({
       ...CUSTOM_SKILL,
-      slug: "estimation-helper-2",
-      trigger: "/estimation-helper-2",
+      id: "b8f3a1c2-0000-0000-0000-000000000003",
+      slug: "prd-author-2",
+      trigger: "/prd-author-2",
+      name: "PRD Author",
       name_conflict: true,
+      replaced: false,
     })
     const { container } = render(React.createElement(SkillsScreen))
     await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
@@ -182,7 +187,7 @@ describe("SkillsScreen", () => {
     })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/skill name/i), {
-        target: { value: "Estimation helper" },
+        target: { value: "PRD Author" },
       })
       fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
         target: { value: "Ours." },
@@ -201,11 +206,58 @@ describe("SkillsScreen", () => {
     await waitFor(() =>
       expect(showToastMock).toHaveBeenCalledWith(
         "Skill uploaded",
-        expect.stringContaining("/estimation-helper-2"),
+        expect.stringContaining("/prd-author-2"),
       ),
     )
     // …and it says the skill that owned the name is still there.
     expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/still works too/i)
+  })
+
+  it("swaps the card in place when the upload replaced one of our own skills", async () => {
+    // Re-uploading a name the company already used updates that row: same id,
+    // same trigger, new content. The library must show ONE card (prepending
+    // would render the same id twice) and the toast must say "updated".
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
+    customUploadMock.mockResolvedValue({
+      ...CUSTOM_SKILL,
+      description: "Scores features by reach × confidence, v2.",
+      replaced: true,
+    })
+    const { container } = render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "Estimation helper" },
+      })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Ours, v2." },
+      })
+    })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method v2"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+    })
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skill updated",
+        expect.stringContaining("/estimation-helper"),
+      ),
+    )
+    // One card for that skill, still first, now showing the new description.
+    expect(screen.getAllByText("Estimation helper").length).toBe(1)
+    expect(
+      screen.getByText("Scores features by reach × confidence, v2"),
+    ).toBeTruthy()
   })
 
   it("deletes a custom skill only through the inline confirm, with an in-flight state", async () => {

@@ -9,10 +9,11 @@ Covered:
 - the server-side validation ladder: missing/over-limit metadata (422), bad
   extension (422), empty file (400), oversize (413), unparseable content
   (400), over-limit parsed content in characters (413)
-- name conflicts: a repeat of the company's OWN skill name is a 409 with the
-  staged object rolled back; sharing a BUILT-IN skill's name is allowed and
+- name conflicts: a repeat of the company's OWN skill name REPLACES that skill
+  in place (same id, same trigger, new content/hash, old original file cleaned
+  up) and reports `replaced`; sharing a BUILT-IN skill's name is allowed and
   overrides nothing — the upload takes the next free trigger and reports it
-  via `trigger` + `name_conflict`
+  via `trigger` + `name_conflict`. Replacement matches within one company only
 - list: newest-first metadata, company-isolated
 - file links: signed/fallback URLs for owned skills; foreign ids 404
 - delete: removes the row and the staged original, frees the slug for
@@ -83,6 +84,8 @@ def test_upload_md_creates_skill(tenant_client):
     assert "uploader_name" in body
     assert body["has_file"] is True
     assert body["name_conflict"] is False
+    # Nothing was replaced — this name was free.
+    assert body["replaced"] is False
     # The original bytes are staged under the workspace prefix.
     assert len(_staged_files()) == 1
 
@@ -259,31 +262,141 @@ def test_trigger_series_skips_slugs_already_handed_out(tenant_client, monkeypatc
     assert _upload(t.client, name="PRD Author").json()["slug"] == "prd-author-3"
 
 
-def test_company_duplicate_409_rolls_back_staged_file(tenant_client):
+def test_reupload_replaces_the_companys_own_skill_in_place(tenant_client):
+    from app import db
+
     t = tenant_client.make(slug="acme")
-    assert _upload(t.client).status_code == 201
+    first = _upload(t.client).json()
     assert len(_staged_files()) == 1
 
-    # A repeat of the company's OWN skill name is still refused — only a
-    # BUILT-IN's name gets the renumbered trigger.
-    resp = _upload(t.client)
-    assert resp.status_code == 409
-    assert "already exists" in resp.json()["detail"]
-    # The duplicate's staged object was rolled back — only the first remains.
+    # A repeat of the company's OWN skill name is a NEW VERSION of it: the row
+    # is updated in place, so the id and the trigger the team already knows
+    # both survive.
+    resp = _upload(
+        t.client, description="Scores features, v2", data=b"# Estimation v2\nNew method.\n"
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["replaced"] is True
+    assert body["id"] == first["id"]
+    assert body["slug"] == first["slug"] == "estimation-helper"
+    assert body["trigger"] == "/estimation-helper"
+    assert body["description"] == "Scores features, v2"
+
+    # One library entry, not two — and it serves the NEW content under the
+    # same slug, which is what /estimation-helper now resolves to.
+    listed = t.client.get("/v1/skills").json()["skills"]
+    assert [s["id"] for s in listed] == [first["id"]]
+    full = db.get_custom_skill(t.company_id, "estimation-helper")
+    assert full["method"] == "# Estimation v2\nNew method.\n"
+
+    # The superseded original file is gone; only the new version's is staged.
     assert len(_staged_files()) == 1
 
 
-def test_company_duplicate_409_matches_on_name_not_stored_slug(tenant_client, monkeypatch):
+def test_reupload_refreshes_the_content_hash(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    _upload(t.client)
+    before = db.get_custom_skill(t.company_id, "estimation-helper")["content_hash"]
+
+    _upload(t.client, data=b"# Estimation\nCompletely different method.\n")
+    after = db.get_custom_skill(t.company_id, "estimation-helper")["content_hash"]
+    # prompt_version carries this hash, so a stale one would misreport which
+    # method text actually answered.
+    assert after and after != before
+
+
+def test_reupload_replaces_the_content_it_does_not_merge_it(tenant_client):
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    zipped = _zip_bytes({"SKILL.md": _MD, "modules/extra.md": b"old module"})
+    assert _upload(t.client, filename="s.zip", data=zipped).status_code == 201
+    assert db.get_custom_skill(t.company_id, "estimation-helper")["modules"] == {
+        "extra.md": "old module"
+    }
+
+    # Re-uploading a bare .md is a full replacement: the module the old bundle
+    # carried is gone, not merged forward into the new version's prompt.
+    assert _upload(t.client, data=b"# just the method\n").json()["replaced"] is True
+    row = db.get_custom_skill(t.company_id, "estimation-helper")
+    assert row["method"] == "# just the method\n"
+    assert row["modules"] == {}
+
+
+def test_reupload_keeps_the_skills_place_in_the_library(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _upload(t.client, name="First Skill").status_code == 201
+    assert _upload(t.client, name="Second Skill").status_code == 201
+
+    # Replacing the older skill refreshes its content, not its created_at —
+    # the library must not reshuffle because someone updated a skill's text.
+    assert _upload(t.client, name="First Skill", data=b"# v2\n").json()["replaced"] is True
+    listed = t.client.get("/v1/skills").json()["skills"]
+    assert [s["slug"] for s in listed] == ["second-skill", "first-skill"]
+
+
+def test_reupload_matches_on_name_not_stored_slug(tenant_client, monkeypatch):
     import app.routes.custom_skills as mod
 
     t = tenant_client.make(slug="acme")
     monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
-    # This one is stored under /prd-author-2, so the duplicate check has to
-    # compare NAMES — matching on the stored slug would let it through.
-    assert _upload(t.client, name="PRD Author").status_code == 201
+    # This one is stored under /prd-author-2 (the built-in owns /prd-author),
+    # so the match has to compare NAMES — matching on the stored slug would
+    # miss it and create a second entry.
+    first = _upload(t.client, name="PRD Author").json()
+    assert first["slug"] == "prd-author-2"
+
     resp = _upload(t.client, name="PRD  author!")  # same name once slugified
-    assert resp.status_code == 409
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["replaced"] is True
+    assert body["id"] == first["id"]
+    assert body["slug"] == "prd-author-2"  # the disambiguated trigger survives
+    assert body["name"] == "PRD  author!"  # the newly typed display name wins
+    assert body["name_conflict"] is True
     assert len(_staged_files()) == 1
+
+
+def test_reupload_of_a_builtins_name_still_deconflicts_the_trigger(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
+
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # Replacement is CUSTOM-vs-CUSTOM only. A built-in is never replaced: the
+    # first upload of its name takes /prd-author-2, and after that name is in
+    # the company's library a second upload replaces THAT row — never the
+    # vendored skill, whose trigger stays free of both.
+    assert _upload(t.client, name="PRD Author").json()["slug"] == "prd-author-2"
+    again = _upload(t.client, name="PRD Author", data=b"# ours v2\n").json()
+    assert again["replaced"] is True
+    assert again["slug"] == "prd-author-2"
+    assert [s["slug"] for s in t.client.get("/v1/skills").json()["skills"]] == ["prd-author-2"]
+
+
+def test_reupload_never_reaches_another_companys_skill(tenant_client):
+    from app import db
+
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    theirs = _upload(a.client).json()
+    # Globex uploading the SAME name creates its own skill — it must not find,
+    # replace, or even observe Acme's row (custom skills are company-scoped and
+    # the library read that drives the match is company-filtered).
+    ours = _upload(b.client, data=b"# Globex method\n").json()
+    assert ours["replaced"] is False
+    assert ours["id"] != theirs["id"]
+    assert ours["slug"] == theirs["slug"] == "estimation-helper"
+
+    # Acme's content and metadata are untouched.
+    a_row = db.get_custom_skill(a.company_id, "estimation-helper")
+    assert a_row["id"] == theirs["id"]
+    assert a_row["method"] == _MD.decode()
+    assert db.get_custom_skill(b.company_id, "estimation-helper")["method"] == "# Globex method\n"
+    # Both originals are still staged — neither delete crossed the boundary.
+    assert len(_staged_files()) == 2
 
 
 def test_same_slug_allowed_across_companies(tenant_client):
