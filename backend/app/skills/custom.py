@@ -197,7 +197,7 @@ def parse_multi_upload(filename: str, data: bytes) -> MultiSkillArchive | None:
         parsed, method_text = _parsed_for_root(zf, md_members, root, roots)
         path = "/".join(root)
         label = root[-1] if root else root_label
-        name, description = _derive_identity(method_text, label)
+        name, description = derive_identity(method_text, label)
         if not method_text.strip():
             skipped.append(SkippedSkill(path, name, "its SKILL.md is empty"))
             continue
@@ -418,32 +418,71 @@ def _parse_zip(filename: str, data: bytes) -> ParsedSkill:
     return ParsedSkill(method=method, modules=modules, references=references)
 
 
-# ─── multi-skill archives ────────────────────────────────────────────────────
+# ─── skill detection (shared by the zip parser and the GitHub importer) ──────
+#
+# These four are PUBLIC because a repo is the same problem as an archive: a
+# tree of paths, some of which are SKILL.md. app/skills/github_source.py walks
+# a GitHub tree through exactly these rules, so an importer and an upload of
+# the same repo produce the same skills — a second implementation would drift
+# the day one of them fixed a bug.
 
-_Root = tuple[str, ...]
+#: A skill's root directory as a path-parts tuple; `()` is the tree root.
+SkillRoot = tuple[str, ...]
+
+_Root = SkillRoot
+
+
+def skill_roots_for(paths: Iterable[str]) -> list[SkillRoot]:
+    """Every directory that DIRECTLY contains a SKILL.md (case-insensitive),
+    as a parts tuple — `()` when the SKILL.md sits at the walked root.
+
+    Sorted, so a caller's import order is the tree's reading order rather than
+    zip-entry or API-response order."""
+    roots: set[SkillRoot] = set()
+    for raw in paths:
+        parts = tuple(p for p in raw.split("/") if p)
+        if parts and parts[-1].lower() == "skill.md":
+            roots.add(parts[:-1])
+    return sorted(roots)
+
+
+def owning_skill_root(path: str, roots: Iterable[SkillRoot]) -> SkillRoot | None:
+    """The DEEPEST skill root this file lives under, or None when it lives
+    under none. Deepest wins, which is the whole rule that keeps a nested
+    skill's files out of its ancestor's bundle."""
+    parts = tuple(p for p in path.split("/") if p)
+    best: SkillRoot | None = None
+    for root in roots:
+        if parts[: len(root)] == root and (best is None or len(root) > len(best)):
+            best = root
+    return best
+
+
+def skill_file_role(path: str, root: SkillRoot) -> str:
+    """Where one file lands inside its skill: "method", "references" or
+    "modules".
+
+    The built-in layout rules, applied RELATIVE to the skill's own directory:
+    its SKILL.md is the method, `references/*.md` are its references, every
+    other .md is a module. Relative-to-the-skill is what fixes
+    `skill-b/references/x.md`, which the single-skill zip parser filed as a
+    module because it only ever looked at the archive's top level."""
+    rel = tuple(p for p in path.split("/") if p)[len(root):]
+    if len(rel) == 1 and rel[0].lower() == "skill.md":
+        return "method"
+    if len(rel) > 1 and rel[0].lower() == "references":
+        return "references"
+    return "modules"
+
+
+def _owning_root(path: PurePosixPath, roots: list[_Root]) -> _Root | None:
+    return owning_skill_root(str(path), roots)
 
 
 def _skill_roots(
     md_members: list[tuple[PurePosixPath, zipfile.ZipInfo]],
 ) -> list[_Root]:
-    """Every directory that directly contains a SKILL.md, as a parts tuple
-    (`()` for the archive root). Sorted so the import order is the archive's
-    reading order, not zip-entry order."""
-    roots = {
-        p.parts[:-1] for p, _ in md_members if p.name.lower() == "skill.md"
-    }
-    return sorted(roots)
-
-
-def _owning_root(path: PurePosixPath, roots: list[_Root]) -> _Root | None:
-    """The DEEPEST skill root this file lives under, or None when it lives
-    under none. Deepest wins, which is the whole rule that keeps a nested
-    skill's files out of its ancestor's bundle."""
-    best: _Root | None = None
-    for root in roots:
-        if path.parts[: len(root)] == root and (best is None or len(root) > len(best)):
-            best = root
-    return best
+    return skill_roots_for(str(p) for p, _ in md_members)
 
 
 def _parsed_for_root(
@@ -453,26 +492,20 @@ def _parsed_for_root(
     roots: list[_Root],
 ) -> tuple[ParsedSkill, str]:
     """One skill's ParsedSkill plus its raw SKILL.md text (which the identity
-    derivation reads separately from the frontmatter).
-
-    Inside a skill folder the layout rules are the built-in ones, applied
-    RELATIVE to that folder: `references/*.md` are its references, every other
-    .md is a module keyed by basename. Applying them relative to the skill
-    rather than to the archive is what fixes `skill-b/references/x.md`, which
-    the single-skill parser filed as a module because it only ever looked at
-    the archive's top level."""
+    derivation reads separately from the frontmatter). Layout rules come from
+    `skill_file_role`, shared with the GitHub importer."""
     method = ""
     modules: dict[str, str] = {}
     references: dict[str, str] = {}
     for path, info in sorted(md_members, key=lambda item: str(item[0]).lower()):
         if _owning_root(path, roots) != root:
             continue
-        rel = path.parts[len(root):]
+        role = skill_file_role(str(path), root)
         text = _read_member(zf, info, path)
-        if len(rel) == 1 and rel[0].lower() == "skill.md" and not method:
+        if role == "method" and not method:
             method = text
             continue
-        target = references if rel[0].lower() == "references" and len(rel) > 1 else modules
+        target = references if role == "references" else modules
         target.setdefault(path.name, text)
     return ParsedSkill(method=method, modules=modules, references=references), method
 
@@ -526,7 +559,7 @@ def _first_paragraph(body: str) -> str:
     return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 
-def _derive_identity(method_text: str, label: str) -> tuple[str, str]:
+def derive_identity(method_text: str, label: str) -> tuple[str, str]:
     """(name, description) for one skill in a multi-skill archive.
 
     The upload form has ONE name and ONE description field, so an archive of
