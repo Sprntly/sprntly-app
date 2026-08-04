@@ -1241,6 +1241,14 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
     return routing_text + "\n\n[Attached document names]\n" + "\n".join(names)
 
 
+#: Providers whose content IS the call corpus. Naming one of these does not
+#: displace the call-digest / call-index interceptors — it names the source
+#: they already read, so "summarize last week's calls in fireflies" belongs to
+#: the digest exactly as it always has. Every OTHER named source is a request
+#: to look somewhere the call paths cannot see.
+_CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong"})
+
+
 def answer(
     *,
     enterprise_id: str,
@@ -1335,6 +1343,72 @@ def answer(
             )
         return _contest_memo[0]
 
+    # Sources the user NAMED in this very message, and whether any of them is
+    # one we can actually open live for this company. Naming a source is the
+    # most explicit routing signal a person can give us, and until now it lost
+    # to every topical interceptor above the lookup: "summarize the slack
+    # channel syncs from this week" matched the call digest's
+    # verb-plus-`syncs?` rule and was answered from Fireflies transcripts;
+    # "what's the latest customer feedback in slack" matched the VoC rule; and
+    # "what are the latest customer conversations in slack" matched the call
+    # index's listing rule. All three named Slack, all three were answered from
+    # calls, and none of them said so.
+    #
+    # HISTORY-FREE on purpose. `is_connector_lookup(q, history)` also resolves
+    # sticky threads — a bare "what's the full thread?" inherits the source the
+    # thread was reading. That is right for CLAIMING a turn (it is still what
+    # runs at the lookup below) and wrong for DISPLACING an interceptor: the
+    # user has to have named the source in the words being routed, or a Slack
+    # thread would quietly swallow the next call question asked inside it.
+    named_sources: set[str] = set()
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        named_sources = is_connector_lookup(routing_text) or set()
+
+    _live_source_memo: list = []
+
+    def _names_live_source() -> bool:
+        """True when this message names a source the connector lookup can
+        actually read for this company — the only case in which standing an
+        interceptor down is an improvement.
+
+        Two narrowings, both deliberate:
+
+        CONNECTED + READABLE. Same capability-gate shape as the tracker and DS
+        branches below: matching a pattern is not enough to claim (or here, to
+        hand over) a turn. If the named source has no adapter or no connection,
+        the lookup would answer "that isn't connected" — so the interceptor
+        keeps the turn and today's behaviour stands unchanged.
+
+        NOT A CALL SOURCE. Fireflies and Gong ARE the call corpus, so naming
+        one is not a request to route away from the call paths — it names the
+        very source they read. `test_call_digest_still_wins_over_a_named_source`
+        pins that precedence and it stays pinned.
+
+        Lazily memoized: `connected_providers` is a DB read, and a question that
+        trips no interceptor must never pay for it.
+        """
+        if not named_sources:
+            return False
+        if not _live_source_memo:
+            try:
+                from app.connector_lookup import registry
+
+                # Parenthesised because `&` binds tighter than `-`: without
+                # them this reads as `named - (calls & lookup & connected)`,
+                # which is a different (and much wider) set.
+                readable = (
+                    (named_sources - _CALL_SOURCE_PROVIDERS)
+                    & set(registry.LOOKUP_PROVIDERS)
+                    & set(registry.connected_providers(enterprise_id))
+                )
+                _live_source_memo.append(bool(readable))
+            except Exception:  # noqa: BLE001 — routing must never break the answer
+                logger.exception(
+                    "connector-source gate failed for %s", enterprise_id
+                )
+                _live_source_memo.append(False)
+        return _live_source_memo[0]
+
     # Call INDEX first: a listing question ("give me the 5 latest transcripts",
     # "which calls did we have last week") wants the LIST, and the index already
     # holds it. Answering from Postgres costs a query; letting it reach the
@@ -1344,7 +1418,11 @@ def answer(
     # transcripts are unavailable. Placed ahead of the digest, and deliberately
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
-    if not pinned_skill and call_index.is_listing_request(routing_text):
+    if (
+        not pinned_skill
+        and call_index.is_listing_request(routing_text)
+        and not _names_live_source()
+    ):
         try:
             listed = call_index.answer_listing(
                 enterprise_id, question, fresh=_index_fresh()
@@ -1376,13 +1454,42 @@ def answer(
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
     # from the lossy, token-capped KG, so intercept it first — unless the user has
     # pinned a specific skill via a follow-up.
-    if not pinned_skill and is_call_digest(routing_text):
+    #
+    # Three things can now stand this interception down, cheapest first.
+    # `_names_live_source` (2026-08-03) declines when the user named a readable
+    # source the digest cannot see into — "summarize the slack channel syncs
+    # from this week" matched `_DIGEST_VERB` + `syncs?` and was answered from
+    # Fireflies transcripts, a source the question never mentioned.
+    # `_custom_beats_digest` (#1038) lets a company's own upload contest it, and
+    # is checked second because it can cost a model call. And `has_call_source`
+    # is the capability gate its NEIGHBOURS already have (the VoC branch below,
+    # the tracker and DS branches further down): this was the only interceptor
+    # on the ladder claiming its turn unconditionally, so a company with no call
+    # source at all still got the digest's empty-corpus answer instead of
+    # falling through to routing that could serve them.
+    if (
+        not pinned_skill
+        and is_call_digest(routing_text)
+        and not _names_live_source()
+    ):
         if _custom_beats_digest() is None:
             from app import call_digest
 
-            return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
-            )
+            try:
+                has_calls = call_digest.has_call_source(enterprise_id)
+            except Exception:  # noqa: BLE001 — routing must never break the answer
+                # Unknown, so behave exactly as this branch did before the gate
+                # existed: claim the turn. A capability check that cannot be
+                # completed must not be read as "no capability" — that would
+                # turn a transient DB blip into a silently re-routed answer.
+                logger.exception("call-source check failed for %s", enterprise_id)
+                has_calls = True
+            if has_calls:
+                return call_digest.answer(
+                    enterprise_id=enterprise_id, question=question, history=history
+                )
+            # No corpus to digest: a declined precondition falls through to
+            # normal routing — never a canned refusal the user never asked for.
 
     # Bare "voice of customer" / "VoC report" asks carry no call-noun, so
     # is_call_digest misses them — they'd fall to the corpus-less skill answer,
@@ -1390,7 +1497,11 @@ def answer(
     # call source IS connected, run the same live digest so the natural phrasing
     # yields a real report; when it isn't, fall through to the skill route so it
     # can explain what to connect.
-    if not pinned_skill and is_voc_report_request(routing_text):
+    if (
+        not pinned_skill
+        and is_voc_report_request(routing_text)
+        and not _names_live_source()
+    ):
         from app import call_digest
 
         if call_digest.has_call_source(enterprise_id) and _custom_beats_digest() is None:
@@ -1467,7 +1578,14 @@ def answer(
     # engine already vetoes itself on call/meeting/transcript/feedback nouns.
     # The failures this routing exists to fix ("top 3 product requests from
     # last week") match no DS rule, so they are unaffected by sitting here.
-    if not pinned_skill:
+    #
+    # Also stood down by `_names_live_source`, and that is not optional: this is
+    # the SECOND door into the call digest, and the reported failure walks
+    # through it. "summarize the slack channel syncs from this week" names an
+    # explicit window, so gating only the digest above would have handed the
+    # very same question to `call_digest.answer` one branch later — the fix
+    # would have looked right in the diff and changed nothing in production.
+    if not pinned_skill and not _names_live_source():
         try:
             window = call_index.windowed_call_question(enterprise_id, routing_text)
         except Exception:  # noqa: BLE001 — routing must never break the answer

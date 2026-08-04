@@ -1922,12 +1922,28 @@ export const connectorsApi = {
    * connection config as sync_channel_ids / sync_channel_names). An empty
    * list clears the selection — the sync reverts to every channel the bot
    * is a member of. `joined` echoes the public channels the bot could
-   * self-join right away. */
+   * self-join right away.
+   *
+   * Unticking is the reverse of ticking, so the response also reports the
+   * teardown: `left` are the channels the bot walked out of, `leave_failed`
+   * the ones Slack refused (today that is every one of them until the app
+   * gains the `channels:manage` scope — the bot only holds `channels:join`),
+   * `delivery_skipped` the ones deliberately kept because somebody delivers
+   * briefs there, and `purged` how much synced content was removed. All four
+   * are advisory: the selection itself always saves. */
   setSlackSyncChannels: (channels: { id: string; name?: string }[]) =>
     api.post<{
       ok: true
       config: ConnectionSummary["config"]
       joined: string[]
+      left: string[]
+      leave_failed: string[]
+      delivery_skipped: string[]
+      purged: {
+        datasets: string[]
+        sections_removed: number
+        reseeded: string[]
+      }
     }>(`/v1/connectors/slack/sync-channels`, { channels }),
 
   // ---- Sprinklr ------------------------------------------------------------

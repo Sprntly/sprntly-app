@@ -252,6 +252,178 @@ def test_call_digest_still_wins_over_a_named_source(monkeypatch):
     assert out["_skill_source"] == "call-digest"
 
 
+# ── naming a live source beats the TOPICAL interceptors ──────────────────────
+#
+# Reported 2026-08-03: a user with Slack connected asked chat for the latest
+# from Slack and got an answer built from Fireflies call transcripts. Three
+# separate interceptors above the connector lookup claimed the phrasings —
+# call-digest, VoC and the call-index listing — and none of them said which
+# source it had actually read. Naming a source is the most explicit routing
+# signal a person can give, and it used to lose to a keyword match.
+#
+# The gate is narrow on purpose: the named source must be one we can OPEN (an
+# adapter, and a live connection), and it must not be a call source. Those two
+# narrowings are pinned below too, because without them this fix trades three
+# wrong answers for a different set of wrong answers.
+
+HIJACKED = [
+    # was: call-digest (_DIGEST_VERB "summari[sz]e" + _CALL_NOUN "syncs")
+    "summarize the slack channel syncs from this week",
+    # was: VoC (_VOC_CUSTOMER_FEEDBACK_RULE, "latest … customer feedback")
+    "what's the latest customer feedback in slack",
+    # was: call-index listing (_LISTING_RULE, "what … conversations")
+    "what are the latest customer conversations in slack",
+]
+
+
+def _slack_connected(monkeypatch, providers=("slack",)):
+    """Make the connector registry report `providers` as connected, without a DB."""
+    from app.connector_lookup import registry
+
+    monkeypatch.setattr(registry, "connected_providers", lambda eid: list(providers))
+    return registry
+
+
+def _trap_call_paths(monkeypatch):
+    """Fail loudly if any call path answers — that IS the bug."""
+    import app.call_digest as cd
+    import app.call_index as ci
+
+    def _boom(name):
+        def _f(*a, **k):
+            raise AssertionError(f"{name} claimed a question that named Slack")
+        return _f
+
+    monkeypatch.setattr(cd, "answer", _boom("call_digest.answer"))
+    monkeypatch.setattr(ci, "answer_listing", _boom("call_index.answer_listing"))
+
+
+def test_naming_a_connected_source_beats_the_topical_interceptors(monkeypatch):
+    registry = _slack_connected(monkeypatch)
+    _no_llm(monkeypatch)
+    _trap_call_paths(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(registry, "answer_for_hints",
+                        lambda **k: seen.update(k) or {"answer": "slack",
+                                                       "_skill_source": "connector-lookup"})
+    for question in HIJACKED:
+        seen.clear()
+        out = qa.answer(enterprise_id="ent", question=question, dataset="acme")
+        assert out["_skill_source"] == "connector-lookup", question
+        assert seen["hints"] == {"slack"}, question
+
+
+def test_an_unconnected_named_source_leaves_routing_exactly_as_it_was(monkeypatch):
+    """The capability half of the gate. If Slack isn't connected, the lookup
+    would only be able to say so — worse than the digest's answer — so the
+    interceptor keeps the turn and nothing changes for that company."""
+    import app.call_digest as cd
+
+    _slack_connected(monkeypatch, providers=("fireflies",))
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    monkeypatch.setattr(cd, "answer",
+                        lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    out = qa.answer(enterprise_id="ent",
+                    question="summarize the slack channel syncs from this week",
+                    dataset="acme")
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_naming_a_CALL_source_does_not_displace_the_call_paths(monkeypatch):
+    """Fireflies and Gong ARE the call corpus, so naming one is not a request to
+    look somewhere else — it names the source the digest already reads."""
+    import app.call_digest as cd
+
+    _slack_connected(monkeypatch, providers=("fireflies",))
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    monkeypatch.setattr(cd, "answer",
+                        lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    out = qa.answer(enterprise_id="ent",
+                    question="summarize the customer calls from last week in fireflies",
+                    dataset="acme")
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_the_artifact_veto_still_stands_the_lookup_down(monkeypatch):
+    """80b0b4d8's narrowing is upstream of this gate and must survive it: a tool
+    named as a possessed artifact is a product question, not a read request — so
+    it neither reaches the lookup nor suppresses anything."""
+    from app.connector_lookup import registry
+
+    _slack_connected(monkeypatch)
+    monkeypatch.setattr(registry, "answer_for_hints",
+                        lambda **k: {"answer": "lookup", "_skill_source": "connector-lookup"})
+    for question in [
+        "latest on the slack integration",
+        "should we prioritise the stripe integration or the notion one?",
+        "how does our roadmap compare to slack?",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
+def test_a_pin_or_a_slash_never_triggers_the_suppression(monkeypatch):
+    """The gate sits behind the same pinned/slash guard the lookup itself uses.
+    That pairing is the point: a message the lookup will NOT claim must not have
+    the interceptors knocked out from under it, or the turn falls through a hole
+    neither path catches."""
+    import app.call_digest as cd
+
+    _seed_custom_skill(monkeypatch)
+    _slack_connected(monkeypatch)
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    monkeypatch.setattr(cd, "answer",
+                        lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
+
+    # Pinned: every interceptor is skipped wholesale, exactly as before.
+    out = qa.answer(enterprise_id="ent",
+                    question="summarize the slack channel syncs from this week",
+                    dataset="acme", pinned_skill=CUSTOM_SKILL)
+    assert out.get("_skill") == CUSTOM_SKILL
+
+    # Slash: the lookup declines a slash command, so the gate declines too and
+    # the digest keeps the turn it has always had here.
+    out = qa.answer(
+        enterprise_id="ent",
+        question=f"/{CUSTOM_SKILL} summarize the slack channel syncs from this week",
+        dataset="acme",
+    )
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_the_call_digest_now_needs_a_call_source_like_its_neighbours(monkeypatch):
+    """The digest was the only interceptor on the ladder claiming its turn
+    unconditionally. With no corpus it answered from nothing; now it declines
+    and the question falls through to routing that can serve it."""
+    import app.call_digest as cd
+
+    _slack_connected(monkeypatch, providers=())
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: False)
+    monkeypatch.setattr(cd, "answer", lambda **k: (_ for _ in ()).throw(
+        AssertionError("digest ran with no call source")))
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
+    out = qa.answer(enterprise_id="ent",
+                    question="summarize the customer calls from last week",
+                    dataset="acme")
+    assert out.get("_skill_source") != "call-digest"
+
+
+def test_an_unreadable_capability_check_keeps_the_digest(monkeypatch):
+    """A routing check that cannot complete must not read as "no capability" —
+    a transient DB failure would otherwise silently re-route every digest."""
+    import app.call_digest as cd
+
+    _slack_connected(monkeypatch, providers=())
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: (_ for _ in ()).throw(
+        RuntimeError("supabase down")))
+    monkeypatch.setattr(cd, "answer",
+                        lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    out = qa.answer(enterprise_id="ent",
+                    question="summarize the customer calls from last week",
+                    dataset="acme")
+    assert out["_skill_source"] == "call-digest"
+
+
 def test_data_analysis_still_wins_over_a_named_source(monkeypatch, tmp_path):
     """Tabular data must actually exist for the DS interceptor to claim the
     turn at all (Part 3 capability gate, AC10) — a real raw/ dir with a file
