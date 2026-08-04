@@ -983,17 +983,29 @@ function ChatArtifactActions({
       <GeneratePrototypeCTA
         prdId={prototypePrdId}
         skipExistenceCheck
+        // Safe: this row shows ONE prototype trigger for the insight's current
+        // PRD at a time (mirrors ContentPanel's TicketsBottomBar), so the
+        // unscoped da:generating signal can't mislabel a different PRD's run.
+        listenForCrossSurfaceGenerating
         onGenerationSettled={onPrototypeSettled}
-        render={({ onClick }) => (
+        render={({ onClick, cta, label }) => (
           <button
             type="button"
             className="bc-action-btn"
             data-testid="chat-prototype-cta"
             disabled={!canPrototype}
             title={canPrototype ? undefined : "Generate a PRD first"}
-            onClick={canPrototype && prototypeReady ? onViewPrototype : onClick}
+            onClick={
+              cta !== "generating" && canPrototype && prototypeReady
+                ? onViewPrototype
+                : onClick
+            }
           >
-            {canPrototype && prototypeReady ? "View Prototype" : "Generate Prototype"}
+            {cta === "generating"
+              ? label
+              : canPrototype && prototypeReady
+                ? "View Prototype"
+                : "Generate Prototype"}
           </button>
         )}
       />
