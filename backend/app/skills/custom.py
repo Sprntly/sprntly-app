@@ -163,13 +163,13 @@ def parse_multi_upload(filename: str, data: bytes) -> MultiSkillArchive | None:
     one-skill contract (the form's name/description, one row, one 201 body)
     byte-identical: nothing below runs for an archive that has always worked.
 
-    A skill is a directory whose immediate contents include a SKILL.md, plus
-    the archive root itself when a root SKILL.md is present. A SKILL.md nested
-    inside another skill's folder is its OWN skill and its files are excluded
-    from the ancestor's — deepest root wins, so `sales/SKILL.md` never swallows
-    `sales/discovery/SKILL.md`. Loose .md files under no skill folder are
-    ignored here (with no SKILL.md anywhere, discovery finds nothing and the
-    single-skill parser's shallowest-.md promotion still applies).
+    A skill is any anchor `skill_anchors_for` finds: a directory whose
+    immediate contents include a SKILL.md (bundling its modules/ and
+    references/), or any other .md file standing on its own. A SKILL.md
+    nested inside another skill's folder is its OWN skill and its files are
+    excluded from the ancestor's — deepest anchor wins, so `sales/SKILL.md`
+    never swallows `sales/discovery/SKILL.md`, and a loose GOVERNACE-SKILL.md
+    beside a root SKILL.md is a second skill, not a module of the first.
 
     Raises SkillParseError only for archive-level problems (bad zip, over the
     member/size caps, non-UTF-8 text) — a single unusable skill folder comes
@@ -182,9 +182,10 @@ def parse_multi_upload(filename: str, data: bytes) -> MultiSkillArchive | None:
     members, wrapper = _zip_members(zf)
     md_members = [(p, info) for p, info in members if p.suffix.lower() == ".md"]
 
-    roots = _skill_roots(md_members)
-    if len(roots) < 2:
+    anchors = skill_anchors_for(str(p) for p, _ in md_members)
+    if len(anchors) < 2:
         return None
+    member_by_parts = {p.parts: info for p, info in md_members}
 
     # The name a root-level skill inherits when its SKILL.md carries no
     # frontmatter: the wrapper folder it was zipped inside, else the zip's own
@@ -193,25 +194,32 @@ def parse_multi_upload(filename: str, data: bytes) -> MultiSkillArchive | None:
 
     skills: list[DiscoveredSkill] = []
     skipped: list[SkippedSkill] = []
-    for root in roots:
-        parsed, method_text = _parsed_for_root(zf, md_members, root, roots)
+    for root in anchors:
+        if is_file_anchor(root):
+            info = member_by_parts[root]
+            method_text = _read_member(zf, info, PurePosixPath(*root))
+            parsed = ParsedSkill(method=method_text)
+            skill_file = root[-1]
+        else:
+            parsed, method_text = _parsed_for_root(zf, md_members, root, anchors)
+            skill_file = "SKILL.md"
         path = "/".join(root)
-        label = root[-1] if root else root_label
+        label = anchor_label(root, root_label)
         name, description = derive_identity(method_text, label)
         if not method_text.strip():
-            skipped.append(SkippedSkill(path, name, "its SKILL.md is empty"))
+            skipped.append(SkippedSkill(path, name, f"its {skill_file} is empty"))
             continue
         if not name or not slugify(name):
             skipped.append(SkippedSkill(
                 path, name,
-                "we couldn't work out a name for it — add `name:` to its SKILL.md",
+                f"we couldn't work out a name for it — add `name:` to its {skill_file}",
             ))
             continue
         if not description:
             skipped.append(SkippedSkill(
                 path, name,
                 "we couldn't work out a description for it — add `description:` "
-                "to its SKILL.md",
+                f"to its {skill_file}",
             ))
             continue
         skills.append(DiscoveredSkill(
@@ -475,14 +483,65 @@ def skill_file_role(path: str, root: SkillRoot) -> str:
     return "modules"
 
 
+def skill_anchors_for(paths: Iterable[str]) -> list[SkillRoot]:
+    """Every skill in a tree, as an anchor: a directory that directly contains
+    a SKILL.md, PLUS every other .md file as its own standalone skill.
+
+    The second half is the rule real repos need. A company's skill repo is
+    very often just a folder of .md files — one skill per file, named however
+    the author liked — with no per-skill folders at all. Under a
+    folders-only rule, one such repo showed exactly one skill: the root
+    SKILL.md claimed the whole tree and its sibling GOVERNACE-SKILL.md was
+    silently demoted to a "module" of it. Every .md the user can see in the
+    repo should be a row they can tick.
+
+    The only .md files that are NOT anchors of their own are the packaged
+    skill's support files: a SKILL.md itself (its directory is the anchor)
+    and anything under a skill directory's modules/ or references/ — those
+    stay bundled with the skill that ships them.
+
+    A file anchor is a parts tuple whose last element ends in ".md";
+    `is_file_anchor` tells the halves apart. `owning_skill_root` works
+    unchanged over the combined list: a file anchor is always the deepest
+    match for its own path, which is exactly what lifts it out of an
+    enclosing skill's bundle."""
+    listed = list(paths)
+    dir_roots = skill_roots_for(listed)
+    anchors: set[SkillRoot] = set(dir_roots)
+    for raw in listed:
+        parts = tuple(p for p in raw.split("/") if p)
+        if not parts or not parts[-1].lower().endswith(".md"):
+            continue
+        if parts[-1].lower() == "skill.md":
+            continue
+        owner = owning_skill_root(raw, dir_roots)
+        if owner is not None:
+            rel = parts[len(owner):]
+            if len(rel) > 1 and rel[0].lower() in ("modules", "references"):
+                continue
+        anchors.add(parts)
+    return sorted(anchors)
+
+
+def is_file_anchor(root: SkillRoot) -> bool:
+    """True when this anchor is a standalone .md file rather than a skill
+    directory — its whole content is the method, and its filename is the
+    naming fallback."""
+    return bool(root) and root[-1].lower().endswith(".md")
+
+
+def anchor_label(root: SkillRoot, root_label: str) -> str:
+    """The naming fallback for one anchor when its frontmatter names nothing:
+    a directory skill is called after its folder, a standalone file after its
+    filename stem, and the tree-root skill after whatever the caller knows
+    the tree itself is called (wrapper folder, zip name, repo, subfolder)."""
+    if is_file_anchor(root):
+        return re.sub(r"\.md$", "", root[-1], flags=re.IGNORECASE)
+    return root[-1] if root else root_label
+
+
 def _owning_root(path: PurePosixPath, roots: list[_Root]) -> _Root | None:
     return owning_skill_root(str(path), roots)
-
-
-def _skill_roots(
-    md_members: list[tuple[PurePosixPath, zipfile.ZipInfo]],
-) -> list[_Root]:
-    return skill_roots_for(str(p) for p, _ in md_members)
 
 
 def _parsed_for_root(

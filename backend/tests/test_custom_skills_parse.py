@@ -360,19 +360,51 @@ def test_single_skill_zips_are_not_multi():
         "SKILL.md": b"# Method",
         "modules/extra.md": b"module text",
         "references/guide.md": b"reference text",
-        "loose.md": b"loose text",
     })) is None
     # The claude.ai single-folder convention.
     assert parse_multi_upload("my-skill.zip", _zip_bytes({
         "my-skill/SKILL.md": b"# Wrapped",
         "my-skill/modules/m.md": b"mod",
     })) is None
-    # No SKILL.md at all: nothing to discover, so the shallowest-.md promotion
-    # in parse_upload still decides.
-    assert parse_multi_upload("s.zip", _zip_bytes({
-        "notes.md": b"the method",
-        "deep/more.md": b"more",
-    })) is None
+    # One loose .md is the bare single-skill upload it always was.
+    assert parse_multi_upload("s.zip", _zip_bytes({"notes.md": b"the method"})) is None
+
+
+def test_multi_zip_every_loose_md_is_its_own_skill():
+    # The repo-of-files layout: skills as sibling .md files, no packaging.
+    # The SKILL.md keeps only its modules/ and references/ bundled — a loose
+    # sibling is a second skill the picker must list, never a hidden "module".
+    data = _zip_bytes({
+        "SKILL.md": _fm("ticket-breakdown", "Breaks work into tickets."),
+        "GOVERNACE-SKILL.md": _fm("governance", "Keeps decisions honest."),
+        "modules/extra.md": b"module text",
+    })
+    archive = parse_multi_upload("s.zip", data)
+    assert archive is not None
+    by_path = {s.path: s for s in archive.skills}
+    assert sorted(by_path) == ["", "GOVERNACE-SKILL.md"]
+    root = by_path[""]
+    assert root.name == "Ticket Breakdown"
+    assert root.parsed.modules == {"extra.md": "module text"}
+    gov = by_path["GOVERNACE-SKILL.md"]
+    assert gov.name == "Governance"
+    assert gov.parsed.method.startswith("---\nname: governance")
+    assert gov.parsed.modules == {} and gov.parsed.references == {}
+
+
+def test_multi_zip_loose_files_without_frontmatter_named_after_their_filenames():
+    data = _zip_bytes({
+        "planning.md": b"Plans the quarter.\n",
+        "review.md": b"Reviews the quarter.\n",
+    })
+    archive = parse_multi_upload("s.zip", data)
+    assert archive is not None
+    assert {s.path: s.name for s in archive.skills} == {
+        "planning.md": "Planning", "review.md": "Review",
+    }
+    assert {s.path: s.description for s in archive.skills} == {
+        "planning.md": "Plans the quarter.", "review.md": "Reviews the quarter.",
+    }
 
 
 def test_multi_zip_hostile_and_junk_members_never_become_skills():

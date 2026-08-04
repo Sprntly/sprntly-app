@@ -73,13 +73,17 @@ def test_ordinary_repo_paths_are_accepted():
 # ─── skill detection ─────────────────────────────────────────────────────────
 
 
-def test_one_skill_per_directory_holding_a_skill_md():
+def test_every_md_is_a_skill_and_folders_bundle_their_support_files():
+    # The listing rule the picker sells: every .md the user can see in the
+    # repo is a row they can tick. A SKILL.md folder keeps ONLY its
+    # references/ and modules/ bundled; every other .md — a loose sibling, a
+    # README — stands on its own and the user simply leaves it unticked.
     entries = [
         _blob("skills/sprint-planner/SKILL.md"),
         _blob("skills/sprint-planner/references/source.md"),
         _blob("skills/sprint-planner/deep-dive.md"),
         _blob("skills/pricing-review/SKILL.md"),
-        _blob("README.md"),  # loose, under no skill → not a skill
+        _blob("README.md"),
     ]
     bodies = {
         "skills/sprint-planner/SKILL.md": _skill_md("sprint-planner", "Plans a sprint."),
@@ -90,7 +94,12 @@ def test_one_skill_per_directory_holding_a_skill_md():
     }
     result = _discover(entries, bodies)
     by_path = {s.path: s for s in result.skills}
-    assert sorted(by_path) == ["skills/pricing-review", "skills/sprint-planner"]
+    assert sorted(by_path) == [
+        "README.md",
+        "skills/pricing-review",
+        "skills/sprint-planner",
+        "skills/sprint-planner/deep-dive.md",
+    ]
 
     planner = by_path["skills/sprint-planner"]
     assert planner.name == "Sprint Planner"
@@ -98,8 +107,21 @@ def test_one_skill_per_directory_holding_a_skill_md():
     # references/ is resolved RELATIVE to the skill, which is the bug the zip
     # parser had when it only looked at the archive root.
     assert planner.parsed.references == {"source.md": "cited"}
-    assert planner.parsed.modules == {"deep-dive.md": "module text"}
-    assert planner.importable and planner.file_count == 3
+    assert planner.parsed.modules == {}
+    assert planner.importable and planner.file_count == 2
+
+    # The loose sibling is a whole skill of its own, named from its filename
+    # when it carries no frontmatter.
+    dive = by_path["skills/sprint-planner/deep-dive.md"]
+    assert dive.name == "Deep Dive"
+    assert dive.parsed.method == "module text"
+    assert dive.parsed.modules == {} and dive.parsed.references == {}
+
+    # A README with no prose body can't derive a description — it is listed
+    # (nothing is hidden) but marked unimportable with the reason.
+    readme = by_path["README.md"]
+    assert readme.name == "README"
+    assert not readme.importable and "description" in readme.reason
 
 
 def test_a_nested_skill_is_its_own_and_leaves_its_ancestor():
@@ -116,9 +138,13 @@ def test_a_nested_skill_is_its_own_and_leaves_its_ancestor():
         "sales/discovery/questions.md": "questions",
     }
     by_path = {s.path: s for s in _discover(entries, bodies).skills}
-    assert sorted(by_path) == ["sales", "sales/discovery"]
-    assert by_path["sales"].parsed.modules == {"pitch.md": "pitch"}
-    assert by_path["sales/discovery"].parsed.modules == {"questions.md": "questions"}
+    assert sorted(by_path) == [
+        "sales", "sales/discovery", "sales/discovery/questions.md", "sales/pitch.md",
+    ]
+    assert by_path["sales"].parsed.modules == {}
+    assert by_path["sales/discovery"].parsed.modules == {}
+    assert by_path["sales/pitch.md"].parsed.method == "pitch"
+    assert by_path["sales/discovery/questions.md"].parsed.method == "questions"
 
 
 def test_subpath_scopes_the_walk_and_the_naming():
@@ -133,10 +159,13 @@ def test_subpath_scopes_the_walk_and_the_naming():
         "skills/raci/extra.md": "extra",
     }
     result = _discover(entries, bodies, subpath="skills")
-    assert [s.path for s in result.skills] == ["raci"]
+    by_path = {s.path: s for s in result.skills}
+    # docs/notes.md is outside the walked folder — never listed. extra.md is
+    # inside it, so it stands as its own skill like any other .md.
+    assert sorted(by_path) == ["raci", "raci/extra.md"]
     # Named for its own folder, not for the folder the import was pointed at.
-    assert result.skills[0].name == "Raci"
-    assert result.skills[0].description == "Builds a RACI grid."
+    assert by_path["raci"].name == "Raci"
+    assert by_path["raci"].description == "Builds a RACI grid."
 
 
 def test_a_root_skill_is_named_from_the_repo_or_the_folder():

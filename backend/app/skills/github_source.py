@@ -7,7 +7,7 @@ re-upload it is a chore that goes stale the moment someone edits a method, so
 this module walks the repo directly and hands the same ParsedSkill shape the
 upload path produces.
 
-Detection is NOT reimplemented here. `skills.custom.skill_roots_for` /
+Detection is NOT reimplemented here. `skills.custom.skill_anchors_for` /
 `owning_skill_root` / `skill_file_role` / `derive_identity` are the same rules
 the zip parser runs, so importing a repo and uploading a zip OF that repo
 produce identical skills — a second implementation would drift the day one of
@@ -52,11 +52,13 @@ from app.skills.custom import (
     MAX_SKILL_CONTENT_CHARS,
     ParsedSkill,
     SkillRoot,
+    anchor_label,
     content_chars,
     derive_identity,
+    is_file_anchor,
     owning_skill_root,
+    skill_anchors_for,
     skill_file_role,
-    skill_roots_for,
     slugify,
 )
 
@@ -339,7 +341,7 @@ def discover_skills(
         p: p[len(prefix) + 1:] if prefix else p
         for p in [*usable, *sorted(oversize)]
     }
-    roots = skill_roots_for(rel.values())
+    roots = skill_anchors_for(rel.values())
     if len(roots) > MAX_SKILLS:
         truncated = True
         notes.append(
@@ -396,9 +398,15 @@ def _skill_for_root(
     method = ""
     modules: dict[str, str] = {}
     references: dict[str, str] = {}
+    skill_file = root[-1] if is_file_anchor(root) else "SKILL.md"
     for path in sorted(paths, key=str.lower):
         text = bodies.get(path)
         if text is None:
+            continue
+        if is_file_anchor(root):
+            # A standalone .md IS the skill: one file, all of it method.
+            if not method:
+                method = text
             continue
         base = path.rsplit("/", 1)[-1]
         role = skill_file_role(rel[path], root)
@@ -410,9 +418,8 @@ def _skill_for_root(
     display_path = "/".join(root)
     # A skill at the walked root has no folder of its own, so it borrows the
     # folder the import was pointed at, else the repo's own name.
-    label = root[-1] if root else (
-        prefix.rsplit("/", 1)[-1] if prefix else repo.rsplit("/", 1)[-1]
-    )
+    tree_label = prefix.rsplit("/", 1)[-1] if prefix else repo.rsplit("/", 1)[-1]
+    label = anchor_label(root, tree_label)
     name, description = derive_identity(method, label)
     parsed = ParsedSkill(method=method, modules=modules, references=references)
     chars = content_chars(parsed)
@@ -430,13 +437,13 @@ def _skill_for_root(
             "GitHub won't serve as text."
         )
     elif not method.strip():
-        reason = "its SKILL.md is empty"
+        reason = f"its {skill_file} is empty"
     elif not name or not slugify(name):
-        reason = "we couldn't work out a name for it — add `name:` to its SKILL.md"
+        reason = f"we couldn't work out a name for it — add `name:` to its {skill_file}"
     elif not description:
         reason = (
             "we couldn't work out a description for it — add `description:` to "
-            "its SKILL.md"
+            f"its {skill_file}"
         )
     elif chars > MAX_SKILL_CONTENT_CHARS:
         reason = (
