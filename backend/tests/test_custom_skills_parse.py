@@ -298,6 +298,27 @@ def test_multi_zip_frontmatter_block_scalar_description_survives():
     assert folded_skill.name == "Folded Skill"
 
 
+def test_multi_zip_frontmatter_survives_bom_crlf_and_a_leading_blank_line():
+    # Frontmatter detection demands `---` at character zero — GitHub's renderer
+    # applies the same rule — but real files open with a Notepad BOM, CRLF
+    # endings, or a stray blank line above the block. One such file cost a
+    # repo's ticket-breakdown skill its own name: the parser saw no
+    # frontmatter and labelled it after the repo instead. Identity derivation
+    # tolerates all three; the stored method still keeps the author's bytes.
+    messy = (
+        "\ufeff\r\n---\r\nname: ticket-breakdown\r\n"
+        "description: Breaks work into tickets.\r\n---\r\n\r\nBody.\r\n"
+    ).encode("utf-8")
+    archive = parse_multi_upload("s.zip", _zip_bytes({
+        "messy/SKILL.md": messy,
+        "plain/SKILL.md": _fm("plain", "Plain."),
+    }))
+    assert archive is not None
+    skill = next(s for s in archive.skills if s.path == "messy")
+    assert skill.name == "Ticket Breakdown"
+    assert skill.description == "Breaks work into tickets."
+
+
 def test_multi_zip_skips_the_unusable_folder_and_keeps_the_rest():
     data = _zip_bytes({
         "good/SKILL.md": _fm("good", "Good one."),

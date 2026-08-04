@@ -559,6 +559,23 @@ def _first_paragraph(body: str) -> str:
     return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 
+def _normalized_for_identity(text: str) -> str:
+    """Frontmatter detection demands `---` at character zero — the same rule
+    GitHub's renderer applies, and the same rule real files break: a UTF-8 BOM
+    from Notepad, CRLF line endings, or a stray blank line above the block. A
+    file like that silently loses its author's `name:` and gets labelled after
+    its folder instead, which is how a repo's ticket-breakdown skill came to be
+    imported as "Custom-Skills". Tolerance lives here, in identity derivation
+    only: the stored method keeps the author's exact bytes, so `content_hash`
+    still pins the file as uploaded."""
+    text = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    return "\n".join(lines[start:])
+
+
 def derive_identity(method_text: str, label: str) -> tuple[str, str]:
     """(name, description) for one skill in a multi-skill archive.
 
@@ -569,6 +586,7 @@ def derive_identity(method_text: str, label: str) -> tuple[str, str]:
     lives in for the name (that IS its id in a skills/ directory), and the
     first paragraph of its body for the description. Both are truncated to the
     same caps the upload form enforces."""
+    method_text = _normalized_for_identity(method_text)
     front = _parse_frontmatter(method_text)
     name = _display_name(front.get("name", "").strip() or label)
     description = re.sub(r"\s+", " ", front.get("description", "").strip())
