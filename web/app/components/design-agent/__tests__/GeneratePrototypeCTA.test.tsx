@@ -162,6 +162,24 @@ describe("GeneratePrototypeCTA — generating state is observable at kickoff", (
     )
     expect(capturedDisabled).toBe(false)
   })
+
+  it("test_ticket_panel_generating_contract_unregressed — AC3: the render-prop contract the ticket panel (ContentPanel's TicketsBottomBar) already relies on — rendering `label` verbatim under listenForCrossSurfaceGenerating — is untouched by the chat-screen fix", () => {
+    mockResult = makeResult({ cta: "generating", ctaLabel: "Generating Prototype" })
+    render(
+      <GeneratePrototypeCTA
+        prdId={1}
+        listenForCrossSurfaceGenerating
+        // Mirrors ContentPanel.tsx's TicketsBottomBar render prop exactly:
+        // the button's ENTIRE text is `label`, nothing else.
+        render={({ label, onClick, disabled }) => (
+          <button type="button" data-testid="tickets-footer-prototype-cta" disabled={disabled} onClick={onClick}>
+            {label}
+          </button>
+        )}
+      />,
+    )
+    expect(screen.getByTestId("tickets-footer-prototype-cta").textContent).toBe("Generating Prototype")
+  })
 })
 
 describe("GeneratePrototypeCTA — platform hint forwarding", () => {
