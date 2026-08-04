@@ -13,6 +13,7 @@ All outbound HTTP is mocked; nothing here touches heymarvin.com.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -487,3 +488,31 @@ def test_fetch_server_identity_returns_server_info_with_tool_count(marvin_env):
 
 def test_account_label_falls_back_when_the_server_names_itself_nothing(marvin_env):
     assert marvin_env.account_label({}, "us") == "Marvin · US / Global"
+
+
+# ───────────────────── oauth_dynamic_clients schema ─────────────────────
+
+
+_MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
+
+
+def test_oauth_dynamic_clients_has_row_level_security_enabled():
+    """The table holds `client_secret_encrypted` — the credential that mints
+    Marvin access tokens — so it must be unreachable with an anon/authenticated
+    key, exactly like `connections` (20260525120500) and `call_index`
+    (20260802160000).
+
+    Asserted across the WHOLE migration set rather than one file, because RLS
+    was added forward-only in a later migration: the original create-table is
+    already applied to the shared database and is deliberately left untouched.
+    """
+    sql = "\n".join(
+        path.read_text(encoding="utf-8").lower()
+        for path in sorted(_MIGRATIONS.glob("*oauth_dynamic_clients*.sql"))
+    )
+    assert sql, "no oauth_dynamic_clients migration found"
+    assert "create table if not exists oauth_dynamic_clients" in sql
+    assert "alter table oauth_dynamic_clients enable row level security" in sql
+    # Forward-only: nothing in this table's history may drop or truncate it.
+    for destructive in ("drop table", "drop column", "delete from"):
+        assert destructive not in sql, destructive

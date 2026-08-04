@@ -1,0 +1,29 @@
+-- Close the RLS gap on oauth_dynamic_clients.
+--
+-- 20260731120002_oauth_dynamic_clients.sql created the table that holds
+-- `client_secret_encrypted` — the OAuth client credential Sprntly self-registers
+-- with Marvin's authorization server (RFC 7591) — but never enabled row level
+-- security on it. Every comparable table does: `connections`, which holds the
+-- Fernet-encrypted connector tokens, enables it
+-- (20260525120500_connections.sql), and so does `call_index`
+-- (20260802160000_call_index.sql). This one was the exception, and it is the
+-- one holding a credential that can mint tokens.
+--
+-- With RLS off, ANY key that can reach the table can read it — including the
+-- anon/authenticated keys the browser holds. The backend is unaffected either
+-- way: it connects with the service-role key, which bypasses RLS entirely, so
+-- app/db/oauth_clients.py keeps working unchanged.
+--
+-- Enabled with NO policies, deliberately, and that is the same shape
+-- `call_index` and `call_index_sync` use: no policy means no anon/authenticated
+-- role can select, insert, update or delete a row, while the service role still
+-- reads and writes freely. A permissive `srv_*` policy would be redundant here
+-- — the service role never consults policies — and would only widen what a
+-- future non-service key could reach.
+--
+-- Forward-only and idempotent: `enable row level security` on a table that
+-- already has it is a no-op, so this is safe to re-apply. Nothing is dropped
+-- and no data is touched; the original migration is left alone because it may
+-- already be applied to the shared database.
+
+alter table oauth_dynamic_clients enable row level security;
