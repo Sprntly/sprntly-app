@@ -23,6 +23,10 @@ const customUploadMock = vi.fn()
 const customRemoveMock = vi.fn()
 const customGetMock = vi.fn()
 const customUpdateMock = vi.fn()
+const githubDiscoverMock = vi.fn()
+const githubImportMock = vi.fn()
+const connectorsListMock = vi.fn()
+const githubReposMock = vi.fn()
 const goToMock = vi.fn()
 const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
@@ -34,6 +38,14 @@ vi.mock("../../../../lib/api", () => ({
     remove: (...a: unknown[]) => customRemoveMock(...a),
     get: (...a: unknown[]) => customGetMock(...a),
     update: (...a: unknown[]) => customUpdateMock(...a),
+    discoverGithub: (...a: unknown[]) => githubDiscoverMock(...a),
+    importGithub: (...a: unknown[]) => githubImportMock(...a),
+  },
+  // The upload modal's GitHub source checks the connector itself (same
+  // pattern DesignSourceSettings uses for its repo picker).
+  connectorsApi: {
+    list: (...a: unknown[]) => connectorsListMock(...a),
+    listAccessibleGithubRepos: (...a: unknown[]) => githubReposMock(...a),
   },
   // The upload body's discriminator: a multi-skill archive answers with a
   // `skills` list instead of the single object. Mirrors the real guard, which
@@ -54,6 +66,16 @@ vi.mock("../../../../context/NavigationContext", () => ({
 let searchParamsMock = new URLSearchParams()
 vi.mock("next/navigation", () => ({
   useSearchParams: () => searchParamsMock,
+}))
+
+vi.mock("../../../../lib/generateConnectorRowState", () => ({
+  getGenerateConnectorRowState: (c: { status?: string } | undefined) => ({
+    connected: c?.status === "connected",
+  }),
+}))
+vi.mock("../../../design-agent/SourceConnectHint", () => ({
+  SourceConnectHint: () =>
+    React.createElement("button", { type: "button" }, "Connect a repo →"),
 }))
 
 // AppLayout drags in app contexts; the screen logic under test doesn't need it.
@@ -101,6 +123,12 @@ const CUSTOM_SKILL_DETAIL = {
 beforeEach(() => {
   customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL, OTHER_SKILL] })
   customGetMock.mockResolvedValue(CUSTOM_SKILL_DETAIL)
+  connectorsListMock.mockResolvedValue({
+    connections: [{ provider: "github", status: "connected" }],
+  })
+  githubReposMock.mockResolvedValue({
+    repositories: [{ full_name: "octocat/methods", default_branch: "main" }],
+  })
   searchParamsMock = new URLSearchParams()
 })
 
@@ -630,6 +658,86 @@ describe("SkillsScreen", () => {
     // The modal stays open on its report — it is where the triggers and the
     // skipped reason live.
     expect(screen.getByRole("dialog", { name: /skills imported/i })).toBeTruthy()
+  })
+
+  it("imports skills from a connected repo and folds them into the library", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    githubDiscoverMock.mockResolvedValue({
+      repo: "octocat/methods",
+      ref: "main",
+      commit_sha: "c0ffee",
+      truncated: false,
+      notes: [],
+      skills: [
+        {
+          path: "skills/journey-mapper", name: "Journey mapper",
+          description: "Maps a journey.", slug_preview: "journey-mapper",
+          trigger_preview: "/journey-mapper", file_count: 1, char_count: 100,
+          status: "new", reason: "",
+        },
+        {
+          path: "skills/estimation-helper", name: "Estimation helper",
+          description: "Scores features.", slug_preview: "estimation-helper",
+          trigger_preview: "/estimation-helper", file_count: 1, char_count: 100,
+          status: "replaces", reason: "",
+        },
+      ],
+    })
+    githubImportMock.mockResolvedValue({
+      imported: [
+        { ...OTHER_SKILL, replaced: false },
+        { ...CUSTOM_SKILL, description: "Scores features, from the repo.", replaced: true },
+      ],
+      skipped: [{ path: "skills/bare", name: "Bare", reason: "no description" }],
+      commit_sha: "c0ffee",
+      ref: "main",
+    })
+    render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /from github/i }))
+    })
+    await waitFor(() => expect(githubReposMock).toHaveBeenCalled())
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/repository/i), {
+        target: { value: "octocat/methods" },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /find skills/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: /journey mapper/i }))
+      fireEvent.click(screen.getByRole("checkbox", { name: /estimation helper/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /import 2 skills/i }))
+    })
+
+    await waitFor(() =>
+      expect(githubImportMock).toHaveBeenCalledWith({
+        repo: "octocat/methods",
+        ref: "main",
+        path: "",
+        paths: ["skills/journey-mapper", "skills/estimation-helper"],
+      }),
+    )
+    // One added, one updated — the same merge and the same counting sentence a
+    // multi-skill zip gets, plus what couldn't be imported.
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skills imported",
+        expect.stringContaining("1 skill added, 1 updated."),
+      ),
+    )
+    expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/1 skill couldn’t be imported/)
+    expect(screen.getAllByText("Estimation helper").length).toBe(1)
+    expect(screen.getByText("Scores features, from the repo")).toBeTruthy()
+    expect(screen.getByText("Journey mapper")).toBeTruthy()
   })
 
   it("filters cards by search query, over name / trigger / description", async () => {

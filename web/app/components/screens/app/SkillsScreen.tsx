@@ -23,7 +23,8 @@
 // skill in it is merged under the same replaced-vs-new rule (mergeUploadedSkills).
 // The modal stays open on that result — the per-skill triggers and the folders
 // it couldn't import are more than a toast can carry — and the toast here just
-// counts what happened.
+// counts what happened. Importing from a connected GitHub repo lands in exactly
+// the same place: the same per-skill payloads, the same merge, the same panel.
 //
 // Each card carries a hover-revealed pencil and trash pair. The pencil opens
 // EditSkillModal, which fetches the skill's method text (GET /v1/skills/{id} —
@@ -440,6 +441,32 @@ function SkillsScreenContent() {
     )
   }
 
+  // Import skills straight out of a connected repo. The server re-runs its own
+  // discovery and imports only what it finds there, so `paths` is a filter, not
+  // a fetch list; the answer is the same per-skill payload an upload returns,
+  // which means the same merge and the same counting toast.
+  async function onImportGithub(req: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) {
+    const result = await skillsApi.importGithub(req)
+    setCustomSkills((prev) => mergeUploadedSkills(prev, result.imported))
+    const updated = result.imported.filter((s) => s.replaced === true).length
+    const skipped = result.skipped.length
+    showToast(
+      "Skills imported",
+      countLine(result.imported.length - updated, updated) +
+        (skipped > 0
+          ? ` ${skipped} ${skipped === 1 ? "skill" : "skills"} couldn’t be imported — see the details in the dialog.`
+          : ""),
+    )
+    // Reshaped to the upload result the modal already reports, so one panel
+    // covers both routes into the library.
+    return { skills: result.imported, skipped: result.skipped }
+  }
+
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
   //
@@ -533,6 +560,8 @@ function SkillsScreenContent() {
         // place) is driven by `customSkills` below and is unaffected, and the
         // server's 201 remains authoritative about the trigger assigned.
         customSkills={customSkills}
+        onDiscoverGithub={(repo, opts) => skillsApi.discoverGithub(repo, opts)}
+        onImportGithub={onImportGithub}
       />
     </AppLayout>
   )

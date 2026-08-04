@@ -40,8 +40,11 @@
  */
 "use client"
 
-import { useState } from "react"
-import type { MultiSkillUploadResult } from "../../lib/api"
+import { useEffect, useState } from "react"
+import { connectorsApi } from "../../lib/api"
+import type { GithubSkillDiscovery, MultiSkillUploadResult } from "../../lib/api"
+import { getGenerateConnectorRowState } from "../../lib/generateConnectorRowState"
+import { SourceConnectHint } from "../design-agent/SourceConnectHint"
 
 /** 20 MB — mirrors skills_storage.MAX_SKILL_UPLOAD_BYTES (the PRD cap). */
 export const MAX_SKILL_FILE_BYTES = 20 * 1024 * 1024
@@ -126,11 +129,44 @@ export type UploadSkillModalViewProps = {
    *  skip skills all in the same upload. Null for every single-skill upload,
    *  which closes on success as it always has. */
   result: MultiSkillUploadResult | null
+  /** Which source the user is adding a skill from. The file branch is the
+   *  original modal, unchanged; "github" swaps the body for the repo picker. */
+  source: SkillSource
+  onSourceChange: (next: SkillSource) => void
+  /** Everything the GitHub panel renders from. Grouped rather than flattened
+   *  into a dozen more props, and still plain data — the panel stays pure. */
+  github: GithubPanelProps
   onNameChange: (next: string) => void
   onDescriptionChange: (next: string) => void
   onFileChange: (next: File | null) => void
   onSubmit: () => void
   onClose: () => void
+}
+
+export type SkillSource = "file" | "github"
+
+export type GithubPanelProps = {
+  /** Whether the company has GitHub connected. Null while it is being checked
+   *  — rendering "not connected" before we know would flash a wrong answer. */
+  connected: boolean | null
+  /** The repos the installation can see. Null while loading. */
+  repos: { full_name: string; default_branch: string }[] | null
+  reposError: boolean
+  repo: string
+  branch: string
+  folder: string
+  searching: boolean
+  discovery: GithubSkillDiscovery | null
+  /** Skill paths the user ticked. Nothing is ticked by default — see the
+   *  wrapper for why a bulk import is opt-in. */
+  selected: string[]
+  importing: boolean
+  error: string | null
+  onRepoChange: (next: string) => void
+  onBranchChange: (next: string) => void
+  onFolderChange: (next: string) => void
+  onSearch: () => void
+  onToggle: (path: string) => void
 }
 
 export function UploadSkillModalView({
@@ -143,6 +179,9 @@ export function UploadSkillModalView({
   nameNotice,
   touched,
   result,
+  source,
+  onSourceChange,
+  github,
   onNameChange,
   onDescriptionChange,
   onFileChange,
@@ -180,6 +219,32 @@ export function UploadSkillModalView({
           </button>
         </div>
         <div className="modal-body">
+          {/* Where the skill comes from. Two sources, one modal: the file
+              branch below is untouched, and GitHub swaps the body for a repo
+              picker rather than opening a second dialog to learn. */}
+          <div className="ob-chip-row" role="group" aria-label="Skill source">
+            <button
+              type="button"
+              className={`btn btn-sm${source === "file" ? " btn-primary" : ""}`}
+              aria-pressed={source === "file"}
+              onClick={() => onSourceChange("file")}
+            >
+              Upload a file
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm${source === "github" ? " btn-primary" : ""}`}
+              aria-pressed={source === "github"}
+              onClick={() => onSourceChange("github")}
+            >
+              From GitHub
+            </button>
+          </div>
+
+          {source === "github" ? (
+            <GithubSkillPanel {...github} />
+          ) : (
+          <>
           <p className="modal-sub">
             Encode your own workflow as a Markdown skill file and invoke it from
             chat like any built-in — a .md file, or a .zip with a SKILL.md plus
@@ -265,22 +330,210 @@ export function UploadSkillModalView({
               {error}
             </p>
           ) : null}
+          </>
+          )}
         </div>
         <div className="modal-foot">
           <button type="button" className="btn btn-sm" onClick={onClose}>
             Cancel
           </button>
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            disabled={!canSubmit}
-            onClick={onSubmit}
-          >
-            {submitting ? "Uploading…" : "Upload skill"}
-          </button>
+          {source === "github" ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              // Gated on a selection, never on "we found some": importing is
+              // always an explicit choice of which skills.
+              disabled={github.selected.length === 0 || github.importing}
+              onClick={onSubmit}
+            >
+              {github.importing
+                ? "Importing…"
+                : github.selected.length > 0
+                  ? `Import ${github.selected.length} ${github.selected.length === 1 ? "skill" : "skills"}`
+                  : "Import skills"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={!canSubmit}
+              onClick={onSubmit}
+            >
+              {submitting ? "Uploading…" : "Upload skill"}
+            </button>
+          )}
         </div>
       </div>
     </div>
+  )
+}
+
+/** Import skills straight out of a connected repo.
+ *
+ *  Pure and prop-driven like the form it sits beside — the wrapper owns the
+ *  connector lookups, the discovery call and the import. Three things this
+ *  panel has to say plainly, because each has a consequence the user cannot
+ *  see from a repo name:
+ *
+ *    - NOTHING IS TICKED BY DEFAULT. Every custom skill's description rides
+ *      along in the router's per-company block on every ask, so importing a
+ *      repo's worth of skills nobody asked for is a real cost. Selection is
+ *      always deliberate.
+ *    - A SKILL MAY REPLACE ONE YOU HAVE. The server already computed that
+ *      against your library, so the row says so before you import, not after.
+ *    - SOME SKILLS CAN'T BE IMPORTED. They are listed, disabled, with the
+ *      reason — hiding them would just look like the repo has fewer skills. */
+function GithubSkillPanel({
+  connected,
+  repos,
+  reposError,
+  repo,
+  branch,
+  folder,
+  searching,
+  discovery,
+  selected,
+  importing,
+  error,
+  onRepoChange,
+  onBranchChange,
+  onFolderChange,
+  onSearch,
+  onToggle,
+}: GithubPanelProps) {
+  if (connected === false) {
+    return (
+      <div className="field">
+        <p className="modal-sub">
+          Keep your skills in the repo they belong to — connect GitHub and
+          Sprntly can import every SKILL.md it finds.
+        </p>
+        <SourceConnectHint provider="github" />
+      </div>
+    )
+  }
+  return (
+    <>
+      <p className="modal-sub">
+        Point Sprntly at a repo and it imports every skill folder it finds —
+        one skill per SKILL.md, named from that file.
+      </p>
+
+      <label className="field-label" htmlFor="skill-github-repo">
+        Repository
+      </label>
+      <select
+        id="skill-github-repo"
+        className="input"
+        value={repo}
+        onChange={(e) => onRepoChange(e.target.value)}
+        disabled={connected === null || repos === null || repos.length === 0}
+      >
+        {connected === null || repos === null ? (
+          <option value="">Loading repos…</option>
+        ) : repos.length === 0 ? (
+          <option value="">
+            {reposError ? "Couldn’t load repos" : "No repos — install the Sprntly App"}
+          </option>
+        ) : (
+          <>
+            <option value="">Pick a repo…</option>
+            {[...repos]
+              .sort((a, b) => a.full_name.localeCompare(b.full_name))
+              .map((r) => (
+                <option key={r.full_name} value={r.full_name}>
+                  {r.full_name}
+                </option>
+              ))}
+          </>
+        )}
+      </select>
+
+      <label className="field-label" htmlFor="skill-github-branch">
+        Branch
+      </label>
+      <input
+        id="skill-github-branch"
+        type="text"
+        className="input"
+        value={branch}
+        onChange={(e) => onBranchChange(e.target.value)}
+        placeholder="main"
+        autoComplete="off"
+      />
+
+      <label className="field-label" htmlFor="skill-github-folder">
+        Folder <span className="muted">(optional)</span>
+      </label>
+      <input
+        id="skill-github-folder"
+        type="text"
+        className="input"
+        value={folder}
+        onChange={(e) => onFolderChange(e.target.value)}
+        placeholder="e.g. skills"
+        autoComplete="off"
+      />
+
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={!repo || searching || importing}
+        onClick={onSearch}
+      >
+        {searching ? "Looking…" : "Find skills"}
+      </button>
+
+      {discovery?.notes?.map((note) => (
+        <p className="settings-msg settings-warning" role="status" key={note}>
+          {note}
+        </p>
+      ))}
+
+      {discovery && discovery.skills.length === 0 ? (
+        <p className="modal-sub" role="status">
+          No skills in {discovery.repo} on {discovery.ref}. A skill is a folder
+          with a SKILL.md in it — try pointing at the folder yours live in.
+        </p>
+      ) : null}
+
+      {discovery && discovery.skills.length > 0 ? (
+        <ul className="modal-sub" role="group" aria-label="Skills found">
+          {discovery.skills.map((s) => {
+            const invalid = s.status === "invalid"
+            return (
+              <li key={s.path}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(s.path)}
+                    disabled={invalid || importing}
+                    onChange={() => onToggle(s.path)}
+                  />{" "}
+                  {s.name || s.path}{" "}
+                  {invalid ? null : <code>{s.trigger_preview}</code>}{" "}
+                  {s.status === "replaces" ? (
+                    <span className="tag tag-double">replaces yours</span>
+                  ) : null}
+                </label>
+                {invalid ? (
+                  <span className="settings-msg settings-warning">
+                    {" "}
+                    Can’t import — {s.reason}
+                  </span>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+
+      {error ? (
+        <p className="settings-msg settings-msg-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </>
   )
 }
 
@@ -405,6 +658,26 @@ type Props = {
    * previewed built-in trigger clear of one already handed out.
    */
   customSkills?: { slug: string; name: string }[]
+  /**
+   * Read a connected repo's skills. Absent → the GitHub source is hidden
+   * entirely, so a caller that has no import path renders exactly the modal it
+   * always did.
+   */
+  onDiscoverGithub?: (
+    repo: string,
+    opts: { ref?: string; path?: string },
+  ) => Promise<GithubSkillDiscovery>
+  /**
+   * Import the ticked skills. Like onUpload, it resolves with what happened so
+   * the modal can report it — the library merge and the toast belong to the
+   * caller.
+   */
+  onImportGithub?: (req: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) => Promise<MultiSkillUploadResult | void>
 }
 
 export function UploadSkillModal({
@@ -413,6 +686,8 @@ export function UploadSkillModal({
   onClose,
   builtinSlugs,
   customSkills,
+  onDiscoverGithub,
+  onImportGithub,
 }: Props) {
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
@@ -422,6 +697,56 @@ export function UploadSkillModal({
   const [touched, setTouched] = useState({ name: false, description: false })
   const [result, setResult] = useState<MultiSkillUploadResult | null>(null)
 
+  // ── GitHub source ──────────────────────────────────────────────────────
+  const [source, setSource] = useState<SkillSource>("file")
+  const [connected, setConnected] = useState<boolean | null>(null)
+  const [repos, setRepos] = useState<{ full_name: string; default_branch: string }[] | null>(null)
+  const [reposError, setReposError] = useState(false)
+  const [repo, setRepo] = useState("")
+  const [branch, setBranch] = useState("")
+  const [folder, setFolder] = useState("")
+  const [searching, setSearching] = useState(false)
+  const [discovery, setDiscovery] = useState<GithubSkillDiscovery | null>(null)
+  const [selected, setSelected] = useState<string[]>([])
+
+  // The connector lookups are LAZY — they run the first time the GitHub tab is
+  // opened, so the file flow (which is most uploads) costs no extra requests.
+  useEffect(() => {
+    if (source !== "github" || connected !== null) return
+    let cancelled = false
+    void connectorsApi
+      .list()
+      .then((r) => {
+        if (cancelled) return
+        const github = r.connections?.find((c) => c.provider === "github")
+        setConnected(getGenerateConnectorRowState(github).connected)
+      })
+      .catch(() => {
+        if (!cancelled) setConnected(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [source, connected])
+
+  useEffect(() => {
+    if (connected !== true || repos !== null) return
+    let cancelled = false
+    void connectorsApi
+      .listAccessibleGithubRepos()
+      .then((r) => {
+        if (!cancelled) setRepos(r.repositories)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setRepos([])
+        setReposError(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connected, repos])
+
   function reset() {
     setName("")
     setDescription("")
@@ -429,6 +754,60 @@ export function UploadSkillModal({
     setError(null)
     setTouched({ name: false, description: false })
     setResult(null)
+    setDiscovery(null)
+    setSelected([])
+  }
+
+  function pickRepo(next: string) {
+    setRepo(next)
+    // The branch follows the repo's own default rather than assuming "main" —
+    // plenty of repos still ship master, and a wrong default reads as "we
+    // couldn't find any skills".
+    setBranch(repos?.find((r) => r.full_name === next)?.default_branch ?? "")
+    setDiscovery(null)
+    setSelected([])
+    setError(null)
+  }
+
+  async function handleSearch() {
+    if (!repo || !onDiscoverGithub) return
+    setSearching(true)
+    setError(null)
+    setDiscovery(null)
+    setSelected([])
+    try {
+      setDiscovery(
+        await onDiscoverGithub(repo, { ref: branch.trim(), path: folder.trim() }),
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  async function handleImport() {
+    if (!onImportGithub || selected.length === 0) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const imported = await onImportGithub({
+        repo,
+        ref: branch.trim(),
+        path: folder.trim(),
+        paths: selected,
+      })
+      if (imported && Array.isArray(imported.skills)) {
+        setResult(imported)
+        return
+      }
+      reset()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function handleSubmit() {
@@ -509,6 +888,32 @@ export function UploadSkillModal({
       nameNotice={nameNotice}
       touched={touched}
       result={result}
+      source={source}
+      onSourceChange={(next) => {
+        setSource(next)
+        setError(null)
+      }}
+      github={{
+        connected,
+        repos,
+        reposError,
+        repo,
+        branch,
+        folder,
+        searching,
+        discovery,
+        selected,
+        importing: submitting,
+        error,
+        onRepoChange: pickRepo,
+        onBranchChange: setBranch,
+        onFolderChange: setFolder,
+        onSearch: () => void handleSearch(),
+        onToggle: (path) =>
+          setSelected((prev) =>
+            prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path],
+          ),
+      }}
       onNameChange={(v) => {
         setName(v)
         setTouched((t) => ({ ...t, name: true }))
@@ -523,7 +928,7 @@ export function UploadSkillModal({
         // waiting for a submit attempt.
         setError(f ? skillFileError(f) : null)
       }}
-      onSubmit={() => void handleSubmit()}
+      onSubmit={() => void (source === "github" ? handleImport() : handleSubmit())}
       onClose={() => {
         reset()
         onClose()

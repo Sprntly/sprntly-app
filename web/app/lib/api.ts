@@ -705,6 +705,47 @@ export type MultiSkillUploadResult = {
 /** What an upload answers: one skill, or the multi-skill archive result. */
 export type SkillUploadResult = CustomSkillInfo | MultiSkillUploadResult
 
+/** One skill found in a connected GitHub repo, as the picker needs it.
+ *
+ *  `status` is the server's verdict, computed against the company's own
+ *  library with the same rules the write path uses — never guessed here:
+ *    - `new`      → imports as a new skill at `trigger_preview`
+ *    - `replaces` → the company already has this name; importing updates that
+ *                   skill in place and keeps its trigger
+ *    - `invalid`  → cannot be imported; `reason` says why (no description, a
+ *                   file over GitHub's 1 MB text ceiling, over the 50k cap) */
+export type GithubSkillPreview = {
+  path: string
+  name: string
+  description: string
+  slug_preview: string
+  trigger_preview: string
+  file_count: number
+  char_count: number
+  status: "new" | "replaces" | "invalid"
+  reason: string
+}
+
+/** GET /v1/skills/github/discover — read-only; writes nothing.
+ *  `truncated` + `notes` report anything the repo was too big to show. */
+export type GithubSkillDiscovery = {
+  repo: string
+  ref: string
+  commit_sha: string
+  truncated: boolean
+  notes: string[]
+  skills: GithubSkillPreview[]
+}
+
+/** POST /v1/skills/github/import — the same per-skill payloads an upload
+ *  returns (each with `replaced`), plus what it couldn't import. */
+export type GithubSkillImportResult = {
+  imported: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+  commit_sha: string
+  ref: string
+}
+
 /** Discriminates the two upload bodies by shape (the multi one has no `id`).
  *  Exported because every caller has to branch on it. */
 export function isMultiSkillUpload(
@@ -760,6 +801,32 @@ export const skillsApi = {
     form.append("description", description)
     return api.post<SkillUploadResult>("/v1/skills", form)
   },
+  /** The skills a CONNECTED GitHub repo holds, at `ref` (default branch when
+   *  omitted), optionally scoped to one folder. Read-only — it writes nothing,
+   *  so it is safe to call as the user types a branch.
+   *
+   *  The repo's installation is resolved server-side from the caller's company;
+   *  a repo this company hasn't connected 404s (never 403 — that would confirm
+   *  someone else connected it). A GitHub outage is a 502, a missing branch a
+   *  404, both with a readable `detail`. */
+  discoverGithub: (repo: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ repo })
+    if (opts?.ref) params.set("ref", opts.ref)
+    if (opts?.path) params.set("path", opts.path)
+    return api.get<GithubSkillDiscovery>(`/v1/skills/github/discover?${params}`)
+  },
+  /** Import the selected skills from that repo. `paths` FILTER the server's
+   *  own re-run of discovery — they are never fetch targets, so a path that
+   *  isn't a skill in that repo imports nothing rather than reading a file.
+   *  Each imported skill follows the upload rules: a name the company already
+   *  used replaces that skill in place, a built-in's name takes the next free
+   *  trigger. Per-skill failures come back in `skipped`. */
+  importGithub: (body: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(

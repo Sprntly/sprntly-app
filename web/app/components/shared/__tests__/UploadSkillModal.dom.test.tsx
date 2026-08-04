@@ -7,9 +7,31 @@
 // contract: a failed upload keeps every input intact.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
+
+// The GitHub source asks the connectors API whether GitHub is connected and
+// which repos the installation can see; discovery and import come in as props.
+const connectorsListMock = vi.fn()
+const reposMock = vi.fn()
+vi.mock("../../../lib/api", () => ({
+  connectorsApi: {
+    list: (...a: unknown[]) => connectorsListMock(...a),
+    listAccessibleGithubRepos: (...a: unknown[]) => reposMock(...a),
+  },
+}))
+vi.mock("../../../lib/generateConnectorRowState", () => ({
+  getGenerateConnectorRowState: (c: { status?: string } | undefined) => ({
+    connected: c?.status === "connected",
+  }),
+}))
+// SourceConnectHint pulls in the design-agent drawer for its redirect; the
+// modal only needs the affordance, so stub it to the label under test.
+vi.mock("../../design-agent/SourceConnectHint", () => ({
+  SourceConnectHint: () =>
+    React.createElement("button", { type: "button" }, "Connect a repo →"),
+}))
 
 import {
   MAX_SKILL_CONTENT_CHARS,
@@ -19,6 +41,18 @@ import {
   skillFileError,
   slugifyName,
 } from "../UploadSkillModal"
+
+beforeEach(() => {
+  connectorsListMock.mockResolvedValue({
+    connections: [{ provider: "github", status: "connected" }],
+  })
+  reposMock.mockResolvedValue({
+    repositories: [
+      { full_name: "octocat/methods", default_branch: "trunk" },
+      { full_name: "octocat/other", default_branch: "main" },
+    ],
+  })
+})
 
 afterEach(() => {
   cleanup()
@@ -387,6 +421,209 @@ describe("UploadSkillModal", () => {
     it("says nothing about skipped folders when there were none", async () => {
       await uploadMulti({ ...MULTI, skipped: [] })
       expect(screen.queryByRole("alert")).toBeNull()
+    })
+  })
+
+  // Importing from a connected repo: same modal, second source. The file
+  // branch above must keep working untouched, so every test here goes through
+  // the source toggle first.
+  describe("the GitHub source", () => {
+    const DISCOVERY = {
+      repo: "octocat/methods",
+      ref: "trunk",
+      commit_sha: "c0ffee",
+      truncated: false,
+      notes: [] as string[],
+      skills: [
+        {
+          path: "skills/sprint-planner", name: "Sprint Planner",
+          description: "Plans a sprint.", slug_preview: "sprint-planner",
+          trigger_preview: "/sprint-planner", file_count: 2, char_count: 900,
+          status: "new" as const, reason: "",
+        },
+        {
+          path: "skills/pricing-review", name: "Pricing Review",
+          description: "Reviews pricing.", slug_preview: "pricing-review",
+          trigger_preview: "/pricing-review", file_count: 1, char_count: 400,
+          status: "replaces" as const, reason: "",
+        },
+        {
+          path: "skills/bare", name: "Bare", description: "",
+          slug_preview: "bare", trigger_preview: "/bare", file_count: 1,
+          char_count: 20, status: "invalid" as const,
+          reason: "we couldn’t work out a description for it",
+        },
+      ],
+    }
+
+    async function openGithub(overrides: Record<string, unknown> = {}) {
+      const onDiscoverGithub = vi.fn().mockResolvedValue(DISCOVERY)
+      const onImportGithub = vi.fn().mockResolvedValue(undefined)
+      const onClose = vi.fn()
+      render(
+        React.createElement(UploadSkillModal, {
+          open: true,
+          onUpload: vi.fn(),
+          onClose,
+          onDiscoverGithub,
+          onImportGithub,
+          ...overrides,
+        }),
+      )
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /from github/i }))
+      })
+      return { onDiscoverGithub, onImportGithub, onClose }
+    }
+
+    async function search() {
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText(/repository/i), {
+          target: { value: "octocat/methods" },
+        })
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /find skills/i }))
+      })
+    }
+
+    it("offers the connect path when GitHub isn't connected", async () => {
+      connectorsListMock.mockResolvedValue({ connections: [] })
+      await openGithub()
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /connect a repo/i })).toBeTruthy(),
+      )
+      // No repo picker to tease with — there is nothing to pick from yet.
+      expect(screen.queryByLabelText(/repository/i)).toBeNull()
+    })
+
+    it("defaults the branch to the picked repo's own default", async () => {
+      await openGithub()
+      await waitFor(() => expect(reposMock).toHaveBeenCalled())
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText(/repository/i), {
+          target: { value: "octocat/methods" },
+        })
+      })
+      // Not "main": plenty of repos still ship something else, and a wrong
+      // default reads to the user as "no skills found".
+      expect((screen.getByLabelText(/branch/i) as HTMLInputElement).value).toBe("trunk")
+    })
+
+    it("lists what the repo holds, with triggers, replace badges and reasons", async () => {
+      const { onDiscoverGithub } = await openGithub()
+      await waitFor(() => expect(reposMock).toHaveBeenCalled())
+      await search()
+
+      expect(onDiscoverGithub).toHaveBeenCalledWith("octocat/methods", {
+        ref: "trunk",
+        path: "",
+      })
+      expect(screen.getByText("/sprint-planner")).toBeTruthy()
+      expect(screen.getByText("replaces yours")).toBeTruthy()
+      // The unimportable one is SHOWN with its reason and cannot be ticked —
+      // hiding it would just look like the repo has fewer skills.
+      const bare = screen.getByRole("checkbox", { name: /bare/i }) as HTMLInputElement
+      expect(bare.disabled).toBe(true)
+      expect(screen.getByText(/couldn’t work out a description/)).toBeTruthy()
+    })
+
+    it("ticks nothing by default and gates import on a selection", async () => {
+      const { onImportGithub } = await openGithub()
+      await waitFor(() => expect(reposMock).toHaveBeenCalled())
+      await search()
+
+      // Every custom skill's description rides the router on every ask, so a
+      // bulk import is opt-in, never the default.
+      const boxes = screen.getAllByRole("checkbox") as HTMLInputElement[]
+      expect(boxes.every((b) => !b.checked)).toBe(true)
+      const importBtn = screen.getByRole("button", { name: /import skills/i }) as HTMLButtonElement
+      expect(importBtn.disabled).toBe(true)
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("checkbox", { name: /sprint planner/i }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /import 1 skill/i }))
+      })
+      expect(onImportGithub).toHaveBeenCalledWith({
+        repo: "octocat/methods",
+        ref: "trunk",
+        path: "",
+        paths: ["skills/sprint-planner"],
+      })
+    })
+
+    it("reports the imported skills in the same panel an archive uses", async () => {
+      const imported = {
+        skills: [
+          {
+            id: "g1", slug: "sprint-planner", trigger: "/sprint-planner",
+            name: "Sprint Planner", description: "Plans a sprint.",
+            uploader_name: "Fortune Tede", created_at: null, has_file: true,
+            name_conflict: false, replaced: false,
+          },
+        ],
+        skipped: [{ path: "skills/bare", name: "Bare", reason: "no description" }],
+      }
+      const { onClose } = await openGithub({
+        onImportGithub: vi.fn().mockResolvedValue(imported),
+      })
+      await waitFor(() => expect(reposMock).toHaveBeenCalled())
+      await search()
+      await act(async () => {
+        fireEvent.click(screen.getByRole("checkbox", { name: /sprint planner/i }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /import 1 skill/i }))
+      })
+
+      expect(screen.getByRole("dialog", { name: /skills imported/i })).toBeTruthy()
+      expect(screen.getByRole("status").textContent).toMatch(/1 skill added\./)
+      expect(screen.getByText(/Bare — no description/)).toBeTruthy()
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it("keeps the search inputs and shows the reason when discovery fails", async () => {
+      await openGithub({
+        onDiscoverGithub: vi
+          .fn()
+          .mockRejectedValue(new Error("That repository isn't connected to Sprntly.")),
+      })
+      await waitFor(() => expect(reposMock).toHaveBeenCalled())
+      await search()
+      expect(screen.getByRole("alert").textContent).toMatch(/isn't connected/)
+      expect((screen.getByLabelText(/branch/i) as HTMLInputElement).value).toBe("trunk")
+    })
+
+    it("leaves the file flow exactly where it was", async () => {
+      const onUpload = vi.fn().mockResolvedValue(undefined)
+      const { container } = render(
+        React.createElement(UploadSkillModal, {
+          open: true,
+          onUpload,
+          onClose: vi.fn(),
+          onDiscoverGithub: vi.fn(),
+          onImportGithub: vi.fn(),
+        }),
+      )
+      // The file source is the default, and nothing about it moved.
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Good" } })
+        fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+          target: { value: "Desc" },
+        })
+        pickFile(container, MD_FILE())
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+      })
+      await waitFor(() =>
+        expect(onUpload).toHaveBeenCalledWith(expect.any(File), "Good", "Desc"),
+      )
+      // The connector lookups are lazy — the file path never asked GitHub
+      // anything.
+      expect(connectorsListMock).not.toHaveBeenCalled()
     })
   })
 
