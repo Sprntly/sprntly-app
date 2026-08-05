@@ -36,6 +36,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import requests
 from fastapi import HTTPException
@@ -43,6 +44,9 @@ from fastapi import HTTPException
 from app.connector_lookup.base import HTTP_TIMEOUT, LookupSession, cap_items
 from app.connectors import slack_oauth, slack_sync
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -610,8 +614,26 @@ class SlackProvider:
         return body + (f"\n{marker}" if marker else "")
 
     def _search(self, handle: SlackHandle, inp: dict) -> str:
+        """`dispatch`'s entry point — unchanged behaviour, now a thin wrapper
+        over `_search_and_hits` so the sweep's `dispatch_records` can reuse the
+        SAME single Slack API call for text and records rather than searching
+        twice. Nothing about this method's return value changed by that split."""
+        text, _kept = self._search_and_hits(handle, inp)
+        return text
+
+    def _search_and_hits(
+        self, handle: SlackHandle, inp: dict
+    ) -> "tuple[str, list[dict]]":
+        """`(rendered text, shareable matches actually rendered)`. Everything
+        below is `_search`'s original body, unmodified, with `kept` (the
+        shareable, capped match list `lines` was built from) now also
+        returned instead of discarded — that discard was the exact gap AC2
+        exists to close (see the module docstring on `RawRecord`-producing
+        adapters generally). `kept` is `[]` for every early return (no user
+        token, no matches, nothing shareable): there is nothing to build
+        records from in those cases either."""
         if not handle.user_token:
-            return SEARCH_UNAVAILABLE
+            return SEARCH_UNAVAILABLE, []
         query = (inp.get("query") or "").strip()
         # Model input, so it is validated, not trusted: anything that isn't the
         # explicit "newest" falls back to Slack's own relevance default. The
@@ -667,8 +689,8 @@ class SlackProvider:
                 return (
                     f"(no Slack messages in the last {_DEFAULT_DAYS} days in "
                     "channels search can see)"
-                )
-            return f"(no Slack messages match {query!r})"
+                ), []
+            return f"(no Slack messages match {query!r})", []
         # PRIVACY GATE — see is_shareable_match. search.messages reads as the
         # authorizing USER, so raw results can contain their DMs and private
         # channels; this answer goes to whoever asked in Sprntly chat.
@@ -680,11 +702,13 @@ class SlackProvider:
         )
         if not shareable:
             return (
-                f"(no Slack messages match {query!r} in channels I'm allowed to "
-                f"report. {excluded} match(es) were in DMs or private channels "
-                "and were excluded — say the search covered public channels "
-                "only, and never imply you read anyone's DMs.)"
-            ) if excluded else f"(no Slack messages match {query!r})"
+                (
+                    f"(no Slack messages match {query!r} in channels I'm allowed to "
+                    f"report. {excluded} match(es) were in DMs or private channels "
+                    "and were excluded — say the search covered public channels "
+                    "only, and never imply you read anyone's DMs.)"
+                ) if excluded else f"(no Slack messages match {query!r})"
+            ), []
         users = handle.user_map()
         kept, marker = cap_items(shareable, _MAX_SEARCH_HITS)
         lines = []
@@ -710,7 +734,95 @@ class SlackProvider:
             notes.append(marker)
         elif total > len(kept):
             notes.append(f"(showing {len(kept)} of {total} matches Slack returned)")
-        return "\n".join(lines + notes)
+        return "\n".join(lines + notes), kept
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `slack_search_messages`, `None` for anything
+        else. Calls `_search_and_hits` — the SAME single Slack API call
+        `dispatch` makes for this tool — so `text` is byte-identical to
+        `dispatch`'s own output by construction, including on the SAME
+        exceptions `dispatch`'s outer try/except turns into friendly text:
+        this method wraps the call itself rather than relying on `dispatch`'s
+        wrapper, since `_AdapterLeg.run` calls it INSTEAD of `dispatch`. See
+        `_match_to_record` for why AC4's byte-identity claim does not apply to
+        Slack at all: there is no `RawRecord`-producing puller for Slack to be
+        identical WITH (see that function's docstring)."""
+        if name != "slack_search_messages":
+            return None
+        handle: SlackHandle = session.handle
+        try:
+            text, kept = self._search_and_hits(handle, inp)
+        except requests.Timeout:
+            return f"(Slack timed out on {name} — no results from this call)", None
+        except HTTPException as exc:
+            return _slack_error_text(name, str(exc.detail)), None
+        except requests.RequestException as exc:
+            return f"(Slack {name} failed to reach Slack: {exc})", None
+        if not kept:
+            return text, None
+        # Cache-hit, not a new call: `_search_and_hits` already populated
+        # `handle`'s lazily-loaded user map to render the `who` in `text`
+        # above (SlackHandle.user_map caches on `_users_loaded`).
+        users = handle.user_map()
+        return text, [_match_to_record(m, users) for m in kept]
+
+
+def _ts_to_iso(ts: str) -> str | None:
+    """A Slack `epoch.seq` timestamp as ISO-8601 UTC, or `None` for an empty
+    or unparseable one. Mirrors `kg_ingest.slack_extract._latest_message_iso`
+    — kept local rather than imported, same reasoning `slack_extract` itself
+    gives for not importing `pullers.jira`'s ADF flattener: this module stays
+    testable in isolation."""
+    if not ts:
+        return None
+    try:
+        epoch = float(str(ts).split(".")[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc).isoformat()
+
+
+def _match_to_record(match: dict, users: dict[str, str]) -> "RawRecord":
+    """One shareable `search.messages` hit → a `RawRecord`.
+
+    AC4 (byte-identity with the scheduled pull's record for the same item)
+    does not apply here, for a reason none of the other four providers share:
+    **Slack has no `RawRecord`-producing puller at all.** `kg_ingest.runner
+    .PULLERS` has no "slack" entry, and Slack's OWN KG path
+    (`kg_ingest/slack_extract.py`) hashes whole chunks of a channel's synced
+    markdown (`_chunk_hash(channel_id, chunk)`, keyed on channel + chunk text)
+    — never one message, and never `RawRecord.render()`. There is structurally
+    nothing for this record to collide with in `sweep_persist`'s ledger; a
+    Slack sweep will never register a `skipped` hit against the scheduled
+    ingestion, no matter how this method is implemented.
+
+    Built anyway, for what it still buys: `external_id` is `channel_id:ts`,
+    Slack's own compound key for one message (AC3), which is at least a STABLE
+    identity across repeated sweeps — two different questions that both
+    resurface the same message now hash identically to EACH OTHER, so a
+    second, differently-worded sweep skips re-extracting a message a prior
+    sweep already paid for. That is real, if narrower, value: sweep-to-sweep
+    dedup, not sweep-to-pull dedup.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    channel = (match.get("channel") or {}) or {}
+    channel_id = str(channel.get("id") or match.get("channel_id") or "")
+    channel_name = channel.get("name") or "?"
+    ts = str(match.get("ts") or "")
+    # Same cleaning + cap as the rendered `text` line above, so the record's
+    # text is the same string the user-facing result already showed.
+    text = slack_sync._clean_message_text(match.get("text") or "", users)[:_TEXT_CHARS]
+    who = match.get("username") or users.get(match.get("user") or "", match.get("user") or "?")
+    return RawRecord(
+        provider="slack",
+        kind="message",
+        external_id=f"{channel_id}:{ts}",
+        title="",
+        text=text,
+        properties={"channel": channel_name, "user": who},
+        timestamp=_ts_to_iso(ts),
+    )
 
 
 def _channel_access_text(handle: SlackHandle, ref: str, detail: str) -> str | None:

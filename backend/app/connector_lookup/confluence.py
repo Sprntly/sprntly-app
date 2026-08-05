@@ -13,8 +13,13 @@ one it is holding.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.connector_lookup.base import LookupSession
 from app.connectors import confluence_fetch
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 DISPLAY_NAME = "Confluence"
 
@@ -129,6 +134,56 @@ SEARCH_UNAVAILABLE = (
 )
 
 
+def _row_to_record(row: dict) -> "RawRecord":
+    """One `confluence_fetch.search_pages` row → the CLOSEST `RawRecord` it can
+    build with NO new HTTP call.
+
+    NOT byte-identical to `kg_ingest.pullers.confluence.pull`'s record for the
+    same page — property KEYS are kept matching the puller's for readability,
+    but four of the seven are structurally unavailable from a CQL search hit
+    and carry `None` (which `RawRecord.render()` then drops, same as an absent
+    key):
+
+      - `space_name`, `status`, `version`, `parent_id`, `author_id` — none of
+        these ride the `/rest/api/search` response at all; only the v2
+        `/pages`/`/blogposts` GETs the puller and `confluence_get_page` use
+        carry them.
+      - `text`: a ~240-char CQL `excerpt` (already HTML-stripped, but a
+        snippet built by Confluence's own search ranking), not the puller's
+        up-to-4,000-char converted page body — a different EXTRACTION, not a
+        truncation of the same one.
+      - `url`: built from the search result's own `url` field, which is a
+        different response field than the puller's `_links.webui` — usually
+        the same destination, not guaranteed the same exact path string.
+      - `timestamp`: the search API's `lastModified` vs the v2 API's
+        `version.createdAt` — two different endpoints' own notion of "when",
+        not guaranteed to agree in value or format.
+
+    Closing any of these needs `confluence_get_page` per hit — the new HTTP
+    call this ticket says not to add. See the AC4 test for the assertion that
+    this record and the puller's record for the same page do NOT collide.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(
+        provider="confluence",
+        kind=row.get("kind") or "page",
+        external_id=str(row.get("id") or ""),
+        title=row.get("title") or "",
+        text=row.get("excerpt") or "",
+        properties={
+            "space_key": row.get("space"),
+            "space_name": None,
+            "url": row.get("url"),
+            "status": None,
+            "version": None,
+            "parent_id": None,
+            "author_id": None,
+        },
+        timestamp=row.get("last_modified"),
+    )
+
+
 class ConfluenceProvider:
     """LookupProvider over app/connectors/confluence_fetch.py."""
 
@@ -185,6 +240,32 @@ class ConfluenceProvider:
                 return f"(no Confluence page found with id {page_id})"
             return confluence_fetch.render_page(page)
         return f"(unknown tool {name})"
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `confluence_search`, `None` for anything else
+        (and `None` when search itself is UNAVAILABLE for this connection —
+        there is nothing to build records from). Calls
+        `confluence_fetch.search_pages` / `render_rows` exactly as `dispatch`
+        does above, so `text` is byte-identical to `dispatch`'s own output by
+        construction. See `_row_to_record` for why the records themselves are
+        NOT byte-identical to the scheduled pull's."""
+        if name != "confluence_search":
+            return None
+        handle = session.handle
+        text_in = (inp.get("text") or "").strip()
+        if not text_in:
+            return "(confluence_search: 'text' is required)", None
+        rows, available = confluence_fetch.search_pages(
+            handle, text=text_in, space_key=inp.get("space_key"),
+        )
+        if not available:
+            return SEARCH_UNAVAILABLE, None
+        kept, marker = confluence_fetch.cap(rows)
+        text = confluence_fetch.render_rows(
+            kept, header=f'Confluence search for "{text_in}":', truncation=marker,
+        )
+        records = [_row_to_record(r) for r in kept] if kept else None
+        return text, records
 
 
 PROVIDER = ConfluenceProvider()

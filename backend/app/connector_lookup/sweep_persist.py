@@ -1,34 +1,39 @@
 """Persist a cross-connector sweep's reads into the knowledge graph.
 
-STATUS: PARKED, flag off. Do not switch `sweep_kg_persist_enabled` on until
-the adapter-record work below lands — see `_content_hash` for the full
-reasoning. In short: the ledger here dedupes a sweep only against a PREVIOUS
-IDENTICAL SWEEP, never against the scheduled 6-hourly pull, because the two
-hash different units. Turning this on today re-extracts content the pull has
-already ingested. That is wasted spend, not graph corruption — signal ids are
-keyed on the fact, so duplicates collapse on write — but the waste is real and
-the ledger's `skipped` count will read ~0, which looks like "the sweep finds
-lots of new material" when it means "this ledger cannot see the pull."
+STATUS: LIVE, unconditionally — no flag. Persistence used to be parked behind
+`sweep_kg_persist_enabled` because the ledger dedupe was structurally broken:
+it hashed `SourceResult.text` — one whole source's answer to whatever question
+triggered the sweep — which could never collide with the scheduled 6-hourly
+pull's hash of `RawRecord.render()` (one record, fixed structural format). The
+adapter-records work fixed the unit mismatch (see `_content_hash` below); with
+dedupe now real, the flag had nothing left to protect against, so it was
+removed rather than flipped. Two things this means, worth stating plainly:
+
+  - persistence is live the moment this merges — every sweep with a
+    RECORDS-capable source now writes to the KG, on every company, with no
+    staged rollout;
+  - the flag's sibling, `settings.chat_cross_connector_sweep`, is UNCHANGED
+    and still gates whether the sweep runs at all. Turning the sweep off
+    still turns this off with it — there is nothing here to persist from a
+    sweep that never ran.
 
 Sibling to `sweep.py`, deliberately kept OUT of it. `sweep.py` carries the
 sweep's latency contract as a load-bearing module comment (BUDGET_S, the
 fan-out itself); folding a write path into that file would put the
 persistence discussion inside the file whose whole point is "we read fast and
-throw it away". Keeping this separate means the flag in `config.py` is a
-one-line unwire — delete the import at the single call site in
-`qa_agent._sweep_context` and this module is dead code again, with zero
-change to `sweep.py`.
+throw it away".
 
 THE SAFETY LINE (do not cross): this module's only input is a `SweepResult` —
-the raw text a sweep read FROM connectors. It has no path that could accept
-the model's answer, and that is deliberate, not incidental. The sweep result
-feeds the very answer call that reads the KG back on the next ask; persisting
-the answer would make the model's own output become its own evidence, and a
-wrong answer written once would look identical to ground truth on every
-future read — an error that compounds silently and does not self-correct.
-Every source ever written here comes from `SweepResult.read`, which is itself
-already filtered to `usable` (actually read from a connector, non-empty) —
-never the rendered prompt block, never anything the model produced.
+the raw text (and, now, the structured records) a sweep read FROM connectors.
+It has no path that could accept the model's answer, and that is deliberate,
+not incidental. The sweep result feeds the very answer call that reads the KG
+back on the next ask; persisting the answer would make the model's own output
+become its own evidence, and a wrong answer written once would look identical
+to ground truth on every future read — an error that compounds silently and
+does not self-correct. Every source ever written here comes from
+`SweepResult.read`, which is itself already filtered to `usable` (actually
+read from a connector, non-empty) — never the rendered prompt block, never
+anything the model produced.
 
 OFF THE ASK PATH: `kickoff_sweep_persist` starts a daemon thread and returns
 immediately, same shape as `app.kg_ingest.auto_sync.kickoff_corpus_seed`. By
@@ -40,15 +45,13 @@ the caller returns.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 from typing import TYPE_CHECKING
 
-from app.config import settings
-
 if TYPE_CHECKING:
     from app.connector_lookup.sweep import SourceResult, SweepResult
+    from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -71,41 +74,56 @@ def _lock_for(enterprise_id: str) -> threading.Lock:
         return lock
 
 
-def _content_hash(text: str) -> str:
-    """Stable ledger key for one source's rendered text.
+def _content_hash(rendered: str) -> str:
+    """Stable ledger key for one rendered unit.
 
-    SCOPE, stated precisely because an earlier version of this docstring
-    claimed more than the code delivers: this dedupes a sweep against a
-    PREVIOUS IDENTICAL SWEEP, and nothing else. It does NOT dedupe against the
-    scheduled pull.
+    This is now LITERALLY `kg_ingest.runner._content_hash` — not merely the
+    same algorithm kept in sync by hand, but the same function object,
+    imported rather than re-implemented — because that is what makes the two
+    hashes collide, and a second sha256-over-utf-8 that happened to agree
+    today could silently drift tomorrow.
 
-    The hash FUNCTION matches `kg_ingest.runner._content_hash` (sha256 over
-    utf-8), but the two hash different UNITS and therefore can never collide:
+    Why sharing the unit matters: this function is unit-agnostic — it hashes
+    whatever string its caller passes — and `_run` below now passes it TWO
+    different kinds of string depending on what a source carries:
 
-      - the scheduled pull hashes `RawRecord.render()` — ONE record, in a
-        fixed structural format (`[jira/issue id=PROJ-123 …]\\ntitle: …`);
-      - this hashes `SourceResult.text` — ONE WHOLE SOURCE's free-text answer
-        to one question, whose shape depends on what was ASKED.
-
-    Two sweeps about the same Jira issue, prompted by different questions,
-    produce different strings; neither matches that issue's record rendering.
-    So content the scheduled pull already ingested WILL be re-extracted here.
-
-    That costs an extraction call; it does NOT corrupt the graph. Signal ids
-    are `uuid5(enterprise_id, content)` (`graph.extractor`, ~:257), keyed on
-    the FACT rather than the document, so a fact arriving by both routes
-    collapses to one row (PK conflict → counted in the extractor's own
-    `skipped`). The graph stays clean; the duplicate work is paid for.
-
-    The real fix is upstream, not here: adapters already hold structured rows
-    before they render prose (e.g. `connector_lookup.jira` has `hits` before
-    `render_search(hits)`), so emitting `RawRecord`s from a sweep would make
-    this hash collide with the pull's by construction. Until that lands, treat
-    this ledger as a same-question cache, and read the extractor's returned
-    `skipped` — not this ledger — as the measure of how much a sweep actually
-    adds.
+      - when a source has `RawRecord`s (the adapter-records capability,
+        `connector_lookup/base.py`'s `RecordsCapable`), each record's
+        `render()` is hashed individually — the SAME unit and the SAME
+        function `kg_ingest.runner.sync_provider` hashes for the scheduled
+        6-hourly pull. A record the pull already ingested and a record this
+        sweep reads for the identical item now hash to the identical value,
+        so the ledger recognises it and the extractor is not paid for it
+        twice. That collision is the entire point of this ticket.
+      - when a source has none (an adapter that hasn't implemented the
+        records capability, or a call whose response was too lean to build
+        one from — see each adapter's `dispatch_records` docstring for which
+        case applies), `source.text` — one whole source's free-text answer to
+        whatever question triggered the sweep — is hashed instead, exactly as
+        before. That still only dedupes a sweep against a PREVIOUS IDENTICAL
+        SWEEP, never against the scheduled pull, because two different
+        questions about the same item produce two different strings. This is
+        the fallback this docstring used to describe as the feature's whole
+        behaviour; it is now the narrower, degraded case.
     """
-    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    from app.kg_ingest.runner import _content_hash as _pull_content_hash
+
+    return _pull_content_hash(rendered)
+
+
+def _hashable_units(
+    source: "SourceResult",
+) -> "list[tuple[str, RawRecord | None]]":
+    """`[(rendered, record_or_None), ...]` — one entry per thing `_run` will
+    hash/extract for this source. A source with records yields one entry PER
+    RECORD (AC6: records are used when present); a source without yields one
+    entry for the whole `source.text` (AC6: falls back to today's behaviour).
+    Never both — records, when present, REPLACE text-hashing for that source
+    rather than adding to it, so a source is never double-counted.
+    """
+    if source.records:
+        return [(record.render(), record) for record in source.records]
+    return [(source.text, None)]
 
 
 def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
@@ -125,11 +143,19 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
     lock = _lock_for(enterprise_id)
     with lock:
         try:
-            hashes = {id(s): _content_hash(s.text) for s in sources}
+            # One item per record when a source has records (AC6), else one
+            # item for the whole source text — see `_hashable_units`.
+            items = [
+                (source, record, _content_hash(rendered))
+                for source in sources
+                for rendered, record in _hashable_units(source)
+            ]
             try:
                 # Fail-open, matching the ledger's own contract: a read error
                 # means "extract everything this run" rather than "skip it".
-                seen = seen_hashes(enterprise_id, list(set(hashes.values())))
+                seen = seen_hashes(
+                    enterprise_id, list({h for *_r, h in items})
+                )
             except Exception:  # noqa: BLE001 — advisory only, never break the run
                 logger.exception(
                     "sweep-persist: ledger read failed for %s (extracting all)",
@@ -139,16 +165,24 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
 
             facade = GraphFacade()
             written = skipped = 0
-            for source in sources:
-                content_hash = hashes[id(source)]
+            for source, record, content_hash in items:
                 if content_hash in seen:
                     skipped += 1
                     continue
                 try:
+                    if record is not None:
+                        text = record.render()
+                        doc_name = (
+                            f"{source.key}-sweep-{record.external_id}-"
+                            f"{content_hash[:12]}"
+                        )
+                    else:
+                        text = source.text
+                        doc_name = f"{source.key}-sweep-{content_hash[:12]}"
                     extract_document(
                         facade, enterprise_id,
-                        doc_name=f"{source.key}-sweep-{content_hash[:12]}",
-                        text=source.text,
+                        doc_name=doc_name,
+                        text=text,
                         agent=f"ingest:{source.key}",
                         origin="connector",
                         # Names the ROUTE, on top of the provider key already
@@ -160,20 +194,21 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
                         # runs through (kg_ingest/runner.py) — no second layer.
                         triage=True,
                     )
-                    # Only a source that made it through extraction is
+                    # Only an item that made it through extraction is
                     # recorded — a failed write keeps its hash out of the
                     # ledger so the next sweep or scheduled pull to read this
                     # content retries it.
                     record_hashes(enterprise_id, source.key, [content_hash])
                     written += 1
-                except Exception:  # noqa: BLE001 — one source failing must not block the rest
+                except Exception:  # noqa: BLE001 — one item failing must not block the rest
                     logger.exception(
                         "sweep-persist: extraction failed for %s/%s",
                         enterprise_id, source.key,
                     )
             logger.info(
-                "sweep-persist: %s written=%d skipped=%d of %d source(s)",
-                enterprise_id, written, skipped, len(sources),
+                "sweep-persist: %s written=%d skipped=%d of %d item(s) "
+                "across %d source(s)",
+                enterprise_id, written, skipped, len(items), len(sources),
             )
         except Exception:  # noqa: BLE001 — fully isolated, see docstring
             logger.exception("sweep-persist: run failed for %s", enterprise_id)
@@ -185,14 +220,13 @@ def kickoff_sweep_persist(enterprise_id: str, result: "SweepResult | None") -> b
     Called from `qa_agent._sweep_context` right after a sweep's block has
     already been rendered for the prompt — this is strictly additional work,
     never a precondition for the answer. Returns False (nothing started) when
-    the flag is off, there is no tenant, or the sweep read nothing usable.
-    Never blocks; never raises into the caller's ask flow.
+    there is no tenant, or the sweep read nothing usable. Unconditional
+    otherwise — there is no feature flag here; see the module docstring for
+    why. Never blocks; never raises into the caller's ask flow.
     """
     if not enterprise_id or result is None:
         return False
     try:
-        if not settings.sweep_kg_persist_enabled:
-            return False
         # `.read` is already filtered to sources actually read from a
         # connector (status ok, non-empty text) — never an unread/timed-out/
         # dropped source, and never an `unread_reason` (AC6).

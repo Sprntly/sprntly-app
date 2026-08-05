@@ -8,8 +8,13 @@ could write without a confirm step is exactly what that contract prevents.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.connector_lookup.base import LookupSession, cap_items
 from app.connectors import clickup_fetch
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 DISPLAY_NAME = "ClickUp"
 
@@ -75,6 +80,55 @@ NOT_CONNECTED = (
 )
 
 
+def _row_to_record(row: dict) -> "RawRecord":
+    """One `clickup_fetch.search_tasks` row → the CLOSEST `RawRecord` it can
+    build with NO new HTTP call.
+
+    NOT byte-identical to `kg_ingest.pullers.clickup.pull`'s record for the
+    same task, and it cannot be made so from a search row alone — stated here
+    because AC4 requires saying so, not papering over it:
+
+      - `tags`: absent from `_task_row` entirely (ClickUp's search endpoint
+        never returns them) — the puller's `tags` KEY is simply not produced,
+        so it never appears in `render()`'s `data:` line, where the puller's
+        does whenever a task has any.
+      - `assignees`: the puller carries every assignee; a search row keeps
+        only `_task_row`'s first one (`assignee`, singular), because that is
+        all the search endpoint returns before the client-side keyword filter
+        runs. Wrapped in a list here for property-name parity, but a task with
+        2+ assignees renders a shorter list than the puller's.
+      - `text`: empty. `_task_row` carries no description/body at all — only
+        `clickup_fetch.get_task` (a second HTTP call, out of scope per the
+        ticket) does.
+      - `timestamp`: even where BOTH sides have data, the FORMAT differs.
+        `_task_row["updated"]` is already `_ms_to_iso`-converted to a bare
+        `YYYY-MM-DD` for display; the puller carries ClickUp's raw
+        `date_updated` epoch-ms STRING, unconverted. Two representations of
+        the same instant, never equal as strings.
+
+    Closing every gap above would need `clickup_get_task` per hit — the new
+    HTTP call this ticket says not to add. See the AC4 test for the assertion
+    that this record and the puller's record for the same task do NOT collide.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    assignee = row.get("assignee")
+    return RawRecord(
+        provider="clickup",
+        kind="task",
+        external_id=str(row.get("id") or ""),
+        title=row.get("name", "") or "",
+        text="",
+        properties={
+            "status": row.get("status"),
+            "priority": row.get("priority"),
+            "list": row.get("list"),
+            "assignees": [assignee] if assignee else [],
+        },
+        timestamp=row.get("updated"),
+    )
+
+
 class ClickUpProvider:
     """LookupProvider over app/connectors/clickup_fetch.py."""
 
@@ -114,6 +168,27 @@ class ClickUpProvider:
                 return f"(no ClickUp task found with id {task_id})"
             return clickup_fetch.render_task(task)
         return f"(unknown tool {name})"
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `clickup_search_tasks`, `None` for anything
+        else. Calls `clickup_fetch.search_tasks` and `render_search` exactly as
+        `dispatch` does above — ONE fetch, reused for both text and records —
+        so `text` is byte-identical to `dispatch`'s own output by construction.
+        See `_row_to_record` for why the records themselves are NOT
+        byte-identical to the scheduled pull's."""
+        if name != "clickup_search_tasks":
+            return None
+        handle = session.handle
+        rows, scanned = clickup_fetch.search_tasks(
+            handle,
+            text=inp.get("text"),
+            status=inp.get("status"),
+            list_name=inp.get("list_name"),
+        )
+        kept, marker = cap_items(rows, clickup_fetch._SEARCH_LIMIT)
+        text = clickup_fetch.render_search(kept, scanned, truncation=marker)
+        records = [_row_to_record(r) for r in kept] if kept else None
+        return text, records
 
 
 PROVIDER = ClickUpProvider()

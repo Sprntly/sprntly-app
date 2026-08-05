@@ -250,6 +250,140 @@ def test_multiple_search_hits_stay_lean(monkeypatch):
     assert "description:" not in out
 
 
+# ── dispatch_records (AC1/AC2/AC3/AC4/AC5) ──────────────────────────────────
+
+
+def test_dispatch_records_returns_none_for_any_tool_but_jira_search():
+    from app.connector_lookup import jira as jira_adapter
+
+    for name in ("jira_get_issue", "jira_editmeta", "jira_propose_change", "other"):
+        assert jira_adapter.dispatch_records(_session(), name, {}) is None
+
+
+def test_dispatch_records_multi_hit_has_no_records_but_matching_text(monkeypatch):
+    """AC2/AC4: a multi-hit search keeps `dispatch`'s exact text (mutation-
+    proof) but yields NO records — `jira_fetch.search`'s lean hit shape (no
+    description, project or labels) cannot honestly become a puller-shaped
+    RawRecord without a second HTTP call per hit, which this ticket says not
+    to add."""
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/search/jql"):
+            return _Resp({"issues": [
+                {"key": "A-1", "fields": {"summary": "one", "status": {"name": "To Do"}}},
+                {"key": "A-2", "fields": {"summary": "two", "status": {"name": "To Do"}}},
+            ]})
+        raise AssertionError("must not fetch a full issue for a multi-hit search")
+
+    from app.connector_lookup import jira as jira_adapter
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    text, records = jira_adapter.dispatch_records(
+        _session(), "jira_search", {"text": "x"}
+    )
+    assert records is None
+    assert text == jl._make_dispatch(_session())("jira_search", {"text": "x"})
+
+
+def test_dispatch_records_zero_hit_has_no_records(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/search/jql"):
+            return _Resp({"issues": []})
+        raise AssertionError("no issue fetch on zero hits")
+
+    from app.connector_lookup import jira as jira_adapter
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    text, records = jira_adapter.dispatch_records(
+        _session(), "jira_search", {"text": "nothing matches this"}
+    )
+    assert records is None
+    assert text == "No matching Jira issues."
+
+
+def test_dispatch_records_single_hit_text_matches_dispatch_exactly(monkeypatch):
+    """AC5, mutation-proof: dispatch_records's text for a single-hit search
+    must be byte-identical to dispatch's own output for the same call — both
+    resolve to the SAME jira_fetch.render_issue(get_issue(...)) call."""
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        if url.endswith("/search/jql"):
+            return _Resp({"issues": [
+                {"key": "PROJ-5", "fields": {"summary": "Checkout broken",
+                                             "status": {"name": "In Progress"}}},
+            ]})
+        return _Resp(_issue_payload("Task"))
+
+    from app.connector_lookup import jira as jira_adapter
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    # fake_get is a pure function of its closure (no consumed/stateful mock),
+    # so calling both dispatch() and dispatch_records() against it is a fair
+    # like-for-like comparison of two independent calls to the same fixture.
+    expected = jl._make_dispatch(_session())("jira_search", {"text": "checkout"})
+    text, records = jira_adapter.dispatch_records(
+        _session(), "jira_search", {"text": "checkout"}
+    )
+    assert text == expected
+    assert records is not None and len(records) == 1
+
+
+def test_ac4_sweep_and_pull_records_are_byte_identical_for_a_single_hit(monkeypatch):
+    """AC4 — THE LOAD-BEARING TEST for Jira.
+
+    Exercises the REAL scheduled-pull puller (`kg_ingest.pullers.jira.pull`)
+    and the REAL sweep-side `connector_lookup.jira.dispatch_records` against
+    mocked HTTP responses describing the SAME issue, and asserts their
+    `RawRecord.render()` outputs are byte-identical — the exact collision
+    AC7's ledger dedupe depends on. Not a hand-reconstruction of either
+    side's shape: both real code paths run, end to end, against one shared
+    fixture.
+    """
+    from app.connector_lookup import jira as jira_adapter
+    from app.kg_ingest.pullers import jira as jira_puller
+
+    issue_fields = _issue_payload("Story")["fields"]
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/oauth/token/accessible-resources"):
+            return _Resp([{"id": "cid"}])
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        if url.endswith("/search/jql"):
+            # Both the puller's bulk listing (wide _FIELDS) and
+            # jira_fetch.search's narrow search hit land here — return the
+            # full field set either way; each caller reads only the subset
+            # it actually requested. Real Jira would narrow this by
+            # `fields=`, but what varies BY CALLER is the code reading the
+            # response, which is exactly what this test needs to exercise.
+            return _Resp({"issues": [{"key": "PROJ-5", "fields": issue_fields}],
+                         "isLast": True})
+        if url.endswith("/issue/PROJ-5"):
+            return _Resp({"fields": issue_fields, "names": {}})
+        raise AssertionError(f"unexpected URL in AC4 fixture: {url}")
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+
+    pull_record = next(jira_puller.pull("tok"))
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    text, sweep_records = jira_adapter.dispatch_records(
+        _session(), "jira_search", {"text": "checkout"}
+    )
+    assert sweep_records is not None and len(sweep_records) == 1
+    sweep_record = sweep_records[0]
+
+    assert sweep_record.render() == pull_record.render(), (
+        "AC4: the sweep's single-hit record must render byte-identical to "
+        "the scheduled pull's record for the same issue"
+    )
+    # AC3 — external_id is the SAME identifier the puller uses (the issue key).
+    assert sweep_record.external_id == pull_record.external_id == "PROJ-5"
+    assert sweep_record.provider == pull_record.provider == "jira"
+    assert sweep_record.kind == pull_record.kind == "issue"
+    assert "description:" in text  # single-hit dispatch still returns the full issue
+
+
 def test_is_jira_lookup_bare_yes_accepts_the_assistants_offer():
     """The lookup ends with "Would you like me to fetch the full details?" and
     the natural reply is one word.

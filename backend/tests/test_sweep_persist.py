@@ -5,15 +5,18 @@ No network, no LLM, no real DB: `extract_document`, `GraphFacade` and the
 `kg_ingest_ledger` store are all patched. What these lock down, in the order
 they matter:
 
-- the flag is a real kill switch: OFF means zero write-path activity, not
-  just "the write is skipped after starting" (AC1, mutation-proved);
 - a source the sweep did NOT actually read (timeout/error/dropped/empty)
   never reaches extraction (AC6);
-- content already in the ledger is never re-extracted (AC4);
+- content already in the ledger is never re-extracted, whether hashed from a
+  source's `records` or (absent those) its whole `text` (AC4/AC6);
 - a persistence failure never propagates out of the background run (AC8);
 - one company's write never uses another company's tenant id (AC9);
 - provenance names both the provider and the sweep route (AC5), and triage
   runs like every other ingestion path (AC7).
+
+There is no feature flag here (removed once the records-based dedupe made it
+unnecessary — see the module docstring); `kickoff_sweep_persist` is gated only
+on "is there a tenant" and "did the sweep read anything usable".
 """
 from __future__ import annotations
 
@@ -62,37 +65,10 @@ def _reset_fake_thread():
     FakeThread.instances = []
 
 
-# ─────────────────────────── AC1 — the flag ───────────────────────────
+# ─────────────────────────── kickoff (no flag) ───────────────────────────
 
 
-def test_flag_off_starts_no_thread(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", False)
-    monkeypatch.setattr(threading, "Thread", FakeThread)
-
-    result = _result(_source())
-    assert sp.kickoff_sweep_persist("ent-A", result) is False
-    assert FakeThread.instances == []
-
-
-def test_flag_off_is_a_real_kill_switch_not_just_a_skip(monkeypatch):
-    """Mutation-proof: with the flag off, nothing downstream of the flag
-    check is even imported/touched, not merely "started and then no-opped"."""
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", False)
-
-    def boom(*a, **k):
-        raise AssertionError("must not run _run when the flag is off")
-
-    monkeypatch.setattr(sp, "_run", boom)
-    monkeypatch.setattr(threading, "Thread",
-                        lambda target=None, args=(), name=None, daemon=None:
-                        (_ for _ in ()).throw(AssertionError("must not spawn a thread")))
-
-    result = _result(_source())
-    assert sp.kickoff_sweep_persist("ent-A", result) is False
-
-
-def test_flag_on_starts_a_daemon_thread_with_the_read_sources(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
+def test_kickoff_starts_a_daemon_thread_with_the_read_sources(monkeypatch):
     monkeypatch.setattr(threading, "Thread", FakeThread)
 
     usable = _source("jira", "PROJ-9")
@@ -112,21 +88,18 @@ def test_flag_on_starts_a_daemon_thread_with_the_read_sources(monkeypatch):
 
 
 def test_no_enterprise_id_starts_nothing(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
     monkeypatch.setattr(threading, "Thread", FakeThread)
     assert sp.kickoff_sweep_persist("", _result(_source())) is False
     assert FakeThread.instances == []
 
 
 def test_no_result_starts_nothing(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
     monkeypatch.setattr(threading, "Thread", FakeThread)
     assert sp.kickoff_sweep_persist("ent-A", None) is False
     assert FakeThread.instances == []
 
 
 def test_nothing_usable_starts_nothing(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
     monkeypatch.setattr(threading, "Thread", FakeThread)
     unread = _source("slack", "", status=cs.STATUS_TIMEOUT)
     assert sp.kickoff_sweep_persist("ent-A", _result(unread)) is False
@@ -134,8 +107,6 @@ def test_nothing_usable_starts_nothing(monkeypatch):
 
 
 def test_kickoff_never_raises_on_thread_spawn_failure(monkeypatch):
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
-
     def boom(*a, **k):
         raise RuntimeError("no threads today")
 
@@ -158,8 +129,6 @@ def test_kickoff_returns_immediately_regardless_of_background_run_duration(monke
     see the done-report for what that live gate still needs to confirm.
     """
     import time
-
-    monkeypatch.setattr(sp.settings, "sweep_kg_persist_enabled", True)
 
     ran_body = threading.Event()
 
@@ -432,3 +401,142 @@ def test_persist_input_is_structurally_only_connector_text():
     for suspicious in ("answer", "response", "reply", "output"):
         assert suspicious not in source_fields
         assert suspicious not in result_fields
+
+
+# ─────────────────────────── AC6 — records vs text fallback ───────────────
+
+
+def test_a_source_with_records_hashes_each_record_not_the_whole_text(monkeypatch):
+    """AC6. A source carrying `records` is hashed/extracted PER RECORD, using
+    `record.render()` — not `source.text` at all. Proven by seeding the ledger
+    with one record's hash and asserting only THAT record is skipped while a
+    second record on the same source is still extracted, and that the
+    extracted text is the record's own rendering, not the source's prose."""
+    from app.graph import facade as facade_mod
+    monkeypatch.setattr(facade_mod, "GraphFacade", lambda: "FACADE")
+
+    from app.db import kg_ingest_ledger as ledger
+    from app.graph import extractor
+    from app.kg_ingest.types import RawRecord
+
+    r1 = RawRecord(provider="jira", kind="issue", external_id="PROJ-1",
+                    title="one", text="", properties={})
+    r2 = RawRecord(provider="jira", kind="issue", external_id="PROJ-2",
+                    title="two", text="", properties={})
+    source = _source("jira", text="stale prose that must never be what gets hashed")
+    source.records = [r1, r2]
+
+    seen_hash = sp._content_hash(r1.render())
+    monkeypatch.setattr(ledger, "seen_hashes", lambda eid, hashes: {seen_hash})
+    recorded = []
+    monkeypatch.setattr(
+        ledger, "record_hashes",
+        lambda eid, provider, hashes: recorded.append(hashes),
+    )
+    extracted_texts = []
+    monkeypatch.setattr(
+        extractor, "extract_document",
+        lambda facade, eid, *, doc_name, text, **k:
+            extracted_texts.append(text) or {"signals": 1, "themes": 0, "skipped": 0},
+    )
+
+    sp._run("ent-A", [source])
+
+    assert extracted_texts == [r2.render()], (
+        "only the record NOT in the ledger should be extracted, and its own "
+        "render() — never source.text — is what gets extracted"
+    )
+    assert recorded == [[sp._content_hash(r2.render())]]
+
+
+def test_a_source_without_records_falls_back_to_hashing_text(monkeypatch):
+    """AC6, the other half: an adapter that returned no records (AC1: absence
+    must keep working) degrades to hashing/extracting `source.text` exactly as
+    before this ticket."""
+    from app.graph import facade as facade_mod
+    monkeypatch.setattr(facade_mod, "GraphFacade", lambda: "FACADE")
+
+    from app.db import kg_ingest_ledger as ledger
+    from app.graph import extractor
+
+    monkeypatch.setattr(ledger, "seen_hashes", lambda eid, hashes: set())
+    monkeypatch.setattr(ledger, "record_hashes", lambda *a, **k: None)
+    extracted_texts = []
+    monkeypatch.setattr(
+        extractor, "extract_document",
+        lambda facade, eid, *, doc_name, text, **k:
+            extracted_texts.append(text) or {"signals": 1, "themes": 0, "skipped": 0},
+    )
+
+    source = _source("slack", text="whole-source prose, no records")
+    assert source.records is None
+    sp._run("ent-A", [source])
+
+    assert extracted_texts == ["whole-source prose, no records"]
+
+
+# ─────────────────────────── AC7 — dedupes against the SCHEDULED PULL ─────
+
+
+def test_sweep_over_content_the_scheduled_pull_already_ingested_is_skipped(monkeypatch):
+    """THE PROOF THE TICKET EXISTS FOR. Seed the ledger via the PULL's own
+    hashing path (`kg_ingest.runner._content_hash` over a `RawRecord.render()`
+    for a fixture Jira issue), then run `sp._run` on a sweep `SourceResult`
+    whose `records` holds the SAME record for the SAME issue. `skipped` (no
+    extraction call) proves the sweep recognises content the pull already
+    ingested — the ledger collision this whole ticket is for.
+    """
+    from app.graph import facade as facade_mod
+    monkeypatch.setattr(facade_mod, "GraphFacade", lambda: "FACADE")
+
+    from app.db import kg_ingest_ledger as ledger
+    from app.graph import extractor
+    from app.kg_ingest.runner import _content_hash as pull_content_hash
+    from app.kg_ingest.types import RawRecord
+
+    # Hand-built independently of connector_lookup.jira's own construction —
+    # this test pins the WIRE FORMAT both sides must agree on, not just that
+    # sp._content_hash equals itself.
+    record = RawRecord(
+        provider="jira", kind="issue", external_id="PROJ-42",
+        title="Billing migration", text="Move billing off the old gateway",
+        properties={
+            "status": "In Progress", "priority": "High", "type": "Story",
+            "project": "PROJ", "labels": ["billing"], "assignee": "Ada",
+        },
+        timestamp="2026-08-01T00:00:00Z",
+    )
+
+    # Ledger already holds the hash the SCHEDULED PULL would have written for
+    # this exact issue — sp._content_hash IS kg_ingest.runner._content_hash
+    # (see that function's docstring), so this is the real collision, not a
+    # simulated one.
+    ledger_store = {pull_content_hash(record.render())}
+    monkeypatch.setattr(
+        ledger, "seen_hashes",
+        lambda eid, hashes: {h for h in hashes if h in ledger_store},
+    )
+    monkeypatch.setattr(
+        ledger, "record_hashes",
+        lambda eid, provider, hashes: ledger_store.update(hashes),
+    )
+    extract_calls = []
+    monkeypatch.setattr(
+        extractor, "extract_document",
+        lambda facade, eid, *, doc_name, text, **k:
+            extract_calls.append(text) or {"signals": 0, "themes": 0, "skipped": 0},
+    )
+
+    source = cs.SourceResult(
+        key="jira", display_name="Jira", status=cs.STATUS_OK,
+        text="(sweep prose for a different question — never hashed when "
+             "records are present)",
+    )
+    source.records = [record]
+
+    sp._run("ent-live", [source])
+
+    assert extract_calls == [], (
+        "the sweep's record must collide with the pull's ledger entry — "
+        "nothing should be re-extracted, i.e. skipped > 0"
+    )

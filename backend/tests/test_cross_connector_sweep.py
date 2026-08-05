@@ -123,6 +123,93 @@ def test_topic_question_sweeps(wire):
     assert "PROJ-1 Checkout redesign" in result.render()
 
 
+# ─────────────── adapter-records capability (AC1/AC5) ───────────────
+
+
+def test_an_adapter_with_no_dispatch_records_keeps_working_unchanged(wire):
+    """AC1 — an adapter left unimplemented ON PURPOSE. `FakeAdapter` has no
+    `dispatch_records` at all (see its class above); `_AdapterLeg.run` must
+    fall back to plain `dispatch` and leave `SourceResult.records` at its
+    `None` default — proving the capability is genuinely optional, not
+    silently required."""
+    jira = FakeAdapter("jira", result="PROJ-1 Checkout redesign")
+    wire({"jira": jira})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    source = result.read[0]
+    assert source.key == "jira"
+    assert source.text == "PROJ-1 Checkout redesign"
+    assert source.records is None
+    assert jira.calls == [("jira_search", {"text": " ".join(result.terms)})]
+
+
+class RecordsAdapter(FakeAdapter):
+    """A FakeAdapter that ALSO implements the optional records capability —
+    proves records flow from the adapter through `_AdapterLeg.run` into
+    `SourceResult.records`, and that doing so costs no SECOND call to the
+    adapter (`dispatch` itself is never invoked when `dispatch_records`
+    handles the call — see the `dispatch` override below, which fails the
+    test if it is ever reached)."""
+
+    def __init__(self, name, *, result="rows", records=None):
+        super().__init__(name, result=result)
+        self._records = records if records is not None else []
+        self.records_calls: list[tuple] = []
+
+    def dispatch(self, session, name, inp):
+        raise AssertionError(
+            "dispatch() must not be called when dispatch_records() handles "
+            "the same tool call — that would be a second live fetch"
+        )
+
+    def dispatch_records(self, session, name, inp):
+        self.records_calls.append((name, inp))
+        return self._result, self._records
+
+
+def test_an_adapter_with_dispatch_records_populates_source_records(wire):
+    """AC5 — records ride alongside text on SourceResult, and `dispatch()` is
+    never separately called (RecordsAdapter raises if it is) — proving the
+    sweep leg fetches ONCE, not once for text and again for records."""
+    from app.kg_ingest.types import RawRecord
+
+    fixture_record = RawRecord(
+        provider="jira", kind="issue", external_id="PROJ-1",
+        title="Checkout redesign", text="", properties={},
+    )
+    jira = RecordsAdapter(
+        "jira", result="PROJ-1 Checkout redesign", records=[fixture_record],
+    )
+    wire({"jira": jira})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    source = result.read[0]
+    assert source.text == "PROJ-1 Checkout redesign"
+    assert source.records == [fixture_record]
+    assert len(jira.records_calls) == 1
+
+
+def test_an_adapter_whose_dispatch_records_returns_none_falls_back_to_text(wire):
+    """A RecordsCapable adapter that returns `None` for THIS particular call
+    (a multi-hit search, say) degrades to `text`-only, `records=None` — the
+    per-call fallback AC6/AC2 depend on, distinct from AC1's per-adapter one."""
+    class SometimesRecordsAdapter(FakeAdapter):
+        def dispatch_records(self, session, name, inp):
+            return None  # "no records for this particular call"
+
+    jira = SometimesRecordsAdapter("jira", result="A-1, A-2 (multiple hits)")
+    wire({"jira": jira})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    source = result.read[0]
+    assert source.text == "A-1, A-2 (multiple hits)"
+    assert source.records is None
+    assert jira.calls, "must have fallen back to dispatch() itself"
+
+
 # ─────────────────────────── multi-source assembly ───────────────────────────
 
 

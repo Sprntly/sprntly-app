@@ -1242,8 +1242,11 @@ def _sweep_context(enterprise_id: Optional[str], question: str) -> str:
         # this path entirely. Kicked off AFTER `block` is already computed —
         # nothing below this line participates in producing the return value,
         # so persistence cannot add latency to the answer it's serving.
-        # `kickoff_sweep_persist` never raises (flag-gated, fully isolated —
-        # see connector_lookup/sweep_persist.py); default off (AC1).
+        # `kickoff_sweep_persist` never raises (fully isolated — see
+        # connector_lookup/sweep_persist.py). Unconditional: there is no
+        # separate persistence flag — `_cross_connector_sweep_enabled` above
+        # already gates whether the sweep (and therefore anything it could
+        # persist) ran at all.
         from app.connector_lookup.sweep_persist import kickoff_sweep_persist
 
         kickoff_sweep_persist(enterprise_id or "", result)

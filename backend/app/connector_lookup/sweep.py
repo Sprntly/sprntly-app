@@ -63,6 +63,10 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +210,13 @@ class SourceResult:
     text: str = ""
     detail: str = ""
     elapsed_ms: int = 0
+    #: The structured rows behind `text`, when the adapter could build them
+    #: without a new HTTP call (`base.RecordsCapable`). `None` — NOT `[]` — is
+    #: "this leg cannot produce records for this call"; sweep_persist reads
+    #: that as "fall back to hashing `text`" (see its module docstring). `[]`
+    #: is reserved for "the adapter tried and there was genuinely nothing" and
+    #: is not produced by any adapter today.
+    records: "list[RawRecord] | None" = None
 
     @property
     def usable(self) -> bool:
@@ -315,7 +326,16 @@ class _AdapterLeg:
     tool: str
     build_input: object  # Callable[[list[str]], dict]
 
-    def run(self, enterprise_id: str, terms: list[str]) -> str:
+    def run(
+        self, enterprise_id: str, terms: list[str]
+    ) -> "tuple[str, list[RawRecord] | None]":
+        """`(text, records)` for one tool call. `dispatch() -> str` is untouched
+        and still the only thing the named-source path calls; this leg prefers
+        the adapter's OPTIONAL `dispatch_records` (base.RecordsCapable) when it
+        implements one, so the fetch happens ONCE rather than once for text and
+        again for records. An adapter without it — or one that returns `None`
+        for this particular call — falls straight back to `dispatch`, exactly
+        the pre-existing behaviour, with `records` staying `None`."""
         from app.connector_lookup import registry
 
         adapter = registry.provider_for(self.provider)
@@ -324,7 +344,14 @@ class _AdapterLeg:
         session = adapter.open_session(enterprise_id)
         if session is None:
             raise _SessionUnavailable(self.provider)
-        return str(adapter.dispatch(session, self.tool, self.build_input(terms)) or "")
+        inp = self.build_input(terms)
+        records_fn = getattr(adapter, "dispatch_records", None)
+        if records_fn is not None:
+            combined = records_fn(session, self.tool, inp)
+            if combined is not None:
+                text, records = combined
+                return str(text or ""), records
+        return str(adapter.dispatch(session, self.tool, inp) or ""), None
 
 
 #: Every live leg searches by keyword and nothing else. A sweep asks one
@@ -586,7 +613,7 @@ def _run_live(
             provider = pending[future]
             result = SourceResult(key=provider, display_name=_display(provider))
             try:
-                text = future.result()
+                text, records = future.result()
             except _SessionUnavailable:
                 logger.info(
                     "cross-connector sweep: %s connected but not openable for %s",
@@ -603,6 +630,7 @@ def _run_live(
             else:
                 if text and text.strip():
                     result.status, result.text = STATUS_OK, text
+                    result.records = records
                 else:
                     result.detail = "is connected but returned nothing for these terms"
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -639,6 +667,7 @@ def _apply_caps(sources: list[SourceResult]) -> None:
             continue
         source.status = STATUS_DROPPED
         source.text = ""
+        source.records = None
 
 
 def sweep(

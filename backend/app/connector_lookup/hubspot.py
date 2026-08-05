@@ -14,11 +14,15 @@ Read-only: search and read. No create/update path is reachable from chat.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import requests
 from fastapi import HTTPException
 
 from app.connector_lookup.base import HTTP_TIMEOUT, LookupSession, cap_items
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +208,117 @@ class HubSpotProvider:
             return f"(no HubSpot {SINGULAR[object_type]} with id {record_id})"
         _raise_for_status(resp)
         return _render_row(object_type, resp.json() or {}, full=True)
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `hubspot_search(object_type="deals")` — the
+        only object type the sweep leg ever asks for (`sweep._LIVE_LEGS`
+        hardcodes it). `None` for any other tool or object type: this ticket's
+        scope is the five live sweep legs' OWN tool calls, and `deals` is the
+        only one this adapter's sweep leg makes.
+
+        Duplicates `_search`'s HTTP call, property list AND `dispatch`'s outer
+        try/except rather than calling either, because `_search` returns only
+        rendered text — the rows are discarded before it returns, which is the
+        exact gap this ticket exists to close. `text` here is built the
+        identical way `_search` builds it (same `_render_row`, same footer
+        logic) and errors are turned into the identical friendly strings
+        `dispatch` itself would return (`_http_error_text` et al.) — HubSpot is
+        the one adapter of the five whose `dispatch` catches request failures
+        itself rather than letting them propagate, so this leg must catch them
+        too or a transient HubSpot timeout would newly surface as a sweep
+        STATUS_ERROR instead of the STATUS_OK-with-friendly-text it is today.
+        See `_deal_row_to_record` for why the records themselves are NOT
+        byte-identical to the scheduled pull's.
+        """
+        if name != "hubspot_search":
+            return None
+        object_type = (inp.get("object_type") or "").strip().lower()
+        if object_type != "deals":
+            return None
+        query = (inp.get("query") or "").strip()
+        if not query:
+            return "(hubspot_search: 'query' is required)", None
+        token = session.handle
+        try:
+            resp = requests.post(
+                f"{API}/crm/v3/objects/{object_type}/search",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "query": query,
+                    "limit": _MAX_HITS,
+                    "properties": OBJECT_PROPS[object_type].split(","),
+                },
+                timeout=HTTP_TIMEOUT,
+            )
+            _raise_for_status(resp)
+            body = resp.json() or {}
+        except requests.Timeout:
+            return f"(HubSpot timed out on {name} — no results from this call)", None
+        except requests.HTTPError as exc:
+            return _http_error_text(name, object_type, exc), None
+        except requests.RequestException as exc:
+            return f"(HubSpot {name} failed to reach HubSpot: {exc})", None
+        results = body.get("results") or []
+        total = body.get("total") or len(results)
+        if not results:
+            return f"(no HubSpot {object_type} match {query!r})", None
+        kept, marker = cap_items(results, _MAX_HITS)
+        lines = [_render_row(object_type, row) for row in kept]
+        footer = marker or (
+            f"(showing {len(kept)} of {total} matching {object_type})"
+            if total > len(kept) else ""
+        )
+        text = "\n".join(lines) + (f"\n{footer}" if footer else "")
+        records = [_deal_row_to_record(r) for r in kept] if kept else None
+        return text, records
+
+
+def _deal_row_to_record(row: dict) -> "RawRecord":
+    """One `hubspot_search` (object_type="deals") result row → the CLOSEST
+    `RawRecord` it can build with NO new HTTP call.
+
+    NOT byte-identical to `kg_ingest.pullers.hubspot._pull_deals`'s record for
+    the same deal — property KEYS are kept matching the puller's for
+    readability, but two of the six carry `None` (which `RawRecord.render()`
+    then drops, same as an absent key):
+
+      - `owner_id`: `OBJECT_PROPS["deals"]` (this module) requests
+        `dealname,amount,dealstage,pipeline,closedate,hs_lastmodifieddate` —
+        six properties. The puller's `_DEAL_PROPS` requests those SAME six
+        plus `hubspot_owner_id` and `description`. The search call this sweep
+        leg makes never asked HubSpot for the owner id, so it is not in the
+        response to read.
+      - `company_ids`: the puller's deal search runs with
+        `associations="companies"`; the sweep's `hubspot_search` POST requests
+        no associations at all, so there is nothing to build this list from.
+      - `text`: empty for the same reason as `owner_id` — `description` was
+        never in the requested property list.
+
+    Closing any of these needs a wider `properties`/`associations` request on
+    the search call, or a follow-up `hubspot_get` per hit — either a materially
+    different request or a new HTTP call, both out of scope per the ticket. See
+    the AC4 test for the assertion that this record and the puller's record for
+    the same deal do NOT collide.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    props = row.get("properties") or {}
+    return RawRecord(
+        provider="hubspot",
+        kind="deal",
+        external_id=str(row.get("id") or ""),
+        title=props.get("dealname", "") or "",
+        text="",
+        properties={
+            "amount_usd": props.get("amount"),
+            "stage": props.get("dealstage"),
+            "pipeline": props.get("pipeline"),
+            "close_date": props.get("closedate"),
+            "owner_id": None,
+            "company_ids": None,
+        },
+        timestamp=props.get("hs_lastmodifieddate"),
+    )
 
 
 def _raise_for_status(resp) -> None:
