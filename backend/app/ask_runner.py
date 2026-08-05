@@ -32,6 +32,7 @@ from app.document_catalog import (
 )
 from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
+from app.prompt_history import render_history_block
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -1322,6 +1323,7 @@ def compose_ask_answer(
     *,
     enterprise_id: str | None = None,
     prd_context: str = "",
+    history: list[dict] | None = None,
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1340,6 +1342,19 @@ def compose_ask_answer(
       - Decision-log the ask (agent="ask", decision_type="answer") with
         kg_refs = the signal/entity ids that fed the answer.
 
+    `question` is the user's bare current-turn message — never fold prior
+    turns into it. It drives all FOUR retrieval consumers below (the shared
+    embedding, KG theme kNN, the document catalog's lexical channel, and
+    Stage N filename matching), so a folded thread turns each of those into a
+    thread-wide search instead of a question-scoped one — see `history` below
+    for where prior turns actually belong.
+
+    `history`, when given, is rendered once (`render_history_block`, same
+    budget/clamping as every other fold site) and prepended to the composed
+    user turn ahead of the question — the model still sees the whole
+    conversation; retrieval never does. Mirrors what
+    `qa_agent._answer_single_shot` already does for the skill-routed path.
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -1349,6 +1364,17 @@ def compose_ask_answer(
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
+    try:
+        history_block = render_history_block(history)
+    except Exception:  # noqa: BLE001 — history is prompt context, never the
+        # reason retrieval or the answer fails; degrade to no history block
+        # rather than lose the ask.
+        logger.warning(
+            "history render failed for enterprise=%s; answering without "
+            "conversation context",
+            enterprise_id, exc_info=True,
+        )
+        history_block = ""
     facts = company_facts_block(enterprise_id)
     # ONE embedding per ask, computed before either consumer and shared by
     # both. Document grounding runs first and the PRD branch skips KG
@@ -1392,7 +1418,7 @@ def compose_ask_answer(
         bundle = None
         system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
                   + connected_sources_line(enterprise_id))
-        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
         corpus = load_corpus(dataset)
@@ -1408,13 +1434,13 @@ def compose_ask_answer(
 
             system = (ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM + today_line()
                       + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_WITH_KG.format(
+            user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context=render_context_section(bundle), question=question
             )
         else:
             system = (ASK_SYSTEM + today_line()
                       + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+            user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once
     # above so it rides EVERY branch's cacheable prefix, first — a long corpus
