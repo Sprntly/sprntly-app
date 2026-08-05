@@ -1385,8 +1385,22 @@ def test_no_existing_signature_changed():
 
     sig = inspect.signature(compose_ask_answer)
     assert set(sig.parameters) >= {
-        "dataset", "question", "enterprise_id", "prd_context", "on_delta",
+        "dataset", "question", "enterprise_id", "prd_context", "history",
+        "on_delta",
     }
+    # Every pre-fix keyword still binds with its pre-fix default, and every
+    # pre-fix call shape (enumerated via `grep -rn 'compose_ask_answer'
+    # backend/`) still binds unchanged — `history` is new and additive, never
+    # required.
+    assert sig.parameters["enterprise_id"].default is None
+    assert sig.parameters["prd_context"].default == ""
+    assert sig.parameters["on_delta"].default is None
+    assert sig.parameters["history"].default is None
+    sig.bind("asurion", "q?")
+    sig.bind("asurion", "q?", enterprise_id="co-1")
+    sig.bind("asurion", "q?", enterprise_id="co-1", prd_context="PRD block")
+    sig.bind("asurion", "q?", enterprise_id="co-1", on_delta=lambda *_: None)
+    sig.bind("asurion", "q?", enterprise_id="co-1", history=[{"role": "user", "content": "x"}])
     sig = inspect.signature(company_facts_block)
     assert list(sig.parameters) == ["enterprise_id"]
     sig = inspect.signature(list_document_sources)

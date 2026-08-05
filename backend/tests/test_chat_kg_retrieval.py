@@ -1013,6 +1013,49 @@ def test_compose_ask_answer_corpus_only_when_no_enterprise(
     assert rows == []
 
 
+def test_direct_path_kg_knn_query_derives_from_the_message(
+    isolated_settings, fake_llm, facade
+):
+    """T4 (AC4) — the query text embedded to drive KG theme kNN is the bare
+    current-turn message, not the folded thread. `compose_ask_answer`
+    computes ONE embedding, shared by document grounding and KG retrieval
+    (`test_the_question_is_embedded_once_and_shared_by_both_consumers` in
+    `test_ask_document_retrieval.py`), so proving the embedded text is bare
+    proves the kNN query is too."""
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    theme, _ = _seed_theme_with_signals(
+        facade, "co-1", "Pipeline",
+        [("revenue", "deal_blocker", "Acme blocked on SSO", {}, 0)],
+    )
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    embedded_texts: list = []
+
+    def _embed(texts, **kw):
+        embedded_texts.append(list(texts))
+        from app.graph.embeddings import EMBEDDING_DIM
+
+        return [[0.1] * EMBEDDING_DIM for _ in texts]
+
+    with patch("app.graph.embeddings.embed_texts", side_effect=_embed), \
+         _patch_candidates([(theme, 0.9)]):
+        ask_runner.compose_ask_answer(
+            "asurion", "how is pipeline doing now?", enterprise_id="co-1",
+            history=history,
+        )
+
+    assert embedded_texts == [["how is pipeline doing now?"]]
+
+
 def test_compose_ask_answer_injects_kg_section_and_logs_refs(
     isolated_settings, fake_llm, facade
 ):
