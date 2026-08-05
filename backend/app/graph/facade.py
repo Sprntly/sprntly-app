@@ -27,6 +27,20 @@ from app.graph.types import (
 
 logger = logging.getLogger(__name__)
 
+#: Every kg_signal column EXCEPT `embedding`. The vector(1536) column is ~30KB
+#: of JSON per row and no consumer of active_signals reads Signal.embedding —
+#: it was pure wire cost on every ask.
+_SIGNAL_COLS = (
+    "id, enterprise_id, source_id, source_type, kind, content, properties, "
+    "valid_at, transaction_at, stale_after, confidence, weight, provenance, "
+    "created_at, skill_id, origin, channel, evidence_eligible"
+)
+
+#: PostgREST caps an unlimited select at ~1000 rows anyway. Making the bound
+#: EXPLICIT — and pairing it with an ORDER BY — turns "an arbitrary page" into
+#: "the newest 1000", which is what every caller already assumed it had.
+_ACTIVE_SIGNALS_LIMIT = 1000
+
 
 class TenantViolationError(PermissionError):
     """Raised when an operation's enterprise_id mismatches the entity's.
@@ -469,16 +483,36 @@ class GraphFacade:
         enterprise_id: str,
         source_types: Optional[list[str]] = None,
         since: Optional[datetime] = None,
+        *,
+        limit: int = _ACTIVE_SIGNALS_LIMIT,
     ) -> list[Signal]:
         """Non-stale signals (stale_after IS NULL OR stale_after > now()).
         Filtered in Python so it works against both real Supabase and the
-        in-memory fake (which doesn't support OR / gt). Per-enterprise
-        volumes are bounded (§20 NFR), so this is fine."""
+        in-memory fake (which doesn't support OR / gt).
+
+        Fetched newest-transaction-first and capped at `limit` (default
+        1000). PostgREST caps an unlimited select at ~1000 rows anyway;
+        without an explicit ORDER BY, *which* 1000 was arbitrary. The old
+        unordered full-select scan could silently return a page holding
+        none of a tenant's newest signals once it passed that cap, so
+        chat's "8 most recent" became 8 recent-within-an-arbitrary-page —
+        the newest connector data became permanently invisible with no
+        error. `embedding` is dropped from the select: no consumer of
+        active_signals reads Signal.embedding, and the vector(1536) column
+        was pure wire cost on every ask."""
         rows = (
-            self._tbl("kg_signal").select("*")
+            self._tbl("kg_signal").select(_SIGNAL_COLS)
             .eq("enterprise_id", enterprise_id)
+            .order("transaction_at", desc=True)
+            .limit(limit)
             .execute().data or []
         )
+        if len(rows) == limit:
+            logger.info(
+                "active_signals hit the fetch limit (enterprise_id=%s, limit=%d); "
+                "some non-stale signals older than the returned page may be omitted",
+                enterprise_id, limit,
+            )
         now = datetime.now(timezone.utc)
         kept: list[Signal] = []
         for r in rows:
