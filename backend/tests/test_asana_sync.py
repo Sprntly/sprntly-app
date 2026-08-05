@@ -98,6 +98,72 @@ def test_list_projects_spans_all_workspaces():
     ]
 
 
+def test_list_project_tasks_returns_the_page(monkeypatch):
+    from app.connectors import asana_oauth
+
+    captured = {}
+
+    def _get(_tok, path, params=None):
+        captured["path"] = path
+        captured["params"] = params
+        return [{"gid": "t1", "name": "Fix login bug"}]
+
+    monkeypatch.setattr(asana_oauth, "_get", _get)
+    tasks = asana_oauth.list_project_tasks("tok", PROJ, limit=50)
+    assert tasks == [{"gid": "t1", "name": "Fix login bug"}]
+    assert captured["path"] == f"/projects/{PROJ}/tasks"
+    assert captured["params"]["limit"] == 50
+    assert captured["params"]["opt_fields"] == asana_oauth._TASK_OPT_FIELDS
+
+
+def test_list_project_tasks_caps_the_request_limit_at_100(monkeypatch):
+    """Asana's own per-request cap — defends the helper even if a future
+    caller passes something larger."""
+    from app.connectors import asana_oauth
+
+    captured = {}
+    monkeypatch.setattr(asana_oauth, "_get",
+                        lambda _t, _p, params=None: captured.update(params) or [])
+    asana_oauth.list_project_tasks("tok", PROJ, limit=500)
+    assert captured["limit"] == 100
+
+
+def test_list_project_tasks_raises_auth_expired_on_401():
+    """Unlike get_task's per-task isolation, a project-task LISTING failure is
+    not swallowed here — auth_oauth._get/_raise_for's normal contract holds,
+    and the kg_ingest puller is the layer that decides per-project isolation
+    vs propagating a reconnect signal (see test_ingest_pullers.py)."""
+    from app.connectors import asana_oauth
+
+    resp = MagicMock(status_code=401, ok=False, text="unauthorized")
+    with patch("app.connectors.asana_oauth.requests.get", return_value=resp):
+        with pytest.raises(asana_oauth.AsanaAuthExpiredError):
+            asana_oauth.list_project_tasks("tok", PROJ, limit=50)
+
+
+def test_asana_auth_expired_error_carries_no_status_code():
+    """REAL FINDING (not fixed by this change — out of its declared scope):
+    unlike MeetAuthExpiredError (which carries `status_code = 401` ON PURPOSE,
+    per its own docstring, exactly so kg_ingest.auto_sync._run_sync's
+    `getattr(exc, "status_code", None) in (401, 403)` dispatch recognizes it),
+    AsanaAuthExpiredError is a bare RuntimeError subclass with no such
+    attribute — the same pre-existing gap as JiraAuthExpiredError and
+    ClickUpAuthExpiredError. So although this puller raises
+    AsanaAuthExpiredError correctly on a 401/403 (see the tests above),
+    auto_sync._run_sync's getattr check does NOT recognize it: `status` comes
+    back None, the WARNING/reconnect-prompt branch is skipped, and the
+    exception instead falls into the generic branch that logs a full ERROR
+    traceback and stamps `last_sync_error` with the raw exception string
+    rather than the friendly "asana authorization expired — reconnect
+    required" message. Fixing this needs a change to AsanaAuthExpiredError (or
+    to auto_sync's dispatch) that is outside this puller-only ticket's stated
+    scope — flagging for a follow-up rather than silently widening either."""
+    from app.connectors.asana_oauth import AsanaAuthExpiredError
+
+    exc = AsanaAuthExpiredError("Asana rejected the stored token")
+    assert getattr(exc, "status_code", None) is None
+
+
 # ── Custom fields: metadata, read normalization, write encoding ──────────────
 
 

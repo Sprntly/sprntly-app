@@ -29,6 +29,7 @@ from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
+    asana,
     clickup,
     confluence,
     fireflies,
@@ -50,6 +51,7 @@ _BATCH_CHAR_BUDGET = 6000
 # provider → (puller fn, token_json key, source-type hint for the extractor)
 PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "clickup":   (clickup.pull,   "access_token", "project_mgmt (work items; classify bug/feature/fix)"),
+    "asana":     (asana.pull,     "access_token", "project_mgmt (tasks: no native type or priority — classify bug/feature/fix from title+notes; status is the SECTION the task sits in within its project, completed is the done boolean; custom fields carry the team's own taxonomy where set)"),
     "jira":      (jira.pull,      "access_token", "project_mgmt (issues: bugs/stories/tasks/epics with native type + status + priority)"),
     "hubspot":   (hubspot.pull,   "access_token", "revenue + support + customer_voice (deals: blockers/feature gaps; tickets: support pain/churn risk; notes/emails: voice-of-customer; owners: attribution; line items: revenue detail)"),
     "fireflies": (fireflies.pull, "api_key",      "customer_voice / communication (meeting transcripts)"),

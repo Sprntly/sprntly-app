@@ -194,6 +194,47 @@ def test_run_sync_handles_expired_token_gracefully(monkeypatch, caplog):
     assert not any(r.levelno >= logging.ERROR for r in recs)  # no ERROR traceback
 
 
+def test_run_sync_does_not_recognize_asana_auth_expired_today(monkeypatch, caplog):
+    """REAL FINDING, proven rather than assumed: unlike the HTTPException(401)
+    used above (which carries a real `status_code` attribute — FastAPI's
+    contract), AsanaAuthExpiredError is a bare RuntimeError subclass with none
+    (see test_asana_auth_expired_error_carries_no_status_code in
+    test_asana_sync.py — same pre-existing gap as JiraAuthExpiredError and
+    ClickUpAuthExpiredError; only MeetAuthExpiredError sets it on purpose).
+    So `_run_sync`'s `getattr(exc, "status_code", None) in (401, 403)` check
+    does NOT recognize it: it falls into the generic branch — a full ERROR
+    traceback and the raw exception string, not the WARNING + friendly
+    reconnect-prompt every other provider's 401 gets. This documents CURRENT
+    behavior; fixing AsanaAuthExpiredError (or the dispatch) is outside the
+    puller-only ticket that added this test."""
+    import logging
+
+    from app.connectors.asana_oauth import AsanaAuthExpiredError
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: '{"access_token": "t"}')
+    monkeypatch.setattr(auto_sync, "token_for", lambda prov, tj: "t")
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+
+    def expired(*a, **k):
+        raise AsanaAuthExpiredError("Asana rejected the stored token")
+
+    monkeypatch.setattr(auto_sync, "sync_provider", expired)
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    with caplog.at_level(logging.WARNING, logger="app.kg_ingest.auto_sync"):
+        auto_sync._run_sync("co-1", "asana")        # must not raise
+
+    # NOT the graceful reconnect-prompt message every other 401 path gets:
+    assert stamps["last_sync_error"] != "asana authorization expired — reconnect required"
+    assert "Asana rejected the stored token" in stamps["last_sync_error"]
+    recs = [r for r in caplog.records if r.name == "app.kg_ingest.auto_sync"]
+    assert any(r.levelno >= logging.ERROR for r in recs)  # falls to the ERROR branch
+
+
 # ---------- github token refresh-on-sync ----------
 
 def _expired_github_tj() -> str:
