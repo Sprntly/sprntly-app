@@ -87,7 +87,13 @@ def test_metadata_route_404_not_500_on_malformed_non_uuid(isolated_settings, mon
 # ── resolve ─────────────────────────────────────────────────────────────
 
 
-def test_resolve_route_same_company_guest_view(isolated_settings, monkeypatch):
+def test_resolve_route_same_company_member(isolated_settings, monkeypatch):
+    """Was `..._guest_view` until 2026-08-04. A caller who can act in the
+    prd's owning workspace now resolves to `member` and is routed into the
+    real, EDITABLE app — handing every same-company caller the read-only
+    guest shell is what stopped colleagues editing shared PRDs and tickets.
+    `guest_view` is still returned when the caller has no access to that
+    workspace; see tests/test_share_member_edit_access.py for both sides."""
     ctx = company_client(monkeypatch)
     db = isolated_settings["db"]
     prd_id, public_id = _seed_prd_with_public_id(db, "acme")
@@ -96,7 +102,7 @@ def test_resolve_route_same_company_guest_view(isolated_settings, monkeypatch):
 
     assert r.status_code == 200
     body = r.json()
-    assert body["outcome"] == "guest_view"
+    assert body["outcome"] == "member"
     assert body["artifact_id"] == prd_id
 
 

@@ -156,8 +156,15 @@ def resolve(token: str, session: dict = Depends(require_session)) -> dict:
     share = result["share"]
     prd = get_prd(share["artifact_id"])
     return {
-        "outcome": "guest_view",
+        # "member" (caller can act in the owning workspace — the gate sends
+        # them into the real, editable app) or "guest_view" (read-only shell
+        # + Join prompt). See db.artifact_shares.resolve_share_access.
+        "outcome": result["outcome"],
         "artifact_id": share["artifact_id"],
+        # The workspace the artifact lives in — the gate stores it as the
+        # caller's active workspace before handing over to the app, so a
+        # `member` arriving from another workspace doesn't land on a 404.
+        "owner_workspace_id": share.get("owner_workspace_id"),
         # The opaque, unguessable identifier postLoginPath()'s redirect and
         # the "Copy share link" mint action put in the URL instead of
         # artifact_id — see the prds.public_id migration's own comment for
@@ -226,13 +233,20 @@ def _grant_workspace_membership(*, share: dict, user_id: str) -> str:
 def join(token: str, session: dict = Depends(require_session)) -> dict:
     """Grant workspace access + record attribution. Re-runs the FULL resolve
     check server-side — a client that already called /resolve is never
-    trusted; only a fresh `guest_view` outcome, computed here, may mutate."""
+    trusted; only a fresh same-company outcome, computed here, may mutate.
+
+    Both same-company outcomes are accepted. `member` reaching here is a
+    no-op in substance (the caller can already act in that workspace, so
+    the upsert re-writes the row they hold), but it must not 403: a browser
+    still running the pre-`member` bundle renders the guest viewer for a
+    `member` outcome and offers its Join button, and that click has to keep
+    working across the deploy window."""
     user_id, user_email = _session_identity(session)
     result = resolve_share_access(token=token, user_id=user_id, user_email=user_email)
     if result["outcome"] == "not_found":
         logger.info("artifact_share_deny route=join gate=not_found")
         raise _not_found()
-    if result["outcome"] != "guest_view":
+    if result["outcome"] not in ("guest_view", "member"):
         logger.info(
             "artifact_share_deny route=join gate=blocked reason=%s",
             result.get("reason"),
@@ -262,14 +276,20 @@ def content(token: str, session: dict = Depends(require_session)) -> dict:
     """Guest read of the shared PRD's rendered content + evidence + tickets,
     scoped by COMPANY only via require_shared_prd (never workspace) — the
     cross-workspace-same-company allowance this primitive exists to
-    provide. Re-runs the FULL resolve check; a non-guest_view outcome 404s
-    (no existence disclosure of the content shape to a blocked caller).
-    Read-only by construction — no PUT/POST sibling."""
+    provide. Re-runs the FULL resolve check; anything but a same-company
+    outcome 404s (no existence disclosure of the content shape to a blocked
+    caller). Read-only by construction — no PUT/POST sibling.
+
+    `member` is accepted alongside `guest_view` for the same deploy-window
+    reason /join is: an older bundle still renders the guest viewer for a
+    `member` caller, and that viewer's one and only data source is this
+    route. It discloses nothing new — a `member` can read the very same PRD
+    through the ordinary company-scoped endpoints."""
     from app.db.prd_tickets import get_tickets
 
     user_id, user_email = _session_identity(session)
     result = resolve_share_access(token=token, user_id=user_id, user_email=user_email)
-    if result["outcome"] != "guest_view":
+    if result["outcome"] not in ("guest_view", "member"):
         logger.info(
             "artifact_share_deny route=content gate=%s",
             result["outcome"] if result["outcome"] == "not_found" else "blocked",

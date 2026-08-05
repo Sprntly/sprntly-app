@@ -12,6 +12,7 @@ import {
 } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
 import { artifactShareApi } from "../lib/artifactShareApi"
+import { presetActiveWorkspace } from "../context/WorkspaceContext"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignInView } from "../components/auth/SignInView"
 
@@ -57,6 +58,19 @@ function SignInForm() {
     if (!shareToken) return defaultPath
     try {
       const outcome = await artifactShareApi.resolve(shareToken)
+      if (outcome.outcome === "member") {
+        // A colleague signing in to open a teammate's link. Drop the
+        // `share=` param: keeping it routes them through ArtifactShareGate
+        // into the READ-ONLY guest viewer, which is exactly the bug — they
+        // are a full member and the PRD (and its tickets) must be editable.
+        if (auth.kind === "authed") {
+          // Same reason ArtifactShareGate does this: open in the workspace
+          // the artifact lives in, not whichever one they last used.
+          presetActiveWorkspace(auth.user.id, outcome.owner_workspace_id)
+        }
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}`
+      }
       if (outcome.outcome === "guest_view") {
         // public_id (never artifact_id, the raw sequential id) — see the
         // prds.public_id migration's own comment.
