@@ -138,6 +138,18 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
+  it("states the empty-selection rule in the same words as Settings", async () => {
+    // Onboarding and Settings → Comms & Brief write the SAME key
+    // (notification_settings.brief_insight_types), so they must present the
+    // same rule. An empty selection means "everything" — a real choice, not an
+    // unfinished form — and onboarding used to omit that, so the two screens
+    // described the same control differently.
+    analyticsConnected()
+    const { container } = mount()
+    expect(container.textContent).toContain("pick any, or leave empty for everything")
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
   it("renders Microsoft Teams disabled — there is no delivery path for it yet", async () => {
     analyticsConnected()
     mount()

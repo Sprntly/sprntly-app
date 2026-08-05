@@ -61,9 +61,63 @@ INSIGHT_TYPES: "dict[str, tuple[str, str]]" = {
 #: needed (schema enum, constraint list, validation).
 INSIGHT_TYPE_SLUGS: "tuple[str, ...]" = tuple(INSIGHT_TYPES.keys())
 
+#: slug -> (badge text, accent hex) for the CARD PILL the reader sees.
+#:
+#: Until 2026-08-05 the pill showed the top-insights skill's own 8-way taxonomy
+#: (Reliability, Growth, Demand, Retention, Competitive, Engagement, Compliance,
+#: Momentum) — a vocabulary the preference picker does not contain, so a reader
+#: who asked for "Reliability & incident signals" had no way to look at a card
+#: and tell whether their selection had been honoured. GROWTH in particular is
+#: not a preference slug at all. The pill now names the finding's OWN
+#: `insight_types`, i.e. the exact vocabulary the picker offers.
+#:
+#: The badge text is a short form of the picker's chip label (the chip wording
+#: in full is too long for an 11px uppercase pill); it lives here beside the
+#: prompt label so the two can never drift. Accents are reused verbatim from the
+#: skill taxonomy's existing palette — no new colours are introduced, each slug
+#: simply claims the hex whose meaning already matched it.
+INSIGHT_TYPE_BADGES: "dict[str, tuple[str, str]]" = {
+    "top_problems":        ("Top problem",      "#b23b52"),  # rose
+    "build_priorities":    ("What to build",    "#1a8a52"),  # green
+    "user_feedback":       ("User feedback",    "#5f57a6"),  # iris
+    "competitor_moves":    ("Competitor moves", "#b07a2e"),  # ochre
+    "reliability_signals": ("Reliability",      "#c0473c"),  # clay
+    "wins":                ("Win",              "#0f7d70"),  # teal
+}
+
 
 def is_valid_insight_type(slug: str) -> bool:
     return slug in INSIGHT_TYPES
+
+
+def display_insight_type(
+    insight_types: object, selected: "list[str] | None" = None,
+) -> "str | None":
+    """Which of a finding's insight types to show on its card.
+
+    A finding carries one or two, in the model's own order — the first is its
+    PRIMARY classification. We walk the finding's types in that order and take
+    the first one the reader selected, so a card whose primary type was asked
+    for keeps it, and a card whose primary was NOT asked for surfaces the
+    secondary type that was. Walking the SELECTION order instead would let a
+    reader's first chip override every card's primary and collapse distinct
+    findings to the same label. With no selection, the primary.
+
+    Returns None when the finding carries no known type, which
+    is the legacy case: briefs composed before the classifier existed have no
+    `insight_types` at all, and the caller must keep its old skill-taxonomy label
+    rather than invent one (the 8 skill types do not map cleanly onto the 6
+    preference slugs — retention, demand, engagement and compliance each have no
+    faithful counterpart).
+    """
+    types = clean_insight_types(insight_types)
+    if not types:
+        return None
+    wanted = set(selected or ())
+    for slug in types:
+        if slug in wanted:
+            return slug
+    return types[0]
 
 
 def clean_insight_types(values: object) -> "list[str]":

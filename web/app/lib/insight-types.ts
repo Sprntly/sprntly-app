@@ -97,6 +97,58 @@ const LABEL_BY_SLUG: Record<string, string> = Object.fromEntries(
   INSIGHT_TYPES.map((t) => [t.value, t.label]),
 )
 
+// The CARD PILL — badge text + accent for a finding, in the reader's own
+// vocabulary. Mirrors backend/app/insight_types.py INSIGHT_TYPE_BADGES.
+//
+// Until 2026-08-05 the pill showed the top-insights skill's separate 8-way
+// taxonomy (Reliability, Growth, Demand, Retention, Competitive, Engagement,
+// Compliance, Momentum). That vocabulary is not what the picker offers —
+// "Growth" is not a preference type at all — so a reader who asked for
+// "Reliability & incident signals" could not look at a card and tell whether
+// their selection had been honoured. The pill now names the finding's own
+// `insight_types`.
+//
+// `badge` is a short form of `label` above: the chip wording in full does not
+// fit an 11px uppercase pill. It lives beside the chip label so the two cannot
+// drift — swap these strings for `label` if the full wording is wanted.
+// Accents are the skill taxonomy's existing hexes, reassigned by meaning; no
+// new colours are introduced.
+export const INSIGHT_TYPE_BADGES: Record<InsightTypeSlug, { badge: string; accent: string }> = {
+  top_problems: { badge: "Top problem", accent: "#b23b52" }, // rose
+  build_priorities: { badge: "What to build", accent: "#1a8a52" }, // green
+  user_feedback: { badge: "User feedback", accent: "#5f57a6" }, // iris
+  competitor_moves: { badge: "Competitor moves", accent: "#b07a2e" }, // ochre
+  reliability_signals: { badge: "Reliability", accent: "#c0473c" }, // clay
+  wins: { badge: "Win", accent: "#0f7d70" }, // teal
+}
+
+/** Which of a finding's insight types to show on its card.
+ *
+ *  A finding carries one or two, in the model's own order — the first is its
+ *  PRIMARY classification. We walk the finding's types in that order and take
+ *  the first one the reader selected, so a card whose primary type was asked
+ *  for keeps it, and a card whose primary was NOT asked for surfaces the
+ *  secondary type that was. Walking the SELECTION order instead would let a
+ *  reader's first chip override every card's primary and collapse distinct
+ *  findings to the same label. With no selection, the primary.
+ *
+ *  Returns null for a legacy finding with no `insight_types` — the caller must
+ *  keep its old skill-taxonomy label rather than invent one, since the 8 skill
+ *  types have no faithful counterpart for retention, demand, engagement or
+ *  compliance. Mirrors backend/app/insight_types.py display_insight_type. */
+export function displayInsightType(
+  insightTypes: unknown,
+  selectedTypes: string[] = [],
+): InsightTypeSlug | null {
+  const types = cleanInsightTypes(insightTypes)
+  if (types.length === 0) return null
+  const wanted = new Set(selectedTypes)
+  for (const slug of types) {
+    if (wanted.has(slug)) return slug
+  }
+  return types[0]
+}
+
 export function isInsightTypeSlug(v: unknown): v is InsightTypeSlug {
   return typeof v === "string" && INSIGHT_TYPE_SET.has(v)
 }

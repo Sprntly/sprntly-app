@@ -374,6 +374,15 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     expect(document.querySelector("#comms-insight-note")).toBeNull()
   })
 
+  it("states the empty-selection rule in the same words as onboarding", () => {
+    // Paired with the matching assertion in PersonalizeStep.dom.test — the two
+    // screens write the same key and must describe it identically.
+    mountWith({})
+    expect(document.body.textContent).toContain(
+      "pick any, or leave empty for everything",
+    )
+  })
+
   it("ignores stored slugs that are no longer offered, along with unknown ones", () => {
     // `wins` is a real slug the pane no longer offers; the other is garbage.
     // Neither may render a phantom chip nor survive into the next save.
