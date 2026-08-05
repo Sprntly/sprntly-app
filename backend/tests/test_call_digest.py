@@ -1509,3 +1509,51 @@ def test_call_transcript_render_defaults_stay_fireflies_shaped():
         "date: 2026-06-20 · participants: a@x.com\n"
         "summary: o"
     )
+
+
+# ── answer/key_points field contract ─────────────────────────────────────────
+# Both VoC prompts drive `_ASK_RESPONSE_SCHEMA`, whose `key_points` is
+# documented as a "Short bullet summary of the answer" — i.e. redundant. Only
+# `answer` is rendered. Observed live on staging (asks 1079/1080): with no
+# field contract stated, the model wrote a lead-in sentence into `answer`
+# ("...here is the product-related feedback — grouped by theme:") and put all
+# nine/ten findings into `key_points`, so the user saw a colon and nothing
+# else — with status "ready" and error None. These are property tests on the
+# actual wording, not presence checks, because a vaguer instruction would let
+# the same split back in.
+
+def test_query_system_states_the_answer_field_contract():
+    s = cd._QUERY_SYSTEM
+    assert "THE WHOLE ANSWER GOES IN `answer`" in s
+    assert "only field rendered" in s
+    assert "redundant summary" in s
+
+
+def test_report_system_states_the_answer_field_contract():
+    s = cd._REPORT_SYSTEM
+    assert "THE WHOLE REPORT GOES IN `answer`" in s
+    assert "only field rendered" in s
+    assert "redundant summary" in s
+
+
+def test_both_voc_prompts_forbid_key_points_as_the_content_home():
+    """The specific failure mode, named in both prompts: `answer` as a lead-in
+    whose content lives in `key_points`."""
+    for name, s in (("_QUERY_SYSTEM", cd._QUERY_SYSTEM),
+                    ("_REPORT_SYSTEM", cd._REPORT_SYSTEM)):
+        assert "lead-in" in s, f"{name} does not name the lead-in failure"
+        assert "never the continuation of a sentence" in s, name
+
+
+def test_voc_prompts_do_not_invite_splitting_content_across_fields():
+    for name, s in (("_QUERY_SYSTEM", cd._QUERY_SYSTEM),
+                    ("_REPORT_SYSTEM", cd._REPORT_SYSTEM)):
+        low = s.lower()
+        for phrase in ("split the", "put the findings in key_points",
+                       "list them in key_points"):
+            assert phrase not in low, f"{name} invites a split: {phrase!r}"
+
+
+def test_voc_prompt_lengths_within_bounds():
+    assert 1200 <= len(cd._QUERY_SYSTEM) <= 3000
+    assert 2500 <= len(cd._REPORT_SYSTEM) <= 5000
