@@ -156,7 +156,9 @@ from app.db.custom_skills import (
 from app.db.connections import (
     delete_connection,
     delete_slack_connection,
+    delete_slack_connection_by_id,
     get_connection,
+    get_orphan_slack_connection,
     get_slack_connection,
     list_all_active_connections,
     list_connections,
@@ -318,7 +320,9 @@ __all__ = [
     # connections
     "delete_connection",
     "delete_slack_connection",
+    "delete_slack_connection_by_id",
     "get_connection",
+    "get_orphan_slack_connection",
     "get_slack_connection",
     "list_all_active_connections",
     "list_connections",
