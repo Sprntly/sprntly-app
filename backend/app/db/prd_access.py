@@ -94,8 +94,15 @@ def resolve_prd_access(*, prd_id: int, user_id: str, user_email: str | None) -> 
     Returns one of:
       {"outcome": "not_found"}
       {"outcome": "blocked", "reason": "different_company"}
+      {"outcome": "member", "owning_company_name": str|None,
+       "owner_company_id": str, "owner_workspace_id": str|None}
       {"outcome": "guest_view", "owning_company_name": str|None,
        "owner_company_id": str, "owner_workspace_id": str|None}
+
+    The `member` / `guest_view` split is the same one `resolve_share_access`
+    documents at length — a same-company caller who can already act in the
+    prd's owning workspace belongs in the real, EDITABLE app, not in the
+    read-only guest shell. See that function's docstring for the rationale.
     """
     owner = owning_info_for_prd(prd_id)
     if owner is None:
@@ -108,9 +115,16 @@ def resolve_prd_access(*, prd_id: int, user_id: str, user_email: str | None) -> 
         return {"outcome": "blocked", "reason": "different_company"}
 
     from app.db.companies import display_name_for_company_id
+    from app.db.workspaces import user_can_act_in_workspace
 
+    in_app = user_can_act_in_workspace(
+        workspace_id=owner["workspace_id"],
+        user_id=user_id,
+        company_id=owner["company_id"],
+        company_role=memberships[0].get("role") or "member",
+    )
     return {
-        "outcome": "guest_view",
+        "outcome": "member" if in_app else "guest_view",
         "owning_company_name": display_name_for_company_id(owner["company_id"]),
         "owner_company_id": owner["company_id"],
         "owner_workspace_id": owner["workspace_id"],

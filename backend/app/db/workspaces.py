@@ -272,6 +272,38 @@ def get_workspace_member(workspace_id: str, user_id: str) -> dict | None:
     return row
 
 
+def user_can_act_in_workspace(
+    *, workspace_id: str | None, user_id: str, company_id: str, company_role: str
+) -> bool:
+    """True when `user_id` could reach `workspace_id` through the ORDINARY
+    app (i.e. `auth._resolve_workspace` would hand them a WorkspaceContext
+    for it), rather than needing the read-only guest surface.
+
+    A deliberate mirror of `auth._resolve_workspace`'s access rule, not a
+    second policy: org owner/admin implicitly administer every workspace of
+    their company; everyone else needs a `workspace_members` row. Kept here
+    (db layer) instead of in `auth` because the callers — the share /
+    bare-link resolvers — must ask the question WITHOUT a FastAPI request
+    to build a context from.
+
+    `workspace_id=None` is an unbound legacy dataset (pre-multi-workspace
+    rollout). `deps.ownership._dataset_in_workspace` accepts those from any
+    workspace of the owning company, so an in-app open genuinely works —
+    hence True. Every other unresolvable case fails CLOSED (missing
+    workspace, or one belonging to a different company): returning False
+    only ever costs the caller the guest viewer they get today, whereas a
+    wrong True would route them into an app view that 404s.
+    """
+    if workspace_id is None:
+        return True
+    ws = get_workspace(workspace_id)
+    if not ws or ws.get("company_id") != company_id:
+        return False
+    if company_role in ("owner", "admin"):
+        return True
+    return get_workspace_member(workspace_id, user_id) is not None
+
+
 @retry_on_disconnect
 def list_workspace_members(workspace_id: str) -> list[dict]:
     """workspace_members rows enriched with profile display data (mirrors
