@@ -1,4 +1,12 @@
-"""POST /v1/chat/intent — the action-envelope decision for a chat message.
+"""The chat surfaces' two out-of-band decisions, either side of a message.
+
+POST /v1/chat/intent — the action-envelope decision for a chat message.
+POST /v1/chat/suggestions — next-prompt suggestions once an answer has landed.
+
+Both are read-only, both load the conversation server-side (ownership-scoped),
+and neither is on the answer path: `/intent` runs before the dispatch and
+`/suggestions` after the answer is already on screen, so the suggestion call
+can be slow, fail, or never return without the user losing anything.
 
 The single backend entry the chat surfaces call BEFORE dispatching a message:
 it loads the conversation history server-side, resolves the target PRD (the
@@ -25,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext
 from app.chat_intent import resolve_chat_intent
+from app.chat_suggestions import suggest_next_prompts
 from app.db.conversations import get_conversation_prd_id
 from app.deps.ownership import require_owned_prd
 from app.entitlements import require_agents_module
@@ -96,3 +105,47 @@ def chat_intent(
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = prd_title
     return envelope
+
+
+class ChatSuggestionsIn(BaseModel):
+    # The thread to continue. Required: suggestions are only meaningful for a
+    # conversation that has an answered turn in it, and the history is read
+    # server-side (ownership-checked) rather than trusted from the client.
+    conversation_id: int
+    # The active tab's open PRD, when there is one. Ownership-gated below.
+    prd_id: int | None = Field(default=None, ge=1)
+
+
+@router.post("/suggestions")
+def chat_suggestions(
+    body: ChatSuggestionsIn,
+    company: CompanyContext = Depends(require_agents_module),
+):
+    """0-3 next prompts continuing this conversation — or, very often, none.
+
+    Called AFTER an answer has rendered, never before or during: this is a
+    separate round trip precisely so it cannot delay, block or fail the answer
+    stream. A late or missing response costs the user nothing, which is why the
+    contract is `{suggestions: [...]}` with `[]` as an ordinary success rather
+    than an error anywhere.
+
+    Silence is the designed default — see app.chat_suggestions for the four
+    abstention layers. This route adds no suggestion logic of its own; it
+    resolves ownership, loads the thread, and hands over.
+    """
+    prd_id = body.prd_id
+    prd_title: str | None = None
+    if prd_id is not None:
+        # Same posture as /intent: a foreign prd_id is a hard 404.
+        prd_row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+        prd_title = (prd_row or {}).get("title") or None
+
+    # Ownership-scoped: `_load_history` returns [] for a conversation that is
+    # not the CALLER's, and an empty thread abstains — so a crafted
+    # conversation_id yields silence, never another user's turns.
+    history = _load_history(body.conversation_id, company.company_id, company.user_id)
+    return {
+        "suggestions": suggest_next_prompts(
+            company.company_id, history, prd_id=prd_id, prd_title=prd_title
+        )
+    }
