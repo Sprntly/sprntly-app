@@ -48,6 +48,144 @@ def test_clickup_puller_yields_tasks(monkeypatch):
     assert r.properties["tags"] == ["auth"]
 
 
+def test_asana_puller_yields_tasks(monkeypatch):
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    monkeypatch.setattr(asana, "list_projects",
+                        lambda tok, ws: [{"gid": "p1", "name": "Sprint 12"}])
+
+    def fake_list_project_tasks(tok, project_gid, *, limit):
+        assert project_gid == "p1"
+        return [{
+            "gid": "t1", "name": "Fix login bug",
+            "notes": "Users report 500 on login", "completed": False,
+            "permalink_url": "https://app.asana.com/0/1/t1",
+            "modified_at": "2026-07-01T00:00:00.000Z",
+            "due_on": "2026-07-15",
+            "assignee": {"name": "Jide", "email": "jide@x.com"},
+            "memberships": [
+                {"project": {"gid": "p1"},
+                 "section": {"gid": "s1", "name": "In Progress"}},
+            ],
+            "custom_fields": [
+                {"gid": "cf1", "name": "Severity", "resource_subtype": "enum",
+                 "enum_value": {"gid": "e1", "name": "High"}},
+            ],
+        }]
+    monkeypatch.setattr(asana, "list_project_tasks", fake_list_project_tasks)
+
+    recs = list(asana.pull("tok"))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.provider, r.kind, r.external_id) == ("asana", "task", "t1")
+    assert r.title == "Fix login bug"
+    assert r.text == "Users report 500 on login"
+    assert r.properties["section"] == "In Progress"
+    assert r.properties["completed"] is False
+    assert r.properties["assignee"] == "Jide"
+    assert r.properties["due_date"] == "2026-07-15"
+    assert r.properties["project"] == "Sprint 12"
+    assert r.properties["permalink"] == "https://app.asana.com/0/1/t1"
+    assert r.properties["custom_fields"] == {"Severity": {"id": "e1", "name": "High"}}
+    assert r.timestamp == "2026-07-01T00:00:00.000Z"
+
+
+def test_asana_puller_empty_workspace_yields_none(monkeypatch):
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    monkeypatch.setattr(asana, "list_projects", lambda tok, ws: [])
+
+    def unexpected(*a, **k):
+        raise AssertionError("list_project_tasks must not be called — no projects")
+    monkeypatch.setattr(asana, "list_project_tasks", unexpected)
+
+    assert list(asana.pull("tok")) == []
+
+
+def test_asana_puller_401_raises_auth_expired(monkeypatch):
+    """A per-project auth failure is a reconnect signal for the WHOLE token —
+    it must propagate, never be swallowed by the per-project isolation that
+    catches every OTHER exception (parity with confluence's never-swallows
+    test)."""
+    from app.connectors.asana_oauth import AsanaAuthExpiredError
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    monkeypatch.setattr(asana, "list_projects",
+                        lambda tok, ws: [{"gid": "p1", "name": "Sprint 12"}])
+
+    def boom(tok, project_gid, *, limit):
+        raise AsanaAuthExpiredError("Asana rejected the stored token")
+    monkeypatch.setattr(asana, "list_project_tasks", boom)
+
+    with pytest.raises(AsanaAuthExpiredError):
+        list(asana.pull("tok"))
+
+
+def test_asana_puller_skips_an_inaccessible_project_and_continues(monkeypatch):
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    monkeypatch.setattr(asana, "list_projects", lambda tok, ws: [
+        {"gid": "p_bad", "name": "Locked"}, {"gid": "p_ok", "name": "Open"},
+    ])
+
+    def fake(tok, project_gid, *, limit):
+        if project_gid == "p_bad":
+            raise RuntimeError("403 forbidden")
+        return [{"gid": "t1", "name": "Task", "notes": "", "completed": False,
+                 "memberships": []}]
+    monkeypatch.setattr(asana, "list_project_tasks", fake)
+
+    recs = list(asana.pull("tok"))
+    assert [r.external_id for r in recs] == ["t1"]
+
+
+def test_asana_puller_project_cap_is_enforced(monkeypatch):
+    """A workspace with far more than `_PROJECT_LIMIT` projects (the '10k
+    tasks scattered across many projects' shape AC5 worries about) must not
+    produce an unbounded pull."""
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    projects = [{"gid": f"p{i}", "name": f"Project {i}"} for i in range(20)]
+    monkeypatch.setattr(asana, "list_projects", lambda tok, ws: projects)
+
+    seen = []
+    def fake(tok, project_gid, *, limit):
+        seen.append(project_gid)
+        return []
+    monkeypatch.setattr(asana, "list_project_tasks", fake)
+
+    list(asana.pull("tok"))
+    assert seen == [p["gid"] for p in projects[:asana._PROJECT_LIMIT]]
+    assert len(seen) < len(projects)
+
+
+def test_asana_puller_text_is_capped_at_2000_chars(monkeypatch):
+    from app.kg_ingest.pullers import asana
+
+    monkeypatch.setattr(asana, "list_workspaces", lambda tok: [{"gid": "ws1"}])
+    monkeypatch.setattr(asana, "list_projects",
+                        lambda tok, ws: [{"gid": "p1", "name": "P"}])
+    monkeypatch.setattr(asana, "list_project_tasks", lambda tok, pg, *, limit: [
+        {"gid": "t1", "name": "T", "notes": "x" * 3000, "completed": False,
+         "memberships": []},
+    ])
+    r = next(iter(asana.pull("tok")))
+    assert len(r.text) == 2000
+
+
+def test_asana_is_registered_with_access_token_credential():
+    from app.kg_ingest.runner import PULLERS
+
+    puller, key, hint = PULLERS["asana"]
+    assert key == "access_token"
+    assert "project_mgmt" in hint
+
+
 def test_jira_puller_yields_issues(monkeypatch):
     from app.connectors import jira_oauth
     from app.kg_ingest.pullers import jira

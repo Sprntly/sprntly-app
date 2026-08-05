@@ -411,6 +411,29 @@ def get_task(access_token: str, task_gid: str, *, project_gid: str) -> dict[str,
     }
 
 
+def list_project_tasks(
+    access_token: str, project_gid: str, *, limit: int
+) -> list[dict[str, Any]]:
+    """Up to `limit` tasks in `project_gid` (GET /projects/{gid}/tasks),
+    normalized field set via `_TASK_OPT_FIELDS` — the same shape `get_task`
+    returns a single task in. KG-puller-only; no counterpart on the
+    ticket-sync write surface (see app.kg_ingest.pullers.asana).
+
+    ONE page: Asana caps a single request's `limit` at 100 (enforced here
+    too, defensively), and this helper carries no pagination cursor. The
+    puller bounds a workspace-wide pull by capping how many PROJECTS it
+    visits, not by walking deeper into any one of them — see that module's
+    docstring. Raises AsanaAuthExpiredError on 401/403 (via `_get`); any
+    other failure also propagates so the puller's per-project isolation can
+    log and skip it (this is a real fetch, not best-effort metadata, so it
+    does not swallow errors itself)."""
+    data = _get(
+        access_token, f"/projects/{project_gid}/tasks",
+        params={"opt_fields": _TASK_OPT_FIELDS, "limit": min(limit, 100)},
+    )
+    return data if isinstance(data, list) else []
+
+
 def create_task(
     access_token: str, project_gid: str, *, name: str, notes: str | None = None,
 ) -> dict[str, Any]:
