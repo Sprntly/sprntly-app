@@ -40,6 +40,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "fireflies": "Fireflies",
     "gong": "Gong",
     "zoom": "Zoom",
+    "google_meet": "Google Meet",
     "github": "GitHub",
     "gitlab": "GitLab",
     "hubspot": "HubSpot",
@@ -111,6 +112,12 @@ LOOKUP_PROVIDERS: tuple[str, ...] = (
 #: Connected (they sync into the KG) but no live-read adapter yet.
 DEFERRED: dict[str, str] = {
     "asana": "Asana",
+    # Syncs into the KG (kg_ingest/pullers/google_meet.py) but has no live-read
+    # adapter yet, so "what did we say in google meet yesterday" is answered
+    # honestly rather than from a half-capability. Deliberately listed rather
+    # than omitted: a user who names Meet deserves the honest answer, not a
+    # KG-flavoured guess from the generic path.
+    "google_meet": "Google Meet",
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",

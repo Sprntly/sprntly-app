@@ -81,6 +81,15 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // host and connecting it requires a Zoom account admin — which the
       // connect modal says before the OAuth tab opens.
       { id: "zoom",       name: "Zoom",       logo: "Z", logoText: "Z", logoColor: "#0B5CFF", logoSvg: "/connectors/zoom.svg", oauth: true, types: ["meetings"] },
+      // Meeting transcripts from the Meet REST API. NOT org-wide, and the
+      // opposite of Zoom on exactly the axis a customer will assume they match:
+      // Google only exposes meetings the connected account ORGANIZED, so each
+      // teammate connects their own — and only the last 30 days exist, because
+      // Google deletes Meet API records after that. Both facts are stated in
+      // the connect modal (ConnectorConnectModal's CONNECT_PREREQS) before the
+      // OAuth tab opens, because someone expecting Zoom-shaped coverage will
+      // read a correct, complete sync as a broken one.
+      { id: "google_meet", name: "Google Meet", logo: "M", logoText: "M", logoColor: "#00832D", logoSvg: "/connectors/google_meet.svg", oauth: true, types: ["meetings"] },
       // Slack is MULTI-TYPE (product decision 2026-07-30): a communication
       // tool AND a customer-voice source — the corpus sync pulls the channels
       // the user selects. Both types stay (they mirror

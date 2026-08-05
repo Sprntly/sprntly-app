@@ -169,6 +169,20 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Google Meet connector (OAuth) — SHARES the google_client_id/secret above.
+    # One Cloud project, one OAuth client, a SECOND redirect URI and a separate
+    # `google_meet` connection row. That is the pattern a1e16c40 corrected the
+    # docs to: a provider gets its own app only when the consent screen would
+    # otherwise ask for permissions the customer did not come for, and here it
+    # would not — Google shows the granted scope list per authorization, so a
+    # Drive-only customer is never asked for Meet and vice versa.
+    #
+    # The SCOPES are deliberately NOT shared: google_oauth.DRIVE_SCOPES must
+    # never grow a Meet scope. Scopes bake into a token at consent and a refresh
+    # carries the old set forward, so widening the constant would leave every
+    # stored Drive token claiming a capability it does not have — silent 403s on
+    # a connection that reports healthy. See connectors/google_meet.MEET_SCOPES.
+    google_meet_oauth_redirect_uri: str = ""
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 

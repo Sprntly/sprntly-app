@@ -143,6 +143,84 @@ def test_zoom_has_a_live_lookup_adapter_not_absent_or_deferred():
     assert provider is not None and provider.provider == "zoom"
 
 
+def test_meet_the_verb_never_routes_to_google_meet_the_connector():
+    """"Meet" is far more dangerous than "zoom" was, and it is why this provider
+    is STRONG-tier with a multi-word pattern rather than ambiguous-tier.
+
+    The ambiguous tier requires a read-context match — but
+    `_CONNECTOR_READ_CONTEXT` includes `meetings?`, `calls?`, `find` and
+    `check`, so "can we meet to go over the tickets" would satisfy BOTH halves
+    of that gate and be hijacked, turning a scheduling question into "Google
+    Meet syncs into your knowledge graph, but I can't query it live". Requiring
+    the "google"/"g" qualifier makes that impossible rather than unlikely."""
+    for question in [
+        "can we meet to go over the tickets",
+        "let's meet tomorrow to check the release",
+        "who should meet with the customer about this",
+        "find a time to meet about the roadmap",
+        "we meet every monday to review open issues",
+        "should we meet or just send the doc",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
+def test_google_meet_the_source_is_intercepted():
+    """A genuine ask about the transcripts still has to reach the connector —
+    false negatives are the expensive failure on the other side."""
+    for question in [
+        "what did we say in google meet yesterday",
+        "check google meet for the call with acme",
+        "pull the gmeet transcript about pricing",
+        "what came up in the g-meet call last week",
+    ]:
+        assert is_connector_lookup(question) == {"google_meet"}, question
+
+
+def test_google_meet_is_not_confused_with_google_drive():
+    """Two providers sharing a first word and an OAuth client. Naming one must
+    never return the other — a Drive answer to a meetings question reads as a
+    confidently wrong search."""
+    assert is_connector_lookup(
+        "what did we say in google meet yesterday") == {"google_meet"}
+    assert is_connector_lookup(
+        "find the google drive doc about pricing") == {"google_drive"}
+
+
+def test_building_the_google_meet_integration_is_not_a_lookup():
+    """The artifact veto. A customer who BUILDS integrations asks this shape
+    constantly, and answering "Google Meet syncs into your KG but I can't query
+    it live" is a dead end with the skill that does answer it never reached."""
+    for question in [
+        "should we build the google meet integration",
+        "how long would the google meet connector take",
+    ]:
+        assert is_connector_lookup(question) is None, question
+    # And the comparison veto, for the same reason.
+    assert is_connector_lookup(
+        "how does google meet compare to zoom for our customers") is None
+
+
+def test_google_meet_syncs_but_has_no_live_adapter_yet():
+    """Meet connects and syncs into the KG (kg_ingest/pullers/google_meet.py)
+    but has no live-read adapter in this PR — so it belongs in DEFERRED, whose
+    copy says exactly that. Absent from every tier it would fall to the generic
+    path and be answered with a KG-flavoured guess; in NO_CONNECTOR it would be
+    told, falsely, that Sprntly has no Meet connector at all."""
+    from app.connector_lookup.registry import (
+        DEFERRED,
+        LOOKUP_PROVIDERS,
+        NO_CONNECTOR,
+        display_name,
+        provider_for,
+    )
+
+    assert "google_meet" in DEFERRED
+    assert "google_meet" not in LOOKUP_PROVIDERS
+    assert "google_meet" not in NO_CONNECTOR
+    assert display_name("google_meet") == "Google Meet"
+    assert provider_for("google_meet") is None
+
+
 def test_zoom_recordings_still_belong_to_the_voice_of_customer_skill():
     """`zoom recordings` is a VoC skill trigger and has been since before this
     connector existed. The two do not fight: qa_agent.answer runs the VoC

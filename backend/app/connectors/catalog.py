@@ -78,6 +78,14 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     # actually said on a call is measured first-party signal, not somebody's
     # write-up of it.
     "zoom": [MEETINGS],
+    # Google Meet transcripts, read straight from the Meet REST API. Typed
+    # `meetings` like Zoom/Fireflies/Gong and evidence-bearing for the same
+    # reason: what a customer actually said on a call is measured first-party
+    # signal. Its coverage is narrower than Zoom's — Google only exposes
+    # meetings the connected account ORGANIZED, and only for 30 days — but that
+    # is a question of how much evidence it brings, not of whether it is
+    # evidence.
+    "google_meet": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
     # Research
     # Marvin is a user-research repository (interviews, usability sessions,

@@ -365,7 +365,18 @@ function lookupItem(providerId: string): ConnectorItemRow | null {
   return null
 }
 
-async function callDisconnect(providerId: string): Promise<void> {
+/**
+ * Route a disconnect to the provider's own endpoint.
+ *
+ * Exported ONLY so a test can hold it. This switch is the single place a newly
+ * shipped connector silently breaks: everything else about a connector is
+ * data-driven off CONNECTOR_CATALOG, so a new row renders, connects, probes and
+ * syncs without touching this file — and then Disconnect throws "not
+ * implemented" at the one moment a user is trying to revoke access to their own
+ * data. A catalog row with no branch here is a bug, and the test next door is
+ * what says so.
+ */
+export async function callDisconnect(providerId: string): Promise<void> {
   if (providerId === "google_drive") {
     await connectorsApi.disconnectGoogleDrive()
   } else if (providerId === "figma") {
@@ -378,6 +389,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectConfluence()
   } else if (providerId === "zoom") {
     await connectorsApi.disconnectZoom()
+  } else if (providerId === "google_meet") {
+    await connectorsApi.disconnectGoogleMeet()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
