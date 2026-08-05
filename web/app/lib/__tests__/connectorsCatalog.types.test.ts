@@ -46,8 +46,9 @@ describe("connector types", () => {
 
   it("Slack is dual-typed communication + customer-voice (multi-type)", () => {
     expect(connectorTypes("slack")).toEqual(["communication", "customer-voice"])
-    // It answers to BOTH type queries, and appears ONCE in each despite
-    // rendering a card on two category shelves.
+    // It answers to BOTH type queries even though it renders a single card on
+    // the Voice shelf — types describe what the tool IS, not where it is
+    // shelved. Its communication half is what Comms & Brief delivery uses.
     const commsIds = connectorsWithType("communication").map((i) => i.id)
     const voiceIds = connectorsWithType("customer-voice").map((i) => i.id)
     expect(commsIds.filter((id) => id === "slack")).toEqual(["slack"])

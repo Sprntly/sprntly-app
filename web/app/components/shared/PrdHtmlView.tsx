@@ -45,11 +45,40 @@ const PANEL_OVERRIDE_CSS = `
 const RESIZE_BUDGET = 24
 
 const HTML_DRAFT_KEY = (prdId: number) => `sprntly_prd_html_draft_${prdId}`
-function loadHtmlDraft(prdId: number): string | null {
-  try { return localStorage.getItem(HTML_DRAFT_KEY(prdId)) } catch { return null }
+
+/** A draft is an edit that has NOT reached the server yet, so it records the
+ *  server document it was based on (`base`) alongside the edited text (`doc`).
+ *  Without `base` a draft is indistinguishable from a stale shadow copy: it
+ *  wins over the server forever, so a PRD another user has since edited keeps
+ *  rendering the local copy — and the next keystroke autosaves that stale doc
+ *  back over their saved work. Comparing against `base` scopes the draft to
+ *  exactly what it is for: recovering unsaved work on a document nobody else
+ *  has moved on. */
+type HtmlDraft = { base: string; doc: string }
+
+function loadHtmlDraft(prdId: number): HtmlDraft | null {
+  try {
+    const raw = localStorage.getItem(HTML_DRAFT_KEY(prdId))
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed === "object" && parsed !== null &&
+      typeof (parsed as HtmlDraft).base === "string" &&
+      typeof (parsed as HtmlDraft).doc === "string"
+    ) return parsed as HtmlDraft
+    // Legacy drafts (a bare HTML string) carry no base, so there is no way to
+    // tell a genuine unsaved edit from the stale shadow copy described above.
+    // Drop them — the server copy is the one that is definitely current.
+    return null
+  } catch { return null }
 }
-function saveHtmlDraft(prdId: number, html: string) {
-  try { localStorage.setItem(HTML_DRAFT_KEY(prdId), html) } catch { /* ignore */ }
+
+function saveHtmlDraft(prdId: number, draft: HtmlDraft) {
+  try { localStorage.setItem(HTML_DRAFT_KEY(prdId), JSON.stringify(draft)) } catch { /* ignore */ }
+}
+
+function clearHtmlDraft(prdId: number) {
+  try { localStorage.removeItem(HTML_DRAFT_KEY(prdId)) } catch { /* ignore */ }
 }
 
 /**
@@ -68,6 +97,16 @@ function saveHtmlDraft(prdId: number, html: string) {
  * the HTML page round-trips as HTML — the full edited document is stored in
  * `payload_md`, so the visual system survives an edit. Autosaves on input
  * (debounced) and exposes an imperative `save()` for the panel's "Save now".
+ *
+ * `readOnly`: the model-generated document carries its own native
+ * `contenteditable` markup (part of the page's HTML, not something this
+ * component adds) — a guest-mode caller can't rely on an outer prop to make
+ * arbitrary generated HTML non-editable, so when `readOnly` is set this
+ * component (a) force-disables every `[contenteditable]` element it finds
+ * once the iframe loads, (b) never wires the debounced input→persist
+ * listener, and (c) makes `persist` itself (and therefore the imperative
+ * `save()`) refuse to call `prdApi.update` at all — three independent stops
+ * on the same write path, not just a UI omission.
  */
 export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   html: string
@@ -79,7 +118,11 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
    *  (the panel switches to its Evidence tab). Omitted → no truncation, so the
    *  full list renders (e.g. when the Evidence tab is unavailable). */
   onViewMoreEvidence?: () => void
-}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence }, ref) {
+  /** Guest-mode / read-only rendering — see the doc comment above. Defaults
+   *  to false (existing editable behavior), so every non-guest caller is
+   *  byte-for-byte unchanged. */
+  readOnly?: boolean
+}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence, readOnly = false }, ref) {
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -89,14 +132,28 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   const titleRef = useRef(title)
   titleRef.current = title
 
-  // The initial document: a local draft (a prior unsaved edit) wins over the
-  // server copy so an in-progress edit survives a remount. Resolved once per
-  // prdId and fed to `srcDoc` — never updated on parent re-render, so keystrokes
-  // inside the iframe are not clobbered by a reset.
+  // The initial document: a local draft (a prior UNSAVED edit) wins over the
+  // server copy so an in-progress edit survives a remount — but only while the
+  // server still holds the document that draft was based on. Once anyone else
+  // has saved, the server copy is newer and wins, otherwise a collaborator's
+  // edits stay invisible here and get overwritten by the next autosave.
+  // Resolved once per prdId and fed to `srcDoc` — never updated on parent
+  // re-render, so keystrokes inside the iframe are not clobbered by a reset.
   const initialDoc = useRef<string>("")
+  // The server document this editing session started from — the `base` stamped
+  // onto any draft written below.
+  const baseDoc = useRef<string>("")
   const [docReady, setDocReady] = useState(false)
   useEffect(() => {
-    initialDoc.current = loadHtmlDraft(prdId) ?? stripHtmlCodeFence(html)
+    const server = stripHtmlCodeFence(html)
+    const draft = loadHtmlDraft(prdId)
+    if (draft && draft.base !== server) {
+      // Someone else saved since this draft was taken — drop it rather than
+      // shadow (and later clobber) their work.
+      clearHtmlDraft(prdId)
+    }
+    baseDoc.current = server
+    initialDoc.current = draft && draft.base === server ? draft.doc : server
     setDocReady(true)
     return () => setDocReady(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -117,18 +174,31 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   }, [])
 
   const persist = useCallback(async () => {
+    // The real backstop: even if something upstream still calls save() (the
+    // imperative handle, a stray input listener), this refuses to reach
+    // prdApi.update for a guest — never just a UI-level omission.
+    if (readOnly) return
     const doc = readDoc()
     if (doc == null) return
     onStatus?.("saving")
-    saveHtmlDraft(prdId, doc)
+    // Written BEFORE the request so a crash or closed tab mid-flight still
+    // recovers the edit; cleared again the moment the server has it.
+    saveHtmlDraft(prdId, { base: baseDoc.current, doc })
     try {
       await prdApi.update(prdId, { title: titleRef.current, payload_md: doc })
+      // Saved — this is no longer an unsaved edit, so the draft must go. Left
+      // behind, it outranks the server copy on every later open, which is how a
+      // collaborator's saved edits became invisible to whoever edited last.
+      clearHtmlDraft(prdId)
+      // The server now holds `doc`; subsequent drafts in this session are based
+      // on it, not on the document we originally loaded.
+      baseDoc.current = doc
       onStatus?.("saved")
     } catch {
       // Local draft is preserved; surface as saved so the UI isn't stuck.
       onStatus?.("saved")
     }
-  }, [prdId, onStatus, readDoc])
+  }, [prdId, onStatus, readDoc, readOnly])
 
   useImperativeHandle(ref, () => ({ save: persist }), [persist])
 
@@ -167,6 +237,21 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       style.textContent = PANEL_OVERRIDE_CSS
       ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
     }
+    // Guest mode: the document's own `contenteditable` markup is part of the
+    // model-generated HTML, not something this component set — force every
+    // such element to non-editable rather than trusting the source content to
+    // already be safe. Also make designMode explicit (belt-and-suspenders;
+    // designMode defaults to "off" but a same-origin doc can flip it).
+    if (readOnly) {
+      cdoc.querySelectorAll("[contenteditable]").forEach((el) => {
+        el.setAttribute("contenteditable", "false")
+      })
+      try {
+        cdoc.designMode = "off"
+      } catch {
+        /* not fatal — the per-element attribute above is the real guard */
+      }
+    }
     // Fold a long Evidence list to its top 3 with a "View more evidence" link
     // (viewer-only — stripped in readDoc). Guarded so a malformed doc can't break
     // the resize/autosave wiring below.
@@ -195,6 +280,10 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     // Fonts land after load and shift line counts; ResizeObserver catches most
     // of it, but this covers engines that don't reflow the observed box.
     cdoc.fonts?.ready.then(() => resize()).catch(() => { /* best effort */ })
+    // Guest mode: never wire the autosave listener at all — the elements are
+    // already non-editable above, so there's nothing for it to react to, and
+    // this keeps the read-only path from scheduling any persist() call.
+    if (readOnly) return
     const onInput = () => {
       onStatus?.("unsaved")
       // Typing genuinely changes the document's height — refill the budget so a
@@ -205,7 +294,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       saveTimer.current = setTimeout(persist, 2000)
     }
     cdoc.addEventListener("input", onInput)
-  }, [resize, persist, onStatus, onViewMoreEvidence])
+  }, [resize, persist, onStatus, onViewMoreEvidence, readOnly])
 
   useEffect(() => () => {
     if (saveTimer.current) clearTimeout(saveTimer.current)

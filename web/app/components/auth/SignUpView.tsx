@@ -3,7 +3,8 @@
 import Link from "next/link"
 import { AuthShell } from "./AuthShell"
 import { PasswordStrengthBar } from "./PasswordStrengthBar"
-import { ArrowRight, Eye, EyeOff, Google, Key } from "./icons"
+import { ArrowRight, Eye, EyeOff, Google, Key, Spinner } from "./icons"
+import { ShareContextStrip } from "../shared/ShareContextStrip"
 
 // Roles from design-v4 page 03 ("Who are you?").
 export const V4_ROLES = [
@@ -24,6 +25,11 @@ export type SignUpStep1ViewProps = {
   password: string
   confirmPassword: string
   showPassword: boolean
+  /** True while the email-availability check is in flight. */
+  submitting: boolean
+  /** True once the Google OAuth redirect has been kicked off — the browser
+   *  leaves this page, so the button stays busy rather than resetting. */
+  googleSubmitting: boolean
   error: string | null
   termsHref: string
   privacyHref: string
@@ -33,11 +39,22 @@ export type SignUpStep1ViewProps = {
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
   onGoogle: () => void
+  /** Set only when this sign-up originated from a valid `?share=` artifact
+   *  link — mounts the ShareContextStrip + a domain-naming hint. Absent (the
+   *  default) renders byte-identically to before this ticket. */
+  shareContext?: { title: string; sharerName: string; requiredDomain: string | null }
 }
 
 export function SignUpStep1View(props: SignUpStep1ViewProps) {
   return (
     <AuthShell tag="1 of 2 · Create account">
+      {props.shareContext && (
+        <ShareContextStrip
+          kind="sign-up"
+          title={props.shareContext.title}
+          sharerName={props.shareContext.sharerName}
+        />
+      )}
       <div className="auth-h">Create your <em>account.</em></div>
       <div className="auth-sub">Start with the basics. We&apos;ll personalize the rest next.</div>
 
@@ -55,6 +72,11 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
             autoComplete="email"
             required
           />
+          {props.shareContext?.requiredDomain && (
+            <div className="field-hint" data-testid="sign-up-domain-hint">
+              Use your {props.shareContext.requiredDomain} work email to view what was shared with you.
+            </div>
+          )}
         </div>
         <div className="field">
           <div className="field-l">
@@ -118,17 +140,35 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
             ))}
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}
-        <button type="submit" className="btn btn-brand btn-block" style={{ marginTop: 6 }}>
-          Create account
-          <ArrowRight width={14} height={14} />
+        {/* Busy for the whole email-availability round-trip, so the click has
+            visible feedback instead of a silent pause before step 2. */}
+        <button
+          type="submit"
+          className="btn btn-brand btn-block"
+          style={{ marginTop: 6 }}
+          disabled={props.submitting || props.googleSubmitting}
+          aria-busy={props.submitting}
+        >
+          {props.submitting ? "Checking…" : "Create account"}
+          {props.submitting ? (
+            <Spinner width={14} height={14} />
+          ) : (
+            <ArrowRight width={14} height={14} />
+          )}
         </button>
       </form>
 
       <div className="auth-divider">or continue with</div>
       <div className="sso-row">
-        <button type="button" className="sso-btn" onClick={props.onGoogle}>
-          <Google />
-          Sign up with Google
+        <button
+          type="button"
+          className="sso-btn"
+          onClick={props.onGoogle}
+          disabled={props.submitting || props.googleSubmitting}
+          aria-busy={props.googleSubmitting}
+        >
+          {props.googleSubmitting ? <Spinner /> : <Google />}
+          {props.googleSubmitting ? "Redirecting…" : "Sign up with Google"}
         </button>
         <button type="button" className="sso-btn" disabled>
           <Key />
@@ -224,18 +264,32 @@ export function SignUpStep2View(props: SignUpStep2ViewProps) {
           </div>
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}
+        {/* `submitting` stays true through the redirect that follows a
+            successful signup (see sign-up/page.tsx) — the account call and the
+            route change together are seconds of wait, and the button must not
+            flip back to "Continue" in the middle of it. */}
         <button
           type="submit"
           className="btn btn-brand btn-block"
           style={{ marginTop: 10 }}
           disabled={props.submitting}
+          aria-busy={props.submitting}
         >
           {props.submitting ? "Creating account…" : "Continue"}
-          {!props.submitting && <ArrowRight width={14} height={14} />}
+          {props.submitting ? (
+            <Spinner width={14} height={14} />
+          ) : (
+            <ArrowRight width={14} height={14} />
+          )}
         </button>
       </form>
       <div className="auth-foot">
-        <button type="button" className="auth-link" onClick={props.onBack}>
+        <button
+          type="button"
+          className="auth-link"
+          onClick={props.onBack}
+          disabled={props.submitting}
+        >
           Back
         </button>
       </div>

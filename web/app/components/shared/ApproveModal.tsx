@@ -12,7 +12,7 @@
 // Prototype", navigates to that in-tab canvas — all delegated to the shared
 // useGeneratePrototype() hook, which owns the existence check, the loading
 // overlay lifecycle, and the notify-when-ready side effects.
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { usePathname } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
@@ -22,9 +22,35 @@ import { useGeneratePrototype } from "../design-agent/useGeneratePrototype"
 import { IconSparkle } from "./app-icons"
 
 export function ApproveModal() {
-  const { activeModal, closeModal, openDrawer, openModal } = useNavigation()
+  const { activeModal, closeModal, openDrawer, openModal, showToast } = useNavigation()
   const { content } = useContent()
   const prd = content.prd
+
+  // handleNotifyWhenReady (below) is passed into useGeneratePrototype as an
+  // OPTION, so it can't close over the hook's own return value directly —
+  // these refs are populated from `gen.loadingScreenProps` right after the
+  // hook call below and read only inside the callback (never during render).
+  const genProtoIdRef = useRef<number | null>(null)
+  const genOnCancelRef = useRef<() => void>(() => {})
+
+  // ApproveModal's own "Notify me when ready" — this modal (unlike
+  // PrototypeRoute) stays mounted after notify rather than navigating away:
+  // the completion toast fires in-place with a manual "Open" action once the
+  // still-mounted GenerateModal's onGenDone resolves. useGeneratePrototype's
+  // own default now navigates to Top Insights (matching PrototypeRoute) on
+  // every host that doesn't supply an override, so this host must supply its
+  // own to keep that stay-mounted contract — reuses the hook's own
+  // `onCancel` (identical clear-timers/notify-mode/hide-overlay dismissal the
+  // old shared default relied on) rather than duplicating that logic here.
+  const handleNotifyWhenReady = useCallback(() => {
+    showToast("Prototype is processing", "We'll let you know when it's ready.")
+    if (genProtoIdRef.current != null) {
+      window.dispatchEvent(
+        new CustomEvent("da:generating", { detail: { prototypeId: genProtoIdRef.current } }),
+      )
+    }
+    genOnCancelRef.current()
+  }, [showToast])
 
   const gen = useGeneratePrototype(prd?.prd_id ?? null, {
     figmaFileKey: prd?.figma_file_key ?? null,
@@ -34,7 +60,10 @@ export function ApproveModal() {
     listenForCrossSurfaceGenerating: true,
     open: activeModal === "generate",
     onOpenChange: (open) => (open ? openModal("generate") : closeModal()),
+    onNotifyWhenReady: handleNotifyWhenReady,
   })
+  genProtoIdRef.current = gen.loadingScreenProps.prototypeId
+  genOnCancelRef.current = gen.loadingScreenProps.onCancel
 
   // Guard for "View Prototype" re-verification: dims the option while the
   // hook's re-verify fetch is in flight. Not part of the hook's own contract —

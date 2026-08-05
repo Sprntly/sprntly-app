@@ -46,6 +46,17 @@ describe("SlackSyncChannelsPickerView", () => {
     expect(html).toContain("every channel the bot has been invited to")
   })
 
+  it("says what ticking a channel actually does, and keeps both warnings", () => {
+    const html = render()
+    // What gets pulled, in the user's words — not just "reads messages".
+    expect(html).toContain("customer feedback and conversations")
+    expect(html).toContain("knowledge base")
+    // Unticking is destructive on the backend; the hint must still say so.
+    expect(html).toContain("deletes the messages already pulled")
+    // Workspace-wide and admin-gated.
+    expect(html).toContain("only admins can change")
+  })
+
   it("ticks the checkboxes for selected channel ids", () => {
     const html = render({ selectedIds: new Set(["C2"]) })
     // Exactly one checked box — the selected private channel.

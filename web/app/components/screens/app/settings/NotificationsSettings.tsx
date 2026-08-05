@@ -337,9 +337,18 @@ export function NotificationsSettings() {
               <p className="ob-slack-sub">Checking Slack connection…</p>
             ) : slackActive ? (
               <>
+                {/*
+                  "Pick where Sprntly posts your brief" undersold this: the
+                  picker below sets the target for everything this page sends,
+                  and it offers a DM as well as a channel — so name both, and
+                  use the same "product comms" wording as the not-connected
+                  state directly below. account_label stays interpolated so
+                  someone with two Slack installs knows which one this is.
+                */}
                 <p className="ob-slack-sub">
                   Connected{slack?.account_label ? ` — ${slack.account_label}` : ""}.
-                  Pick where Sprntly posts your brief below.
+                  Choose where Sprntly sends your product comms — a channel, or
+                  a direct message to you.
                 </p>
                 <SlackChannelPicker
                   savedTargetType={slack?.config?.target_type as "channel" | "dm" | undefined}

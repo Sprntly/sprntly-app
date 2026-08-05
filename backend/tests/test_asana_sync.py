@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.stories.generate import Story
+
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID literal,
+# pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
 
 CID = "11111111-2222-3333-4444-555555555555"
 PROJ = "PROJ_GID"

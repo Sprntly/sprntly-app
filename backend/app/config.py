@@ -32,11 +32,17 @@ class Settings(BaseSettings):
     design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
     # Process-wide cap on concurrent in-flight Anthropic streams; calls beyond
-    # this QUEUE instead of piling on. The default is conservative for a small
-    # box; raise it (env LLM_MAX_CONCURRENCY) on hosts with RAM headroom —
-    # measured: 6 concurrent streams used ~80 MB on the 3.8 GB prod box. Values
-    # <= 0 fall back to the default (never 0, which would deadlock).
-    llm_max_concurrency: int = 3
+    # this QUEUE instead of piling on. Raised from 3 to 6 once a real caller
+    # (competitive_intel's per-competitor capture fan-out) started dispatching
+    # several of its own calls concurrently — measured: 6 concurrent streams
+    # used ~80 MB on the 3.8 GB prod box, so 6 is not a new, untested number.
+    # This gate is shared by EVERY interactive LLM call in the app. Raise
+    # further (env LLM_MAX_CONCURRENCY) on hosts with more RAM headroom. Values
+    # <= 0 fall back to the default (never 0, which would deadlock). MUST stay
+    # in sync with app.llm._DEFAULT_MAX_CONCURRENCY, which this value shadows
+    # whenever the env var is unset (this field's own default always wins over
+    # that module constant — see app.llm._resolve_max_concurrency).
+    llm_max_concurrency: int = 6
     # How many of those slots BACKGROUND (warm / pre-generation) calls may hold
     # at once. Bounds warm parallelism while leaving (capacity - bg_cap) slots
     # interactive callers can always reach, so a user's click is never queued
@@ -163,6 +169,28 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
+    #
+    # Sharing was the original design (one Cloud project, one client, a second
+    # redirect URI), and it works when both connectors live in the same Google
+    # account. They need not: an operator can run Drive against one Workspace
+    # and Meet against another, which is exactly how this was first deployed.
+    # A shared client cannot express that — the client belongs to one project
+    # in one account — so Meet carries its own triple and FALLS BACK TO
+    # NOTHING. An unset Meet client makes `google_meet_configured()` False and
+    # the connector renders as not-configured, which is a legible state; a
+    # silent fallback to Drive's client would instead authorize against the
+    # wrong Google project and fail deep inside the consent flow with a
+    # redirect_uri_mismatch nobody can trace back to here.
+    #
+    # The SCOPES are deliberately NOT shared either: google_oauth.DRIVE_SCOPES
+    # must never grow a Meet scope. Scopes bake into a token at consent and a
+    # refresh carries the old set forward, so widening the constant would leave
+    # every stored Drive token claiming a capability it does not have — silent
+    # 403s on a connection that reports healthy. See google_meet.MEET_SCOPES.
+    google_meet_client_id: str = ""
+    google_meet_client_secret: str = ""
+    google_meet_oauth_redirect_uri: str = ""
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 
@@ -201,6 +229,18 @@ class Settings(BaseSettings):
     confluence_client_id: str = ""
     confluence_client_secret: str = ""
     confluence_oauth_redirect_uri: str = ""
+
+    # Zoom connector (OAuth 2.0 authorization-code flow; ~1h access tokens and
+    # 90-day refresh tokens that ROTATE on every refresh). A General,
+    # ADMIN-MANAGED app in the Zoom Marketplace — a user-managed app cannot be
+    # granted the `:admin` scopes at all, and Server-to-Server apps cannot hold
+    # the granular cloud_recording scopes either. The scopes are admin-level
+    # (`…:admin`), so the person who clicks Connect must be a Zoom account
+    # owner/admin: the connection is org-wide, reading every host's cloud
+    # recordings, not just the connector's own.
+    zoom_client_id: str = ""
+    zoom_client_secret: str = ""
+    zoom_oauth_redirect_uri: str = ""
 
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
@@ -376,6 +416,16 @@ class Settings(BaseSettings):
     # Per-company overrides in companies.notification_settings["drip"] win over
     # this (see app/drip_email.py:resolve_cadence).
     drip_cadence_days: str = ""
+    # Upper bound on a step's send window, in days: a step is only sent while
+    # day_offset <= age_days <= day_offset + grace. Past that it is recorded
+    # as "skipped" and never fires. Without this, a member older than the whole
+    # ladder receives every unsent step at once. Empty → DEFAULT_GRACE_DAYS in
+    # app/drip_email.py. Per-company overrides in
+    # companies.notification_settings["drip"]["grace_days"] win over this
+    # (see app/drip_email.py:resolve_grace_days). Kept a str (not an int) so an
+    # unparseable value falls back to the default instead of failing boot on an
+    # email path.
+    drip_grace_days: str = ""
     # How often the drip job runs. Hourly+ is fine: a step fires the first
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
@@ -420,10 +470,8 @@ class Settings(BaseSettings):
     # check of recent extraction output per skill_id against the expected
     # shape each vendored connector-extraction skill declares in its own
     # references/expected-signal-shape.md. Read-only + sampled by design —
-    # never runs on a live ingestion or request path. OFF by default like the
-    # other opt-in scheduler jobs; flip on once there's enough real
-    # hubspot/jira/clickup extraction volume for a sample to be meaningful.
-    extraction_eval_enabled: bool = False
+    # never runs on a live ingestion or request path. Runs unconditionally on
+    # its own cadence.
     extraction_eval_interval_hours: int = 24
     # How many of an enterprise+skill's most recent signals one eval pass
     # samples.
@@ -453,6 +501,16 @@ class Settings(BaseSettings):
     # (mint + validate both refuse) when this is empty — never serve with an
     # unsigned/forgeable grant.
     design_agent_token_secret: str = ""
+
+    # Artifact share-grant token secret. A DISTINCT secret from jwt_secret AND
+    # from design_agent_token_secret — never reuse either. Provisioned now
+    # (harmless, currently unused) so a future revocation/rotation ticket that
+    # wants HMAC-signed short-lived view grants (mirroring da_view_grant) has
+    # the secret already reviewed. The share primitive itself is DB-row-token-
+    # backed (an opaque uuid4 looked up by exact match, like
+    # prototypes.share_token) — a bare DB-token lookup needs no secret, so
+    # nothing in this ticket signs or verifies an HMAC with this value.
+    artifact_share_token_secret: str = ""
 
     # Bundle-proxy public origin (Decision 2 — same-origin serving). The prototype
     # bundle is served from the APP origin (e.g. https://app.sprntly.ai) via an

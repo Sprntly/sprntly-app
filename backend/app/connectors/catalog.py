@@ -31,6 +31,12 @@ CRM = "crm"
 CODE = "code"
 MONITORING = "monitoring"
 DESIGN = "design"
+#: User research: interview/usability repositories and the research artifacts a
+#: team uploads by hand (transcripts, study readouts, survey results). Distinct
+#: from CUSTOMER_VOICE (inbound, unsolicited — tickets, reviews, NPS) and from
+#: MEETINGS (sales/CSM call recordings): research is deliberately gathered
+#: evidence about users, so it is evidence-bearing like both of those.
+RESEARCH = "research"
 
 #: provider → its types (see cardinality note above).
 #: Covers every provider the backend has an auth module or puller for, plus
@@ -67,7 +73,26 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "sprinklr": [CUSTOMER_VOICE],
     "fireflies": [MEETINGS],
     "gong": [MEETINGS],
+    # Cloud recordings + their VTT transcripts. Typed `meetings` like Fireflies
+    # and Gong, and evidence-bearing for the same reason: what a customer
+    # actually said on a call is measured first-party signal, not somebody's
+    # write-up of it.
+    "zoom": [MEETINGS],
+    # Google Meet transcripts, read straight from the Meet REST API. Typed
+    # `meetings` like Zoom/Fireflies/Gong and evidence-bearing for the same
+    # reason: what a customer actually said on a call is measured first-party
+    # signal. Its coverage is narrower than Zoom's — Google only exposes
+    # meetings the connected account ORGANIZED, and only for 30 days — but that
+    # is a question of how much evidence it brings, not of whether it is
+    # evidence.
+    "google_meet": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
+    # Research
+    # Marvin is a user-research repository (interviews, usability sessions,
+    # study readouts). Catalog-only for now — no auth module or puller yet, so
+    # it renders "Coming soon"; it is classified up-front because the Research
+    # category it anchors ships with the manual-upload path live.
+    "marvin": [RESEARCH],
     "salesforce": [CRM],
     # Analytics
     "mixpanel": [ANALYTICS],
@@ -114,8 +139,10 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 #                    that shapes a brief, not customer/product evidence.
 #
 # Everything else (analytics, customer-voice, meetings, crm, revenue,
-# monitoring) is evidence and can drive a brief. A multi-type provider is
-# evidence iff ANY of its types is evidence-bearing.
+# monitoring, research) is evidence and can drive a brief. A multi-type provider
+# is evidence iff ANY of its types is evidence-bearing. `research` is
+# deliberately absent from the set below: a study readout or interview
+# transcript is gathered evidence about real users, not internal documentation.
 NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
     {TASK_MANAGEMENT, CODE, DESIGN, COMMUNICATION, DOCUMENTS}
 )
@@ -191,4 +218,15 @@ EVIDENCE_UPLOAD_CATEGORIES: dict[str, tuple[str, str]] = {
     "monitoring": ("analytics",
                    "analytics (user-uploaded monitoring/reliability exports: "
                    "incident reports, error/uptime data)"),
+    # The Research category's upload strip is its PRIMARY path today (Marvin,
+    # the only connector on that shelf, is still coming-soon) — so this entry is
+    # what makes hand-uploaded research real evidence rather than a plain
+    # document drop. There is no `research` member of SIGNAL_SOURCE_TYPES (a new
+    # one would mean altering the signals CHECK constraint on live data), so
+    # research defaults to the closest KG type, `customer_voice`, and the hint
+    # carries the real context to the extractor — same shape as monitoring/crm.
+    "research": ("customer_voice",
+                 "customer_voice (user-uploaded user-research artifacts: "
+                 "interview transcripts and notes, usability test findings, "
+                 "survey results, discovery/research reports, personas)"),
 }

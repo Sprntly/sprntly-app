@@ -39,6 +39,8 @@ DISPLAY_NAMES: dict[str, str] = {
     "sprinklr": "Sprinklr",
     "fireflies": "Fireflies",
     "gong": "Gong",
+    "zoom": "Zoom",
+    "google_meet": "Google Meet",
     "github": "GitHub",
     "gitlab": "GitLab",
     "hubspot": "HubSpot",
@@ -93,6 +95,10 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.confluence import PROVIDER
 
         return PROVIDER
+    if name == "zoom":
+        from app.connector_lookup.zoom import PROVIDER
+
+        return PROVIDER
     return None
 
 
@@ -100,12 +106,18 @@ def provider_for(name: str) -> LookupProvider | None:
 #: not-supported copy agree with what actually exists.
 LOOKUP_PROVIDERS: tuple[str, ...] = (
     "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
-    "confluence",
+    "confluence", "zoom",
 )
 
 #: Connected (they sync into the KG) but no live-read adapter yet.
 DEFERRED: dict[str, str] = {
     "asana": "Asana",
+    # Syncs into the KG (kg_ingest/pullers/google_meet.py) but has no live-read
+    # adapter yet, so "what did we say in google meet yesterday" is answered
+    # honestly rather than from a half-capability. Deliberately listed rather
+    # than omitted: a user who names Meet deserves the honest answer, not a
+    # KG-flavoured guess from the generic path.
+    "google_meet": "Google Meet",
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
@@ -200,6 +212,7 @@ def answer_for_hints(
     question: str,
     history: list[dict] | None,
     hints: set[str],
+    include_knowledge_graph: bool = False,
 ) -> dict:
     """Answer an ad-hoc connector question for the providers the router matched.
 
@@ -207,6 +220,10 @@ def answer_for_hints(
     MAX_PROVIDERS_PER_LOOKUP of them, connected ones first). When the question
     only named sources we cannot read, nothing is fetched and nothing is
     invented — the honest message is returned directly.
+
+    `include_knowledge_graph` is passed through to the tool loop for questions
+    that named no source at all (the document-intent path) — see
+    connector_lookup/knowledge_graph.py for why those need both readers.
     """
     supported = [h for h in hints if h in LOOKUP_PROVIDERS]
     if not supported:
@@ -238,4 +255,5 @@ def answer_for_hints(
         history=history,
         providers=providers,
         unavailable_names=unavailable,
+        include_knowledge_graph=include_knowledge_graph,
     )

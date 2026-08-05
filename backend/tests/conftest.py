@@ -175,7 +175,12 @@ CREATE TABLE prds (
     -- 20260731090000: originating-chat-question linkage (mirrors reports'
     -- question/ask_id) — NULL on every path except the chat-task command.
     question         TEXT,
-    ask_id           INTEGER
+    ask_id           INTEGER,
+    -- Mirrors 20260802120000_prds_public_id.sql. Real Postgres backfills +
+    -- defaults this via gen_random_uuid(), which sqlite has no equivalent
+    -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
+    -- stamp a real uuid4 explicitly via an UPDATE after seeding.
+    public_id        TEXT
 );
 
 CREATE TABLE evidences (
@@ -451,6 +456,13 @@ CREATE TABLE companies (
     business_context_summary TEXT,
     business_context_accepted_at TEXT,
     metric_definitions  TEXT NOT NULL DEFAULT '[]',
+    -- Async business-context refresh state, singleton per tenant (mirrors
+    -- 20260802140000_business_context_refresh_status.sql). status defaults
+    -- 'idle' (never NULL) — see that migration for why.
+    business_context_refresh_status TEXT NOT NULL DEFAULT 'idle',
+    business_context_refresh_error TEXT,
+    business_context_refresh_started_at TEXT,
+    business_context_refresh_heartbeat_at TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -1096,6 +1108,56 @@ CREATE TABLE document_source_file (
 CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
 CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
 
+-- Document catalog (mirrors 20260803120000_document_catalog.sql, SQLite-ized).
+-- One row per document-shaped item from ANY source, carrying an extractive
+-- summary + topics + a summary embedding, so a document can be found by what
+-- it is about. Both constraints that carry meaning are mirrored faithfully:
+-- the unique triple the registration upsert conflicts on, and the check that
+-- makes an ownerless session-scoped row unrepresentable.
+--
+-- NOT mirrored (no SQLite equivalent, and nothing under test needs them):
+-- `search_tsv` (a generated tsvector maintained by Postgres) and the
+-- ivfflat/GIN indexes. `embedding` and `topics` are JSON-encoded TEXT via the
+-- fake's _JSONB_COLUMNS map. `document_find_candidates` is a Postgres
+-- function; its tenancy filter is exercised against real Postgres, not here
+-- (the fake's rpc() returns whatever a test registers).
+CREATE TABLE document_catalog (
+    -- Postgres fills this with gen_random_uuid(); the registration upsert
+    -- deliberately never sends an `id` (sending one would rewrite the PK on
+    -- every re-registration), so the mirror needs its own uuid4 default.
+    id              TEXT PRIMARY KEY DEFAULT (
+                        lower(hex(randomblob(4))) || '-'
+                        || lower(hex(randomblob(2))) || '-4'
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || substr('89ab', abs(random()) % 4 + 1, 1)
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || lower(hex(randomblob(6)))
+                    ),
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    user_id         TEXT,
+    provider        TEXT NOT NULL,
+    external_id     TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    source_name     TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    doc_date        TEXT,
+    content_hash    TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    topics          TEXT NOT NULL DEFAULT '[]',
+    summary_model   TEXT,
+    summary_version TEXT,
+    embedding       TEXT,
+    body_text       TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider, external_id),
+    CONSTRAINT document_catalog_session_needs_owner
+        CHECK (conversation_id IS NULL OR user_id IS NOT NULL)
+);
+CREATE INDEX document_catalog_company_idx ON document_catalog (company_id);
+
 -- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
 -- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
 -- share one library; workspace_id records the uploading workspace only):
@@ -1274,6 +1336,34 @@ CREATE TABLE llm_usage_events (
     created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
+
+-- Artifact share-grant primitive (mirrors
+-- 20260801130000_artifact_share_links.sql, SQLite-ized: bigint identity /
+-- timestamptz are INTEGER / TEXT here). owner_company_id / owner_workspace_id
+-- are plain TEXT with no FK, matching the workspaces-table note above — route
+-- tests fabricate tenant ids that have no parent rows.
+CREATE TABLE artifact_shares (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    token              TEXT NOT NULL UNIQUE,
+    artifact_type      TEXT NOT NULL DEFAULT 'prd',
+    artifact_id        INTEGER NOT NULL,
+    owner_company_id   TEXT NOT NULL,
+    owner_workspace_id TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at         TEXT
+);
+CREATE INDEX artifact_shares_artifact_idx ON artifact_shares (artifact_type, artifact_id);
+
+CREATE TABLE artifact_share_joins (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    share_id            INTEGER NOT NULL REFERENCES artifact_shares (id),
+    joined_user_id      TEXT NOT NULL,
+    joined_company_id   TEXT NOT NULL,
+    joined_workspace_id TEXT NOT NULL,
+    joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (share_id, joined_user_id)
+);
 """
 
 
@@ -1396,6 +1486,12 @@ def _no_background_connector_sync(request, monkeypatch):
         # otherwise inherit exactly the two hazards above.
         monkeypatch.setattr(auto_sync, "kickoff_slack_corpus_sync", _noop_sync,
                             raising=False)
+        # And for the call-index refresh, fired by POST /v1/connectors/fireflies
+        # /apikey and by the scheduler cycle: its thread hits api.fireflies.ai
+        # for real and upserts call_index / call_index_sync through the same
+        # mid-reset DB — the identical pair of hazards.
+        monkeypatch.setattr(auto_sync, "kickoff_call_index_sync", _noop_sync,
+                            raising=False)
     except Exception:
         pass
     try:
@@ -1508,6 +1604,111 @@ def _no_real_browser_in_preview_capture(monkeypatch):
         except Exception:
             pass
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_llm_usage_background_writer():
+    """Disable `app.db.llm_usage`'s process-wide background flusher thread
+    before ANY test in this worker/process runs.
+
+    `_ensure_writer()` lazily spawns a daemon thread (`llm-usage-writer`) the
+    FIRST time any code path calls `record_usage()` (e.g. any `install_metering`-
+    wrapped LLM client). That thread runs `while True` for the rest of the
+    process, flushing whatever's buffered via `require_client()` on its own
+    5-second cadence — resolved dynamically, so it keeps firing long after
+    whichever test originally started it, into WHATEVER test's fake DB happens
+    to be current at that moment. `test_llm_usage_metering.py` already opts
+    itself out locally (`disable_background_writer()` + `reset_for_tests()`),
+    but that only helps once THAT file happens to run — under `-n auto`, most
+    worker processes never execute it at all, so the writer stays live and
+    contends `_fake_supabase._LOCK` at unpredictable points for their entire
+    session. Confirmed via instrumentation: this thread is the direct cause of
+    an intermittent class of unrelated test failures (ticket-sync tests
+    observing a mid-flight state their own setup never produced) that only
+    reproduces under parallel execution. Disabling it session-wide, once, up
+    front removes the hazard outright — buffered rows are just queued
+    (harmless; this ledger is explicitly fail-open/analytics-only, see
+    `app/db/llm_usage.py`'s module docstring) until a test explicitly calls
+    `flush()`, exactly as that module already documents."""
+    from app.db import llm_usage
+
+    llm_usage.disable_background_writer()
+
+
+@pytest.fixture(autouse=True)
+async def _drain_orphaned_executor_work():
+    """STRUCTURAL fix for cross-test contamination via orphaned
+    `asyncio.to_thread`/`loop.run_in_executor` background work — the actual
+    root cause behind an intermittent class of failures in the ticket-sync /
+    fake-tracker test family (test_ticket_sync.py, test_ticket_lifecycle.py,
+    test_tracker_native_sync.py and any other test sharing that fixture
+    machinery) that reproduced even after the targeted per-test fixes below
+    (see git history on this fixture's neighbors) and got WORSE, not better,
+    on GitHub's 2-vCPU runners — a slower run gives an orphaned thread more
+    real wall-clock time to land badly.
+
+    `asyncio.run()` is safe: its cleanup calls `shutdown_default_executor()`,
+    which BLOCKS until every `to_thread` call has actually finished (verified
+    directly — a fire-and-forget `asyncio.create_task(...)` whose coroutine is
+    suspended inside `to_thread` when the outer coroutine returns still keeps
+    `asyncio.run()` from returning until that executor thread is done,
+    because cancelling the asyncio-level future does NOT interrupt an
+    already-dispatched executor thread).
+
+    pytest-asyncio's own per-test event loop teardown does NOT do this — it
+    calls `loop.close()` directly (see `pytest_asyncio/plugin.py`), with no
+    executor drain. Confirmed directly: with that teardown, an orphaned
+    `to_thread` call keeps running for its FULL duration strictly AFTER
+    "the test" has already returned and the next one has started — meaning
+    ANY test (not just the couple already found and stubbed) that exercises a
+    route/function scheduling `asyncio.create_task(...)` fire-and-forget work
+    (PRD/impl-spec pre-warm, ticket-generation warm, connector sync kicks,
+    etc.) without itself explicitly draining that work is a potential source,
+    regardless of which specific test files happen to intersect with the
+    ticket-sync fixture family. This fixture makes every pytest-asyncio-
+    managed test wait the same way `asyncio.run()` already does, closing the
+    hole at its source rather than in each downstream victim.
+
+    Async (not sync) so pytest-asyncio hands it a REAL running loop to await
+    on for its teardown — `asyncio_mode = auto` still wraps this correctly
+    for sync test functions too (verified). A test with no orphaned work
+    pays ~nothing (shutdown_default_executor() on an idle executor returns
+    immediately)."""
+    yield
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.shutdown_default_executor()
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_daemon_threads():
+    """Guard against a fire-and-forget daemon thread (`kick_prd_sync_from_key`,
+    `kick_comment_push`, `kick_comment_delete`, `app.kg_ingest.auto_sync`'s
+    kickoffs, and anything else following that pattern) outliving its own
+    test and racing a LATER test's freshly-reset fake DB / class-level fixture
+    state.
+
+    These kicks resolve their targets (`_Tracker`, `supabase_client()`, etc.)
+    by NAME at call time, not at thread-spawn time — so a thread still mid-
+    flight when the next test's `isolated_settings`/`fake_tracker` fixtures
+    reset that state runs against the NEW test's fake DB using the OLD test's
+    captured ids, corrupting a completely unrelated test (this is the
+    documented "intermittent, order-dependent" hazard `_no_background_
+    connector_sync` calls out; a handful of tests intentionally exercise a
+    real kick thread and only wait on an observable side effect, not a
+    `join()`). Snapshot the live threads before the test, then after, join
+    anything NEW with a bounded grace period — a legitimate daemon thread has
+    already done its (in-memory, fast) work by the time the test's own
+    assertions pass, so this is a no-op in the common case and only matters
+    when a thread is still mid-unwind."""
+    import threading
+
+    before = set(threading.enumerate())
+    yield
+    for t in threading.enumerate():
+        if t not in before and t is not threading.current_thread() and t.daemon:
+            t.join(timeout=5)
 
 
 @pytest.fixture

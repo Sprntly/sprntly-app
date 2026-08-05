@@ -472,6 +472,986 @@ def test_confluence_puller_quiet_when_not_connected(monkeypatch):
     assert list(confluence.pull("co-1")) == []
 
 
+# ---------- zoom puller ----------
+#
+# Like Confluence, the credential is a COMPANY ID, so every test stubs
+# sync_context (the seam that reads the connection row) plus the Zoom read
+# helpers — all in the puller's own namespace, per house style.
+
+
+_VTT = """WEBVTT
+
+1
+00:00:01.000 --> 00:00:04.000
+Sam Lee: Right, the renewal.
+
+2
+00:00:04.000 --> 00:00:08.000
+Sam Lee: They will not sign without SSO.
+
+3
+00:00:08.000 --> 00:00:11.000
+Kim Patel: That is the third account this quarter.
+"""
+
+
+def _zctx(user_ids=(), user_names=None, cursor=None):
+    from app.connectors.zoom_oauth import ZoomContext
+
+    return ZoomContext(
+        company_id="co-1",
+        access_token="tok",
+        user_ids=list(user_ids),
+        user_names=dict(user_names or {}),
+        last_synced_until=cursor,
+    )
+
+
+def _meeting(uuid="m1", topic="Acme renewal", *, files=None, start="2026-07-20T10:00:00Z"):
+    return {
+        "uuid": uuid,
+        "id": 99,
+        "topic": topic,
+        "start_time": start,
+        "duration": 42,
+        "host_email": "sam@acme.co",
+        "recording_files": (
+            [{"file_type": "TRANSCRIPT", "file_extension": "VTT",
+              "download_url": "https://zoom.test/dl/secret-token-in-url"}]
+            if files is None else files
+        ),
+    }
+
+
+def _zstub(monkeypatch, ctx, *, meetings_by_host, vtt=_VTT, users=None):
+    """Route the Zoom read helpers, recording which host/window was asked for
+    so a test can assert WHAT was fetched, not just what came back."""
+    from app.kg_ingest.pullers import zoom
+
+    asked: list[tuple[str, str, str]] = []
+
+    def fake_list_recordings(_tok, user_id, *, frm=None, to=None, **_kw):
+        asked.append((str(user_id), frm, to))
+        return list((meetings_by_host or {}).get(str(user_id), []))
+
+    monkeypatch.setattr(zoom, "sync_context", lambda cid: ctx)
+    monkeypatch.setattr(zoom, "list_user_recordings", fake_list_recordings)
+    monkeypatch.setattr(
+        zoom, "list_users",
+        lambda _tok, **kw: (
+            users if users is not None else [
+                {"id": "u1", "email": "sam@acme.co", "display_name": "Sam",
+                 "licensed": True},
+                {"id": "u2", "email": "kim@acme.co", "display_name": "Kim",
+                 "licensed": True},
+            ],
+            False,
+        ),
+    )
+    monkeypatch.setattr(zoom, "fetch_transcript_text", lambda _tok, _url: vtt)
+    monkeypatch.setattr(zoom, "get_meeting_recordings", lambda _tok, _uuid: {})
+    monkeypatch.setattr(zoom, "_stamp_counters", lambda *a, **k: None)
+    return zoom, asked
+
+
+# ── VTT parsing ──────────────────────────────────────────────────────────────
+
+
+def test_vtt_parses_to_speaker_attributed_text_and_merges_runs():
+    """Zoom emits a cue every few seconds, so an unmerged transcript is
+    hundreds of two-line fragments — which reads to an extractor as hundreds of
+    disconnected utterances rather than one person making one argument."""
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    text, speakers = parse_vtt(_VTT)
+    assert text == (
+        "Sam Lee: Right, the renewal. They will not sign without SSO.\n"
+        "Kim Patel: That is the third account this quarter."
+    )
+    assert speakers == ["Sam Lee", "Kim Patel"]
+    # Timecodes, cue indices and the WEBVTT header are all gone.
+    assert "-->" not in text and "WEBVTT" not in text
+    assert "00:00" not in text
+
+
+def test_vtt_tolerates_cues_with_no_speaker_prefix():
+    """Some accounts record without speaker attribution. Dropping those cues
+    would turn a perfectly good transcript into an empty one."""
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    raw = (
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:03.000\nWe should ship it.\n\n"
+        "2\n00:00:03.000 --> 00:00:05.000\nAgreed.\n\n"
+        "3\n00:00:05.000 --> 00:00:08.000\nKim: I'll write it up.\n"
+    )
+    text, speakers = parse_vtt(raw)
+    assert "We should ship it. Agreed." in text
+    assert "Kim: I'll write it up." in text
+    assert speakers == ["Kim"]
+
+
+def test_vtt_does_not_mistake_a_colon_in_a_sentence_for_a_speaker():
+    """A length bound alone is not enough — "the problem is this" is only
+    nineteen characters, so a purely length-based rule attributes a customer's
+    actual complaint to a speaker of that name and then merges every later cue
+    into it."""
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    raw = (
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:03.000\n"
+        "the problem is this: nobody in the enterprise tier can log in at all\n"
+    )
+    text, speakers = parse_vtt(raw)
+    assert speakers == []
+    # The words are all still there — a missing attribution is less detail, a
+    # WRONG one is asserted misinformation.
+    assert text.startswith("the problem is this:")
+    assert "nobody in the enterprise tier can log in at all" in text
+
+
+def test_vtt_keeps_a_real_speaker_whose_line_also_contains_a_colon():
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    raw = (
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:03.000\n"
+        "Sam Lee: the problem is this: nobody can log in\n"
+    )
+    text, speakers = parse_vtt(raw)
+    assert speakers == ["Sam Lee"]
+    assert text == "Sam Lee: the problem is this: nobody can log in"
+
+
+def test_vtt_accepts_an_email_style_speaker_label():
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    raw = (
+        "WEBVTT\n\n1\n00:00:01.000 --> 00:00:03.000\n"
+        "sam@acme.co: we need SSO\n"
+    )
+    _text, speakers = parse_vtt(raw)
+    assert speakers == ["sam@acme.co"]
+
+
+def test_vtt_empty_input_is_empty_output():
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    assert parse_vtt("") == ("", [])
+    assert parse_vtt("WEBVTT\n\n") == ("", [])
+
+
+# ── Records ──────────────────────────────────────────────────────────────────
+
+
+def test_zoom_puller_yields_transcript_records(monkeypatch):
+    ctx = _zctx(user_ids=["u1"], user_names={"u1": "sam@acme.co"})
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]})
+    recs = list(zoom.pull("co-1"))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.provider, r.kind, r.external_id) == ("zoom", "meeting", "m1")
+    assert r.title == "Acme renewal"
+    assert "Sam Lee: Right, the renewal." in r.text
+    assert r.properties["host_email"] == "sam@acme.co"
+    assert r.properties["duration_min"] == 42
+    assert r.properties["speakers"] == ["Sam Lee", "Kim Patel"]
+    assert r.properties["has_transcript"] is True
+    assert r.timestamp == "2026-07-20T10:00:00Z"
+
+
+def test_zoom_record_never_carries_a_download_url_or_token(monkeypatch):
+    """A Zoom download_url is a credential-bearing link to customer
+    conversation. It must not reach properties, the rendered record, or the
+    content hash."""
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]})
+    r = list(zoom.pull("co-1"))[0]
+    blob = r.render() + repr(r.properties)
+    assert "secret-token-in-url" not in blob
+    assert "download_url" not in blob
+    assert "zoom.test" not in blob
+
+
+def test_zoom_puller_never_logs_the_download_url(monkeypatch, caplog):
+    import logging as _logging
+
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]})
+    with caplog.at_level(_logging.DEBUG):
+        list(zoom.pull("co-1"))
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "secret-token-in-url" not in logged
+    assert "zoom.test" not in logged
+
+
+def test_a_meeting_with_no_transcript_still_yields_a_record(monkeypatch):
+    """"We found nothing" and "we could not look" are different answers. The
+    commonest cause is audio transcription switched off in the customer's Zoom
+    account — silently skipping those meetings would present a half-empty
+    corpus as a complete one, with nothing anywhere to explain the gap."""
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting(files=[
+            {"file_type": "MP4", "file_extension": "MP4", "download_url": "x"},
+        ])]},
+    )
+    recs = list(zoom.pull("co-1"))
+    assert len(recs) == 1
+    assert "no transcript available" in recs[0].text.lower()
+    assert recs[0].properties["has_transcript"] is False
+    # The meeting is still identifiable — this is a record, not a placeholder.
+    assert recs[0].external_id == "m1"
+    assert recs[0].title == "Acme renewal"
+
+
+def test_a_transcript_shape_we_cannot_parse_is_skipped_not_crashed(monkeypatch):
+    """Zoom's docs contradict themselves on whether TRANSCRIPT is .vtt or
+    .json. A JSON transcript must degrade to the no-transcript record rather
+    than be fed to a WebVTT parser."""
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting(files=[
+            {"file_type": "TRANSCRIPT", "file_extension": "JSON",
+             "download_url": "x"},
+        ])]},
+    )
+    recs = list(zoom.pull("co-1"))
+    assert len(recs) == 1
+    assert "no transcript available" in recs[0].text.lower()
+
+
+def test_cc_captions_are_ignored_as_a_duplicate(monkeypatch):
+    """CC duplicates TRANSCRIPT's content, so falling back to it buys a second
+    copy of the same conversation at the cost of a second extraction."""
+    from app.connectors.zoom_oauth import transcript_file_from
+
+    assert transcript_file_from({"recording_files": [
+        {"file_type": "CC", "file_extension": "VTT", "download_url": "cc"},
+    ]}) is None
+    picked = transcript_file_from({"recording_files": [
+        {"file_type": "CC", "file_extension": "VTT", "download_url": "cc"},
+        {"file_type": "TRANSCRIPT", "file_extension": "VTT", "download_url": "t"},
+    ]})
+    assert picked["download_url"] == "t"
+
+
+# ── Windowing ────────────────────────────────────────────────────────────────
+
+
+def test_puller_never_requests_a_window_wider_than_one_month(monkeypatch):
+    """Zoom SILENTLY CLAMPS a wider from/to instead of erroring, so a naive
+    "last 90 days" request returns a month and looks like a quiet quarter."""
+    from datetime import date
+
+    from app.connectors.zoom_oauth import MAX_WINDOW_DAYS
+
+    ctx = _zctx(user_ids=["u1"])
+    zoom, asked = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+    list(zoom.pull("co-1"))
+    assert asked, "no window was requested at all"
+    for _uid, frm, to in asked:
+        span = (date.fromisoformat(to) - date.fromisoformat(frm)).days
+        assert 0 <= span <= MAX_WINDOW_DAYS, (frm, to)
+
+
+def test_first_sync_backfills_three_months_newest_first(monkeypatch):
+    """A new connection should land a quarter of calls in the graph, not
+    whatever happened this week — and if the valve trips, what gets dropped
+    should be the OLDEST calls."""
+    from datetime import date
+
+    ctx = _zctx(user_ids=["u1"], cursor=None)
+    zoom, asked = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+    list(zoom.pull("co-1"))
+
+    windows = [(f, t) for _u, f, t in asked]
+    assert len(windows) == 3
+    tos = [date.fromisoformat(t) for _f, t in windows]
+    assert tos == sorted(tos, reverse=True)      # newest first
+    span = date.fromisoformat(windows[0][1]) - date.fromisoformat(windows[-1][0])
+    assert 89 <= span.days <= 91                 # ~3 months end to end
+
+
+def test_a_later_run_walks_only_the_gap_since_the_last_sync(monkeypatch):
+    """Without the cursor a 6-hourly schedule would re-walk the entire backfill
+    forever: three windows per host, four times a day."""
+    from datetime import date, timedelta
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    ctx = _zctx(user_ids=["u1"], cursor=yesterday)
+    zoom, asked = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+    list(zoom.pull("co-1"))
+
+    assert len(asked) == 1, asked
+    assert asked[0][1] == yesterday
+
+
+def test_a_long_outage_resumes_with_the_recent_past_not_a_year(monkeypatch):
+    from datetime import date, timedelta
+
+    ctx = _zctx(user_ids=["u1"],
+                cursor=(date.today() - timedelta(days=400)).isoformat())
+    zoom, asked = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+    list(zoom.pull("co-1"))
+    assert len(asked) == 3          # bounded by _MAX_WINDOWS, not 14 windows
+
+
+def test_an_unreadable_cursor_falls_back_to_a_backfill(monkeypatch):
+    ctx = _zctx(user_ids=["u1"], cursor="not-a-date")
+    zoom, asked = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+    list(zoom.pull("co-1"))
+    assert len(asked) == 3
+
+
+# ── Host selection ───────────────────────────────────────────────────────────
+
+
+def test_zoom_puller_honours_the_host_selection(monkeypatch):
+    """The whole point of the picker: an unselected host is never fetched, not
+    merely filtered out after the request."""
+    ctx = _zctx(user_ids=["u2"], user_names={"u2": "kim@acme.co"})
+    zoom, asked = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting()], "u2": [_meeting(uuid="m9")]},
+    )
+    recs = list(zoom.pull("co-1"))
+    assert {uid for uid, _f, _t in asked} == {"u2"}
+    assert [r.external_id for r in recs] == ["m9"]
+
+
+def test_no_selection_pulls_every_licensed_host(monkeypatch):
+    """Empty selection = every host — the backwards-compatible default that
+    keeps a pre-picker connection working. Basic (unlicensed) accounts cannot
+    record to the cloud at all, so listing them spends a request to learn
+    nothing."""
+    ctx = _zctx(user_ids=[])
+    zoom, asked = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting()], "u2": [_meeting(uuid="m9")],
+                          "u3": [_meeting(uuid="m3")]},
+        users=[
+            {"id": "u1", "email": "sam@acme.co", "licensed": True},
+            {"id": "u2", "email": "kim@acme.co", "licensed": True},
+            {"id": "u3", "email": "basic@acme.co", "licensed": False},
+        ],
+    )
+    recs = list(zoom.pull("co-1"))
+    assert {uid for uid, _f, _t in asked} == {"u1", "u2"}
+    assert "m3" not in {r.external_id for r in recs}
+
+
+def test_a_selected_host_that_no_longer_lists_is_still_pulled(monkeypatch):
+    """A deactivated host still OWNS their old recordings. Dropping them
+    because they fell out of the active listing would silently shrink the
+    corpus."""
+    ctx = _zctx(user_ids=["gone-1"], user_names={"gone-1": "left@acme.co"})
+    zoom, asked = _zstub(
+        monkeypatch, ctx, meetings_by_host={"gone-1": [_meeting(uuid="m-old")]},
+        users=[],
+    )
+    recs = list(zoom.pull("co-1"))
+    assert [r.external_id for r in recs] == ["m-old"]
+    assert asked[0][0] == "gone-1"
+
+
+# ── Caps and failure isolation ───────────────────────────────────────────────
+
+
+def test_recordings_per_host_cap_holds(monkeypatch):
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting(uuid=f"m{i}") for i in range(80)]},
+    )
+    monkeypatch.setattr(zoom, "_MAX_RECORDINGS_PER_HOST", 5)
+    assert len(list(zoom.pull("co-1"))) == 5
+
+
+def test_global_record_valve_holds(monkeypatch):
+    """The content-hash ledger makes RE-syncs free, but the FIRST sync pays the
+    LLM for everything."""
+    ctx = _zctx(user_ids=["u1", "u2"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={
+            "u1": [_meeting(uuid=f"a{i}") for i in range(10)],
+            "u2": [_meeting(uuid=f"b{i}") for i in range(10)],
+        },
+    )
+    monkeypatch.setattr(zoom, "_MAX_RECORDS", 4)
+    assert len(list(zoom.pull("co-1"))) == 4
+
+
+def test_text_is_capped_under_the_runner_batch_budget(monkeypatch):
+    """A record that blew the 6000-char batch budget would be split across
+    batches mid-sentence and both halves would lose their context."""
+    from app.kg_ingest.runner import _BATCH_CHAR_BUDGET
+
+    ctx = _zctx(user_ids=["u1"])
+    long_vtt = "WEBVTT\n\n" + "\n\n".join(
+        f"{i}\n00:00:0{i % 10}.000 --> 00:00:0{(i + 1) % 10}.000\n"
+        f"Sam Lee: {'word ' * 40}"
+        for i in range(200)
+    )
+    zoom, _ = _zstub(
+        monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]}, vtt=long_vtt,
+    )
+    r = list(zoom.pull("co-1"))[0]
+    assert len(r.text) <= zoom._TEXT_CHARS
+    assert len(r.render()) < _BATCH_CHAR_BUDGET
+
+
+def test_a_deleted_recording_mid_sync_skips_without_failing(monkeypatch):
+    """A recording deleted or trashed between the listing and the read is a
+    normal race on a live account, not a broken credential."""
+    ctx = _zctx(user_ids=["u1", "u2"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting()], "u2": [_meeting(uuid="m9")]},
+    )
+
+    def flaky(_tok, user_id, **kw):
+        if str(user_id) == "u1":
+            raise RuntimeError("404 recording no longer exists")
+        return [_meeting(uuid="m9")]
+
+    monkeypatch.setattr(zoom, "list_user_recordings", flaky)
+    recs = list(zoom.pull("co-1"))
+    assert [r.external_id for r in recs] == ["m9"]
+
+
+def test_an_expired_token_is_never_swallowed_by_host_isolation(monkeypatch):
+    """Per-host isolation must not hide a reconnect signal — that would report
+    a cheerful zero-record sync on a dead connection."""
+    from app.connectors.zoom_oauth import ZoomAuthExpiredError
+
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": []})
+
+    def dead(*_a, **_k):
+        raise ZoomAuthExpiredError("reconnect")
+
+    monkeypatch.setattr(zoom, "list_user_recordings", dead)
+    with pytest.raises(ZoomAuthExpiredError):
+        list(zoom.pull("co-1"))
+
+
+def test_zoom_puller_quiet_when_not_connected(monkeypatch):
+    """A disconnected company is a no-op, not an error — the scheduler sweeps
+    every row and a race with a disconnect must not stamp a failure."""
+    from app.kg_ingest.pullers import zoom
+
+    def gone(cid):
+        raise zoom.ZoomNotConnectedError("no row")
+
+    monkeypatch.setattr(zoom, "sync_context", gone)
+    assert list(zoom.pull("co-1")) == []
+
+
+def test_a_recurring_meeting_seen_in_two_windows_counts_once(monkeypatch):
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]})
+    # Every window returns the same meeting.
+    recs = list(zoom.pull("co-1"))
+    assert [r.external_id for r in recs] == ["m1"]
+
+
+# ── Counters + cursor ────────────────────────────────────────────────────────
+
+
+def _capture_counters(monkeypatch, zoom):
+    stamped: dict = {}
+    monkeypatch.setattr(
+        zoom, "_stamp_counters",
+        lambda cid, *, meetings, transcripts, until: stamped.update(
+            company_id=cid, meetings=meetings, transcripts=transcripts, until=until
+        ),
+    )
+    return stamped
+
+
+def test_counters_split_meetings_from_transcripts(monkeypatch):
+    """The GAP between these two numbers is how the web layer says "recordings
+    are syncing but transcription is off in Zoom" — a settings problem in the
+    customer's account that is invisible without both."""
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [
+            _meeting(uuid="m1"),
+            _meeting(uuid="m2", files=[{"file_type": "MP4",
+                                        "file_extension": "MP4",
+                                        "download_url": "x"}]),
+        ]},
+    )
+    stamped = _capture_counters(monkeypatch, zoom)
+    list(zoom.pull("co-1"))
+    assert stamped["meetings"] == 2
+    assert stamped["transcripts"] == 1
+
+
+def test_cursor_advances_on_a_clean_run(monkeypatch):
+    from datetime import date
+
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u1": [_meeting()]})
+    stamped = _capture_counters(monkeypatch, zoom)
+    list(zoom.pull("co-1"))
+    assert stamped["until"] == date.today().isoformat()
+
+
+def test_cursor_does_not_advance_when_a_host_failed(monkeypatch):
+    """A partial run that moved the watermark would skip the failed host's
+    window PERMANENTLY — those calls would never be picked up by any later
+    sync, and nothing would ever say so."""
+    ctx = _zctx(user_ids=["u1", "u2"])
+    zoom, _ = _zstub(monkeypatch, ctx, meetings_by_host={"u2": [_meeting(uuid="m9")]})
+
+    def flaky(_tok, user_id, **kw):
+        if str(user_id) == "u1":
+            raise RuntimeError("host unavailable")
+        return [_meeting(uuid="m9")]
+
+    monkeypatch.setattr(zoom, "list_user_recordings", flaky)
+    stamped = _capture_counters(monkeypatch, zoom)
+    list(zoom.pull("co-1"))
+    assert stamped["until"] is None
+    assert stamped["meetings"] == 1     # counters still report what DID happen
+
+
+def test_cursor_does_not_advance_when_the_valve_tripped(monkeypatch):
+    ctx = _zctx(user_ids=["u1"])
+    zoom, _ = _zstub(
+        monkeypatch, ctx,
+        meetings_by_host={"u1": [_meeting(uuid=f"m{i}") for i in range(10)]},
+    )
+    monkeypatch.setattr(zoom, "_MAX_RECORDS", 2)
+    stamped = _capture_counters(monkeypatch, zoom)
+    list(zoom.pull("co-1"))
+    assert stamped["until"] is None
+
+
+def test_counters_are_written_through_the_config_MERGE(monkeypatch):
+    """Not a wholesale upsert. The connection config also holds sync_user_ids,
+    and replacing it here would silently widen a narrowed host selection back
+    to every host — the same regression the OAuth callback had to be fixed
+    for."""
+    from app import db
+    from app.kg_ingest.pullers import zoom
+
+    calls: dict = {}
+    monkeypatch.setattr(
+        db, "patch_connection_config",
+        lambda cid, provider, patch: calls.update(
+            cid=cid, provider=provider, patch=patch
+        ),
+    )
+    zoom._stamp_counters("co-1", meetings=4, transcripts=3, until="2026-08-04")
+
+    assert calls["provider"] == "zoom"
+    assert calls["patch"] == {
+        "last_sync_meetings": 4,
+        "last_sync_transcripts": 3,
+        "last_synced_until": "2026-08-04",
+    }
+    # The merge writer is the one that preserves everything else on the config.
+    assert "sync_user_ids" not in calls["patch"]
+
+
+def test_stamping_counters_never_fails_a_good_sync(monkeypatch):
+    from app import db
+    from app.kg_ingest.pullers import zoom
+
+    def boom(*_a, **_k):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(db, "patch_connection_config", boom)
+    zoom._stamp_counters("co-1", meetings=1, transcripts=1, until="2026-08-04")
+
+
+# ── Registration ─────────────────────────────────────────────────────────────
+
+
+def test_zoom_is_registered_as_a_company_id_puller():
+    """The credential must be the COMPANY ID: a Zoom pull needs the picked
+    hosts and the cursor off the connection row, which a lone access token
+    cannot reach."""
+    from app.kg_ingest.runner import PULLERS, _DOCUMENT_PROVIDERS
+
+    puller, key, hint = PULLERS["zoom"]
+    assert key == "company_id"
+    assert "customer_voice" in hint
+    # A recorded call is EVIDENCE, not an upload-class document — putting zoom
+    # here would hand it the brief gate's upload-only relaxation it has not
+    # earned.
+    assert "zoom" not in _DOCUMENT_PROVIDERS
+
+
+def test_the_scheduler_picks_zoom_up_with_no_scheduler_edit():
+    """refresh_connectors fires kickoff_sync for any provider in PULLERS, so
+    registration alone is what puts zoom on the 6-hourly sweep."""
+    from app.kg_ingest.runner import PULLERS
+
+    assert "zoom" in PULLERS
+
+
+# ---------- google meet puller ----------
+#
+# Like Zoom and Confluence, the credential is a COMPANY ID, so every test stubs
+# sync_context (the seam that reads the connection row) plus the Meet read
+# helpers — all in the puller's own namespace, per house style.
+#
+# The shape is deliberately different from Zoom's in the two ways Google's API
+# is: the transcript arrives as STRUCTURED ENTRIES (no file, no VTT parsing) and
+# speaker attribution comes from a separate participants listing that has to be
+# joined on the participant resource name.
+
+
+def _gmctx(email="pm@acme.co"):
+    from app.connectors.google_meet import MeetContext
+
+    return MeetContext(
+        company_id="co-1", access_token="tok", account_email=email,
+    )
+
+
+def _conference(name="conferenceRecords/c1", start="2026-07-20T10:00:00Z"):
+    return {
+        "name": name,
+        "startTime": start,
+        "endTime": "2026-07-20T10:42:00Z",
+        "space": "spaces/abc123",
+    }
+
+
+_GM_PARTICIPANTS = [
+    {"name": "conferenceRecords/c1/participants/p1",
+     "signedinUser": {"user": "users/1", "displayName": "Sam Lee"}},
+    {"name": "conferenceRecords/c1/participants/p2",
+     "anonymousUser": {"displayName": "Kim Patel"}},
+]
+
+_GM_ENTRIES = [
+    {"participant": "conferenceRecords/c1/participants/p1",
+     "text": "Right, the renewal."},
+    {"participant": "conferenceRecords/c1/participants/p1",
+     "text": "They will not sign without SSO."},
+    {"participant": "conferenceRecords/c1/participants/p2",
+     "text": "That is the third account this quarter."},
+]
+
+
+def _gmstub(
+    monkeypatch,
+    ctx,
+    *,
+    conferences=None,
+    transcripts=None,
+    entries=None,
+    participants=None,
+):
+    """Route the Meet read helpers, recording what was asked for so a test can
+    assert WHAT was fetched, not just what came back."""
+    from app.kg_ingest.pullers import google_meet
+
+    asked: dict[str, list] = {"transcripts": [], "entries": [], "participants": []}
+
+    def fake_transcripts(_tok, conference, **_kw):
+        asked["transcripts"].append(conference)
+        if transcripts is None:
+            return [{"name": f"{conference}/transcripts/t1",
+                     "state": "FILE_GENERATED"}]
+        return list(transcripts)
+
+    def fake_entries(_tok, transcript, **_kw):
+        asked["entries"].append(transcript)
+        return list(_GM_ENTRIES if entries is None else entries)
+
+    def fake_participants(_tok, conference, **_kw):
+        asked["participants"].append(conference)
+        return list(_GM_PARTICIPANTS if participants is None else participants)
+
+    monkeypatch.setattr(google_meet, "sync_context", lambda cid: ctx)
+    monkeypatch.setattr(
+        google_meet, "list_conference_records",
+        lambda _tok, **kw: list(
+            [_conference()] if conferences is None else conferences
+        ),
+    )
+    monkeypatch.setattr(google_meet, "list_transcripts", fake_transcripts)
+    monkeypatch.setattr(google_meet, "list_transcript_entries", fake_entries)
+    monkeypatch.setattr(google_meet, "list_participants", fake_participants)
+    monkeypatch.setattr(google_meet, "_stamp_counters", lambda *a, **k: None)
+    return google_meet, asked
+
+
+# ── Entry joining ────────────────────────────────────────────────────────────
+
+
+def test_entries_join_into_speaker_attributed_text_and_merge_runs():
+    """Google emits an entry per utterance, so an unmerged transcript is
+    hundreds of one-line fragments — which reads to an extractor as hundreds of
+    disconnected statements rather than one person making one argument."""
+    from app.kg_ingest.pullers.google_meet import join_entries
+
+    speakers = {
+        "conferenceRecords/c1/participants/p1": "Sam Lee",
+        "conferenceRecords/c1/participants/p2": "Kim Patel",
+    }
+    text, ordered = join_entries(_GM_ENTRIES, speakers)
+    assert text == (
+        "Sam Lee: Right, the renewal. They will not sign without SSO.\n"
+        "Kim Patel: That is the third account this quarter."
+    )
+    assert ordered == ["Sam Lee", "Kim Patel"]
+
+
+def test_an_unknown_speaker_keeps_its_words():
+    """A participant who left before the listing, or a listing that failed. A
+    wrong speaker label is asserted misinformation; a missing one is only less
+    detail."""
+    from app.kg_ingest.pullers.google_meet import join_entries
+
+    text, ordered = join_entries(_GM_ENTRIES, {})
+    assert "They will not sign without SSO." in text
+    assert "That is the third account this quarter." in text
+    assert ordered == []
+    assert ":" not in text.split("\n")[0][:20]
+
+
+# ── The pull ─────────────────────────────────────────────────────────────────
+
+
+def test_google_meet_puller_yields_transcript_records(monkeypatch):
+    gm, asked = _gmstub(monkeypatch, _gmctx())
+    recs = list(gm.pull("co-1"))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.provider, r.kind, r.external_id) == (
+        "google_meet", "meeting", "conferenceRecords/c1",
+    )
+    assert "Sam Lee: Right, the renewal." in r.text
+    assert r.properties["has_transcript"] is True
+    assert r.properties["speakers"] == ["Sam Lee", "Kim Patel"]
+    assert r.properties["participants"] == ["Kim Patel", "Sam Lee"]
+    assert r.properties["start_time"] == "2026-07-20T10:00:00Z"
+    assert r.timestamp == "2026-07-20T10:00:00Z"
+    # Coverage is organizer-only, so WHOSE calendar this came from is part of
+    # the record, not bookkeeping.
+    assert r.properties["organizer_email"] == "pm@acme.co"
+    # A label a person can recognise the call by — the API exposes no subject
+    # line, so it is built from who was there plus when.
+    assert "Sam Lee" in r.title and "2026-07-20" in r.title
+
+
+def test_transcript_entries_paginate_past_the_100_cap(monkeypatch):
+    """The real API caps a page at 100 and defaults to TEN. This asserts the
+    puller consumes whatever the paging helper returns rather than a first
+    page's worth — a 250-entry meeting must land whole."""
+    long_entries = [
+        {"participant": "conferenceRecords/c1/participants/p1", "text": f"line {i}"}
+        for i in range(250)
+    ]
+    gm, _ = _gmstub(monkeypatch, _gmctx(), entries=long_entries)
+    monkeypatch.setattr(gm, "_TEXT_CHARS", 100_000)
+    r = list(gm.pull("co-1"))[0]
+    assert "line 0" in r.text and "line 249" in r.text
+
+
+def test_a_transcript_not_yet_file_generated_is_skipped(monkeypatch):
+    """STARTED is a live meeting and ENDED is the gap while Google assembles the
+    file. Reading either yields a PARTIAL transcript that would then be
+    ledger-hashed as if it were the whole thing — the meeting would look
+    permanently half-recorded, because the finished version only hashes
+    differently if we re-read it, and we wouldn't."""
+    for state in ("STARTED", "ENDED", "STATE_UNSPECIFIED"):
+        gm, asked = _gmstub(
+            monkeypatch, _gmctx(),
+            transcripts=[{"name": "conferenceRecords/c1/transcripts/t1",
+                          "state": state}],
+        )
+        r = list(gm.pull("co-1"))[0]
+        assert asked["entries"] == [], state    # never even fetched
+        assert r.properties["has_transcript"] is False, state
+        assert "No transcript available" in r.text, state
+
+
+def test_a_conference_with_no_transcript_yields_the_honest_record(monkeypatch):
+    """Never a silent skip. The commonest cause is that "Record the transcript"
+    was never switched on — a setting the customer can change — and dropping
+    those meetings would present a half-empty corpus as a complete one with
+    nothing anywhere to explain the gap."""
+    gm, _ = _gmstub(monkeypatch, _gmctx(), transcripts=[])
+    recs = list(gm.pull("co-1"))
+    assert len(recs) == 1
+    assert recs[0].properties["has_transcript"] is False
+    assert "not an empty meeting" in recs[0].text.lower()
+    assert "record the transcript" in recs[0].text.lower()
+
+
+def test_every_ready_transcript_on_a_conference_is_read(monkeypatch):
+    """Transcription stopped and restarted mid-call produces two. Taking [0]
+    would silently drop the second half of the meeting."""
+    gm, asked = _gmstub(
+        monkeypatch, _gmctx(),
+        transcripts=[
+            {"name": "conferenceRecords/c1/transcripts/t1", "state": "FILE_GENERATED"},
+            {"name": "conferenceRecords/c1/transcripts/t2", "state": "ENDED"},
+            {"name": "conferenceRecords/c1/transcripts/t3", "state": "FILE_GENERATED"},
+        ],
+    )
+    list(gm.pull("co-1"))
+    assert asked["entries"] == [
+        "conferenceRecords/c1/transcripts/t1",
+        "conferenceRecords/c1/transcripts/t3",
+    ]
+
+
+def test_text_is_capped_under_the_runner_batch_budget_meet(monkeypatch):
+    """A record that blew the 6000-char batch budget would be split across
+    batches mid-sentence and both halves would lose their context."""
+    from app.kg_ingest.runner import _BATCH_CHAR_BUDGET
+
+    long_entries = [
+        {"participant": "conferenceRecords/c1/participants/p1",
+         "text": "word " * 60}
+        for _ in range(200)
+    ]
+    gm, _ = _gmstub(monkeypatch, _gmctx(), entries=long_entries)
+    r = list(gm.pull("co-1"))[0]
+    assert len(r.text) <= gm._TEXT_CHARS
+    assert len(r.render()) < _BATCH_CHAR_BUDGET
+
+
+def test_global_record_valve_holds_meet(monkeypatch):
+    """The content-hash ledger makes RE-syncs free, but the FIRST sync pays the
+    LLM for everything."""
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name=f"conferenceRecords/c{i}") for i in range(20)],
+    )
+    monkeypatch.setattr(gm, "_MAX_RECORDS", 4)
+    assert len(list(gm.pull("co-1"))) == 4
+
+
+def test_google_meet_puller_never_logs_a_token_or_a_url(monkeypatch, caplog):
+    """A transcript is customer conversation and an access token is a
+    credential; neither belongs in a log line, and this is the assertion that
+    keeps a future debugging print from putting one there."""
+    import logging
+
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        transcripts=[{"name": "conferenceRecords/c1/transcripts/t1",
+                      "state": "ENDED"}],
+    )
+    with caplog.at_level(logging.DEBUG):
+        list(gm.pull("co-1"))
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "tok" not in logged
+    assert "meet.googleapis.com" not in logged
+
+
+def test_a_bad_conference_skips_without_failing_the_sync(monkeypatch):
+    """One unreadable call must not cost the rest of the window — and it must
+    be SKIPPED, not turned into a no-transcript record.
+
+    That record states in words that the meeting was probably never set to
+    transcribe, which is a claim about the customer's own Google Meet settings.
+    A 500 from Google is not evidence of that, and letting the failure fall
+    through to it would write a confident falsehood into the knowledge graph."""
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name="conferenceRecords/bad"),
+                     _conference(name="conferenceRecords/good")],
+    )
+
+    def flaky(_tok, conference, **kw):
+        if conference.endswith("bad"):
+            raise RuntimeError("500 from Google")
+        return [{"name": f"{conference}/transcripts/t1", "state": "FILE_GENERATED"}]
+
+    monkeypatch.setattr(gm, "list_transcripts", flaky)
+    recs = list(gm.pull("co-1"))
+    assert [r.external_id for r in recs] == ["conferenceRecords/good"]
+
+
+def test_an_expired_token_is_never_swallowed_by_per_call_isolation(monkeypatch):
+    """Per-conference isolation must not hide a reconnect signal — that would
+    report a cheerful zero-record sync on a dead connection, which looks
+    identical to "nobody had any meetings"."""
+    from app.connectors.google_meet import MeetAuthExpiredError
+
+    gm, _ = _gmstub(monkeypatch, _gmctx())
+
+    def dead(*_a, **_k):
+        raise MeetAuthExpiredError("reconnect")
+
+    monkeypatch.setattr(gm, "list_transcripts", dead)
+    with pytest.raises(MeetAuthExpiredError):
+        list(gm.pull("co-1"))
+
+
+def test_google_meet_puller_quiet_when_not_connected(monkeypatch):
+    """A disconnected company is a no-op, not an error — the scheduler sweeps
+    every row and a race with a disconnect must not stamp a failure."""
+    from app.kg_ingest.pullers import google_meet
+
+    def gone(cid):
+        raise google_meet.MeetNotConnectedError("no row")
+
+    monkeypatch.setattr(google_meet, "sync_context", gone)
+    assert list(google_meet.pull("co-1")) == []
+
+
+def test_counters_split_meetings_from_transcripts_meet(monkeypatch):
+    """The GAP between these two numbers is how the web layer can say "meetings
+    are syncing but transcription was never switched on" — a setting in the
+    customer's own Workspace that is invisible without both."""
+    from app.kg_ingest.pullers import google_meet
+
+    stamped: dict = {}
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name="conferenceRecords/c1"),
+                     _conference(name="conferenceRecords/c2")],
+    )
+
+    def flaky(_tok, conference, **kw):
+        if conference.endswith("c2"):
+            return []       # no transcript for this one
+        return [{"name": f"{conference}/transcripts/t1", "state": "FILE_GENERATED"}]
+
+    monkeypatch.setattr(gm, "list_transcripts", flaky)
+    monkeypatch.setattr(
+        google_meet, "_stamp_counters",
+        lambda cid, *, meetings, transcripts: stamped.update(
+            meetings=meetings, transcripts=transcripts
+        ),
+    )
+    list(gm.pull("co-1"))
+    assert stamped == {"meetings": 2, "transcripts": 1}
+
+
+def test_google_meet_is_registered_as_a_company_id_puller():
+    """The credential must be the COMPANY ID: a Meet pull needs the connected
+    account's identity off the connection row, which a lone access token cannot
+    reach."""
+    from app.kg_ingest.runner import PULLERS, _DOCUMENT_PROVIDERS
+
+    puller, key, hint = PULLERS["google_meet"]
+    assert key == "company_id"
+    assert "customer_voice" in hint
+    # The hint has to carry the coverage limit, or the extractor treats an
+    # organizer-only 30-day slice as if it were the company's whole meeting
+    # history and reads absence as evidence.
+    assert "ORGANIZED" in hint and "30 days" in hint
+    # A meeting is EVIDENCE, not an upload-class document — putting it here
+    # would hand it the brief gate's upload-only relaxation it has not earned.
+    assert "google_meet" not in _DOCUMENT_PROVIDERS
+
+
 # ---------- runner ----------
 
 def _recs(n, provider="clickup"):

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 //
-// C2b — usePinMarking hook smoke test, PLUS the public requireName-gate
-// regression tests below. The original smoke test mounted the hook via
-// renderToStaticMarkup (SSR-only, no interactivity) — that's kept as-is
-// (renderToStaticMarkup works fine under jsdom too). The requireName-gate
-// tests need a real interactive render (drop a pin, mutate its draft, submit,
+// C2b — usePinMarking hook smoke test, PLUS the requireName-gate regression
+// tests and the handlePinApply await-then-conditionally-resolve tests below.
+// The original smoke test mounted the hook via renderToStaticMarkup
+// (SSR-only, no interactivity) — that's kept as-is (renderToStaticMarkup
+// works fine under jsdom too). The requireName-gate and handlePinApply tests
+// need a real interactive render (drop a pin, mutate its draft, submit,
 // observe the resulting state), so they use `renderHook` + `act` from
 // @testing-library/react, the same pattern as the sibling
 // usePinMarking.*.dom.test.tsx files — hence the file-level jsdom environment
@@ -15,11 +16,12 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { act, renderHook } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { usePinMarking, type UsePinMarkingReturn } from "../usePinMarking"
+import type { CommentRecord } from "../../../lib/api"
 
 function captureHook(
   params: Parameters<typeof usePinMarking>[0],
@@ -32,6 +34,19 @@ function captureHook(
   renderToStaticMarkup(React.createElement(Harness))
   if (!captured) throw new Error("hook did not run")
   return captured
+}
+
+function comment(overrides: Partial<CommentRecord> = {}): CommentRecord {
+  return {
+    id: 42,
+    anchor_id: "pin-1",
+    body: "make it bigger",
+    author: "demo",
+    status: "open",
+    created_at: "2026-07-01T00:00:00Z",
+    resolved_at: null,
+    ...overrides,
+  }
 }
 
 describe("usePinMarking — returned API surface + initial state", () => {
@@ -66,6 +81,78 @@ describe("usePinMarking — returned API surface + initial state", () => {
     // no pins dropped → submitting a non-existent pin must not hit the create-fn
     await api.handlePinSubmit(99)
     expect(calls).toBe(0)
+  })
+})
+
+/** Drop a pin, fill its draft, and submit it to a saved state (`saved: true`,
+ *  `commentId` set from the mocked create's returned record). Returns the
+ *  dropped pin's number. */
+async function dropAndSavePin(
+  result: { current: UsePinMarkingReturn },
+): Promise<number> {
+  act(() => {
+    result.current.handleStageClick(10, 10, 0, 0, null)
+  })
+  const n = result.current.pins[result.current.pins.length - 1].n
+  act(() => {
+    result.current.handlePinDraftChange(n, "make it bigger")
+  })
+  await act(async () => {
+    await result.current.handlePinSubmit(n)
+  })
+  return n
+}
+
+describe("usePinMarking — handlePinApply awaits onPinIterate before resolving the pin", () => {
+  it("test_pin_apply_rejected_does_not_resolve_the_pin", async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    const onPinIterate = vi.fn().mockResolvedValue(false)
+    const created = comment({ id: 77 })
+
+    const { result } = renderHook(() =>
+      usePinMarking({
+        onCreate: async () => created,
+        onPinIterate,
+        onResolve,
+      }),
+    )
+
+    const n = await dropAndSavePin(result)
+
+    await act(async () => {
+      await result.current.handlePinApply(n)
+    })
+
+    expect(onPinIterate).toHaveBeenCalledTimes(1)
+    const pin = result.current.pins.find((p) => p.n === n)
+    expect(pin?.resolved).not.toBe(true)
+    expect(onResolve).not.toHaveBeenCalled()
+  })
+
+  it("test_pin_apply_accepted_resolves_the_pin", async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    const onPinIterate = vi.fn().mockResolvedValue(true)
+    const created = comment({ id: 77 })
+
+    const { result } = renderHook(() =>
+      usePinMarking({
+        onCreate: async () => created,
+        onPinIterate,
+        onResolve,
+      }),
+    )
+
+    const n = await dropAndSavePin(result)
+
+    await act(async () => {
+      await result.current.handlePinApply(n)
+    })
+
+    expect(onPinIterate).toHaveBeenCalledTimes(1)
+    const pin = result.current.pins.find((p) => p.n === n)
+    expect(pin?.resolved).toBe(true)
+    expect(onResolve).toHaveBeenCalledTimes(1)
+    expect(onResolve).toHaveBeenCalledWith(77)
   })
 })
 

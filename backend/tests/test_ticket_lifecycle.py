@@ -21,6 +21,10 @@ from app.stories.generate import Story
 from tests._company_helpers import company_client
 from tests.test_ticket_sync import CID, FakeTracker, _seed_prd_tickets, _sync_cfg, fake_tracker  # noqa: F401
 
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID/FakeTracker
+# fixture family, pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
+
 KEY = "prd-7-guest-alert-data-model"
 
 

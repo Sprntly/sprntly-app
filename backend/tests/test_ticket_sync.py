@@ -13,6 +13,21 @@ import pytest
 from app.auth import CompanyContext
 from app.stories.generate import Story
 
+# Pin every test that touches this shared CID / FakeTracker / prd_id fixture
+# family to the SAME xdist worker (requires `--dist=loadgroup`), run as one
+# contiguous scheduling unit. Several unrelated test files independently
+# reuse this exact CID (and small, easily-colliding prd_ids like 7/30/31/42)
+# with the SAME FakeTracker/isolated_settings machinery; under `-n auto`
+# these can otherwise be scheduled interleaved with unrelated tests
+# elsewhere in the suite, widening the window for any as-yet-unknown
+# cross-test leak to land here. Defense in depth alongside the structural
+# executor-drain fix in conftest.py (`_drain_orphaned_executor_work`) — see
+# that fixture's docstring for the actual mechanism this was compensating
+# for. Every file sharing this exact CID literal carries the same mark:
+# test_ticket_sync.py (source), test_ticket_lifecycle.py,
+# test_tracker_native_sync.py, test_asana_sync.py, test_tracker_meta.py.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
+
 CID = "11111111-2222-3333-4444-555555555555"
 
 

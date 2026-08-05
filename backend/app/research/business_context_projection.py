@@ -110,7 +110,14 @@ def project_business_context(
     created = {"segments": 0, "competitors": 0, "signals": 0}
     name = doc.identity.legal_name
     company_label = str(name.value).strip() if isinstance(name, Meta) and name.is_known else None
-    company_id = facade.ensure_company_entity(enterprise_id, label=company_label)
+    # relabel=True: a company root created via a non-business-context path
+    # first (e.g. roadmap upload, which has no real name to give it) must not
+    # stay stuck with its fallback label forever — once this refresh knows a
+    # real legal_name, rename the existing root to it. No-op when the label
+    # is unknown or already matches (idempotent re-runs write nothing).
+    company_id = facade.ensure_company_entity(
+        enterprise_id, label=company_label, relabel=True
+    )
 
     # Segments → segment entities.
     for seg in doc.users_segments.segments:

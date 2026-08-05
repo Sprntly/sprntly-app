@@ -539,6 +539,32 @@ def test_render_context_section_empty_bundle_is_blank():
 # ─────────────────────────── compose_ask_answer wiring ───────────────────────────
 
 
+def _only_answer_row(isolated_settings) -> dict:
+    """The ask's own `answer` row, asserting the whole world of rows it wrote.
+
+    An ask now writes TWO rows, not one: this `answer` row, and a
+    `document_selection` row written from inside document grounding — the
+    function BOTH ask paths go through. The skill-routed path wrote none of
+    this before, which is why topical selection returning the wrong document
+    there left nothing in the record to find it by.
+
+    Grouped by `decision_type` rather than counted in total, so this still
+    closes the world: a second `answer` row, a missing one, a stray write of
+    any other type, or a duplicated `document_selection` all still fail. It is
+    deliberately not loosened to "at least one row".
+    """
+    rows = (
+        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
+    )
+    by_type: dict[str, list[dict]] = {}
+    for row in rows:
+        by_type.setdefault(row["decision_type"], []).append(row)
+    assert sorted(by_type) == ["answer", "document_selection"], by_type
+    assert len(by_type["answer"]) == 1
+    assert len(by_type["document_selection"]) == 1
+    return by_type["answer"][0]
+
+
 def test_compose_ask_answer_corpus_only_when_no_enterprise(
     isolated_settings, fake_llm
 ):
@@ -592,11 +618,7 @@ def test_compose_ask_answer_injects_kg_section_and_logs_refs(
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
 
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    row = rows[0]
+    row = _only_answer_row(isolated_settings)
     assert row["agent"] == "ask"
     assert row["decision_type"] == "answer"
     assert row["enterprise_id"] == "co-1"
@@ -626,15 +648,12 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
 
     user = fake_llm["calls"][0]["user"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in user
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    row = _only_answer_row(isolated_settings)
+    factors = row["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["kg_used"] is False
-    kg_refs = rows[0]["kg_refs"]
+    kg_refs = row["kg_refs"]
     if isinstance(kg_refs, str):
         kg_refs = json.loads(kg_refs)
     assert kg_refs == []
@@ -678,11 +697,7 @@ def test_compose_ask_answer_prd_grounded_skips_kg_and_corpus(
     )
     assert "CURRENT PRD CONTEXT" not in call["user"]
     assert "What does this PRD say?" in call["user"]
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    factors = _only_answer_row(isolated_settings)["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["prd_grounded"] is True
@@ -715,6 +730,227 @@ def test_compose_ask_answer_prd_prefix_stable_across_turns(
         == block
     )
     assert first["user"] != second["user"]
+
+
+# ────────────────────── compose_ask_answer × workspace configuration ────────
+
+
+def _seed_company_with_config(
+    db, company_id, *, website="https://sprntly.ai", display_name="Sprntly",
+    product_name="Sprntly",
+):
+    """A companies row + its primary product row — the two reads
+    `company_facts_block` composes into the answer-prompt configuration
+    block."""
+    db.table("companies").insert(
+        {"id": company_id, "slug": f"slug-{company_id}", "display_name": display_name}
+    ).execute()
+    db.table("products").insert(
+        {
+            "id": f"prod-{company_id}",
+            "company_id": company_id,
+            "name": product_name,
+            "website": website,
+            "is_primary": 1,
+        }
+    ).execute()
+
+
+def test_compose_ask_answer_prompt_carries_company_domain(
+    isolated_settings, fake_llm
+):
+    """Regression: the incident tenant's own domain must ride the prompt so it
+    can outrank a wrong domain elsewhere. Fails on unfixed code — the domain
+    appears nowhere in the assembled prompt when no workspace configuration is
+    wired in. (AC7, AC12)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "What's our domain?", enterprise_id="co-1")
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER in prefix
+    assert "https://sprntly.ai" in prefix
+
+
+def test_compose_ask_answer_puts_company_facts_in_cacheable_prefix_not_user(
+    isolated_settings, fake_llm
+):
+    """The config block rides the CACHEABLE prefix, never the uncached `user`
+    turn, and the precedence addendum lands in `system`. (AC7)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+    from app.prompts import ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-1")
+
+    call = fake_llm["calls"][0]
+    assert WORKSPACE_CONFIG_HEADER in call["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER not in call["user"]
+    assert ASK_SYSTEM_COMPANY_FACTS_ADDENDUM in call["system"]
+
+
+def test_compose_ask_answer_kg_branch_carries_company_facts(
+    isolated_settings, fake_llm, facade
+):
+    """The config block rides alongside a KG-grounded answer too — the two
+    conditions are independent (config can be present with no KG bundle and
+    vice versa). (AC7)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "grounded", "key_points": [], "citations": [], "confidence": 0.7,
+        "unanswered": "",
+    }
+    theme, _sigs = _seed_theme_with_signals(
+        facade, "co-1", "Pipeline",
+        [("revenue", "deal_blocker", "Acme blocked on SSO", {}, 0)],
+    )
+
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        ask_runner.compose_ask_answer("asurion", "How is pipeline?", enterprise_id="co-1")
+
+    call = fake_llm["calls"][0]
+    assert WORKSPACE_CONFIG_HEADER in call["kwargs"]["user_cacheable_prefix"]
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in call["user"]
+
+
+def test_compose_ask_answer_prd_branch_prefixes_company_facts(
+    isolated_settings, fake_llm
+):
+    """PRD-grounded branch: the composed prefix is exactly
+    `facts + "\\n\\n---\\n\\n" + prd_context`. (AC9)"""
+    from app import ask_runner
+    from app.ask_runner import company_facts_block
+
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    facts = company_facts_block("co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+    block = "=== CURRENT PRD CONTEXT ===\nThe open PRD body."
+
+    ask_runner.compose_ask_answer(
+        "asurion", "q?", enterprise_id="co-1", prd_context=block,
+    )
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix == f"{facts}\n\n---\n\n{block}"
+
+
+def test_compose_ask_answer_prd_prefix_stable_across_turns_with_company_facts(
+    isolated_settings, fake_llm
+):
+    """Two consecutive calls, same tenant + same PRD, produce byte-identical
+    prefixes even with the per-tenant config block riding it. (AC9)"""
+    from app import ask_runner
+
+    _seed_company_with_config(isolated_settings["supabase"], "co-1")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+    block = "=== CURRENT PRD CONTEXT ===\nSame PRD content."
+
+    ask_runner.compose_ask_answer(
+        "asurion", "first question", enterprise_id="co-1", prd_context=block
+    )
+    ask_runner.compose_ask_answer(
+        "asurion", "second question", enterprise_id="co-1", prd_context=block
+    )
+
+    first, second = fake_llm["calls"]
+    assert (
+        first["kwargs"]["user_cacheable_prefix"]
+        == second["kwargs"]["user_cacheable_prefix"]
+    )
+
+
+def test_compose_ask_answer_unchanged_when_no_workspace_config(
+    isolated_settings, fake_llm
+):
+    """No product row at all (2 of the 21-tenant population) → prefix/system
+    stay byte-identical to the pre-fix composition — never an error. (AC6)"""
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-no-doc")
+
+    call = fake_llm["calls"][0]
+    assert call["kwargs"]["user_cacheable_prefix"] == (
+        "Source material:\n\n<<< SOURCE: a >>>\nlegacy corpus body\n<<< END SOURCE >>>"
+    )
+    assert "WORKSPACE CONFIGURATION" not in call["system"]
+
+
+def test_compose_ask_answer_prefix_none_when_no_corpus_and_no_facts(
+    isolated_settings, fake_llm
+):
+    """Empty dataset + no product row → user_cacheable_prefix is None, exactly
+    as before this ticket. (AC6)"""
+    from app import ask_runner
+
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-empty-no-doc")
+
+    assert fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"] is None
+
+
+def test_compose_ask_answer_guarded_website_is_omitted(
+    isolated_settings, fake_llm
+):
+    """A preview-deploy website (`*.vercel.app`) is guarded out of the block —
+    the company name still renders, the website line does not."""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    _seed_company_with_config(
+        isolated_settings["supabase"], "co-preview",
+        website="https://my-app-git-main.vercel.app",
+    )
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
+    }
+
+    with _patch_embed(), _patch_candidates([]):
+        ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-preview")
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert WORKSPACE_CONFIG_HEADER in prefix
+    assert "vercel.app" not in prefix
 
 
 # ─────────────────────────── route: POST /v1/ask ───────────────────────────

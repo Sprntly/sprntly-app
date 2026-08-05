@@ -7,18 +7,16 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import {
   artifactsApi,
-  askApi,
   prdApi,
   evidenceApi,
   type ArtifactItem,
-  type ReportKindOption,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
+import { evidenceOpenScopePatch } from "../../../lib/panelPrdScope"
 import { prototypePath } from "../../../lib/routes"
 import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-import { NewReportMenu } from "./NewReportMenu"
 
 // ── Artifacts ──
 //
@@ -37,15 +35,15 @@ const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "evidence", label: "Evidence" },
 ]
 
-// Poll cadence for a panel-started report run. These skills read every source, so
-// a run is minutes long — a slow poll keeps the wait honest without hammering.
-const REPORT_POLL_MS = 4000
-
-// "+ New report" is hidden: reports are asked for in chat, where the answer and
-// the document live together, and they're read in that thread's Reports tab.
-// The generation path below (NewReportMenu + generateReport) is left intact and
-// tested, so bringing the button back is this one flag.
-const SHOW_NEW_REPORT_BUTTON = false
+// The "+ New report" picker is GONE, not hidden. It was already dark behind
+// `SHOW_NEW_REPORT_BUTTON = false` — reports are asked for in chat, where the
+// answer and the document live together — and the fixed report FORMATS it
+// picked between (Voice of Customer / Competitor Analysis / Public Feedback,
+// server-listed by the deleted `GET /v1/reports/kinds`) no longer exist. There
+// is nothing left for a picker to pick, so nothing user-facing changed here.
+// Browsing and opening captured reports is untouched: the "Reports" filter, the
+// REPORT badge, and `reportKindLabel` all still work on rows already in the
+// library.
 
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
   prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
@@ -238,7 +236,6 @@ export function ArtifactsView({
   filter,
   loading,
   activeKey = null,
-  generatingKind = null,
   onFilterChange,
   onOpen,
 }: {
@@ -248,17 +245,10 @@ export function ArtifactsView({
   /** `${type}-${id}` of the artifact whose panel is currently open — that row
    *  renders in its selected (green) state. Null = nothing selected. */
   activeKey?: string | null
-  /** Label of a report being generated from this panel, or null. A report row
-   *  only exists once the run completes, so this pending row is what makes a
-   *  multi-minute run visible — the prototype shimmer's role, held client-side
-   *  because there is no server row to poll yet. */
-  generatingKind?: string | null
   onFilterChange: (f: ArtifactFilter) => void
   onOpen: (a: ArtifactItem) => void
 }) {
   const filtered = filter === "all" ? items : items.filter((a) => a.type === filter)
-  // The pending row belongs to the report filters only.
-  const showPending = generatingKind != null && (filter === "all" || filter === "report")
 
   return (
     <div>
@@ -302,37 +292,8 @@ export function ArtifactsView({
         </div>
       )}
 
-      {/* Pending report run — the artifact does not exist server-side until the
-          run completes, so this row is the only sign the work is happening. */}
-      {showPending && (
-        <div
-          data-testid="report-pending-row"
-          style={{
-            display: "flex", alignItems: "center", gap: 14,
-            padding: "14px 10px", borderRadius: 10, cursor: "default",
-          }}
-        >
-          <div style={{
-            width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
-            background: ARTIFACT_BADGE.report.bg,
-            animation: "chats-pulse 1.4s ease-in-out infinite",
-          }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)", marginBottom: 4,
-            }}>
-              {generatingKind} report
-            </div>
-            <div style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
-              Generating · this can take a few minutes
-            </div>
-          </div>
-          <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
-        </div>
-      )}
-
       {/* Empty state */}
-      {!loading && !showPending && filtered.length === 0 && (
+      {!loading && filtered.length === 0 && (
         <EmptyPane
           title="No artifacts yet"
           hint="Upload a PRD, generate a PRD, prototype, or evidence from a brief finding, or ask for a report in chat."
@@ -423,10 +384,6 @@ export function ArtifactsScreen() {
     if (contentPanelTab == null) setActiveArtifactKey(null)
   }, [contentPanelTab])
 
-  // "New report" run in flight — the label of the kind being generated, or null.
-  // Drives the pending row so a multi-minute run is visible rather than silent.
-  const [generatingKind, setGeneratingKind] = useState<string | null>(null)
-
   // Upload-a-PRD state (the Import flow).
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
@@ -485,7 +442,11 @@ export function ArtifactsScreen() {
       }
       if (a.type === "evidence") {
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ evidence: null, evidenceGenerating: true })
+        // Retires whatever PRD was cached from a previous artifact — this
+        // fetch cannot attribute the evidence document to it, so no
+        // PRD-acting control (Share, header, prototype CTA) may stay armed
+        // on it. See lib/panelPrdScope.ts.
+        setContent({ evidence: null, evidenceGenerating: true, ...evidenceOpenScopePatch() })
         openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
@@ -552,42 +513,6 @@ export function ArtifactsScreen() {
     }
   }, [setContent, openContentPanel, openPrdTab, openReportTab, router, showToast])
 
-  // Generate a report straight from this panel. The run goes through the ORDINARY
-  // ask pipeline with the skill pinned, so the result is identical to asking for
-  // the same report in chat and it lands in the library via the same capture path
-  // (app/report_capture.py) — no parallel generation route to keep in step.
-  //
-  // The report has no chat or PRD to attach to, which is a normal state: the row
-  // simply reads as its kind with no "from" line.
-  const generateReport = useCallback(async (kind: ReportKindOption) => {
-    if (!activeCompany || generatingKind) return
-    setGeneratingKind(kind.label)
-    try {
-      const { ask_id } = await askApi.start(kind.prompt, activeCompany, {
-        pinned_skill: kind.skill,
-      })
-      // These runs are minutes long (the skills read every source), so poll
-      // rather than hold a request open.
-      for (;;) {
-        await new Promise((r) => setTimeout(r, REPORT_POLL_MS))
-        const job = await askApi.get(ask_id)
-        if (job.status === "generating") continue
-        if (job.status === "ready") {
-          showToast("Report ready", `Your ${kind.label} report is in Artifacts.`)
-          refreshArtifacts()
-        } else {
-          // cancelled / error — say so rather than leaving a row that never lands.
-          showToast("Report failed", "The report couldn't be generated. Please try again.")
-        }
-        return
-      }
-    } catch {
-      showToast("Report failed", "The report couldn't be started. Please try again.")
-    } finally {
-      setGeneratingKind(null)
-    }
-  }, [activeCompany, generatingKind, refreshArtifacts, showToast])
-
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning
   // a 'generating' prd_id fast — so we open the chat window IMMEDIATELY and let
@@ -617,14 +542,6 @@ export function ArtifactsScreen() {
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
         {/* Upload a PRD → parsed + converted into our format server-side. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
-          {/* Start a report without composing a prompt in chat. */}
-          {SHOW_NEW_REPORT_BUTTON && (
-            <NewReportMenu
-              disabled={!activeCompany}
-              generating={generatingKind != null}
-              onGenerate={(kind) => void generateReport(kind)}
-            />
-          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -673,7 +590,6 @@ export function ArtifactsScreen() {
           filter={artifactFilter}
           loading={artifactsLoading}
           activeKey={activeArtifactKey}
-          generatingKind={generatingKind}
           onFilterChange={setArtifactFilter}
           onOpen={openArtifact}
         />

@@ -3,8 +3,6 @@
   GET  /v1/reports?conversation_id=  -> the reports captured in one chat thread,
                                         without their bodies. Backs the chat
                                         panel's Reports tab.
-  GET  /v1/reports/kinds             -> the report kinds the "New report" picker
-                                        offers, and the prompt each one runs.
   GET  /v1/reports/{report_id}       -> one report: its HTML document plus the
                                         attachment metadata the viewer's header needs.
   GET  /v1/reports/{report_id}/pdf   -> the same document rendered to PDF, as a
@@ -38,7 +36,6 @@ from app.auth import CompanyContext, require_company
 from app.db import get_report, list_reports_for_conversation, set_report_share_config
 from app.design_agent.rate_limit import SlidingWindowLimiter
 from app.design_agent.url_slug import url_slugify
-from app.report_kinds import available_report_kinds, prompt_for_kind
 from app.report_pdf import render_report_pdf
 
 logger = logging.getLogger(__name__)
@@ -50,26 +47,6 @@ router = APIRouter(prefix="/v1/reports", tags=["reports"])
 # downloads cannot lock their colleagues out. Process-local; see
 # design_agent/rate_limit.py for the Redis path under horizontal scaling.
 PDF_LIMITER = SlidingWindowLimiter(max_events=15, window_seconds=300)
-
-
-@router.get("/kinds")
-def list_report_kinds(company: CompanyContext = Depends(require_company)):  # noqa: ARG001
-    """The report kinds the Artifacts panel offers, with the prompt each runs.
-
-    Declared BEFORE `/{report_id}` so the literal path wins over the int-typed
-    dynamic segment.
-
-    The prompt rides along so the client can start the run through the ordinary
-    ask pipeline (POST /v1/ask with the skill pinned) — a report generated here
-    is then identical to one asked for in chat, and lands via the same capture
-    path rather than a parallel one.
-    """
-    return {
-        "kinds": [
-            {**k, "prompt": prompt_for_kind(k["skill"])}
-            for k in available_report_kinds()
-        ]
-    }
 
 
 @router.get("")

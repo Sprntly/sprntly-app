@@ -8,6 +8,7 @@ import Link from "next/link"
 import { AuthShell } from "./AuthShell"
 import { OtpInput } from "./OtpInput"
 import { InfoCircle, MailCheck, Refresh } from "./icons"
+import { ShareContextStrip } from "../shared/ShareContextStrip"
 
 export type VerifyEmailViewProps = {
   email: string
@@ -20,11 +21,22 @@ export type VerifyEmailViewProps = {
   onCodeChange: (next: string) => void
   onSubmit: (e: React.FormEvent) => void
   onResend: () => void
+  /** Set only when this verification originated from a valid `?share=`
+   *  artifact link. Absent renders unchanged from the OTP-only shape this
+   *  view already had before share-context support was added. */
+  shareContext?: { title: string; sharerName: string }
 }
 
 export function VerifyEmailView(props: VerifyEmailViewProps) {
   return (
     <AuthShell tag="Verify email" cardClassName="auth-card-center">
+      {props.shareContext && (
+        <ShareContextStrip
+          kind="verify"
+          title={props.shareContext.title}
+          sharerName={props.shareContext.sharerName}
+        />
+      )}
       <div className="verify-icon">
         <MailCheck width={30} height={30} />
       </div>

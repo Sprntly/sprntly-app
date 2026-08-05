@@ -77,6 +77,7 @@ from app.connectors import (
     figma_oauth,
     fireflies_apikey,
     github_app,
+    google_meet,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
@@ -84,6 +85,7 @@ from app.connectors import (
     sprinklr_oauth,
     superset_auth,
     uploads,
+    zoom_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -98,6 +100,7 @@ from app.connectors.tokens import (
 )
 from app.deps.ownership import require_owned_dataset
 from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
     kickoff_corpus_seed,
     kickoff_slack_corpus_sync,
     kickoff_sync,
@@ -415,6 +418,27 @@ def _build_post_oauth_redirect(payload: dict, provider: str) -> RedirectResponse
     return RedirectResponse(target)
 
 
+def _build_post_oauth_error_redirect(
+    payload: dict, provider: str, code: str
+) -> RedirectResponse:
+    """Same return-page redirect as above, but carrying a failure the user has
+    to act on rather than a new connection.
+
+    `code` is a STABLE SPRNTLY CODE (e.g. "zoom_app_not_approved"), never the
+    provider's own error string. Two reasons: a provider's wording changes
+    without notice and would leak straight onto a screen, and the copy for
+    "ask your Zoom admin to approve Sprntly" is the web layer's to write — the
+    backend's job is to say precisely which failure happened.
+    """
+    return_to = payload.get("return_to")
+    frontend = settings.frontend_url.rstrip("/")
+    params = {"provider": provider, "error": code}
+    if return_to and _is_safe_return_to(return_to):
+        params["return_to"] = return_to
+    target = f"{frontend}/connectors/return?{urlencode(params)}"
+    return RedirectResponse(target)
+
+
 class StartOauthIn(BaseModel):
     dataset: str | None = None
     # Optional relative path the callback redirects to instead of the
@@ -505,6 +529,28 @@ def start_oauth(
             raise HTTPException(500, "Confluence OAuth is not configured on the server")
         url = confluence_oauth.authorize_url(
             state=confluence_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == zoom_oauth.ZOOM_PROVIDER:
+        if not zoom_oauth.zoom_configured():
+            raise HTTPException(500, "Zoom OAuth is not configured on the server")
+        url = zoom_oauth.authorize_url(
+            state=zoom_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == google_meet.GOOGLE_MEET_PROVIDER:
+        if not google_meet.google_meet_configured():
+            raise HTTPException(
+                500, "Google Meet OAuth is not configured on the server"
+            )
+        url = google_meet.authorize_url(
+            state=google_meet.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -853,8 +899,19 @@ def google_drive_picker_token(
     to the owner's own browser grants them nothing they couldn't already do
     with their own Google account.
 
-    Returns ``{"access_token", "expires_in"}`` (seconds until expiry). 404 if
-    Drive isn't connected — matching how the other Drive routes signal that.
+    Also returns ``app_id``: the Google Cloud project number, required by the
+    Picker's ``setAppId()`` under the ``drive.file`` scope so a picked file is
+    bound to this app (without it Drive answers "File not found" for files
+    picked but never otherwise granted). Google OAuth client ids are shaped
+    ``<PROJECT_NUMBER>-<random>.apps.googleusercontent.com``, so we derive the
+    project number from ``settings.google_client_id`` rather than adding a new
+    config value that could drift from the OAuth client if it's ever rotated
+    into another project. Empty string if the client id is unset or
+    unexpectedly shaped (missing ``-``) — the route still returns 200.
+
+    Returns ``{"access_token", "expires_in", "app_id"}`` (seconds until
+    expiry). 404 if Drive isn't connected — matching how the other Drive
+    routes signal that.
     """
     _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
@@ -886,7 +943,10 @@ def google_drive_picker_token(
         if remaining > 0:
             expires_in = remaining
 
-    return {"access_token": creds.token, "expires_in": expires_in}
+    client_id = settings.google_client_id or ""
+    app_id = client_id.split("-", 1)[0] if "-" in client_id else ""
+
+    return {"access_token": creds.token, "expires_in": expires_in, "app_id": app_id}
 
 
 @router.delete("/google-drive")
@@ -1968,6 +2028,478 @@ def confluence_save_sync_spaces(
     # the user just told us what they want ingested.
     kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
     return {"ok": True, "config": config}
+
+
+# ─────────────────────── Zoom ───────────────────────
+#
+# Cloud recordings + transcripts. ORG-WIDE, not per-user: every scope is an
+# `:admin` scope so one connection reads every host's recordings, which is why
+# zoom is deliberately NOT in _PERSONAL_PROVIDERS and every mutating route here
+# goes through _require_admin_for_org_connector.
+#
+# CURRENT SCOPE: connect / disconnect / probe / host picker. No kg_ingest
+# puller yet, so a connected Zoom is healthy and ingests nothing.
+
+
+@router.get("/zoom/callback")
+def zoom_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Zoom's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Zoom calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state being replayed here.
+    """
+    payload = zoom_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. THREE different things end up here and
+    # they need three different sentences from the return page, so they get
+    # three stable codes rather than one catch-all:
+    #
+    #   access_denied         the user clicked Decline. Nothing is wrong; they
+    #                         just have to try again and accept. Telling them to
+    #                         "ask your Zoom admin to approve Sprntly" would
+    #                         send them to bother a colleague over their own
+    #                         click.
+    #   approval prose        a Zoom admin has not pre-approved the app
+    #                         (Marketplace → Manage → Approved Apps). This one
+    #                         genuinely does need another person.
+    #   anything else         honest generic failure.
+    #
+    # Zoom's own error string is never forwarded: it changes without notice and
+    # would land straight on a screen.
+    if error:
+        logger.warning(
+            "Zoom consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        if zoom_oauth.looks_like_app_not_approved(error, error_description):
+            code_out = "zoom_app_not_approved"
+        elif (error or "").strip().lower() == "access_denied":
+            code_out = "zoom_consent_declined"
+        else:
+            code_out = "zoom_oauth_failed"
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Zoom did not return an authorization code")
+
+    try:
+        token_json = zoom_oauth.exchange_code_for_token(code)
+    except zoom_oauth.ZoomAppNotApprovedError:
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, "zoom_app_not_approved",
+        )
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Zoom did not return an access_token")
+
+    # Best-effort label only. fetch_current_user answers on `user:read:user:admin`
+    # while everything this connector reads answers on the cloud_recording
+    # scopes, so a failure here says nothing about whether the connection works
+    # — it must not block the connect. The probe validates the read that
+    # matters.
+    user = zoom_oauth.fetch_current_user(access_token)
+    label = zoom_oauth.account_label_from(user)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed: the puller needs
+            # the picked hosts off connections.config, which a lone access token
+            # can't reach. See zoom_oauth.token_payload_to_store.
+            zoom_oauth.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect — which is not a rare event here:
+    # Zoom refresh tokens expire at 90 days, so every long-lived customer
+    # reconnects on a schedule. Writing a fresh `{"user": …}` would silently
+    # drop `sync_user_ids`, and an empty selection means EVERY HOST — so a
+    # workspace that deliberately narrowed sync to three sales hosts would
+    # quietly widen to the whole company every quarter, with no event to trace
+    # it to. Start from the existing config and only add.
+    existing = db.get_connection(company_id, zoom_oauth.ZOOM_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only three fields of the identity payload are kept — config_json is
+    # returned verbatim to every company member by GET /v1/connectors, and
+    # Zoom's user object carries the admin's personal meeting URL, phone number
+    # and department. `id` is the one that matters: it is the real userId the
+    # probe addresses instead of `me`. And an identity lookup that failed writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    if user:
+        config[zoom_oauth.CONFIG_USER] = zoom_oauth.identity_to_store(user)
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=zoom_oauth.ZOOM_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=zoom_oauth.ZOOM_SCOPES,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep — a first connect
+    # backfills three months of recordings, and a customer who just connected
+    # should see calls in the graph, not an empty one until this evening.
+    kickoff_sync(company_id, zoom_oauth.ZOOM_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, zoom_oauth.ZOOM_PROVIDER)
+
+
+@router.delete("/zoom")
+def zoom_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Zoom, revoking the grant on Zoom's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete: a
+    refresh token we merely forget stays valid on Zoom's side for the rest of
+    its 90 days, so forgetting without revoking leaves a live credential to this
+    customer's recordings in a token store we no longer show them. If the revoke
+    fails we still delete — the user asked to disconnect, and keeping our copy
+    would be the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        zoom_oauth.revoke_token(token_json.get("access_token") or "")
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Zoom revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    # Drop Zoom's half of the call index with the connection — same reasoning as
+    # the Fireflies disconnect: chat answering call questions from indexed Zoom
+    # rows while the connector list correctly reports Zoom as disconnected puts
+    # two contradictory claims in one answer. SCOPED, so a company that also
+    # runs Fireflies keeps its Fireflies index intact.
+    try:
+        from app import call_index
+
+        call_index.clear_company(company.company_id, call_index.PROVIDER_ZOOM)
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("zoom: could not clear call index for %s",
+                       company.company_id, exc_info=True)
+    return {"deleted": True, "provider": zoom_oauth.ZOOM_PROVIDER}
+
+
+#: How many hosts the picker will return. Zoom accounts run to thousands of
+#: users; past this a picker needs search rather than a longer scroll, and
+#: `truncated` is how the UI says so honestly instead of silently showing a
+#: prefix.
+_ZOOM_USER_PICKER_LIMIT = 500
+
+
+@router.get("/zoom/users")
+def zoom_list_users(
+    company: CompanyContext = Depends(require_company),
+):
+    """The hosts on the connected Zoom account, for the picker.
+
+    Readable by any member (mirrors confluence_list_spaces and
+    slack_list_channels) — seeing what COULD be synced is not a privileged
+    action; changing the selection is.
+
+    `recording_count` is present on every row and is null in this slice: the
+    count needs one windowed recordings call PER HOST, which is the puller's
+    job. It ships as a declared null rather than a missing key so the client
+    renders "—" from day one instead of gaining a new field later.
+
+    Three fields describe the size of the answer, and they mean different
+    things. `total` is HOW MANY WE FETCHED, not how many exist. `fetch_capped`
+    says Zoom still had more pages when the listing budget ran out — on a
+    5,000-host account that is the difference between an honest "showing the
+    first 500 of at least 1,200" and a flat lie about the customer's own org.
+    `truncated` says the response itself was cut to the picker limit.
+
+    `selected_names` returns the names stored WITH the selection rather than
+    only the ids. That is the entire reason they are persisted: a host who has
+    since been deactivated is gone from `users` (the listing is active-only), so
+    without their name the picker can only render a bare opaque id — or, worse,
+    silently show a shorter selection than the one actually in force.
+    """
+    try:
+        ctx = zoom_oauth.sync_context(company.company_id)
+        found, fetch_capped = zoom_oauth.list_users(ctx.access_token)
+    except zoom_oauth.ZoomNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    except zoom_oauth.ZoomAuthExpiredError as e:
+        # Must be caught. An escaping exception becomes an unhandled 500 with no
+        # CORS headers, which the browser reports as a bare "Failed to fetch" —
+        # the picker then shows a network error for what is really a reconnect
+        # prompt. That exact defect shipped on Confluence's space picker
+        # (a1e16c40); the likeliest trigger here is the same one: a token minted
+        # before a scope changed, or the connecting admin losing their admin role.
+        raise HTTPException(400, str(e)) from e
+    truncated = len(found) > _ZOOM_USER_PICKER_LIMIT
+    users = [
+        {**u, "recording_count": None} for u in found[:_ZOOM_USER_PICKER_LIMIT]
+    ]
+    return {
+        "users": users,
+        "selected_ids": ctx.user_ids,
+        "selected_names": ctx.user_names,
+        # Fetched, NOT the account's true user count — see the docstring.
+        "total": len(found),
+        "fetch_capped": fetch_capped,
+        "truncated": truncated,
+    }
+
+
+#: How many hosts one selection may name. Mirrors Confluence's 25-space cap and
+#: exists for the same reason: refuse a selection the puller could never honor
+#: rather than silently truncating one. Sized for Zoom's cost shape — the puller
+#: pays ONE windowed recordings call per selected host per sync window, so 100
+#: hosts is 100 calls a pass before a single transcript is read.
+_ZOOM_MAX_SYNC_USERS = 100
+
+
+class ZoomUserIn(BaseModel):
+    id: str
+    email: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("user id cannot be empty")
+
+
+class ZoomSyncUsersIn(BaseModel):
+    users: list[ZoomUserIn]
+
+    def model_post_init(self, _context) -> None:
+        if len(self.users) > _ZOOM_MAX_SYNC_USERS:
+            raise ValueError(
+                f"select at most {_ZOOM_MAX_SYNC_USERS} hosts — "
+                "leave the selection empty to sync every host instead"
+            )
+
+
+@router.post("/zoom/users")
+def zoom_save_sync_users(
+    body: ZoomSyncUsersIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which hosts' recordings the KG ingest pulls — COMPANY-WIDE.
+
+    An EMPTY list clears the selection, which means every host on the account
+    again. That is the backwards-compatible default (the same rule as
+    Confluence's spaces and Slack's channels): a connection made before this
+    picker existed has no stored selection and must keep working.
+
+    Emails are stored alongside the ids so a host who is later deactivated can
+    be reported BY NAME in the sync log rather than as an opaque Zoom user id.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    # Dedupe preserving order — the puller walks the selection in order, one
+    # windowed recordings call per host, so a duplicated id is a duplicated call.
+    ids = list(dict.fromkeys(u.id for u in body.users))
+    names = {
+        u.id: u.email.strip()
+        for u in body.users
+        if u.email and u.email.strip()
+    }
+    updated = db.patch_connection_config(
+        company.company_id,
+        zoom_oauth.ZOOM_PROVIDER,
+        {
+            zoom_oauth.CONFIG_SYNC_USER_IDS: ids,
+            zoom_oauth.CONFIG_SYNC_USER_NAMES: names,
+        },
+    )
+    try:
+        config = json.loads((updated or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    # Pull the new selection now rather than waiting for the next sweep — the
+    # user just told us what they want ingested.
+    kickoff_sync(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    return {"ok": True, "config": config}
+
+
+# ─────────────────────── Google Meet ───────────────────────
+#
+# Meeting transcripts, read from the Meet REST API v2. Shares the Google Cloud
+# project and OAuth client with the Drive connector but is a fully separate
+# provider — its own redirect URI, its own connection row, its own state signer
+# and its own scope list (see connectors/google_meet.py for why the scope lists
+# must never merge).
+#
+# NOT ORG-WIDE, and this is the opposite of Zoom. Google exposes only the
+# conferences the connected account ORGANIZED; there is no admin-level listing
+# and no scope that would add one. It is nevertheless treated as an ORG
+# connector for RBAC (absent from _PERSONAL_PROVIDERS, every mutation behind
+# _require_admin_for_org_connector), because the connection row is
+# company-scoped: one row per company, so whoever holds it decides what the
+# whole workspace ingests. Per-user Meet connections would need the per-user
+# row shape Slack has, which is its own change.
+#
+# There is no picker route. There is nothing to pick: coverage is fixed to the
+# connecting account's own meetings, and the 30-day retention window is Google's
+# to set, not the customer's.
+
+
+@router.get("/google-meet/callback")
+def google_meet_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Google's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Google calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state (including the Drive connector's, minted by the very same
+    OAuth client) being replayed here.
+    """
+    payload = google_meet.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. Google's own error string is never
+    # forwarded — it changes without notice and would land straight on a screen
+    # — so this collapses to two stable codes the return page maps to copy:
+    # the user declined (nothing is wrong, try again and accept), or anything
+    # else (honest generic failure).
+    if error:
+        logger.warning(
+            "Google Meet consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        code_out = (
+            "google_meet_consent_declined"
+            if (error or "").strip().lower() == "access_denied"
+            else "google_meet_oauth_failed"
+        )
+        return _build_post_oauth_error_redirect(
+            payload, google_meet.GOOGLE_MEET_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Google Meet did not return an authorization code")
+
+    token_json = google_meet.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Google Meet did not return an access_token")
+
+    # The email comes free out of the OIDC id_token (we request openid +
+    # userinfo.email), so the common path costs no extra round trip. The
+    # userinfo call is only the fallback, and a failure there costs the LABEL,
+    # never the connection: userinfo answers on a different scope from every
+    # meeting read, so it says nothing about whether the connector works. The
+    # probe validates the read that matters.
+    email = google_meet.email_from_id_token(token_json)
+    user = {} if email else google_meet.fetch_current_user(access_token)
+    label = google_meet.account_label_from(user, email=email)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed — see
+            # google_meet.token_payload_to_store.
+            google_meet.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect. Writing a fresh dict would drop
+    # whatever else lives there — today the puller's sync counters, tomorrow
+    # anything a config surface adds — which is exactly the regression the Zoom
+    # callback had to be fixed for (there it silently widened a narrowed host
+    # selection back to every host, once a quarter, with no event to trace it
+    # to). Start from the existing config and only add.
+    existing = db.get_connection(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only {id, email} of the identity payload is kept — config_json is returned
+    # verbatim to every company member by GET /v1/connectors, and Google's
+    # userinfo carries the connecting person's full name, profile picture URL,
+    # locale and hosted domain. An identity lookup that produced nothing writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    identity = google_meet.identity_to_store(user, email=email)
+    if identity.get("id") or identity.get("email"):
+        config[google_meet.CONFIG_USER] = identity
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_meet.GOOGLE_MEET_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=google_meet.MEET_SCOPE_STRING,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep. It matters more here
+    # than on any other connector: the corpus is only ever the last 30 days, so
+    # every hour of delay is an hour of the window that will expire unread.
+    kickoff_sync(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, google_meet.GOOGLE_MEET_PROVIDER)
+
+
+@router.delete("/google-meet")
+def google_meet_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Google Meet, revoking the grant on Google's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete. It
+    matters more than on the connectors with a token clock: Google refresh
+    tokens do not expire on a schedule, so one we merely forget stays live
+    indefinitely — a permanent credential to this customer's meeting
+    transcripts, in a token store we no longer show them. If the revoke fails we
+    still delete: the user asked to disconnect, and keeping our copy would be
+    the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, google_meet.GOOGLE_MEET_PROVIDER)
+    row = db.get_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Meet is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        # The refresh token is the one worth killing — revoking any token of a
+        # grant invalidates the whole grant, and the access token would have
+        # expired within the hour anyway.
+        google_meet.revoke_token(
+            token_json.get("refresh_token") or token_json.get("access_token") or ""
+        )
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Google Meet revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    return {"deleted": True, "provider": google_meet.GOOGLE_MEET_PROVIDER}
 
 
 # ─────────────────────── HubSpot ───────────────────────
@@ -3101,6 +3633,50 @@ class SlackSyncChannelsIn(BaseModel):
             raise ValueError("select at most 50 channels")
 
 
+def _slack_delivery_channel_ids(company_id: str) -> set[str] | None:
+    """Every channel this company currently DELIVERS to over Slack, or None
+    when the lookup itself failed.
+
+    Delivery is per-user (each member picks their own target — see
+    connectors/slack_company.py), so this reads every member's Slack row, not
+    just the company sync row. A channel in this set must never be left even
+    when it is unticked in the pull picker: the bot has to stay a member to
+    post there, and `post_to_target` only re-joins PUBLIC channels — walking
+    out of a private delivery channel would silently break that member's
+    briefs, nudges and design-agent notifications with no way back but a
+    manual /invite.
+
+    Matches `slack_oauth.post_to_target`'s own reading of the config, including
+    its default: an absent `target_type` means "channel", so a row carrying
+    only `channel_id` still counts.
+
+    Returns None — NOT an empty set — when the connection lookup blows up. The
+    two mean opposite things to the caller: empty is "nothing is a delivery
+    target, every leave is safe", None is "we don't know", and the only safe
+    response to not knowing is to leave nothing at all. An empty set here would
+    turn a transient DB hiccup into a silently broken brief channel.
+    """
+    from app.connectors.slack_company import row_config
+
+    targets: set[str] = set()
+    try:
+        rows = db.list_slack_connections(company_id)
+    except Exception:  # noqa: BLE001 — unknown targets ⇒ skip every leave
+        logger.exception("slack delivery-target lookup failed for %s", company_id)
+        return None
+    for row in rows:
+        cfg = row_config(row)
+        target_type = (
+            cfg.get("target_type") or slack_oauth.TARGET_CHANNEL
+        ).strip()
+        if target_type != slack_oauth.TARGET_CHANNEL:
+            continue
+        channel_id = str(cfg.get("channel_id") or "").strip()
+        if channel_id:
+            targets.add(channel_id)
+    return targets
+
+
 @router.post("/slack/sync-channels")
 def slack_save_sync_channels(
     body: SlackSyncChannelsIn,
@@ -3115,7 +3691,23 @@ def slack_save_sync_channels(
     every channel the bot is a member of). Selected public channels are
     best-effort self-joined right away (idempotent, `channels:join`) so the
     first sync doesn't skip them as not_in_channel; private channels can't
-    be self-joined and need a manual /invite."""
+    be self-joined and need a manual /invite.
+
+    UNTICKING REVERSES TICKING. A channel dropped from the selection is
+    diffed out of the PREVIOUS selection and then undone in both directions
+    ticking it went: the bot leaves the channel in Slack
+    (`slack_oauth.leave_channel`), and the messages that channel already
+    contributed are stripped out of the company's synced corpus
+    (`slack_sync.purge_channels_from_synced_data`), which then re-seeds the KG
+    the way an ordinary sync does. Two rules bound that:
+
+      * A channel that is somebody's DELIVERY target is never left, only
+        purged — see `_slack_delivery_channel_ids`.
+      * Every leave and every purge is best-effort. The selection write above
+        them is the source of truth and has already committed; cleanup that
+        fails is logged and reported in the response, never turned into an
+        error the admin's save disappears into.
+    """
     from app.connectors.slack_company import (
         CompanySlackError,
         company_slack_token,
@@ -3125,6 +3717,7 @@ def slack_save_sync_channels(
     from app.connectors.slack_sync import (
         CONFIG_SYNC_CHANNEL_IDS,
         CONFIG_SYNC_CHANNEL_NAMES,
+        purge_channels_from_synced_data,
     )
 
     # Company-wide config → org-connector RBAC, even though the underlying
@@ -3138,6 +3731,20 @@ def slack_save_sync_channels(
     row = resolve_company_slack_row(company.company_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
+    # Snapshot the OUTGOING selection before the patch overwrites it — this is
+    # the only moment both halves of the diff exist. The names map matters as
+    # much as the ids: the corpus keys its per-channel sections by channel NAME
+    # (`## #support`), and the new payload no longer carries a name for a
+    # channel that was just unticked.
+    previous = row_config(row)
+    previous_ids = [
+        str(cid) for cid in (previous.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
+    ]
+    previous_names = previous.get(CONFIG_SYNC_CHANNEL_NAMES)
+    if not isinstance(previous_names, dict):
+        # A hand-edited or pre-picker config can carry anything here; a bad
+        # names map must degrade to "no name known", not to a 500 on save.
+        previous_names = {}
     # Dedupe preserving order — the sync pulls in selection order.
     ids = list(dict.fromkeys(c.id for c in body.channels))
     names = {
@@ -3167,7 +3774,99 @@ def slack_save_sync_channels(
             logger.exception("slack auto-join on sync-channels save failed")
         except Exception:  # noqa: BLE001 — join must never block the save
             logger.exception("slack auto-join on sync-channels save failed")
-    return {"ok": True, "config": config, "joined": joined}
+
+    # ── Unticked channels: leave in Slack, then un-sync their messages ──
+    #
+    # An empty incoming list is "clear the selection back to every bot-member
+    # channel", NOT "unsubscribe from everything the bot is in" — clearing
+    # widens what the sync reads, so nothing is removed and nothing is left.
+    selected = set(ids)
+    removed_ids = (
+        [cid for cid in previous_ids if cid not in selected] if ids else []
+    )
+    left: list[str] = []
+    leave_failed: list[str] = []
+    delivery_skipped: list[str] = []
+    purged: dict = {"datasets": [], "sections_removed": 0, "reseeded": []}
+
+    if removed_ids:
+        delivery_targets = _slack_delivery_channel_ids(company.company_id)
+        if delivery_targets is None:
+            # Couldn't establish which channels deliver — skip every leave
+            # rather than risk walking out of a brief channel.
+            delivery_skipped = list(removed_ids)
+            logger.warning(
+                "slack un-sync: delivery targets unknown for company=%s — "
+                "skipping all %d leave(s); data purge still runs",
+                company.company_id, len(removed_ids),
+            )
+        else:
+            try:
+                resolved = company_slack_token(company.company_id)
+            except CompanySlackError:
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            except Exception:  # noqa: BLE001 — never block the save
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            if resolved:
+                bot_token, _leave_row = resolved
+                for cid in removed_ids:
+                    if cid in delivery_targets:
+                        # Still purged below — the guard protects DELIVERY, not
+                        # the corpus. The admin asked for this channel's
+                        # messages to stop being read; the bot just has to stay
+                        # in the room to keep posting there.
+                        delivery_skipped.append(cid)
+                        logger.info(
+                            "slack un-sync: keeping bot in %s — it is a Slack "
+                            "delivery target for this company", cid,
+                        )
+                        continue
+                    try:
+                        if slack_oauth.leave_channel(bot_token, cid):
+                            left.append(cid)
+                        else:
+                            leave_failed.append(cid)
+                    except Exception:  # noqa: BLE001 — per-channel isolation
+                        leave_failed.append(cid)
+                        logger.exception("slack leave failed for %s", cid)
+            else:
+                leave_failed = list(removed_ids)
+
+        # Purge every removed channel's pulled messages, delivery targets
+        # included. Names come from the OUTGOING map; a channel we never
+        # stored a name for has no addressable corpus section, so it is
+        # reported rather than guessed at.
+        removed_names = [
+            str(previous_names.get(cid) or "").strip() for cid in removed_ids
+        ]
+        purge_names = [n for n in removed_names if n]
+        if len(purge_names) < len(removed_ids):
+            logger.warning(
+                "slack un-sync: %d of %d removed channels had no stored name — "
+                "their corpus sections cannot be located and are left for the "
+                "next full sync to overwrite",
+                len(removed_ids) - len(purge_names), len(removed_ids),
+            )
+        try:
+            purged = purge_channels_from_synced_data(
+                company.company_id, purge_names
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "slack un-sync: purge failed for company=%s", company.company_id
+            )
+
+    return {
+        "ok": True,
+        "config": config,
+        "joined": joined,
+        "left": left,
+        "leave_failed": leave_failed,
+        "delivery_skipped": delivery_skipped,
+        "purged": purged,
+    }
 
 
 class SlackSyncCorpusIn(BaseModel):
@@ -3258,6 +3957,14 @@ def fireflies_connect_apikey(
     )
 
     kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Populate the CALL INDEX at connect time too. kickoff_sync above fills the
+    # KG (distilled summaries); this fills the metadata index chat answers call
+    # listings from. Without it the index stays empty until the next 6-hourly
+    # scheduler cycle, and an empty index is not an error anyone can see — every
+    # interception in qa_agent just returns None and the question silently
+    # degrades to the old expensive path. Same gap, same fix as d30ca7ee's
+    # "sync Slack the moment it's connected, not six hours later".
+    kickoff_call_index_sync(company.company_id)
 
     return {
         "ok": True,
@@ -3275,6 +3982,25 @@ def fireflies_disconnect(
     if not row:
         raise HTTPException(404, "Fireflies is not connected")
     db.delete_connection(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Drop the call index with the connection. Leaving it is NOT harmless: chat
+    # would keep answering call questions from indexed rows while
+    # prompts.connected_sources_line correctly reports that no transcript source
+    # is connected — two contradictory claims inside one answer, with no way for
+    # the reader to tell which half is wrong. Best-effort; call_index.ensure_fresh
+    # independently refuses to serve once the source is gone, so a failure here
+    # degrades to "no answer from the index" rather than to a stale one.
+    try:
+        from app import call_index
+
+        # SCOPED to Fireflies. An unscoped wipe would also destroy a working
+        # Zoom index — disconnect one tool, silently lose another tool's call
+        # history — now that two sources populate this table.
+        call_index.clear_company(
+            company.company_id, call_index.PROVIDER_FIREFLIES
+        )
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("fireflies: could not clear call index for %s",
+                       company.company_id, exc_info=True)
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 

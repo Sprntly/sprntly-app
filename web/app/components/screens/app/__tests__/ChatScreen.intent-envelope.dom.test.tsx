@@ -80,8 +80,11 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useSearchParams: () => new URLSearchParams("new=1"),
 }))
-// Flag ON — the whole point of this suite. (The sibling command suites mock
-// workspace: null, so they lock the flag-OFF ladder.)
+// Flag EXPLICITLY on — the whole point of this suite. The other two states of
+// the flag (key absent, explicit false) have their own suites:
+// ChatScreen.envelope-default.dom.test.tsx. (The sibling command suites now
+// mock an explicit `chat_intent_envelope: false`, since a null/flagless
+// workspace resolves to ON.)
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
   useWorkspace: () => ({

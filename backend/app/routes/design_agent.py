@@ -101,10 +101,10 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
-from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.event_stream import close as _sse_close, publish_step, subscribe as _sse_subscribe
 from app.design_agent.notify import notify_prototype_ready  # prototype-ready ping (best-effort)
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
-from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
+from app.design_agent.runner import MODEL, _final_text_summary, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.url_slug import url_slugify  # cosmetic /p/<company>/<feature>/<token> segments
 from app.design_agent.codebase_map.recreate import (
@@ -550,14 +550,36 @@ async def generate(
     this workspace + template_version (mirrors routes/prd.py's find_existing
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
-    _require_feature_enabled()
-    _require_company_prototype_enabled(company.company_id)
+    # Kickoff timing: one structured line on every exit below, raises included
+    # — the <200ms claim above was previously asserted, never measured. Three
+    # outcome shapes (dedupe / worker-enqueued / in-process insert) have
+    # materially different costs and are kept distinguishable rather than
+    # averaged into one number; every early rejection shares "rejected" since
+    # they carry no outcome to distinguish.
+    _kickoff_start = time.monotonic()
+
+    def _log_kickoff(outcome: str) -> None:
+        logger.info(
+            "design_agent_generate_kickoff company_id=%s prd_id=%s outcome=%s elapsed_ms=%.1f",
+            company.company_id,
+            body.prd_id,
+            outcome,
+            (time.monotonic() - _kickoff_start) * 1000,
+        )
+
+    try:
+        _require_feature_enabled()
+        _require_company_prototype_enabled(company.company_id)
+    except HTTPException:
+        _log_kickoff("rejected")
+        raise
     # Tier 0: while the process is draining on SIGTERM, reject new work
     # cleanly rather than start a task a pending SIGKILL would abandon mid-run.
     # 503 is the retry signal the frontend retry self-heals on (the next
     # boot accepts it). Checked after the feature gate so the feature stays
     # invisible (404) when off.
     if _shutting_down:
+        _log_kickoff("rejected")
         raise HTTPException(
             status_code=503,
             detail="service is draining, retry shortly",
@@ -577,12 +599,14 @@ async def generate(
     # source rather than letting the key persist and fail only at read time.
     if body.screenshot_keys:
         if len(body.screenshot_keys) > 10:
+            _log_kickoff("rejected")
             raise HTTPException(
                 status_code=422,
                 detail={"error": "too_many_screenshots", "max": 10},
             )
         for key in body.screenshot_keys:
             if not key.startswith(f"uploads/{workspace_id}/") or ".." in key.split("/"):
+                _log_kickoff("rejected")
                 raise HTTPException(
                     status_code=403, detail={"error": "screenshot_key_forbidden"}
                 )
@@ -595,6 +619,7 @@ async def generate(
         variant=_VARIANT,
     )
     if existing:
+        _log_kickoff("dedupe")
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
     # Connected-repo identifier the user chose as the existing codebase to match.
@@ -740,6 +765,7 @@ async def generate(
                 "design_agent_generation_enqueued prototype_id=%s job_id=%s",
                 prototype_id, job.get("id"),
             )
+            _log_kickoff("worker_enqueued")
             return GenerateResponse(prototype_id=prototype_id, status="generating")
         # enqueue failed (table missing / DB error) — fall through to in-process.
         logger.warning(
@@ -774,6 +800,7 @@ async def generate(
 
     task.add_done_callback(_clear_generation_entry)
 
+    _log_kickoff("in_process")
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
 
@@ -2097,6 +2124,17 @@ async def _run_generation_bg(
                     # Repair-token accumulator: _build_repair_loop sums each repair
                     # pass's usage into this so the ledger captures primary + repair.
                     repair_usage=repair_usage,
+                    # The agent's own 1-2 sentence change summary, computed
+                    # here (not inside _stage_complete_run, which has no RunResult)
+                    # and threaded through so the deferred `done` sentinel it emits
+                    # after complete_prototype carries the same text `_finish` used
+                    # to attach immediately. Empty when the run's final turn had no
+                    # text block (the summary is best-effort, per _final_text_summary).
+                    # getattr (not result.final_content): mirrors the file's existing
+                    # defensive reads (theme_expectations/error_message/error_class
+                    # above) so a minimal RunResult test stub without the attribute
+                    # never AttributeErrors here.
+                    summary=_final_text_summary(getattr(result, "final_content", None)),
                 )
                 # Prototype-ready notification (best-effort side effect): fires
                 # ONLY on a successful FIRST-completion stage — iterate/manual
@@ -2147,6 +2185,15 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error="agent_loop completed but emitted no files",
                 )
+                # AC3's operative rule: a complete run that never reaches
+                # _stage_complete_run (no files to stage) still fails the row via
+                # fail_prototype — and agent_loop deferred the done close for
+                # THIS status too (mode="scaffold"), so nothing has closed the
+                # stream yet. Without this the row fails silently: no done (good,
+                # deferred), but also no error — the same "unrepresentable
+                # failure" AC3 targets, just one step earlier than the six-branch
+                # table (this exit never reaches _stage_complete_run at all).
+                _sse_close(prototype_id, kind="error")
                 _finalize_usage_event_failed(
                     event_id=event_id,
                     workspace_id=workspace_id,
@@ -2478,6 +2525,7 @@ async def _stage_complete_run(
     interactive_scope: list[str] | None = None,
     parity_located: "LocatedScreen | None" = None,
     repair_usage: RunUsage | None = None,
+    summary: str = "",
 ) -> bool:
     """Post-run hook: vite_build → checkpoint → stage_bundle → complete.
 
@@ -2486,6 +2534,17 @@ async def _stage_complete_run(
     the matching usage-ledger terminal status. `repair_usage`, when passed, is the
     accumulator the build-repair loop sums its (separate-agent-loop) token usage
     into so the caller's ledger row reflects primary + repair tokens.
+
+    This function now OWNS the SSE terminal event for the runs it stages.
+    `agent_loop` (mode="scaffold") defers its own `done` close so it is not sent
+    until the prototype is actually openable — every `return False` below emits
+    an `error` terminal (the agent succeeded but staging failed; the six branches
+    below cover every `fail_prototype` exit, so a new one added later must do the
+    same), and the success path emits `done` (carrying `summary`, the caller's
+    precomputed `_final_text_summary(result.final_content)`) right after
+    `complete_prototype` — the true "the prototype exists" moment. `_sse_close` is
+    a safe no-op when no subscribers are registered (e.g. every isolated unit
+    test that calls this function directly without a live SSE consumer).
 
     Four steps, each gating the next:
 
@@ -2636,6 +2695,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"placeholder_shipped: {exc}",
             )
+            _sse_close(prototype_id, kind="error")
             return False
         try:
             dist_files, repaired_virtual_fs = await _build_repair_loop(
@@ -2659,6 +2719,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"placeholder_shipped: {repair_exc}",
             )
+            _sse_close(prototype_id, kind="error")
             return False
     except (TypeCheckError, ViteBuildError) as exc:
         # A model-fixable build failure does NOT fail outright. This covers a
@@ -2681,6 +2742,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
+            _sse_close(prototype_id, kind="error")
             return False
         try:
             dist_files, repaired_virtual_fs = await _build_repair_loop(
@@ -2704,6 +2766,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"{type(repair_exc).__name__}: {repair_exc}",
             )
+            _sse_close(prototype_id, kind="error")
             return False
     except (FileNotFoundError, ThemeBridgeError) as exc:
         # The fail-fast path: a missing runtime/scaffold file (not model-fixable) or
@@ -2726,6 +2789,7 @@ async def _stage_complete_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+        _sse_close(prototype_id, kind="error")
         return False
     # Rebind to the repaired source BEFORE the `_source/` staging step so
     # the staged source matches the built dist. On a clean build this is the same
@@ -2767,6 +2831,7 @@ async def _stage_complete_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+        _sse_close(prototype_id, kind="error")
         return False
 
     # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
@@ -2823,6 +2888,11 @@ async def _stage_complete_run(
         current_checkpoint_id=checkpoint_id,
         preview_image_url=preview_image_url,
     )
+    # AC1: the `done` terminal fires HERE — after complete_prototype,
+    # the moment the row is actually ready and its bundle retrievable — not at
+    # agent-completion. `agent_loop` (mode="scaffold") deferred this close for
+    # exactly this reason (see `_finish`'s comment).
+    _sse_close(prototype_id, kind="done", summary=summary)
     return True
 
 
@@ -4002,6 +4072,13 @@ async def _run_iterate_bg(
                 virtual_fs=virtual_fs,
                 iterate_prompt=body.prompt,
                 recovering_from_failure=(proto.get("status") == "failed"),
+                # AC6: execute-mode iterate defers its `done` close the
+                # same way generate does (agent_loop mode="execute") — carry the
+                # agent's change summary through so _stage_iterate_run's deferred
+                # close attaches the same text `_finish` used to attach immediately.
+                # getattr guards a minimal RunResult test stub (see the matching
+                # generate call site above).
+                summary=_final_text_summary(getattr(result, "final_content", None)),
             )
             # Finalize the iteration ledger row. _stage_iterate_run owns the
             # prototype write (advance on success, fail on build error), so we
@@ -4029,6 +4106,10 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
             )
+            # AC3/AC6 parity with generate's equivalent branch above:
+            # agent_loop deferred the done close for this complete status too
+            # (mode="execute"), and this exit never reaches _stage_iterate_run.
+            _sse_close(prototype_id, kind="error")
             _finalize_usage_event_failed(
                 event_id=iter_event_id,
                 workspace_id=workspace_id,
@@ -4170,6 +4251,7 @@ async def _stage_iterate_run(
     virtual_fs: dict[str, str],
     iterate_prompt: str,
     recovering_from_failure: bool = False,
+    summary: str = "",
 ) -> bool:
     """Iterate-completion staging path. DELIBERATELY SEPARATE from
     `_stage_complete_run`: it does NOT call `complete_prototype`. An iterate
@@ -4186,6 +4268,13 @@ async def _stage_iterate_run(
     the iterate prompt into prompt_history) → stage_bundle (dist + raw _source so
     the NEXT iterate can read it back). Then the seam advances
     `current_checkpoint_id` + bundle_url WITHOUT a completed_at re-stamp.
+
+    AC6: also called from manual-edit (`_run_manual_edit_bg`), which does
+    NOT defer its `_finish` close (mode="manual", intentionally out of scope) —
+    for that caller every `_sse_close` below is a harmless no-op (the stream
+    already closed at agent-completion; `close()` on an empty/absent registry
+    entry never raises). Only the execute-mode iterate caller (`_run_iterate_bg`,
+    mode="execute") actually depends on these closes firing.
     """
     # Step 1 — Vite build (anchor-id plugin runs here).
     try:
@@ -4206,6 +4295,7 @@ async def _stage_iterate_run(
             workspace_id=workspace_id,
             error=f"placeholder_shipped: {exc}",
         )
+        _sse_close(prototype_id, kind="error")
         return False
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
         # Cross-cutting seam: the type-check runs inside the shared
@@ -4221,6 +4311,7 @@ async def _stage_iterate_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+        _sse_close(prototype_id, kind="error")
         return False
     logger.info(
         "iterate_vite_build_succeeded prototype_id=%s dist_file_count=%s",
@@ -4248,6 +4339,7 @@ async def _stage_iterate_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+        _sse_close(prototype_id, kind="error")
         return False
 
     # Step 4 — Advance current_checkpoint_id + bundle_url WITHOUT a
@@ -4264,6 +4356,10 @@ async def _stage_iterate_run(
         bundle_url=bundle_url,
         recovered_from_failure=recovering_from_failure,
     )
+    # AC1/AC6: fires HERE, after the checkpoint actually advanced — see
+    # _stage_complete_run's matching close for the full rationale. A no-op when
+    # called from manual-edit (see docstring).
+    _sse_close(prototype_id, kind="done", summary=summary)
     return True
 
 

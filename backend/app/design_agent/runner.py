@@ -880,6 +880,23 @@ async def agent_loop(
     single-inference-site decision (routing lives in the route layer).
     """
     client = get_design_agent_client()
+    # Whether a COMPLETE run's terminal `done` is deferred to the route rather
+    # than emitted here. True for "scaffold" (generate) and "execute"
+    # (iterate) — the two modes whose complete run is followed by real staging
+    # (vite build, checkpoint, bundle upload) before the prototype is openable;
+    # see `_finish`'s comment for the full rationale. Plan mode and a manual
+    # edit ("manual") are NOT deferred — nothing stages after a plan run, and
+    # manual-edit's terminal timing is intentionally left unchanged (out of scope).
+    # A build-repair re-entry (`repair_build_run`) also passes mode="scaffold",
+    # so a repair pass that itself completes is ALSO deferred — a beneficial
+    # side effect: today a repair pass ending in status="complete" already
+    # closes the outer stream mid-repair (the same defect class, one level
+    # deeper); deferring it here means the repair loop's own completions no
+    # longer emit a premature terminal either. Its non-complete exits still
+    # close immediately via the (unmoved) error branch below, same as before.
+    # Computed once, before the loop, from the same `mode` the tool registry
+    # partition already uses (never reassigned mid-run — AD10).
+    _defer_done_terminal = mode in ("scaffold", "execute")
     # AD17 + AD10: the registry is partitioned PER MODE and computed ONCE here,
     # before the loop — never reassigned inside it (a mid-run tool change would
     # invalidate the prompt cache, agent-build-research.md §3.4). PLAN mode gets
@@ -1054,10 +1071,10 @@ async def agent_loop(
                     ctx.prototype_id,
                     {"kind": "step", "text": "Generation stopped early to control cost", "state": "active"},
                 )
-                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop == "end_turn":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop == "max_tokens":
                 if max_tokens_retried:
@@ -1075,7 +1092,7 @@ async def agent_loop(
                         max_tokens = ESCALATION_MAX_TOKENS
                         messages.pop()
                         continue
-                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id, model_escalated=True)
+                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id, model_escalated=True, defer_done_terminal=_defer_done_terminal)
                 max_tokens *= 2
                 max_tokens_retried = True
                 # The truncated assistant turn was appended above. When the cap
@@ -1093,10 +1110,10 @@ async def agent_loop(
                 continue
 
             if stop == "refusal":
-                return _finish(usage, "refused", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "refused", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop != "tool_use":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
@@ -1160,7 +1177,7 @@ async def agent_loop(
             )
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             # Emit a per-tool step event BEFORE dispatch so the frontend
             # activity stream shows what the agent is about to do at tool
@@ -1243,7 +1260,7 @@ async def agent_loop(
         # Exited because iters == max_iters. Salvage the last assistant turn as
         # final_content (was discarded as []) — a build that ran out of turns
         # mid-flow is usually near-complete and worth staging, not throwing away.
-        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
+        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
     except Exception as exc:
         from app.design_agent.provider_errors import (
@@ -1267,7 +1284,7 @@ async def agent_loop(
             ctx.prototype_id,
             {"kind": "step", "text": error_message, "state": "active"},
         )
-        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
         result.error_class = cls.value
         result.error_message = error_message
         logger.warning(
@@ -1367,21 +1384,43 @@ def _finish(
     final_content: list,
     prototype_id: int | None = None,
     model_escalated: bool = False,
+    defer_done_terminal: bool = False,
 ) -> RunResult:
     # Flush the SSE terminal event to all active subscribers so every open
     # /events stream ends cleanly. Covers every exit path (complete / max_iters /
     # aborted / error) in one place. awaiting_clarification is a pause, not a
     # terminal — the stream stays open while the user composes an answer.
+    #
+    # defer_done_terminal (the success path ONLY — see below): True whenever the
+    # caller passed mode="scaffold" (generate) or mode="execute" (iterate) into
+    # `agent_loop`, which derives it once, before the loop runs, and threads it
+    # into every `_finish` call (see agent_loop's own comment). For those, a
+    # complete run is followed by real staging work (vite build, checkpoint,
+    # bundle upload, complete_prototype) before the prototype is actually
+    # openable — closing here would tell the client the run is done 15-22s
+    # before it is. The ROUTE (routes/design_agent.py: _stage_complete_run /
+    # _stage_iterate_run) owns emitting `done` itself, after its own
+    # `complete_prototype` / `advance_current_checkpoint` call succeeds, and an
+    # `error` terminal on any staging failure. Plan-mode iterate and manual edit
+    # stage nothing after a complete run (in this ticket's scope) and keep the
+    # immediate close, unchanged.
+    #
+    # The error branch below is NOT gated by this flag and must never move: a
+    # non-complete exit (max_iters / aborted / refused / error) is a genuine
+    # terminal the moment it happens, regardless of whether staging was ever
+    # going to run.
     if prototype_id is not None and status != "awaiting_clarification":
         if status == "complete":
-            # done sentinel carries the agent's own 1-2 sentence change summary
-            # (last text block of THIS run's final_content) when present. Only the
-            # complete/done path surfaces text; error sentinels stay shape-stable.
-            _sse_close(
-                prototype_id,
-                kind="done",
-                summary=_final_text_summary(final_content),
-            )
+            if not defer_done_terminal:
+                # done sentinel carries the agent's own 1-2 sentence change
+                # summary (last text block of THIS run's final_content) when
+                # present. Only the complete/done path surfaces text; error
+                # sentinels stay shape-stable.
+                _sse_close(
+                    prototype_id,
+                    kind="done",
+                    summary=_final_text_summary(final_content),
+                )
         else:
             _sse_close(prototype_id, kind="error")
     duration_ms = int((time.perf_counter() - start) * 1000)

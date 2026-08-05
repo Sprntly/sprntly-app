@@ -153,12 +153,25 @@ def test_detect_intent_routes_report_shapes_to_cir(q):
     "I need a battlecard for the Acme deal",
     "help me handle objections about pricing",
 ])
-def test_battlecard_wins_over_cir(q):
-    """The battlecard rule sits ABOVE CIR: a sales-enablement ask must not buy
-    a multi-minute landscape review."""
+def test_sales_enablement_asks_never_buy_a_cir_sweep(q):
+    """A sales-enablement ask must not buy a multi-minute landscape review.
+
+    That guarantee is unchanged; what enforces it moved. It used to be the
+    `sales-battlecard` rule sitting ABOVE CIR in `_RULES`, and this asserted
+    the ask reached that skill. `sales-battlecard` was a method-only skill and
+    went with the built-in layer, so these questions now reach the ordinary
+    answer — which is a STRONGER version of the same protection, and the thing
+    actually worth pinning.
+
+    Two of the four ("battlecard") are additionally covered by `_CIR_VETO`,
+    which is where the protection always really lived; the rule ordering was
+    belt-and-braces. The other two are safe because CIR's rule needs a
+    competitor SUBJECT word and a named company is not one.
+    """
     d = detect_intent(q)
-    assert d and d.skill_id == "sales-battlecard", (
-        f"{q!r} routed to {getattr(d, 'skill_id', None)!r}"
+    assert d is None or d.skill_id != CIR, (
+        f"{q!r} bought a competitive sweep: routed to "
+        f"{getattr(d, 'skill_id', None)!r}"
     )
 
 

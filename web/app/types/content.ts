@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse, ReportSummary } from "../lib/api"
+import type { AskResponse, GeneratedStory, ReportSummary } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -265,6 +265,11 @@ export type ConnectorType =
   | "code"
   | "monitoring"
   | "design"
+  // User research — interview/usability repositories (Marvin) and the research
+  // artifacts a team uploads by hand. Distinct from "customer-voice" (inbound,
+  // unsolicited) and "meetings" (sales/CSM calls): research is deliberately
+  // gathered evidence about users. Mirrors backend catalog.py RESEARCH.
+  | "research"
 
 export interface ConnectorItemRow {
   id: string
@@ -335,13 +340,27 @@ export interface ConnectorCategoryRow {
    * categories that explicitly set `false` hide the strip.
    *
    * Turned off for categories whose data should only ever arrive through the
-   * real integration (Communications, Codebase, Project Management): a hand-
-   * uploaded Slack/GitHub/Jira export has no sync, no permissions model, and
-   * no incremental updates, so it produces stale, misleading sources.
+   * real integration (Codebase, Project Management): a hand-uploaded
+   * GitHub/Jira export has no sync, no permissions model, and no incremental
+   * updates, so it produces stale, misleading sources. Company documentation
+   * also opts out, for a different reason: it takes uploads through its own
+   * named-source picker rather than the generic per-category strip.
    * The backend upload path is untouched — flip this back to `true` (or drop
    * the field) to restore the dropzone.
    */
   allowsManualUpload?: boolean
+  /**
+   * Keep this category visible in `connectableCatalog()` even when none of its
+   * connectors is wired yet. Defaults to FALSE: normally an all-"Coming soon"
+   * category is dropped so we never show a shelf the user can't act on.
+   *
+   * Set only for Research, where the manual upload strip — not the connector
+   * grid — is the feature: Marvin is still coming-soon, so without this the
+   * whole shelf (and the only way to hand us research) would vanish from
+   * Settings AND the onboarding wizard. A category setting this must therefore
+   * allow manual upload; a shelf with neither connectors nor uploads is empty.
+   */
+  keepWhenEmpty?: boolean
 }
 
 export interface DetailQuoteRow {
@@ -586,6 +605,14 @@ export interface PrdContent {
 export interface PrdState extends PrdContent {
   /** DB id of the loaded PRD (`PrdRecord.id`). Always present once a PRD is loaded. */
   prd_id: number
+  /** Opaque, unguessable external identifier (`PrdRecord.public_id`) —
+   *  what `useArtifactUrlSync` reflects onto the `?prd=` URL instead of the
+   *  sequential `prd_id`, so a copied/bookmarked link never discloses a
+   *  blind-enumerable id. Optional: absent on any PrdState built before this
+   *  field existed (none currently — every load path sets it — kept
+   *  optional so a future load path that forgets it fails soft, not a type
+   *  error blocking an unrelated build). */
+  public_id?: string
   /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
   figma_file_key?: string | null
   /** Part B — the implementation-spec markdown (`PrdRecord.llm_part`). Rendered
@@ -732,6 +759,14 @@ export interface AppContentState {
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
   connectedConnectorIds: string[]
+  /** Whether `connectedConnectorIds` has actually been answered by the backend
+   *  yet. It starts `[]`, which is indistinguishable from "this workspace has
+   *  no connectors" — and the Top Insights surface turns that into a dead-end
+   *  "connect a source" page. Surfaces that branch on the connector list must
+   *  wait for this flag instead of reading the default. Set (to `true`) by
+   *  AppShell on both success and failure of the connectors fetch, and reset to
+   *  `false` on a workspace switch. */
+  connectorsHydrated: boolean
   /** The workspace's Top Insights filter (companies.notification_settings.
    *  brief_insight_types), loaded once by AppShell. The Top Insights tab shows
    *  the findings whose types intersect it; empty/absent = surface everything
@@ -743,6 +778,11 @@ export interface AppContentState {
   sidebarConvCount: number | null
   /** Override default AI chips per screen id; empty array = no chips */
   aiScreenChips: Partial<Record<string, string[]>>
+  /** A guest session's pre-fetched ticket set (GuestArtifactViewer populates
+   *  this directly from the artifact-share content endpoint) — the Tickets
+   *  tab renders these instead of calling storiesApi when useGuestSession()
+   *  is non-null. `null`/absent for every non-guest render. */
+  guestTickets?: GeneratedStory[] | null
 }
 
 export function isBriefEmpty(b: BriefState): boolean {

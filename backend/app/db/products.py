@@ -6,8 +6,10 @@
 """Products — onboarding's per-company product rows (read-only here).
 
 `products` is owned by the onboarding flow (migration 20260525150300_products.sql);
-each company gets a primary product carrying the brand `website`. This module only
-*reads* it, to source a design system when generation has no Figma file.
+each company gets a primary product carrying the brand `website`. This module
+*reads* it for two purposes: sourcing a design system when generation has no
+Figma file (`get_company_website`), and rendering the workspace's self-reported
+name/website into the Ask answer prompt (`get_primary_product`, app.ask_runner).
 """
 from __future__ import annotations
 
@@ -46,3 +48,33 @@ def get_company_website(company_id: str) -> str | None:
             return website
     logger.info("design_agent_no_company_website company_id=%s", company_id)
     return None
+
+
+def get_primary_product(company_id: str) -> dict | None:
+    """Return `{"name": str, "website": str}` for the company's ONE product
+    row — the `is_primary` row when one exists, else the most-recently
+    created (same ordering as `get_company_website`; `LIMIT 1` so this never
+    fans out across a company's other products). `website` is `""` when the
+    row's website column is empty/NULL — the caller decides what to do with a
+    missing website. Returns None when the company has no product row at all.
+    """
+    if not company_id:
+        return None
+    rows = (
+        require_client()
+        .table("products")
+        .select("name, website, is_primary, created_at")
+        .eq("company_id", company_id)
+        .order("is_primary", desc=True)   # primary row first
+        .order("created_at", desc=True)   # then most-recent
+        .limit(1)
+        .execute()
+        .data
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "name": (row.get("name") or "").strip(),
+        "website": (row.get("website") or "").strip(),
+    }

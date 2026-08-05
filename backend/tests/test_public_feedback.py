@@ -25,25 +25,62 @@ PROFILE = {
     "product": {"name": "Strava", "website": "https://strava.com"},
 }
 
+# The synthesis call's output. It used to fill `public_feedback_report.SCHEMA`
+# — ~30 fields a 686-line template rendered into HTML with a drawn monthly
+# chart. Template and schema are both deleted: the report is MARKDOWN, and only
+# the two values with a machine reader kept their structure — `window_label`
+# (read back by follow-up query mode to date its answers; it was `eyebrow`) and
+# `metadata` (what query mode is answered FROM).
+REPORT_MD = (
+    "## What people are saying\n\n"
+    "Three problems dominate: latency, exports, mobile.\n\n"
+    "### Integrity\n- 2 posts collected across 2 sources."
+)
+
+# A REALISTIC response — one that validates against `_REPORT_SCHEMA`. The
+# previous `{"totals": {"collected": 2}}` fixture was thinner than the schema
+# requires, which is how the sibling CIR bug survived its own suite: the stub
+# returned a payload the real grammar would never have produced.
 REPORT_DATA = {
-    "eyebrow": "Public feedback · 2026", "prepared": "Prepared 26 July 2026",
-    "covers": "c", "looked": "l", "answering": "a",
-    "counts": {"collected": 2, "product": 1, "non_product": 1,
-               "sources": 2, "leaving": 0},
-    "tldr_source_line": "s", "tldr_intro": "i",
-    "tldr": [{"headline": "h", "sub": "s", "quote": "", "quote_attr": ""}],
-    "first_move": "f", "months": [], "chart_kpis": [], "chart_note": "",
-    "chart_callout": "", "ratings_kpis": [], "ratings_callout": "",
-    "problems": [], "new_items": [], "stuck_items": [], "fixed_items": [],
-    "mix": {"product_pos": 0, "product_neu": 0, "product_neg": 1,
-            "non_pos": 0, "non_neu": 0, "non_neg": 1, "note": ""},
-    "progress_callout": "", "platforms": [], "platforms_note": "",
-    "compare_title": "", "why_these": "", "us_name": "", "us_loves": [],
-    "rivals": [], "dimensions": [], "switching": "", "recs_intro": "",
-    "recommendations": [], "non_product_intro": "", "non_product_items": [],
-    "next_steps": "n", "integrity": [],
-    "metadata": {"totals": {"collected": 2}},
+    "answer": REPORT_MD,
+    "window_label": "Public feedback · 2026",
+    "metadata": {
+        "generated_by": "public-feedback-report",
+        "window": "Feb - Jul 2026",
+        "totals": {"collected": 2, "product": 1, "non_product": 1,
+                   "sources": 2, "leaving": 0},
+        "by_source": [
+            {"platform": "App Store", "total": 1, "sentiment": "negative",
+             "product": 1, "non_product": 0, "earliest_post": "2026-06-01",
+             "latest_post": "2026-06-01", "caution": ""},
+            {"platform": "Reddit", "total": 1, "sentiment": "mixed",
+             "product": 0, "non_product": 1, "earliest_post": "2026-07-02",
+             "latest_post": "2026-07-02", "caution": "single thread"},
+        ],
+        "by_month": [{"month": "2026-06", "count": 1},
+                     {"month": "2026-07", "count": 1}],
+        "themes": [{"label": "export latency", "first_seen": "2026-06-01",
+                    "last_seen": "2026-07-02", "status": "unresolved",
+                    "owner": "platform", "count": 1}],
+        "switching": "Nobody said outright they are leaving.",
+        "competitors": ["Globex"],
+        "external_ratings": [{"platform": "App Store", "rating": "4.1",
+                              "as_of": "2026-07-30"}],
+        "limits": "Two posts is too few to trend; treat as directional only.",
+    },
 }
+
+
+def test_report_data_fixture_matches_the_schema():
+    """The stub must be something the model could ACTUALLY produce.
+
+    Same guard as the competitive-intelligence suite, for the same reason: a
+    bare `{"type": "object"}` metadata block meant the grammar could only emit
+    `{}`, and a hand-written fixture hid that from every test here. Validating
+    the fixture against the schema ties the two together."""
+    import jsonschema
+
+    jsonschema.validate(REPORT_DATA, pf._REPORT_SCHEMA)
 
 
 # ── record parsing ───────────────────────────────────────────────────────────
@@ -153,8 +190,9 @@ def test_answer_happy_path_renders_and_persists(monkeypatch):
     monkeypatch.setattr(db, "save_public_feedback_run", fake_save)
 
     out = pf.answer(enterprise_id="e1", question="what are people saying about us online?")
-    assert out["answer"].startswith("<!DOCTYPE html>")
-    assert "report-metadata" in out["answer"]
+    # An ordinary chat answer — markdown, not a document.
+    assert out["answer"] == REPORT_MD
+    assert not out["answer"].lstrip().startswith("<")
     assert out["_skill"] == "public-feedback-report"
     assert out["_skill_action"] == "Public feedback · 2 posts"
     # analyse call carries the skill binding, schema, and the records
@@ -165,7 +203,19 @@ def test_answer_happy_path_renders_and_persists(monkeypatch):
     # the run is persisted with records + metadata + html
     assert calls["save"]["company_id"] == "e1"
     assert calls["save"]["records"] == RECORDS
-    assert calls["save"]["metadata"] == {"totals": {"collected": 2}}
+    # Persisted INTACT — asserted against the fixture rather than a hand-copied
+    # thin dict, so it cannot drift out of step with what the schema permits.
+    assert calls["save"]["metadata"] == REPORT_DATA["metadata"]
+    assert calls["save"]["metadata"]["window"], (
+        "an empty window leaves every follow-up question undateable — the "
+        "sibling of the competitive-intelligence failure on staging run 8"
+    )
+    assert calls["save"]["metadata"]["by_source"]
+    # `window_label` is what query mode reads back to date its answers. It came
+    # off the deleted schema's `eyebrow`; it is asked for by name now.
+    assert calls["save"]["window_label"] == "Public feedback · 2026"
+    # The column is still `html` — renaming it is a migration — and it holds the
+    # stored copy of the answer, which is markdown.
     assert calls["save"]["html"] == out["answer"]
 
 
@@ -180,7 +230,7 @@ def test_answer_save_failure_never_breaks_the_answer(monkeypatch):
     def boom(*a, **k): raise RuntimeError("db down")
     monkeypatch.setattr(db, "save_public_feedback_run", boom)
     out = pf.answer(enterprise_id="e1", question="q")
-    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert out["answer"] == REPORT_MD
 
 
 def test_answer_synthesis_failure_is_graceful(monkeypatch):

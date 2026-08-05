@@ -16,9 +16,12 @@
  *   - the `<GenerateModal>` open/close state (internal by default, or fully
  *     controlled by a host that already owns an external open signal),
  *   - the full-screen `<GenerationLoadingScreen>` overlay lifecycle
- *     (min-visible-duration + safety-ceiling + kickoff-failure-guard timers,
- *     copied byte-for-byte from `ApproveModal`'s existing implementation —
- *     the richest of the 4 prior copies),
+ *     (min-visible-duration + safety-ceiling timers, copied byte-for-byte
+ *     from `ApproveModal`'s existing implementation — the richest of the 4
+ *     prior copies; the kickoff-failure GUESS this used to also carry — a
+ *     fixed timer that inferred a failed kickoff from the modal still being
+ *     open a beat later — was removed once a real failure signal existed to
+ *     replace it, see `handleGenStart`),
  *   - the "Notify me when ready" default side effects, and
  *   - the terminal post-success outcome (navigate to the in-tab canvas, or
  *     hand the prototype to a host-supplied `onSuccess`).
@@ -53,12 +56,6 @@ const MIN_VISIBLE_MS = 2500
 // swallowed kickoff failure). `runGenerateFlow`'s own poll caps at 6 min; this
 // is a slightly-longer belt-and-braces backstop. Copied from `ApproveModal`.
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
-// Kickoff-failure guard delay. `runGenerateFlow` swallows a kickoff error
-// (toasts "Generate failed", leaves the modal OPEN, never fires the done
-// callback) — so on success it ALWAYS closes the modal. If the modal is still
-// open a beat after start, the kickoff failed: dismiss the overlay so it
-// doesn't hang to the safety ceiling. Copied from `ApproveModal`.
-const KICKOFF_FAILURE_GUARD_MS = 1500
 
 export type GeneratePrototypeCtaState =
   | "loading" // existence check in flight (skipExistenceCheck=false only)
@@ -141,14 +138,14 @@ export type UseGeneratePrototypeOptions = {
    *  and relabel "Generate prototype" → "View prototype" without a remount. */
   onGenerationSettled?: (result?: DesignAgentGenResult) => void
   /** Fires when the user clicks "Notify me when ready" INSTEAD of the hook's
-   *  default (dispatch `da:generating`, close the overlay, keep the mounted
-   *  GenerateModal's onGenDone alive to fire a toast on completion — matches
-   *  ApproveModal's current behavior for a host that stays mounted). Hosts that
-   *  navigate away on notify (PrototypeRoute) MUST supply their own override
-   *  that ALSO dispatches `da:notify-generation` with `{prototypeId, prdId}`
-   *  before navigating — the shell's `useGenerationNotify` only resumes polling
-   *  for ids it receives via that event; omitting it strands the poll on
-   *  unmount. */
+   *  default. The default now matches PrototypeRoute's own notify handler on
+   *  every host: toast, dispatch `da:generating`, dispatch
+   *  `da:notify-generation` with `{prototypeId, prdId}` (so the shell's
+   *  `useGenerationNotify` — mounted once at the app-shell level, so it
+   *  survives the host unmounting — resumes polling for this run), close the
+   *  overlay, then navigate to Top Insights via `goTo("brief")`. A
+   *  host-supplied override replaces ALL of that (PrototypeRoute supplies its
+   *  own equivalent handler and is unaffected by this default). */
   onNotifyWhenReady?: () => void
 }
 
@@ -228,7 +225,7 @@ export function useGeneratePrototype(
   } = options ?? {}
 
   const router = useRouter()
-  const { showToast } = useNavigation()
+  const { showToast, goTo } = useNavigation()
   const { workspace, refresh } = useWorkspace()
   const savedPreference = workspace?.design_source ?? null
 
@@ -369,10 +366,6 @@ export function useGeneratePrototype(
   // run — the terminal onGenDone then skips navigation/onSuccess entirely
   // (the notify path already handed off).
   const notifyModeRef = useRef(false)
-  // Live mirror of the generate modal's open state for the kickoff-failure
-  // guard's deferred timeout (avoids a stale closure).
-  const generateActiveRef = useRef(false)
-  generateActiveRef.current = genModalOpen
 
   const clearOverlayTimers = useCallback(() => {
     if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
@@ -408,15 +401,26 @@ export function useGeneratePrototype(
       setGenLoading(true)
       if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
       safetyTimerRef.current = setTimeout(hideLoading, SAFETY_MAX_MS)
-      setTimeout(() => {
-        if (!resolvedRef.current && generateActiveRef.current) hideLoading()
-      }, KICKOFF_FAILURE_GUARD_MS)
+      // A genuine kickoff failure is no longer inferred from a fixed timer —
+      // it is a real signal (`handleGenDone` fed a failure result; see
+      // GenerateModal's `onKickoffFailed` wiring), which surfaces its own
+      // error and dismisses the overlay through the SAME path a post-kickoff
+      // failure already does. There is nothing left here to guess with a
+      // timer.
     },
     [hideLoading],
   )
 
   const handleKickoff = useCallback((prototypeId: number) => {
     setGenProtoId(prototypeId)
+    // A generation is now genuinely running — make that observable app-wide
+    // from this moment, not only once the client's own poll times out or the
+    // user explicitly backgrounds it (the only two dispatch points until
+    // now). Same event/detail shape as those two so every listener (the
+    // cross-surface CTA signal, useGenerationNotify) treats it identically.
+    window.dispatchEvent(
+      new CustomEvent("da:generating", { detail: { prototypeId } }),
+    )
   }, [])
 
   const handleGenDone = useCallback(
@@ -567,10 +571,17 @@ export function useGeneratePrototype(
     [genProtoId, showToast, onSuccess, router, prdId],
   )
 
-  // Default "Notify me when ready" side effects — reproduces
-  // ApproveModal.handleNotifyWhenReady exactly (byte-for-byte copy of that
-  // function's 3 side effects): toast, conditional da:generating dispatch,
-  // close the overlay. A host-supplied override replaces this entirely (AC12).
+  // Default "Notify me when ready" side effects — mirrors PrototypeRoute's
+  // own handleNotifyWhenReady exactly (toast, da:generating, conditional
+  // da:notify-generation with the prdId so useGenerationNotify can resume
+  // polling for this run after this host unmounts, close the overlay,
+  // navigate to Top Insights) so every surface behaves the same regardless of
+  // whether it stays mounted or navigates away. Fixes a bug where this
+  // fallback (used by every host that doesn't supply its own
+  // onNotifyWhenReady override — i.e. every surface except PrototypeRoute)
+  // neither navigated nor dispatched da:notify-generation, silently
+  // stranding the completion poll once the user did navigate away by other
+  // means. A host-supplied override replaces this entirely.
   const handleNotifyWhenReady = useCallback(() => {
     notifyModeRef.current = true
     if (onNotifyWhenReady) {
@@ -582,9 +593,17 @@ export function useGeneratePrototype(
       window.dispatchEvent(
         new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }),
       )
+      if (prdId != null) {
+        window.dispatchEvent(
+          new CustomEvent("da:notify-generation", {
+            detail: { prototypeId: genProtoId, prdId },
+          }),
+        )
+      }
     }
     setGenLoading(false)
-  }, [onNotifyWhenReady, showToast, genProtoId])
+    goTo("brief")
+  }, [onNotifyWhenReady, showToast, genProtoId, prdId, goTo])
 
   // No sanctioned "stop the running generation" contract exists at this
   // wrapper layer — the true-abort endpoint (`designAgentApi.cancel`) is only

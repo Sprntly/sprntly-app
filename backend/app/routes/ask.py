@@ -130,7 +130,20 @@ def _load_history(
     first. Chats are per-user: the conversation must belong to the CALLER, not
     just their company — otherwise a teammate's conversation_id would replay
     that teammate's private turns into the model context. Best-effort: no id,
-    foreign/unowned conversation, or any read error → []."""
+    foreign/unowned conversation, or any read error → [].
+
+    Each turn's OWN attachments (`conversation_turns.attachments` — extracted
+    text persisted at upload time, see `routes/conversations.py:TurnAttachment`)
+    are folded onto that SAME turn's `content` before it is returned. Without
+    this, an attachment's text rides the FIRST turn only via the question
+    string the composer built client-side — by the third turn, the per-turn
+    clamp (`app.prompt_history.clamp_turn_text`, applied unmodified at
+    `qa_agent._render_history`) has erased every trace of it, and the model
+    denies the document exists. Folding happens HERE, not in
+    `_render_history`: the point of this split is that a turn with no
+    attachments still returns exactly `{role, content}` — byte-identical to
+    today — with nothing downstream needing to know attachments exist at
+    all."""
     if not conversation_id:
         return []
     try:
@@ -150,12 +163,25 @@ def _load_history(
             return []
         turns = (
             c.table("conversation_turns")
-            .select("role,content")
+            .select("role,content,attachments")
             .eq("conversation_id", conversation_id)
             .order("created_at")
             .execute()
         )
-        return turns.data or []
+        out: list[dict] = []
+        for row in turns.data or []:
+            content = row.get("content") or ""
+            for attachment in row.get("attachments") or []:
+                body = attachment.get("content") or ""
+                if not body:
+                    # A document imported straight to a PRD persists a
+                    # name-only chip (content == "") — the file BECAME the
+                    # PRD, not this turn's context; nothing to fold in.
+                    continue
+                name = attachment.get("name") or "attachment"
+                content += f"\n\n[Attached: {name}]\n{body}"
+            out.append({"role": row.get("role", "user"), "content": content})
+        return out
     except Exception:  # noqa: BLE001 — history must never break the answer
         return []
 
@@ -276,6 +302,13 @@ async def ask(
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
+            # The caller's own identity, for the SAME ownership check
+            # `_load_history` above already ran — document_grounding
+            # (app.ask_runner) re-derives it independently rather than
+            # trusting body.conversation_id, since that raw value is
+            # otherwise passed through unconditionally regardless of
+            # ownership (see app.ask_runner.set_active_conversation).
+            user_id=company.user_id,
             workspace_id=company.workspace_id,
         )
         row = get_ask_job(ask_id)
@@ -292,6 +325,8 @@ async def ask(
             prd_id=body.prd_id,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
+            # The caller's own identity — see above.
+            user_id=company.user_id,
             workspace_id=company.workspace_id,
         )
     )
@@ -301,9 +336,19 @@ async def ask(
 
 
 @router.get("/skills")
-def get_skills():
-    """Return the list of available skills for the chat composer UI."""
-    return {"skills": list_available_skills()}
+def get_skills(company: CompanyContext = Depends(require_company)):
+    """The skills the chat composer may offer — the company's OWN uploads.
+
+    COMPANY-SCOPED as of the bare-chat change, which is why this gained an auth
+    dependency it never had. It used to serve a process-global list of vendored
+    built-ins, so no tenant was involved; it now serves one customer's uploaded
+    library, so serving it unauthenticated would hand any caller another
+    company's skill names and descriptions.
+
+    See `skill_router.list_available_skills` for why built-ins are no longer
+    offered here at all.
+    """
+    return {"skills": list_available_skills(company.company_id)}
 
 
 # Same ceiling as PRD import — a slide deck or spec is comfortably under this.
@@ -405,6 +450,10 @@ def get_ask(
         "citations": payload.get("citations", []),
         "confidence": payload.get("confidence", 0),
         "unanswered": payload.get("unanswered", ""),
+        # Server-derived document manifest (existence-vs-retrieval contract) —
+        # defaulted explicitly so a warm/cached row from before this ticket
+        # (no "documents" key) still returns [] rather than dropping the key.
+        "documents": payload.get("documents", []),
         # Pass through any extra fields the qa_agent attaches (e.g. confirm-gate
         # metadata, the payload's own `_skill`) so the contract stays a superset
         # of the old body. The two routed_skill* keys are excluded so the job
@@ -422,6 +471,7 @@ def get_ask(
                 "unanswered",
                 "routed_skill",
                 "routed_skill_action",
+                "documents",
             }
         },
     }

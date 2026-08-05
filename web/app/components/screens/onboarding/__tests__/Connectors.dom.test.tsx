@@ -3,9 +3,10 @@
 // Container-level mount test for onboarding step 05 — "Connect your tools."
 // (v6 screenshot spec 2026-07-17). Mounts the real container under jsdom with
 // mocked auth/onboarding/router/api/modal and asserts:
-//   - categories come from wizardCategories() — only the v6 wizard categories
-//     (docs + revenue are Settings-only), only SUPPORTED connectors, empty
-//     categories hidden
+//   - categories come from wizardCategories() — only the wizard categories
+//     (revenue is Settings-only; docs joined 2026-08-03 and renders last),
+//     only SUPPORTED connectors, empty categories hidden, and the `uploads`
+//     provider dropped since it has no connect flow to open here
 //   - ONE AT A TIME: only the categories already reviewed (collapsed) plus the
 //     open one are rendered. Unreached categories are absent from the DOM
 //     entirely — there are no locked placeholder rows.
@@ -73,9 +74,8 @@ import {
 import { ONBOARDING_STEP_COUNT } from "../../../../lib/onboarding/types"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
-// What onboarding actually renders: the v6 wizard categories only (docs and
-// revenue are Settings-only), supported connectors only, empty categories
-// dropped.
+// What onboarding actually renders: the wizard categories only (revenue is
+// Settings-only), supported connectors only, empty categories dropped.
 const SHOWN_CATEGORIES = wizardCategories()
 
 function mountLoaded(connections: unknown[] = []) {
@@ -187,23 +187,66 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(container.querySelectorAll(".conn-steps .conn-step").length).toBeGreaterThan(0)
   })
 
-  it("shows ONLY the v6 wizard categories — docs and revenue are Settings-only, crm is in", () => {
+  it("shows ONLY the wizard categories — revenue is Settings-only, crm and docs are in", () => {
     const { container } = mountLoaded()
     // Walk the whole list so every category has been revealed.
     advanceToLastCategory(container)
     const keys = Array.from(container.querySelectorAll(".conn-step")).map((s) =>
       s.getAttribute("data-conn"),
     )
-    // Docs (Notion / Google Docs) and revenue (Stripe / ChartMogul) never
-    // appear in the wizard.
-    expect(keys).not.toContain("docs")
+    // Revenue (Stripe / ChartMogul) never appears in the wizard.
     expect(keys).not.toContain("revenue")
     // The new CRM category is a wizard step.
     expect(keys).toContain("crm")
+    // Company documentation joined 2026-08-03 and renders last.
+    expect(keys).toContain("docs")
+    expect(keys[keys.length - 1]).toBe("docs")
     // Every shown key is one of the declared wizard categories, in order.
     for (const key of keys) {
       expect(ONBOARDING_CONNECTOR_CATEGORIES).toContain(key)
     }
+  })
+
+  it("offers Confluence on the Company documentation shelf, and opens its connect modal", () => {
+    const { container } = mountLoaded()
+    // Walk to the last category — Company documentation.
+    advanceToLastCategory(container)
+    const docs = container.querySelector(
+      '.conn-step[data-conn="docs"]',
+    ) as HTMLElement
+    expect(docs).not.toBeNull()
+    expect(docs.classList.contains("open")).toBe(true)
+
+    const tiles = Array.from(docs.querySelectorAll(".conn-grid .conn")).map(
+      (b) => (b.querySelector(".conn-name") as HTMLElement).textContent,
+    )
+    expect(tiles).toContain("Confluence")
+    // The user's own document sources are NOT a connector tile here: there is
+    // no auth flow to open and the "Add a document source" picker that drives
+    // them is Settings-only.
+    expect(tiles).not.toContain("Uploaded documents")
+
+    // Confluence is OAuth-wired, so the tile opens the real connect modal
+    // (which mounts the spaces picker once the OAuth tab returns).
+    fireEvent.click(
+      Array.from(docs.querySelectorAll(".conn-grid .conn")).find(
+        (b) => (b.querySelector(".conn-name") as HTMLElement).textContent === "Confluence",
+      ) as HTMLElement,
+    )
+    expect(
+      (screen.getByTestId("connect-modal") as HTMLElement).getAttribute(
+        "data-provider",
+      ),
+    ).toBe("confluence")
+  })
+
+  it("gives Company documentation no upload strip — its picker is Settings-only", () => {
+    const { container } = mountLoaded()
+    advanceToLastCategory(container)
+    const docs = container.querySelector(
+      '.conn-step[data-conn="docs"]',
+    ) as HTMLElement
+    expect(docs.querySelector(".conn-upload")).toBeNull()
   })
 
   it("relabels Continue to 'Continue to your key' only on the final category", () => {
@@ -278,13 +321,13 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
 
   it("hides the upload fallback on categories that opt out in the catalog", () => {
     const { container } = mountLoaded()
-    // Communications (comms) sets allowsManualUpload: false — a one-off export
-    // has no channel/permission model to sync against.
+    // Company documentation (docs) is the wizard's last step and sets
+    // allowsManualUpload: false — its uploads go through the named-source
+    // picker in Settings, not this generic strip.
     advanceToLastCategory(container)
     const open = container.querySelector(".conn-step.open") as HTMLElement
-    if (open.getAttribute("data-conn") === "comms") {
-      expect(open.querySelector(".conn-upload")).toBeNull()
-    }
+    expect(open.getAttribute("data-conn")).toBe("docs")
+    expect(open.querySelector(".conn-upload")).toBeNull()
   })
 
   it("hides unsupported connectors and empty categories", () => {
@@ -295,7 +338,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Superset")).not.toBeNull()
     expect(screen.queryByText("Mixpanel")).toBeNull()
     expect(screen.queryByText("PostHog")).toBeNull()
-    // MS Teams (coming soon) never renders anywhere in the wizard.
+    // MS Teams left the catalog with the Communications category (2026-08-04),
+    // so it can't render anywhere in the wizard.
     expect(screen.queryByText("MS Teams")).toBeNull()
     // Monitoring has no supported connector today → the whole category is
     // dropped from the catalog, so it never appears however far you walk.
@@ -308,6 +352,18 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.getByText("Fireflies")).not.toBeNull()
     expect(screen.queryByText("Zendesk")).toBeNull()
     expect(screen.queryByText("Gong")).toBeNull()
+    // Slack is offered HERE, and only here: the Communications step that used
+    // to ask for it a second time was removed with its category (2026-08-04).
+    expect(screen.getAllByText("Slack").length).toBe(1)
+    // Advance to Research. It has NO visible connector at all (Marvin is
+    // coming-soon) yet the category still renders — its upload strip is what
+    // onboarding is asking for, so `keepWhenEmpty` keeps the shelf alive.
+    fireEvent.click(footerContinue(container))
+    const research = container.querySelector('.conn-step[data-conn="research"]')
+    expect(research).not.toBeNull()
+    expect(screen.queryByText("Marvin")).toBeNull()
+    expect(research!.querySelectorAll(".conn").length).toBe(0)
+    expect(research!.querySelector(".conn-upload")).not.toBeNull()
     // Advance to CRM: HubSpot (oauth) shows, the coming-soons don't.
     fireEvent.click(footerContinue(container))
     expect(screen.getByText("HubSpot")).not.toBeNull()
@@ -315,11 +371,16 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     // Design-kit-only names never appear.
     expect(screen.queryByText("Segment")).toBeNull()
     expect(screen.queryByText("Trello")).toBeNull()
-    // Communications (Slack is OAuth-wired) is a real category — it appears
-    // once walked to, and monitoring still never does.
+    // Walk to the end: there is no Communications step (removed 2026-08-04 —
+    // Slack was already offered on the Voice shelf above), and monitoring
+    // still never appears.
     advanceToLastCategory(container)
-    expect(container.querySelector('.conn-step[data-conn="comms"]')).not.toBeNull()
+    expect(container.querySelector('.conn-step[data-conn="comms"]')).toBeNull()
     expect(container.querySelector('.conn-step[data-conn="monitoring"]')).toBeNull()
+    // Walking to the end never turns up a second Slack tile — a reviewed
+    // category collapses to a "Connected" row, so no connector grid but also
+    // no Communications step waiting at the bottom.
+    expect(screen.queryByText("Slack")).toBeNull()
   })
 
   it("does not render a category until it is reached", () => {
@@ -383,7 +444,9 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
 
   it("opens the connect modal for a connectable card", () => {
     const { container } = mountLoaded()
-    // Advance to the CRM category, where HubSpot (oauth) lives.
+    // Advance to the CRM category, where HubSpot (oauth) lives — Analytics →
+    // Voice → Research → CRM.
+    fireEvent.click(footerContinue(container))
     fireEvent.click(footerContinue(container))
     fireEvent.click(footerContinue(container))
     fireEvent.click(screen.getByText("HubSpot").closest(".conn") as HTMLElement)

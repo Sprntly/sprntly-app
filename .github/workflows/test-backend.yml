@@ -16,8 +16,12 @@ on:
 
 jobs:
   # Fast lane: runs on every PR
-  # Skips real vite-build and Node-subprocess tests (~29 tests, ~230s).
-  # Completes in ~3-4 minutes. Coverage: all unit + mock tests (~1,378 tests).
+  # Skips real vite-build and Node-subprocess tests (17 tests, marked real_build).
+  # Coverage: all unit + mock tests (~6,590 tests). Runs with pytest-xdist
+  # (-n auto) to parallelize across the runner's available cores — the suite's
+  # dominant cost is per-test fixture setup (isolated_settings' module-reload
+  # cost), not test-body work, so wall-clock scales close to linearly with
+  # worker count.
   pytest-fast:
     runs-on: ubuntu-latest
     steps:
@@ -37,12 +41,20 @@ jobs:
 
       - name: Run pytest (fast lane — no integration tests)
         working-directory: backend
-        run: python -m pytest tests/ -q --strict-markers -m "not integration"
+        # --dist=loadgroup: honors @pytest.mark.xdist_group so the ticket-sync /
+        # FakeTracker fixture family (test_ticket_sync.py + siblings — several
+        # unrelated files share one hardcoded CID + easily-colliding prd_ids)
+        # runs as one contiguous unit on a single worker, instead of being
+        # interleaved with unrelated tests elsewhere in the suite. Ungrouped
+        # tests still load-balance normally across all workers.
+        run: python -m pytest tests/ -q --strict-markers -m "not integration" -n auto --dist=loadgroup
 
   # Integration lane: gates merge-to-main + runs nightly
   # Includes real vite builds, real tsc, real Node subprocesses.
   # Runs: (a) on PRs targeting main, (b) on push to main, (c) nightly.
-  # Expected duration: ~7-8 minutes (full suite).
+  # ~6,643 tests in step 1 (full suite excl. real_build), run with pytest-xdist
+  # (-n auto) for parallelization. Step 2 (17 real_build tests) stays
+  # SEQUENTIAL/single-worker on purpose — see the comment on that step below.
   pytest-integration:
     runs-on: ubuntu-latest
     if: |
@@ -95,7 +107,7 @@ jobs:
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
-        run: python -m pytest tests/ -v -m "not real_build"
+        run: python -m pytest tests/ -v -m "not real_build" -n auto --dist=loadgroup
 
       # Step 2 — the real-`vite build`/`tsc` tests, run SEQUENTIALLY on their own.
       # ROOT-CAUSE FIX for the "vite build timed out" flake: when these ran inside
@@ -106,6 +118,10 @@ jobs:
       # the lane is deterministic. Coverage is unchanged — these run on EVERY PR,
       # not quarantined to nightly. The build timeout is pinned generously for CI
       # (read at call-time by storage._vite_build_sync); prod default stays 180s.
+      # DELIBERATELY not given -n auto: parallelizing these 17 tests would
+      # reintroduce exactly the CPU-starvation flake this step was split out to
+      # fix, since each worker's own `vite build`/`tsc` subprocess would compete
+      # with its siblings for the runner's cores.
       - name: Run pytest (real vite build / tsc — isolated, sequential)
         working-directory: backend
         env:

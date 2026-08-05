@@ -189,6 +189,7 @@ def retrieve_context(
     *,
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    question_embedding: Optional[list[float]] = None,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
 
@@ -233,13 +234,21 @@ def retrieve_context(
 
     # 1) Embed the question. Embeddings can be unconfigured (no OPENAI key) or
     #    the call can fail; either way we still return recent signals.
-    qvec: Optional[list[float]] = None
+    #
+    #    `question_embedding`, when the caller supplies it, is used as-is and
+    #    no embedding call is made here. The ask path computes the question's
+    #    vector once and shares it with document selection, which runs before
+    #    this does — without that sharing the same question would be embedded
+    #    twice per ask. A caller that passes nothing keeps the original
+    #    self-contained behaviour, which is what every other caller relies on.
+    qvec: Optional[list[float]] = question_embedding
     try:
-        from app.graph.embeddings import embed_texts
+        if qvec is None:
+            from app.graph.embeddings import embed_texts
 
-        vecs = embed_texts([question], enterprise_id=enterprise_id,
-                           purpose="kg_retrieval")
-        qvec = vecs[0] if vecs else None
+            vecs = embed_texts([question], enterprise_id=enterprise_id,
+                               purpose="kg_retrieval")
+            qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
 

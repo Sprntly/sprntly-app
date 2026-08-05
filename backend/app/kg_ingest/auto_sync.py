@@ -58,12 +58,19 @@ def _maybe_refresh_token(
     not configured) logs a WARNING and returns the input unchanged, so the
     caller's sync surfaces the usual 401 → "reconnect required".
 
-    Jira and Confluence (Atlassian) are handled alongside github: their access
-    tokens expire ~1h and their refresh tokens ROTATE, so — like github — we
-    persist the whole new payload on every refresh. Confluence additionally
-    requires company_id to survive the rewrite, because that is the credential
-    its puller is handed (see confluence_oauth.token_payload_to_store)."""
-    if provider not in ("github", "jira", "confluence"):
+    Jira, Confluence (Atlassian) and Zoom are handled alongside github: their
+    access tokens expire ~1h and their refresh tokens ROTATE, so — like github —
+    we persist the whole new payload on every refresh. Confluence and Zoom
+    additionally require company_id to survive the rewrite, because that is the
+    credential their pullers are handed (see
+    confluence_oauth.token_payload_to_store).
+
+    Google Meet is here for a DIFFERENT reason. Its refresh tokens do not
+    rotate, so nothing is stranded by a throwaway refresh — but Google's refresh
+    response omits `refresh_token` ENTIRELY, so persisting it verbatim blanks
+    the stored one and the connection dies at the following cycle. It carries
+    the same company_id obligation as Confluence and Zoom."""
+    if provider not in ("github", "jira", "confluence", "zoom", "google_meet"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -81,6 +88,31 @@ def _maybe_refresh_token(
                 # Dropping this here breaks the NEXT sync, not this refresh:
                 # token_for("confluence", ...) reads exactly this field.
                 company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "zoom":
+            from app.connectors import zoom_oauth
+
+            new_json_str = zoom_oauth.token_payload_to_store(
+                zoom_oauth.refresh_access_token(refresh_token),
+                # Same trap as confluence above: dropping this here breaks the
+                # NEXT sync, not this refresh, because token_for("zoom", ...)
+                # reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "google_meet":
+            from app.connectors import google_meet
+
+            new_json_str = google_meet.token_payload_to_store(
+                google_meet.refresh_access_token(refresh_token),
+                # Same trap as confluence/zoom above: dropping this here breaks
+                # the NEXT sync, not this refresh, because
+                # token_for("google_meet", ...) reads exactly this field.
+                company_id=company_id,
+                # And this one is not optional on Google: the refresh response
+                # has no refresh_token at all, so without the carry-forward the
+                # stored credential is replaced by nothing.
                 keep_refresh_token=refresh_token,
             )
         elif provider == "jira":
@@ -443,4 +475,62 @@ def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
     except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
         logger.exception("roadmap-ingest: failed to start thread for %s (ws=%s)",
                          company_id, workspace_id)
+        return False
+
+
+# ── Call index refresh ──────────────────────────────────────────────────────
+#
+# The call index (app/call_index.py) holds cheap metadata for every call in a
+# connected transcript source, so a listing question is a DB read instead of a
+# 168-second corpus pass. It is only worth anything if it is POPULATED, and an
+# index nobody fills fails in the quietest possible way: every interception in
+# qa_agent returns None, the question degrades to the old expensive path, and
+# nothing anywhere reports a problem.
+#
+# So it gets the same two triggers every other connector has — the moment it
+# connects, and every scheduler cycle thereafter — plus a third the others do
+# not need: `call_index.ensure_fresh` tops it up inline on the read path when a
+# call may have landed since the last cycle. This is the same gap Fortune's
+# d30ca7ee closed for Slack ("sync the moment it's connected, not six hours
+# later"), with the read-path top-up added because a 6-hour-old call list is
+# not merely incomplete — `answer_listing` states a COUNT, so it is WRONG.
+
+def _run_call_index_sync(company_id: str) -> None:
+    """Blocking call-index refresh — runs inside the daemon thread. Fully
+    isolated: `call_index.sync_all_sources` already stamps each provider's own
+    failure on `call_index_sync` (which is what makes the failure visible to
+    the read path), so this only has to keep it out of the caller's flow.
+
+    Every connected source, in one pass. Kicking per provider instead would
+    race two threads of the same name onto the same company and duplicate the
+    work for a tenant that has both."""
+    from app import call_index
+
+    try:
+        written = call_index.sync_all_sources(company_id)
+        if written is None:
+            logger.info("call-index: no transcript source for %s — nothing to do",
+                        company_id)
+            return
+        logger.info("call-index refresh done: %s calls=%s", company_id, written)
+    except Exception:  # noqa: BLE001 — fully isolated; already stamped
+        logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
+
+
+def kickoff_call_index_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh this company's call index.
+
+    Called from the Fireflies connect route and from the scheduled connector
+    refresh. Returns False when nothing was started. Never blocks; never raises
+    into the caller's flow."""
+    try:
+        t = threading.Thread(
+            target=_run_call_index_sync, args=(company_id,),
+            name="call-index-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break connect
+        logger.exception("call-index: failed to start refresh thread for %s",
+                         company_id)
         return False

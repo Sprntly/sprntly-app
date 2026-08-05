@@ -101,7 +101,8 @@ class GraphFacade:
         return entity
 
     def ensure_company_entity(
-        self, enterprise_id: str, label: Optional[str] = None
+        self, enterprise_id: str, label: Optional[str] = None, *,
+        relabel: bool = False,
     ) -> str:
         """Find-or-create the tenant's single root `company` entity — the KG's
         tenant-scoped anchor node. Every enterprise gets exactly one; other
@@ -111,13 +112,25 @@ class GraphFacade:
         Unlike theme/segment/competitor entities, there's no embedding
         dedupe concern here — a plain existence check by type is enough
         since there is only ever one per tenant. `label` is only used the
-        first time (entity creation); a later call with a different label
-        does NOT rename an already-existing company entity. When no label
-        is supplied, falls back to `companies.display_name` for this
-        enterprise (the human-readable name every real tenant already has),
-        and only as a last resort — no `companies` row, or `display_name`
-        itself unset — to the raw `enterprise_id`, so this is always safe
-        to call with just an enterprise_id.
+        first time (entity creation) UNLESS `relabel=True` — by default, a
+        later call with a different label does NOT rename an already-existing
+        company entity. When no label is supplied, falls back to
+        `companies.display_name` for this enterprise (the human-readable name
+        every real tenant already has), and only as a last resort — no
+        `companies` row, or `display_name` itself unset — to the raw
+        `enterprise_id`, so this is always safe to call with just an
+        enterprise_id.
+
+        `relabel=True` (opt-in, e.g. `business_context_projection` after a
+        successful refresh) additionally updates an ALREADY-EXISTING entity's
+        canonical_label when a truthy `label` differs from its current one —
+        the fix for a company root that got created via a non-business-context
+        path first (e.g. roadmap upload) and would otherwise stay stuck with
+        its fallback label forever. Scoped narrowly: only fires when a real
+        label is actually supplied and different; a `None`/empty label or an
+        unchanged one is a no-op, so idempotent re-runs never write. This does
+        NOT touch the separate, deliberately-deferred backfill of SCOPED_TO/
+        INFORMS wiring for entities that predate that wiring.
 
         A shared primitive rather than a private helper on one caller,
         because more than one write path needs "find or create this
@@ -126,7 +139,19 @@ class GraphFacade:
         same find-or-create semantics."""
         existing = self.query_entities(enterprise_id, type=COMPANY_ENTITY_TYPE)
         if existing:
-            return existing[0].id
+            entity = existing[0]
+            if relabel and label and label != entity.canonical_label:
+                (
+                    self._tbl("kg_entity")
+                    .update({
+                        "canonical_label": label,
+                        "updated_at": _iso(datetime.now(timezone.utc)),
+                    })
+                    .eq("enterprise_id", enterprise_id)
+                    .eq("id", entity.id)
+                    .execute()
+                )
+            return entity.id
         if label is None:
             label = display_name_for_company_id(enterprise_id) or enterprise_id
         ent = Entity(
@@ -301,6 +326,23 @@ class GraphFacade:
         if source_type:
             q = q.eq("source_type", source_type)
         return [self._row_to_source(r) for r in (q.execute().data or [])]
+
+    def get_source(self, enterprise_id: str, source_id: str) -> Optional[Source]:
+        """ONE `kg_source` row by id, tenant-scoped — or None.
+
+        Sibling of get_entity/get_signal, and the read half of create_source.
+        Exists because source ids are DETERMINISTIC (uuid5 over a stable
+        per-file key), so a caller that knows the file can address its
+        provenance row directly instead of listing every source the tenant has
+        just to find one — a listing that grows with the connected corpus and
+        would run on every ask."""
+        r = (
+            self._tbl("kg_source").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", source_id)
+            .execute()
+        )
+        return self._row_to_source(r.data[0]) if r.data else None
 
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (

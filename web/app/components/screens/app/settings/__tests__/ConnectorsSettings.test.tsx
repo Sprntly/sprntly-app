@@ -196,14 +196,16 @@ describe("ConnectorsSettingsView — category rail (master column)", () => {
 
   it("swaps the rendered connectors when another category is selected", () => {
     const design = render({ selectedCategoryKey: "design" })
-    const comms = render({ selectedCategoryKey: "comms" })
+    const voice = render({ selectedCategoryKey: "voice" })
     expect(design).toContain("Figma")
     expect(design).not.toContain("Slack")
-    expect(comms).toContain("Slack")
-    expect(comms).not.toContain("Figma")
-    expect(comms).toContain('id="conn-cat-panel-comms"')
-    expect(comms).toContain(
-      'id="conn-cat-tab-comms" aria-controls="conn-cat-panel-comms" aria-selected="true"',
+    // Voice is Slack's only shelf since the Communications category was
+    // removed (2026-08-04).
+    expect(voice).toContain("Slack")
+    expect(voice).not.toContain("Figma")
+    expect(voice).toContain('id="conn-cat-panel-voice"')
+    expect(voice).toContain(
+      'id="conn-cat-tab-voice" aria-controls="conn-cat-panel-voice" aria-selected="true"',
     )
   })
 
@@ -298,9 +300,12 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders only the OPEN category's rows, not all 43 catalog rows", () => {
+  it("renders only the OPEN category's rows, not all 44 catalog rows", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43) // v6 catalog + Uploaded documents + Slack's second (voice) placement
+    // v6 catalog + Uploaded documents + Marvin + Zoom + Google Meet, less the
+    // Communications category (Slack's second placement + MS Teams) removed
+    // 2026-08-04.
+    expect(total).toBe(44)
     for (const cat of CONNECTOR_CATALOG) {
       // The `uploads` provider is never rendered as a connector row — it's
       // surfaced as the document-source list instead.
@@ -366,10 +371,10 @@ describe("ConnectorsSettingsView — the open category's upload strip", () => {
     expect(html).toContain("Upload files to this category")
   })
 
-  it("hides the upload strip for integration-only categories (comms, code, pm)", () => {
+  it("hides the upload strip for integration-only categories (code, pm)", () => {
     // Those categories must be populated by connecting the real integration,
     // so they opt out via `allowsManualUpload: false` in the catalog.
-    for (const key of ["comms", "code", "pm"]) {
+    for (const key of ["code", "pm"]) {
       const html = render({ selectedCategoryKey: key })
       expect(html).not.toContain("Upload files to this category")
       // The connector rows themselves are untouched.
@@ -377,9 +382,13 @@ describe("ConnectorsSettingsView — the open category's upload strip", () => {
         CONNECTOR_CATALOG.find((c) => c.key === key)!.items.length,
       )
     }
-    expect(render({ selectedCategoryKey: "comms" })).toContain("Slack")
     expect(render({ selectedCategoryKey: "code" })).toContain("GitHub")
     expect(render({ selectedCategoryKey: "pm" })).toContain("Jira")
+    // Voice — Slack's only shelf now — is NOT integration-only: an exported
+    // transcript is legitimate customer voice, so its strip stays.
+    expect(render({ selectedCategoryKey: "voice" })).toContain(
+      "Upload files to this category",
+    )
   })
 
   it("advertises the shared accepted-types hint", () => {
@@ -532,17 +541,21 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
       expect(html).toContain(name)
     }
     // Coming soon (removed):
-    for (const name of ["Mixpanel", "Amplitude", "Sentry", "Linear", "Stripe", "MS Teams"]) {
+    for (const name of ["Mixpanel", "Amplitude", "Sentry", "Linear", "Stripe"]) {
       expect(html).not.toContain(name)
     }
+    // MS Teams is not merely hidden — it left the catalog with the
+    // Communications category (2026-08-04).
+    expect(html).not.toContain("MS Teams")
   })
 
   it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // One rail tab per surviving category. 13 connectors are wired, but the
+    // One rail tab per surviving category. 15 connectors are wired, but the
     // `uploads` provider is never shown as a row (it's the document-source
-    // list) while dual-typed Slack renders a row on BOTH its shelves (voice
-    // + comms), so 13 connector rows render across the panels.
+    // list), Slack renders on ONE shelf (voice) rather than two, and Zoom and
+    // Google Meet add one row each, so 14 connector rows render across the
+    // panels.
     const one = render({ categories: keptCategories })
     expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
@@ -553,7 +566,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(13)
+    expect(rowsAcrossPanels).toBe(14)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(
@@ -567,12 +580,25 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     expect(one).not.toContain("powers On-Call Agent")
   })
 
+  it("keeps the Research panel — no connector rows, but its upload strip is live", () => {
+    const keptCategories = connectableCatalog()
+    const research = keptCategories.find((c) => c.key === "research")
+    // Marvin is coming-soon, so the shelf survives only on `keepWhenEmpty`. It
+    // has to: the dropzone is the entire feature until Marvin is wired.
+    expect(research).toBeTruthy()
+    const html = render({ categories: keptCategories, selectedCategoryKey: "research" })
+    expect(countRows(html)).toBe(0)
+    expect(html).not.toContain("Marvin")
+    expect(html).toContain('class="set-conn-upload"')
+    // The rail still offers it as a tab, so the user can get to that dropzone.
+    expect(render({ categories: keptCategories })).toContain("Research")
+  })
+
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = renderAllPanels()
-    // 9 of the 11 wired connectors have an official bundled SVG mark
-    // (Fireflies and Sprinklr keep their letter glyphs). Slack's mark
-    // renders twice — its card sits on both the voice and comms shelves —
-    // so 10 <img> tags total.
+    // 11 of the 12 wired connectors have a bundled SVG mark (Fireflies and
+    // Sprinklr keep their letter glyphs). Slack's mark renders once now that
+    // its card sits on the voice shelf alone, so 11 <img> tags.
     for (const id of [
       "slack",
       "github",
@@ -583,10 +609,12 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
       "google_drive",
       "asana",
       "confluence",
+      "zoom",
+      "google_meet",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(10)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(11)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).

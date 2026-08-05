@@ -92,6 +92,13 @@ Emit Markdown only. May be appended below the human PRD (separated by a horizont
 - **Independent verification:** all 10 PRD requirements trace to EARS ✓; tags inherited (2 failure, 2 edge) ✓; 0 invented contracts (all labeled) ✓; 3 `[ESCALATE]` flagged ✓ — **PASS**, with those three as the only required human input.
 
 ## Contents
+
+What reaches you at generation time: **this SKILL.md, and the B0–B9 skeleton**, which Sprntly
+injects above your input under a `TEMPLATE` heading. Fill a copy of that skeleton.
+
 - `SKILL.md` — this method (B0–B9 output spec, derivation rule, tag inheritance, verification bar).
-- `templates/implementation-spec-template.md` — the B0–B9 skeleton incl. the B0 derivation header, the B7 release plan, and merged B8 tests + DoD.
+- `templates/implementation-spec-template.md` — the B0–B9 skeleton incl. the B0 derivation header, the B7 release plan, and merged B8 tests + DoD. **Injected into your prompt** — it is the `TEMPLATE` block above your input, so work from that copy rather than reconstructing it from the prose above.
+
+Repository material for whoever MAINTAINS this skill — not sent to you, so do not try to read it:
+
 - `examples/01-perch.md` · `examples/02-tandem.md` · `examples/03-copperline.md` — Part B specs derived from the matching `prd-author` Part A examples (same three cases): B0 names the source Part A, B3 traced to Part A IDs, copperline carries three `[ESCALATE]` items A→B.

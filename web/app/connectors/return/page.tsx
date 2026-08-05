@@ -1,7 +1,10 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { handleConnectorReturn } from "../../lib/connectorReturn"
+import {
+  handleConnectorReturn,
+  oauthErrorMessage,
+} from "../../lib/connectorReturn"
 
 /**
  * Lightweight landing page for connector OAuth callbacks (`/connectors/return`).
@@ -28,7 +31,11 @@ export default function ConnectorReturnPage() {
     const returnTo = params.get("return_to")
 
     if (err) {
-      setError(err)
+      // Mapped copy, never the raw code. The backend sends a stable Sprntly
+      // code precisely so this page can say what to DO about the failure —
+      // "ask a Zoom admin to approve Sprntly" and "you clicked Decline" need
+      // different sentences, and `unauthorized_client` is not a sentence.
+      setError(oauthErrorMessage(err, params.get("provider")))
       return
     }
     if (!connected) return
@@ -43,8 +50,8 @@ export default function ConnectorReturnPage() {
       style={{ justifyContent: "center", textAlign: "center" }}
     >
       {error ? (
-        <p style={{ color: "var(--muted)", fontSize: 14 }}>
-          Connection failed: {error}. You can close this tab and try again.
+        <p style={{ color: "var(--muted)", fontSize: 14 }} role="alert">
+          {error}
         </p>
       ) : (
         <p style={{ color: "var(--muted)", fontSize: 14 }}>

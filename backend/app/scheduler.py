@@ -42,7 +42,12 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
+from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
+from app.call_index import CALL_PROVIDERS as CALL_INDEX_PROVIDERS
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,9 @@ def _refresh_all_company_connectors() -> None:
             )
             continue
         slack_kicked = False
+        # One call-index kick per company per cycle, however many call sources
+        # it has connected — see the branch below.
+        call_index_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
@@ -150,6 +158,30 @@ def _refresh_all_company_connectors() -> None:
                         company_id,
                     )
                 continue
+            # A CALL SOURCE (fireflies or zoom): refresh the CALL INDEX
+            # alongside the KG pull below. They fill different things —
+            # kickoff_sync writes distilled summaries into the graph, this
+            # writes the per-call metadata chat answers listings from — and
+            # only the index can answer "which calls last week" without a
+            # 168-second corpus pass.
+            #
+            # Not `continue`: both providers ARE in PULLERS, so they must still
+            # fall through to the KG kickoff below.
+            #
+            # Kicked at most ONCE per company per cycle, whichever call sources
+            # it has. `sync_all_sources` walks every connected one in a single
+            # pass, so a company running both Fireflies AND Zoom gets both
+            # indexed by one kickoff — while two kickoffs would race two threads
+            # of the same name onto the same company and do the work twice.
+            if provider in CALL_INDEX_PROVIDERS and not call_index_kicked:
+                call_index_kicked = True
+                try:
+                    kickoff_call_index_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: call-index kickoff raised for %s",
+                        company_id,
+                    )
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).
@@ -568,7 +600,11 @@ def _run_orphan_ask_job_sweep() -> None:
     task silently — same shared-Supabase age-gating rationale, see
     db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
     abandoned the same way (a stale 'running' row there also wedges the
-    double-trigger guard, so healing it is what lets a retry through)."""
+    double-trigger guard, so healing it is what lets a retry through), and
+    business-context refreshes abandoned in 'generating' (companies.
+    business_context_refresh_status) the same way — a stale row there would
+    otherwise wedge the "Save Company Shape" trigger's start-guard until this
+    sweep or a restart heals it."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -597,6 +633,18 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned company-research run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan company-research sweep failed")
+    try:
+        from app.db.business_context_refresh import (
+            fail_orphan_business_context_refreshes,
+        )
+
+        n = fail_orphan_business_context_refreshes()
+        if n:
+            logger.info(
+                "Failed %d abandoned business-context refresh(es) stuck in "
+                "generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan business-context refresh sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -773,17 +821,16 @@ def start_scheduler() -> None:
 
     # Extraction evals: sampled structural check of recent extraction output
     # against each vendored connector-extraction skill's declared shape
-    # contract. Opt-in via EXTRACTION_EVAL_ENABLED; read-only + sampled, own
-    # cadence decoupled from the connector refresh interval above.
-    if settings.extraction_eval_enabled:
-        eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
-        _scheduler.add_job(
-            _run_extraction_eval_cycle,
-            trigger=IntervalTrigger(hours=eval_hours),
-            id="extraction_eval",
-            name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
-            replace_existing=True,
-        )
+    # contract. Read-only + sampled, own cadence decoupled from the connector
+    # refresh interval above.
+    eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+    _scheduler.add_job(
+        _run_extraction_eval_cycle,
+        trigger=IntervalTrigger(hours=eval_hours),
+        id="extraction_eval",
+        name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
+        replace_existing=True,
+    )
 
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and

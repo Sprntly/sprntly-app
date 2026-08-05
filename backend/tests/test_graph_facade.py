@@ -473,6 +473,62 @@ def test_ensure_company_entity_is_idempotent_and_does_not_rename(facade):
     assert len(facade.query_entities("ent-A", type="company")) == 1
 
 
+def _raw_kg_entity(facade, enterprise_id: str, entity_id: str) -> dict:
+    """Entity has no `updated_at` field — read the raw row for it."""
+    r = (
+        facade._tbl("kg_entity")
+        .select("canonical_label, created_at, updated_at")
+        .eq("enterprise_id", enterprise_id)
+        .eq("id", entity_id)
+        .execute()
+    )
+    return r.data[0]
+
+
+def test_ensure_company_entity_relabel_true_renames_existing(facade):
+    """`relabel=True` (opt-in) DOES rename an already-existing company entity
+    when a truthy, different label is supplied — the fix for a root created
+    via a non-business-context path first (e.g. roadmap upload) that would
+    otherwise stay stuck with its fallback label forever."""
+    first_id = facade.ensure_company_entity("ent-A", label="ent-A")  # UUID-fallback-style
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    second_id = facade.ensure_company_entity("ent-A", label="Acme Inc", relabel=True)
+    assert second_id == first_id  # still the same node, never duplicated
+
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert len(facade.query_entities("ent-A", type="company")) == 1
+    # updated_at actually bumped (never equal to what it was pre-relabel).
+    assert after["updated_at"] != before["updated_at"]
+
+
+def test_ensure_company_entity_relabel_true_is_a_noop_without_a_real_label(facade):
+    """`relabel=True` with no label (or an unknown/empty one) must never
+    overwrite the existing label with a fallback — it only fires when a real
+    name is actually available."""
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    same_id = facade.ensure_company_entity("ent-A", label=None, relabel=True)
+    assert same_id == first_id
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert after["updated_at"] == before["updated_at"]  # no write happened
+
+
+def test_ensure_company_entity_relabel_true_is_idempotent_on_unchanged_label(facade):
+    """Re-running with the SAME label + relabel=True must not write (no
+    spurious updated_at bump on every idempotent refresh re-run)."""
+    first_id = facade.ensure_company_entity("ent-A", label="Acme Inc")
+    before = _raw_kg_entity(facade, "ent-A", first_id)
+
+    facade.ensure_company_entity("ent-A", label="Acme Inc", relabel=True)
+    after = _raw_kg_entity(facade, "ent-A", first_id)
+    assert after["canonical_label"] == "Acme Inc"
+    assert after["updated_at"] == before["updated_at"]
+
+
 def test_ensure_company_entity_falls_back_to_display_name(facade, isolated_settings):
     """No label passed, but a `companies` row with a display_name exists for
     this enterprise → the created entity's canonical_label is the

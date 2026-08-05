@@ -535,12 +535,18 @@ export const jiraApi = {
   }) => api.post<JiraWriteResult>("/v1/jira/write", change),
 }
 
+/** One entry the chat composer's skill palette may offer.
+ *
+ *  This used to be the vendored BUILT-IN catalog. It is now the company's own
+ *  uploaded skills: chat no longer selects a built-in method for a turn, so a
+ *  palette of built-ins would have offered triggers nothing would honour.
+ *  `category` is therefore always "Custom". The shape is unchanged so the
+ *  composer, the Skills screen and the command palette need no new contract. */
 export type SkillInfo = {
   id: string
   label: string
   trigger: string
   description: string
-  /** Display category from the backend catalog (e.g. "Discovery & Research"). */
   category: string
 }
 
@@ -559,7 +565,18 @@ export type AskStartResponse = {
 export type AskStatusResponse = AskResponse & {
   status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
-  /** Extra qa_agent metadata (e.g. routed skill) passed through verbatim. */
+  /** The skill `qa_agent.route()` chose, or null when it answered directly with
+   *  no skill. Backed by the `ask_jobs.routed_skill` column and returned at
+   *  EVERY status — including `generating` — so it is known while the answer is
+   *  still being written, not only once it lands.
+   *
+   *  Declared explicitly rather than left to the index signature below: these
+   *  two are a real part of the contract (routes/ask.py excludes them from the
+   *  payload passthrough so the columns stay authoritative), and typing them as
+   *  `unknown` is what let them sit unread here since they shipped. */
+  routed_skill?: string | null
+  routed_skill_action?: string | null
+  /** Extra qa_agent metadata passed through verbatim. */
   [extra: string]: unknown
 }
 
@@ -600,7 +617,9 @@ export const askApi = {
     api.post<{ ask_id: number; status: "generating" | "ready" | "error" | "cancelled" }>(
       `/v1/ask/${askId}/cancel`,
     ),
-  /** List available skills the chat can route to. */
+  /** The skills the chat composer may offer — the company's own uploads.
+   *  Company-scoped and authenticated (it serves one customer's library now,
+   *  not a global catalog). */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
   /** Parse a binary document attachment (pptx/pdf/docx/…) to markdown so the
@@ -613,9 +632,9 @@ export const askApi = {
 }
 
 /** A user-uploaded custom skill (PRD 1854) — COMPANY-scoped: every workspace
- *  in the company shares one library. Distinct from SkillInfo (the built-in
- *  routable manifest): custom skills carry uploader attribution and no
- *  category. `trigger` invokes exactly like a built-in's. */
+ *  in the company shares one library. The MANAGEMENT view of the same skills
+ *  `askApi.skills()` returns for the composer: this one carries uploader
+ *  attribution, the file, and the id the delete/download routes take. */
 export type CustomSkillInfo = {
   id: string
   slug: string
@@ -625,29 +644,189 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
-  /** The name was already taken when this skill was uploaded, so its trigger
-   *  was disambiguated away from the name's plain slug (`/prd-author-2` for a
-   *  skill named "PRD Author"). Nothing was replaced — the skill that owned
-   *  the name keeps its own trigger and both are invocable. */
+  /** A BUILT-IN skill's name was already taken when this skill was uploaded,
+   *  so its trigger was disambiguated away from the name's plain slug
+   *  (`/prd-author-2` for a skill named "PRD Author"). Nothing was replaced —
+   *  the skill that owned the name keeps its own trigger and both are
+   *  invocable. */
   name_conflict: boolean
+  /** POST only: this upload REPLACED the company's existing skill of the same
+   *  name (same id, same trigger, new content) rather than adding a new one.
+   *  Absent on list items, where it would mean nothing. */
+  replaced?: boolean
+}
+
+/** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
+ *  edit form pre-fills from. Split from the list because a method can run to
+ *  50,000 characters and the library grid needs none of it.
+ *
+ *  `modules`/`references` are FILENAMES only: editing swaps the main method
+ *  and leaves a .zip's supporting files attached untouched, so the form
+ *  reports them rather than editing them. `attached_chars` is what those files
+ *  contribute toward the 50,000-character cap, which is measured over the
+ *  whole parsed skill — without it a client-side check would be wrong for
+ *  every skill uploaded as an archive. */
+export type CustomSkillDetail = CustomSkillInfo & {
+  method: string
+  modules: string[]
+  references: string[]
+  attached_chars: number
+}
+
+/** The PATCH result: the edited skill, plus the id of the company's OTHER
+ *  skill this edit absorbed (a rename onto a name they already used replaces
+ *  that skill). `null` means nothing else changed. */
+export type CustomSkillEditResult = CustomSkillDetail & {
+  replaced_skill_id: string | null
+}
+
+/** A skill folder inside a multi-skill archive that could NOT be imported.
+ *  `path` is the folder it sat in ("" for the archive root), `name` whatever
+ *  name we could derive, and `reason` is written for a person to act on
+ *  (a missing `description:`, an over-cap method). */
+export type SkippedSkill = {
+  path: string
+  name: string
+  reason: string
+}
+
+/** POST /v1/skills when the uploaded .zip held SEVERAL skills — one folder per
+ *  skill, the layout a zipped `skills/` directory has. Each one became its own
+ *  row with its own trigger, named from its own SKILL.md frontmatter rather
+ *  than from the form (which can only name one), so the answer is a LIST
+ *  instead of the single object. Folders that couldn't be imported are in
+ *  `skipped` with a reason and cost the others nothing; an archive that
+ *  yielded no skills at all fails the request instead. */
+export type MultiSkillUploadResult = {
+  skills: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+}
+
+/** What an upload answers: one skill, or the multi-skill archive result. */
+export type SkillUploadResult = CustomSkillInfo | MultiSkillUploadResult
+
+/** One skill found in a connected GitHub repo, as the picker needs it.
+ *
+ *  `status` is the server's verdict, computed against the company's own
+ *  library with the same rules the write path uses — never guessed here:
+ *    - `new`      → imports as a new skill at `trigger_preview`
+ *    - `replaces` → the company already has this name; importing updates that
+ *                   skill in place and keeps its trigger
+ *    - `invalid`  → cannot be imported; `reason` says why (no description, a
+ *                   file over GitHub's 1 MB text ceiling, over the 50k cap) */
+export type GithubSkillPreview = {
+  path: string
+  name: string
+  description: string
+  slug_preview: string
+  trigger_preview: string
+  file_count: number
+  char_count: number
+  status: "new" | "replaces" | "invalid"
+  reason: string
+}
+
+/** GET /v1/skills/github/discover — read-only; writes nothing.
+ *  `truncated` + `notes` report anything the repo was too big to show. */
+export type GithubSkillDiscovery = {
+  repo: string
+  ref: string
+  commit_sha: string
+  truncated: boolean
+  notes: string[]
+  skills: GithubSkillPreview[]
+}
+
+/** POST /v1/skills/github/import — the same per-skill payloads an upload
+ *  returns (each with `replaced`), plus what it couldn't import. */
+export type GithubSkillImportResult = {
+  imported: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+  commit_sha: string
+  ref: string
+}
+
+/** Discriminates the two upload bodies by shape (the multi one has no `id`).
+ *  Exported because every caller has to branch on it. */
+export function isMultiSkillUpload(
+  result: SkillUploadResult,
+): result is MultiSkillUploadResult {
+  return Array.isArray((result as MultiSkillUploadResult).skills)
 }
 
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
+  /** One skill with its method text (the edit form's source). 404s on a
+   *  foreign or unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<CustomSkillDetail>(`/v1/skills/${encodeURIComponent(id)}`),
+  /** Edit a skill's name, description, and method in place — same row, same
+   *  id. All three are always sent: the form owns the complete set it
+   *  rendered, so a partial write could revert a field.
+   *
+   *  Two consequences the caller has to handle. RENAMING re-derives the
+   *  trigger (the response's `slug`/`trigger` are authoritative — a name
+   *  shared with a built-in lands on the `-2` series, and the old `/slug`
+   *  stops working). Renaming onto one of the company's OWN skill names
+   *  REPLACES that skill: it is deleted and its id comes back as
+   *  `replaced_skill_id`, so the caller must drop that card. That is
+   *  destructive — confirm it with the user before calling. */
+  update: (
+    id: string,
+    patch: { name: string; description: string; method: string },
+  ) =>
+    api.patch<CustomSkillEditResult>(
+      `/v1/skills/${encodeURIComponent(id)}`,
+      patch,
+    ),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
-   *  Server is the authoritative validator (422/400/413/409 with readable
+   *  Server is the authoritative validator (422/400/413 with readable
    *  `detail`); the modal mirrors the cheap checks client-side. A name shared
    *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
    *  report the disambiguated trigger); a name already used by one of the
-   *  company's OWN custom skills is the 409. */
+   *  company's OWN custom skills REPLACES that skill in place — same id, same
+   *  trigger, new content — and the 201 comes back with `replaced: true`.
+   *
+   *  A .zip holding SEVERAL SKILL.md files imports as several skills and
+   *  answers `{skills, skipped}` instead of the single object — branch with
+   *  `isMultiSkillUpload`. The name and description sent here apply to a
+   *  single skill only; a multi-skill archive names each skill from its own
+   *  SKILL.md, and the per-skill collision rules (replace-in-place, the `-2`
+   *  built-in series) apply to each of them independently. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("name", name)
     form.append("description", description)
-    return api.post<CustomSkillInfo>("/v1/skills", form)
+    return api.post<SkillUploadResult>("/v1/skills", form)
   },
+  /** The skills a CONNECTED GitHub repo holds, at `ref` (default branch when
+   *  omitted), optionally scoped to one folder. Read-only — it writes nothing,
+   *  so it is safe to call as the user types a branch.
+   *
+   *  The repo's installation is resolved server-side from the caller's company;
+   *  a repo this company hasn't connected 404s (never 403 — that would confirm
+   *  someone else connected it). A GitHub outage is a 502, a missing branch a
+   *  404, both with a readable `detail`. */
+  discoverGithub: (repo: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ repo })
+    if (opts?.ref) params.set("ref", opts.ref)
+    if (opts?.path) params.set("path", opts.path)
+    return api.get<GithubSkillDiscovery>(`/v1/skills/github/discover?${params}`)
+  },
+  /** Import the selected skills from that repo. `paths` FILTER the server's
+   *  own re-run of discovery — they are never fetch targets, so a path that
+   *  isn't a skill in that repo imports nothing rather than reading a file.
+   *  Each imported skill follows the upload rules: a name the company already
+   *  used replaces that skill in place, a built-in's name takes the next free
+   *  trigger. Per-skill failures come back in `skipped`. */
+  importGithub: (body: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(
@@ -714,6 +893,10 @@ export type PrdStartResponse = {
 
 export type PrdRecord = {
   id: number
+  /** Opaque, unguessable external identifier — returned by the GET routes'
+   *  `select("*")` (prds.public_id). What `useArtifactUrlSync` puts in the
+   *  `?prd=` URL going forward, instead of the sequential `id`. */
+  public_id?: string
   brief_id: number
   insight_index: number
   generated_at: string
@@ -1205,6 +1388,14 @@ export type BusinessContextDoc = {
   version: number
 }
 
+/** `GET /v1/company/business-context/refresh-status` — polled after
+ *  `refresh()` kicks off the async job. status stays 'idle' for a company
+ *  that has never triggered a refresh. */
+export type BusinessContextRefreshStatus = {
+  status: "idle" | "generating" | "done" | "error"
+  error: string | null
+}
+
 export const businessContextApi = {
   /**
    * GET the current business-context doc (any member). Returns `null` when
@@ -1226,10 +1417,23 @@ export const businessContextApi = {
       "/v1/company/business-context",
       doc,
     ),
-  /** POST refresh — re-runs the Business Context agent (admin-only). */
+  /** POST refresh (admin-only) — kicks off the Business Context agent as a
+   *  background job and returns immediately (`status: "generating"`, or
+   *  `"done"`/`"error"` under the test harness's synchronous inline path).
+   *  `already_running: true` means a refresh was already live for this
+   *  tenant and this call was a no-op, not a new run. Poll
+   *  `refreshStatus()` (see lib/runBusinessContextRefresh.ts) for
+   *  completion — the doc itself only updates once status leaves
+   *  'generating'. */
   refresh: () =>
-    api.post<{ ok: true; [k: string]: unknown }>(
-      "/v1/company/business-context/refresh",
+    api.post<
+      BusinessContextRefreshStatus & { ok: true; already_running?: boolean }
+    >("/v1/company/business-context/refresh"),
+  /** GET refresh-status (any member) — the current async refresh job's
+   *  state for this tenant. */
+  refreshStatus: () =>
+    api.get<BusinessContextRefreshStatus>(
+      "/v1/company/business-context/refresh-status",
     ),
 }
 
@@ -1517,8 +1721,14 @@ export type ConnectionSummary = {
     dataset?: string
     folder_id?: string
     folder_name?: string
-    // Google Drive — files picked via the Google Picker (drive.file scope)
+    // Google Drive — files picked via the Google Picker (drive.file scope).
+    // An entry may be a FOLDER: only Drive metadata says which, so the shape is
+    // identical either way.
     files?: GoogleDrivePickedFile[]
+    // Written by the sync: folder id -> the files that folder expanded to on
+    // the last run. Present (possibly empty) for every picked entry that turned
+    // out to be a folder, which is also how the UI knows an entry IS one.
+    folder_contents?: Record<string, GoogleDrivePickedFile[]>
     // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string
@@ -1538,6 +1748,20 @@ export type ConnectionSummary = {
     cloud_id?: string
     sync_space_ids?: string[]
     sync_space_keys?: Record<string, string>
+    // Zoom — which hosts' cloud recordings the KG ingest reads. Empty/absent =
+    // every licensed host on the account. COMPANY-wide, admin-only to change.
+    // Names are stored alongside the ids so a host who has since been
+    // deactivated (and so is absent from the live listing) can still be shown
+    // by name rather than as an opaque Zoom user id.
+    sync_user_ids?: string[]
+    sync_user_names?: Record<string, string>
+    // …and the last run's counters. The GAP between them is the signal: a
+    // sync that found meetings but read no transcripts almost always means
+    // Audio transcript is switched off in the customer's Zoom account, which
+    // is a setting they can fix. Absent (undefined) means "never synced" —
+    // which is NOT the same as zero and must not be rendered as one.
+    last_sync_meetings?: number
+    last_sync_transcripts?: number
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1602,6 +1826,7 @@ export type GoogleDrivePickedFile = {
 export type GoogleDrivePickerToken = {
   access_token: string
   expires_in: number
+  app_id?: string
 }
 
 /** One document inside a named upload source (never the extracted text
@@ -1649,6 +1874,21 @@ export type ConfluenceSpace = {
   name: string | null
   /** "global" | "personal" — personal spaces are filtered out server-side. */
   type: string | null
+}
+
+export type ZoomUser = {
+  id: string
+  email: string
+  display_name: string
+  /** Only Licensed Zoom accounts can record to the cloud, so an unlicensed
+   *  host has nothing to sync. Surfaced rather than filtered so a user looking
+   *  for a colleague finds them with an explanation instead of an absence. */
+  licensed: boolean
+  /** How many recordings this host has. ALWAYS PRESENT, and null until the
+   *  count is cheap to compute — it needs one windowed recordings call per
+   *  host. Declared null rather than omitted so the UI renders its degraded
+   *  line from day one instead of gaining a field later. */
+  recording_count: number | null
 }
 
 // Multitenant: connector routes resolve the active company entirely
@@ -1766,6 +2006,51 @@ export const connectorsApi = {
       { spaces },
     ),
 
+  // ---- Google Meet ---------------------------------------------------------
+  /** Drops the company's Google Meet connection, revoking the grant at Google
+   *  first. Admin-only — a member gets 403 with the admin-gate message.
+   *
+   *  There is no `listGoogleMeet…` picker counterpart on purpose: coverage is
+   *  fixed to the connecting account's own meetings (Google exposes nothing
+   *  else) and the 30-day window is Google's, so there is nothing to choose. */
+  disconnectGoogleMeet: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/google-meet`),
+
+  // ---- Zoom ----------------------------------------------------------------
+  disconnectZoom: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/zoom`),
+
+  /** The active hosts on the connected Zoom account, plus the persisted
+   *  selection.
+   *
+   *  `total` is HOW MANY WE FETCHED, not how many exist on the account, and
+   *  `fetch_capped` says Zoom still had pages when the listing budget ran out
+   *  — the two together are what let the UI say "the first N" honestly instead
+   *  of asserting a number it cannot know.
+   *
+   *  `selected_names` matters because the listing is ACTIVE-ONLY: a selected
+   *  host who has since been deactivated is absent from `users`, and without
+   *  their stored name the picker could only show a bare id. */
+  listZoomUsers: () =>
+    api.get<{
+      users: ZoomUser[]
+      selected_ids: string[]
+      selected_names: Record<string, string>
+      total: number
+      fetch_capped: boolean
+      truncated: boolean
+    }>(`/v1/connectors/zoom/users`),
+
+  /** Choose which hosts' recordings the KG ingest pulls from (stored on the
+   *  company's Zoom connection config as sync_user_ids / sync_user_names). An
+   *  empty list clears the selection back to every licensed host.
+   *  Admin-only — a member gets 403 with the admin-gate message. */
+  setZoomSyncUsers: (users: { id: string; email?: string | null }[]) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/zoom/users`,
+      { users },
+    ),
+
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
@@ -1818,12 +2103,28 @@ export const connectorsApi = {
    * connection config as sync_channel_ids / sync_channel_names). An empty
    * list clears the selection — the sync reverts to every channel the bot
    * is a member of. `joined` echoes the public channels the bot could
-   * self-join right away. */
+   * self-join right away.
+   *
+   * Unticking is the reverse of ticking, so the response also reports the
+   * teardown: `left` are the channels the bot walked out of, `leave_failed`
+   * the ones Slack refused (today that is every one of them until the app
+   * gains the `channels:manage` scope — the bot only holds `channels:join`),
+   * `delivery_skipped` the ones deliberately kept because somebody delivers
+   * briefs there, and `purged` how much synced content was removed. All four
+   * are advisory: the selection itself always saves. */
   setSlackSyncChannels: (channels: { id: string; name?: string }[]) =>
     api.post<{
       ok: true
       config: ConnectionSummary["config"]
       joined: string[]
+      left: string[]
+      leave_failed: string[]
+      delivery_skipped: string[]
+      purged: {
+        datasets: string[]
+        sections_removed: number
+        reseeded: string[]
+      }
     }>(`/v1/connectors/slack/sync-channels`, { channels }),
 
   // ---- Sprinklr ------------------------------------------------------------
@@ -2101,6 +2402,12 @@ export const prdApi = {
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Resolve a PRD's opaque public_id (the `?prd=` URL's canonical form) to
+   *  its real internal id — same ownership check `get(id)` already enforces.
+   *  The one call `useArtifactUrlSync` needs to open a `?prd={public_id}`
+   *  deep-link with the existing, unchanged internal open path. */
+  resolveIdByPublicId: (publicId: string) =>
+    api.get<{ id: number }>(`/v1/prd/by-public-id/${encodeURIComponent(publicId)}`),
   /** Fetch the latest ready PRD for a dataset/company slug. 404 if none. */
   latest: (dataset: string) => api.get<PrdRecord>(`/v1/prd/latest?dataset=${encodeURIComponent(dataset)}`),
   /** Old name retained for compatibility. */
@@ -4027,16 +4334,6 @@ export const artifactsApi = {
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 
-/** One entry in the "New report" picker (GET /v1/reports/kinds). */
-export type ReportKindOption = {
-  /** The skill to pin when starting the run, e.g. "voice-of-customer-report". */
-  skill: string
-  label: string
-  blurb: string
-  /** The seeded question the run is started with. */
-  prompt: string
-}
-
 /** One row in a thread's report list (GET /v1/reports?conversation_id=…) — the
  *  same document as `ReportDoc` minus the body, which the list never carries. */
 export type ReportSummary = Omit<ReportDoc, "html" | "share_token">
@@ -4074,15 +4371,6 @@ export const reportsApi = {
     if (!res.ok) throw new ApiError(res.status, await res.text())
     return { blob: await res.blob(), filename: filenameFromDisposition(res.headers) }
   },
-
-  /**
-   * The report kinds the "New report" picker offers. Server-owned (and filtered
-   * to skills that actually exist) so the client never shows a button that would
-   * fail on click. Each carries the prompt to run — generation goes through the
-   * ordinary ask pipeline with the skill pinned, so a report started here is
-   * identical to one asked for in chat and is captured the same way.
-   */
-  kinds: () => api.get<{ kinds: ReportKindOption[] }>("/v1/reports/kinds"),
 
   /** Turn link sharing on/off. Passcode is required iff share_mode==="passcode".
    *  The returned token is null while private. */

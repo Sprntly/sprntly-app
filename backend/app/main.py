@@ -44,6 +44,7 @@ from app.prompts import (
 from app.routes import (
     admin,
     agent_chat,
+    artifact_share,
     artifacts,
     ask,
     brief,
@@ -84,6 +85,7 @@ from app.routes import (
     internal,
     pipeline,
     prd,
+    prd_access,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -204,6 +206,24 @@ async def lifespan(app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
         logger.exception("Orphan company-research sweep failed at startup")
+    # Same for business-context refreshes (companies.business_context_refresh_
+    # status): a restart mid-refresh leaves the row 'generating' forever, which
+    # would wedge the "Save Company Shape" trigger's start-guard so the company
+    # could never refresh again until this sweep or the scheduler's 5m heal
+    # catches it. Age-gated on the heartbeat column, not raw age — see
+    # app/db/business_context_refresh.py for why (the exact ask_jobs incident
+    # this ticket is designed around: an age-only check can reap a
+    # healthy-but-slow refresh out from under itself).
+    try:
+        bc_refresh_orphans = db.fail_orphan_business_context_refreshes()
+        if bc_refresh_orphans:
+            logger.info(
+                "Failed %d orphan business-context refresh(es) stuck in "
+                "generating (restart interrupt)",
+                bc_refresh_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan business-context refresh sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
@@ -413,6 +433,8 @@ app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
 app.include_router(internal_mcp.data_router)
+app.include_router(artifact_share.router)
+app.include_router(prd_access.router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)
