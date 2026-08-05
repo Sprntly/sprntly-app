@@ -1184,6 +1184,66 @@ def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
         return False
 
 
+def _cross_connector_sweep_enabled(enterprise_id: Optional[str]) -> bool:
+    """Should this company's source-agnostic questions also read connectors live?
+
+    Two levers, checked in this order:
+      * `settings.chat_cross_connector_sweep` — the GLOBAL operational switch,
+        so the sweep can be turned off everywhere without a per-company DB
+        write. Checked first because it must win.
+      * `chat_cross_connector_sweep` in companies.feature_flags — the per-company
+        product control, DEFAULT ON via the usual grandfather pattern.
+
+    A failed flag read resolves ON, matching `cross_connector_sweep_enabled`'s
+    reasoning: the sweep only re-reads sources the tenant already connected,
+    through the same read-only adapters, so an unknown flag state risks latency
+    rather than exposure — and the global switch is the lever for latency.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.config import settings
+
+        if not settings.chat_cross_connector_sweep:
+            return False
+        from app.entitlements import cross_connector_sweep_enabled, read_feature_flags
+
+        return cross_connector_sweep_enabled(read_feature_flags(enterprise_id))
+    except Exception:  # noqa: BLE001 — flag read must never break the ask
+        logger.exception(
+            "chat_cross_connector_sweep flag read failed for %s", enterprise_id
+        )
+        return True
+
+
+def _sweep_context(enterprise_id: Optional[str], question: str) -> str:
+    """The live cross-source block for the direct path, or "" — never raises.
+
+    Deliberately called on the DIRECT path only, and only after routing has
+    declined every other interception. Everything above it either names its own
+    source (the connector-lookup and document paths, which read it live already)
+    or owns a pipeline with its own retrieval (VoC, DS, CIR, public feedback).
+    What is left is the one shape that had no live reader at all: a question
+    about the company's work that names no tool.
+    """
+    try:
+        from app.connector_lookup import sweep as connector_sweep
+
+        # Cheapest gate FIRST. Most turns in a working thread are follow-ups and
+        # instructions that name no topic, and this check is pure string work —
+        # putting the flag read (a DB round trip) ahead of it would charge every
+        # "make it shorter" for a decision that was always going to be no.
+        if len(connector_sweep.sweep_terms(question)) < connector_sweep.MIN_TERMS:
+            return ""
+        if not _cross_connector_sweep_enabled(enterprise_id):
+            return ""
+        block, _result = connector_sweep.context_block(enterprise_id or "", question)
+        return block
+    except Exception:  # noqa: BLE001 — a sweep degrades, it never breaks the answer
+        logger.exception("cross-connector sweep failed for %s", enterprise_id)
+        return ""
+
+
 # The composer inlines every attachment's extracted text after this literal
 # block, client-side (`ChatScreen.tsx` `submitAsk`:
 # `` `${sendQuery}\n\n[Attached files]\n${ctx}` ``). It is already an
@@ -1786,16 +1846,36 @@ def answer(
         prd_context = build_prd_context(enterprise_id, prd_id)
 
     if not decision.skill_id:
-        # Direct path — corpus + KG. Retrieval (the shared question embedding,
-        # KG theme kNN, the document catalog's lexical channel, and Stage N
-        # filename matching) must see the bare question, not the thread —
-        # folding history into it turned each of those into a thread-wide
-        # search instead of a question-scoped one. History still reaches the
-        # model: it rides its own segment inside compose_ask_answer, exactly
-        # as the skill-routed path already does (_answer_single_shot, above).
+        # Direct path — corpus + KG, plus a bounded live read of every connected
+        # source. Retrieval (the shared question embedding, KG theme kNN, the
+        # document catalog's lexical channel, and Stage N filename matching)
+        # must see the bare question, not the thread — folding history into it
+        # turned each of those into a thread-wide search instead of a
+        # question-scoped one. History still reaches the model: it rides its own
+        # segment inside compose_ask_answer, exactly as the skill-routed path
+        # already does (_answer_single_shot, above).
+        #
+        # This is the path a question about the company's actual work lands on
+        # when it names no tool, and until the sweep it was the only path with
+        # no live reader: a company with Jira, Slack and Confluence connected
+        # got an answer assembled from the corpus and a periodic KG snapshot,
+        # having read none of them.
+        #
+        # The sweep is a FIFTH consumer of that bare question, and it wants the
+        # bare form for the same reason the other four do: it derives keyword
+        # terms, so a folded thread would search every connector for the
+        # previous turn's vocabulary. It was written against the raw question
+        # before the fold was removed here, so the two agree by construction
+        # rather than by retrofit — and a follow-up naming no topic of its own
+        # correctly sweeps nothing.
+        #
+        # Skipped when a PRD is open — that branch skips corpus AND KG
+        # retrieval on purpose (the PRD block is the grounding) and adding I/O
+        # to it would spend exactly what it was built to save.
+        live_context = "" if prd_context else _sweep_context(enterprise_id, question)
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
-            history=history, on_delta=on_delta,
+            history=history, live_context=live_context, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic

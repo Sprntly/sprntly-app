@@ -40,6 +40,7 @@ from app.prompts import (
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -1324,6 +1325,7 @@ def compose_ask_answer(
     enterprise_id: str | None = None,
     prd_context: str = "",
     history: list[dict] | None = None,
+    live_context: str = "",
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1354,6 +1356,25 @@ def compose_ask_answer(
     user turn ahead of the question — the model still sees the whole
     conversation; retrieval never does. Mirrors what
     `qa_agent._answer_single_shot` already does for the skill-routed path.
+
+    `live_context`, when given, is a pre-assembled block of LIVE reads from the
+    company's connected tools (app/connector_lookup/sweep.py — the caller runs
+    the sweep, this function only composes it). It rides the SAME slot as the KG
+    bundle, and for the same reason: both are per-question retrieval and neither
+    may enter the cacheable prefix, which exists to be byte-stable across every
+    ask in a dataset. A sweep block in that prefix would invalidate the shared
+    corpus cache on every single question.
+
+    It is a FIFTH consumer of the bare `question` above, and for exactly the
+    reason stated there: the sweep derives keyword terms, so a folded thread
+    would search every connector for the previous turn's vocabulary. The sweep
+    has always run on the raw question — that independent choice and this
+    contract now agree, rather than one having to be retrofitted to the other.
+
+    It is composed even when the KG bundle is empty — a company whose graph has
+    nothing on a topic but whose Jira and Slack do is exactly the case this
+    exists for — and it never reaches the PRD-grounded branch, which skips
+    corpus and KG retrieval by design and would lose that saving.
 
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
@@ -1429,13 +1450,32 @@ def compose_ask_answer(
             embedding_unavailable=embedding_degraded,
         )
 
+        # The KG bundle and the live sweep share one "connected sources" slot.
+        # Keeping them in ONE section (rather than adding a second template)
+        # is what stops the prompt fragmenting into four shapes, and it is
+        # also true to what they are: two readers of the same connected
+        # sources, one a sync-time snapshot and one read just now. The
+        # addendum below is what tells the model which is which.
+        context_sections: list[str] = []
         if bundle:
             from app.graph.retrieval import render_context_section
 
-            system = (ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM + today_line()
-                      + connected_sources_line(enterprise_id))
+            context_sections.append(render_context_section(bundle))
+        if live_context:
+            context_sections.append(live_context)
+
+        if context_sections:
+            # Each addendum is gated on ITS OWN section being present. The KG
+            # addendum names a "LIVE CONTEXT FROM CONNECTED SOURCES" heading
+            # that only `render_context_section` emits, so appending it for a
+            # sweep-only prompt would point the model at a section that is not
+            # there.
+            system = (ASK_SYSTEM
+                      + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
+                      + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
+                      + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
-                kg_context=render_context_section(bundle), question=question
+                kg_context="\n\n---\n\n".join(context_sections), question=question
             )
         else:
             system = (ASK_SYSTEM + today_line()
@@ -1509,6 +1549,14 @@ def compose_ask_answer(
                     "dataset": dataset,
                     "question": question,
                     "kg_used": bool(bundle),
+                    # Whether the answer additionally read connected tools LIVE.
+                    # Recorded because a sweep that silently stops firing —
+                    # a flag flipped, a connection expiring, terms never
+                    # extracting — looks exactly like "the sweep found
+                    # nothing" from the outside, and nothing else in the
+                    # record would distinguish them.
+                    "live_sweep": bool(live_context),
+                    "live_sweep_chars": len(live_context),
                     "prd_grounded": bool(prd_context),
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
