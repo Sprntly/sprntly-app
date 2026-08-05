@@ -362,13 +362,22 @@ class Settings(BaseSettings):
     # Setting it false disables the sweep for EVERY company regardless of flags.
     chat_cross_connector_sweep: bool = True
 
-    # Persist a cross-connector sweep's genuinely-new reads into the KG
+    # Persist a cross-connector sweep's reads into the KG
     # (app/connector_lookup/sweep_persist.py), instead of discarding them once
-    # the answer they fed is returned. Default OFF for staged rollout: the
-    # sweep only ever reaches sources the scheduled 6-hourly pull already
-    # covers, so this earns its keep only where the pull's caps (message/record
-    # counts, per-page char limits) miss material the sweep's demand-driven
-    # probe reaches — flip on per environment once that's confirmed live.
+    # the answer they fed is returned.
+    #
+    # ⚠️ DO NOT SWITCH ON YET. Off is not merely a staged-rollout default here —
+    # the feature is incomplete. `sweep_persist._content_hash` dedupes a sweep
+    # only against a previous IDENTICAL sweep, never against the scheduled
+    # 6-hourly pull, because the two hash different units (one whole source's
+    # question-shaped text vs one `RawRecord.render()`). On today, every sweep
+    # re-extracts content the pull already has: wasted LLM spend, and a ledger
+    # `skipped` count near zero that flatters the feature rather than measuring
+    # it. Not graph corruption — signal ids are keyed on the fact, so duplicates
+    # collapse on write. The unblocker is emitting `RawRecord`s from the
+    # adapters (they already hold structured rows before rendering prose), which
+    # makes the two hashes collide by construction.
+    #
     # Independent of `chat_cross_connector_sweep` above: that gates whether the
     # sweep RUNS at all; this gates only whether its output is ALSO written to
     # the KG. Off means today's behavior exactly — sweep runs, nothing persists.

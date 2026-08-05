@@ -1,5 +1,14 @@
-"""Persist a cross-connector sweep's genuinely-new reads into the knowledge
-graph.
+"""Persist a cross-connector sweep's reads into the knowledge graph.
+
+STATUS: PARKED, flag off. Do not switch `sweep_kg_persist_enabled` on until
+the adapter-record work below lands — see `_content_hash` for the full
+reasoning. In short: the ledger here dedupes a sweep only against a PREVIOUS
+IDENTICAL SWEEP, never against the scheduled 6-hourly pull, because the two
+hash different units. Turning this on today re-extracts content the pull has
+already ingested. That is wasted spend, not graph corruption — signal ids are
+keyed on the fact, so duplicates collapse on write — but the waste is real and
+the ledger's `skipped` count will read ~0, which looks like "the sweep finds
+lots of new material" when it means "this ledger cannot see the pull."
 
 Sibling to `sweep.py`, deliberately kept OUT of it. `sweep.py` carries the
 sweep's latency contract as a load-bearing module comment (BUDGET_S, the
@@ -63,10 +72,39 @@ def _lock_for(enterprise_id: str) -> threading.Lock:
 
 
 def _content_hash(text: str) -> str:
-    """Stable ledger key for one source's rendered text — same hash shape as
-    `kg_ingest.runner._content_hash`, so a sweep read and a later scheduled
-    pull of the identical content collide on the same ledger row rather than
-    getting extracted twice under two different keys."""
+    """Stable ledger key for one source's rendered text.
+
+    SCOPE, stated precisely because an earlier version of this docstring
+    claimed more than the code delivers: this dedupes a sweep against a
+    PREVIOUS IDENTICAL SWEEP, and nothing else. It does NOT dedupe against the
+    scheduled pull.
+
+    The hash FUNCTION matches `kg_ingest.runner._content_hash` (sha256 over
+    utf-8), but the two hash different UNITS and therefore can never collide:
+
+      - the scheduled pull hashes `RawRecord.render()` — ONE record, in a
+        fixed structural format (`[jira/issue id=PROJ-123 …]\\ntitle: …`);
+      - this hashes `SourceResult.text` — ONE WHOLE SOURCE's free-text answer
+        to one question, whose shape depends on what was ASKED.
+
+    Two sweeps about the same Jira issue, prompted by different questions,
+    produce different strings; neither matches that issue's record rendering.
+    So content the scheduled pull already ingested WILL be re-extracted here.
+
+    That costs an extraction call; it does NOT corrupt the graph. Signal ids
+    are `uuid5(enterprise_id, content)` (`graph.extractor`, ~:257), keyed on
+    the FACT rather than the document, so a fact arriving by both routes
+    collapses to one row (PK conflict → counted in the extractor's own
+    `skipped`). The graph stays clean; the duplicate work is paid for.
+
+    The real fix is upstream, not here: adapters already hold structured rows
+    before they render prose (e.g. `connector_lookup.jira` has `hits` before
+    `render_search(hits)`), so emitting `RawRecord`s from a sweep would make
+    this hash collide with the pull's by construction. Until that lands, treat
+    this ledger as a same-question cache, and read the extractor's returned
+    `skipped` — not this ledger — as the measure of how much a sweep actually
+    adds.
+    """
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
@@ -142,7 +180,7 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
 
 
 def kickoff_sweep_persist(enterprise_id: str, result: "SweepResult | None") -> bool:
-    """Fire-and-forget: persist a completed sweep's genuinely-new reads.
+    """Fire-and-forget: persist a completed sweep's reads.
 
     Called from `qa_agent._sweep_context` right after a sweep's block has
     already been rendered for the prompt — this is strictly additional work,
