@@ -65,13 +65,21 @@ export function SlackSyncChannelsPickerView({
     <div className="conn-slack-setup">
       <div>
         <span className="conn-slack-label">Channels to pull from</span>
+        {/*
+          Leads with WHAT gets pulled, not HOW. Product-owner feedback from
+          the live panel: "pull from" alone left people unsure what Sprntly
+          was taking — naming customer feedback up front ties ticking a
+          channel to where the knowledge base actually gets its evidence.
+          Same length as before; the two warnings (destructive untick,
+          workspace-wide + admin-only) are load-bearing and stay.
+        */}
         <p className="conn-slack-hint">
-          Sprntly reads messages only from the channels selected here, and
-          syncs them into your knowledge base on a schedule. Unticking a
-          channel also removes the messages already pulled from it. This
-          selection applies to your whole workspace and only admins can
-          change it. With nothing selected, every channel the bot has been
-          invited to is read.
+          Tick the channels where customer feedback and conversations happen —
+          Sprntly pulls those messages into your knowledge base on a schedule.
+          Unticking a channel also deletes the messages already pulled from
+          it. This applies to your whole workspace and only admins can change
+          it. With nothing ticked, every channel the bot has been invited to
+          is read.
         </p>
       </div>
 

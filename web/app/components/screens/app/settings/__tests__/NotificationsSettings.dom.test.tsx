@@ -398,4 +398,22 @@ describe("NotificationsSettings — copy", () => {
     // The Brief concept is NOT renamed — only this page's wording changed.
     expect(document.body.textContent).toContain("Next Brief will land")
   })
+
+  it("names the connected Slack account and BOTH delivery targets", async () => {
+    listMock.mockResolvedValueOnce({
+      connections: [
+        { provider: "slack", status: "active", account_label: "sprntly", config: {} },
+      ],
+    } as never)
+    mountWith({})
+    // Which install this is stays visible — some people have more than one.
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Connected — sprntly"),
+    )
+    // The picker below offers a DM as well as a channel, so the copy above it
+    // must not promise a channel only.
+    expect(document.body.textContent).toContain(
+      "Choose where Sprntly sends your product comms — a channel, or a direct message to you.",
+    )
+  })
 })
