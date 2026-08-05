@@ -17,6 +17,12 @@ that did not are here:
                    `ConfluenceBody` below for why a cache would have delivered
                    LESS text than a fetch.
 
+    slack          the channel's own section of `slack_channels.md`, which
+                   `connectors.slack_sync.sync_slack` already writes and keeps
+                   current on every sync. No network call, no scopes, no rate
+                   limit, and no divergence between what was catalogued and
+                   what is quoted — see `resolve_slack_body` below.
+
 WHY A SEPARATE MODULE. `ask_runner` composes prompts; it should not also know
 how a Drive file's markdown is named or which Confluence endpoint carries a
 body. Keeping resolution here also keeps the heavy imports lazy — the graph
@@ -45,8 +51,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app import document_catalog
 from app.datasets import dataset_path
-from app.document_catalog import PROVIDER_CONFLUENCE, PROVIDER_GOOGLE_DRIVE
+from app.document_catalog import (
+    PROVIDER_CONFLUENCE,
+    PROVIDER_GOOGLE_DRIVE,
+    PROVIDER_SLACK,
+)
 from app.ingest import md_filename
 
 logger = logging.getLogger(__name__)
@@ -254,6 +265,92 @@ def backfill_drive_markdown_paths(
     return counts
 
 
+# ── Slack ──────────────────────────────────────────────────────────────────
+#
+# A channel's body already lives in `slack_channels.md`, written by
+# `connectors.slack_sync.sync_slack` and kept current by every sync — so,
+# unlike Confluence, this reads the corpus copy rather than calling Slack:
+# no network, no scopes, no rate limit, and no divergence between what was
+# catalogued and what is quoted.
+
+#: The placeholder `channel_messages_to_markdown` writes for a channel with
+#: no messages this sync — "read, genuinely empty" per the ResolvedBody
+#: contract above, not content to quote. Kept here (not imported from
+#: `slack_sync`) because it is a STRING CONTRACT between the two modules,
+#: not a shared regex or shape.
+_SLACK_EMPTY_CHANNEL_MARKER = "_No recent messages._"
+
+
+def _slack_section_content(section: str) -> str:
+    """The message content of one channel section, with the heading and the
+    Topic/Purpose metadata lines stripped — used only to tell a genuinely
+    empty channel (AC11) from one with real messages to quote."""
+    lines = section.splitlines()[1:]  # drop the "## #<name>" heading
+    kept = [
+        line for line in lines
+        if line.strip()
+        and not line.strip().startswith("**Topic:**")
+        and not line.strip().startswith("**Purpose:**")
+    ]
+    return "\n".join(kept).strip()
+
+
+def resolve_slack_body(company_id: str, channel_id: str) -> ResolvedBody:
+    """One Slack channel's markdown section, read from the corpus copy.
+
+    1. `channel_id` -> channel name, from the catalog row's own title
+       (`"#name"`) — never re-derived, so a rename that already updated the
+       catalog row (see `kg_ingest.slack_extract.register_slack_catalog`)
+       resolves under its current name.
+    2. Sweeps EVERY dataset this company owns via `company_dataset_slugs` —
+       not just the default one — the same multi-dataset sweep
+       `purge_channels_from_synced_data` already uses, because the scheduled
+       refresh and the manual sync-to-corpus route can write to different
+       datasets. First hit wins.
+    3. `text is None` with a reason distinguishes "no corpus file in any
+       dataset" from "a corpus file exists but this channel has no section
+       in it" — two different facts, two different sentences."""
+    from app.connectors import slack_sync
+
+    doc = document_catalog.fetch_document(company_id, PROVIDER_SLACK, channel_id)
+    if doc is None:
+        return ResolvedBody(
+            None, "Sprntly has no catalog record for this Slack channel"
+        )
+    channel_name = doc.title.lstrip("#")
+
+    found_file = False
+    for slug in slack_sync.company_dataset_slugs(company_id):
+        path = dataset_path(slug) / "slack_channels.md"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            logger.warning(
+                "slack body: could not read %s for company=%s channel=%s",
+                path, company_id, channel_id, exc_info=True,
+            )
+            continue
+        found_file = True
+        section = slack_sync.channel_section(text, channel_name)
+        if section is None:
+            continue
+        if _slack_section_content(section) == _SLACK_EMPTY_CHANNEL_MARKER:
+            return ResolvedBody("")
+        return ResolvedBody(section)
+
+    if found_file:
+        return ResolvedBody(
+            None,
+            "this channel's synced messages could not be found in Sprntly's "
+            "stored copy",
+        )
+    return ResolvedBody(
+        None, "Sprntly has no stored copy of this workspace's Slack messages"
+    )
+
+
 # ── Confluence ─────────────────────────────────────────────────────────────
 
 
@@ -339,6 +436,8 @@ class BodyResolver:
             return self.resolve_confluence(external_id)
         if provider == PROVIDER_GOOGLE_DRIVE:
             return resolve_drive_body(self.company_id, external_id)
+        if provider == PROVIDER_SLACK:
+            return resolve_slack_body(self.company_id, external_id)
         return ResolvedBody(
             None, "Sprntly cannot read documents from this source yet"
         )
@@ -348,5 +447,5 @@ __all__ = [
     "BodyResolver", "ResolvedBody", "DRIVE_SOURCE_NS", "DRIVE_SOURCE_TYPE",
     "MD_DATASET_KEY", "MD_FILE_KEY", "backfill_drive_markdown_paths",
     "drive_markdown_path", "drive_source_id", "markdown_location",
-    "resolve_drive_body", "stored_markdown_location",
+    "resolve_drive_body", "resolve_slack_body", "stored_markdown_location",
 ]

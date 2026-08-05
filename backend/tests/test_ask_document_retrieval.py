@@ -1068,9 +1068,15 @@ def test_compose_ask_answer_documents_in_cacheable_prefix_not_user(
     assert "the body text" not in call["user"]
 
 
-def test_compose_ask_answer_documents_ordered_after_facts_before_corpus(
+def test_compose_ask_answer_documents_ordered_after_facts_and_after_corpus(
     isolated_settings, fake_llm
 ):
+    """The cacheable prefix orders `facts` -> corpus -> `docs_block`: the
+    corpus (the largest, most stable block) precedes the per-question
+    document index/bodies, so the shared prefix survives a change in which
+    documents a given question selects. Was
+    `..._ordered_after_facts_before_corpus`, pinning the OPPOSITE order —
+    every miss on the corpus block paid a full re-prefill on every ask."""
     from app import ask_runner
     from app.ask_runner import WORKSPACE_CONFIG_HEADER
 
@@ -1099,8 +1105,57 @@ def test_compose_ask_answer_documents_ordered_after_facts_before_corpus(
     )
 
     prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
-    assert prefix.index(WORKSPACE_CONFIG_HEADER) < prefix.index("THE DOCUMENT BODY")
-    assert prefix.index("THE DOCUMENT BODY") < prefix.index("THE CORPUS BODY")
+    assert prefix.index(WORKSPACE_CONFIG_HEADER) < prefix.index("THE CORPUS BODY")
+    assert prefix.index("THE CORPUS BODY") < prefix.index("THE DOCUMENT BODY")
+
+
+def test_two_different_questions_share_the_whole_corpus_prefix(
+    isolated_settings, fake_llm
+):
+    """Two asks in the same dataset with DIFFERENT questions (which select
+    different documents, so `docs_block`'s per-question load markers and
+    bodies differ) still share a common prefix that covers the entire corpus
+    block — the point of the reorder. On the unfixed (docs-before-corpus)
+    ordering, the first differing byte falls inside `docs_block`, BEFORE the
+    corpus even starts, and this fails. (AC3)"""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-two-q")
+    _seed_file(db, "f-alpha", src, filename="Alpha_Report.docx",
+               extracted_text="ALPHA BODY")
+    _seed_file(db, "f-beta", src, filename="Beta_Report.docx",
+               extracted_text="BETA BODY")
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    corpus_text = "THE SHARED CORPUS BODY " * 50
+    (ds / "a.md").write_text(corpus_text)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "Tell me about Alpha_Report", enterprise_id=_CID,
+    )
+    ask_runner.compose_ask_answer(
+        "asurion", "Tell me about Beta_Report", enterprise_id=_CID,
+    )
+
+    prefix_a = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    prefix_b = fake_llm["calls"][1]["kwargs"]["user_cacheable_prefix"]
+    # Sanity: the two asks really did load different documents, so
+    # `docs_block` genuinely differs between them.
+    assert prefix_a != prefix_b
+
+    common_len = 0
+    for a, b in zip(prefix_a, prefix_b):
+        if a != b:
+            break
+        common_len += 1
+
+    assert corpus_text in prefix_a[:common_len]
 
 
 def test_compose_ask_answer_appends_documents_addendum_only_when_block_present(
@@ -1330,8 +1385,22 @@ def test_no_existing_signature_changed():
 
     sig = inspect.signature(compose_ask_answer)
     assert set(sig.parameters) >= {
-        "dataset", "question", "enterprise_id", "prd_context", "on_delta",
+        "dataset", "question", "enterprise_id", "prd_context", "history",
+        "on_delta",
     }
+    # Every pre-fix keyword still binds with its pre-fix default, and every
+    # pre-fix call shape (enumerated via `grep -rn 'compose_ask_answer'
+    # backend/`) still binds unchanged — `history` is new and additive, never
+    # required.
+    assert sig.parameters["enterprise_id"].default is None
+    assert sig.parameters["prd_context"].default == ""
+    assert sig.parameters["on_delta"].default is None
+    assert sig.parameters["history"].default is None
+    sig.bind("asurion", "q?")
+    sig.bind("asurion", "q?", enterprise_id="co-1")
+    sig.bind("asurion", "q?", enterprise_id="co-1", prd_context="PRD block")
+    sig.bind("asurion", "q?", enterprise_id="co-1", on_delta=lambda *_: None)
+    sig.bind("asurion", "q?", enterprise_id="co-1", history=[{"role": "user", "content": "x"}])
     sig = inspect.signature(company_facts_block)
     assert list(sig.parameters) == ["enterprise_id"]
     sig = inspect.signature(list_document_sources)
@@ -1802,6 +1871,222 @@ def test_degraded_embedding_is_written_to_the_decision_log(
     ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
 
     assert logged["factors"]["retrieval_embedding_degraded"] is True
+
+
+# The accessor above is correct and its result is thrown away one call
+# later: `question_embedding=None` means "compute it yourself" to
+# `retrieve_context`, not "there is none". These pin the fix: the degraded
+# flag `_question_embedding` already produces now rides across the
+# `retrieve_context` boundary (`skip_semantic`) instead of collapsing back to
+# a self-embed on a doomed zero vector.
+#
+# NOTE: `isolated_settings` never sets `OPENAI_API_KEY`, so `settings.
+# openai_api_key` is already unset ("") for every test below that doesn't
+# explicitly configure one — the real no-key `embed_texts` fallback runs
+# unmocked, exactly as it would in production with no key configured.
+
+
+def test_no_key_never_runs_theme_knn(isolated_settings, fake_llm):
+    """With no key, a direct-path ask must reach `find_candidates` zero times
+    for theme kNN — no call with a zero vector, no call with any vector.
+    RED before the fix: `question_embedding=None` reached `retrieve_context`,
+    which self-embedded, got a zero vector from the no-key fallback, and
+    shipped it to `find_candidates` anyway."""
+    from unittest.mock import patch
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert calls == [], f"find_candidates called for theme kNN with no key: {calls}"
+
+
+def test_no_key_issues_exactly_one_embedding_call(isolated_settings, fake_llm, monkeypatch):
+    """`embed_texts` is called at most once per direct-path ask — the shared
+    ContextVar / `_resolve_question_embedding` machinery exists specifically
+    to keep this at exactly one. RED before the fix: `retrieve_context`
+    re-embedded a second time because `None` collapsed back to "compute your
+    own"."""
+    from app import ask_runner
+    import app.graph.embeddings as embeddings_mod
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls: list = []
+    real_embed_texts = embeddings_mod.embed_texts
+
+    def _counting_embed(texts, **kw):
+        calls.append(texts)
+        return real_embed_texts(texts, **kw)
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _counting_embed)
+
+    ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert len(calls) == 1, f"expected exactly one embed_texts call, got {len(calls)}"
+
+
+def test_no_key_still_returns_an_answer(isolated_settings, fake_llm):
+    """With no key, `compose_ask_answer` still returns a well-formed payload —
+    the guard degrades, it never raises and never yields an empty answer."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "grounded on lexical channels only", "key_points": ["k"],
+        "citations": [], "confidence": 0.6, "unanswered": "",
+    }
+
+    payload = ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert payload["answer"] == "grounded on lexical channels only"
+    assert payload["key_points"] == ["k"]
+
+
+def test_no_key_bundle_is_recent_signals_not_empty_and_not_raised(
+    isolated_settings, fake_llm
+):
+    """The documented degradation shape holds: with no key, theme kNN never
+    runs, but a KG with recent non-stale signals still yields a non-empty
+    bundle (the recent-signals fallback) — not an exception, not an empty
+    answer. `retrieve_context`'s docstring binds this: "never raises on a
+    partial-KG read — degrades to an emptier bundle and logs."""
+    from datetime import datetime, timezone
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+    from app.graph.types import Signal
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    GraphFacade().write_signal(
+        _CID,
+        Signal(
+            enterprise_id=_CID,
+            source_type="analytics",
+            kind="metric_shift",
+            content="recent-only signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    user = fake_llm["calls"][0]["user"]
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
+    assert "recent-only signal" in user
+
+
+def test_embed_texts_raising_does_not_break_the_ask(isolated_settings, fake_llm, monkeypatch):
+    """The embedder raising (a real HTTP failure, not just a missing key)
+    leaves the answer intact — resilience must hold on this path exactly as
+    it does on the no-key path."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    payload = ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert payload["answer"] == "x"
+
+
+def test_decision_log_degraded_flag_matches_behaviour(
+    isolated_settings, fake_llm, monkeypatch
+):
+    """When `retrieval_embedding_degraded` is True in the decision log, no
+    semantic channel ran for EITHER consumer — not just document selection.
+    This is the exact gap the ticket closes: the flag previously read as "we
+    degraded to lexical-only" while the KG silently ran kNN on a zero
+    vector."""
+    from unittest.mock import patch
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    logged = {}
+    monkeypatch.setattr(
+        "app.graph.decision_log.log_agent_decision",
+        lambda **kw: logged.update(kw),
+    )
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert logged["factors"]["retrieval_embedding_degraded"] is True
+    assert calls == [], (
+        "retrieval_embedding_degraded=True but theme kNN ran anyway — "
+        "the audit row would be lying"
+    )
+
+
+def test_accessor_pinned_tests_unchanged():
+    """CLOSED-WORLD TRAP guard: this diff must not touch `_question_embedding`
+    or its three pinned tests. Confirms they still exist under their exact
+    names in this module — a rename or deletion here would be a silent
+    regression this suite otherwise wouldn't catch. (The "unedited" half of
+    this AC is enforced by code review against the diff, not a runtime
+    assertion.)"""
+    import tests.test_ask_document_retrieval as _mod
+
+    for name in (
+        "test_missing_embedding_degrades_to_lexical_and_is_recorded",
+        "test_a_usable_embedding_is_not_reported_as_degraded",
+        "test_degraded_embedding_is_written_to_the_decision_log",
+    ):
+        assert hasattr(_mod, name), f"pinned test {name} is missing"
 
 
 # T8 — catalog read failure degrades Stage T only.
@@ -2673,3 +2958,392 @@ def test_ask_worker_publishes_the_embedding_and_always_clears_it(
     assert seen["embedding"] == ([0.75] * 1536, False)
     # ...and gone once the call has returned, even though it raised.
     assert ask_runner._carried_question_embedding() is None
+
+
+# ══════════════════ Cache-prefix ordering: content preservation ════════════
+
+
+def test_prefix_content_set_is_unchanged_only_reordered(isolated_settings, fake_llm):
+    """For one ask, the reorder changes ORDER only — every block that was in
+    the prefix before is still in it, none added, dropped, or truncated.
+    (AC4)"""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": _CID, "slug": "slug-co-set", "display_name": "Sprntly"}
+    ).execute()
+    db.table("products").insert(
+        {"id": "prod-co-set", "company_id": _CID, "name": "Sprntly",
+         "website": "https://sprntly.ai", "is_primary": 1}
+    ).execute()
+    src = _seed_source(db, "src-set")
+    _seed_file(db, "f-set", src, filename="Set_Report.docx",
+               extracted_text="SET DOCUMENT BODY")
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("SET CORPUS BODY")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer("asurion", "About Set_Report", enterprise_id=_CID)
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    blocks = prefix.split("\n\n---\n\n")
+
+    # Exactly the three blocks this ask produces — none merged or dropped by
+    # the reorder. Order is asserted separately (see the ordered-after-facts
+    # test above); this checks the SET.
+    assert len(blocks) == 3
+    assert sum(WORKSPACE_CONFIG_HEADER in b for b in blocks) == 1
+    assert sum(b.count("SET CORPUS BODY") == 1 for b in blocks) == 1
+    assert sum("SET DOCUMENT BODY" in b for b in blocks) == 1
+
+
+def test_no_documents_prefix_byte_identical_to_prefix_fix(isolated_settings, fake_llm):
+    """When `docs_block` is empty, the join drops the empty part, so the
+    prefix is byte-identical whether `docs_block` would have sat before or
+    after the corpus — order is unobservable. (AC5)"""
+    from app import ask_runner
+    from app.ask_runner import company_facts_block
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": _CID, "slug": "slug-co-nodocs", "display_name": "Sprntly"}
+    ).execute()
+    db.table("products").insert(
+        {"id": "prod-co-nodocs", "company_id": _CID, "name": "Sprntly",
+         "website": "https://sprntly.ai", "is_primary": 1}
+    ).execute()
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("NO DOCS CORPUS BODY")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer("asurion", "q?", enterprise_id=_CID)
+
+    facts = company_facts_block(_CID)
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix == (
+        f"{facts}\n\n---\n\nSource material:\n\n"
+        "<<< SOURCE: a >>>\nNO DOCS CORPUS BODY\n<<< END SOURCE >>>"
+    )
+
+
+def test_no_facts_prefix_starts_with_corpus(isolated_settings, fake_llm):
+    """When `facts` is empty, the prefix begins with the corpus and
+    `docs_block` still trails it. (AC6)"""
+    from app import ask_runner
+
+    # A `companies` row with a BLANK display name (the FK the document rows
+    # need) and no `products` row at all — `company_facts_block` returns ""
+    # for exactly this shape (no company_name, no product_name, no website
+    # → no lines → ""), keeping `facts` genuinely empty rather than merely
+    # unseeded.
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-nofacts", "slug": "slug-co-nofacts", "display_name": ""}
+    ).execute()
+    db.table("document_source").insert(
+        {"id": "src-nofacts", "company_id": "co-nofacts", "name": "x", "description": ""}
+    ).execute()
+    db.table("document_source_file").insert(
+        {
+            "id": "f-nofacts", "source_id": "src-nofacts", "company_id": "co-nofacts",
+            "filename": "Nofacts_Report.docx", "extracted_text": "NOFACTS DOCUMENT BODY",
+            "uploaded_at": "2026-08-02T00:00:00+00:00",
+        }
+    ).execute()
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("NOFACTS CORPUS BODY")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "About Nofacts_Report", enterprise_id="co-nofacts",
+    )
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix.startswith("Source material:")
+    assert prefix.index("NOFACTS CORPUS BODY") < prefix.index("NOFACTS DOCUMENT BODY")
+
+
+def test_empty_corpus_and_no_documents_prefix_is_none(isolated_settings, fake_llm):
+    """All parts empty → `user_cacheable_prefix is None`, matching the
+    existing behaviour this ticket does not change (also pinned in
+    `test_chat_kg_retrieval.py`)."""
+    from app import ask_runner
+
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-all-empty-x")
+
+    assert fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"] is None
+
+
+def test_single_block_prefix_has_no_delimiter(isolated_settings, fake_llm):
+    """Exactly one non-empty part (facts only, here) → no stray
+    `\\n\\n---\\n\\n` delimiter in the prefix."""
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": _CID, "slug": "slug-co-single", "display_name": "Sprntly"}
+    ).execute()
+    db.table("products").insert(
+        {"id": "prod-co-single", "company_id": _CID, "name": "Sprntly",
+         "website": "https://sprntly.ai", "is_primary": 1}
+    ).execute()
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer("asurion", "q?", enterprise_id=_CID)
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert "\n\n---\n\n" not in prefix
+    assert WORKSPACE_CONFIG_HEADER in prefix
+
+
+# ══════════════════ Cache-prefix ordering: observability (meta_out) ════════
+
+
+def test_cache_counters_recorded_on_the_answer_decision_row(isolated_settings, monkeypatch):
+    """The `answer` decision-log row carries both cache counters as
+    integers. (AC7)"""
+    import json as jsonmod
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-cache-1")
+
+    def _fake_call_json(**kwargs):
+        meta_out = kwargs.get("meta_out")
+        if meta_out is not None:
+            meta_out.update({
+                "cache_read_input_tokens": 4200,
+                "cache_creation_input_tokens": 0,
+                "input_tokens": 4500,
+            })
+        return {
+            "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+            "unanswered": "",
+        }
+
+    monkeypatch.setattr(ask_runner, "call_json", _fake_call_json)
+
+    ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-cache-1")
+
+    rows = (
+        db.table("agent_decision_log").select("*")
+        .eq("decision_type", "answer").execute().data
+    )
+    assert len(rows) == 1
+    factors = rows[0]["factors"]
+    factors = jsonmod.loads(factors) if isinstance(factors, str) else factors
+    assert factors["cache_read_input_tokens"] == 4200
+    assert factors["cache_creation_input_tokens"] == 0
+    assert factors["input_tokens"] == 4500
+    assert isinstance(factors["cache_read_input_tokens"], int)
+    assert isinstance(factors["cache_creation_input_tokens"], int)
+    assert isinstance(factors["input_tokens"], int)
+
+
+def test_cache_counters_default_to_zero_when_absent(isolated_settings, fake_llm):
+    """The stock `fake_llm` fixture never populates `meta_out` — a provider
+    that reports no usage still yields integer `0`, never `None` and never a
+    missing key. (AC7)"""
+    import json as jsonmod
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-cache-2")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-cache-2")
+
+    rows = db.table("agent_decision_log").select("*").execute().data
+    answer_rows = [r for r in rows if r["decision_type"] == "answer"]
+    assert len(answer_rows) == 1
+    factors = answer_rows[0]["factors"]
+    factors = jsonmod.loads(factors) if isinstance(factors, str) else factors
+    assert factors["cache_read_input_tokens"] == 0
+    assert factors["cache_creation_input_tokens"] == 0
+    assert factors["input_tokens"] == 0
+    assert factors["cache_read_input_tokens"] is not None
+
+
+def test_missing_meta_out_does_not_break_the_answer(isolated_settings, fake_llm):
+    """The counters are best-effort — a provider that returns no usage object
+    still yields a complete answer payload."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-meta-missing")
+    fake_llm["payload"] = {
+        "answer": "the answer text", "key_points": ["a"], "citations": [],
+        "confidence": 0.5, "unanswered": "",
+    }
+
+    payload = ask_runner.compose_ask_answer(
+        "asurion", "q?", enterprise_id="co-meta-missing",
+    )
+
+    assert payload["answer"] == "the answer text"
+    assert payload["key_points"] == ["a"]
+    assert "documents" in payload
+
+
+def test_cache_read_tokens_non_zero_on_second_call(isolated_settings, monkeypatch):
+    """Unit-level with a fake that echoes usage: a second call within the
+    cache window reports non-zero `cache_read_input_tokens`. The REAL proof
+    is the live base-vs-head run (LV1) — this only proves the wiring.
+    (AC8)"""
+    import json as jsonmod
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-cache-second")
+
+    responses = [
+        {"cache_read_input_tokens": 0, "cache_creation_input_tokens": 5000},
+        {"cache_read_input_tokens": 4800, "cache_creation_input_tokens": 0},
+    ]
+
+    def _fake_call_json(**kwargs):
+        usage = responses.pop(0)
+        meta_out = kwargs.get("meta_out")
+        if meta_out is not None:
+            meta_out.update({**usage, "input_tokens": 5000})
+        return {
+            "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+            "unanswered": "",
+        }
+
+    monkeypatch.setattr(ask_runner, "call_json", _fake_call_json)
+
+    ask_runner.compose_ask_answer("asurion", "first q", enterprise_id="co-cache-second")
+    ask_runner.compose_ask_answer("asurion", "second q", enterprise_id="co-cache-second")
+
+    rows = (
+        db.table("agent_decision_log").select("*")
+        .eq("decision_type", "answer").execute().data
+    )
+    assert len(rows) == 2
+
+    def _factors(row):
+        f = row["factors"]
+        return jsonmod.loads(f) if isinstance(f, str) else f
+
+    reads = sorted(_factors(r)["cache_read_input_tokens"] for r in rows)
+    assert reads == [0, 4800]
+
+
+def test_no_document_or_corpus_text_in_decision_factors(isolated_settings, fake_llm):
+    """The added cache/usage factors are integers only; no factor value on
+    any row this ask writes contains a filename, title, summary, corpus
+    text, or PRD text. (AC11)"""
+    import json as jsonmod
+
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    src = _seed_source(db, "src-prop", company_id="co-prop")
+    _seed_file(db, "f-prop", src, company_id="co-prop",
+               filename="Confidential_Roadmap.docx",
+               extracted_text="SECRET CORPUS-ADJACENT TEXT nobody should log")
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("SECRET CORPUS BODY nobody should log either")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "About Confidential_Roadmap", enterprise_id="co-prop",
+    )
+
+    rows = db.table("agent_decision_log").select("*").execute().data
+    assert rows
+    for row in rows:
+        f = row["factors"]
+        factors = jsonmod.loads(f) if isinstance(f, str) else f
+        blob = jsonmod.dumps(factors)
+        assert "Confidential_Roadmap.docx" not in blob
+        assert "SECRET CORPUS-ADJACENT TEXT" not in blob
+        assert "SECRET CORPUS BODY" not in blob
+
+    answer_rows = [r for r in rows if r["decision_type"] == "answer"]
+    factors = answer_rows[0]["factors"]
+    factors = jsonmod.loads(factors) if isinstance(factors, str) else factors
+    for key in ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens"):
+        assert isinstance(factors[key], int)
+
+
+# ══════════════ Cache-prefix ordering: contract (non-breakage) ═════════════
+
+
+def test_cache_control_breakpoint_placement_unchanged():
+    """`cache_control: ephemeral` placement in `llm._build_base_kwargs` is
+    unchanged by this ticket — still exactly one breakpoint, on the whole
+    cacheable-prefix block, before the uncached `user` turn. This ticket only
+    reorders what's INSIDE `user_cacheable_prefix`; it never touches
+    `llm.py`. (AC9)"""
+    from app import llm
+
+    kwargs = llm._build_base_kwargs(
+        model="claude-sonnet-4-6",
+        max_tokens=100,
+        system="a short system prompt",
+        user="the question",
+        user_cacheable_prefix="the cacheable prefix text",
+    )
+
+    content = kwargs["messages"][0]["content"]
+    cache_blocks = [b for b in content if "cache_control" in b]
+    assert len(cache_blocks) == 1
+    block = cache_blocks[0]
+    assert block["type"] == "text"
+    assert block["text"] == "the cacheable prefix text"
+    assert block["cache_control"] == {"type": "ephemeral"}
+    assert content[0] is block
+    assert content[1] == {"type": "text", "text": "the question"}
+
+
+def test_prefix_call_sites_still_bind():
+    """Every enumerated `user_cacheable_prefix` caller still `py_compile`s
+    and still passes the same keyword — this ticket changes the ORDER of the
+    string each site passes, never the signature or the call shape. (AC10)"""
+    import py_compile
+
+    from app import ask_runner, qa_agent
+
+    py_compile.compile(ask_runner.__file__, doraise=True)
+    py_compile.compile(qa_agent.__file__, doraise=True)
+
+    import inspect
+
+    assert inspect.getsource(ask_runner).count("user_cacheable_prefix=") >= 2
+    assert "user_cacheable_prefix=" in inspect.getsource(qa_agent)

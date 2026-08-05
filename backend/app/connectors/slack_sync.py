@@ -57,6 +57,14 @@ MAX_THREAD_REPLIES = 50
 # Only sync messages from the last N days (default 90)
 DEFAULT_HISTORY_DAYS = 90
 
+# The corpus filename stem this module writes (:588) and that
+# `synthesis_brief._seed_from_corpus` skips extracting directly — one
+# source of truth so the two never drift apart. Slack's KG extraction runs
+# per-channel via `kg_ingest.slack_extract` instead; the corpus file itself
+# stays (it still feeds brief generation, Ask, and DS Agent — see the
+# module docstring above).
+SLACK_CORPUS_DOC_STEM = "slack_channels"
+
 # Connection-config keys for the user's pull-channel selection, written by
 # POST /v1/connectors/slack/sync-channels and honored by sync_slack below.
 # ids is the authoritative list; names is an {id: name} display map kept so
@@ -452,6 +460,26 @@ def channels_summary_to_markdown(
 # ───── Sync orchestrator ─────
 
 
+def _slack_team_domain(access_token: str) -> str | None:
+    """The workspace's Slack subdomain, for building a channel permalink —
+    resolved ONCE PER SYNC, never once per channel: `fetch_team_info` is a
+    real Slack API call, and the stored token payload carries `team_id` /
+    `team_name` but not `domain` (see `slack_oauth.token_payload_to_store`).
+
+    `None` on any failure — a missing permalink degrades a catalogued Slack
+    document to uncited-but-named, which is honest; a guessed link would not
+    be (see `kg_ingest.slack_extract`'s catalog registration)."""
+    from app.connectors.slack_oauth import fetch_team_info
+
+    try:
+        team = fetch_team_info(access_token)
+    except Exception:  # noqa: BLE001 — a permalink is never worth a sync failure
+        logger.warning("slack sync: team domain lookup failed", exc_info=True)
+        return None
+    domain = str((team or {}).get("domain") or "").strip()
+    return domain or None
+
+
 def sync_slack(
     dataset: str,
     *,
@@ -526,9 +554,15 @@ def sync_slack(
     oldest_epoch = time.time() - (history_days * 86400)
     oldest_ts = f"{oldest_epoch:.6f}"
 
+    # Per-channel KG extraction (kg_ingest.slack_extract) — lazy import
+    # keeps graph/LLM/db deps off this module's load, matching
+    # google_drive_sync's identical lazy import of drive_extract.
+    from app.kg_ingest.slack_extract import SlackChannelDoc, kickoff_slack_extract
+
     # 3. Fetch messages + threads per channel, build markdown
     channel_markdowns: list[str] = []
     message_counts: dict[str, int] = {}
+    slack_channel_docs: list[SlackChannelDoc] = []
 
     for ch in channels:
         ch_id = ch.get("id", "")
@@ -569,6 +603,25 @@ def sync_slack(
         )
         channel_markdowns.append(md)
 
+        # Free: this markdown and metadata are already computed for the
+        # corpus write above — collecting a SlackChannelDoc here costs zero
+        # additional Slack API calls. `latest_ts` is the newest message ts
+        # seen this pass (Slack "epoch.seq" sorts lexicographically same as
+        # numerically for same-length strings, so max() by float is exact).
+        latest_ts = ""
+        if messages:
+            latest_ts = max(
+                messages, key=lambda m: float(m.get("ts", "0") or "0")
+            ).get("ts", "")
+        slack_channel_docs.append(SlackChannelDoc(
+            channel_id=ch_id,
+            channel_name=ch_name,
+            text=md,
+            latest_ts=latest_ts,
+            message_count=len(messages),
+            is_private=bool(ch.get("is_private", False)),
+        ))
+
     # 4. Assemble final markdown document
     header = (
         f"# Slack Workspace Messages\n\n"
@@ -585,14 +638,33 @@ def sync_slack(
 
     # 5. Write to corpus
     try:
-        (corpus_dir / "slack_channels.md").write_text(full_md, encoding="utf-8")
+        (corpus_dir / f"{SLACK_CORPUS_DOC_STEM}.md").write_text(
+            full_md, encoding="utf-8"
+        )
         logger.info(
-            "Wrote slack_channels.md for %s (%d chars, %d messages)",
-            dataset, len(full_md), result.messages_count,
+            "Wrote %s.md for %s (%d chars, %d messages)",
+            SLACK_CORPUS_DOC_STEM, dataset, len(full_md), result.messages_count,
         )
     except Exception as exc:
         result.errors.append(f"write: {exc}")
-        logger.error("Failed to write slack_channels.md: %s", exc, exc_info=True)
+        logger.error("Failed to write %s.md: %s", SLACK_CORPUS_DOC_STEM, exc,
+                     exc_info=True)
+
+    # 5b. Kick off per-channel KG extraction (kg_ingest.slack_extract) and
+    # per-channel catalog registration. Fire-and-forget, off the request
+    # path — never let an extraction-kick failure affect this sync's own
+    # result. Extraction itself makes no new Slack API calls: the docs
+    # collected above are built entirely from data already fetched for the
+    # corpus write. The one genuinely new call is the team-domain lookup
+    # below, for catalog permalinks — made ONCE per sync, not once per
+    # channel.
+    team_domain = _slack_team_domain(access_token)
+    try:
+        kickoff_slack_extract(company_id, slack_channel_docs, team_domain=team_domain)
+    except Exception:  # noqa: BLE001 — extraction must never fail the sync
+        logger.exception(
+            "slack sync: KG extraction kick failed for %s", company_id
+        )
 
     # 6. Update sync status + auto-enable input source
     _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
@@ -766,6 +838,50 @@ def remove_channels_from_corpus(dataset: str, channel_names: list[str]) -> int:
         logger.warning("slack un-sync: cannot rewrite %s: %s", path, exc)
         return 0
     return removed
+
+
+def channel_section(text: str, channel_name: str) -> str | None:
+    """One channel's `## #<name>` section out of a `slack_channels.md` body
+    (the whole slice `channel_messages_to_markdown` wrote for that channel,
+    heading included), or `None` when the channel has no section in `text`.
+
+    Built on the SAME `_CHANNEL_HEADING_RE` module constant and the same
+    "only a `## #<name>` heading closes a section" rule
+    `remove_channels_from_corpus` already enforces (see the trap noted
+    there): a message whose own text happens to be written as a markdown
+    heading must not end the slice early. Matches names case-insensitively
+    with the same `strip().lstrip("#").lower()` normalisation used there.
+
+    Deliberately does NOT reuse `remove_channels_from_corpus`'s loop — that
+    function is a working, tested single-pass filter that also rewrites two
+    count lines; sharing the regex and the closing rule is the duplication
+    that matters, sharing the loop is not."""
+    wanted = channel_name.strip().lstrip("#").lower()
+    if not wanted or not text:
+        return None
+    lines: list[str] = []
+    collecting = False
+    found = False
+    for line in text.splitlines():
+        heading = _CHANNEL_HEADING_RE.match(line)
+        if heading:
+            if collecting:
+                # The next channel's heading — this channel's section is over.
+                break
+            collecting = heading.group("name").strip().lower() == wanted
+            if collecting:
+                found = True
+            else:
+                continue
+        if collecting:
+            lines.append(line)
+    if not found:
+        return None
+    # splitlines() strips line-ending characters but preserves blank lines as
+    # empty elements, so rejoining with "\n" and appending one trailing "\n"
+    # exactly reproduces the original slice (including its own trailing
+    # blank line, if any) rather than only approximating it.
+    return "\n".join(lines) + "\n"
 
 
 def company_dataset_slugs(company_id: str) -> list[str]:

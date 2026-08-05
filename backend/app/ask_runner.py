@@ -32,6 +32,7 @@ from app.document_catalog import (
 )
 from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
+from app.prompt_history import render_history_block
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -1281,9 +1282,17 @@ def _retrieve_kg_bundle(
     question: str,
     *,
     question_embedding: list[float] | None = None,
+    embedding_unavailable: bool = False,
 ) -> dict | None:
     """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
     or None when there's no tenant context or the KG yields nothing / errors.
+
+    `embedding_unavailable` carries forward `_question_embedding`'s degraded
+    flag: True means the caller already determined there is no usable vector
+    (no key configured, or the accessor's own zero-vector check tripped) —
+    passed through to `retrieve_context` as `skip_semantic` so the KG neither
+    runs kNN on a zero vector nor re-embeds a question that's already known to
+    embed to nothing.
 
     Resilient by construction: a missing tenant, an empty KG, a fake backend
     with no pgvector, or any read failure all collapse to None so the caller
@@ -1298,6 +1307,7 @@ def _retrieve_kg_bundle(
         bundle = retrieve_context(
             facade, enterprise_id, question,
             question_embedding=question_embedding,
+            skip_semantic=embedding_unavailable,
         )
     except Exception:  # noqa: BLE001 — KG must never break Ask
         logger.exception("Ask KG retrieval failed for enterprise=%s", enterprise_id)
@@ -1313,6 +1323,7 @@ def compose_ask_answer(
     *,
     enterprise_id: str | None = None,
     prd_context: str = "",
+    history: list[dict] | None = None,
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1331,6 +1342,19 @@ def compose_ask_answer(
       - Decision-log the ask (agent="ask", decision_type="answer") with
         kg_refs = the signal/entity ids that fed the answer.
 
+    `question` is the user's bare current-turn message — never fold prior
+    turns into it. It drives all FOUR retrieval consumers below (the shared
+    embedding, KG theme kNN, the document catalog's lexical channel, and
+    Stage N filename matching), so a folded thread turns each of those into a
+    thread-wide search instead of a question-scoped one — see `history` below
+    for where prior turns actually belong.
+
+    `history`, when given, is rendered once (`render_history_block`, same
+    budget/clamping as every other fold site) and prepended to the composed
+    user turn ahead of the question — the model still sees the whole
+    conversation; retrieval never does. Mirrors what
+    `qa_agent._answer_single_shot` already does for the skill-routed path.
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -1340,6 +1364,17 @@ def compose_ask_answer(
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
+    try:
+        history_block = render_history_block(history)
+    except Exception:  # noqa: BLE001 — history is prompt context, never the
+        # reason retrieval or the answer fails; degrade to no history block
+        # rather than lose the ask.
+        logger.warning(
+            "history render failed for enterprise=%s; answering without "
+            "conversation context",
+            enterprise_id, exc_info=True,
+        )
+        history_block = ""
     facts = company_facts_block(enterprise_id)
     # ONE embedding per ask, computed before either consumer and shared by
     # both. Document grounding runs first and the PRD branch skips KG
@@ -1383,14 +1418,15 @@ def compose_ask_answer(
         bundle = None
         system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
                   + connected_sources_line(enterprise_id))
-        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
         corpus = load_corpus(dataset)
         cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
 
         bundle = _retrieve_kg_bundle(
-            enterprise_id, question, question_embedding=question_embedding
+            enterprise_id, question, question_embedding=question_embedding,
+            embedding_unavailable=embedding_degraded,
         )
 
         if bundle:
@@ -1398,21 +1434,31 @@ def compose_ask_answer(
 
             system = (ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM + today_line()
                       + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_WITH_KG.format(
+            user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context=render_context_section(bundle), question=question
             )
         else:
             system = (ASK_SYSTEM + today_line()
                       + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+            user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once
     # above so it rides EVERY branch's cacheable prefix, first — a long corpus
     # or PRD block can never push it out. facts == "" ⇒ cacheable/system are
     # byte-identical to the pre-fix composition (including the None case).
-    # Documents sit after facts and before the corpus/PRD/KG block.
+    #
+    # `docs_block` trails the corpus/PRD/KG block, not the other way around.
+    # Prompt caching is prefix-matched: it hits only up to the first differing
+    # byte. `docs_block` is stamped with a per-question "[loaded for this
+    # question]"/"[not loaded]" marker on every catalogued document
+    # (`_index_line`) and carries the selected bodies themselves, so it is
+    # volatile on every single ask. `facts` and the corpus/PRD block are
+    # stable (per tenant, per dataset/PRD respectively). Putting the volatile
+    # block last means the shared prefix — the whole stable part — still
+    # matches across two different questions in the same dataset; putting it
+    # first (the old order) invalidated the cache on every ask.
     cacheable = (
-        "\n\n---\n\n".join(p for p in (facts, docs_block, cacheable) if p) or None
+        "\n\n---\n\n".join(p for p in (facts, cacheable, docs_block) if p) or None
     )
     if facts:
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
@@ -1423,6 +1469,12 @@ def compose_ask_answer(
     # (non-gateway) answer call. See app.llm_keys.
     from app.llm_keys import company_llm_key
 
+    # Best-effort cache/usage telemetry for the answer decision-log row below
+    # — makes the cache-prefix reorder's win measurable rather than asserted.
+    # `call_json` populates this from the provider's usage object; it stays
+    # `{}` (and every counter below defaults to 0) if the provider returns
+    # none.
+    meta_out: dict = {}
     with company_llm_key(enterprise_id):
         payload = call_json(
             system=system,
@@ -1430,6 +1482,7 @@ def compose_ask_answer(
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
+            meta_out=meta_out,
             # Token-streaming a chat answer implies the streaming transport
             # (and its long read timeout) — same pattern as the gateway.
             stream=on_delta is not None,
@@ -1478,6 +1531,18 @@ def compose_ask_answer(
                     # because the system keeps answering — slightly worse —
                     # and nothing else in the record would say why.
                     "retrieval_embedding_degraded": embedding_degraded,
+                    # Cache/usage counts only — never text (see the rule
+                    # above this block). Makes the cacheable-prefix ordering
+                    # measurable: a healthy cache hit shows up here as a
+                    # non-zero `cache_read_input_tokens` on the second+ ask
+                    # in a dataset within the cache TTL.
+                    "cache_read_input_tokens": meta_out.get(
+                        "cache_read_input_tokens", 0
+                    ),
+                    "cache_creation_input_tokens": meta_out.get(
+                        "cache_creation_input_tokens", 0
+                    ),
+                    "input_tokens": meta_out.get("input_tokens", 0),
                 },
                 output={
                     "key_points": payload.get("key_points", []),

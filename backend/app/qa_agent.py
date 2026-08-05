@@ -1786,11 +1786,16 @@ def answer(
         prd_context = build_prd_context(enterprise_id, prd_id)
 
     if not decision.skill_id:
-        # Direct path — corpus + KG, unchanged. Fold history into the question.
-        q = _render_history(history) + question if history else question
+        # Direct path — corpus + KG. Retrieval (the shared question embedding,
+        # KG theme kNN, the document catalog's lexical channel, and Stage N
+        # filename matching) must see the bare question, not the thread —
+        # folding history into it turned each of those into a thread-wide
+        # search instead of a question-scoped one. History still reaches the
+        # model: it rides its own segment inside compose_ask_answer, exactly
+        # as the skill-routed path already does (_answer_single_shot, above).
         return compose_ask_answer(
-            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context,
-            on_delta=on_delta,
+            dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
+            history=history, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic

@@ -249,6 +249,13 @@ async def ask(
     if body.prd_id is not None:
         require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
 
+    # History loads BEFORE the cache resolution (not after, as it did before
+    # this fix) so eligibility can be derived from it: a thread that already
+    # holds an assistant turn must not be served a cache hit that never read
+    # that thread. Moving it up costs one extra DB read on a cache hit; it
+    # already ran on every miss.
+    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
     # cached answer onto an immediately-`ready` ask job (rather than returning it
@@ -257,9 +264,16 @@ async def ask(
     # user-visible result is identical (same payload, same synthetic delay).
     # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
     # so it would serve a context-free answer for a question about the open PRD.
+    # SKIPPED for a mid-thread ask, for the same reason: a thread that already
+    # holds an assistant turn has context a cache hit never read. A FIRST-TURN
+    # ask deliberately stays eligible even though `conversation_id` is already
+    # set on that request — the client awaits conversation creation before
+    # asking, so `conversation_id` is non-null on turn one too, and a first-turn
+    # ask has no thread yet to be blind to (that's what the starter chips send).
+    mid_thread = any(turn.get("role") == "assistant" for turn in history)
     cached_payload = (
         await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
-        if body.prd_id is None
+        if (body.prd_id is None and not mid_thread)
         else None
     )
     if cached_payload is not None:
@@ -276,7 +290,7 @@ async def ask(
     # 2) Cache miss → persist a generating job and kick the SAME qa_agent
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
-    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+    # `history` was already loaded above (before cache resolution).
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
