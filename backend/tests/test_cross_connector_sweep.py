@@ -574,7 +574,15 @@ def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fak
     from app import ask_runner
     from app.prompts import ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
 
+    # Anchored on #1059's LITERAL heading, not a paraphrase: the model has to
+    # match a string rather than infer which of several sections we meant. If
+    # that heading is ever reworded, this assertion is what fails loudly instead
+    # of the precedence quietly ceasing to bind.
     assert "PRECEDENCE" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+    assert (
+        'headed "The document this message refers to is UNRESOLVED"'
+        in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+    )
     assert "WINS over this section" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
 
     ds = isolated_settings["data_dir"] / "asurion"
@@ -591,7 +599,7 @@ def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fak
     )
 
     system = fake_llm["calls"][0]["system"]
-    assert "could NOT resolve" in system
+    assert "The document this message refers to is UNRESOLVED" in system
     assert "never to skip it" in system
 
 
