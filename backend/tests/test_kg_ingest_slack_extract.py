@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app import document_catalog
 from app.kg_ingest import slack_extract
 from app.kg_ingest.slack_extract import SlackChannelDoc
 
@@ -558,7 +559,7 @@ def _slack_get_fake(channels, messages_by_channel, *, users=None, url_log=None):
 @pytest.fixture
 def slack_sync_env(isolated_settings, tmp_data_dir, monkeypatch):
     import app.config as config_mod
-    from app.connectors import slack_sync
+    from app.connectors import slack_oauth, slack_sync
 
     # slack_sync does `from app.config import settings` at import time and
     # is not in conftest's reload order, so it can hold a Settings object
@@ -572,6 +573,13 @@ def slack_sync_env(isolated_settings, tmp_data_dir, monkeypatch):
                         lambda *a, **k: None)
     monkeypatch.setattr(slack_sync.db, "upsert_input_source",
                         lambda *a, **k: None)
+    # The team-domain lookup (AC8) is a real Slack API call
+    # (`slack_oauth.fetch_team_info`, not routed through `_slack_get`) —
+    # stubbed here so every sync-wiring test below stays hermetic. Tests that
+    # care about this call specifically re-patch it themselves.
+    monkeypatch.setattr(
+        slack_oauth, "fetch_team_info", lambda token: {"domain": "test-workspace"}
+    )
     return slack_sync
 
 
@@ -594,8 +602,9 @@ def test_sync_slack_builds_one_channel_doc_per_channel_and_kicks_off_extraction(
     captured = {}
     monkeypatch.setattr(
         se, "kickoff_slack_extract",
-        lambda company_id, docs: captured.update(company_id=company_id, docs=docs)
-        or True,
+        lambda company_id, docs, **kw: captured.update(
+            company_id=company_id, docs=docs
+        ) or True,
     )
 
     result = slack_sync_env.sync_slack("acme", company_id="co-1")
@@ -631,7 +640,7 @@ def test_slack_extract_honours_existing_channel_selection(slack_sync_env, monkey
     captured = {}
     monkeypatch.setattr(
         se, "kickoff_slack_extract",
-        lambda company_id, docs: captured.update(docs=docs) or True,
+        lambda company_id, docs, **kw: captured.update(docs=docs) or True,
     )
 
     slack_sync_env.sync_slack("acme", company_id="co-1")
@@ -675,7 +684,7 @@ def test_slack_extract_failure_never_raises_into_sync_slack(slack_sync_env, monk
     monkeypatch.setattr(slack_sync_env, "_slack_get",
                         _slack_get_fake(channels, messages))
 
-    def _boom(company_id, docs):
+    def _boom(company_id, docs, **kw):
         raise RuntimeError("thread spawn exploded")
 
     monkeypatch.setattr(se, "kickoff_slack_extract", _boom)
@@ -699,3 +708,310 @@ def test_slack_corpus_file_still_written_after_sync(slack_sync_env, monkeypatch,
     slack_sync_env.sync_slack("acme", company_id="co-1")
 
     assert (Path(tmp_data_dir) / "acme" / "slack_channels.md").exists()
+
+
+def test_team_info_called_once_per_sync(slack_sync_env, monkeypatch):
+    """AC8: the permalink domain lookup is a real Slack API call — resolved
+    ONCE per sync regardless of channel count, never once per channel."""
+    from app.connectors import slack_oauth
+    from app.kg_ingest import slack_extract as se
+
+    channels = [_channel(f"C{i}", f"chan{i}") for i in range(5)]
+    messages = {
+        c["id"]: [{"user": "U1", "text": "hi", "ts": "1700000000.000001"}]
+        for c in channels
+    }
+    monkeypatch.setattr(slack_sync_env, "_slack_get",
+                        _slack_get_fake(channels, messages))
+    monkeypatch.setattr(se, "kickoff_slack_extract", lambda *a, **k: True)
+
+    calls: list[str] = []
+
+    def _fake_team_info(token):
+        calls.append(token)
+        return {"domain": "acme"}
+
+    monkeypatch.setattr(slack_oauth, "fetch_team_info", _fake_team_info)
+
+    slack_sync_env.sync_slack("acme", company_id="co-1")
+
+    assert len(calls) == 1
+
+
+# ═══════════════════════ Catalog registration (AC1-AC9, AC14) ═══════════════
+#
+# `register_slack_catalog` is called from `run_slack_extract`, ONE LEVEL
+# ABOVE `extract_slack_channels` — every test above calls the extraction
+# function directly and is completely unaffected by these calls existing at
+# all. These exercise `register_slack_catalog` on its own, the same
+# isolation `test_document_catalog_writers.py` uses for the other three
+# writers: a real `document_catalog.register_document` upsert against the
+# fake Supabase, with `llm_call`/`embed_texts` stubbed so no real network
+# round-trip happens.
+
+
+@pytest.fixture
+def slack_catalog(isolated_settings, monkeypatch):
+    state = {"summary_calls": []}
+
+    def _fake_llm(**kwargs):
+        state["summary_calls"].append(kwargs)
+        return type("R", (), {"output": {"summary": "s", "topics": ["t"]}})()
+
+    monkeypatch.setattr(document_catalog, "llm_call", _fake_llm)
+    monkeypatch.setattr(
+        document_catalog, "embed_texts", lambda texts, **k: [[0.1] * 1536 for _ in texts]
+    )
+
+    db = isolated_settings["supabase"]
+    cid = "co-slack-catalog"
+    db.table("companies").insert(
+        {"id": cid, "slug": f"slug-{cid}", "display_name": cid}
+    ).execute()
+    state["db"] = db
+    state["cid"] = cid
+    return state
+
+
+def _catalog_rows(db, company_id: str) -> list[dict]:
+    return (
+        db.table("document_catalog")
+        .select("*")
+        .eq("company_id", company_id)
+        .eq("provider", "slack")
+        .execute()
+        .data
+    )
+
+
+# ─────────────────────────── Creation (AC1, AC2) ────────────────────────────
+
+
+def test_provider_slack_constant_value():
+    assert document_catalog.PROVIDER_SLACK == "slack"
+
+
+def test_slack_registers_one_catalog_row_per_channel(slack_catalog):
+    docs = [
+        _doc(channel_id="C1", channel_name="general"),
+        _doc(channel_id="C2", channel_name="support"),
+        _doc(channel_id="C3", channel_name="random"),
+    ]
+    slack_extract.register_slack_catalog(slack_catalog["cid"], docs)
+
+    rows = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+    assert len(rows) == 3
+    assert {r["provider"] for r in rows} == {"slack"}
+
+
+def test_slack_catalog_external_id_is_channel_id_not_name(slack_catalog):
+    slack_extract.register_slack_catalog(
+        slack_catalog["cid"], [_doc(channel_id="C0123ABCD", channel_name="general")]
+    )
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["external_id"] == "C0123ABCD"
+
+
+def test_slack_catalog_title_is_hash_prefixed_channel_name(slack_catalog):
+    slack_extract.register_slack_catalog(
+        slack_catalog["cid"], [_doc(channel_id="C1", channel_name="product-feedback")]
+    )
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["title"] == "#product-feedback"
+    assert row["source_name"] == "Slack"
+
+
+# ───────────────────── Serialization (AC5, AC6, AC7, AC8) ──────────────────
+
+
+def test_slack_catalog_content_hash_covers_full_section(slack_catalog):
+    """Two sections differing only PAST the 60,000-char KG extraction
+    truncation must still hash differently and re-summarise — content_hash
+    is taken over `doc.text` in full, never the truncated extraction slice."""
+    base = "x" * 60_100
+    doc_a = _doc(channel_id="C1", channel_name="eng", text=f"## #eng\n\n{base}A\n")
+    doc_b = _doc(channel_id="C1", channel_name="eng", text=f"## #eng\n\n{base}B\n")
+
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc_a])
+    first_hash = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]["content_hash"]
+
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc_b])
+    second_hash = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]["content_hash"]
+
+    assert first_hash != second_hash
+    assert len(slack_catalog["summary_calls"]) == 2  # re-summarised on the change
+
+
+def test_slack_catalog_never_sets_body_text(slack_catalog):
+    slack_extract.register_slack_catalog(
+        slack_catalog["cid"], [_doc(channel_id="C1", channel_name="eng")]
+    )
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["body_text"] is None
+
+
+def test_slack_catalog_doc_date_is_iso_from_latest_message(slack_catalog):
+    from datetime import datetime, timezone
+
+    doc = _doc(channel_id="C1", channel_name="eng", latest_ts="1712345678.000100")
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc])
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+
+    assert row["doc_date"] is not None
+    parsed = datetime.fromisoformat(str(row["doc_date"]).replace("Z", "+00:00"))
+    assert parsed == datetime.fromtimestamp(1712345678, tz=timezone.utc)
+
+
+def test_slack_catalog_doc_date_is_none_for_empty_channel(slack_catalog):
+    doc = _doc(
+        channel_id="C1", channel_name="eng", latest_ts="", message_count=0,
+        text="## #eng\n\n_No recent messages._\n",
+    )
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc])
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["doc_date"] is None
+
+
+def test_slack_catalog_url_uses_team_domain(slack_catalog):
+    doc = _doc(channel_id="C0123ABCD", channel_name="eng")
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc], team_domain="acme")
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["url"] == "https://acme.slack.com/archives/C0123ABCD"
+
+
+def test_slack_catalog_url_is_none_when_team_info_fails(slack_catalog):
+    """`team_domain=None` is exactly what `slack_sync._slack_team_domain`
+    resolves to when `fetch_team_info` raises — registration must still
+    happen, just without a permalink."""
+    doc = _doc(channel_id="C1", channel_name="eng")
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc], team_domain=None)
+    row = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])[0]
+    assert row["url"] is None
+
+
+# ──────────────────────────── Idempotency (AC3, AC4) ────────────────────────
+
+
+def test_slack_catalog_reregistration_unchanged_is_a_noop(slack_catalog):
+    doc = _doc(channel_id="C1", channel_name="eng")
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc])
+    first = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+    assert len(first) == 1
+    assert len(slack_catalog["summary_calls"]) == 1
+
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc])
+    second = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+
+    assert len(second) == 1
+    assert len(slack_catalog["summary_calls"]) == 1  # no second summarisation
+    assert second[0]["updated_at"] == first[0]["updated_at"]
+
+
+def test_slack_catalog_rename_updates_the_same_row(slack_catalog):
+    doc_a = _doc(channel_id="C1", channel_name="general", text="## #general\n\nhello\n")
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc_a])
+    first = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+    assert len(first) == 1
+
+    doc_b = _doc(
+        channel_id="C1", channel_name="general-renamed",
+        text="## #general-renamed\n\nhello\n",
+    )
+    slack_extract.register_slack_catalog(slack_catalog["cid"], [doc_b])
+    second = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+
+    assert len(second) == 1
+    assert second[0]["id"] == first[0]["id"]
+    assert second[0]["title"] == "#general-renamed"
+
+
+# ─────────────────────────── Error handling (AC9, AC14) ─────────────────────
+
+
+def test_slack_catalog_registration_failure_isolates_one_channel(
+    slack_catalog, monkeypatch
+):
+    real_register = document_catalog.register_document
+
+    def _flaky(company_id, **kw):
+        if kw.get("external_id") == "C2":
+            raise RuntimeError("catalog down")
+        return real_register(company_id, **kw)
+
+    monkeypatch.setattr(document_catalog, "register_document", _flaky)
+    docs = [
+        _doc(channel_id="C1", channel_name="general"),
+        _doc(channel_id="C2", channel_name="support"),
+        _doc(channel_id="C3", channel_name="random"),
+    ]
+    slack_extract.register_slack_catalog(slack_catalog["cid"], docs)
+
+    rows = _catalog_rows(slack_catalog["db"], slack_catalog["cid"])
+    assert {r["external_id"] for r in rows} == {"C1", "C3"}
+
+
+def test_slack_catalog_failure_logs_identifiers_not_message_text(
+    slack_catalog, monkeypatch, caplog
+):
+    def _boom(company_id, **kw):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(document_catalog, "register_document", _boom)
+    secret_text = "customer said the pipeline was cancelled over pricing"
+    doc = _doc(
+        channel_id="C7", channel_name="eng",
+        text=f"## #eng\n\n**Bob**: {secret_text}\n",
+    )
+
+    with caplog.at_level("WARNING", logger="app.kg_ingest.slack_extract"):
+        slack_extract.register_slack_catalog(slack_catalog["cid"], [doc])
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "C7" in log_text
+    assert "RuntimeError" in log_text
+    assert slack_catalog["cid"] in log_text
+    assert secret_text not in log_text
+
+
+# ═══════════════════════ Regression / non-breakage (AC15) ═══════════════════
+
+
+def test_remove_channels_from_corpus_unchanged(isolated_settings, tmp_data_dir, monkeypatch):
+    """Pins `remove_channels_from_corpus`'s pre-existing behaviour now that
+    `channel_section` shares its heading regex and closing rule inside the
+    same module — its own dedicated suite in `test_slack_sync_channels.py`
+    is run UNMODIFIED as part of this ticket's blast radius; this is a
+    second, independent proof at the call-site level."""
+    import app.config as config_mod
+    from app.connectors import slack_sync
+    from app.datasets import dataset_path
+
+    # slack_sync does `from app.config import settings` at import time and is
+    # NOT in conftest's reload order, so it can still hold a Settings object
+    # from an earlier test's DATA_DIR (see test_slack_sync_channels.py's
+    # identical `slack_corpus` fixture rebind).
+    monkeypatch.setattr(slack_sync, "settings", config_mod.settings)
+
+    text = (
+        "# Slack Workspace Messages\n\n"
+        "## Channels Overview\n\n"
+        "**Total channels synced:** 2\n\n"
+        "| Channel | Members | Messages Synced | Topic |\n"
+        "|---------|---------|-----------------|-------|\n"
+        "| #general | 3 | 1 | |\n"
+        "| #support | 2 | 1 | |\n\n"
+        "**Channels:** 2 | **Messages:** 2 | **Thread replies:** 0\n\n"
+        "---\n\n"
+        "## #general\n\nhello\n\n"
+        "## #support\n\nhelp\n"
+    )
+    path = dataset_path("acme") / "slack_channels.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+    removed = slack_sync.remove_channels_from_corpus("acme", ["support"])
+
+    assert removed == 1
+    remaining = path.read_text(encoding="utf-8")
+    assert "## #general" in remaining
+    assert "## #support" not in remaining

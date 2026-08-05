@@ -460,6 +460,26 @@ def channels_summary_to_markdown(
 # ───── Sync orchestrator ─────
 
 
+def _slack_team_domain(access_token: str) -> str | None:
+    """The workspace's Slack subdomain, for building a channel permalink —
+    resolved ONCE PER SYNC, never once per channel: `fetch_team_info` is a
+    real Slack API call, and the stored token payload carries `team_id` /
+    `team_name` but not `domain` (see `slack_oauth.token_payload_to_store`).
+
+    `None` on any failure — a missing permalink degrades a catalogued Slack
+    document to uncited-but-named, which is honest; a guessed link would not
+    be (see `kg_ingest.slack_extract`'s catalog registration)."""
+    from app.connectors.slack_oauth import fetch_team_info
+
+    try:
+        team = fetch_team_info(access_token)
+    except Exception:  # noqa: BLE001 — a permalink is never worth a sync failure
+        logger.warning("slack sync: team domain lookup failed", exc_info=True)
+        return None
+    domain = str((team or {}).get("domain") or "").strip()
+    return domain or None
+
+
 def sync_slack(
     dataset: str,
     *,
@@ -630,13 +650,17 @@ def sync_slack(
         logger.error("Failed to write %s.md: %s", SLACK_CORPUS_DOC_STEM, exc,
                      exc_info=True)
 
-    # 5b. Kick off per-channel KG extraction (kg_ingest.slack_extract).
-    # Fire-and-forget, off the request path — never let an extraction-kick
-    # failure affect this sync's own result. No new Slack API calls: the
-    # docs collected above are built entirely from data already fetched
-    # for the corpus write.
+    # 5b. Kick off per-channel KG extraction (kg_ingest.slack_extract) and
+    # per-channel catalog registration. Fire-and-forget, off the request
+    # path — never let an extraction-kick failure affect this sync's own
+    # result. Extraction itself makes no new Slack API calls: the docs
+    # collected above are built entirely from data already fetched for the
+    # corpus write. The one genuinely new call is the team-domain lookup
+    # below, for catalog permalinks — made ONCE per sync, not once per
+    # channel.
+    team_domain = _slack_team_domain(access_token)
     try:
-        kickoff_slack_extract(company_id, slack_channel_docs)
+        kickoff_slack_extract(company_id, slack_channel_docs, team_domain=team_domain)
     except Exception:  # noqa: BLE001 — extraction must never fail the sync
         logger.exception(
             "slack sync: KG extraction kick failed for %s", company_id
@@ -814,6 +838,50 @@ def remove_channels_from_corpus(dataset: str, channel_names: list[str]) -> int:
         logger.warning("slack un-sync: cannot rewrite %s: %s", path, exc)
         return 0
     return removed
+
+
+def channel_section(text: str, channel_name: str) -> str | None:
+    """One channel's `## #<name>` section out of a `slack_channels.md` body
+    (the whole slice `channel_messages_to_markdown` wrote for that channel,
+    heading included), or `None` when the channel has no section in `text`.
+
+    Built on the SAME `_CHANNEL_HEADING_RE` module constant and the same
+    "only a `## #<name>` heading closes a section" rule
+    `remove_channels_from_corpus` already enforces (see the trap noted
+    there): a message whose own text happens to be written as a markdown
+    heading must not end the slice early. Matches names case-insensitively
+    with the same `strip().lstrip("#").lower()` normalisation used there.
+
+    Deliberately does NOT reuse `remove_channels_from_corpus`'s loop — that
+    function is a working, tested single-pass filter that also rewrites two
+    count lines; sharing the regex and the closing rule is the duplication
+    that matters, sharing the loop is not."""
+    wanted = channel_name.strip().lstrip("#").lower()
+    if not wanted or not text:
+        return None
+    lines: list[str] = []
+    collecting = False
+    found = False
+    for line in text.splitlines():
+        heading = _CHANNEL_HEADING_RE.match(line)
+        if heading:
+            if collecting:
+                # The next channel's heading — this channel's section is over.
+                break
+            collecting = heading.group("name").strip().lower() == wanted
+            if collecting:
+                found = True
+            else:
+                continue
+        if collecting:
+            lines.append(line)
+    if not found:
+        return None
+    # splitlines() strips line-ending characters but preserves blank lines as
+    # empty elements, so rejoining with "\n" and appending one trailing "\n"
+    # exactly reproduces the original slice (including its own trailing
+    # blank line, if any) rather than only approximating it.
+    return "\n".join(lines) + "\n"
 
 
 def company_dataset_slugs(company_id: str) -> list[str]:

@@ -36,13 +36,21 @@ import hashlib
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
 
+from app import document_catalog
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.kg_ingest.drive_extract import _chunks
 
 logger = logging.getLogger(__name__)
+
+#: Catalog `source_name` for Slack documents — mirrors `drive_extract`'s
+#: `_DRIVE_SOURCE_NAME`: every Slack row carries the connector's own label,
+#: which is what a user would say ("the #support channel in Slack").
+_SLACK_SOURCE_NAME = "Slack"
 
 # Mirrors drive_extract._CHUNK_CHARS / runner._BATCH_CHAR_BUDGET exactly —
 # one extraction call per ~6k chars across every ingestion path.
@@ -207,6 +215,80 @@ def extract_slack_channels(
     return {**totals, "errors": errors}
 
 
+# ── Catalog registration ──────────────────────────────────────────────
+#
+# One `document_catalog` row per SYNCED channel — unconditionally, unlike KG
+# extraction above, which skips a channel with no messages. Catalog rows are
+# what make a channel individually selectable, ranked and CITED; an empty
+# channel is still a real, findable (if contentless) document.
+
+
+def _channel_permalink(channel_id: str, team_domain: Optional[str]) -> Optional[str]:
+    """A working Slack deep link, or `None` when the workspace domain could
+    not be resolved. Never fabricates the undocumented `slack.com/archives`
+    form — a missing link degrades to an uncited-but-named document; a wrong
+    one would be worse."""
+    if not team_domain:
+        return None
+    return f"https://{team_domain}.slack.com/archives/{channel_id}"
+
+
+def _latest_message_iso(ts: str) -> Optional[str]:
+    """A Slack `epoch.seq` timestamp as ISO-8601 UTC, or `None` for an empty
+    or unparseable one — a channel that synced with no messages must store
+    NULL, never an epoch-zero date."""
+    if not ts:
+        return None
+    try:
+        epoch = float(ts.split(".")[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def register_slack_catalog(
+    company_id: str,
+    docs: list[SlackChannelDoc],
+    *,
+    team_domain: Optional[str] = None,
+) -> None:
+    """Upsert one `document_catalog` row per channel in `docs`.
+
+    `content_hash` is taken over the channel's FULL section text
+    (`doc.text`), never the `_MAX_KG_CHARS`-truncated slice extraction uses —
+    an edit past the truncation point must still re-hash, or the summary
+    freezes at an old version (mirrors `pullers.confluence` / `drive_extract`).
+
+    Error isolation matches the Confluence puller, not Drive: wrapped in
+    try/except, log-and-continue. Drive's deliberate no-except exists because
+    a swallowed failure there would advance `kg_file_mtime` and strand the
+    file until a human edits it in Drive. Slack has no such latch — the next
+    sync re-registers a failed channel for free, keyed on the same content
+    hash the KG ledger already uses — so copying Drive's no-except here would
+    take a whole sync down for a cataloguing failure it does not need to."""
+    for doc in docs:
+        try:
+            document_catalog.register_document(
+                company_id,
+                provider=document_catalog.PROVIDER_SLACK,
+                external_id=doc.channel_id,
+                title=f"#{doc.channel_name}",
+                source_name=_SLACK_SOURCE_NAME,
+                url=_channel_permalink(doc.channel_id, team_domain),
+                doc_date=_latest_message_iso(doc.latest_ts),
+                content_hash=document_catalog.content_hash_for(doc.text),
+                get_text=lambda text=doc.text: text,
+            )
+        except Exception as e:  # noqa: BLE001 — log-and-continue (Confluence precedent)
+            # Identifiers only — company id, channel id, error class. Never
+            # message text, never a token, never channel body content.
+            logger.warning(
+                "slack-catalog: registration failed company=%s channel=%s "
+                "error_class=%s",
+                company_id, doc.channel_id, type(e).__name__,
+            )
+
+
 # Per-company locks so overlapping runs (a manual re-sync racing the
 # scheduled refresh) serialize instead of extracting the same channels
 # twice in parallel. Mirrors drive_extract.py's identical idiom.
@@ -223,29 +305,48 @@ def _extract_lock(company_id: str) -> threading.Lock:
         return lock
 
 
-def run_slack_extract(company_id: str, docs: list[SlackChannelDoc]) -> dict:
-    """Blocking extract. Serialized per company — overlapping callers can't
-    double-extract the same channels."""
+def run_slack_extract(
+    company_id: str,
+    docs: list[SlackChannelDoc],
+    *,
+    team_domain: Optional[str] = None,
+) -> dict:
+    """Blocking extract + catalog registration. Serialized per company —
+    overlapping callers can't double-extract the same channels."""
     with _extract_lock(company_id):
         facade = GraphFacade()
-        return extract_slack_channels(facade, company_id, docs)
+        result = extract_slack_channels(facade, company_id, docs)
+        register_slack_catalog(company_id, docs, team_domain=team_domain)
+        return result
 
 
-def _run_isolated(company_id: str, docs: list[SlackChannelDoc]) -> None:
+def _run_isolated(
+    company_id: str,
+    docs: list[SlackChannelDoc],
+    *,
+    team_domain: Optional[str] = None,
+) -> None:
     try:
-        run_slack_extract(company_id, docs)
+        run_slack_extract(company_id, docs, team_domain=team_domain)
     except Exception:  # noqa: BLE001 — fully isolated
         logger.exception("slack-extract failed for %s", company_id)
 
 
-def kickoff_slack_extract(company_id: str, docs: list[SlackChannelDoc]) -> bool:
-    """Fire-and-forget: extract synced Slack channels into the KG in a
-    daemon thread. Never blocks; never raises into the caller's sync flow."""
+def kickoff_slack_extract(
+    company_id: str,
+    docs: list[SlackChannelDoc],
+    *,
+    team_domain: Optional[str] = None,
+) -> bool:
+    """Fire-and-forget: extract synced Slack channels into the KG and
+    register their catalog rows, in a daemon thread. Never blocks; never
+    raises into the caller's sync flow."""
     if not docs:
         return False
     try:
         t = threading.Thread(
             target=_run_isolated, args=(company_id, docs),
+            kwargs={"team_domain": team_domain},
             name="slack-kg-extract", daemon=True,
         )
         t.start()
