@@ -137,9 +137,59 @@ NO_CONNECTOR: dict[str, str] = {
     "sentry": "Sentry",
 }
 
-#: At most this many providers' toolsets go into one loop. Two is enough for
-#: "check Slack and Jira" while keeping the tool list (and the cost) small.
-MAX_PROVIDERS_PER_LOOKUP = 2
+#: At most this many providers' TOOLSETS go into one loop.
+#:
+#: This used to be 2, and 2 was the literal implementation of "chat only looks
+#: at one or two connectors". A question naming three sources had the third
+#: silently truncated into an apology. But the fix is NOT simply a bigger
+#: number, because the tool loop is SERIAL and its costs are per-iteration:
+#:
+#:   measured tool-schema + system-block overhead, re-sent EVERY iteration
+#:     jira 732 tok · slack 761 · github 569 · confluence 393 · clickup 251 ·
+#:     hubspot 227 · fireflies 217 · google_drive 158  (schema only)
+#:   the widest real company (5 live-readable adapters) = 19 tools,
+#:     ~4,400 tok of schema+system per iteration
+#:
+#: So unioning five providers' tools into one 6-iteration loop costs ~26k tokens
+#: of re-sent overhead AND leaves the model one spare turn after it has spent
+#: five reaching each source once. That is not breadth; it is the same coverage
+#: paid for twice.
+#:
+#: The split below is the actual fix. Coverage comes from a PARALLEL keyword
+#: sweep (connector_lookup/sweep.py) over every named source; the loop's tools
+#: are for DRILL-DOWN on the few most likely to need a follow-up read. Three is
+#: chosen because the loop's job is now depth, not coverage, and three toolsets
+#: (~1,900 tok) keeps per-iteration overhead below where 2 used to sit relative
+#: to its own iteration budget.
+MAX_TOOL_PROVIDERS = 3
+
+#: Backwards-compatible alias. Kept because it is the name every existing
+#: comment, test and reader knows this concept by; deleting it would make the
+#: diff look like the cap vanished rather than split in two.
+MAX_PROVIDERS_PER_LOOKUP = MAX_TOOL_PROVIDERS
+
+#: How many named providers the parallel sweep may cover. Eight is every adapter
+#: that exists, so in practice this never binds — the real ceiling is what a
+#: company has connected, and no company in the database has more than six
+#: providers (of which `uploads` is not a live adapter at all).
+MAX_SWEEP_PROVIDERS = 8
+
+#: Wall-clock the sweep may draw for priming, CARVED OUT of answer.py's existing
+#: WALL_CLOCK_BUDGET_S rather than added to it. This is the whole reason breadth
+#: is affordable: the user-facing worst case for a wide lookup is unchanged from
+#: what a two-provider lookup could already cost, because the sweep spends part
+#: of a budget the loop was already allowed to spend.
+SWEEP_PRIME_BUDGET_S = 8.0
+
+#: Ceiling on the primed digest, TIGHTER than the sweep's own 12k default.
+#:
+#: The digest rides the user turn, and the user turn is re-sent on every loop
+#: iteration — so unlike the chat path, where the block is paid for once, here
+#: its cost is multiplied by the iteration budget. At 10 iterations a 12k-char
+#: block is ~30k tokens of repetition. 6k halves that while still carrying
+#: several results per swept source, and `cap_text` marks the truncation so the
+#: model never reads a trimmed digest as a complete one.
+PRIME_CHARS = 6_000
 
 
 def connected_providers(enterprise_id: str) -> list[str]:
@@ -206,6 +256,37 @@ def not_supported_message(hints: list[str], enterprise_id: str) -> str:
     return " ".join(parts)
 
 
+def _sweepable(provider: str) -> bool:
+    """Can the parallel sweep cover this provider if it loses its tool slot?
+
+    Imported lazily and fail-safe: if the sweep module can't be reached we
+    report False, which pushes every source toward a tool slot — the
+    pre-existing behaviour, and the safe direction to be wrong in.
+    """
+    try:
+        from app.connector_lookup import sweep as connector_sweep
+
+        return connector_sweep.can_sweep(provider)
+    except Exception:  # noqa: BLE001
+        logger.warning("connector-lookup: sweep capability check failed", exc_info=True)
+        return False
+
+
+def _tool_count(provider: str) -> int:
+    """How many tools this adapter offers — the drill-down richness proxy used
+    to rank tool slots. Derived from the adapter itself so it stays true as
+    adapters gain tools, rather than from a hand-kept preference list that would
+    silently rot. Unresolvable adapter → 0, which ranks it last."""
+    try:
+        adapter = provider_for(provider)
+        return len(adapter.tools()) if adapter is not None else 0
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "connector-lookup: tool count failed for %s", provider, exc_info=True
+        )
+        return 0
+
+
 def answer_for_hints(
     *,
     enterprise_id: str,
@@ -231,24 +312,76 @@ def answer_for_hints(
             not_supported_message(sorted(hints), enterprise_id),
             skill_action="Connector lookup",
         )
-    # Connected providers first, so a two-provider cap never drops the one we can
-    # actually read.
+    # WHICH named sources get the scarce tool slots. Three keys, in order:
+    #   1. connected first — a slot spent on a disconnected source reads nothing;
+    #   2. then sources the SWEEP CANNOT reach (Google Drive, live Fireflies).
+    #      Losing a slot makes those unreachable entirely, while a sweepable
+    #      source is still covered by the parallel probe below. Without this key
+    #      the split was alphabetical, so whether a source got covered at all
+    #      came down to its name — Drive dropped and HubSpot kept, for no reason
+    #      anyone could defend;
+    #   3. then RICHEST DRILL-DOWN FIRST, measured by how many tools the adapter
+    #      offers. The loop's remaining job is depth, and a slot is worth most
+    #      where a follow-up read can do something the keyword probe cannot:
+    #      Jira (4 tools, including the propose→confirm card) and Confluence
+    #      (4, including full page bodies) earn a slot over HubSpot or ClickUp
+    #      (2 each, which the probe already summarises well). Alphabetical order
+    #      was quietly dropping Jira, the richest source of the four;
+    #   4. name, purely so the choice is deterministic and testable.
     connected = set(connected_providers(enterprise_id))
-    supported.sort(key=lambda p: (p not in connected, p))
-    chosen = supported[:MAX_PROVIDERS_PER_LOOKUP]
+    supported.sort(
+        key=lambda p: (p not in connected, _sweepable(p), -_tool_count(p), p)
+    )
+    chosen = supported[:MAX_TOOL_PROVIDERS]
     providers = [p for p in (provider_for(name) for name in chosen) if p is not None]
     if not providers:
         return connector_answer.plain_payload(
             not_supported_message(sorted(hints), enterprise_id),
             skill_action="Connector lookup",
         )
-    # The halves we are NOT reading: sources with no adapter, and supported ones
-    # dropped by the ≤2 cap. Threaded into the system block so an answer about
-    # Slack never reads as an answer about "Slack and HubSpot".
-    unavailable = [
-        display_name(h) for h in sorted(hints)
-        if h not in {p.provider for p in providers}
-    ]
+
+    # BREADTH. Sources the question named that did not fit the tool cap are no
+    # longer written off with an apology — they get the parallel keyword probe
+    # and their results are primed into the loop, so the answer really does draw
+    # on every named source. Only the DEPTH (a follow-up read) is rationed.
+    #
+    # Deliberately skipped when everything fits: a one- or two-provider lookup
+    # composes byte-identically to before this change, which keeps the whole
+    # common case — and the Jira shim's verbatim prompt — off the new path.
+    overflow = [p for p in supported[MAX_TOOL_PROVIDERS:MAX_SWEEP_PROVIDERS]
+                if p in connected]
+    primed = ""
+    swept_keys: set[str] = set()
+    if overflow:
+        try:
+            from app.connector_lookup import sweep as connector_sweep
+
+            result = connector_sweep.sweep(
+                enterprise_id, question,
+                budget_s=SWEEP_PRIME_BUDGET_S,
+                only=set(overflow),
+                # The user NAMED these sources. One topic word is enough to be
+                # worth a probe here; the default floor exists to stop the
+                # source-agnostic path fanning out on "make it shorter", which
+                # is not a risk when three tools were spelled out.
+                min_terms=1,
+            )
+            from app.connector_lookup.base import cap_text
+
+            primed = cap_text(result.render(), limit=PRIME_CHARS)
+            swept_keys = result.covered_providers()
+        except Exception:  # noqa: BLE001 — breadth degrades, it never breaks chat
+            logger.exception(
+                "connector-lookup: priming sweep failed for %s", enterprise_id
+            )
+
+    # Still genuinely uncovered: sources with no adapter, plus any overflow the
+    # sweep could not read. A source the sweep DID read is removed from this list
+    # — it was covered, just not with a drill-down tool — because telling the
+    # model it never checked something it is holding results from is how an
+    # answer contradicts its own evidence.
+    covered = {p.provider for p in providers} | swept_keys
+    unavailable = [display_name(h) for h in sorted(hints) if h not in covered]
     return connector_answer.answer(
         enterprise_id=enterprise_id,
         question=question,
@@ -256,4 +389,8 @@ def answer_for_hints(
         providers=providers,
         unavailable_names=unavailable,
         include_knowledge_graph=include_knowledge_graph,
+        primed_context=primed,
+        # The loop's own budget shrinks by whatever the sweep just spent, so a
+        # wide lookup's worst case equals a narrow one's instead of stacking.
+        budget_penalty_s=SWEEP_PRIME_BUDGET_S if overflow else 0.0,
     )

@@ -272,6 +272,22 @@ class SweepResult:
             )
         return "\n".join(parts)
 
+    def covered_providers(self) -> set[str]:
+        """PROVIDER keys this sweep actually read something for.
+
+        Not the display names: those carry qualifiers ("HubSpot (deals)") and a
+        local leg answers under what it reads ("calls") rather than under the
+        provider that feeds it ("fireflies"). A caller deciding whether a source
+        still belongs in its "did not check this" list must match on the stable
+        key, or it will apologise for a source it is holding results from.
+        """
+        keys = {s.key for s in self.read}
+        covered = {k for k in keys if k in _LIVE_LEGS}
+        for provider, leg in _LOCAL_LEG_FOR_PROVIDER.items():
+            if leg in keys:
+                covered.add(provider)
+        return covered
+
     def outcome_summary(self) -> str:
         """`jira=ok slack=timeout calls=empty` — statuses only, never the terms
         and never the content.
@@ -445,6 +461,18 @@ def _local_legs() -> tuple[_LocalLeg, ...]:
     )
 
 
+#: Which local leg answers for a PROVIDER the caller named. The named path speaks
+#: in connection-row keys ("fireflies"), the local legs in what they read
+#: ("calls" — the index, which holds Fireflies AND Zoom). Without this map a
+#: caller that scopes the sweep to `{"fireflies"}` would silently sweep nothing,
+#: because no live leg has that key.
+_LOCAL_LEG_FOR_PROVIDER: dict[str, str] = {
+    "fireflies": "calls",
+    "zoom": "calls",
+    "github": "github",
+}
+
+
 # ── the sweep ────────────────────────────────────────────────────────────────
 
 
@@ -461,6 +489,17 @@ def _live_candidates(enterprise_id: str) -> list[str]:
     return [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
 
 
+def can_sweep(provider: str) -> bool:
+    """True when this provider has a probe the sweep can run for it.
+
+    The named-lookup path uses this to decide WHICH sources deserve a scarce
+    tool slot: a provider the sweep cannot reach (Google Drive, live Fireflies)
+    becomes unreachable entirely if it loses its slot, while a sweepable one is
+    still covered. Coverage should never depend on alphabetical luck.
+    """
+    return provider in _LIVE_LEGS or provider in _LOCAL_LEG_FOR_PROVIDER
+
+
 def _display(provider: str) -> str:
     from app.connector_lookup import registry
 
@@ -468,10 +507,13 @@ def _display(provider: str) -> str:
 
 
 def _run_local(
-    enterprise_id: str, terms: list[str], deadline: float
+    enterprise_id: str, terms: list[str], deadline: float,
+    only: set[str] | None = None,
 ) -> list[SourceResult]:
     out: list[SourceResult] = []
     for leg in _local_legs():
+        if only is not None and leg.key not in only:
+            continue
         started = time.monotonic()
         result = SourceResult(key=leg.key, display_name=leg.display_name)
         # A failed CONNECTEDNESS probe is not a failed read, and the difference
@@ -604,30 +646,52 @@ def sweep(
     question: str,
     *,
     budget_s: float = BUDGET_S,
+    only: set[str] | None = None,
+    min_terms: int = MIN_TERMS,
 ) -> SweepResult:
     """Gather cross-source context for one question. Never raises.
 
     Returns an empty result (no sources, no terms) whenever there is nothing
     worth paying for: no tenant, no topic words, or no connected source with a
     leg. The caller can treat an empty `render()` as "answer exactly as before".
+
+    `only` scopes the sweep to specific PROVIDER keys instead of discovering
+    every connected one. The named-lookup path uses it (registry.answer_for_hints)
+    to cover the sources a question named that did not fit the tool-loop cap:
+    there, breadth is already decided by what the user asked about, and sweeping
+    beyond it would answer about sources nobody mentioned.
+
+    `min_terms` lets that same caller lower the floor. The floor exists to stop
+    the DEFAULT path fanning out on a topicless message; when the user has
+    explicitly named three tools, one topic word is enough to be worth a probe,
+    and refusing would silently drop a source the user asked for.
     """
     started = time.monotonic()
     result = SweepResult()
     if not enterprise_id:
         return result
     terms = sweep_terms(question)
-    if len(terms) < MIN_TERMS:
+    if len(terms) < min_terms:
         return result
     result.terms = terms
     deadline = started + max(budget_s, 0.0)
 
+    local_only = None
+    if only is not None:
+        local_only = {
+            leg for provider, leg in _LOCAL_LEG_FOR_PROVIDER.items() if provider in only
+        }
     try:
-        result.sources.extend(_run_local(enterprise_id, terms, deadline))
+        result.sources.extend(
+            _run_local(enterprise_id, terms, deadline, only=local_only)
+        )
     except Exception:  # noqa: BLE001
         logger.exception("cross-connector sweep: local legs failed for %s", enterprise_id)
 
     try:
         providers = _live_candidates(enterprise_id)
+        if only is not None:
+            providers = [p for p in providers if p in only]
     except Exception:  # noqa: BLE001
         logger.exception(
             "cross-connector sweep: provider discovery failed for %s", enterprise_id
