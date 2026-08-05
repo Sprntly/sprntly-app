@@ -575,15 +575,32 @@ def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fak
     from app.prompts import ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
 
     # Anchored on #1059's LITERAL heading, not a paraphrase: the model has to
-    # match a string rather than infer which of several sections we meant. If
-    # that heading is ever reworded, this assertion is what fails loudly instead
-    # of the precedence quietly ceasing to bind.
+    # match a string rather than infer which of several sections we meant.
     assert "PRECEDENCE" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
     assert (
         'headed "The document this message refers to is UNRESOLVED"'
         in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
     )
     assert "WINS over this section" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+
+    # CROSS-MODULE DRIFT GUARD. #1059 owns that heading as
+    # ask_runner.UNRESOLVED_REFERENCE_HEADING, but `prompts` cannot import it —
+    # `ask_runner` already imports `prompts`, so the dependency only runs one
+    # way and the clause above has to carry the string literally. That is
+    # exactly why this asserts EQUALITY rather than importing the constant and
+    # calling it a day: binding the test to the constant would keep it green
+    # while the prompt text quietly went stale, which is the failure it exists
+    # to catch.
+    #
+    # Guarded because the constant lands with #1059; delete the guard, keep the
+    # assertion, once that has merged.
+    heading = getattr(ask_runner, "UNRESOLVED_REFERENCE_HEADING", None)
+    if heading is not None:
+        assert heading in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM, (
+            "#1059 reworded UNRESOLVED_REFERENCE_HEADING; the PRECEDENCE clause "
+            "in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM quotes it literally and must be "
+            "updated to match, or the sweep stops deferring to it."
+        )
 
     ds = isolated_settings["data_dir"] / "asurion"
     ds.mkdir(exist_ok=True)
