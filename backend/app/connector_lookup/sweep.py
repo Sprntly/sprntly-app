@@ -489,6 +489,46 @@ def _live_candidates(enterprise_id: str) -> list[str]:
     return [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
 
 
+def enabled_for(enterprise_id: str) -> bool:
+    """Is the sweep switched on for this company?
+
+    Lives HERE, not in the caller, because the caller is not a reliable place to
+    put it. This shipped gated at `qa_agent._sweep_context` only, and
+    `registry.answer_for_hints`'s priming call — added in the same PR — had no
+    check at all, so `CHAT_CROSS_CONNECTOR_SWEEP=false` silently left half the
+    feature running. A kill switch covering one of two entry points is not a
+    kill switch, and the next entry point would have missed it too.
+
+    `sweep()` consults this itself, so the gate cannot be bypassed by forgetting
+    it. Callers may still check early as a cheap short-circuit; they can no
+    longer be the only thing between a disabled flag and a fan-out.
+
+    Two levers, global first:
+      * `settings.chat_cross_connector_sweep` — operational, off everywhere
+        without a per-company DB write;
+      * `chat_cross_connector_sweep` in companies.feature_flags — per-company,
+        default ON via the usual grandfather pattern.
+
+    A failed flag read resolves ON: the sweep only re-reads sources the tenant
+    already connected, so the risk of being wrong is latency, not exposure.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.config import settings
+
+        if not settings.chat_cross_connector_sweep:
+            return False
+        from app.entitlements import cross_connector_sweep_enabled, read_feature_flags
+
+        return cross_connector_sweep_enabled(read_feature_flags(enterprise_id))
+    except Exception:  # noqa: BLE001 — a flag read must never break the answer
+        logger.exception(
+            "cross-connector sweep: flag read failed for %s", enterprise_id
+        )
+        return True
+
+
 def can_sweep(provider: str) -> bool:
     """True when this provider has a probe the sweep can run for it.
 
@@ -672,6 +712,12 @@ def sweep(
         return result
     terms = sweep_terms(question)
     if len(terms) < min_terms:
+        return result
+    # THE choke point for the kill switch. Checked here rather than trusted to
+    # callers: it shipped gated at one of two entry points, which is a kill
+    # switch that does not kill. Ordered after the term gate so a topicless
+    # message still costs no DB read.
+    if not enabled_for(enterprise_id):
         return result
     result.terms = terms
     deadline = started + max(budget_s, 0.0)
