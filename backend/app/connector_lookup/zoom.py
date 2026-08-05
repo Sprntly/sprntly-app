@@ -50,25 +50,40 @@ SYSTEM = (
     "Tools:\n"
     "- zoom_search_recordings: find cloud-recorded Zoom meetings in a time "
     "window, optionally filtered by `keywords` matched against the meeting "
-    "topic and host email. Returns one line per meeting with its id.\n"
+    "topic and host email. Returns one line per meeting with its id — "
+    "METADATA ONLY, no call content.\n"
     "- zoom_get_recording: one meeting's transcript in full by the id from a "
     "search result, speaker-attributed where Zoom generated one.\n\n"
+    "ALWAYS READ THE TRANSCRIPT, DO NOT STOP AT THE SEARCH RESULT. A search "
+    "result is topic, host and time — never what was said. If the question is "
+    "about a call at all (\"the most recent call\", \"the call with Acme\", "
+    "\"what did we discuss\", \"check zoom for X\"), call zoom_get_recording for "
+    "the matching meeting(s) in the SAME turn and answer from the transcript. "
+    "Do not list search results and ask the user whether you should read the "
+    "transcript — read it, then answer. The only time zoom_search_recordings "
+    "alone is a complete answer is a pure count/listing question with no "
+    "interest in content (\"how many calls did we have this week\", \"list "
+    "this month's recordings\") — and even then, if only one or two meetings "
+    "matched, prefer reading them anyway over asking.\n\n"
     "Honest limits you MUST respect: the search only covers the hosts this "
     "company has chosen to sync (or every licensed host, if none are chosen) "
     "and only a bounded recent window (default 30 days, max 90) — an empty "
     "result means \"not in the window/hosts I read\", say which window that "
     "was. Some meetings have no transcript (audio transcription may be off "
     "for the account, or Zoom is still processing it) — say so rather than "
-    "inventing content."
+    "inventing content; that is a real answer, not a reason to stop before "
+    "trying."
 )
 
 SEARCH_TOOL = {
     "name": "zoom_search_recordings",
     "description": (
-        "Find cloud-recorded Zoom meetings. `days` sets how far back to look "
-        "(default 30, max 90); `keywords` narrows to meetings whose topic or "
-        "host email mention them. Returns id, topic, host, start time and "
-        "duration per meeting."
+        "Find cloud-recorded Zoom meetings. Returns METADATA ONLY (id, topic, "
+        "host, start time, duration) — never call content. `days` sets how far "
+        "back to look (default 30, max 90); `keywords` narrows to meetings "
+        "whose topic or host email mention them. Follow with zoom_get_recording "
+        "for whichever meeting(s) the question is actually about — do not "
+        "answer from this list alone unless the question is a pure count."
     ),
     "input_schema": {
         "type": "object",
@@ -83,7 +98,9 @@ GET_RECORDING_TOOL = {
     "name": "zoom_get_recording",
     "description": (
         "Read one Zoom meeting's transcript in full by the `meeting_id` from "
-        "zoom_search_recordings."
+        "zoom_search_recordings. Call this before answering any question about "
+        "what was said, decided or discussed on a call — a search result alone "
+        "is not enough to answer it."
     ),
     "input_schema": {
         "type": "object",
