@@ -284,13 +284,23 @@ def upsert_github_pull_request(
 
 
 def list_open_pull_requests(
-    company_id: str, installation_id: int | None = None
+    company_id: str, installation_id: int | None = None, limit: int | None = None
 ) -> list[dict]:
     """Open PRs owned by ``company_id``.
 
     Tenant-scoped: filters on company_id (excluding legacy NULL-company rows),
     optionally narrowed to a single installation. A None/empty company yields
     no rows — never a global list.
+
+    ``limit`` caps the rows fetched, newest-updated first. It defaults to None,
+    which emits **exactly the query this function has always emitted** — the two
+    UI callers in routes/connectors.py are unchanged, and a test pins that.
+
+    It exists because this read is otherwise unbounded, and an org-wide
+    installation can hold many hundreds of open PRs. Callers on a latency budget
+    (the cross-connector sweep) pass a bound; callers rendering the full list do
+    not. NOTE the cause is only half-addressed: an unbounded caller still pays
+    for the whole read, which is pre-existing and owned by whoever owns db/.
     """
     if not company_id:
         return []
@@ -303,7 +313,10 @@ def list_open_pull_requests(
     )
     if installation_id is not None:
         q = q.eq("installation_id", installation_id)
-    resp = q.order("pr_updated_at", desc=True).execute()
+    q = q.order("pr_updated_at", desc=True)
+    if limit is not None:
+        q = q.limit(limit)
+    resp = q.execute()
     rows = resp.data or []
     # is_draft: Supabase bool -> back-compat int.
     for r in rows:

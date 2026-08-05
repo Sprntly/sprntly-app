@@ -110,6 +110,12 @@ MAX_TERMS = 8
 #: sources it runs ahead of.
 LOCAL_BUDGET_SHARE = 0.35
 
+#: Rows the GitHub leg asks for. The table is ordered newest-updated first, so
+#: the cap keeps the PRs most likely to matter and the leg's cost stops scaling
+#: with how large the org's install is. Client-side keyword matching then runs
+#: over a bounded window, and the leg says so when it matches nothing.
+GITHUB_PR_SCAN_LIMIT = 200
+
 #: Terms a message must yield before ANY source is probed.
 #:
 #: ONE, lowered from two, and only because two other things changed first.
@@ -465,7 +471,12 @@ def _leg_github(enterprise_id: str, terms: list[str]) -> str:
     """
     from app import db
 
-    rows = db.list_open_pull_requests(enterprise_id) or []
+    # BOUNDED. Unbounded, an org-wide installation's open-PR list can be many
+    # hundreds of rows, and this leg runs on the calling thread ahead of the
+    # fan-out — which is how it came to spend the whole budget before a single
+    # live source was opened. Newest-updated first, so the cap keeps the rows
+    # most likely to matter.
+    rows = db.list_open_pull_requests(enterprise_id, limit=GITHUB_PR_SCAN_LIMIT) or []
     if not rows:
         return ""
     lowered = [t.lower() for t in terms]

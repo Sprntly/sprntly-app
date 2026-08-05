@@ -514,7 +514,7 @@ def test_github_leg_matches_open_prs_by_title(monkeypatch, wire):
 
     wire({}, connected=[])
     monkeypatch.setattr(cs, "_has_github", lambda eid: True)
-    monkeypatch.setattr(db, "list_open_pull_requests", lambda eid: [
+    monkeypatch.setattr(db, "list_open_pull_requests", lambda eid, **kw: [
         {"repo_full_name": "acme/app", "pr_number": 7,
          "title": "Checkout redesign step 1", "is_draft": 0},
         {"repo_full_name": "acme/app", "pr_number": 8,
@@ -534,7 +534,7 @@ def test_github_leg_is_scoped_to_the_calling_tenant(monkeypatch, wire):
     wire({}, connected=[])
     monkeypatch.setattr(cs, "_has_github", lambda eid: True)
     monkeypatch.setattr(
-        db, "list_open_pull_requests", lambda eid: (seen.append(eid), [])[1]
+        db, "list_open_pull_requests", lambda eid, **kw: (seen.append(eid), [])[1]
     )
 
     cs.sweep("ent-beta", "checkout redesign status")
@@ -956,3 +956,68 @@ def test_local_budget_share_leaves_the_majority_for_the_fan_out():
     """The slice must be a minority — the fan-out is the part that talks to the
     network and is what the budget mainly exists to bound."""
     assert 0 < cs.LOCAL_BUDGET_SHARE < 0.5
+
+
+def test_pr_limit_default_emits_the_query_it_always_emitted():
+    """CONTRACT PIN for the two UI callers in routes/connectors.py.
+
+    `limit` was added for the sweep. It defaults to None, and with that default
+    `list_open_pull_requests` must build EXACTLY the query it built before —
+    no `.limit()` call at all. Pinned rather than asserted, so a future edit to
+    the default fails here instead of silently truncating a UI list.
+    """
+    from app.db import github as db_github
+
+    class RecordingQuery:
+        def __init__(self, calls):
+            self.calls = calls
+
+        def __getattr__(self, name):
+            def _call(*args, **kwargs):
+                self.calls.append((name, args))
+                return self
+            return _call
+
+        def execute(self):
+            self.calls.append(("execute", ()))
+            return type("R", (), {"data": []})()
+
+    calls: list = []
+
+    class Client:
+        def table(self, name):
+            calls.append(("table", (name,)))
+            return RecordingQuery(calls)
+
+    import app.db.client as client_mod
+    original = client_mod.require_client
+    db_github.require_client = lambda: Client()
+    try:
+        db_github.list_open_pull_requests("co-1")
+        assert [c[0] for c in calls if c[0] == "limit"] == [], (
+            "default must not add .limit() — the UI callers rely on the full list"
+        )
+
+        calls.clear()
+        db_github.list_open_pull_requests("co-1", limit=200)
+        assert ("limit", (200,)) in calls
+    finally:
+        db_github.require_client = original
+
+
+def test_github_leg_asks_for_a_bounded_window(monkeypatch, wire):
+    """The sweep's leg must pass the bound — an unbounded read on the calling
+    thread is what let it starve the fan-out."""
+    from app import db
+
+    seen: dict = {}
+    wire({}, connected=[])
+    monkeypatch.setattr(cs, "_has_github", lambda eid: True)
+    monkeypatch.setattr(
+        db, "list_open_pull_requests",
+        lambda eid, **kw: (seen.update(kw), [])[1],
+    )
+
+    cs.sweep("ent-1", "checkout redesign status")
+
+    assert seen.get("limit") == cs.GITHUB_PR_SCAN_LIMIT
