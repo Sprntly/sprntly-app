@@ -24,7 +24,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.connector_lookup.base import HTTP_TIMEOUT, cap_items
+from app.connector_lookup.base import HTTP_TIMEOUT, cap_items, cap_text
 from app.connectors.confluence_oauth import (
     ConfluenceAuthExpiredError,
     ConfluenceContext,
@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 
 #: Max hits rendered from one search / listing.
 SEARCH_LIMIT = 15
-#: Body chars rendered for ONE page. Well under base.DEFAULT_RESULT_CHARS so a
-#: full page plus its header still fits inside one tool result.
+#: Body chars rendered for ONE page before `cap_text` truncates it with an
+#: honest marker. Staying under base.DEFAULT_RESULT_CHARS keeps a full page
+#: plus its header and marker inside one tool result — it does NOT mean the
+#: page reaches the model whole, so truncation past this cap must be surfaced
+#: here; the outer cap will never be reached to catch it.
 PAGE_BODY_CHARS = 6000
 #: Excerpt chars per row in a multi-row result.
 EXCERPT_CHARS = 240
@@ -243,7 +246,7 @@ def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
         "version": (body.get("version") or {}).get("number"),
         "last_modified": (body.get("version") or {}).get("createdAt"),
         "url": _page_url(ctx, body),
-        "text": _body_text(body)[:PAGE_BODY_CHARS],
+        "text": cap_text(_body_text(body), limit=PAGE_BODY_CHARS),
     }
 
 
