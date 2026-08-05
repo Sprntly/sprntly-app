@@ -1084,6 +1084,77 @@ async def test_stage_iterate_run_advances_current_checkpoint(env, monkeypatch, c
     assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in row["bundle_url"]
 
 
+# ─── AC6: execute-mode iterate defers its `done` close too ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_done_terminal_fires_after_advance_checkpoint(env, monkeypatch):
+    """AC1/AC6: mirrors the generate-side terminal-ordering test — `done` fires AFTER
+    advance_current_checkpoint, not at agent-completion (agent_loop's
+    mode="execute" defers _finish's close the same way mode="scaffold" does)."""
+    events: list[str] = []
+    real_advance = env.routes.advance_current_checkpoint
+
+    def _advance_spy(**kwargs):
+        events.append("advance_current_checkpoint")
+        return real_advance(**kwargs)
+
+    monkeypatch.setattr(env.routes, "advance_current_checkpoint", _advance_spy)
+
+    def _capture_close(pid, *, kind, summary=""):
+        events.append(f"sse_close:{kind}")
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    async def fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def fake_stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        return "https://bundle/iterated"
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", fake_stage)
+    monkeypatch.setattr(env.routes, "create_checkpoint", lambda **k: 111)
+    pid = _seed_ready(env)
+
+    ok = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="make it blue",
+        summary="Made the button blue.",
+    )
+
+    assert ok is True
+    assert events == ["advance_current_checkpoint", "sse_close:done"]
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_staging_failure_emits_error_not_done(env, monkeypatch):
+    """AC3: an iterate whose agent succeeded but whose staging failed
+    produces an error terminal, never `done` — mirrors the generate-side test."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    async def fake_vite_raises(vfs):
+        raise FileNotFoundError("missing scaffold file")
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite_raises)
+    pid = _seed_ready(env)
+
+    ok = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="make it blue",
+    )
+
+    assert ok is False
+    assert closed == [(pid, "error")]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "failed"
+
+
 @pytest.mark.asyncio
 async def test_run_iterate_bg_failure_marks_prototype_failed(env, monkeypatch):
     # A non-complete runner result fails the row in the existing Sprntly format
