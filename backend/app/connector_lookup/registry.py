@@ -94,6 +94,10 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.confluence import PROVIDER
 
         return PROVIDER
+    if name == "zoom":
+        from app.connector_lookup.zoom import PROVIDER
+
+        return PROVIDER
     return None
 
 
@@ -101,7 +105,7 @@ def provider_for(name: str) -> LookupProvider | None:
 #: not-supported copy agree with what actually exists.
 LOOKUP_PROVIDERS: tuple[str, ...] = (
     "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
-    "confluence",
+    "confluence", "zoom",
 )
 
 #: Connected (they sync into the KG) but no live-read adapter yet.
@@ -110,11 +114,6 @@ DEFERRED: dict[str, str] = {
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
-    # Connects and (once the puller lands) syncs into the KG, but has no
-    # live-read adapter — so "what was said on yesterday's Zoom call" gets the
-    # honest "it syncs but I can't query it live in chat yet" rather than a
-    # KG-flavoured guess dressed up as a live read.
-    "zoom": "Zoom",
 }
 
 #: No Sprntly connector at all — catalog entries only (connectors/catalog.py).

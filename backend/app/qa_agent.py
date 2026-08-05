@@ -1246,7 +1246,7 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
 #: they already read, so "summarize last week's calls in fireflies" belongs to
 #: the digest exactly as it always has. Every OTHER named source is a request
 #: to look somewhere the call paths cannot see.
-_CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong"})
+_CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong", "zoom"})
 
 
 def answer(
