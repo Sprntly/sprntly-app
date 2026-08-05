@@ -37,9 +37,30 @@ def _client_for(monkeypatch, user_id: str) -> TestClient:
     return TestClient(main_mod.app, headers=supabase_bearer(user_id))
 
 
+def _bind_dataset(slug: str, workspace_id: str) -> None:
+    """Give `slug` a real `datasets` row bound to `workspace_id`.
+
+    `_company_helpers.seed_company` creates companies + company_members but
+    NO datasets row, so without this `workspace_for_dataset_slug` returns
+    None, `owning_info_for_prd` yields `workspace_id: None`, and
+    `user_can_act_in_workspace` takes its unbound-legacy branch — which means
+    a bare-link test's `upsert_workspace_member(...)` line is INERT and the
+    member/guest_view split is never actually exercised. Any bare-link test
+    that means to test workspace scoping must call this.
+    """
+    from app.db.client import require_client
+
+    require_client().table("datasets").insert(
+        {"slug": slug, "display_name": slug.title(), "workspace_id": workspace_id}
+    ).execute()
+
+
 def _seed_prd(db, dataset: str, *, title: str = "t") -> tuple[int, str]:
     """A real PRD stamped with a real public_id (the sqlite test schema has no
-    gen_random_uuid() default). Returns (prd_id, public_id)."""
+    gen_random_uuid() default). Returns (prd_id, public_id).
+
+    NOTE: does not bind the dataset — call `_bind_dataset` when the test
+    depends on workspace scoping being real."""
     from app.db.client import require_client
 
     brief_id = db.save_brief(dataset, "W", {"insights": []}, schema_version=1)
@@ -111,11 +132,17 @@ def test_share_resolve_gives_a_non_creator_member_the_editable_app(
 def test_bare_link_resolve_gives_a_non_creator_member_the_editable_app(
     isolated_settings, monkeypatch
 ):
-    """Same for the token-less `?prd=` sibling."""
+    """Same for the token-less `?prd=` sibling.
+
+    The dataset is BOUND, so `user_can_act_in_workspace` really has to
+    consult the workspace_members row. Without the binding this test passed
+    through the unbound short-circuit and the grant below was inert — its
+    guest_view twin immediately after is what pins that down."""
     ctx = company_client(monkeypatch)
     default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
     db = isolated_settings["db"]
     prd_id, public_id = _seed_prd(db, "acme")
+    _bind_dataset("acme", default_ws["id"])
 
     from app.db.workspaces import upsert_workspace_member
 
@@ -131,6 +158,67 @@ def test_bare_link_resolve_gives_a_non_creator_member_the_editable_app(
     body = r.json()
     assert body["outcome"] == "member"
     assert body["artifact_id"] == prd_id
+
+
+def test_bare_link_resolve_guest_view_without_the_workspace_row(
+    isolated_settings, monkeypatch
+):
+    """The other side of the split, and the reason the test above is now
+    meaningful: SAME setup, SAME bound dataset, but no workspace_members
+    row. Delete the grant from the member test and this is what you get —
+    so the grant is load-bearing, which it was not before the binding."""
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    _, public_id = _seed_prd(db, "acme")
+    _bind_dataset("acme", default_ws["id"])
+
+    colleague = "colleague-" + uuid.uuid4().hex[:8]
+    _add_plain_member(ctx.company_id, colleague)  # company only, NO workspace row
+
+    r = ctx.client.get(
+        f"/v1/prd-access/{public_id}/resolve", headers=supabase_bearer(colleague)
+    )
+
+    assert r.status_code == 200
+    assert r.json()["outcome"] == "guest_view"
+
+
+def test_bare_link_unbound_dataset_needs_a_workspace_somewhere(
+    isolated_settings, monkeypatch
+):
+    """The Finding-2 case: an UNBOUND legacy dataset.
+
+    `user_can_act_in_workspace` used to answer True unconditionally here, so
+    a domain-matched fresh signup — company_members row, no workspace row
+    anywhere — resolved to `member`, was routed into the app, and then hit
+    require_workspace's 403 with no Join prompt. Worse than the read-only
+    viewer they had before. Now the answer depends on whether the caller can
+    obtain a WorkspaceContext at all."""
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    _, public_id = _seed_prd(db, "acme")  # deliberately NOT bound
+
+    from app.db.workspaces import upsert_workspace_member
+
+    stranded = "stranded-" + uuid.uuid4().hex[:8]
+    _add_plain_member(ctx.company_id, stranded)
+    r = ctx.client.get(
+        f"/v1/prd-access/{public_id}/resolve", headers=supabase_bearer(stranded)
+    )
+    assert r.status_code == 200
+    assert r.json()["outcome"] == "guest_view", (
+        "a caller with no workspace row anywhere would 403 inside the app"
+    )
+
+    # Give them a workspace row and the same call flips to `member`, because
+    # an unbound dataset IS reachable from any workspace of the company.
+    upsert_workspace_member(default_ws["id"], stranded, "member")
+    r2 = ctx.client.get(
+        f"/v1/prd-access/{public_id}/resolve", headers=supabase_bearer(stranded)
+    )
+    assert r2.json()["outcome"] == "member"
 
 
 def test_share_resolve_gives_the_creator_themselves_the_editable_app(

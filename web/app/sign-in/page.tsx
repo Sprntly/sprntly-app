@@ -13,6 +13,7 @@ import {
 import { publicPath } from "../lib/public-path"
 import { artifactShareApi } from "../lib/artifactShareApi"
 import { presetActiveWorkspace } from "../context/WorkspaceContext"
+import { getSupabase } from "../lib/supabase/client"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignInView } from "../components/auth/SignInView"
 
@@ -54,7 +55,17 @@ function SignInForm() {
   // through to the caller's own default path — never strands the user on a
   // blank screen, and never re-derives the deny reason differently from the
   // server's own resolve() outcome.
-  async function withShareResolved(defaultPath: string): Promise<string> {
+  // `userId` is passed IN rather than read off `auth` here. On the submit
+  // path this function runs immediately after signInWithPassword resolves,
+  // while the enclosing render's `auth` is still the ANONYMOUS one it closed
+  // over — an `auth.kind === "authed"` test there is false, so the workspace
+  // preset silently never happened unless the auth effect happened to
+  // re-render first. That race decided whether a multi-workspace member
+  // landed on their PRD or on a 404. Callers now supply the id explicitly.
+  async function withShareResolved(
+    defaultPath: string,
+    userId: string | null,
+  ): Promise<string> {
     if (!shareToken) return defaultPath
     try {
       const outcome = await artifactShareApi.resolve(shareToken)
@@ -63,10 +74,10 @@ function SignInForm() {
         // `share=` param: keeping it routes them through ArtifactShareGate
         // into the READ-ONLY guest viewer, which is exactly the bug — they
         // are a full member and the PRD (and its tickets) must be editable.
-        if (auth.kind === "authed") {
+        if (userId) {
           // Same reason ArtifactShareGate does this: open in the workspace
           // the artifact lives in, not whichever one they last used.
-          presetActiveWorkspace(auth.user.id, outcome.owner_workspace_id)
+          presetActiveWorkspace(userId, outcome.owner_workspace_id)
         }
         const prdParam = outcome.public_id ?? String(outcome.artifact_id)
         return `/?prd=${encodeURIComponent(prdParam)}`
@@ -88,9 +99,10 @@ function SignInForm() {
 
   useEffect(() => {
     if (auth.kind === "authed") {
+      const userId = auth.user.id
       void auth
         .postLoginPath()
-        .then((path) => withShareResolved(path))
+        .then((path) => withShareResolved(path, userId))
         .then((path) => router.replace(path))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,7 +128,17 @@ function SignInForm() {
       await auth.signInWithPassword(email, password)
       clearSignInAttempts()
       const defaultPath = await auth.postLoginPath()
-      router.replace(await withShareResolved(defaultPath))
+      // Read the id from the freshly-established session rather than from
+      // `auth`, which is still this render's anonymous snapshot — see
+      // withShareResolved's own note. Best-effort: a failure here costs the
+      // workspace preset, never the sign-in.
+      let userId: string | null = null
+      try {
+        userId = (await getSupabase().auth.getUser()).data.user?.id ?? null
+      } catch {
+        /* preset is an optimisation, not a gate */
+      }
+      router.replace(await withShareResolved(defaultPath, userId))
       // Stay in the submitting state — the button keeps its loading label
       // until navigation unmounts this page.
     } catch (e) {

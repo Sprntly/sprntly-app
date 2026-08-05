@@ -38,8 +38,28 @@ vi.mock("../../context/WorkspaceContext", () => ({
 vi.mock("../../components/auth/AuthShell", () => ({
   AuthShell: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
+// Capture the real props so a test can drive the SUBMIT path, not just the
+// already-authed effect path. The submit path is where the workspace-preset
+// race lived, and a harness that only seeds `kind: "authed"` can never see it.
+const viewProps = vi.hoisted(() => ({ current: null as Record<string, any> | null }))
 vi.mock("../../components/auth/SignInView", () => ({
-  SignInView: () => <div data-testid="sign-in-view" />,
+  SignInView: (props: Record<string, any>) => {
+    viewProps.current = props
+    return <div data-testid="sign-in-view" />
+  },
+}))
+
+const getUserMock = vi.fn()
+vi.mock("../../lib/supabase/client", () => ({
+  getSupabase: () => ({ auth: { getUser: getUserMock } }),
+}))
+
+vi.mock("../../lib/auth-validation", () => ({
+  authLockoutRemainingMs: () => 0,
+  clearSignInAttempts: () => {},
+  describeSignInError: (e: unknown) => String(e),
+  recordFailedSignIn: () => {},
+  validateWorkEmail: () => null,
 }))
 
 import SignInPage from "../page"
@@ -104,5 +124,56 @@ describe("sign-in redirect for a shared artifact", () => {
     expect(replaceMock.mock.calls.at(-1)![0]).toBe(
       "/not-authorized?share=tok-abc&reason=different_company",
     )
+  })
+})
+
+describe("sign-in SUBMIT path — the workspace-preset race", () => {
+  it("presets the workspace even though `auth` is still the anonymous closure", async () => {
+    // Exactly the real sequence: the page renders while ANONYMOUS, the user
+    // submits, signInWithPassword resolves, and withShareResolved runs — all
+    // before any re-render has replaced `auth`. The old code tested
+    // `auth.kind === "authed"` against that stale closure, so the preset was
+    // skipped unless the auth effect happened to win the race.
+    authMock.value = {
+      kind: "anonymous",
+      signInWithPassword: vi.fn().mockResolvedValue(undefined),
+      postLoginPath: vi.fn().mockResolvedValue("/"),
+    }
+    getUserMock.mockResolvedValue({ data: { user: { id: "user-99" } } })
+    resolveMock.mockResolvedValue(MEMBER)
+
+    render(<SignInPage />)
+    await waitFor(() => expect(viewProps.current).not.toBeNull())
+
+    await viewProps.current!.onSubmit({ preventDefault() {} })
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalled())
+    expect(replaceMock.mock.calls.at(-1)![0]).toBe(
+      "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+    )
+    // The assertion that fails on the pre-fix closure guard.
+    expect(presetMock).toHaveBeenCalledWith("user-99", "ws-notifications")
+  })
+
+  it("still signs in and redirects when the user lookup fails", async () => {
+    // The preset is an optimisation, never a gate — a getUser() failure must
+    // cost the workspace hint and nothing else.
+    authMock.value = {
+      kind: "anonymous",
+      signInWithPassword: vi.fn().mockResolvedValue(undefined),
+      postLoginPath: vi.fn().mockResolvedValue("/"),
+    }
+    getUserMock.mockRejectedValue(new Error("network"))
+    resolveMock.mockResolvedValue(MEMBER)
+
+    render(<SignInPage />)
+    await waitFor(() => expect(viewProps.current).not.toBeNull())
+    await viewProps.current!.onSubmit({ preventDefault() {} })
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalled())
+    expect(replaceMock.mock.calls.at(-1)![0]).toBe(
+      "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+    )
+    expect(presetMock).not.toHaveBeenCalled()
   })
 })
