@@ -85,6 +85,16 @@ $$;
 -- Rebuild the stored column so existing rows are re-tokenised. Dropping it
 -- also drops document_catalog_search_gin (an index cannot outlive its
 -- column), so that is recreated immediately after.
+--
+-- This rewrite needs more working memory than this project's
+-- maintenance_work_mem default: production failed with "memory required is
+-- 61 MB, maintenance_work_mem is 32 MB" (SQLSTATE 54000), meaning
+-- document_catalog holds far more rows there than the single-digit count
+-- this file's cost note above was written against. SET LOCAL scopes the
+-- bump to this migration's own transaction — nothing persists after it
+-- commits or rolls back, and no session- or database-level setting changes.
+set local maintenance_work_mem = '128MB';
+
 alter table document_catalog drop column if exists search_tsv;
 
 alter table document_catalog add column search_tsv tsvector

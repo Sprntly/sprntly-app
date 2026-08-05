@@ -122,21 +122,25 @@ def test_one_ambiguous_names_veto_does_not_suppress_the_others():
         "check linear and notion for the pricing decision") == {"linear", "notion"}
 
 
-def test_zoom_is_deferred_not_absent_in_the_lookup_registry():
-    """Zoom connects and (once the puller lands) syncs into the KG, but has no
-    live-read adapter — so the honest answer is "it syncs but I can't query it
-    live in chat yet", not "that isn't a Sprntly connector"."""
+def test_zoom_has_a_live_lookup_adapter_not_absent_or_deferred():
+    """Zoom connects, syncs into the KG, and (as of the live connector_lookup
+    adapter) can be read live in chat too — so a question naming Zoom gets an
+    actual answer, not "that isn't a Sprntly connector" and not the older
+    "it syncs but I can't query it live yet" placeholder."""
     from app.connector_lookup.registry import (
         DEFERRED,
         LOOKUP_PROVIDERS,
         NO_CONNECTOR,
         display_name,
+        provider_for,
     )
 
-    assert "zoom" in DEFERRED
+    assert "zoom" in LOOKUP_PROVIDERS
+    assert "zoom" not in DEFERRED
     assert "zoom" not in NO_CONNECTOR
-    assert "zoom" not in LOOKUP_PROVIDERS
     assert display_name("zoom") == "Zoom"
+    provider = provider_for("zoom")
+    assert provider is not None and provider.provider == "zoom"
 
 
 def test_zoom_recordings_still_belong_to_the_voice_of_customer_skill():

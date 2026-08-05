@@ -1,4 +1,5 @@
-"""Fireflies / GitHub / HubSpot / Google Drive adapters + not-supported copy.
+"""Fireflies / Zoom / GitHub / HubSpot / Google Drive adapters + not-supported
+copy.
 
 Mirrors tests/test_jira_lookup.py — no network/LLM/DB. Each adapter's fetchers,
 token store and connection row are patched in its own namespace.
@@ -6,6 +7,11 @@ token store and connection row are patched in its own namespace.
 The load-bearing assertions per adapter:
   Fireflies  the digest still owns window questions; the window read is bounded
              and stated.
+  Zoom       transcript-first: the system prompt and both tool descriptions
+             mandate reading a matching recording's transcript before
+             answering a content question — a search result (metadata only)
+             must never be presented as a complete answer, or listed with a
+             question asking whether to read it.
   GitHub     an installation id NEVER comes from model input; a repo outside the
              company's installation is refused before any HTTP call.
   HubSpot    a 403 is a SCOPE gap, said as one — never "there are no deals" —
@@ -27,6 +33,7 @@ from app.connector_lookup.fireflies import PROVIDER as FIREFLIES
 from app.connector_lookup.gdrive import PROVIDER as DRIVE
 from app.connector_lookup.github import PROVIDER as GITHUB
 from app.connector_lookup.hubspot import PROVIDER as HUBSPOT
+from app.connector_lookup.zoom import PROVIDER as ZOOM
 from app.kg_ingest.pullers.fireflies import CallTranscript
 
 
@@ -196,6 +203,240 @@ def test_fireflies_system_block_defers_window_summaries_to_the_digest():
     block = FIREFLIES.system_block()
     assert "bounded window" in block
     assert "digest path handles that" in block
+
+
+# ── Zoom ─────────────────────────────────────────────────────────────────────
+#
+# Load-bearing assertion: transcript-first. A search result is metadata only
+# (topic, host, time) — never call content — so the system prompt and both
+# tool descriptions must instruct the model to call zoom_get_recording for the
+# matching meeting(s) BEFORE answering a content question, rather than listing
+# search hits and asking the user whether it should read the transcript. This
+# was a real product complaint: a live question ("check zoom for the most
+# recent call") returned a metadata table and asked permission to read it,
+# when the transcript is the entire point of asking. Unit tests can only
+# verify the INSTRUCTION is present and correctly worded — whether the model
+# actually obeys a system prompt is not something a unit test can guarantee,
+# same as every other "MUST"-worded rule in these adapters' system blocks.
+
+def _zoom_ctx(user_ids=None, user_names=None):
+    from app.connectors.zoom_oauth import ZoomContext
+
+    return ZoomContext(
+        company_id="co", access_token="tok-a",
+        user_ids=user_ids or [], user_names=user_names or {},
+    )
+
+
+def _zoom_handle(**ctx_kwargs):
+    from app.connector_lookup.zoom import ZoomHandle
+
+    return ZoomHandle(ctx=_zoom_ctx(**ctx_kwargs))
+
+
+def _meeting(uuid="m1", topic="Acme onboarding", host_email="rep@sprntly.ai",
+             start_time="2026-07-20T10:00:00Z", duration=30):
+    return {
+        "uuid": uuid, "topic": topic, "host_email": host_email,
+        "start_time": start_time, "duration": duration,
+    }
+
+
+def _host(hid="h1", email="rep@sprntly.ai", display_name="Rep"):
+    return {"id": hid, "email": email, "display_name": display_name}
+
+
+def test_zoom_open_session_none_when_token_rejected(monkeypatch):
+    from app.connector_lookup import zoom as z
+    from app.connectors.zoom_oauth import ZoomAuthExpiredError
+
+    def boom(company_id):
+        raise ZoomAuthExpiredError("reconnect")
+
+    monkeypatch.setattr(z, "sync_context", boom)
+    assert ZOOM.open_session("co") is None
+
+
+def test_zoom_open_session_none_on_any_failure_never_raises(monkeypatch):
+    """_load_context's docstring promises it never raises — a live-lookup open
+    that threw would take the whole chat answer down with it."""
+    from app.connector_lookup import zoom as z
+
+    def boom(company_id):
+        raise RuntimeError("supabase is down")
+
+    monkeypatch.setattr(z, "sync_context", boom)
+    assert ZOOM.open_session("co") is None
+
+
+def test_zoom_open_session_returns_a_working_handle(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "sync_context", lambda cid: _zoom_ctx())
+    session = ZOOM.open_session("co-a")
+    assert session.provider == "zoom"
+    assert session.handle.ctx.company_id == "co"
+
+
+def test_zoom_search_filters_and_states_the_window(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    captured = {}
+
+    def fake_list(token, user_id, *, frm=None, to=None, page_size=30):
+        captured.setdefault("calls", []).append((user_id, frm, to))
+        return [
+            _meeting("m1", "Acme onboarding"),
+            _meeting("m2", "Weekly standup", host_email="lead@sprntly.ai"),
+        ]
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", fake_list)
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_search_recordings", {"keywords": "acme", "days": 14})
+    assert "m1: Acme onboarding" in out
+    assert "Weekly standup" not in out
+    assert "in the last 14 days" in out and "of 2 read" in out
+    # Every host in the selection was actually asked, not just the first.
+    assert captured["calls"][0][0] == "h1"
+
+
+def test_zoom_window_is_clamped_to_the_adapter_max(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", lambda *a, **k: [])
+    days_seen = {}
+
+    real_sync_windows = z.sync_windows
+
+    def spying_sync_windows(cursor, *, today=None, max_windows=3):
+        days_seen["max_windows"] = max_windows
+        return real_sync_windows(cursor, today=today, max_windows=max_windows)
+
+    monkeypatch.setattr(z, "sync_windows", spying_sync_windows)
+    ZOOM.dispatch(_session("zoom", _zoom_handle()), "zoom_search_recordings",
+                 {"days": 9999})
+    assert days_seen["max_windows"] == -(-z._MAX_DAYS // 30)  # ceil(90/30) = 3
+
+
+def test_zoom_a_wide_window_is_walked_in_month_sized_chunks_not_one_call(monkeypatch):
+    """The exact bug class Zoom's silent clamping invites: a naive one-shot
+    request for a wide range looks like a quiet quarter instead of an error.
+    Every individual list_user_recordings call must span <=31 days."""
+    from app.connector_lookup import zoom as z
+    from datetime import date
+
+    spans = []
+
+    def fake_list(token, user_id, *, frm=None, to=None, page_size=30):
+        span = (date.fromisoformat(to) - date.fromisoformat(frm)).days
+        spans.append(span)
+        return []
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", fake_list)
+    ZOOM.dispatch(_session("zoom", _zoom_handle()), "zoom_search_recordings",
+                 {"days": z._MAX_DAYS})
+    assert spans, "list_user_recordings was never called"
+    assert all(span <= 31 for span in spans), spans
+
+
+def test_zoom_empty_search_says_which_window_it_read(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", lambda *a, **k: [])
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_search_recordings", {"keywords": "zzz"})
+    assert "no Zoom cloud recordings in the last 30 days" in out
+    assert "Say which window you searched" in out
+
+
+def test_zoom_huge_result_is_capped(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(
+        z, "list_user_recordings",
+        lambda *a, **k: [_meeting(f"m{i}") for i in range(50)],
+    )
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_search_recordings", {})
+    assert "showing 10 of 50 matches" in out
+
+
+def test_zoom_get_recording_uses_the_search_cache(monkeypatch):
+    """Search-then-read must not re-list the window."""
+    from app.connector_lookup import zoom as z
+
+    calls = {"n": 0}
+
+    def fake_list(token, user_id, *, frm=None, to=None, page_size=30):
+        calls["n"] += 1
+        return [_meeting("m1")]
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", fake_list)
+    monkeypatch.setattr(z, "_transcript_for",
+                        lambda ctx, meeting: {"download_url": "https://zoom/x"})
+    monkeypatch.setattr(z, "fetch_transcript_text", lambda tok, url: "raw-vtt")
+    monkeypatch.setattr(z, "parse_vtt", lambda raw: ("Ada: we need SSO by Q4", ["Ada"]))
+
+    session = _session("zoom", _zoom_handle())
+    ZOOM.dispatch(session, "zoom_search_recordings", {})
+    out = ZOOM.dispatch(session, "zoom_get_recording", {"meeting_id": "m1"})
+    assert calls["n"] == 1
+    assert "we need SSO by Q4" in out
+    assert "Acme onboarding" in out
+    assert "speakers: Ada" in out
+
+
+def test_zoom_get_recording_unknown_id_is_honest(monkeypatch):
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", lambda *a, **k: [_meeting("m1")])
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_get_recording", {"meeting_id": "nope"})
+    assert "no Zoom recording with id nope" in out
+    assert "search a wider window" in out
+
+
+def test_zoom_requires_a_meeting_id():
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_get_recording", {})
+    assert out == "(zoom_get_recording: 'meeting_id' is required)"
+
+
+def test_zoom_get_recording_with_no_transcript_says_so_honestly(monkeypatch):
+    """The commonest real case: audio transcription is off, or Zoom hasn't
+    finished processing. Never invent content — say so, which IS a complete
+    answer per the system prompt's own honest-limits rule."""
+    from app.connector_lookup import zoom as z
+
+    monkeypatch.setattr(z, "_hosts", lambda ctx: [_host()])
+    monkeypatch.setattr(z, "list_user_recordings", lambda *a, **k: [_meeting("m1")])
+    monkeypatch.setattr(z, "_transcript_for", lambda ctx, meeting: None)
+
+    out = ZOOM.dispatch(_session("zoom", _zoom_handle()),
+                        "zoom_get_recording", {"meeting_id": "m1"})
+    assert "No transcript available" in out
+    assert "audio transcription being turned off" in out
+
+
+def test_zoom_system_block_and_tools_mandate_reading_the_transcript():
+    """The regression this whole section exists to prevent: a search result
+    alone must never be presented as a complete answer to a content question."""
+    block = ZOOM.system_block()
+    assert "ALWAYS READ THE TRANSCRIPT" in block
+    assert "do not stop at the search result" in block.lower()
+    assert "do not list search results and ask" in block.lower()
+
+    tools = {t["name"]: t for t in ZOOM.tools()}
+    assert "metadata only" in tools["zoom_search_recordings"]["description"].lower()
+    assert "zoom_get_recording" in tools["zoom_search_recordings"]["description"]
+    assert "before answering" in tools["zoom_get_recording"]["description"].lower()
 
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
@@ -652,7 +893,7 @@ def _connected(monkeypatch):
 def test_every_shipped_adapter_resolves():
     assert set(registry.LOOKUP_PROVIDERS) == {
         "jira", "clickup", "slack", "fireflies", "github", "hubspot",
-        "google_drive", "confluence",
+        "google_drive", "confluence", "zoom",
     }
     for name in registry.LOOKUP_PROVIDERS:
         provider = registry.provider_for(name)
@@ -729,3 +970,11 @@ def test_no_adapter_credential_survives_a_repr():
     assert "xoxp-secret" not in repr(
         _session("slack", {"user_token": "xoxp-secret"})
     )
+    from app.connector_lookup.zoom import ZoomHandle
+    from app.connectors.zoom_oauth import ZoomContext
+
+    zoom_handle = ZoomHandle(
+        ctx=ZoomContext(company_id="co", access_token="zoom-secret",
+                        user_ids=[], user_names={}),
+    )
+    assert "zoom-secret" not in repr(zoom_handle)
