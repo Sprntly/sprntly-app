@@ -539,6 +539,32 @@ def test_render_context_section_empty_bundle_is_blank():
 # ─────────────────────────── compose_ask_answer wiring ───────────────────────────
 
 
+def _only_answer_row(isolated_settings) -> dict:
+    """The ask's own `answer` row, asserting the whole world of rows it wrote.
+
+    An ask now writes TWO rows, not one: this `answer` row, and a
+    `document_selection` row written from inside document grounding — the
+    function BOTH ask paths go through. The skill-routed path wrote none of
+    this before, which is why topical selection returning the wrong document
+    there left nothing in the record to find it by.
+
+    Grouped by `decision_type` rather than counted in total, so this still
+    closes the world: a second `answer` row, a missing one, a stray write of
+    any other type, or a duplicated `document_selection` all still fail. It is
+    deliberately not loosened to "at least one row".
+    """
+    rows = (
+        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
+    )
+    by_type: dict[str, list[dict]] = {}
+    for row in rows:
+        by_type.setdefault(row["decision_type"], []).append(row)
+    assert sorted(by_type) == ["answer", "document_selection"], by_type
+    assert len(by_type["answer"]) == 1
+    assert len(by_type["document_selection"]) == 1
+    return by_type["answer"][0]
+
+
 def test_compose_ask_answer_corpus_only_when_no_enterprise(
     isolated_settings, fake_llm
 ):
@@ -592,11 +618,7 @@ def test_compose_ask_answer_injects_kg_section_and_logs_refs(
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
 
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    row = rows[0]
+    row = _only_answer_row(isolated_settings)
     assert row["agent"] == "ask"
     assert row["decision_type"] == "answer"
     assert row["enterprise_id"] == "co-1"
@@ -626,15 +648,12 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
 
     user = fake_llm["calls"][0]["user"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in user
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    row = _only_answer_row(isolated_settings)
+    factors = row["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["kg_used"] is False
-    kg_refs = rows[0]["kg_refs"]
+    kg_refs = row["kg_refs"]
     if isinstance(kg_refs, str):
         kg_refs = json.loads(kg_refs)
     assert kg_refs == []
@@ -678,11 +697,7 @@ def test_compose_ask_answer_prd_grounded_skips_kg_and_corpus(
     )
     assert "CURRENT PRD CONTEXT" not in call["user"]
     assert "What does this PRD say?" in call["user"]
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    factors = _only_answer_row(isolated_settings)["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["prd_grounded"] is True
