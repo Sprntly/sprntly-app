@@ -456,9 +456,22 @@ def test_render_context_section_omits_below_floor_themes(facade):
 
 def test_below_floor_theme_signals_do_not_reach_the_bundle(facade):
     """Signals reachable ONLY through a below-floor theme edge never enter
-    the bundle. Aged past the recency window so the theme edge is the only
-    path in — otherwise the independent recency path would smuggle them
-    back in and this test would prove nothing."""
+    the bundle.
+
+    DO NOT "simplify" this to age=0 — every signal `_seed_theme_with_signals`
+    writes is a real row in kg_signal, so at age=0 it is picked up
+    independently by the recency path (step 4 in `retrieve_context`)
+    regardless of whether its theme survives the floor. An age-0 version of
+    this test would pass even with the floor completely disabled, because
+    the assertion would be satisfied by dedup against the recency path, not
+    by the floor dropping anything. Aging past the `revenue` source's
+    30-day stale window (see `SOURCE_STALE_WINDOW_DAYS`) removes that
+    escape hatch: `active_signals` excludes them, so the theme edge — now
+    filtered — is the ONLY path in, and a red assertion here is actually
+    caused by the floor working, not a fixture accident. See the sibling
+    `test_recent_signal_survives_when_its_theme_is_filtered` for the age-0
+    case, which is a genuinely different assertion (theme=None via
+    recency), not a relaxed version of this one."""
     from app.graph.retrieval import retrieve_context
 
     theme, _ = _seed_theme_with_signals(
