@@ -417,19 +417,121 @@ def test_answer_voc_request_diverts_to_digest_when_source_connected(monkeypatch)
     assert router_calls == []  # never reached the router/answer LLM
 
 
-def test_answer_voc_request_falls_through_when_no_source(monkeypatch):
-    # With NO call source connected, the same bare request must fall through to
-    # the normal skill route (which explains what to connect), NOT the digest.
+def test_answer_voc_request_without_a_call_source_still_reaches_the_merged_path(
+    monkeypatch,
+):
+    """CHANGED 2026-08-05 with the VoC merge. This case used to assert the
+    opposite — that with no call source `call_digest.answer` must NOT run and
+    the turn fell through to the generic skill answer. That assertion encoded
+    the either/or that WAS the reported bug: `has_call_source` decided whether a
+    company saw live calls or its knowledge graph, never both.
+
+    `call_digest.answer` now merges the two and degrades per-source on its own,
+    so there is nothing left for a capability gate to decide. A company with no
+    call source but a populated graph belongs on the merged path (it degrades to
+    KG-only and answers); a company with neither gets the digest's own
+    what-to-connect message, which is the same guidance the generic skill answer
+    used to give. What is pinned here is the ROUTE: the bare request still
+    declines the fast-path interception and arrives via normal routing.
+    """
     import app.call_digest as cd
 
     monkeypatch.setattr(cd, "has_call_source", lambda cid: False)
+    seen: list = []
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: seen.append(k) or {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me a voice of customer report",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    # Reached from the VoC dispatch, not the interception the capability gate
+    # still (correctly) declines.
+    assert len(seen) == 1 and seen[0]["question"] == "give me a voice of customer report"
+
+
+def test_voc_dispatch_no_longer_consults_the_call_source_gate(monkeypatch):
+    """The gate is gone from this branch, not merely satisfied. If any code path
+    still asks `has_call_source` before dispatching VoC, the either/or can grow
+    back the next time someone edits it."""
+    import app.call_digest as cd
+
+    def _must_not_ask(cid):
+        raise AssertionError("the VoC dispatch must not gate on has_call_source")
+
+    monkeypatch.setattr(qa, "_answer_voc_report",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("KG-only path taken")))
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "route",
+        lambda q, **k: qa.RouteDecision("voice-of-customer-report", 1.0, "llm"),
+    )
+    monkeypatch.setattr(cd, "has_call_source", _must_not_ask)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="what are customers feedback",
+                    dataset="acme")
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_llm_routed_voc_reaches_the_merged_path(monkeypatch):
+    """The reported question matched NO regex — the haiku router classified it
+    voice-of-customer-report and it landed on this dispatch. Fixing the dispatch
+    is what covers every entry path, so pin the LLM-routed one explicitly."""
+    import app.call_digest as cd
+    import app.skill_router as sr
+
+    assert sr.is_call_digest("what are customers feedback") is False
+    assert sr.is_voc_report_request("what are customers feedback") is False
+
+    seen: list = []
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: seen.append(k) or {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    monkeypatch.setattr(
+        qa, "route",
+        lambda q, **k: qa.RouteDecision("voice-of-customer-report", 0.9, "llm"),
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="what are customers feedback",
+                    dataset="acme")
+
+    assert out["_skill_source"] == "call-digest" and len(seen) == 1
+
+
+def test_pinned_voc_still_answers_from_the_kg_alone(monkeypatch):
+    """`pinned_skill` behaviour is deliberately unchanged: a pinned
+    voice-of-customer-report is a pipeline id, survives `_invocable`, and runs
+    `_answer_voc_report` over the KG bundle with no live fetch. This is the one
+    caller that keeps that function alive — it is not dead code."""
+    import app.call_digest as cd
+
     def _no_digest(**k):
-        raise AssertionError("call_digest.answer must not run when no source is connected")
+        raise AssertionError("a pinned VoC must not run the live digest")
+
     monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    import app.graph.retrieval as retrieval
+    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
-    out = qa.answer(enterprise_id="ent", question="give me a voice of customer report", dataset="acme")
-    assert out["_skill"] == "voice-of-customer-report"  # regex fast-path → skill route
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me a voice of customer report",
+        dataset="acme", pinned_skill="voice-of-customer-report",
+    )
+
+    assert out["_skill"] == "voice-of-customer-report"
+    assert captured["purpose"] == "voc_from_kg"
+    assert "KG SIGNAL" in captured["input"]
 
 
 # ─── interception contest: a company's own skill may beat the call digest ────

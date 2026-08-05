@@ -1141,6 +1141,363 @@ def test_fireflies_only_answer_omits_the_source_split(monkeypatch):
     assert "could not be reached" not in captured["input"]
 
 
+# ── The knowledge graph as the OTHER half of the corpus ──────────────────────
+#
+# The reported defect: connecting Zoom or Fireflies flipped `has_call_source()`
+# True, and `qa_agent`'s either/or then answered every voice-of-customer
+# question from live calls ALONE — Slack, support tickets and every other synced
+# source vanished from answers that used to include them. A user asked "what are
+# customers feedback" and got three Zoom calls while Slack sat connected and
+# populated. These cases pin the merge, its budgets, and its per-source
+# degradation.
+#
+# The stub seam is `ask_runner._retrieve_kg_bundle` — deliberately NOT
+# `cd.build_kg_context` — so the real `render_context_section` runs and these
+# tests would fail if the rendering the KG-only path shares with this one moved
+# underneath us.
+
+
+def _kg_signal(content, *, doc="slack_channels", source_type="customer_voice",
+               kind="pain"):
+    """One retrieval-bundle signal, in `retrieval._signal_payload`'s shape.
+
+    `doc` is what decides both dedupe and the coverage line's source name:
+    a connector sync writes "<provider>-sync-batch-N", a corpus document (which
+    is how Slack reaches the graph — slack_sync writes slack_channels.md) writes
+    its own filename.
+    """
+    return {
+        "signal_id": f"sig-{abs(hash(content)) % 10_000}",
+        "content": content, "kind": kind, "source_type": source_type,
+        "provenance": {"source": "extractor", "doc": doc},
+        "theme": None, "confidence": 0.8, "rank": 1.0,
+    }
+
+
+def _stub_kg(monkeypatch, signals, *, themes=None):
+    """Wire the KG half to fixtures at the retrieval seam."""
+    import app.ask_runner as ask_runner
+
+    bundle = {
+        "signals": list(signals), "themes": list(themes or []),
+        "decisions": [], "hypotheses": [], "outcomes": [],
+        "kg_refs": [], "token_estimate": 100, "empty": False,
+    }
+    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", lambda eid, q: bundle)
+    return bundle
+
+
+def _stub_no_kg(monkeypatch):
+    """An empty/unreadable graph — what `_retrieve_kg_bundle` returns for a
+    tenant with no signal, and what every pre-merge test implicitly assumed."""
+    import app.ask_runner as ask_runner
+
+    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", lambda eid, q: None)
+
+
+def test_calls_and_kg_both_reach_the_corpus(monkeypatch):
+    """THE REGRESSION TEST FOR THE REPORTED BUG. Zoom connected and returning
+    calls, Slack synced into the graph: the answer must be built from BOTH.
+    Before the fix the Slack signal was not in the prompt at all."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+    monkeypatch.setattr(
+        cd, "fetch_zoom_calls", lambda ctx, w: [_zoom_transcript(1)]
+    )
+    _stub_kg(monkeypatch, [
+        _kg_signal("Customers in #support keep asking for SSO", doc="slack_channels"),
+        _kg_signal("Export timeouts raised on 4 tickets", doc="jira-sync-batch-0"),
+    ])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    prompt = captured["input"]
+    # The live Zoom call is still there — the calls half is not traded away.
+    assert "Zoom call 1" in prompt and 'Sam Lee: "zoom quote 1"' in prompt
+    # …and so is the Slack signal that used to disappear the moment Zoom
+    # was connected. This single assertion is the bug.
+    assert "Customers in #support keep asking for SSO" in prompt
+    assert "Export timeouts raised on 4 tickets" in prompt
+    assert p["_skill"] == "voice-of-customer-report"
+
+
+def test_reported_question_is_query_shaped_and_still_gets_the_kg(monkeypatch):
+    """The reported question routes to QUERY mode, not the report pass
+    (`is_voc_query` matches its what/customers shape). A merge wired only into
+    the report path would have left the actual bug untouched."""
+    from app.call_digest import is_voc_query
+
+    question = "what are customers feedback"
+    assert is_voc_query(question) is True     # the mode the real case takes
+
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+    monkeypatch.setattr(cd, "fetch_zoom_calls", lambda ctx, w: [_zoom_transcript(1)])
+    _stub_kg(monkeypatch, [_kg_signal("Slack: onboarding is confusing")])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question=question)
+
+    assert p["_skill_source"] == "voc-query"
+    assert captured["purpose"] == "voc_query"
+    assert "Slack: onboarding is confusing" in captured["input"]
+    assert "Zoom call 1" in captured["input"]
+    # The pointed answer discloses its basis too, not only the report does.
+    assert "stored signal" in captured["input"]
+
+
+def test_calls_only_company_is_unchanged_when_the_graph_is_empty(monkeypatch):
+    """No KG signal → the prompt, the coverage line and the run line are exactly
+    what they were before the merge existed."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_no_kg(monkeypatch)
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    label = cd.parse_window("summarize customer calls last week").label
+    assert f"=== CUSTOMER CALLS — {label} (2 calls) ===" in captured["input"]
+    assert "stored signal" not in captured["input"]
+    assert "CONNECTED-SOURCE SIGNAL" not in captured["input"]
+    assert p["_skill_action"] == f"Voice of customer · 2 calls · {label}"
+
+
+def test_kg_only_company_gets_a_real_answer_not_a_dead_end(monkeypatch):
+    """No call source connected at all, but the graph is populated. Before the
+    fix this fell out of the digest entirely; now it is the merged path
+    degrading to KG-only, and it answers."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    _stub_kg(monkeypatch, [_kg_signal("Billing confusion reported in #cs")])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    assert p["answer"].startswith("## Voice of customer")
+    assert "no call source is connected" not in p["answer"]
+    assert "Billing confusion reported in #cs" in captured["input"]
+    # The banner is honest about the missing half rather than printing "0 calls".
+    assert "CONNECTED-SOURCE SIGNAL" in captured["input"]
+    assert "no call source connected" in captured["input"]
+    assert "0 calls" not in captured["input"]
+
+
+def test_neither_source_keeps_the_what_to_connect_message(monkeypatch):
+    """Both halves empty → the pre-existing guidance, unchanged, and no spend."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    _stub_no_kg(monkeypatch)
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    assert "no call source is connected" in p["answer"]
+    assert "Fireflies" in p["answer"] and "Zoom" in p["answer"]
+    assert captured == {}
+
+
+def test_unreachable_call_source_still_answers_from_the_graph_and_says_so(monkeypatch):
+    """An expired Zoom grant is a reason to CAVEAT an answer, not to withhold
+    one built from the ticket queue. The disclosure is the load-bearing half:
+    a KG answer silently standing in for a dead connector is the failure this
+    whole path exists to avoid."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+
+    def _boom(ctx, w):
+        raise RuntimeError("zoom 401")
+
+    monkeypatch.setattr(cd, "fetch_zoom_calls", _boom)
+    _stub_kg(monkeypatch, [_kg_signal("Support backlog is growing")])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    assert p["answer"].startswith("## Voice of customer")   # answered, not refused
+    assert "Support backlog is growing" in captured["input"]
+    assert "Zoom could not be reached" in captured["input"]
+
+
+def test_empty_window_still_answers_from_the_graph(monkeypatch):
+    """Zoom connected and healthy but the window is quiet. The graph still has
+    signal, so the answer runs and the banner says the window was empty."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+    monkeypatch.setattr(cd, "fetch_zoom_calls", lambda ctx, w: [])
+    _stub_kg(monkeypatch, [_kg_signal("Churn risk flagged on two accounts")])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls from last week")
+
+    assert p["answer"].startswith("## Voice of customer")
+    assert "No customer calls" not in p["answer"]
+    assert "no calls or uploaded documents found in" in captured["input"]
+    assert "Churn risk flagged on two accounts" in captured["input"]
+
+
+def test_a_call_synced_into_the_graph_is_not_counted_twice(monkeypatch):
+    """Zoom calls sync INTO the graph as well as being fetched live, so one
+    conversation can arrive twice — once as a transcript, once as a distilled
+    signal — and a model reads that as two accounts corroborating each other.
+    With live calls in hand the distilled copies are dropped; the signal from
+    every OTHER source stays."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+    monkeypatch.setattr(cd, "fetch_zoom_calls", lambda ctx, w: [_zoom_transcript(1)])
+    _stub_kg(monkeypatch, [
+        _kg_signal("Export limit hit weekly", doc="zoom-sync-batch-0"),
+        _kg_signal("Export limit hit weekly", doc="fireflies-sync-batch-2"),
+        _kg_signal("Same ask raised in #support", doc="slack_channels"),
+    ])
+    captured = _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    prompt = captured["input"]
+    # The live transcript is the richer copy and it is the one that survives.
+    assert "Zoom call 1" in prompt
+    assert "Export limit hit weekly" not in prompt
+    # Non-call sources are untouched — dropping those would be the original bug.
+    assert "Same ask raised in #support" in prompt
+    # And the exclusion is disclosed rather than silent.
+    assert "2 stored signals distilled from the same call sources were excluded" in prompt
+
+
+def test_call_derived_signal_is_kept_when_no_live_call_came_back(monkeypatch):
+    """The mirror of the dedupe rule. With no live calls, the graph's distilled
+    copies are the ONLY record of those conversations — dropping them would
+    recreate the reported bug pointing the other way."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: _zoom_ctx())
+    monkeypatch.setattr(cd, "fetch_zoom_calls", lambda ctx, w: [])
+    _stub_kg(monkeypatch, [
+        _kg_signal("Export limit hit weekly", doc="zoom-sync-batch-0"),
+    ])
+    captured = _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="summarize customer calls from last week")
+
+    assert "Export limit hit weekly" in captured["input"]
+    assert "were excluded" not in captured["input"]
+
+
+def test_neither_half_can_starve_the_other_to_zero(monkeypatch):
+    """The budgets are separate constants precisely so this cannot happen: a
+    company with 200 chatty calls must still show graph signal, and a company
+    with a huge graph must still show its calls."""
+    calls = [_chatty_call(i) for i in range(30)]
+    full_calls = len("\n\n".join(c.render() for c in calls))
+    big_kg = [_kg_signal(f"signal {i} — {'y' * 400}", doc="slack_channels")
+              for i in range(200)]
+
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls)
+    # Squeeze BOTH budgets hard at once.
+    monkeypatch.setattr(cd, "_CORPUS_CHAR_BUDGET", full_calls // 4)
+    monkeypatch.setattr(cd, "_KG_CHAR_BUDGET", 3_000)
+    _stub_kg(monkeypatch, big_kg)
+    captured = _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="summarize calls from the last 30 days")
+    prompt = captured["input"]
+
+    # Every call still represented (the fit ladder trims quotes, not calls)…
+    for i in range(30):
+        assert f"Call {i}" in prompt
+    # …and the graph is still there, trimmed to its own ceiling rather than
+    # evicted by the calls.
+    assert "signal 0" in prompt
+    assert "stored signal truncated for space" in prompt
+    # Each half stayed inside ITS OWN budget — neither borrowed from the other.
+    assert len(prompt) < full_calls // 4 + 3_000 + 5_000
+
+
+def test_coverage_line_names_the_graph_sources_it_read(monkeypatch):
+    """The single most important observable: a user has to be able to read one
+    line and tell whether Slack was actually consulted."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_kg(monkeypatch, [
+        _kg_signal("a", doc="slack_channels"),
+        _kg_signal("b", doc="jira-sync-batch-0"),
+        _kg_signal("c", doc="hubspot-sync-batch-1"),
+    ])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    banner = captured["input"]
+    assert "3 stored signals from your other connected sources" in banner
+    assert "slack_channels" in banner and "jira" in banner and "hubspot" in banner
+    # Stated as unwindowed, because retrieval ranks by relevance and does not
+    # filter to the asked window — a count dated into it would be a lie.
+    assert "NOT limited to this window" in banner
+    assert "CUSTOMER CALLS + CONNECTED-SOURCE SIGNAL" in banner
+    # The run line under the answer carries it too.
+    assert "3 stored signals" in p["_skill_action"]
+
+
+def test_a_broken_graph_read_never_costs_the_calls(monkeypatch):
+    """Per-source isolation, extended to the new half: the graph failing must
+    cost the answer its calls no more than a dead Zoom grant costs it the
+    graph."""
+    import app.ask_runner as ask_runner
+
+    def _boom(eid, q):
+        raise RuntimeError("pgvector down")
+
+    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", _boom)
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    captured = _stub_voc_pass(monkeypatch)
+
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+
+    assert p["answer"].startswith("## Voice of customer")
+    assert "Call 1" in captured["input"]
+    assert "stored signal" not in captured["input"]
+
+
+def test_kg_context_drops_the_section_when_dedupe_empties_it(monkeypatch):
+    """A graph holding nothing BUT call-derived signal, with the live calls
+    already in hand, must not render an empty header the model then treats as
+    a source that was consulted and found silent."""
+    _stub_kg(monkeypatch, [
+        _kg_signal("x", doc="zoom-sync-batch-0"),
+        _kg_signal("y", doc="fireflies-sync-batch-0"),
+    ])
+    kg = cd.build_kg_context("co", "what are customers saying", live_calls=True)
+    assert kg.present is False
+    assert kg.deduped == 2 and kg.signal_count == 0
+
+
+def test_kg_source_label_reads_a_sync_batch_as_its_provider():
+    assert cd._kg_source_label(_kg_signal("a", doc="jira-sync-batch-12")) == "jira"
+    assert cd._kg_source_label(_kg_signal("a", doc="slack_channels")) == "slack_channels"
+    # No doc at all (agent findings, web research) → the signal's source_type.
+    bare = _kg_signal("a")
+    bare["provenance"] = {}
+    assert cd._kg_source_label(bare) == "customer_voice"
+
+
 def test_call_transcript_render_defaults_stay_fireflies_shaped():
     """The shared shape gained `provider` and `note` as DEFAULTED fields; a
     record built the old way must render exactly as it always did."""
