@@ -72,6 +72,24 @@ def _scenarios(docs: list) -> list[tuple[str, str, list | None]]:
             break
 
     established = named_title or "the onboarding page"
+    # ORDINARY BUSINESS QUESTIONS — the input class every review finding lived
+    # in. These name no document and must resolve to nothing; a pin here means
+    # a general question is about to be deflected into one wiki page.
+    ordinary = [
+        "what's our pricing strategy for enterprise?",
+        "how is onboarding going for new hires?",
+        "how many customers do we have?",
+        "what are our top 3 product requests from last week?",
+        "how many seats is it?",
+        "when is the next release?",
+        "who owns the billing integration?",
+        "is the security review done yet?",
+        "what should we build next quarter?",
+        "can you summarize it?",
+        "is there more detail on it?",
+        "what does it say about pricing?",
+    ]
+
     cases: list[tuple[str, str, list | None]] = [
         ("(a) NAMED — implicit, never spells the title", named_msg, None),
         (
@@ -95,6 +113,15 @@ def _scenarios(docs: list) -> list[tuple[str, str, list | None]]:
             2, ("(c) AMBIGUOUS — real near-collision, must ABSTAIN",
                 ambiguous_msg, None)
         )
+    # A short thread so the anaphoric cases have somewhere to look.
+    thread = [
+        {"role": "user", "content": "what are our top 3 product requests?"},
+        {"role": "assistant",
+         "content": "The top three were SSO, bulk export and dark mode."},
+    ]
+    for msg in ordinary:
+        cases.append(("(ORD) must NOT pin", msg,
+                      thread if " it" in f" {msg}" else None))
     return cases
 
 

@@ -23,6 +23,8 @@ reachable here — "can you summarize our docs" against a page titled
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 _CID = "co-docref"
@@ -211,16 +213,62 @@ def test_one_common_word_is_never_enough_to_pin():
     assert ref.documents == []
 
 
-def test_one_LONG_distinctive_word_is_enough_to_pin():
-    """The complement — the two-hit rule must not make single-word document
-    names unreachable. "onboarding" identifies a document by itself in a way
-    "plan" does not."""
+def test_one_title_word_pins_ONLY_with_a_document_cue():
+    """Single-word titles must stay reachable without reopening the class.
+
+    A length-based escape hatch used to allow this — any whole-word hit of
+    >= 6 chars pinned. That let "how is onboarding going for new hires?" pin a
+    page titled "Onboarding": a question about the BUSINESS deflected into a
+    wiki page. Length is the wrong signal, because "onboarding" is both long
+    and completely ordinary.
+
+    The signal that separates them is whether the message is talking about a
+    DOCUMENT at all."""
     from app.document_reference import resolve_documents
 
     docs = [_Doc("Onboarding"), _Doc("Billing Migration Notes")]
-    ref = resolve_documents("what does onboarding say about SSO?", docs)
 
-    assert [d.title for d in ref.documents] == ["Onboarding"]
+    # No document cue — this is a question about the business.
+    assert resolve_documents(
+        "how is onboarding going for new hires?", docs
+    ).documents == []
+    # A document cue — now it is a reference.
+    assert [d.title for d in resolve_documents(
+        "what does the onboarding doc say about SSO?", docs
+    ).documents] == ["Onboarding"]
+
+
+def test_a_topic_word_never_establishes_a_reference():
+    """Topics feed RANKING, never the reference gate.
+
+    "what's our pricing strategy for enterprise?" shares a topic word with a
+    teardown and names nothing. Counting topic hits toward the gate pinned
+    that page and, via rule 10, told the model to answer FROM it — a general
+    strategy question answered out of one wiki page."""
+    from app.document_reference import resolve_documents
+
+    docs = [
+        _Doc("Q3 Pricing Teardown", topics=["pricing", "discounts"]),
+        _Doc("Onboarding"),
+    ]
+    assert resolve_documents(
+        "what's our pricing strategy for enterprise?", docs
+    ).documents == []
+    # The same catalog, a message that does name it, still resolves.
+    assert [d.title for d in resolve_documents(
+        "summarize the Q3 pricing teardown", docs
+    ).documents] == ["Q3 Pricing Teardown"]
+
+
+def test_repeating_one_word_cannot_satisfy_the_two_word_gate():
+    """Hits were counted per occurrence, so a message repeating a single word
+    could clear a gate that asks for two DISTINCT ones — the gate bypassed by
+    repetition rather than by evidence."""
+    from app.document_reference import query_terms, resolve_documents
+
+    assert query_terms("pricing pricing pricing") == ["pricing"]
+    docs = [_Doc("Pricing"), _Doc("Roadmap 2026")]
+    assert resolve_documents("pricing pricing pricing", docs).documents == []
 
 
 def test_generic_words_alone_name_nothing():
@@ -291,16 +339,32 @@ def test_narrow_candidates_applies_a_disambiguation_reply():
 
 
 def _asked_which(original: str) -> list[dict]:
-    """History where the assistant's last turn was our clarifying question."""
-    from app.document_reference import UNRESOLVED_REFERENCE_HEADING
+    """History whose last assistant turn is a REALISTIC clarifying question.
 
+    This used to fabricate the literal `UNRESOLVED_REFERENCE_HEADING` block as
+    assistant content, and that made every test below worthless: the heading
+    is rendered into the SYSTEM PROMPT, while an assistant turn holds the
+    model's reply. Production never puts one in the other, so the tests passed
+    against a state that could not occur and step 0 was dead in the product
+    while green here.
+
+    What prompt rule 11 actually produces is an answer that names the
+    candidate titles and asks. That is what this fixture is now — the shape
+    the detector keys on, and the shape a real model writes.
+    """
+    return _asked_which_of(
+        original, "Q3 Pricing Teardown", "Q4 Pricing Teardown"
+    )
+
+
+def _asked_which_of(original: str, *titles: str) -> list[dict]:
+    """Same, for a specific pair of candidate titles."""
+    listed = ", ".join(titles[:-1]) + f" and {titles[-1]}"
     return [
         _turn("user", original),
         _turn("assistant",
-              f"## {UNRESOLVED_REFERENCE_HEADING}\n"
-              "Closest matches, to offer as choices:\n"
-              "- Q3 Pricing Teardown (Confluence)\n"
-              "- Q4 Pricing Teardown (Confluence)"),
+              f"I can see a few documents that could match: {listed} — "
+              "which did you mean?"),
     ]
 
 
@@ -349,27 +413,70 @@ def test_a_reply_narrows_on_the_TITLE_the_user_was_shown_not_on_topics():
     ]
     ref = resolve_documents(
         "the template one", docs,
-        history=_asked_which("what does the product requirements page say?"),
+        history=_asked_which_of(
+            "what does the product requirements page say?",
+            "Product requirements", "Template - Product requirements",
+        ),
     )
 
     assert [d.title for d in ref.documents] == ["Template - Product requirements"]
 
 
 def test_a_reply_that_still_does_not_choose_re_abstains():
-    """Answering "either" or something unrelated must not resolve to a guess —
-    but it must also not silently fall back to cold resolution, which would
-    lose the candidate list we already showed."""
+    """A reply that matches BOTH offered documents keeps asking, over the two
+    that were actually offered — never over the catalog at large."""
     from app.document_reference import resolve_documents
 
     docs = [_Doc("Q3 Pricing Teardown"), _Doc("Q4 Pricing Teardown")]
     ref = resolve_documents(
-        "pricing", docs,
+        "the pricing teardown one", docs,
         history=_asked_which("what does the pricing teardown say about discounts?"),
     )
 
     assert ref.documents == []
     assert ref.abstained is True
-    assert len(ref.candidates) == 2
+    assert {d.title for d in ref.candidates} == {
+        "Q3 Pricing Teardown", "Q4 Pricing Teardown"
+    }
+
+
+def test_a_reply_naming_a_DIFFERENT_document_wins_over_the_old_candidates():
+    """The user changed their mind. Narrowing the reply against the previous
+    options returned one of them — the user named another document outright
+    and got a stale candidate back."""
+    from app.document_reference import resolve_documents
+
+    docs = [
+        _Doc("Q3 Pricing Teardown"), _Doc("Q4 Pricing Teardown"),
+        _Doc("Q4 Board Deck"),
+    ]
+    ref = resolve_documents(
+        "forget it - summarize the Q4 board deck", docs,
+        history=_asked_which("what does the pricing teardown say?"),
+    )
+
+    assert [d.title for d in ref.documents] == ["Q4 Board Deck"]
+
+
+def test_a_clarification_reply_never_reaches_outside_what_was_offered():
+    """`candidates or list(documents)` fell back to the WHOLE CATALOG, so an
+    ordinal reply returned an arbitrary row reported as the user's choice."""
+    from app.document_reference import resolve_documents
+
+    docs = [
+        _Doc("Pricing"), _Doc("Roadmap 2026"), _Doc("Security Review"),
+        _Doc("Q3 Board Deck"), _Doc("Runbook"), _Doc("SSO Rollout"),
+    ]
+    # An assistant turn that names NOTHING — so nothing was offered.
+    history = [
+        _turn("user", "what does it say about pricing?"),
+        _turn("assistant", "Could you say a bit more about what you need?"),
+    ]
+    ref = resolve_documents("the second one", docs, history=history)
+
+    assert ref.documents == [], (
+        "an ordinal reply pinned a catalog row that was never offered"
+    )
 
 
 def test_only_the_MOST_RECENT_assistant_turn_counts_as_our_question():
@@ -450,7 +557,14 @@ def test_followup_abstains_when_the_previous_answer_covered_several_documents():
     assert len(ref.candidates) == 2
 
 
-def test_followup_abstains_when_no_turn_established_anything():
+def test_followup_makes_NO_REFERENCE_when_no_turn_established_anything():
+    """An anaphor with nothing behind it is not a document reference.
+
+    This used to ABSTAIN, which rendered "This message refers to a specific
+    document… ask which one the user means" — with no candidates to offer. The
+    user's follow-up about seat counts got a clarifying question about
+    Confluence pages. Falling through silently to Stage T is the honest
+    outcome: we have no evidence a document was meant."""
     from app.document_reference import resolve_documents
 
     docs = [_Doc("Q3 Pricing Teardown")]
@@ -460,18 +574,119 @@ def test_followup_abstains_when_no_turn_established_anything():
     ]
     ref = resolve_documents("what does it say about that?", docs, history=history)
 
-    assert ref.abstained is True
     assert ref.documents == []
-    assert "no earlier turn" in ref.reason
+    assert ref.abstained is False, "a bare anaphor produced a clarifying question"
+    assert ref.referenced is False
 
 
-def test_followup_with_no_history_at_all_abstains():
+def test_followup_with_no_history_at_all_makes_no_reference():
+    """Turn one, no thread. Abstaining here asked "which document?" and listed
+    nothing, which is the worst possible first message."""
     from app.document_reference import resolve_documents
 
     ref = resolve_documents("what does it say about pricing?",
                             [_Doc("Q3 Pricing Teardown")])
-    assert ref.abstained is True
     assert ref.documents == []
+    assert ref.abstained is False
+    assert ref.candidates == []
+
+
+def test_the_commonest_followup_in_the_product_stays_quiet():
+    """"can you summarize it?" after an ordinary answer.
+
+    Weakest possible evidence — one short substring against a topic — used to
+    be enough to declare a reference, so this asked which Confluence page the
+    user meant when they had asked to summarize the previous answer."""
+    from app.document_reference import resolve_documents
+
+    docs = [
+        _Doc("Q3 Pricing Teardown"),
+        _Doc("Product requirements"),
+        _Doc("Template - Product requirements"),
+    ]
+    history = [
+        _turn("user", "what are our top 3 product requests from last week?"),
+        _turn("assistant",
+              "The top three were SSO, bulk export and a dark mode toggle."),
+    ]
+    for message in ("can you summarize it?", "is there more detail on it?"):
+        ref = resolve_documents(message, docs, history=history)
+        assert ref.documents == [], message
+        assert ref.abstained is False, (
+            f"{message!r} produced a clarifying question about documents"
+        )
+
+
+def test_a_first_message_naming_its_subject_resolves_rather_than_asking():
+    """Empty history, a document cue AND a named subject. This abstained with
+    zero candidates because the anaphoric branch claimed it and had no
+    fallback to the message's own words."""
+    from app.document_reference import resolve_documents
+
+    docs = [_Doc("Q3 Pricing Teardown"), _Doc("Onboarding")]
+    ref = resolve_documents("what does the doc say about Q3 pricing?", docs)
+
+    assert [d.title for d in ref.documents] == ["Q3 Pricing Teardown"]
+
+
+def test_history_containing_the_CURRENT_message_does_not_change_the_answer():
+    """The frontend persists the user turn fire-and-forget and then fires the
+    ask, so `_load_history` can return a thread that already contains the
+    message being asked about. When it does, the backwards walk hits the
+    current message first and re-resolves it on its own words — reproducing
+    verbatim the failure the anaphora-first ordering exists to prevent.
+
+    Traced: with the duplicate turn present, "what does it say about
+    discounts?" pinned a "Discount Policy" page (its TOPICS carry "discounts")
+    instead of the teardown under discussion. Intermittently, because it is a
+    race.
+
+    Fixed in the resolver rather than the frontend so the guarantee does not
+    depend on one caller behaving; Slack and MCP assemble history their own
+    way."""
+    from app.document_reference import resolve_documents
+
+    docs = [
+        _Doc("Q3 Pricing Teardown", external_id="teardown"),
+        _Doc("Discount Policy", external_id="policy",
+             topics=["discounts", "rebates"]),
+    ]
+    current = "what does it say about discounts?"
+    clean = [
+        _turn("user", "summarize the Q3 Pricing Teardown"),
+        _turn("assistant", "Here is the teardown summary."),
+    ]
+    raced = clean + [_turn("user", current)]
+
+    assert [d.title for d in resolve_documents(current, docs, history=clean).documents] \
+        == ["Q3 Pricing Teardown"]
+    assert [d.title for d in resolve_documents(current, docs, history=raced).documents] \
+        == ["Q3 Pricing Teardown"], (
+            "the duplicated current turn changed the referent — the race is live"
+        )
+
+
+def test_reference_resolution_is_bounded_on_a_huge_attachment_turn(monkeypatch):
+    """`_load_history` folds attachment text into a turn UNCLAMPED, so an
+    imported PRD can put tens of thousands of characters into one turn.
+    Measured before the clamp: 56 KB against a 200-row catalog cost 1.09 s of
+    synchronous CPU inside the request, before any model call.
+
+    Asserts the clamp is doing the work, not the wall clock — a timing
+    assertion would be flaky on shared CI."""
+    from app.document_reference import _MAX_TURN_CHARS, query_terms, resolve_documents
+
+    docs = [_Doc(f"Runbook {i} Operations Guide") for i in range(200)]
+    huge = "lorem ipsum pricing discount rollout " * 1600  # ~56 KB
+    assert len(huge) > 50_000
+    history = [_turn("user", huge), _turn("assistant", "ok")]
+
+    resolve_documents("what does it say about pricing?", docs, history=history)
+
+    # The clamp bounds what any single turn contributes...
+    assert _MAX_TURN_CHARS <= 4000
+    # ...and dedupe bounds the term count regardless of repetition.
+    assert len(query_terms(huge)) < 20
 
 
 def test_naming_a_document_overrides_the_established_one():
@@ -1125,10 +1340,21 @@ def test_an_abstention_and_a_live_sweep_compose_into_ONE_coherent_prompt(
     there and still agree on the string.
     """
     from app.ask_runner import UNRESOLVED_REFERENCE_HEADING, compose_ask_answer
-    from app.prompts import (
-        ASK_SYSTEM_DOCUMENTS_ADDENDUM,
-        ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
+    from app.prompts import ASK_SYSTEM_DOCUMENTS_ADDENDUM
+
+    # #1060-only surface. Skipped rather than imported at module scope so THIS
+    # file stays green if #1060 is ever reverted — the runtime does not depend
+    # on it, and a test file that goes red on main over another PR's revert is
+    # a coupling nobody asked for.
+    sweep_addendum = getattr(
+        __import__("app.prompts", fromlist=["x"]),
+        "ASK_SYSTEM_LIVE_SWEEP_ADDENDUM", None,
     )
+    if sweep_addendum is None or "live_context" not in inspect.signature(
+        compose_ask_answer
+    ).parameters:
+        pytest.skip("#1060 (cross-connector sweep) is not present")
+    ASK_SYSTEM_LIVE_SWEEP_ADDENDUM = sweep_addendum
 
     db = isolated_settings["supabase"]
     for external_id, title in (

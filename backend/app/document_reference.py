@@ -77,20 +77,36 @@ _PHRASE_SCORE = 10
 #: of them there are.
 _MIN_PIN_SCORE = _WHOLE_WORD_SCORE
 
-#: Whole-word hits normally required to pin. TWO, not one, because one common
+#: TITLE whole-word hits required to pin. TWO, not one, because one common
 #: word shared with a title is not a reference to it — and no stopword list is
 #: ever complete enough to make it one. Against a real workspace, "how many
 #: customers do we have?" pinned "Template - How-to guide" on the single word
-#: "how"; adding "how" to _ASK_WORDS fixes that instance, and this fixes the
-#: CLASS, which is the one that matters when the next title contains "when" or
-#: "get" or "make".
-_MIN_PIN_WHOLE_WORDS = 2
+#: "how"; adding "how" to _ASK_WORDS fixed that instance, and this fixes the
+#: CLASS, which is what matters when the next title contains "when" or "get".
+_MIN_PIN_TITLE_WORDS = 2
 
-#: …unless the single hit is long enough to be a name in its own right.
-#: "onboarding", "productboard", "teardown" identify a document alone;
-#: "how", "page", "plan" do not. Six characters is where a word stops being
-#: something every other sentence contains.
-_SOLO_PIN_TERM_CHARS = 6
+#: …unless the message also carries a DOCUMENT CUE, in which case one title
+#: word is enough.
+#:
+#: This replaces a length-based escape hatch (any single whole-word hit of >= 6
+#: chars could pin). That hatch reopened the exact class it was added beside:
+#: "how is onboarding going for new hires?" pinned a page titled "Onboarding",
+#: and "what's our pricing strategy for enterprise?" pinned a teardown whose
+#: TOPICS carried "pricing". Length is the wrong signal — "onboarding" is a
+#: long word and an ordinary one.
+#:
+#: The right signal is whether the message is talking ABOUT A DOCUMENT at all.
+#: "the hiring PAGE", "what's in the DOC" refer; "how is onboarding going"
+#: does not, however long its words are. Questions that merely relate to a
+#: document are Stage T's job — it has no floor and an explicit
+#: ignore-if-irrelevant rule, which is the right contract for them.
+_DOCUMENT_CUE = re.compile(
+    r"\b(?:doc|docs|document|documents|file|files|page|pages|wiki|deck|decks|"
+    r"pdf|spec|specs|report|reports|guide|guides|runbook|runbooks|memo|memos|"
+    r"write-?up|one-?pager|slide|slides|sheet|sheets|attachment|attachments|"
+    r"confluence|drive|gdrive|notion)\b",
+    re.I,
+)
 
 #: How far the winner must beat the runner-up. One whole word of separation:
 #: below that the two documents are matched on the same words and choosing
@@ -315,21 +331,48 @@ def _is_naming_token(word: str) -> bool:
     return len(word) == 2 and any(ch.isdigit() for ch in word)
 
 
+#: Characters of any one conversation turn that reference resolution reads.
+#:
+#: `routes.ask._load_history` folds ATTACHMENT TEXT into a turn's content,
+#: unclamped, so a thread carrying an imported PRD or PDF can put tens of
+#: thousands of characters into one turn. Measured before this cap: a 56 KB
+#: attachment against a 200-row catalog cost 1.09 s of synchronous CPU inside
+#: the request, before any model call, scaling linearly with the attachment.
+#:
+#: A reference lives in the words the user typed, not in a pasted appendix, so
+#: reading the head of each turn loses nothing this stage needs while bounding
+#: the cost at roughly a page of prose per turn.
+_MAX_TURN_CHARS = 2_000
+
+
+def _clamp_turn(text: str) -> str:
+    return (text or "")[:_MAX_TURN_CHARS]
+
+
 def query_terms(question: str) -> list[str]:
-    """The words that plausibly NAME a document.
+    """The words that plausibly NAME a document, DEDUPED and order-preserving.
 
     An empty result is the signal that the message named nothing — "can you
     summarize our recent internal docs" leaves nothing behind, which is exactly
     right, because it names no document. Callers must treat empty as
     "no named reference", never as "match everything".
+
+    Deduping is not tidiness. Hits were counted per OCCURRENCE, so a message
+    repeating one word ("pricing, pricing, pricing") could satisfy the
+    two-title-word reference gate from a single distinct word — the gate
+    bypassed by repetition rather than by evidence.
     """
     out: list[str] = []
+    seen: set[str] = set()
     for word in re.findall(r"[A-Za-z0-9]+", question or ""):
         lowered = word.lower()
         if not _is_naming_token(word):
             continue
         if lowered in _ASK_WORDS or lowered in _GENERIC_DOCUMENT_WORDS:
             continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
         out.append(word)
     return out
 
@@ -351,19 +394,28 @@ def _document_text(doc) -> tuple[str, set[str]]:
 
 
 def _score_detail(terms: Sequence[str], doc) -> tuple[int, int]:
-    """`(score, whole_word_hits)` for one document.
+    """`(score, title_whole_word_hits)` for one document.
 
-    The second value is tracked separately because the pin gate is not about
-    the TOTAL — it is specifically about whether any term matched a whole word.
-    A large score assembled purely from substrings still must not pin, and a
-    single number cannot express that.
+    The second value counts whole-word hits **against the TITLE ONLY**, and
+    that restriction is the whole gate. Score may draw on the title, the
+    source name and the topics, because all three are useful for RANKING. Only
+    the title may establish that a message REFERS to a document, because the
+    title is the document's name and the topics are not:
+
+        catalog: "Q3 Pricing Teardown", topics ["pricing", "discounts"]
+        message: "what's our pricing strategy for enterprise?"
+
+    That message shares a topic word and names nothing. Counting topic hits
+    toward the reference gate is what let it pin the teardown and be told to
+    answer FROM it — a general strategy question deflected into one wiki page.
+    Ranking on topics is right; REFERRING on them is not.
     """
     haystack, words = _document_text(doc)
+    title_words = _words(getattr(doc, "title", "") or "")
     if not haystack:
         return 0, 0
     score = 0
-    whole_word_hits = 0
-    longest_whole_word = 0
+    title_hits = 0
     # A "phrase" needs more than one word. Awarding the phrase bonus to a
     # single-term query would make a lone mid-word hit ("roadmap" inside
     # "Roadmapping Guidelines") score like an exact title match, which is the
@@ -378,17 +430,11 @@ def _score_detail(terms: Sequence[str], doc) -> tuple[int, int]:
             continue
         if token in words:
             score += _WHOLE_WORD_SCORE          # whole word — any length
-            whole_word_hits += 1
-            longest_whole_word = max(longest_whole_word, len(token))
+            if token in title_words:
+                title_hits += 1
         elif len(token) >= _MIN_SUBSTRING_TERM and token in haystack:
             score += _SUBSTRING_SCORE           # mid-word, only if distinctive
-    # A lone hit counts toward pinning only when the word is long enough to
-    # name a document by itself (see _SOLO_PIN_TERM_CHARS). Reported by
-    # inflating the hit count rather than as a third return value, because
-    # every caller asks the same question of it — "is this enough to pin?"
-    if whole_word_hits == 1 and longest_whole_word >= _SOLO_PIN_TERM_CHARS:
-        whole_word_hits = _MIN_PIN_WHOLE_WORDS
-    return score, whole_word_hits
+    return score, title_hits
 
 
 def score_document(terms: Sequence[str], doc) -> int:
@@ -417,41 +463,59 @@ def _rank(
     return hits
 
 
-def _pin(hits: list[tuple[int, int, Any]], basis: str) -> DocumentReference:
-    """Turn a ranking into a pin, or into a stated abstention.
+def _pin(
+    hits: list[tuple[int, int, Any]], basis: str, *, has_cue: bool
+) -> DocumentReference:
+    """Turn a ranking into one of THREE outcomes.
 
-    Three gates, and they are the whole point of the module:
+    The third one is the fix for a whole class of bug. This used to return
+    only "pin" or "abstain", so once any document scored above zero — a single
+    four-character substring against a topic was enough — the message was
+    declared to REFER to a document, and an unresolvable reference became a
+    user-visible "which document did you mean?". That produced clarifying
+    questions on "can you summarize it?", on a first message with no thread at
+    all (candidates empty, so the model could only ask a bare "which one?"),
+    and on a message naming the single document in the workspace.
 
-      * the winner must have at least one WHOLE-WORD hit. A document reached
-        only by substrings is never the referent, however high its score —
-        this is the gate that stops the phrase bonus from laundering a
-        mid-word match into a confident pin;
-      * the winner must clear `_MIN_PIN_SCORE`;
-      * the winner must beat the runner-up by `_AMBIGUITY_MARGIN` — otherwise
-        the two documents matched on the same words and picking one would be a
-        guess dressed as a resolution.
+    So:
+
+      NO REFERENCE   evidence too weak to claim the message points at a
+                     document at all. Falls through to Stage T, silently, the
+                     way every non-document question already does. This is the
+                     common case and it must be quiet.
+      ABSTAIN        evidence strong enough that the message clearly names
+                     SOMETHING, and more than one document fits. Worth asking
+                     about — this is the case the UNRESOLVED block exists for.
+      PIN            one document, clearly.
+
+    The reference gate is `_MIN_PIN_TITLE_WORDS` whole words matched against
+    the TITLE, relaxed to one when the message carries a document cue. See
+    `_DOCUMENT_CUE` for why length was the wrong signal.
     """
     if not hits:
-        return DocumentReference(
-            referenced=True, abstained=True, basis=basis,
-            reason="no document in this workspace matches that reference",
-        )
-    top_score, top_whole_words, top_doc = hits[0]
-    if top_whole_words < _MIN_PIN_WHOLE_WORDS or top_score < _MIN_PIN_SCORE:
-        return DocumentReference(
-            referenced=True, abstained=True, basis=basis,
-            reason=(
-                "the reference matched document titles too weakly — a single "
-                "common word is not enough to identify one"
-            ),
-            candidates=[doc for _, _, doc in hits[:MAX_RESOLVED_DOCUMENTS + 1]],
-        )
-    runner_up = hits[1][0] if len(hits) > 1 else 0
+        return DocumentReference()
+
+    needed = 1 if has_cue else _MIN_PIN_TITLE_WORDS
+    strong = [
+        (score, title_hits, doc) for score, title_hits, doc in hits
+        if title_hits >= needed and score >= _MIN_PIN_SCORE
+    ]
+    if not strong:
+        # Words in common, but nothing that names a document. Not a reference.
+        return DocumentReference()
+
+    top_score, _, top_doc = strong[0]
+    runner_up = strong[1][0] if len(strong) > 1 else 0
     if top_score - runner_up < _AMBIGUITY_MARGIN:
         tied = [
-            doc for score, _, doc in hits
+            doc for score, _, doc in strong
             if top_score - score < _AMBIGUITY_MARGIN
         ]
+        if len(tied) < 2:
+            # A lone qualifying document cannot be ambiguous with itself.
+            return DocumentReference(
+                documents=[top_doc], basis=basis, referenced=True,
+            )
         return DocumentReference(
             referenced=True, abstained=True, basis=basis,
             reason=(
@@ -501,7 +565,7 @@ def _resolve_named(question: str, documents: Sequence[Any]) -> DocumentReference
         # That is not a reference to a document we hold — it is a message about
         # something else, and claiming otherwise would be the overreach.
         return DocumentReference()
-    return _pin(hits, "named")
+    return _pin(hits, "named", has_cue=bool(_DOCUMENT_CUE.search(question or "")))
 
 
 def _titles_in_text(text: str, documents: Sequence[Any]) -> list[Any]:
@@ -526,27 +590,59 @@ def _titles_in_text(text: str, documents: Sequence[Any]) -> list[Any]:
     return found
 
 
+def _without_current_turn(
+    question: str, history: Optional[Sequence[dict]]
+) -> list[dict]:
+    """`history` with any trailing copy of the CURRENT message removed.
+
+    THE THREAD MUST NOT CONTAIN THE MESSAGE IT IS BEING ASKED ABOUT. When it
+    does, the backwards walk hits the current message first, re-resolves it
+    through `_resolve_named`, and returns whatever the message's own words
+    match — which is precisely what anaphora-first ordering exists to prevent.
+    Executed: for "what does it say about discounts?" after a thread about the
+    Q3 teardown, a duplicated turn pins a "Discount Policy" page instead.
+
+    This is reachable today, not hypothetically. `ChatScreen.tsx` persists the
+    user turn fire-and-forget (`void persistence.pushUserTurn(...)`) and then
+    fires the ask; `routes.ask._load_history` reads the turns table with no
+    ordering guarantee between the two. When the insert wins the race the
+    current message is in `history`, intermittently.
+
+    Fixed HERE rather than in the frontend on purpose: this function must be
+    correct for every caller, and the frontend is only one of them — Slack and
+    MCP entry points assemble history their own way, and a future one may
+    legitimately include the current turn. A resolver that is only correct
+    when its caller is well-behaved is the wrong shape for something whose
+    entire job is refusing to guess. The frontend race is still worth closing
+    on its own merits; this does not depend on it.
+    """
+    turns = list(history or [])
+    target = (question or "").strip()
+    while turns and (turns[-1].get("role") or "user").lower() == "user" \
+            and (turns[-1].get("content") or "").strip() == target:
+        turns.pop()
+    return turns
+
+
 def _established_referent(
-    history: Optional[Sequence[dict]], documents: Sequence[Any]
+    question: str, history: Optional[Sequence[dict]], documents: Sequence[Any]
 ) -> DocumentReference:
     """The document the THREAD has established, walking backwards.
 
     Most recent establishment wins, and the walk STOPS at the first turn that
-    carries a document signal — resolving or abstaining on it. Walking past an
-    ambiguous turn to find an older unambiguous one would answer about a
-    document two topics ago, which is the same confident-wrong-document failure
-    from a different direction.
+    carries a document signal. Walking past an ambiguous turn to find an older
+    unambiguous one would answer about a document two topics ago, which is the
+    same confident-wrong-document failure from a different direction.
 
     Both roles are read. A user turn is re-resolved through the same named
-    path, so every guard above applies to it unchanged. An assistant turn is
-    read for titles it mentions, and establishes a referent ONLY when exactly
-    one appears: an answer that listed five documents has established nothing,
-    and "what does it say" after that list must ask which.
+    path, so every guard applies to it unchanged. An assistant turn is read
+    for titles it mentions, and establishes a referent ONLY when exactly one
+    appears: an answer that listed five documents has established nothing.
     """
     turns = list(history or [])[-_HISTORY_LOOKBACK_TURNS:]
     for turn in reversed(turns):
         role = (turn.get("role") or "user").lower()
-        content = turn.get("content") or ""
+        content = _clamp_turn(turn.get("content") or "")
         if not content:
             continue
         if role == "assistant":
@@ -574,13 +670,19 @@ def _established_referent(
                 abstained=named.abstained, reason=named.reason,
                 candidates=named.candidates,
             )
-    return DocumentReference(
-        referenced=True, abstained=True, basis="anaphoric",
-        reason=(
-            "this message refers to a document, but no earlier turn in this "
-            "conversation established which one"
-        ),
-    )
+    # Nothing established. FALL BACK to the message's own words before giving
+    # up: "what does the doc say about Q3 pricing?" carries a document cue AND
+    # names its subject, and on a first message there is no thread to resolve
+    # against. Without this it abstained with an EMPTY candidate list, so the
+    # rendered block asked "which document do you mean?" and listed nothing —
+    # the worst possible turn-one experience, and produced by the anaphora
+    # branch claiming a message it could not serve.
+    named = _resolve_named(question, documents)
+    if named.referenced:
+        return named
+    # Genuinely nothing: no referent established, and the message names no
+    # document either. Not a reference — stay quiet and let Stage T work.
+    return DocumentReference()
 
 
 def resolve_documents(
@@ -627,12 +729,29 @@ def resolve_documents(
         # would imply there was something to pick from.
         return DocumentReference()
 
+    history = _without_current_turn(question, history)
     answered = _answer_to_our_question(question, documents, history)
     if answered is not None:
         return answered
+
+    # A message that NAMES a document strongly enough to pin outranks the
+    # thread, even when it also carries an anaphor. "forget it — summarize the
+    # Q4 board deck" contains "it", and treating that as the operative signal
+    # returned one of the previous turn's candidates while the user was
+    # plainly asking for something else.
+    #
+    # Safe only because the pin gate is strict: pinning needs two whole TITLE
+    # words, or one plus a document cue. "what does it say about discounts?"
+    # cannot pin — `discounts` matches a topic, not a title — so it still
+    # falls to the thread, which is the ordering the module argues for and the
+    # case it was written to protect.
+    named = _resolve_named(question, documents)
+    if named.documents:
+        return named
+
     if has_document_anaphora(question):
-        return _established_referent(history, documents)
-    return _resolve_named(question, documents)
+        return _established_referent(question, history, documents)
+    return named
 
 
 def narrow_candidates(reply: str, candidates: Sequence[Any]) -> list[Any]:
@@ -687,26 +806,42 @@ def narrow_candidates(reply: str, candidates: Sequence[Any]) -> list[Any]:
     return narrowed[:MAX_RESOLVED_DOCUMENTS]
 
 
-def _asked_which_document(history: Optional[Sequence[dict]]) -> Optional[str]:
-    """The message that triggered our "which document?" question, if the LAST
-    assistant turn was one. None otherwise.
+def _offered_candidates(
+    history: Optional[Sequence[dict]], documents: Sequence[Any]
+) -> list[Any]:
+    """The documents our own last answer OFFERED as a choice, or [].
 
-    Mirrors `call_index._prior_disambiguation`. Only the most recent assistant
-    turn counts: an older clarification the user already moved past must not
-    capture an unrelated message ten turns later.
+    DETECTED FROM WHAT THE MODEL ACTUALLY WRITES, not from our prompt. The
+    first version of this matched `UNRESOLVED_REFERENCE_HEADING` against the
+    assistant turn — but that heading is rendered into the SYSTEM PROMPT, and
+    an assistant turn holds the model's reply. Prompt rule 11 tells the model
+    to name the possibilities and ask; it never asks it to echo the heading.
+    So the condition could not occur in production, and step 0 was dead: we
+    asked "did you mean Q3 or Q4?", the user answered, the cold path ran, "Q4"
+    failed every guard, and we asked again — the exact dead end this step
+    exists to close, hidden because the tests fabricated the heading as
+    assistant content, a state production never produces.
+
+    What rule 11 DOES reliably produce is an answer that names the candidate
+    titles and asks a question. That is observable, so this keys on it: the
+    last assistant turn mentions two or more catalog titles and asks something.
+
+    Returns only the titles that turn actually named — never the whole
+    catalog. The previous fallback (`prior.candidates or list(documents)`)
+    turned "the second one" into an arbitrary catalog row, reported with
+    `basis="clarified"` as though the user had chosen it.
     """
     turns = list(history or [])
     for i in range(len(turns) - 1, -1, -1):
         turn = turns[i]
         if (turn.get("role") or "user") != "assistant":
             continue
-        if UNRESOLVED_REFERENCE_HEADING not in (turn.get("content") or ""):
-            return None
-        for j in range(i - 1, -1, -1):
-            if (turns[j].get("role") or "user") == "user":
-                return turns[j].get("content") or None
-        return None
-    return None
+        content = _clamp_turn(turn.get("content") or "")
+        if "?" not in content:
+            return []
+        mentioned = _titles_in_text(content, documents)
+        return mentioned if len(mentioned) >= 2 else []
+    return []
 
 
 def _answer_to_our_question(
@@ -726,33 +861,43 @@ def _answer_to_our_question(
     to the KG. Following that precedent means copying the FIX too, not only
     the guards.
 
-    Candidates are re-derived by re-resolving the original question rather than
-    stored, so this needs no state and cannot go stale.
+    Candidates come from the titles our last answer actually NAMED
+    (`_offered_candidates`) — never from the catalog at large, and never from
+    re-resolving the original question. Both of those produced a document the
+    user was never shown: "the second one" against a six-row catalog returned
+    an arbitrary row, labelled `basis="clarified"` as though it had been
+    chosen.
 
-    Returns None when the last turn was not our question, so the caller
-    proceeds normally.
+    Returns None when the last turn was not a clarifying question, so the
+    caller proceeds normally.
     """
-    original = _asked_which_document(history)
-    if original is None:
+    candidates = _offered_candidates(history, documents)
+    if len(candidates) < 2:
         return None
-    prior = _resolve_named(original, documents)
-    candidates = prior.candidates or list(documents)
+
+    # A reply that NAMES a document outright is a new request, not a
+    # selection. "forget it - summarize the Q4 board deck" used to be narrowed
+    # against the old options and return one of them; the user named a
+    # different document and got a stale candidate. Cold resolution first, and
+    # only fall back to narrowing when the reply names nothing on its own.
+    named = _resolve_named(question, documents)
+    if named.documents:
+        return named
+
     picked = narrow_candidates(question, candidates)
     if len(picked) == 1:
         logger.info("document reference: clarification answered by the user")
         return DocumentReference(
             documents=picked, basis="clarified", referenced=True,
         )
-    # Still ambiguous, or the reply changed the subject entirely. Re-abstain
-    # rather than guess — but only over what we actually offered.
+    if not picked:
+        # The reply chose nothing and named nothing — it has moved on. Let the
+        # normal path handle it rather than re-asking about stale options.
+        return None
     return DocumentReference(
         referenced=True, abstained=True, basis="clarified",
-        reason=(
-            "that reply still matches more than one of the documents offered"
-            if len(picked) > 1
-            else "it is not clear which of the offered documents that reply means"
-        ),
-        candidates=list(candidates)[: MAX_RESOLVED_DOCUMENTS + 3],
+        reason="that reply still matches more than one of the documents offered",
+        candidates=list(picked)[: MAX_RESOLVED_DOCUMENTS + 3],
     )
 
 
