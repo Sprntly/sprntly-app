@@ -187,7 +187,24 @@ function isHeadlineFlag(insight: Insight): boolean {
   return flag === true
 }
 
-function pickHeroIndex(insights: Insight[]): number {
+function pickHeroIndex(insights: Insight[], selectedTypes: string[] = []): number {
+  // 0) With an active insight-type selection, the list reaching this point is
+  //    already preference-ordered (the backend stable-partitions the pool at
+  //    generation time; selectFindingsForTypes keeps that order), so the lead
+  //    IS the hero — the reader asked for these types, and rank within them is
+  //    the ranking we computed. Taking highest-confidence here instead would
+  //    silently re-sort that away and put the browser out of step with the
+  //    emailed and Slacked brief, which lead with insights[0].
+  //    Confined to findings that actually match: when the selection matched
+  //    nothing this week the list is the unfiltered top 3 (the never-blank
+  //    fallback), and the model's own hero pick below is the honest answer.
+  if (selectedTypes.length > 0) {
+    const wanted = new Set(selectedTypes)
+    const firstMatch = insights.findIndex(
+      (ins) => Array.isArray(ins.insight_types) && ins.insight_types.some((t) => wanted.has(t)),
+    )
+    if (firstMatch >= 0) return firstMatch
+  }
   // 1) Exactly one marked is_headline → take it.
   // 2) If zero or multiple are marked → highest confidence wins.
   const marked = insights
@@ -460,7 +477,7 @@ export function companyLabel(brief: Pick<Brief, "company" | "company_name">): st
   return brief.company_name?.trim() || prettyCompany(brief.company || "")
 }
 
-function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
+function buildKpiTiles(insights: Insight[], selectedTypes: string[] = []): BriefV2KpiTile[] {
   // Tile 1: lead impact metric (from hero) — tone follows hero tag.
   // Tile 2: secondary scale metric (hero's second metric, or the first
   // metric of the next-strongest insight as a fallback).
@@ -468,7 +485,7 @@ function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
   // rather than a business signal; sources are still listed below the
   // card stack via `sourcesLine`.
   if (insights.length === 0) return []
-  const heroIdx = pickHeroIndex(insights)
+  const heroIdx = pickHeroIndex(insights, selectedTypes)
   const hero = insights[heroIdx]
   const heroMeta = metaFor(hero.tag)
   const tone: BriefV2KpiTone =
@@ -577,7 +594,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
   if (insights.length === 0) return empty
 
   const rankMap = rankWithinTag(insights)
-  const heroIdx = pickHeroIndex(insights)
+  const heroIdx = pickHeroIndex(insights, selectedTypes)
   const heroInsight = insights[heroIdx]
   const heroRank = rankMap.get(heroIdx) ?? 1
   const hero = buildHero(heroInsight, heroRank)
@@ -602,7 +619,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     generatedAt: brief.generated_at ?? null,
     company: companyLabel(brief),
     productArea,
-    kpiTiles: buildKpiTiles(insights),
+    kpiTiles: buildKpiTiles(insights, selectedTypes),
     hero,
     supporting,
     sourcesLine: buildSourcesLine(insights),
