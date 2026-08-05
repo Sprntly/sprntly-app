@@ -3276,6 +3276,24 @@ export function ChatScreen() {
       // before the optimistic turn) so an empty send can never strand a
       // placeholder on screen.
       if (trimmed.length < 1 && attachments.length === 0) return
+      // Retire the previous turn's next-prompt suggestions RIGHT HERE — the one
+      // and only place, so every entry point clears identically.
+      //
+      // This used to sit ~290 lines further down, after the intent-envelope
+      // round trip and after eighteen early returns. A typed send that resolved
+      // to `answer` reached it and looked correct; a send that took ANY command
+      // branch (edit_prd / tickets / generate_prd) returned before it and left
+      // the strip standing for the whole generation. Chip clicks hit that far
+      // more often than typing does, because a suggestion is frequently phrased
+      // as exactly the kind of request the envelope routes to a command — which
+      // is why this read as "chip clicks don't clear" (staging, 2026-08-05).
+      //
+      // Keyed on activeTabId, not the not-yet-resolved targetTabId: that is what
+      // the strip renders from, and a send that spawns a NEW tab gives that tab
+      // no suggestions to clear. Synchronous and unconditional — the instant
+      // anything is sent, suggestions about the previous turn are stale, and
+      // there is no branch where keeping them is right.
+      if (activeTabId) clearSuggestions(activeTabId)
       // Show the user's message NOW — before the dispatch decision, which is a
       // network round-trip away. `settlePendingSend()` retires it at every exit
       // below; the branch that wins renders its own real turn in the same commit.
@@ -3643,10 +3661,8 @@ export function ChatScreen() {
       }
       pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
       setActiveConv(0)
-      // The previous turn's suggestions are about a conversation that has just
-      // moved on — drop them at SEND, not when the next answer lands, so they
-      // never sit under a question they no longer follow from.
-      clearSuggestions(targetTabId)
+      // (Suggestions were cleared at the top of this function, before any await
+      // or early return — deliberately NOT here. See the note there.)
       // The conversation id resolved inside `ask` below, captured so the
       // post-answer suggestion fetch can reuse it without a second lookup.
       let askConvId: number | null = null

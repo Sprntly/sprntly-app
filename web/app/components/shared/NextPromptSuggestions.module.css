@@ -29,10 +29,24 @@
   transition: all 0.14s;
 }
 
+/* Hover is a HOVER, not a selection.
+   The first version tinted the border, the fill and the text green at once,
+   which is the same visual weight this app gives a chosen item — so a chip
+   sitting under a stationary cursor read as "you already asked this", and
+   after the list was replaced that false reading landed on a suggestion the
+   user had never clicked (staging, 2026-08-05). Only the surface moves now;
+   the border and text stay put, so the cue says "clickable", not "chosen". */
 .chip:hover {
-  border-color: #9bdcc1;
-  background: #edf8f2;
-  color: #0e6e49;
+  background: #f2f7f4;
+}
+
+/* Keyboard focus, on the other hand, SHOULD be unmistakable — and must be
+   visually distinct from hover so the two can never be confused. `:focus-visible`
+   (not `:focus`) keeps the ring off mouse clicks, which is what left a lingering
+   highlight on the clicked chip in the first place. */
+.chip:focus-visible {
+  outline: 2px solid var(--accent, #0e6e49);
+  outline-offset: 2px;
 }
 
 .chip:disabled {
