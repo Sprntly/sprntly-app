@@ -16,10 +16,10 @@ Access tokens last ~1h. Refresh tokens do NOT rotate — but Google's refresh
 response omits `refresh_token` entirely, so every write path is asserted to
 carry the stored one forward rather than blank it.
 
-Meet shares the Drive connector's OAuth CLIENT and a separate redirect URI, so
-the state provider claim is doing more work here than on any other connector: a
-Drive state is signed by the same secret, for the same Google client, and would
-otherwise verify at this callback.
+Meet carries its OWN OAuth client, separate from Drive's, because the two can be
+pointed at two different Google accounts. The state provider claim still does
+real work: both connectors sign state with the same JWT secret, so a Drive state
+would otherwise verify at this callback.
 """
 from __future__ import annotations
 
@@ -51,9 +51,14 @@ def _reload_app_modules():
 def meet_env(isolated_settings, monkeypatch):
     key = Fernet.generate_key().decode()
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", key)
-    # Deliberately the SHARED Google client — Meet does not get its own.
-    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-google-client-id")
-    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-google-client-secret")
+    # Meet's OWN client, deliberately DIFFERENT from Drive's below: the two
+    # connectors can be pointed at two different Google accounts, so every
+    # assertion that a Meet request carries the Meet client id would still pass
+    # if the code read Drive's — unless the two values differ. They differ.
+    monkeypatch.setenv("GOOGLE_MEET_CLIENT_ID", "test-meet-client-id")
+    monkeypatch.setenv("GOOGLE_MEET_CLIENT_SECRET", "test-meet-client-secret")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-drive-client-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-drive-client-secret")
     monkeypatch.setenv(
         "GOOGLE_OAUTH_REDIRECT_URI",
         "http://testserver/v1/connectors/google-drive/callback",
@@ -100,7 +105,7 @@ def test_google_meet_configured_reflects_env(meet_env, monkeypatch):
     assert google_meet.google_meet_configured() is True
 
     # The Meet redirect URI is its OWN setting — clearing it must disable Meet
-    # without touching the Drive connector that shares the client.
+    # without touching the Drive connector alongside it.
     monkeypatch.setenv("GOOGLE_MEET_OAUTH_REDIRECT_URI", "")
     _reload_app_modules()
     from app.connectors import google_meet as reloaded
@@ -110,8 +115,7 @@ def test_google_meet_configured_reflects_env(meet_env, monkeypatch):
 def test_authorize_url_requests_exactly_the_documented_scopes(meet_env):
     """`meetings.space.readonly` is the one scope that reads anything, and the
     openid/userinfo trio is what stops google-auth-oauthlib's "Scope has
-    changed" rejection (Google auto-adds them for a sign-in client, and ours is
-    shared with Drive).
+    changed" rejection (Google auto-adds them for a sign-in client).
 
     The negative assertions are the load-bearing half. A Drive scope here would
     be a RESTRICTED-tier grant, dragging this whole OAuth client through an
@@ -132,12 +136,37 @@ def test_authorize_url_requests_exactly_the_documented_scopes(meet_env):
     assert "meetings.space.created" not in joined
 
 
+def test_meet_uses_its_own_client_and_never_falls_back_to_drives(meet_env, monkeypatch):
+    """Drive and Meet can be pointed at two DIFFERENT Google accounts, so Meet
+    reads its own client triple and must never borrow Drive's.
+
+    The second half is the one that matters: with the Meet client cleared, the
+    connector must report NOT CONFIGURED. A fallback to Drive's client would
+    look like it worked here and then fail deep inside Google's consent flow
+    with a redirect_uri_mismatch — Drive's project has no Meet redirect URI
+    registered — which is a far harder failure to trace back to a missing
+    environment variable."""
+    from app.connectors import google_meet
+
+    assert google_meet.settings.google_meet_client_id == "test-meet-client-id"
+    assert google_meet.settings.google_meet_client_secret == "test-meet-client-secret"
+
+    monkeypatch.setenv("GOOGLE_MEET_CLIENT_ID", "")
+    monkeypatch.setenv("GOOGLE_MEET_CLIENT_SECRET", "")
+    _reload_app_modules()
+    from app.connectors import google_meet as reloaded
+
+    # Drive's client is still fully populated — and is NOT borrowed.
+    assert reloaded.settings.google_client_id == "test-drive-client-id"
+    assert reloaded.google_meet_configured() is False
+
+
 def test_meet_scopes_never_leak_into_the_drive_connector(meet_env):
     """THE cross-connector trap. Scopes bake into a token at consent and a
     refresh carries the old set forward, so adding a Meet scope to DRIVE_SCOPES
     would leave every already-stored Drive token claiming a capability it does
     not have — silent 403s on connections whose probe reads healthy. The two
-    lists must stay disjoint apart from the shared OIDC trio."""
+    lists must stay disjoint apart from the common OIDC trio."""
     from app.connectors import google_meet, google_oauth
 
     assert google_meet.MEET_READONLY_SCOPE not in google_oauth.DRIVE_SCOPES
@@ -152,7 +181,7 @@ def test_authorize_url_has_required_params(meet_env):
     url = google_meet.authorize_url(state="state-token")
     assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth")
     q = parse_qs(urlparse(url).query)
-    assert q["client_id"] == ["test-google-client-id"]
+    assert q["client_id"] == ["test-meet-client-id"]
     assert q["response_type"] == ["code"]
     assert q["state"] == ["state-token"]
     # Every scope, verbatim and in order.
@@ -162,7 +191,7 @@ def test_authorize_url_has_required_params(meet_env):
     # works for exactly one hour.
     assert q["access_type"] == ["offline"]
     assert q["prompt"] == ["consent"]
-    # Meet's own redirect URI, not Drive's, on a shared client.
+    # Meet's own redirect URI and own client, never Drive's.
     assert q["redirect_uri"] == [
         "http://testserver/v1/connectors/google-meet/callback"
     ]
@@ -236,8 +265,8 @@ def test_exchange_code_sends_client_credentials_in_the_body(meet_env):
     data = mock_post.call_args.kwargs["data"]
     assert data["grant_type"] == "authorization_code"
     assert data["code"] == "auth-code-123"
-    assert data["client_id"] == "test-google-client-id"
-    assert data["client_secret"] == "test-google-client-secret"
+    assert data["client_id"] == "test-meet-client-id"
+    assert data["client_secret"] == "test-meet-client-secret"
     assert data["redirect_uri"].endswith("/v1/connectors/google-meet/callback")
 
 

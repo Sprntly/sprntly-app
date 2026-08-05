@@ -15,10 +15,15 @@ Flow:
        label the connection from the OIDC id_token, and store an encrypted JSON
        blob under provider="google_meet".
 
-A SEPARATE PROVIDER FROM DRIVE, ON PURPOSE. It shares the Cloud project and the
-OAuth client (`settings.google_client_id`/`_secret`) but has its own redirect
-URI, its own connection row, its own state signer and — the load-bearing part —
-its own scope list. `google_oauth.DRIVE_SCOPES` must never grow a Meet scope:
+A SEPARATE PROVIDER FROM DRIVE, ON PURPOSE. It carries its OWN OAuth client
+(`settings.google_meet_client_id`/`_secret`), its own redirect URI, its own
+connection row, its own state signer and — the load-bearing part — its own
+scope list. The credentials are separate rather than shared with Drive because
+the two connectors need not live in the same Google account: an operator can
+run Drive against one Workspace and Meet against another, and an OAuth client
+belongs to exactly one project in one account. There is deliberately NO
+fallback to Drive's client — see the comment on `google_meet_client_id` in
+config.py. `google_oauth.DRIVE_SCOPES` must never grow a Meet scope:
 scopes are baked into a token at consent and a refresh carries the OLD set
 forward, so widening that constant would leave every already-stored Drive token
 claiming a capability it does not have. Nothing fails at the moment of the
@@ -166,8 +171,8 @@ def google_meet_configured() -> bool:
     set. The redirect URI is separate per connector even though the client is
     shared — that is what keeps the two connection rows distinct."""
     return bool(
-        settings.google_client_id
-        and settings.google_client_secret
+        settings.google_meet_client_id
+        and settings.google_meet_client_secret
         and settings.google_meet_oauth_redirect_uri
     )
 
@@ -190,7 +195,7 @@ def authorize_url(state: str) -> str:
 
     params = {
         "response_type": "code",
-        "client_id": settings.google_client_id,
+        "client_id": settings.google_meet_client_id,
         "redirect_uri": settings.google_meet_oauth_redirect_uri,
         "scope": MEET_SCOPE_STRING,
         "access_type": "offline",
@@ -279,8 +284,8 @@ def exchange_code_for_token(code: str) -> dict[str, Any]:
         data={
             "grant_type": "authorization_code",
             "code": code,
-            "client_id": settings.google_client_id,
-            "client_secret": settings.google_client_secret,
+            "client_id": settings.google_meet_client_id,
+            "client_secret": settings.google_meet_client_secret,
             "redirect_uri": settings.google_meet_oauth_redirect_uri,
         },
         timeout=15,
@@ -318,8 +323,8 @@ def refresh_access_token(refresh_token: str) -> dict[str, Any]:
         data={
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": settings.google_client_id,
-            "client_secret": settings.google_client_secret,
+            "client_id": settings.google_meet_client_id,
+            "client_secret": settings.google_meet_client_secret,
         },
         timeout=15,
     )
