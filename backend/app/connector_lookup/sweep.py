@@ -97,6 +97,19 @@ MAX_SOURCES = 8
 #: matching nothing at all (an AND-ish search over a whole sentence).
 MAX_TERMS = 8
 
+#: Share of the budget the LOCAL legs may consume before the live fan-out starts.
+#:
+#: They run first, on the calling thread, because they are DB reads and normally
+#: cost milliseconds. "Normally" was doing too much work: `list_open_pull_requests`
+#: has no row limit, so an org-wide GitHub install can make that leg slow enough
+#: to spend the whole budget before a single live source is opened — at which
+#: point every live provider is reported unread having never been contacted.
+#:
+#: Reserving the majority for the fan-out means a pathological local leg can cost
+#: at most its slice. It still gets reported honestly; it just cannot starve the
+#: sources it runs ahead of.
+LOCAL_BUDGET_SHARE = 0.35
+
 #: Terms a message must yield before ANY source is probed.
 #:
 #: ONE, lowered from two, and only because two other things changed first.
@@ -213,6 +226,12 @@ STATUS_UNAVAILABLE = "unavailable"
 #: Skipped because opening it would have rotated the tenant's OAuth token.
 #: A healthy connector we declined to touch — not a broken one.
 STATUS_REFRESH_DUE = "refresh_due"
+#: The budget was already spent before this provider was reached, so it was
+#: never contacted. DISTINCT from STATUS_TIMEOUT, which means we asked and it
+#: did not answer in time. Reporting "Jira did not answer within the time
+#: budget" about a source we never opened is a FALSE unread reason — the worst
+#: possible defect in a feature whose whole premise is honest unread reasons.
+STATUS_NOT_ATTEMPTED = "not_attempted"
 
 
 class _SessionUnavailable(Exception):
@@ -247,6 +266,11 @@ class SourceResult:
             return "did not answer within the time budget"
         if self.status == STATUS_ERROR:
             return self.detail or "could not be read just now"
+        if self.status == STATUS_NOT_ATTEMPTED:
+            return (
+                "was NOT contacted — the time budget was already spent before this "
+                "source was reached, so nothing is known about it either way"
+            )
         if self.status == STATUS_REFRESH_DUE:
             return (
                 "was NOT searched — its access token is due for renewal, and "
@@ -746,8 +770,14 @@ def _run_live(
         return results, False
     remaining = deadline - time.monotonic()
     if remaining <= 0:
+        # NEVER CONTACTED, so not a timeout. These providers were never opened —
+        # the budget ran out upstream (a slow local leg, most plausibly a large
+        # open-PR read). Marking them STATUS_TIMEOUT told the user "Jira did not
+        # answer within the time budget" about a source that was never asked.
         return [
-            SourceResult(key=p, display_name=_display(p), status=STATUS_TIMEOUT)
+            SourceResult(
+                key=p, display_name=_display(p), status=STATUS_NOT_ATTEMPTED
+            )
             for p in providers
         ], True
 
@@ -875,7 +905,13 @@ def sweep(
         }
     try:
         result.sources.extend(
-            _run_local(enterprise_id, terms, deadline, only=local_only)
+            _run_local(
+                enterprise_id, terms,
+                # Local legs get a SLICE, not the whole budget — see
+                # LOCAL_BUDGET_SHARE. The fan-out keeps the rest.
+                started + max(budget_s, 0.0) * LOCAL_BUDGET_SHARE,
+                only=local_only,
+            )
         )
     except Exception:  # noqa: BLE001
         logger.exception("cross-connector sweep: local legs failed for %s", enterprise_id)

@@ -900,3 +900,59 @@ def test_skew_covers_every_guarded_provider():
     # Slack and ClickUp do not refresh on open, so they are not guarded.
     assert "slack" not in cs._REFRESHES_ON_OPEN
     assert "clickup" not in cs._REFRESHES_ON_OPEN
+
+
+# ─────────── never-contacted is not a timeout (review item 4) ───────────
+
+
+def test_a_never_contacted_provider_is_not_reported_as_a_timeout(wire, monkeypatch):
+    """FALSE UNREAD REASON. When the budget was already spent upstream, the live
+    providers were never opened — so "Jira did not answer within the time budget"
+    is a claim about a request that was never made.
+
+    In a feature whose premise is honest unread reasons, a false unread reason is
+    the worst defect available: it is indistinguishable from a true one, and it
+    invites the model to describe a source as unresponsive when it is healthy.
+    """
+    jira = FakeAdapter("jira", result="PROJ-1")
+    wire({"jira": jira})
+
+    # Budget already exhausted before the fan-out is reached.
+    result = cs.sweep("ent-1", "checkout redesign status", budget_s=0.0)
+
+    unread = {s.key: s for s in result.unread}
+    assert unread["jira"].status == cs.STATUS_NOT_ATTEMPTED
+    assert unread["jira"].status != cs.STATUS_TIMEOUT
+    reason = unread["jira"].unread_reason()
+    assert "was NOT contacted" in reason
+    assert "did not answer" not in reason, "must not imply we asked and got silence"
+    assert jira.opened_with == [], "nothing was contacted, so nothing was opened"
+
+
+def test_a_slow_local_leg_cannot_starve_the_live_fan_out(wire, monkeypatch):
+    """ROOT CAUSE of the false timeout. Local legs run first on the calling
+    thread, and `list_open_pull_requests` has no row limit — an org-wide install
+    can make that leg slow enough to spend the whole budget before a single live
+    source is opened. They now get a bounded slice, so the fan-out still runs.
+    """
+    jira = FakeAdapter("jira", result="PROJ-9 Checkout")
+    wire({"jira": jira})
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+
+    def _slow(eid, terms):
+        time.sleep(2.0)
+        return "call rows"
+
+    monkeypatch.setattr(cs, "_leg_calls", _slow)
+
+    result = cs.sweep("ent-1", "checkout redesign status", budget_s=3.0)
+
+    # The live source was still reached despite the slow local leg.
+    assert jira.opened_with == ["ent-1"]
+    assert "jira" in {s.key for s in result.read}
+
+
+def test_local_budget_share_leaves_the_majority_for_the_fan_out():
+    """The slice must be a minority — the fan-out is the part that talks to the
+    network and is what the budget mainly exists to bound."""
+    assert 0 < cs.LOCAL_BUDGET_SHARE < 0.5
