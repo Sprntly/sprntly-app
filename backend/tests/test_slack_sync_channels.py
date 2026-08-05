@@ -78,6 +78,59 @@ def test_unavailable_channel_without_name_falls_back_to_id():
     assert "C9" in errors[0]
 
 
+# ── PRIVACY GUARD — fetch_channels never enumerates DMs (per-channel KG) ───
+#
+# The Slack bot token holds im:history/mpim:history scopes (config.py Slack
+# scope grant) — the ONLY thing preventing DM content from ever reaching a
+# `conversations.history` call is that `conversations.list` is never asked
+# to enumerate `im`/`mpim` conversations in the first place, and that only
+# `is_member` channels are ever turned into a document. Both guards are
+# written against the actual parameters sent, not against an assertion of
+# intent, so widening either one later trips a RED test rather than
+# silently shipping DM content into the knowledge graph.
+
+
+def test_slack_sync_never_enumerates_dm_conversations(monkeypatch):
+    """RED-first — add "im" (or "mpim") to slack_sync.py's `types` param at
+    the conversations.list call site and this test fails."""
+    from app.connectors import slack_sync
+
+    captured_params: list[dict] = []
+
+    def _fake_slack_get(url, token, params=None, timeout=30):
+        captured_params.append(dict(params or {}))
+        return {"ok": True, "channels": []}
+
+    monkeypatch.setattr(slack_sync, "_slack_get", _fake_slack_get)
+    slack_sync.fetch_channels("xoxb-test")
+
+    assert captured_params, "conversations.list was never called"
+    for params in captured_params:
+        types = {t.strip() for t in params.get("types", "").split(",")}
+        assert "im" not in types
+        assert "mpim" not in types
+
+
+def test_slack_extract_ingests_only_bot_member_channels(monkeypatch):
+    """A channel the bot is not a member of is never turned into a
+    document — `fetch_channels` filters it out before anything downstream
+    (including the new per-channel KG path) ever sees it."""
+    from app.connectors import slack_sync
+
+    def _fake_slack_get(url, token, params=None, timeout=30):
+        return {
+            "ok": True,
+            "channels": [
+                {"id": "C1", "name": "general", "is_member": True},
+                {"id": "C2", "name": "not-invited", "is_member": False},
+            ],
+        }
+
+    monkeypatch.setattr(slack_sync, "_slack_get", _fake_slack_get)
+    channels = slack_sync.fetch_channels("xoxb-test")
+    assert [c["id"] for c in channels] == ["C1"]
+
+
 # ── resolve_company_slack_row — which install is "the company's" ────────────
 #
 # Voice-of-customer pulling is company-level: one Slack row serves the whole
