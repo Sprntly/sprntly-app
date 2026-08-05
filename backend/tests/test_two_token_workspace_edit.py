@@ -4,12 +4,13 @@ artifact" must be able to edit PRDs and tickets.
 Run it:
 
     cd backend
-    .venv/bin/python -m pytest tests/proof_two_token_workspace_edit.py -q
-    cat /tmp/sprntly-two-token-proof.txt
+    PROOF_OUT=/tmp/proof.txt .venv/bin/python -m pytest \
+        tests/test_two_token_workspace_edit.py -q && cat /tmp/proof.txt
 
-Named `proof_*` on purpose: pytest only auto-collects `test_*.py`, so this
-never runs in CI. It is an on-demand acceptance artifact. It writes its
-report to /tmp/sprntly-two-token-proof.txt (override with PROOF_OUT).
+Named `test_*` so pytest DOES collect it — it ran as `proof_*` originally,
+which meant this acceptance evidence never executed in CI and could rot
+unnoticed. Set PROOF_OUT to also dump the human-readable report to a file;
+without it the assertions still run, they just print nothing.
 
 WHY THIS SHAPE, AND NOT LIVE STAGING
 ------------------------------------
@@ -63,7 +64,7 @@ from fastapi.testclient import TestClient
 
 from tests._company_helpers import seed_company, setup_supabase_auth, supabase_bearer
 
-OUT_PATH = os.environ.get("PROOF_OUT", "/tmp/sprntly-two-token-proof.txt")
+OUT_PATH = os.environ.get("PROOF_OUT")  # unset in CI: assert only, no file
 
 # `PUT /v1/prd/{id}` is first and deliberately so: that is the endpoint the
 # PRD editor's AUTOSAVE calls (PrdHtmlView.tsx -> prdApi.update), not some
@@ -288,9 +289,10 @@ def test_proof(isolated_settings, monkeypatch):
     say("=" * 78)
 
     report = "\n".join(log)
-    with open(OUT_PATH, "w") as fh:
-        fh.write(report + "\n")
-    print("\n" + report + f"\n[report written to {OUT_PATH}]\n")
+    if OUT_PATH:
+        with open(OUT_PATH, "w") as fh:
+            fh.write(report + "\n")
+        print("\n" + report + f"\n[report written to {OUT_PATH}]\n")
 
     # ── Assertions, so a wrong story fails loudly instead of printing ──────
 
@@ -346,7 +348,7 @@ def test_proof(isolated_settings, monkeypatch):
     )
     a_row = [r for r in c_rows if r["company_id"] == company]
     assert len(a_row) == 1, "expected exactly one ticket_edits row in A's company"
-    # D (viewer) writes after C in the loop above, so whoever the LAST
+    # The loop order is A, B, C, D, E — so E writes last, and whoever the LAST
     # in-company writer was owns the title. What matters is that it is never
     # C's — an out-of-company write must never reach this row.
     assert a_row[0]["title"] != "Retitled by C", (

@@ -287,15 +287,29 @@ def user_can_act_in_workspace(
     to build a context from.
 
     `workspace_id=None` is an unbound legacy dataset (pre-multi-workspace
-    rollout). `deps.ownership._dataset_in_workspace` accepts those from any
-    workspace of the owning company, so an in-app open genuinely works —
-    hence True. Every other unresolvable case fails CLOSED (missing
-    workspace, or one belonging to a different company): returning False
-    only ever costs the caller the guest viewer they get today, whereas a
-    wrong True would route them into an app view that 404s.
+    rollout). `deps.ownership._dataset_in_workspace` DOES accept those from
+    any workspace of the owning company — but only once the request already
+    holds a WorkspaceContext, and `_resolve_workspace` is what decides that.
+    A plain member with no `workspace_members` row anywhere never gets one:
+    the no-header path falls back to `ensure_default_workspace` and then
+    403s "Not a member of this workspace". So an unbound dataset is NOT
+    unconditionally reachable, and answering True for everyone sent exactly
+    the caller `ArtifactShareGate` exists to protect — a domain-matched
+    fresh signup holding company membership and no workspace row — into an
+    app that 403s, with no Join prompt, when they used to get a working
+    read-only viewer. The question here is therefore "can this caller
+    obtain a WorkspaceContext at all?", which is what
+    `list_workspaces_for_user` answers.
+
+    Every other unresolvable case fails CLOSED (missing workspace, or one
+    belonging to a different company): returning False only ever costs the
+    caller the guest viewer they already get, whereas a wrong True routes
+    them into an app view that 404s or 403s.
     """
     if workspace_id is None:
-        return True
+        if company_role in ("owner", "admin"):
+            return True
+        return bool(list_workspaces_for_user(company_id, user_id, company_role))
     ws = get_workspace(workspace_id)
     if not ws or ws.get("company_id") != company_id:
         return False

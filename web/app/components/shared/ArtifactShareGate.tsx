@@ -83,11 +83,23 @@ type ArtifactShareGateProps =
  *  the fallback for a (currently unreachable) PRD row with no public_id, and
  *  is accepted as a legacy `?prd=` form by useArtifactUrlSync — same
  *  defensive shape postLoginPath and JoinConfirmModal already use. */
-function memberAppUrl(outcome: {
-  public_id?: string | null
-  artifact_id: number
-}): string {
-  const param = outcome.public_id ?? String(outcome.artifact_id)
+function memberAppUrl(
+  outcome: { public_id?: string | null; artifact_id: number },
+  publicId: string | null,
+): string {
+  // Identifier precedence, opaque first:
+  //   1. the resolve payload's own public_id (token mode returns it);
+  //   2. `publicId` — the bare-link mode's URL parameter, which IS the
+  //      opaque id. Without this the bare-link branch fell through to the
+  //      raw artifact_id even though the component was already holding the
+  //      opaque one, putting `/?prd=1881` in the address bar and undoing
+  //      the "never expose the sequential id" rule prd_access.py states in
+  //      capitals. A re-shared `/?prd=1881` also 404s for a colleague, where
+  //      the public_id form would have given them guest_view + Join.
+  //   3. the raw id, only when neither exists — a PRD row with no public_id,
+  //      currently unreachable, and accepted by useArtifactUrlSync as the
+  //      legacy `?prd=` form.
+  const param = outcome.public_id ?? publicId ?? String(outcome.artifact_id)
   return `/?prd=${encodeURIComponent(param)}`
 }
 
@@ -108,8 +120,8 @@ export function ArtifactShareGate({ token, publicId }: ArtifactShareGateProps) {
     if (auth.kind === "authed") {
       presetActiveWorkspace(auth.user.id, resolveState.outcome.owner_workspace_id)
     }
-    window.location.assign(memberAppUrl(resolveState.outcome))
-  }, [resolveState, auth])
+    window.location.assign(memberAppUrl(resolveState.outcome, publicId ?? null))
+  }, [resolveState, auth, publicId])
 
   useEffect(() => {
     if (auth.kind !== "authed") return

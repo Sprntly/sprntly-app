@@ -173,11 +173,40 @@ describe("ArtifactShareGate — member outcome (bare link)", () => {
       </ArtifactShareGate>,
     )
 
-    // No public_id on this payload — the caller already has it in the URL, so
-    // the artifact_id fallback is the expected form here.
-    await waitFor(() => expect(assignMock).toHaveBeenCalledWith("/?prd=1881"))
+    // The bare-link resolve payload carries NO public_id — but the component
+    // is holding the opaque id in its own `publicId` prop, so that is what
+    // the URL must use. This previously fell through to the raw sequential
+    // artifact_id (`/?prd=1881`), undoing the "never expose the sequential
+    // id" rule and producing a re-shareable link that 404s for a colleague.
+    await waitFor(() =>
+      expect(assignMock).toHaveBeenCalledWith(
+        "/?prd=042494cd-22c0-4c20-9967-cc761d192ae0",
+      ),
+    )
+    expect(assignMock.mock.calls[0][0]).not.toContain("1881")
     expect(screen.queryByTestId("guest-viewer")).toBeNull()
     expect(presetMock).toHaveBeenCalledWith("user-42", "ws-default")
+  })
+
+  it("falls back to the raw id only when neither opaque id is available", async () => {
+    prdResolveMock.mockResolvedValue({
+      outcome: "member",
+      artifact_type: "prd",
+      artifact_id: 1881,
+      owner_workspace_id: "ws-default",
+      owning_company_name: "Acme Co",
+    })
+
+    // Token mode with a null public_id and no publicId prop — the only path
+    // left with nothing opaque to use.
+    resolveMock.mockResolvedValue({ ...MEMBER_SHARE, public_id: null })
+    render(
+      <ArtifactShareGate token="tok">
+        <AppTreeSpy />
+      </ArtifactShareGate>,
+    )
+
+    await waitFor(() => expect(assignMock).toHaveBeenCalledWith("/?prd=482"))
   })
 })
 

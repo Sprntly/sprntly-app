@@ -97,6 +97,16 @@ def test_resolve_route_same_company_member(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     db = isolated_settings["db"]
     prd_id, public_id = _seed_prd_with_public_id(db, "acme")
+    # Bind the dataset, or `user_can_act_in_workspace` takes its unbound
+    # short-circuit and this asserts nothing about workspace scoping.
+    # seed_company creates no datasets row — see _bind_dataset in
+    # tests/test_share_member_edit_access.py for the full explanation.
+    from app.db.client import require_client
+
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    require_client().table("datasets").insert(
+        {"slug": "acme", "display_name": "Acme", "workspace_id": default_ws["id"]}
+    ).execute()
 
     r = ctx.client.get(f"/v1/prd-access/{public_id}/resolve")
 
