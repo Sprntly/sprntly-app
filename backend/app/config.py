@@ -362,6 +362,18 @@ class Settings(BaseSettings):
     # Setting it false disables the sweep for EVERY company regardless of flags.
     chat_cross_connector_sweep: bool = True
 
+    # Persist a cross-connector sweep's genuinely-new reads into the KG
+    # (app/connector_lookup/sweep_persist.py), instead of discarding them once
+    # the answer they fed is returned. Default OFF for staged rollout: the
+    # sweep only ever reaches sources the scheduled 6-hourly pull already
+    # covers, so this earns its keep only where the pull's caps (message/record
+    # counts, per-page char limits) miss material the sweep's demand-driven
+    # probe reaches — flip on per environment once that's confirmed live.
+    # Independent of `chat_cross_connector_sweep` above: that gates whether the
+    # sweep RUNS at all; this gates only whether its output is ALSO written to
+    # the KG. Off means today's behavior exactly — sweep runs, nothing persists.
+    sweep_kg_persist_enabled: bool = False
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
