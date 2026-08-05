@@ -63,8 +63,14 @@ def _maybe_refresh_token(
     we persist the whole new payload on every refresh. Confluence and Zoom
     additionally require company_id to survive the rewrite, because that is the
     credential their pullers are handed (see
-    confluence_oauth.token_payload_to_store)."""
-    if provider not in ("github", "jira", "confluence", "zoom"):
+    confluence_oauth.token_payload_to_store).
+
+    Google Meet is here for a DIFFERENT reason. Its refresh tokens do not
+    rotate, so nothing is stranded by a throwaway refresh — but Google's refresh
+    response omits `refresh_token` ENTIRELY, so persisting it verbatim blanks
+    the stored one and the connection dies at the following cycle. It carries
+    the same company_id obligation as Confluence and Zoom."""
+    if provider not in ("github", "jira", "confluence", "zoom", "google_meet"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -93,6 +99,20 @@ def _maybe_refresh_token(
                 # NEXT sync, not this refresh, because token_for("zoom", ...)
                 # reads exactly this field.
                 company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "google_meet":
+            from app.connectors import google_meet
+
+            new_json_str = google_meet.token_payload_to_store(
+                google_meet.refresh_access_token(refresh_token),
+                # Same trap as confluence/zoom above: dropping this here breaks
+                # the NEXT sync, not this refresh, because
+                # token_for("google_meet", ...) reads exactly this field.
+                company_id=company_id,
+                # And this one is not optional on Google: the refresh response
+                # has no refresh_token at all, so without the carry-forward the
+                # stored credential is replaced by nothing.
                 keep_refresh_token=refresh_token,
             )
         elif provider == "jira":

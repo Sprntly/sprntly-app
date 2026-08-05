@@ -169,6 +169,28 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
+    #
+    # Sharing was the original design (one Cloud project, one client, a second
+    # redirect URI), and it works when both connectors live in the same Google
+    # account. They need not: an operator can run Drive against one Workspace
+    # and Meet against another, which is exactly how this was first deployed.
+    # A shared client cannot express that — the client belongs to one project
+    # in one account — so Meet carries its own triple and FALLS BACK TO
+    # NOTHING. An unset Meet client makes `google_meet_configured()` False and
+    # the connector renders as not-configured, which is a legible state; a
+    # silent fallback to Drive's client would instead authorize against the
+    # wrong Google project and fail deep inside the consent flow with a
+    # redirect_uri_mismatch nobody can trace back to here.
+    #
+    # The SCOPES are deliberately NOT shared either: google_oauth.DRIVE_SCOPES
+    # must never grow a Meet scope. Scopes bake into a token at consent and a
+    # refresh carries the old set forward, so widening the constant would leave
+    # every stored Drive token claiming a capability it does not have — silent
+    # 403s on a connection that reports healthy. See google_meet.MEET_SCOPES.
+    google_meet_client_id: str = ""
+    google_meet_client_secret: str = ""
+    google_meet_oauth_redirect_uri: str = ""
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 

@@ -77,6 +77,7 @@ from app.connectors import (
     figma_oauth,
     fireflies_apikey,
     github_app,
+    google_meet,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
@@ -538,6 +539,18 @@ def start_oauth(
             raise HTTPException(500, "Zoom OAuth is not configured on the server")
         url = zoom_oauth.authorize_url(
             state=zoom_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == google_meet.GOOGLE_MEET_PROVIDER:
+        if not google_meet.google_meet_configured():
+            raise HTTPException(
+                500, "Google Meet OAuth is not configured on the server"
+            )
+        url = google_meet.authorize_url(
+            state=google_meet.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -2325,6 +2338,168 @@ def zoom_save_sync_users(
     # user just told us what they want ingested.
     kickoff_sync(company.company_id, zoom_oauth.ZOOM_PROVIDER)
     return {"ok": True, "config": config}
+
+
+# ─────────────────────── Google Meet ───────────────────────
+#
+# Meeting transcripts, read from the Meet REST API v2. Shares the Google Cloud
+# project and OAuth client with the Drive connector but is a fully separate
+# provider — its own redirect URI, its own connection row, its own state signer
+# and its own scope list (see connectors/google_meet.py for why the scope lists
+# must never merge).
+#
+# NOT ORG-WIDE, and this is the opposite of Zoom. Google exposes only the
+# conferences the connected account ORGANIZED; there is no admin-level listing
+# and no scope that would add one. It is nevertheless treated as an ORG
+# connector for RBAC (absent from _PERSONAL_PROVIDERS, every mutation behind
+# _require_admin_for_org_connector), because the connection row is
+# company-scoped: one row per company, so whoever holds it decides what the
+# whole workspace ingests. Per-user Meet connections would need the per-user
+# row shape Slack has, which is its own change.
+#
+# There is no picker route. There is nothing to pick: coverage is fixed to the
+# connecting account's own meetings, and the 30-day retention window is Google's
+# to set, not the customer's.
+
+
+@router.get("/google-meet/callback")
+def google_meet_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Google's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Google calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state (including the Drive connector's, minted by the very same
+    OAuth client) being replayed here.
+    """
+    payload = google_meet.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. Google's own error string is never
+    # forwarded — it changes without notice and would land straight on a screen
+    # — so this collapses to two stable codes the return page maps to copy:
+    # the user declined (nothing is wrong, try again and accept), or anything
+    # else (honest generic failure).
+    if error:
+        logger.warning(
+            "Google Meet consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        code_out = (
+            "google_meet_consent_declined"
+            if (error or "").strip().lower() == "access_denied"
+            else "google_meet_oauth_failed"
+        )
+        return _build_post_oauth_error_redirect(
+            payload, google_meet.GOOGLE_MEET_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Google Meet did not return an authorization code")
+
+    token_json = google_meet.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Google Meet did not return an access_token")
+
+    # The email comes free out of the OIDC id_token (we request openid +
+    # userinfo.email), so the common path costs no extra round trip. The
+    # userinfo call is only the fallback, and a failure there costs the LABEL,
+    # never the connection: userinfo answers on a different scope from every
+    # meeting read, so it says nothing about whether the connector works. The
+    # probe validates the read that matters.
+    email = google_meet.email_from_id_token(token_json)
+    user = {} if email else google_meet.fetch_current_user(access_token)
+    label = google_meet.account_label_from(user, email=email)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed — see
+            # google_meet.token_payload_to_store.
+            google_meet.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect. Writing a fresh dict would drop
+    # whatever else lives there — today the puller's sync counters, tomorrow
+    # anything a config surface adds — which is exactly the regression the Zoom
+    # callback had to be fixed for (there it silently widened a narrowed host
+    # selection back to every host, once a quarter, with no event to trace it
+    # to). Start from the existing config and only add.
+    existing = db.get_connection(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only {id, email} of the identity payload is kept — config_json is returned
+    # verbatim to every company member by GET /v1/connectors, and Google's
+    # userinfo carries the connecting person's full name, profile picture URL,
+    # locale and hosted domain. An identity lookup that produced nothing writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    identity = google_meet.identity_to_store(user, email=email)
+    if identity.get("id") or identity.get("email"):
+        config[google_meet.CONFIG_USER] = identity
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_meet.GOOGLE_MEET_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=google_meet.MEET_SCOPE_STRING,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep. It matters more here
+    # than on any other connector: the corpus is only ever the last 30 days, so
+    # every hour of delay is an hour of the window that will expire unread.
+    kickoff_sync(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, google_meet.GOOGLE_MEET_PROVIDER)
+
+
+@router.delete("/google-meet")
+def google_meet_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Google Meet, revoking the grant on Google's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete. It
+    matters more than on the connectors with a token clock: Google refresh
+    tokens do not expire on a schedule, so one we merely forget stays live
+    indefinitely — a permanent credential to this customer's meeting
+    transcripts, in a token store we no longer show them. If the revoke fails we
+    still delete: the user asked to disconnect, and keeping our copy would be
+    the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, google_meet.GOOGLE_MEET_PROVIDER)
+    row = db.get_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Meet is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        # The refresh token is the one worth killing — revoking any token of a
+        # grant invalidates the whole grant, and the access token would have
+        # expired within the hour anyway.
+        google_meet.revoke_token(
+            token_json.get("refresh_token") or token_json.get("access_token") or ""
+        )
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Google Meet revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    return {"deleted": True, "provider": google_meet.GOOGLE_MEET_PROVIDER}
 
 
 # ─────────────────────── HubSpot ───────────────────────

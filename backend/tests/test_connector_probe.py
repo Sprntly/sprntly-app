@@ -604,3 +604,211 @@ def test_zoom_probe_is_registered_at_all(monkeypatch, _zoom_recordings_ok):
                    "expires_in": 3600}),
     )
     assert healthy is True
+
+
+# ─────────────────────────── Google Meet ───────────────────────────
+#
+# 1h access tokens with NON-rotating refresh tokens — so the "spent the stored
+# one" hazard Zoom and Atlassian have is absent here. The trap is the mirror
+# image: Google's refresh response omits `refresh_token` ENTIRELY, so storing it
+# verbatim blanks the stored one and reaches the same dead end. Same company_id
+# obligation as Confluence and Zoom: it is the credential the puller is handed.
+
+
+def _meet_row(token: dict) -> dict:
+    row = _row("google_meet", token)
+    row["company_id"] = "co-42"
+    row["config_json"] = json.dumps(
+        {"user": {"id": "google-sub-1", "email": "pm@acme.test"}}
+    )
+    return row
+
+
+@pytest.fixture
+def _meet_conferences_ok(monkeypatch):
+    """Default the conference-records read — the probe's real assertion — to
+    passing, so the labelling tests isolate the label logic."""
+    monkeypatch.setattr(
+        connector_probe.google_meet, "list_conference_records",
+        lambda tok, **kw: [],
+    )
+
+
+def test_meet_probes_the_conference_read_not_the_identity_call(monkeypatch):
+    """The defect this probe exists to catch, and the one that already shipped
+    once on Confluence (a1e16c40). Google's userinfo answers on
+    `userinfo.email` while every meeting read answers on
+    `meetings.space.readonly` — and those genuinely come apart, because the Meet
+    API has to be ENABLED on the Cloud project and can be blocked for a
+    Workspace by its admin, neither of which touches sign-in. An identity-only
+    probe would report GREEN on a token whose every sync 403s."""
+    import time
+
+    def _rejected(_tok, **_kw):
+        raise connector_probe.google_meet.MeetAuthExpiredError(
+            "Google rejected the stored token"
+        )
+
+    monkeypatch.setattr(
+        connector_probe.google_meet, "list_conference_records", _rejected
+    )
+    # Identity would succeed — which is exactly why it must not be the probe.
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user",
+        lambda tok: {"email": "pm@acme.test"},
+    )
+    with pytest.raises(ProbeError) as ei:
+        probe_connection(
+            "google_meet",
+            _meet_row({
+                "access_token": "t", "refresh_token": "r",
+                "obtained_at": int(time.time()), "expires_in": 3600,
+            }),
+        )
+    assert ei.value.reason == "rejected"
+
+
+def test_meet_probe_asks_for_exactly_one_record(monkeypatch):
+    """A health check must not walk 30 days of a customer's calendar."""
+    import time
+
+    seen: dict = {}
+
+    def _list(_tok, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(connector_probe.google_meet, "list_conference_records", _list)
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user",
+        lambda tok: {"email": "pm@acme.test"},
+    )
+    probe_connection(
+        "google_meet",
+        _meet_row({"access_token": "t", "obtained_at": int(time.time()),
+                   "expires_in": 3600}),
+    )
+    assert seen == {"page_size": 1, "max_pages": 1}
+
+
+def test_meet_healthy_with_no_conferences_in_the_window(
+    monkeypatch, _meet_conferences_ok
+):
+    """This matters more here than on any other connector. Coverage is
+    organizer-only over a 30-day window, so a PM who chairs no meetings
+    legitimately has NOTHING — and calling that disconnected would send a
+    customer to reconnect something that works perfectly."""
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user",
+        lambda tok: {"email": "pm@acme.test"},
+    )
+    healthy, detail = probe_connection(
+        "google_meet",
+        _meet_row({"access_token": "t", "obtained_at": int(time.time()),
+                   "expires_in": 3600}),
+    )
+    assert healthy is True
+    assert detail == "pm@acme.test"
+
+
+def test_meet_healthy_with_the_stored_label_when_identity_is_refused(
+    monkeypatch, _meet_conferences_ok
+):
+    """The read check passed, so the connection IS healthy even though the
+    identity lookup came back empty."""
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user", lambda tok: {},
+    )
+    row = _meet_row({"access_token": "t", "obtained_at": int(time.time()),
+                     "expires_in": 3600})
+    row["account_label"] = "pm@acme.test"
+    healthy, detail = probe_connection("google_meet", row)
+    assert healthy is True
+    assert detail == "pm@acme.test"
+
+
+def test_meet_refresh_carries_the_refresh_token_google_omits(
+    monkeypatch, _meet_conferences_ok
+):
+    """The highest-risk regression in this connector. Google's refresh response
+    has NO refresh_token field, so persisting it verbatim blanks the stored one
+    — and nothing fails at the moment of the mistake, only at the next cycle.
+    company_id has to survive the rewrite for the same delayed-blast-radius
+    reason: `runner.token_for` raises on the NEXT sync."""
+    persisted: dict = {}
+
+    monkeypatch.setattr(
+        connector_probe.google_meet, "refresh_access_token",
+        # Exactly what Google returns: no refresh_token.
+        lambda rt: {"access_token": "fresh", "expires_in": 3599},
+    )
+    monkeypatch.setattr(connector_probe, "encrypt_token_json", lambda blob: blob)
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user",
+        lambda tok: {"email": "pm@acme.test"},
+    )
+
+    from app import db
+
+    monkeypatch.setattr(
+        db, "update_connection_tokens",
+        lambda cid, provider, blob: persisted.update(
+            {"company_id": cid, "provider": provider, "blob": blob}
+        ),
+    )
+
+    healthy, _ = probe_connection(
+        "google_meet",
+        # obtained_at 0 → provably expired → the refresh path runs.
+        _meet_row({
+            "access_token": "stale", "refresh_token": "the-only-refresh-token",
+            "obtained_at": 0, "expires_in": 3600, "company_id": "co-42",
+        }),
+    )
+    assert healthy is True
+    assert persisted["provider"] == "google_meet"
+    stored = json.loads(persisted["blob"])
+    assert stored["access_token"] == "fresh"
+    assert stored["refresh_token"] == "the-only-refresh-token"  # not blanked
+    assert stored["company_id"] == "co-42"                      # puller's credential
+
+
+def test_meet_refresh_rejection_raises_probe_error(monkeypatch):
+    """A revoked grant (or the 7-day Testing-mode expiry) must yield the probe
+    failure that stamps health: "disconnected" — that is what the web's
+    reconnect prompt keys off."""
+    def _dead(_rt):
+        raise connector_probe.google_meet.MeetAuthExpiredError("invalid_grant")
+
+    monkeypatch.setattr(connector_probe.google_meet, "refresh_access_token", _dead)
+    with pytest.raises(ProbeError) as ei:
+        probe_connection(
+            "google_meet",
+            _meet_row({
+                "access_token": "stale", "refresh_token": "dead",
+                "obtained_at": 0, "expires_in": 3600,
+            }),
+        )
+    assert ei.value.reason == "rejected"
+
+
+def test_meet_probe_is_registered_at_all(monkeypatch, _meet_conferences_ok):
+    """probe_connection raises ProbeError("unsupported") for an unknown
+    provider, and connector_health sweeps every connection row hourly — so a
+    callback shipped without its probe branch logs a hard failure per company
+    per cycle. This is the guard against that."""
+    import time
+
+    monkeypatch.setattr(
+        connector_probe.google_meet, "fetch_current_user", lambda tok: {},
+    )
+    healthy, _ = probe_connection(
+        "google_meet",
+        _meet_row({"access_token": "t", "obtained_at": int(time.time()),
+                   "expires_in": 3600}),
+    )
+    assert healthy is True

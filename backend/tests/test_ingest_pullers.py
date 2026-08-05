@@ -1096,6 +1096,362 @@ def test_the_scheduler_picks_zoom_up_with_no_scheduler_edit():
     assert "zoom" in PULLERS
 
 
+# ---------- google meet puller ----------
+#
+# Like Zoom and Confluence, the credential is a COMPANY ID, so every test stubs
+# sync_context (the seam that reads the connection row) plus the Meet read
+# helpers — all in the puller's own namespace, per house style.
+#
+# The shape is deliberately different from Zoom's in the two ways Google's API
+# is: the transcript arrives as STRUCTURED ENTRIES (no file, no VTT parsing) and
+# speaker attribution comes from a separate participants listing that has to be
+# joined on the participant resource name.
+
+
+def _gmctx(email="pm@acme.co"):
+    from app.connectors.google_meet import MeetContext
+
+    return MeetContext(
+        company_id="co-1", access_token="tok", account_email=email,
+    )
+
+
+def _conference(name="conferenceRecords/c1", start="2026-07-20T10:00:00Z"):
+    return {
+        "name": name,
+        "startTime": start,
+        "endTime": "2026-07-20T10:42:00Z",
+        "space": "spaces/abc123",
+    }
+
+
+_GM_PARTICIPANTS = [
+    {"name": "conferenceRecords/c1/participants/p1",
+     "signedinUser": {"user": "users/1", "displayName": "Sam Lee"}},
+    {"name": "conferenceRecords/c1/participants/p2",
+     "anonymousUser": {"displayName": "Kim Patel"}},
+]
+
+_GM_ENTRIES = [
+    {"participant": "conferenceRecords/c1/participants/p1",
+     "text": "Right, the renewal."},
+    {"participant": "conferenceRecords/c1/participants/p1",
+     "text": "They will not sign without SSO."},
+    {"participant": "conferenceRecords/c1/participants/p2",
+     "text": "That is the third account this quarter."},
+]
+
+
+def _gmstub(
+    monkeypatch,
+    ctx,
+    *,
+    conferences=None,
+    transcripts=None,
+    entries=None,
+    participants=None,
+):
+    """Route the Meet read helpers, recording what was asked for so a test can
+    assert WHAT was fetched, not just what came back."""
+    from app.kg_ingest.pullers import google_meet
+
+    asked: dict[str, list] = {"transcripts": [], "entries": [], "participants": []}
+
+    def fake_transcripts(_tok, conference, **_kw):
+        asked["transcripts"].append(conference)
+        if transcripts is None:
+            return [{"name": f"{conference}/transcripts/t1",
+                     "state": "FILE_GENERATED"}]
+        return list(transcripts)
+
+    def fake_entries(_tok, transcript, **_kw):
+        asked["entries"].append(transcript)
+        return list(_GM_ENTRIES if entries is None else entries)
+
+    def fake_participants(_tok, conference, **_kw):
+        asked["participants"].append(conference)
+        return list(_GM_PARTICIPANTS if participants is None else participants)
+
+    monkeypatch.setattr(google_meet, "sync_context", lambda cid: ctx)
+    monkeypatch.setattr(
+        google_meet, "list_conference_records",
+        lambda _tok, **kw: list(
+            [_conference()] if conferences is None else conferences
+        ),
+    )
+    monkeypatch.setattr(google_meet, "list_transcripts", fake_transcripts)
+    monkeypatch.setattr(google_meet, "list_transcript_entries", fake_entries)
+    monkeypatch.setattr(google_meet, "list_participants", fake_participants)
+    monkeypatch.setattr(google_meet, "_stamp_counters", lambda *a, **k: None)
+    return google_meet, asked
+
+
+# ── Entry joining ────────────────────────────────────────────────────────────
+
+
+def test_entries_join_into_speaker_attributed_text_and_merge_runs():
+    """Google emits an entry per utterance, so an unmerged transcript is
+    hundreds of one-line fragments — which reads to an extractor as hundreds of
+    disconnected statements rather than one person making one argument."""
+    from app.kg_ingest.pullers.google_meet import join_entries
+
+    speakers = {
+        "conferenceRecords/c1/participants/p1": "Sam Lee",
+        "conferenceRecords/c1/participants/p2": "Kim Patel",
+    }
+    text, ordered = join_entries(_GM_ENTRIES, speakers)
+    assert text == (
+        "Sam Lee: Right, the renewal. They will not sign without SSO.\n"
+        "Kim Patel: That is the third account this quarter."
+    )
+    assert ordered == ["Sam Lee", "Kim Patel"]
+
+
+def test_an_unknown_speaker_keeps_its_words():
+    """A participant who left before the listing, or a listing that failed. A
+    wrong speaker label is asserted misinformation; a missing one is only less
+    detail."""
+    from app.kg_ingest.pullers.google_meet import join_entries
+
+    text, ordered = join_entries(_GM_ENTRIES, {})
+    assert "They will not sign without SSO." in text
+    assert "That is the third account this quarter." in text
+    assert ordered == []
+    assert ":" not in text.split("\n")[0][:20]
+
+
+# ── The pull ─────────────────────────────────────────────────────────────────
+
+
+def test_google_meet_puller_yields_transcript_records(monkeypatch):
+    gm, asked = _gmstub(monkeypatch, _gmctx())
+    recs = list(gm.pull("co-1"))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.provider, r.kind, r.external_id) == (
+        "google_meet", "meeting", "conferenceRecords/c1",
+    )
+    assert "Sam Lee: Right, the renewal." in r.text
+    assert r.properties["has_transcript"] is True
+    assert r.properties["speakers"] == ["Sam Lee", "Kim Patel"]
+    assert r.properties["participants"] == ["Kim Patel", "Sam Lee"]
+    assert r.properties["start_time"] == "2026-07-20T10:00:00Z"
+    assert r.timestamp == "2026-07-20T10:00:00Z"
+    # Coverage is organizer-only, so WHOSE calendar this came from is part of
+    # the record, not bookkeeping.
+    assert r.properties["organizer_email"] == "pm@acme.co"
+    # A label a person can recognise the call by — the API exposes no subject
+    # line, so it is built from who was there plus when.
+    assert "Sam Lee" in r.title and "2026-07-20" in r.title
+
+
+def test_transcript_entries_paginate_past_the_100_cap(monkeypatch):
+    """The real API caps a page at 100 and defaults to TEN. This asserts the
+    puller consumes whatever the paging helper returns rather than a first
+    page's worth — a 250-entry meeting must land whole."""
+    long_entries = [
+        {"participant": "conferenceRecords/c1/participants/p1", "text": f"line {i}"}
+        for i in range(250)
+    ]
+    gm, _ = _gmstub(monkeypatch, _gmctx(), entries=long_entries)
+    monkeypatch.setattr(gm, "_TEXT_CHARS", 100_000)
+    r = list(gm.pull("co-1"))[0]
+    assert "line 0" in r.text and "line 249" in r.text
+
+
+def test_a_transcript_not_yet_file_generated_is_skipped(monkeypatch):
+    """STARTED is a live meeting and ENDED is the gap while Google assembles the
+    file. Reading either yields a PARTIAL transcript that would then be
+    ledger-hashed as if it were the whole thing — the meeting would look
+    permanently half-recorded, because the finished version only hashes
+    differently if we re-read it, and we wouldn't."""
+    for state in ("STARTED", "ENDED", "STATE_UNSPECIFIED"):
+        gm, asked = _gmstub(
+            monkeypatch, _gmctx(),
+            transcripts=[{"name": "conferenceRecords/c1/transcripts/t1",
+                          "state": state}],
+        )
+        r = list(gm.pull("co-1"))[0]
+        assert asked["entries"] == [], state    # never even fetched
+        assert r.properties["has_transcript"] is False, state
+        assert "No transcript available" in r.text, state
+
+
+def test_a_conference_with_no_transcript_yields_the_honest_record(monkeypatch):
+    """Never a silent skip. The commonest cause is that "Record the transcript"
+    was never switched on — a setting the customer can change — and dropping
+    those meetings would present a half-empty corpus as a complete one with
+    nothing anywhere to explain the gap."""
+    gm, _ = _gmstub(monkeypatch, _gmctx(), transcripts=[])
+    recs = list(gm.pull("co-1"))
+    assert len(recs) == 1
+    assert recs[0].properties["has_transcript"] is False
+    assert "not an empty meeting" in recs[0].text.lower()
+    assert "record the transcript" in recs[0].text.lower()
+
+
+def test_every_ready_transcript_on_a_conference_is_read(monkeypatch):
+    """Transcription stopped and restarted mid-call produces two. Taking [0]
+    would silently drop the second half of the meeting."""
+    gm, asked = _gmstub(
+        monkeypatch, _gmctx(),
+        transcripts=[
+            {"name": "conferenceRecords/c1/transcripts/t1", "state": "FILE_GENERATED"},
+            {"name": "conferenceRecords/c1/transcripts/t2", "state": "ENDED"},
+            {"name": "conferenceRecords/c1/transcripts/t3", "state": "FILE_GENERATED"},
+        ],
+    )
+    list(gm.pull("co-1"))
+    assert asked["entries"] == [
+        "conferenceRecords/c1/transcripts/t1",
+        "conferenceRecords/c1/transcripts/t3",
+    ]
+
+
+def test_text_is_capped_under_the_runner_batch_budget_meet(monkeypatch):
+    """A record that blew the 6000-char batch budget would be split across
+    batches mid-sentence and both halves would lose their context."""
+    from app.kg_ingest.runner import _BATCH_CHAR_BUDGET
+
+    long_entries = [
+        {"participant": "conferenceRecords/c1/participants/p1",
+         "text": "word " * 60}
+        for _ in range(200)
+    ]
+    gm, _ = _gmstub(monkeypatch, _gmctx(), entries=long_entries)
+    r = list(gm.pull("co-1"))[0]
+    assert len(r.text) <= gm._TEXT_CHARS
+    assert len(r.render()) < _BATCH_CHAR_BUDGET
+
+
+def test_global_record_valve_holds_meet(monkeypatch):
+    """The content-hash ledger makes RE-syncs free, but the FIRST sync pays the
+    LLM for everything."""
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name=f"conferenceRecords/c{i}") for i in range(20)],
+    )
+    monkeypatch.setattr(gm, "_MAX_RECORDS", 4)
+    assert len(list(gm.pull("co-1"))) == 4
+
+
+def test_google_meet_puller_never_logs_a_token_or_a_url(monkeypatch, caplog):
+    """A transcript is customer conversation and an access token is a
+    credential; neither belongs in a log line, and this is the assertion that
+    keeps a future debugging print from putting one there."""
+    import logging
+
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        transcripts=[{"name": "conferenceRecords/c1/transcripts/t1",
+                      "state": "ENDED"}],
+    )
+    with caplog.at_level(logging.DEBUG):
+        list(gm.pull("co-1"))
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "tok" not in logged
+    assert "meet.googleapis.com" not in logged
+
+
+def test_a_bad_conference_skips_without_failing_the_sync(monkeypatch):
+    """One unreadable call must not cost the rest of the window — and it must
+    be SKIPPED, not turned into a no-transcript record.
+
+    That record states in words that the meeting was probably never set to
+    transcribe, which is a claim about the customer's own Google Meet settings.
+    A 500 from Google is not evidence of that, and letting the failure fall
+    through to it would write a confident falsehood into the knowledge graph."""
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name="conferenceRecords/bad"),
+                     _conference(name="conferenceRecords/good")],
+    )
+
+    def flaky(_tok, conference, **kw):
+        if conference.endswith("bad"):
+            raise RuntimeError("500 from Google")
+        return [{"name": f"{conference}/transcripts/t1", "state": "FILE_GENERATED"}]
+
+    monkeypatch.setattr(gm, "list_transcripts", flaky)
+    recs = list(gm.pull("co-1"))
+    assert [r.external_id for r in recs] == ["conferenceRecords/good"]
+
+
+def test_an_expired_token_is_never_swallowed_by_per_call_isolation(monkeypatch):
+    """Per-conference isolation must not hide a reconnect signal — that would
+    report a cheerful zero-record sync on a dead connection, which looks
+    identical to "nobody had any meetings"."""
+    from app.connectors.google_meet import MeetAuthExpiredError
+
+    gm, _ = _gmstub(monkeypatch, _gmctx())
+
+    def dead(*_a, **_k):
+        raise MeetAuthExpiredError("reconnect")
+
+    monkeypatch.setattr(gm, "list_transcripts", dead)
+    with pytest.raises(MeetAuthExpiredError):
+        list(gm.pull("co-1"))
+
+
+def test_google_meet_puller_quiet_when_not_connected(monkeypatch):
+    """A disconnected company is a no-op, not an error — the scheduler sweeps
+    every row and a race with a disconnect must not stamp a failure."""
+    from app.kg_ingest.pullers import google_meet
+
+    def gone(cid):
+        raise google_meet.MeetNotConnectedError("no row")
+
+    monkeypatch.setattr(google_meet, "sync_context", gone)
+    assert list(google_meet.pull("co-1")) == []
+
+
+def test_counters_split_meetings_from_transcripts_meet(monkeypatch):
+    """The GAP between these two numbers is how the web layer can say "meetings
+    are syncing but transcription was never switched on" — a setting in the
+    customer's own Workspace that is invisible without both."""
+    from app.kg_ingest.pullers import google_meet
+
+    stamped: dict = {}
+    gm, _ = _gmstub(
+        monkeypatch, _gmctx(),
+        conferences=[_conference(name="conferenceRecords/c1"),
+                     _conference(name="conferenceRecords/c2")],
+    )
+
+    def flaky(_tok, conference, **kw):
+        if conference.endswith("c2"):
+            return []       # no transcript for this one
+        return [{"name": f"{conference}/transcripts/t1", "state": "FILE_GENERATED"}]
+
+    monkeypatch.setattr(gm, "list_transcripts", flaky)
+    monkeypatch.setattr(
+        google_meet, "_stamp_counters",
+        lambda cid, *, meetings, transcripts: stamped.update(
+            meetings=meetings, transcripts=transcripts
+        ),
+    )
+    list(gm.pull("co-1"))
+    assert stamped == {"meetings": 2, "transcripts": 1}
+
+
+def test_google_meet_is_registered_as_a_company_id_puller():
+    """The credential must be the COMPANY ID: a Meet pull needs the connected
+    account's identity off the connection row, which a lone access token cannot
+    reach."""
+    from app.kg_ingest.runner import PULLERS, _DOCUMENT_PROVIDERS
+
+    puller, key, hint = PULLERS["google_meet"]
+    assert key == "company_id"
+    assert "customer_voice" in hint
+    # The hint has to carry the coverage limit, or the extractor treats an
+    # organizer-only 30-day slice as if it were the company's whole meeting
+    # history and reads absence as evidence.
+    assert "ORGANIZED" in hint and "30 days" in hint
+    # A meeting is EVIDENCE, not an upload-class document — putting it here
+    # would hand it the brief gate's upload-only relaxation it has not earned.
+    assert "google_meet" not in _DOCUMENT_PROVIDERS
+
+
 # ---------- runner ----------
 
 def _recs(n, provider="clickup"):

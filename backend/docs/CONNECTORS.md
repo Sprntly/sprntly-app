@@ -51,6 +51,146 @@ first-time empty-KG seed (inline).
 
 ---
 
+## Google Meet
+
+Meeting transcripts, read from the **Meet REST API v2** (`https://meet.googleapis.com/v2`, GA).
+Auth module `app/connectors/google_meet.py`, puller `app/kg_ingest/pullers/google_meet.py`,
+provider key `google_meet`.
+
+**Shares the Drive connector's Cloud project and OAuth client.** Same
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, a **second redirect URI**, and a
+separate `connections` row. Do not create a second OAuth client — Google shows
+the granted scope list per authorization, so a Drive-only customer is never
+asked for Meet permissions and vice versa. (This mirrors the correction
+a1e16c40 made about sharing the Jira app with Confluence.)
+
+The **scope lists are not shared and must never be merged.**
+`google_oauth.DRIVE_SCOPES` must not grow a Meet scope: scopes bake into a token
+at consent and a refresh carries the old set forward, so widening that constant
+would leave every already-stored Drive token claiming a capability it does not
+have — silent 403s on connections whose probe reads healthy.
+
+### Operator setup
+
+1. **Enable the Meet API** on the existing Cloud project:
+   <https://console.cloud.google.com/apis/library/meet.googleapis.com>. Nothing
+   works before this, and the failure looks like an auth problem (403), not a
+   missing-API one.
+2. **Add the redirect URI** to the existing OAuth client's *Authorized redirect
+   URIs*: `https://api.sprntly.ai/v1/connectors/google-meet/callback`
+   (and the staging equivalent).
+3. **Declare the scope and submit for verification.**
+   `https://www.googleapis.com/auth/meetings.space.readonly` is **sensitive**
+   tier. Until Google approves it — roughly 10 business days, longer if they ask
+   for a demo video — every user sees the unverified-app warning screen and the
+   app is capped at 100 users.
+4. Set `GOOGLE_MEET_OAUTH_REDIRECT_URI`.
+
+### Scopes
+
+```
+https://www.googleapis.com/auth/meetings.space.readonly   <- reads everything
+openid
+https://www.googleapis.com/auth/userinfo.email
+https://www.googleapis.com/auth/userinfo.profile
+```
+
+The trio after the Meet scope is **not optional**. Google auto-adds them to the
+granted set for any client that is also a sign-in client (ours is), so
+requesting the Meet scope alone makes the granted set a *superset* of the
+requested one, and `google-auth-oauthlib` raises "Scope has changed" at token
+exchange. `google_oauth.py:26-33` carries the same note for Drive. We also get
+the connecting user's verified email from the ID token, saving a round trip.
+
+`meetings.space.created` is deliberately **not** requested — it covers spaces
+this app created, and Sprntly creates no meetings.
+
+**We will never take a restricted Drive scope.** Recordings (the MP4) and Gemini
+smart notes live in the organizer's Google Drive and are only reachable via
+`drive.readonly` or `drive.meet.readonly`, both **restricted** tier. Taking one
+would put this entire OAuth client — the Drive connector included — through an
+annual, paid **CASA** security assessment, plus the restricted-scope review.
+The transcript *text* comes straight from the Meet API with no Drive access at
+all, and that is the part worth having. Recordings and smart notes are therefore
+permanently out of scope: a deliberate business decision, not a backlog item.
+
+### Coverage — read this before debugging a "broken" sync
+
+**Organizer-only.** `conferenceRecords.list` returns only conferences where the
+authenticating user was the **organizer** — not meetings they merely attended,
+and never a colleague's. There is no admin or account-wide listing equivalent to
+Zoom's `:admin` scopes, and no scope that would add one. Each teammate whose
+meetings should reach Sprntly connects their own Google account. A PM who chairs
+nothing legitimately syncs zero meetings, and that is a healthy connection.
+
+**30-day retention, hard.** Google deletes conference records *and* transcript
+entries 30 days after the conference ends. There is no historical backfill and
+there never can be; a first sync reaches back 30 days and that is the entire
+corpus. Because "everything that exists" and "the last 30 days" are the same
+set, the puller keeps no incremental cursor — it walks the full window every run
+and lets the runner's content-hash ledger make re-seen records free.
+
+**Customer-side requirements**, all three of which produce an empty-but-healthy
+connector when unmet:
+
+- Google Workspace **Business Standard or higher**. Business Starter and
+  personal Gmail accounts cannot record or transcribe at all.
+- **"Record the transcript" switched on before the meeting starts.** Google will
+  not transcribe a call retroactively.
+  <https://support.google.com/meet/answer/12849897>
+- The Meet API not blocked for the Workspace by its admin.
+
+### Tokens
+
+Standard Google OAuth: `access_type=offline` + `prompt=consent` (both required
+to be issued a refresh token; without the forced prompt a *re*-authorization
+silently omits one). Access tokens last ~1 hour.
+
+Google refresh tokens **do not rotate** — no rotation-strand hazard, unlike Zoom
+and Atlassian. They die on user revoke, six months unused, or eviction by the
+100-tokens-per-account-per-client cap. **But the refresh response omits
+`refresh_token` entirely**, so a caller that stores it verbatim blanks the stored
+one and reaches the same dead end by a different road; `token_payload_to_store`'s
+`keep_refresh_token` is what prevents that and is load-bearing on every refresh
+path (`sync_context`, `connector_probe`, `auto_sync._maybe_refresh_token`).
+
+While the consent screen is in **Testing** publishing status, refresh tokens
+expire after **7 days**. Expect this during development and before verification
+lands — it is the likeliest cause of "it worked last week".
+
+### Health probe
+
+`connector_probe` lists **one conference record**, not an identity call. The
+userinfo endpoint answers on `userinfo.email` while every meeting read answers on
+`meetings.space.readonly`, and those genuinely come apart — the Meet API can be
+disabled on the project or blocked for the Workspace without touching sign-in.
+An identity-only probe would report green on a connector whose every sync 403s,
+which is exactly defect #2 of the Confluence granular-scopes incident
+(a1e16c40). An **empty** conference list is healthy.
+
+### Ingestion
+
+`pull(company_id)` yields one `RawRecord` per conference:
+`conferenceRecords.list` (30-day filter) → `participants.list` (the join table
+that turns a transcript entry's participant resource name into a display name)
+→ `transcripts.list` → for each transcript in state `FILE_GENERATED`,
+`transcripts.entries.list` **paged to the 100 maximum**. Entry paging is
+mandatory, not an optimisation: `pageSize` defaults to **10**, so an unpaged
+call returns the first ten seconds of a meeting while looking exactly like a
+complete short one.
+
+A conference with no finished transcript still yields a record whose text says
+so in words — never a silent skip. The commonest cause is a Meet setting the
+customer can change, and dropping those meetings would present a half-empty
+corpus as a complete one with nothing to explain the gap.
+
+Not implemented, deliberately: recordings/video, Gemini smart notes, in-meeting
+chat (not exposed by the API), whole-org coverage (impossible), live chat lookup
+(`connector_lookup` lists Meet as `DEFERRED`), and webhooks / Workspace Events
+subscriptions.
+
+---
+
 ## Figma
 
 OAuth App (not "Plugin"). Register at

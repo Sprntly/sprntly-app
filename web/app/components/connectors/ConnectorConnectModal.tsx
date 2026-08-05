@@ -58,12 +58,36 @@ const APIKEY_PAGE_URL: Record<string, string> = {
  * Basic Zoom account has no cloud recordings at all, and an account that
  * requires app pre-approval refuses before Sprntly is ever reached. Saying so
  * here costs three lines; not saying it costs a support thread.
+ *
+ * Google Meet's are the same idea and one step further, because its coverage is
+ * genuinely NARROWER than the connector sitting next to it on the same shelf.
+ * Somebody who has connected Zoom will reasonably assume Meet works the same
+ * way, and it does not: Google exposes only the meetings the connected account
+ * ORGANIZED, and only for 30 days. A customer holding the wrong model reads a
+ * correct, complete sync as a broken one — so the limits are stated here,
+ * before consent, rather than discovered as an apparently-missing meeting.
+ *
+ * A line may be a plain string or `{ text, href, linkText }` when it needs to
+ * send the reader somewhere (Google will not transcribe a call retroactively,
+ * so the setting has to be found and switched on BEFORE a meeting — a pointer
+ * to the exact help page is worth more than the sentence alone).
  */
-const CONNECT_PREREQS: Record<string, string[]> = {
+type PrereqLine = string | { text: string; href: string; linkText: string }
+
+const CONNECT_PREREQS: Record<string, PrereqLine[]> = {
   zoom: [
     "Zoom connects once for your whole company. You'll need to authorize as a Zoom account admin.",
     "Cloud recording is a paid Zoom feature — Free and Basic accounts have no cloud recordings for Sprntly to read.",
     "If your Zoom account requires apps to be pre-approved, ask a Zoom admin to approve Sprntly on the Zoom Marketplace first.",
+  ],
+  google_meet: [
+    "Sprntly only sees meetings the connected account organized — not every meeting they attended, and not other people's meetings. Each teammate whose meetings you want in Sprntly connects their own Google account.",
+    "Requires Google Workspace Business Standard or higher. Business Starter and personal Gmail accounts can't record or transcribe meetings at all.",
+    {
+      text: "Turn on audio transcripts in Google Meet before a meeting starts — Google won't transcribe a call after the fact.",
+      href: "https://support.google.com/meet/answer/12849897",
+      linkText: "How to turn on transcripts",
+    },
   ],
 }
 
@@ -72,6 +96,8 @@ const CONNECT_PREREQS: Record<string, string[]> = {
 const CONNECT_SCOPE_NOTE: Record<string, string> = {
   zoom:
     "Sprntly reads the transcript and details of each cloud recording — never the video or audio. The first sync covers the last 3 months, then refreshes every 6 hours.",
+  google_meet:
+    "Sprntly reads the transcript text and details of each meeting — never the recording video or audio. Only the last 30 days are available: Google deletes Meet records after 30 days, so there's no older history to import.",
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -332,9 +358,24 @@ export function ConnectorConnectModalView({
                 <div className="conn-modal-blurb">
                   <strong>Before you connect</strong>
                   <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                    {CONNECT_PREREQS[item.id].map((line) => (
-                      <li key={line}>{line}</li>
-                    ))}
+                    {CONNECT_PREREQS[item.id].map((line) =>
+                      typeof line === "string" ? (
+                        <li key={line}>{line}</li>
+                      ) : (
+                        <li key={line.text}>
+                          {line.text}{" "}
+                          {/* Opens in a new tab so the reader does not lose the
+                              half-finished connect flow behind them. */}
+                          <a
+                            href={line.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {line.linkText}
+                          </a>
+                        </li>
+                      ),
+                    )}
                   </ul>
                 </div>
               ) : null}

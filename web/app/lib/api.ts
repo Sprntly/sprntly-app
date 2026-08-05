@@ -2006,6 +2006,16 @@ export const connectorsApi = {
       { spaces },
     ),
 
+  // ---- Google Meet ---------------------------------------------------------
+  /** Drops the company's Google Meet connection, revoking the grant at Google
+   *  first. Admin-only — a member gets 403 with the admin-gate message.
+   *
+   *  There is no `listGoogleMeet…` picker counterpart on purpose: coverage is
+   *  fixed to the connecting account's own meetings (Google exposes nothing
+   *  else) and the 30-day window is Google's, so there is nothing to choose. */
+  disconnectGoogleMeet: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/google-meet`),
+
   // ---- Zoom ----------------------------------------------------------------
   disconnectZoom: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/zoom`),
