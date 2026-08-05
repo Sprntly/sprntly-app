@@ -753,6 +753,29 @@ def test_single_shot_stays_corpus_less_when_kg_empty(monkeypatch):
     assert captured["input"] == "Question: score the billing epic"
 
 
+def test_skill_path_kg_grounding_honours_the_sentinel(isolated_settings):
+    """`_kg_grounding` calls `_retrieve_kg_bundle(enterprise_id, question)`
+    with no `question_embedding` at all — the second route into the same
+    hole `compose_ask_answer` has. `isolated_settings` never sets
+    `OPENAI_API_KEY`, so this exercises the REAL no-key `embed_texts`
+    fallback (unmocked): `_kg_grounding` gets the same "no theme kNN on a
+    zero vector" guarantee as the direct-path ask (AC1), with no change
+    required to `qa_agent.py` itself — the guarantee lives in
+    `retrieve_context`'s own defence-in-depth check."""
+    from unittest.mock import patch
+
+    from app.graph.facade import GraphFacade
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        qa._kg_grounding("ent-skill", "how is the pipeline?")
+
+    assert calls == [], f"find_candidates called for theme kNN with no key: {calls}"
+
+
 def test_kg_grounding_does_not_touch_wired_call_digest_path(monkeypatch):
     """The dedicated call/VoC process owns its own grounding and must not be
     re-routed through the generic KG-grounded single-shot path."""

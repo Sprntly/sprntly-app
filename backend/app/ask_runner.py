@@ -1281,9 +1281,17 @@ def _retrieve_kg_bundle(
     question: str,
     *,
     question_embedding: list[float] | None = None,
+    embedding_unavailable: bool = False,
 ) -> dict | None:
     """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
     or None when there's no tenant context or the KG yields nothing / errors.
+
+    `embedding_unavailable` carries forward `_question_embedding`'s degraded
+    flag: True means the caller already determined there is no usable vector
+    (no key configured, or the accessor's own zero-vector check tripped) —
+    passed through to `retrieve_context` as `skip_semantic` so the KG neither
+    runs kNN on a zero vector nor re-embeds a question that's already known to
+    embed to nothing.
 
     Resilient by construction: a missing tenant, an empty KG, a fake backend
     with no pgvector, or any read failure all collapse to None so the caller
@@ -1298,6 +1306,7 @@ def _retrieve_kg_bundle(
         bundle = retrieve_context(
             facade, enterprise_id, question,
             question_embedding=question_embedding,
+            skip_semantic=embedding_unavailable,
         )
     except Exception:  # noqa: BLE001 — KG must never break Ask
         logger.exception("Ask KG retrieval failed for enterprise=%s", enterprise_id)
@@ -1390,7 +1399,8 @@ def compose_ask_answer(
         cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
 
         bundle = _retrieve_kg_bundle(
-            enterprise_id, question, question_embedding=question_embedding
+            enterprise_id, question, question_embedding=question_embedding,
+            embedding_unavailable=embedding_degraded,
         )
 
         if bundle:

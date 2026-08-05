@@ -1804,6 +1804,222 @@ def test_degraded_embedding_is_written_to_the_decision_log(
     assert logged["factors"]["retrieval_embedding_degraded"] is True
 
 
+# The accessor above is correct and its result is thrown away one call
+# later: `question_embedding=None` means "compute it yourself" to
+# `retrieve_context`, not "there is none". These pin the fix: the degraded
+# flag `_question_embedding` already produces now rides across the
+# `retrieve_context` boundary (`skip_semantic`) instead of collapsing back to
+# a self-embed on a doomed zero vector.
+#
+# NOTE: `isolated_settings` never sets `OPENAI_API_KEY`, so `settings.
+# openai_api_key` is already unset ("") for every test below that doesn't
+# explicitly configure one — the real no-key `embed_texts` fallback runs
+# unmocked, exactly as it would in production with no key configured.
+
+
+def test_no_key_never_runs_theme_knn(isolated_settings, fake_llm):
+    """With no key, a direct-path ask must reach `find_candidates` zero times
+    for theme kNN — no call with a zero vector, no call with any vector.
+    RED before the fix: `question_embedding=None` reached `retrieve_context`,
+    which self-embedded, got a zero vector from the no-key fallback, and
+    shipped it to `find_candidates` anyway."""
+    from unittest.mock import patch
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert calls == [], f"find_candidates called for theme kNN with no key: {calls}"
+
+
+def test_no_key_issues_exactly_one_embedding_call(isolated_settings, fake_llm, monkeypatch):
+    """`embed_texts` is called at most once per direct-path ask — the shared
+    ContextVar / `_resolve_question_embedding` machinery exists specifically
+    to keep this at exactly one. RED before the fix: `retrieve_context`
+    re-embedded a second time because `None` collapsed back to "compute your
+    own"."""
+    from app import ask_runner
+    import app.graph.embeddings as embeddings_mod
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    calls: list = []
+    real_embed_texts = embeddings_mod.embed_texts
+
+    def _counting_embed(texts, **kw):
+        calls.append(texts)
+        return real_embed_texts(texts, **kw)
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _counting_embed)
+
+    ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert len(calls) == 1, f"expected exactly one embed_texts call, got {len(calls)}"
+
+
+def test_no_key_still_returns_an_answer(isolated_settings, fake_llm):
+    """With no key, `compose_ask_answer` still returns a well-formed payload —
+    the guard degrades, it never raises and never yields an empty answer."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "grounded on lexical channels only", "key_points": ["k"],
+        "citations": [], "confidence": 0.6, "unanswered": "",
+    }
+
+    payload = ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert payload["answer"] == "grounded on lexical channels only"
+    assert payload["key_points"] == ["k"]
+
+
+def test_no_key_bundle_is_recent_signals_not_empty_and_not_raised(
+    isolated_settings, fake_llm
+):
+    """The documented degradation shape holds: with no key, theme kNN never
+    runs, but a KG with recent non-stale signals still yields a non-empty
+    bundle (the recent-signals fallback) — not an exception, not an empty
+    answer. `retrieve_context`'s docstring binds this: "never raises on a
+    partial-KG read — degrades to an emptier bundle and logs."""
+    from datetime import datetime, timezone
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+    from app.graph.types import Signal
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    GraphFacade().write_signal(
+        _CID,
+        Signal(
+            enterprise_id=_CID,
+            source_type="analytics",
+            kind="metric_shift",
+            content="recent-only signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    user = fake_llm["calls"][0]["user"]
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
+    assert "recent-only signal" in user
+
+
+def test_embed_texts_raising_does_not_break_the_ask(isolated_settings, fake_llm, monkeypatch):
+    """The embedder raising (a real HTTP failure, not just a missing key)
+    leaves the answer intact — resilience must hold on this path exactly as
+    it does on the no-key path."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    payload = ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert payload["answer"] == "x"
+
+
+def test_decision_log_degraded_flag_matches_behaviour(
+    isolated_settings, fake_llm, monkeypatch
+):
+    """When `retrieval_embedding_degraded` is True in the decision log, no
+    semantic channel ran for EITHER consumer — not just document selection.
+    This is the exact gap the ticket closes: the flag previously read as "we
+    degraded to lexical-only" while the KG silently ran kNN on a zero
+    vector."""
+    from unittest.mock import patch
+
+    from app import ask_runner
+    from app.graph.facade import GraphFacade
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    logged = {}
+    monkeypatch.setattr(
+        "app.graph.decision_log.log_agent_decision",
+        lambda **kw: logged.update(kw),
+    )
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        ask_runner.compose_ask_answer("asurion", "anything", enterprise_id=_CID)
+
+    assert logged["factors"]["retrieval_embedding_degraded"] is True
+    assert calls == [], (
+        "retrieval_embedding_degraded=True but theme kNN ran anyway — "
+        "the audit row would be lying"
+    )
+
+
+def test_accessor_pinned_tests_unchanged():
+    """CLOSED-WORLD TRAP guard: this diff must not touch `_question_embedding`
+    or its three pinned tests. Confirms they still exist under their exact
+    names in this module — a rename or deletion here would be a silent
+    regression this suite otherwise wouldn't catch. (The "unedited" half of
+    this AC is enforced by code review against the diff, not a runtime
+    assertion.)"""
+    import tests.test_ask_document_retrieval as _mod
+
+    for name in (
+        "test_missing_embedding_degrades_to_lexical_and_is_recorded",
+        "test_a_usable_embedding_is_not_reported_as_degraded",
+        "test_degraded_embedding_is_written_to_the_decision_log",
+    ):
+        assert hasattr(_mod, name), f"pinned test {name} is missing"
+
+
 # T8 — catalog read failure degrades Stage T only.
 def test_catalog_failure_leaves_stage_n_and_the_answer_intact(
     isolated_settings, fake_llm, monkeypatch

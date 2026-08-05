@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from app.graph.embeddings import EMBEDDING_DIM
 from app.graph.facade import GraphFacade
 from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
 
@@ -198,9 +199,19 @@ def retrieve_context(
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     question_embedding: Optional[list[float]] = None,
+    skip_semantic: bool = False,
     min_theme_score: float = _MIN_THEME_SCORE,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
+
+    `question_embedding=None` (the default) means "compute one for me" —
+    self-embeds unless `skip_semantic=True`, which means "there is no usable
+    embedding, do not try": the theme kNN step is skipped entirely rather than
+    running on a zero vector. A zero or wrong-dimension vector reaching
+    `qvec` by any route is also dropped before it can reach `find_candidates`
+    (see the defence-in-depth check below) — `skip_semantic` avoids the
+    redundant embedding call; the dimension/zero check is the belt-and-braces
+    behind it.
 
     Steps:
       1. Embed the question (best-effort; if embeddings are unavailable we
@@ -251,11 +262,22 @@ def retrieve_context(
     #    no embedding call is made here. The ask path computes the question's
     #    vector once and shares it with document selection, which runs before
     #    this does — without that sharing the same question would be embedded
-    #    twice per ask. A caller that passes nothing keeps the original
-    #    self-contained behaviour, which is what every other caller relies on.
+    #    twice per ask. A caller that passes nothing AND does not set
+    #    `skip_semantic` keeps the original self-contained behaviour, which is
+    #    what every other caller relies on.
+    #
+    #    `skip_semantic=True` is the caller stating "there is no embedding, do
+    #    not compute one" — distinct from the `question_embedding=None`
+    #    default, which means "compute one for me". Without this distinction a
+    #    caller that already determined its embedding is unusable (no key, or
+    #    an all-zero vector came back) had no way to say so: `None` collapsed
+    #    back to "self-embed", which re-issued the same doomed call and got the
+    #    same zero vector back. Set by the Ask path whenever its shared
+    #    embedding is degraded; every other caller leaves it at the default and
+    #    is unaffected.
     qvec: Optional[list[float]] = question_embedding
     try:
-        if qvec is None:
+        if qvec is None and not skip_semantic:
             from app.graph.embeddings import embed_texts
 
             vecs = embed_texts([question], enterprise_id=enterprise_id,
@@ -263,6 +285,16 @@ def retrieve_context(
             qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
+
+    # 1b) Defence-in-depth: a zero-vector or wrong-dimension "embedding" is not
+    #     a real one — the no-key fallback in `embed_texts` returns an
+    #     all-zero vector, which in cosine kNN ranks arbitrarily and is worse
+    #     than nothing. Mirrors `document_catalog.find_candidates`'s exact
+    #     check so the invariant holds even for a caller (this module's own
+    #     self-embed above, or an external caller) that hands a zero vector to
+    #     `qvec` directly rather than going through `skip_semantic`.
+    if qvec is not None and (len(qvec) != EMBEDDING_DIM or not any(qvec)):
+        qvec = None
 
     # 2) kNN theme match (returns [] on the fake/no-pgvector backend).
     matched_themes: list[tuple[Any, float]] = []
