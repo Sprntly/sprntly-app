@@ -628,6 +628,164 @@ describe("no regression: a manual locate failure never blanks the surface", () =
   })
 })
 
+// ─── a failed kickoff must not leave the "generating" card stuck open ────────
+//
+// The module mock above stands `runGenerateFlow` in for every OTHER suite so
+// generation never runs for real. These tests swap in the REAL implementation
+// (via `vi.importActual`) for the duration of a single test, because the fix
+// under test lives inside that shared function's own `catch` — a stand-in
+// would only prove this modal reacts correctly to a signal that already
+// existed, not that the signal now actually fires on a kickoff failure.
+
+function reopenableModal(overrides: Record<string, unknown> = {}) {
+  function Harness() {
+    const [open, setOpen] = React.useState(true)
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement("button", {
+        type: "button",
+        "data-testid": "test-host-reopen",
+        onClick: () => setOpen(true),
+      }),
+      React.createElement(GenerateModal, {
+        ...manualProps(overrides),
+        open,
+        onClose: () => setOpen(false),
+      }),
+    )
+  }
+  return React.createElement(Harness)
+}
+
+async function useRealRunGenerateFlow() {
+  const actual = await vi.importActual<typeof import("../DesignAgentDrawer")>(
+    "../DesignAgentDrawer",
+  )
+  vi.mocked(runGenerateFlow).mockImplementation(actual.runGenerateFlow)
+}
+
+describe("a failed kickoff resets the modal instead of freezing it", () => {
+  it("a kickoff failure leaves nothing rendering a generating state (AC1)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    vi.spyOn(designAgentApi, "generate").mockRejectedValue(
+      new Error("Internal Server Error"),
+    )
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    // The locate auto-proceeds first — the generating card mounts.
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-state"]'),
+      ).toBeTruthy(),
+    )
+
+    // The kickoff POST rejects. Assert the ABSENCE of a generating claim —
+    // not the presence of the failure toast, which already fires correctly
+    // today and proves nothing about this bug.
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+    expect(
+      container.querySelector('[data-testid="generate-loading-state"]'),
+    ).toBeNull()
+  })
+
+  it("after a failed kickoff the modal reopens clean and a second attempt succeeds (AC2)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    const generateSpy = vi
+      .spyOn(designAgentApi, "generate")
+      .mockRejectedValueOnce(new Error("Internal Server Error"))
+      .mockResolvedValueOnce({ prototype_id: 41, status: "generating" })
+    vi.spyOn(designAgentApi, "get").mockResolvedValue({
+      id: 41,
+      status: "ready",
+      bundle_url: "https://example.test/bundle",
+      error: null,
+    })
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+    expect(generateSpy).toHaveBeenCalledTimes(1)
+
+    // Reopen the SAME instance the way a host's own CTA would — no manual
+    // dismissal was needed to get here.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="test-host-reopen"]')!
+        .click()
+    })
+
+    expect(
+      container.querySelector('[data-testid="generate-btn"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="generate-loading-state"]'),
+    ).toBeNull()
+
+    clickGenerate(container)
+    await waitFor(() => expect(generateSpy).toHaveBeenCalledTimes(2))
+  })
+
+  it("the legacy drawer's stay-open contract is untouched: omitting onKickoffFailed means no close call fires (AC3)", async () => {
+    const actual = await vi.importActual<typeof import("../DesignAgentDrawer")>(
+      "../DesignAgentDrawer",
+    )
+    const onOpenChange = vi.fn()
+    const showToast = vi.fn()
+
+    await actual.runGenerateFlow({
+      params: {
+        prd_id: PRD_ID,
+        target_platform: "desktop",
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockRejectedValue(new Error("server 500")),
+      runGeneration: vi.fn(),
+      onOpenChange,
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+      // onKickoffFailed intentionally omitted — mirrors the legacy drawer's
+      // own call site, which never wires it.
+    })
+
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith("Generate failed", "server 500")
+  })
+
+  it("a successful kickoff still closes the modal exactly as today (AC4)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    vi.spyOn(designAgentApi, "generate").mockResolvedValue({
+      prototype_id: 42,
+      status: "generating",
+    })
+    vi.spyOn(designAgentApi, "get").mockResolvedValue({
+      id: 42,
+      status: "ready",
+      bundle_url: "https://example.test/bundle",
+      error: null,
+    })
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+  })
+})
+
 // ─── late arrival (AC9) ────────────────────────────────────────────────────
 //
 // The repo list resolving AFTER the undetermined fallback has already

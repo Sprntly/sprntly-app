@@ -173,9 +173,14 @@ type GenerateFlowDeps = {
    *  post-kickoff failure does, instead of leaving the overlay with no signal
    *  to react to. When supplied, it REPLACES the raw `showToast("Generate
    *  failed", message)` below — the caller owns showing the error via its own
-   *  curated path. Omit (as the legacy drawer does — it has no overlay to
-   *  signal into and already leaves itself open with this raw toast as its
-   *  only failure surface) to keep today's behaviour exactly. */
+   *  curated path — AND the catch now also calls `onOpenChange(false)` before
+   *  invoking it, so a caller-owned "generating" surface (the GenerateModal
+   *  loading card) never outlives the failed request; a caller with no such
+   *  surface to close still gets this for free (its `onOpenChange` no-ops or
+   *  is the same close it already wants). Omit (as the legacy drawer does —
+   *  it has no overlay to signal into and deliberately leaves itself open
+   *  with this raw toast as its only failure surface) to keep today's
+   *  behaviour exactly: no close call, no signal. */
   onKickoffFailed?: (message: string) => void
 }
 
@@ -337,9 +342,18 @@ export async function runGenerateFlow({
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error"
     if (onKickoffFailed) {
-      // The caller owns the overlay lifecycle and will surface its own
-      // curated error + dismiss it — do not ALSO raw-toast here, or a kickoff
-      // failure would show two failure toasts back to back.
+      // Deliberately NOT an unconditional `onOpenChange(false)` — that would
+      // silently reverse the legacy drawer's documented stay-open-on-failure
+      // exception (see the call site that omits `onKickoffFailed`, below).
+      // Gating the close on `onKickoffFailed`'s presence routes it through
+      // the caller-supplied signal instead: only a caller that opted in to
+      // owning the failure (GenerateModal, via its overlay wiring) gets a
+      // close call, and it fires BEFORE the caller's own handler so a
+      // caller-owned "generating" surface never renders stale after this
+      // returns. The caller owns the overlay lifecycle and will surface its
+      // own curated error — do not ALSO raw-toast here, or a kickoff failure
+      // would show two failure toasts back to back.
+      onOpenChange(false)
       onKickoffFailed(message)
     } else {
       showToast("Generate failed", message)
