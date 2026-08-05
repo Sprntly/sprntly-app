@@ -882,6 +882,22 @@ export const chatIntentApi = {
     }),
 }
 
+/** Next-prompt suggestions for a chat thread — `POST /v1/chat/suggestions`.
+ *
+ *  Fetched AFTER an answer has rendered, never before or during: it is a
+ *  separate round trip so it cannot delay, block or fail the answer stream.
+ *  An empty array is the ORDINARY result, not a failure — the backend abstains
+ *  whenever the conversation doesn't point at a specific next step (see
+ *  app/chat_suggestions.py). Callers must treat `[]` and a rejected promise
+ *  identically: render nothing. */
+export const chatSuggestionsApi = {
+  next: (conversationId: number, opts?: { prdId?: number | null }) =>
+    api.post<{ suggestions: string[] }>("/v1/chat/suggestions", {
+      conversation_id: conversationId,
+      ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
+    }),
+}
+
 export type PrdStartResponse = {
   prd_id: number
   status: "generating" | "ready" | "failed"

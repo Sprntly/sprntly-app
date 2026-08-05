@@ -35,7 +35,8 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
+import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -1303,6 +1304,17 @@ export function ChatScreen() {
   // `askApi.skills()` now serves the company's own library and there is one
   // list again.
   const [skills, setSkills] = useState<SkillInfo[]>([])
+  // Next-prompt suggestions, per tab. Fetched AFTER an answer settles, off the
+  // answer path entirely: a slow, failed or never-returned request costs the
+  // user nothing because the absence of suggestions is a normal, invisible
+  // state (see components/shared/NextPromptSuggestions). Keyed by tab so a
+  // background tab's suggestions never appear under another tab's thread, and
+  // cleared the moment that tab sends again — stale chips proposing the
+  // conversation the user has already moved past are worse than none.
+  const [suggestionsByTab, setSuggestionsByTab] = useState<Record<string, string[]>>({})
+  const clearSuggestions = useCallback((tabId: string) => {
+    setSuggestionsByTab((prev) => (prev[tabId]?.length ? { ...prev, [tabId]: [] } : prev))
+  }, [])
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
@@ -2773,8 +2785,13 @@ export function ChatScreen() {
     [setContent, persistence],
   )
 
+  // Returns the persistence promise so a caller that needs the assistant turn
+  // to EXIST server-side can wait for it (the next-prompt suggestion fetch does
+  // — it reads the thread back out of the DB, and without this it would race
+  // the write and see the conversation one turn short). Every other caller
+  // ignores the return, exactly as before.
   const finalizeConversationTurn = useCallback(
-    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => {
+    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string): Promise<void> => {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
@@ -2797,8 +2814,9 @@ export function ChatScreen() {
       // The helper awaits any in-flight create so the assistant turn lands in the
       // SAME conversation as its user turn.
       if (updates.reply) {
-        void persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
+        return persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
       }
+      return Promise.resolve()
     },
     [setContent, persistence],
   )
@@ -3625,6 +3643,13 @@ export function ChatScreen() {
       }
       pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
       setActiveConv(0)
+      // The previous turn's suggestions are about a conversation that has just
+      // moved on — drop them at SEND, not when the next answer lands, so they
+      // never sit under a question they no longer follow from.
+      clearSuggestions(targetTabId)
+      // The conversation id resolved inside `ask` below, captured so the
+      // post-answer suggestion fetch can reuse it without a second lookup.
+      let askConvId: number | null = null
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in
       // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
@@ -3664,6 +3689,7 @@ export function ChatScreen() {
                 : displayQuery,
               query: displayQuery,
             }))
+          askConvId = convId ?? null
           // Resolved AFTER the await — tabsRef, not the closure — so a
           // conversation created (or a PRD that finished generating) AFTER the
           // tab opened is still picked up. `sendQuery` carries any attached-
@@ -3727,7 +3753,44 @@ export function ChatScreen() {
                 : turn)
             }
           ))
-          finalizeConversationTurn(id, { reply: res }, tabId)
+          const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
+          // Suggestions are fetched HERE — after the answer is on screen — and
+          // deliberately not awaited by the turn: it is already complete, so a
+          // slow or failed request degrades to the ordinary empty state. Only
+          // the error path is handled, because there is nothing to report; a
+          // rejection and an empty list mean the same thing to the user.
+          //
+          // It DOES wait on `persisted`, though. The backend reads the thread
+          // from the database, so firing before this turn's assistant row lands
+          // would ask "what comes next?" about a conversation missing the very
+          // exchange it should continue — and on a first message the thread
+          // would look empty and abstain every time.
+          //
+          // The whole block is wrapped: `onResult` runs inside runTabAsk, which
+          // turns anything thrown here into the TURN's error path — so a
+          // synchronous fault in this optional extra would surface as "Ask
+          // failed" over an answer that actually succeeded. Nothing about a
+          // suggestion strip is worth that, and it costs one try/catch to make
+          // it structurally impossible.
+          if (askConvId != null) {
+            const convId = askConvId
+            const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
+            try {
+              void Promise.resolve(persisted)
+                .then(() => chatSuggestionsApi.next(convId, { prdId }))
+                .then(({ suggestions }) => {
+                  // Late arrival guards: the screen may have unmounted, the tab
+                  // closed, or the user already sent the NEXT message (which
+                  // cleared the strip and left an ask in flight). In that last
+                  // case these chips belong to a superseded turn — drop them.
+                  if (!mountedRef.current || !suggestions?.length) return
+                  if (!tabsRef.current.some((t) => t.id === tabId)) return
+                  if (askingTabsRef.current.has(tabId)) return
+                  setSuggestionsByTab((prev) => ({ ...prev, [tabId]: suggestions }))
+                })
+                .catch(() => { /* silence is the designed fallback */ })
+            } catch { /* same fallback, for a synchronous throw */ }
+          }
         },
         onError: (tabId, e) => {
           // Poll cancelled because the user left the chat screen mid-flight: the
@@ -3790,7 +3853,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, clearSuggestions, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -5660,6 +5723,18 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
+                {/* Renders NOTHING when there are no suggestions — no empty
+                    container, no reserved height — so a thread Sprntly has
+                    nothing to add to looks exactly as it did before this
+                    feature, and a late response never shifts the composer
+                    under the user's cursor. Active tab only: `suggestionsByTab`
+                    is keyed by tab so a background answer's chips stay with
+                    their own thread. */}
+                <NextPromptSuggestions
+                  suggestions={(activeTabId && suggestionsByTab[activeTabId]) || []}
+                  disabled={busy}
+                  onPick={(prompt) => { void submitAsk(prompt) }}
+                />
                 {renderComposer(false)}
               </div>
             ) : null}
