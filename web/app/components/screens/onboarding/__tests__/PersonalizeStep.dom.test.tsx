@@ -122,16 +122,22 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
-  it("offers only the insight types that have a skill behind them, in the specified order", async () => {
+  it("offers every insight type the brief classifies into, in the specified order", async () => {
     analyticsConnected()
     const { container } = mount()
     const labels = Array.from(
       container.querySelectorAll('[data-field="surfaces"] button'),
     ).map((b) => (b.textContent ?? "").trim())
+    // All six as of 2026-08-04. Narrowing to three made the picker useless:
+    // top_problems tags ~2/3 of all findings, so the only types that could
+    // actually steer a brief were the ones a PM couldn't select.
     expect(labels).toEqual([
       "Top Customer Problem",
       "Competitor & market moves",
       "What to build next",
+      "User feedback & complaints",
+      "Reliability & incident signals",
+      "Wins to celebrate",
     ])
     // The free-text override is gone with them.
     expect(container.querySelector("textarea")).toBeNull()

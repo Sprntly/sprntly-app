@@ -360,7 +360,7 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     expect(ns.email_recipients).toEqual(["a@co.com"])
   })
 
-  it("offers only the insight types that have a skill behind them, in the specified order, with no note field", () => {
+  it("offers every insight type the brief classifies into, in the specified order, with no note field", () => {
     mountWith({})
     const labels = Array.from(
       document.querySelectorAll('[data-field="insight-types"] button'),
@@ -370,16 +370,31 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
       "Top Customer Problem",
       "Competitor & market moves",
       "What to build next",
+      "User feedback & complaints",
+      "Reliability & incident signals",
+      "Wins to celebrate",
     ])
     expect(document.querySelector("#comms-insight-note")).toBeNull()
   })
 
-  it("ignores stored slugs that are no longer offered, along with unknown ones", () => {
-    // `wins` is a real slug the pane no longer offers; the other is garbage.
-    // Neither may render a phantom chip nor survive into the next save.
-    mountWith({ brief_insight_types: ["wins", "not_a_real_type", "competitor_moves"] })
+  it("restores a stored selection across the whole vocabulary", () => {
+    // `wins` and `reliability_signals` were unpickable while the set was
+    // narrowed to three; a workspace that had stored them must get its chips
+    // back now that they're offered again.
+    mountWith({ brief_insight_types: ["wins", "reliability_signals"] })
+    expect(insightChip("Wins to celebrate").getAttribute("aria-pressed")).toBe("true")
+    expect(
+      insightChip("Reliability & incident signals").getAttribute("aria-pressed"),
+    ).toBe("true")
+    expect(insightChip("Top Customer Problem").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("ignores unknown stored slugs", () => {
+    // Garbage (or a retired slug like the pre-rename `drive_metric`) may
+    // neither render a phantom chip nor survive into the next save.
+    mountWith({ brief_insight_types: ["drive_metric", "not_a_real_type", "competitor_moves"] })
     const chips = document.querySelectorAll('[data-field="insight-types"] button')
-    expect(chips.length).toBe(3)
+    expect(chips.length).toBe(6)
     expect(insightChip("Competitor & market moves").getAttribute("aria-pressed")).toBe("true")
   })
 })

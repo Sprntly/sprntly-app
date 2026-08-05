@@ -71,17 +71,25 @@ export const INSIGHT_TYPES: InsightType[] = [
 
 export const INSIGHT_TYPE_SLUGS: InsightTypeSlug[] = INSIGHT_TYPES.map((t) => t.value)
 
-// The subset a PM can actually pick today (2026-07-27). The other three types
-// stay in the canonical list on purpose — the compose prompt still classifies
-// findings into all six, stored selections still validate, and the DB check
-// constraint is unchanged — but no skill is configured to produce them yet, so
-// offering them promises insights that never arrive. This is the ONE list to
-// edit when a type goes live; the pickers and the Top Insights filter all read
-// through it.
+// The subset a PM can actually pick. This is the ONE list to edit when a type
+// goes live; the pickers and the Top Insights filter all read through it.
+//
+// All six as of 2026-08-04. It was narrowed to three on 2026-07-27 on the
+// grounds that "no skill is configured to produce" the other three — no longer
+// true: measured across the live briefs, the compose step classifies findings
+// into reliability_signals (26% of findings), user_feedback (20%), wins (10%)
+// and competitor_moves (8%) every week. Withholding them was the opposite
+// problem — top_problems tags 67% of all findings, so the two types a PM could
+// still pick were catch-alls that steered nothing, and the types they'd
+// actually want to prioritise were unpickable AND stripped from a stored
+// selection on read (see selectableInsightTypes).
 export const SELECTABLE_INSIGHT_TYPE_SLUGS: InsightTypeSlug[] = [
   "top_problems",
   "competitor_moves",
   "build_priorities",
+  "user_feedback",
+  "reliability_signals",
+  "wins",
 ]
 
 const SELECTABLE_SET = new Set<string>(SELECTABLE_INSIGHT_TYPE_SLUGS)
