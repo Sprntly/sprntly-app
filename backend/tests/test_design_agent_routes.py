@@ -394,6 +394,214 @@ async def test_background_task_marks_failed_when_runner_incomplete(env, monkeypa
     assert "status=max_iters" in row["error"]
 
 
+# ─── The SSE terminal follows staging, not agent-completion ────────────────
+#
+# `_stub_generate` (above) always returns `virtual_fs={}` by default, which
+# never reaches `_stage_complete_run` — fine for the existing bg-task tests,
+# but these need the REAL staging path (vite_build_with_repair → checkpoint →
+# stage_bundle → complete_prototype) to exercise the actual fix. `_stage_seams`
+# fakes only the two I/O boundaries (build + storage upload); the checkpoint
+# insert and complete_prototype/fail_prototype writes are the REAL fake-
+# Supabase-backed helpers, so `_sse_close`'s ordering relative to them is real.
+
+
+def _stage_seams(monkeypatch, routes_mod, *, dist=None, raises=None):
+    """Stub vite_build_with_repair + stage_bundle so _stage_complete_run runs
+    to a real terminal (success, or the chosen `raises` staging failure)
+    against the real checkpoint/complete_prototype/fail_prototype helpers."""
+    from tests import _fake_supabase
+
+    monkeypatch.setitem(
+        _fake_supabase._JSONB_COLUMNS, "prototype_checkpoints",
+        {"prompt_history", "comment_state"},
+    )
+
+    async def _build(vfs):
+        if raises is not None:
+            raise raises
+        return (dist or {"index.html": "<html>built</html>"}), dict(vfs)
+
+    monkeypatch.setattr(routes_mod, "vite_build_with_repair", _build)
+
+    async def _stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        return "file:///x/index.html"
+
+    monkeypatch.setattr(routes_mod, "stage_bundle", _stage)
+    monkeypatch.setattr(routes_mod, "reconcile_comments_on_checkpoint", lambda **kw: None)
+
+
+async def test_run_generation_bg_done_terminal_fires_after_complete_prototype(env, monkeypatch):
+    """AC1: the `done` SSE terminal is emitted AFTER complete_prototype
+    runs, not at agent-completion — proven by the real ORDER of two real side
+    effects (a spy on complete_prototype + a captured _sse_close), not by
+    inspecting the code."""
+    events: list[str] = []
+    real_complete = env.routes.complete_prototype
+
+    def _complete_spy(**kwargs):
+        events.append("complete_prototype")
+        return real_complete(**kwargs)
+
+    monkeypatch.setattr(env.routes, "complete_prototype", _complete_spy)
+
+    def _capture_close(pid, *, kind, summary=""):
+        events.append(f"sse_close:{kind}")
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    _stage_seams(monkeypatch, env.routes)
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+
+    assert events == ["complete_prototype", "sse_close:done"]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "ready"
+
+
+async def test_run_generation_bg_staging_failure_emits_error_not_done(env, monkeypatch):
+    """AC3 (the important one): the agent succeeds but staging raises
+    — subscribers get an ERROR terminal, never `done`. Uses the fail-fast
+    FileNotFoundError branch (never re-enters the agent) to isolate this close
+    from the separately-covered build-repair loop."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    _stage_seams(monkeypatch, env.routes, raises=FileNotFoundError("missing scaffold file"))
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+
+    assert closed == [(pid, "error")]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+
+
+async def test_run_generation_bg_complete_no_files_emits_error_terminal(env, monkeypatch):
+    """Operative-rule extension (flagged in the builder report): a
+    complete run that emits NO files never reaches _stage_complete_run at all
+    (nothing to stage) — this exit must still resolve the deferred close with
+    an error terminal, not leave it unresolved (the same "unrepresentable
+    failure" AC3 targets, one step earlier than the six-branch table)."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={})
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+
+    assert closed == [(pid, "error")]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+
+
+async def test_run_generation_bg_staging_publishes_progress_before_terminal(env, monkeypatch):
+    """AC2: the staging window is not silent. A live SSE subscriber
+    receives at least one progress `step` (the already-existing VITE_PHASE_STEP
+    publish, routes/design_agent.py:2543) BEFORE the terminal — reachable now
+    only because nothing closed the stream early."""
+    from app.design_agent import event_stream
+
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    _stage_seams(monkeypatch, env.routes)
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    received: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(pid):
+            received.append(ev)
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.sleep(0)  # let the subscriber register before the bg run starts
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    await consumer
+
+    kinds = [ev.get("kind") for ev in received]
+    assert "step" in kinds[:-1]         # at least one progress step before the terminal
+    assert received[-1]["kind"] == "done"
+
+
+def _old_client_observe(events: list[dict]) -> str | None:
+    """Frozen-fixture reproduction of the SHIPPED (pre-fix) client's terminal
+    handling — web/app/components/design-agent/GenerationLoadingScreen.tsx:225:
+    on the FIRST event whose `kind` is "done" or "error", the client marks every
+    active step done, sets isLiveDone, and closes the EventSource — treating
+    both kinds identically as terminal, exactly as today's shipped code does.
+    This fix does not change the event SHAPE (still `{kind, text?}`), only WHEN
+    `done` is sent, so this exact client logic needs no change (AC5) — proven
+    here by driving it, unmodified, against the fixed backend's real events."""
+    for ev in events:
+        if ev.get("kind") in ("done", "error"):
+            return ev["kind"]
+    return None
+
+
+async def test_old_client_terminal_handling_sees_a_ready_row_at_terminal(env, monkeypatch):
+    """AC5: the pre-fix client's terminal-handling (frozen fixture
+    above) reaches a clean terminal against the fixed backend — AND, unlike
+    before this fix, the prototype row is ALREADY 'ready' the moment that
+    terminal fires, so the client's separate poller fallback (unchanged, still
+    there — out of scope) has nothing stale left to wait out."""
+    from app.design_agent import event_stream
+
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    _stage_seams(monkeypatch, env.routes)
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    received: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(pid):
+            received.append(ev)
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    await consumer
+
+    assert _old_client_observe(received) == "done"
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "ready"
+
+
 # ─── Failure-path diagnostics: propagate RunResult.error_message (P2-02) ────
 
 
