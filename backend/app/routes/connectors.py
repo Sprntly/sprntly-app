@@ -2800,13 +2800,37 @@ def slack_callback(code: str, state: str):
 def slack_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
-    # Disconnect only THIS user's Slack — never another member's.
+    # Disconnect only THIS user's Slack — never another member's. That guard
+    # is unconditional: it applies before we even look at role.
     row = db.get_slack_connection(company.company_id, company.user_id)
+    owned_by_caller = row is not None
+
+    # This member has no personal Slack row of their own. If the only Slack
+    # connection visible to them is the shared company sync row (see
+    # _company_slack_row_sanitized / resolve_company_slack_row), that row is
+    # STILL someone else's personal install, only promoted to also serve the
+    # company's voice-of-customer sync — it is NOT workspace-scoped, and
+    # Slack is dual-typed (catalog.py), so deleting it would also kill that
+    # owner's own DM/brief delivery, not just the company's channel sync.
+    # That case stays owner-only, same as any other personal connection —
+    # an admin gets no special reach into it.
+    #
+    # The one shape with no other remedy is a pre-per-user-migration orphan
+    # (user_id IS NULL): no owner exists to disconnect it themselves, so an
+    # admin/owner may clear it on the company's behalf. Everyone else
+    # (including an admin facing another member's promoted personal row)
+    # gets the same 404 as before.
+    if row is None and company.role in ("owner", "admin"):
+        row = db.get_orphan_slack_connection(company.company_id)
+
     if not row:
         raise HTTPException(404, "Slack is not connected")
+
     # Revoke the token on Slack's side first (best-effort), so the install is
     # torn down for the workspace, not just deleted locally — Slack Marketplace
-    # expects a clean uninstall. A revoke failure must not block the local delete.
+    # expects a clean uninstall. A revoke failure must not block the local
+    # delete — the whole point of this path is recovering a connection whose
+    # credential is already dead.
     try:
         token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
         bot_token = token_json.get("access_token")
@@ -2814,7 +2838,11 @@ def slack_disconnect(
             slack_oauth.revoke_token(bot_token)
     except Exception:  # noqa: BLE001 — never let revoke block the disconnect
         logger.warning("Slack token revoke on disconnect failed", exc_info=True)
-    db.delete_slack_connection(company.company_id, company.user_id)
+
+    if owned_by_caller:
+        db.delete_slack_connection(company.company_id, company.user_id)
+    else:
+        db.delete_slack_connection_by_id(company.company_id, row["id"])
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
