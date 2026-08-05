@@ -80,6 +80,44 @@ def clean_insight_types(values: object) -> "list[str]":
     return out
 
 
+def order_pool_for_types(
+    pool: "list[dict]", selected: "list[str]",
+) -> "tuple[list[dict], int]":
+    """Stable partition of a composed pool by the reader's insight types.
+
+    Findings whose `insight_types` intersect `selected` lead, in their existing
+    (best-first) order; everything else follows, also in its existing order.
+    Returns the reordered pool plus how many findings matched.
+
+    This is the DETERMINISTIC half of the preference contract. The compose
+    prompt already carries the selection as a ranking nudge
+    (synthesis/reader_prefs), but a nudge can't guarantee the LEAD finding
+    matches — measured across the live briefs, a preferred finding existed but
+    sat below rank 1 in most of them. Reordering here makes `insights[0]` — the
+    canonical top insight the weekly email, the Slack post, PRD warming and the
+    KG ledger all key off — a preferred finding whenever the pool holds one.
+
+    Honours SKILL.md step 4b literally: preferences REORDER, they never
+    exclude. Nothing is dropped, and no selection (or no match) returns the
+    pool unchanged so the model's own ranking stands. Byte-for-byte the same
+    semantics as the frontend's orderPoolForTypes in web/app/lib/
+    brief-v2-adapter.ts, so the browser's partition of an already-partitioned
+    pool is the identity and the two surfaces cannot disagree.
+    """
+    wanted = {s for s in selected if s in INSIGHT_TYPES}
+    if not wanted:
+        return pool, 0
+    matching: list[dict] = []
+    rest: list[dict] = []
+    for ins in pool:
+        types = ins.get("insight_types")
+        if isinstance(types, (list, tuple)) and wanted.intersection(types):
+            matching.append(ins)
+        else:
+            rest.append(ins)
+    return matching + rest, len(matching)
+
+
 def prompt_block() -> str:
     """The TYPES reference block injected into the compose prompt, so the model
     classifies each finding into these exact categories."""

@@ -119,3 +119,45 @@ describe("briefToBriefV2State with a filter", () => {
     expect(state.supporting.map((s) => s.title)).toEqual(["B feedback", "C problems"])
   })
 })
+
+// The hero is the TOP insight the reader actually sees. With a selection
+// active the list reaching the renderer is already preference-ordered (the
+// backend stable-partitions the pool at generation time), so the hero must be
+// its lead — otherwise the browser re-sorts by confidence and disagrees with
+// the emailed and Slacked brief, which both render insights[0] first.
+describe("hero pick under an active insight-type filter", () => {
+  const lowFirst = finding("low but preferred", ["wins"], 0.4)
+  const highSecond = finding("high and preferred", ["wins"], 0.95)
+
+  it("leads with pool order, not the highest-confidence match", () => {
+    const brief = briefWithPool([lowFirst, highSecond], [lowFirst, highSecond])
+    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("low but preferred")
+    // ...and without a filter the old confidence rule is untouched.
+    expect(briefToBriefV2State(brief, []).hero?.title).toBe("high and preferred")
+  })
+
+  it("outranks a stale is_headline flag on a demoted finding", () => {
+    // A brief generated before the backend re-pointed is_headline, or one read
+    // after the PM changed their selection, can carry the flag on a card the
+    // current preference order no longer leads with.
+    const stale = { ...highSecond, is_headline: true } as Insight
+    const brief = briefWithPool([lowFirst, stale], [lowFirst, stale])
+    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("low but preferred")
+  })
+
+  it("keeps the model's own hero when the selection matched nothing", () => {
+    // Fallback path: the list is the unfiltered top 3, so there is no
+    // preference order to honour and the flagged/strongest card is the honest
+    // answer rather than an arbitrary first element.
+    const flagged = { ...C, is_headline: true } as Insight
+    const brief = briefWithPool([A, B, flagged], [A, B, flagged])
+    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("C problems")
+  })
+
+  it("drives the KPI tiles off the same hero", () => {
+    const brief = briefWithPool([lowFirst, highSecond], [lowFirst, highSecond])
+    const state = briefToBriefV2State(brief, ["wins"])
+    expect(state.hero?.title).toBe("low but preferred")
+    expect(state.kpiTiles.length).toBeGreaterThan(0)
+  })
+})

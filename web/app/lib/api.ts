@@ -256,6 +256,14 @@ export type Brief = {
    *  insight-type filter, falling back to `insights`. Absent on briefs generated
    *  before the pool existed — treat `insights` as the pool in that case. */
   _pool?: Insight[]
+  /** Preference audit: the workspace's stored insight-type selection at
+   *  generation time, and how many pooled findings carried one of those types.
+   *  The backend stable-partitions the pool by `selected` before persisting, so
+   *  `insights[0]` (and `_pool[0]`) already lead with a preferred finding when
+   *  `matched > 0`. `matched === 0` with a non-empty `selected` is the honest
+   *  "nothing of that type this week" case — the brief fell back to the model's
+   *  own ranking. Absent on briefs generated before the deterministic reorder. */
+  _insight_prefs?: { selected: string[]; matched: number }
   /** Phase 2A ledger: candidates held back from this brief with a reason
    *  (carried | dismissed | deferred | in_progress | rotation_exhausted).
    *  `deferred_until` accompanies reason 'deferred'. Feeds the quiet
