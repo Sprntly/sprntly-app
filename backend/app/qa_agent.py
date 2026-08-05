@@ -1187,28 +1187,19 @@ def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
 def _cross_connector_sweep_enabled(enterprise_id: Optional[str]) -> bool:
     """Should this company's source-agnostic questions also read connectors live?
 
-    Two levers, checked in this order:
-      * `settings.chat_cross_connector_sweep` — the GLOBAL operational switch,
-        so the sweep can be turned off everywhere without a per-company DB
-        write. Checked first because it must win.
-      * `chat_cross_connector_sweep` in companies.feature_flags — the per-company
-        product control, DEFAULT ON via the usual grandfather pattern.
-
-    A failed flag read resolves ON, matching `cross_connector_sweep_enabled`'s
-    reasoning: the sweep only re-reads sources the tenant already connected,
-    through the same read-only adapters, so an unknown flag state risks latency
-    rather than exposure — and the global switch is the lever for latency.
+    Delegates to `sweep.enabled_for`, which is now the single definition of both
+    levers. It used to live here, and that was the bug: `registry
+    .answer_for_hints`'s priming sweep — added in the same PR — never consulted
+    it, so `CHAT_CROSS_CONNECTOR_SWEEP=false` disabled the direct path and left
+    priming running. `sweep()` enforces the gate itself now; this remains only
+    as the cheap early-out that skips composing anything on the direct path.
     """
     if not enterprise_id:
         return False
     try:
-        from app.config import settings
+        from app.connector_lookup import sweep as connector_sweep
 
-        if not settings.chat_cross_connector_sweep:
-            return False
-        from app.entitlements import cross_connector_sweep_enabled, read_feature_flags
-
-        return cross_connector_sweep_enabled(read_feature_flags(enterprise_id))
+        return connector_sweep.enabled_for(enterprise_id)
     except Exception:  # noqa: BLE001 — flag read must never break the ask
         logger.exception(
             "chat_cross_connector_sweep flag read failed for %s", enterprise_id

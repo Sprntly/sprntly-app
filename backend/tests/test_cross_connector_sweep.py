@@ -411,9 +411,21 @@ def test_calls_leg_reads_the_index_not_the_fireflies_api(monkeypatch, wire):
     assert "### Recorded calls" in block
 
 
-def test_calls_leg_reports_index_size_on_a_keyword_miss(monkeypatch, wire):
-    """"13 calls, none matching" is a materially different answer from "no
-    calls", and only the first one is true."""
+def test_a_keyword_miss_alone_renders_no_block_at_all(monkeypatch, wire):
+    """REGRESSION. This test used to assert the opposite, and asserting the
+    opposite is what let the bug ship.
+
+    `_leg_calls` returns real prose on a miss ("13 recorded calls are indexed,
+    none match"), and while that was the leg's TEXT the source counted as
+    `usable` — so `render()` could never return "" for any company with a call
+    index. A user typing "add more detail" got a prompt announcing that five
+    sources had been searched and found nothing, steering the model into
+    asserting an absence drawn from a keyword probe.
+
+    A miss is now UNREAD. On its own it produces no block, so composition is
+    genuinely byte-identical to before the sweep existed — the claim this
+    feature's PR made and did not honour.
+    """
     from app import call_index
 
     wire({}, connected=[])
@@ -421,8 +433,31 @@ def test_calls_leg_reports_index_size_on_a_keyword_miss(monkeypatch, wire):
     monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [])
     monkeypatch.setattr(call_index, "count_calls", lambda eid, **k: 13)
 
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert result.read == []
+    assert result.render() == ""
+    # The honest detail is retained — it just is not content.
+    assert "13 recorded calls are indexed" in result.unread[0].unread_reason()
+
+
+def test_a_keyword_miss_is_disclosed_when_another_source_did_answer(
+    monkeypatch, wire
+):
+    """The miss detail still earns its place ALONGSIDE a real hit: "13 calls
+    indexed, none match" is materially different from "no calls", and once
+    something else has been read there is an answer for it to qualify."""
+    from app import call_index
+
+    wire({"jira": FakeAdapter("jira", result="PROJ-9 Checkout redesign")})
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [])
+    monkeypatch.setattr(call_index, "count_calls", lambda eid, **k: 13)
+
     block = cs.sweep("ent-1", "checkout redesign status").render()
 
+    assert "PROJ-9 Checkout redesign" in block
+    assert "Sources NOT covered by this sweep" in block
     assert "13 recorded calls are indexed" in block
     assert "not transcripts" in block
 
@@ -525,6 +560,48 @@ def test_global_setting_beats_the_per_company_flag(monkeypatch):
         "app.entitlements.read_feature_flags", lambda cid: {}
     )
     assert qa_agent._cross_connector_sweep_enabled("ent-1") is True
+
+
+def test_global_switch_stops_the_sweep_itself_not_just_one_caller(monkeypatch, wire):
+    """REGRESSION. The gate shipped in `qa_agent._sweep_context` only, so
+    `registry.answer_for_hints`'s priming call — added in the same PR — swept
+    with no check at all. `CHAT_CROSS_CONNECTOR_SWEEP=false` therefore disabled
+    the direct path and left priming running: a kill switch that does not kill.
+
+    The gate now lives inside `sweep()`, so it holds for every caller including
+    ones not written yet. Asserted against `sweep()` DIRECTLY — asserting via a
+    caller is what let the second entry point go uncovered.
+    """
+    from app.config import settings
+
+    jira = FakeAdapter("jira", result="PROJ-1")
+    wire({"jira": jira})
+    monkeypatch.setattr(settings, "chat_cross_connector_sweep", False)
+
+    result = cs.sweep("ent-1", "what is the state of the billing migration?")
+
+    assert result.sources == []
+    assert result.render() == ""
+    assert jira.opened_with == [], "a disabled sweep must open no sessions"
+    assert cs.enabled_for("ent-1") is False
+
+
+def test_disabled_sweep_opens_no_session_so_it_cannot_refresh_a_token(
+    monkeypatch, wire
+):
+    """Why the switch matters beyond latency: `open_session` is a WRITE path for
+    Jira, Confluence and HubSpot (it refreshes and persists a rotating token).
+    With the sweep off, no session is opened, so it cannot contribute to that
+    write at all — which is what makes the flag a usable containment lever."""
+    from app.config import settings
+
+    adapters = {p: FakeAdapter(p, result="x") for p in cs.LIVE_PROVIDERS}
+    wire(adapters)
+    monkeypatch.setattr(settings, "chat_cross_connector_sweep", False)
+
+    cs.sweep("ent-1", "what is the state of the billing migration?", only={"jira"})
+
+    assert all(a.opened_with == [] for a in adapters.values())
 
 
 def test_sweep_context_never_raises(monkeypatch):

@@ -612,19 +612,50 @@ def sync_context(company_id: str) -> ConfluenceContext:
             "the stored Confluence token could not be read"
         ) from e
 
+    def _is_stale(payload: dict) -> bool:
+        obtained_at = payload.get("obtained_at") or 0
+        expires_in = payload.get("expires_in") or 3600
+        return time.time() > obtained_at + expires_in - 120
+
     refresh_token = token_json.get("refresh_token")
-    obtained_at = token_json.get("obtained_at") or 0
-    expires_in = token_json.get("expires_in") or 3600
-    if refresh_token and time.time() > obtained_at + expires_in - 120:
-        new_payload = token_payload_to_store(
-            refresh_access_token(refresh_token),
-            company_id=company_id,
-            keep_refresh_token=refresh_token,
-        )
-        db.update_connection_tokens(
-            company_id, CONFLUENCE_PROVIDER, encrypt_token_json(new_payload)
-        )
-        token_json = json.loads(new_payload)
+    if refresh_token and _is_stale(token_json):
+        from app.connectors.token_refresh import serialised_refresh
+
+        # Serialise, then RE-READ inside the lock. Atlassian rotates refresh
+        # tokens, so two callers racing on the same stale row present the same
+        # token; both can succeed inside the reuse grace window and the LAST
+        # write wins, which can leave a retired credential stored and the
+        # connection dead until a human reconnects. The re-read is the fix — the
+        # loser finds the row already fresh and does nothing.
+        #
+        # The docstring above already noted this re-reads every pass as a
+        # backstop; what was missing is that the re-read must happen INSIDE the
+        # critical section to be worth anything under concurrency.
+        with serialised_refresh(company_id, CONFLUENCE_PROVIDER):
+            fresh_row = db.get_connection(company_id, CONFLUENCE_PROVIDER)
+            if fresh_row:
+                try:
+                    current = json.loads(
+                        decrypt_token_json(fresh_row["token_json_encrypted"])
+                    )
+                except Exception:  # noqa: BLE001 — fall through to refreshing
+                    current = None
+                if current and not _is_stale(current):
+                    token_json = current
+                    refresh_token = None  # someone else just did it
+                elif current and current.get("refresh_token"):
+                    refresh_token = current["refresh_token"]
+
+            if refresh_token:
+                new_payload = token_payload_to_store(
+                    refresh_access_token(refresh_token),
+                    company_id=company_id,
+                    keep_refresh_token=refresh_token,
+                )
+                db.update_connection_tokens(
+                    company_id, CONFLUENCE_PROVIDER, encrypt_token_json(new_payload)
+                )
+                token_json = json.loads(new_payload)
 
     access_token = token_json.get("access_token") or ""
     if not access_token:

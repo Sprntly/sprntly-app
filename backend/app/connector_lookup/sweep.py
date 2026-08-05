@@ -99,15 +99,24 @@ MAX_TERMS = 8
 
 #: Terms a message must yield before ANY source is probed.
 #:
-#: Two, not one, and the second one is doing real work. A single surviving
-#: content word is as often an instruction about the answer ("make it punchier")
-#: or a bare acknowledgement as it is a topic, and the probe is far cheaper to
-#: skip than to run and discard. The cost is honest and worth stating: a
-#: one-noun question ("anything on Acme?") does not sweep. It still answers from
-#: corpus + KG exactly as it did before, and naming a source or asking a fuller
-#: question both reach the live read — so the failure mode is "no better than
-#: yesterday", never "worse".
-MIN_TERMS = 2
+#: ONE, lowered from two, and only because two other things changed first.
+#:
+#: A count is a bad proxy for "is this a topic". At two it blocked real
+#: questions — "How is onboarding going?" and "anything on Acme?" both yield a
+#: single noun and both deserve a sweep — while still passing "add more detail"
+#: and "change the title", which yield two words that name nothing. It was
+#: filtering on the wrong axis, so it leaked and over-blocked at the same time.
+#:
+#: The vocabulary above now does that job directly, and a keyword MISS is no
+#: longer `usable` (see LegMiss), so a false positive costs one bounded parallel
+#: probe and renders nothing. That asymmetry is what makes the looser floor
+#: safe: over-sweeping is now cheap, under-sweeping is still a feature that
+#: silently does not work.
+#:
+#: Measured over 12 formatting follow-ups and 7 real questions: 0/12 leak, 7/7
+#: caught. At two it was 0/12 and 5/7. Honest limit — this is lexical, so it
+#: will never be exact; LegMiss is what keeps the inexactness cheap.
+MIN_TERMS = 1
 
 #: Live-readable providers this sweep probes, in render priority order. Each is
 #: gated on an actual connection before anything is opened.
@@ -136,6 +145,18 @@ _STOPWORDS = frozenset({
     "month", "year", "recent", "recently", "latest", "new", "old", "status",
     "update", "updates", "summary", "summarize", "summarise", "anything",
     "everything", "something", "nothing", "one", "two", "sprntly",
+    # Words that shape the ANSWER or the DOCUMENT, not the company. A review of
+    # 28 realistic turns found the gate leaking mostly here: "add more detail"
+    # ("add", "detail"), "change the title", "put the risks first", "sounds
+    # good, ship it" all cleared it and swept every connector for vocabulary
+    # that names nothing. In a working thread these are a large share of all
+    # turns, so they were a large share of all sweeps.
+    "add", "detail", "details", "change", "title", "heading", "section",
+    "risk", "risks", "put", "move", "reorder", "swap", "first", "last", "top",
+    "bottom", "above", "below", "ship", "sounds", "fine", "done", "same",
+    "another", "again", "version", "point", "points", "line", "lines", "word",
+    "words", "text", "copy", "wording", "format", "formatting", "style",
+    "but", "good", "cool", "right", "time", "times", "bit", "little",
     # Words about the ANSWER rather than about the company. Without these,
     # "make it shorter and punchier" clears MIN_TERMS on two words that name
     # nothing, and every connector gets searched for "shorter punchier". These
@@ -371,11 +392,10 @@ def _leg_calls(enterprise_id: str, terms: list[str]) -> str:
         total = call_index.count_calls(enterprise_id)
         if not total:
             return ""
-        return (
-            f"{total} recorded calls are indexed for this workspace, but none of "
-            "their titles or accounts match these terms. That says nothing about "
-            "what was SAID on them — the index holds titles, dates and accounts, "
-            "not transcripts."
+        return LegMiss(
+            f"{total} recorded calls are indexed, but no title or account matches "
+            "these terms — the index holds titles, dates and accounts, not "
+            "transcripts, so this says nothing about what was SAID on them"
         )
     rows = [
         f"- {c.call_date or 'undated'} · {c.title or 'untitled'}"
@@ -409,10 +429,9 @@ def _leg_github(enterprise_id: str, terms: list[str]) -> str:
                for t in lowered)
     ]
     if not hits:
-        return (
-            f"{len(rows)} open pull request(s) are synced for this workspace, none "
-            "whose title mentions these terms. Only PR titles are matched here, "
-            "not diffs or comments."
+        return LegMiss(
+            f"{len(rows)} open pull requests are synced, none whose TITLE mentions "
+            "these terms — only titles are matched here, not diffs or comments"
         )
     rows_out = [
         f"- {r.get('repo_full_name') or 'repo'}#{r.get('pr_number')} · "
@@ -424,6 +443,29 @@ def _leg_github(enterprise_id: str, terms: list[str]) -> str:
     if len(hits) > 10:
         head += " (showing 10)"
     return head + ":\n" + "\n".join(rows_out)
+
+
+@dataclass(frozen=True)
+class LegMiss:
+    """A leg that ran fine and matched NOTHING, plus the honest detail.
+
+    Distinct from returning the detail as content, which is the bug this type
+    exists to prevent. `_leg_calls` and `_leg_github` know something worth
+    saying on a miss — "40 calls are indexed, none match these terms" — and
+    returning that as the leg's TEXT made the source `usable`, so `render()`
+    could never return "" for any company with a call index or synced PRs.
+
+    A user typing "add more detail" then got a prompt announcing that five
+    sources had been searched and found nothing, which steered the model into
+    asserting an absence from a keyword probe — precisely what `render()`'s own
+    docstring exists to prevent, and it falsified this feature's claim that an
+    empty sweep composes identically to before.
+
+    So a miss is now UNREAD, and the detail rides the unread line where it
+    belongs: it is context for an answer, never an answer.
+    """
+
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -489,6 +531,47 @@ def _live_candidates(enterprise_id: str) -> list[str]:
     return [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
 
 
+def enabled_for(enterprise_id: str) -> bool:
+    """Is the sweep switched on for this company?
+
+    Lives HERE, not in the caller, because the caller is not a reliable place to
+    put it. This shipped gated at `qa_agent._sweep_context` only, and
+    `registry.answer_for_hints`'s priming call — added in the same PR — had no
+    check at all, so `CHAT_CROSS_CONNECTOR_SWEEP=false` silently left half the
+    feature running. A kill switch that covers one of two entry points is not a
+    kill switch, and the next entry point would have missed it too.
+
+    `sweep()` now consults this itself, so the gate cannot be bypassed by
+    forgetting it. Callers may still check early as a cheap short-circuit; they
+    can no longer be the only thing standing between a disabled flag and a
+    fan-out.
+
+    Two levers, global first:
+      * `settings.chat_cross_connector_sweep` — operational, off everywhere
+        without a per-company DB write;
+      * `chat_cross_connector_sweep` in companies.feature_flags — per-company,
+        default ON via the usual grandfather pattern.
+
+    A failed flag read resolves ON: the sweep only re-reads sources the tenant
+    already connected, so the risk of being wrong is latency, not exposure.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.config import settings
+
+        if not settings.chat_cross_connector_sweep:
+            return False
+        from app.entitlements import cross_connector_sweep_enabled, read_feature_flags
+
+        return cross_connector_sweep_enabled(read_feature_flags(enterprise_id))
+    except Exception:  # noqa: BLE001 — a flag read must never break the answer
+        logger.exception(
+            "cross-connector sweep: flag read failed for %s", enterprise_id
+        )
+        return True
+
+
 def can_sweep(provider: str) -> bool:
     """True when this provider has a probe the sweep can run for it.
 
@@ -534,9 +617,14 @@ def _run_local(
             if time.monotonic() > deadline:
                 result.status = STATUS_TIMEOUT
             else:
-                text = leg.run(enterprise_id, terms)
-                if text.strip():
-                    result.status, result.text = STATUS_OK, text
+                produced = leg.run(enterprise_id, terms)
+                if isinstance(produced, LegMiss):
+                    # Ran fine, matched nothing. Stays UNREAD so it cannot make
+                    # `render()` produce a block on its own — the detail is
+                    # context for an answer, never an answer.
+                    result.detail = produced.detail
+                elif produced.strip():
+                    result.status, result.text = STATUS_OK, produced
         except Exception as exc:  # noqa: BLE001 — a leg degrades, never breaks chat
             logger.warning(
                 "cross-connector sweep: local leg %s failed for %s",
@@ -672,6 +760,12 @@ def sweep(
         return result
     terms = sweep_terms(question)
     if len(terms) < min_terms:
+        return result
+    # THE choke point for the kill switch. Checked here rather than trusted to
+    # callers: it shipped gated at one of two entry points, which is a kill
+    # switch that does not kill. Ordered after the term gate so a topicless
+    # message still costs no DB read.
+    if not enabled_for(enterprise_id):
         return result
     result.terms = terms
     deadline = started + max(budget_s, 0.0)

@@ -140,13 +140,43 @@ def _refresh_if_stale(company_id: str, token_json: dict) -> dict:
         return token_json
     try:
         from app import db
+        from app.connectors.token_refresh import serialised_refresh
 
-        new_json_str = token_payload_to_store(refresh_access_token(refresh_token))
-        db.update_connection_tokens(
-            company_id, "jira", encrypt_token_json(new_json_str)
-        )
-        logger.info("jira-lookup: refreshed access token for %s", company_id)
-        return json.loads(new_json_str)
+        # Serialise, then RE-READ inside the lock. Jira's refresh tokens rotate,
+        # so two callers racing on the same stale row both present the same
+        # token and can both succeed within Atlassian's reuse grace window,
+        # returning two different new refresh tokens — and whichever write lands
+        # LAST wins the row. If that is the earlier-issued payload we have
+        # stored a credential Atlassian already retired, and this company's Jira
+        # is dead until someone reconnects.
+        #
+        # The lock alone would not fix it: the loser would still POST a token
+        # the winner just retired. The re-read is the actual fix — by the time
+        # the loser gets in, the row is fresh and there is nothing to do.
+        with serialised_refresh(company_id, "jira"):
+            row = db.get_connection(company_id, "jira")
+            if row:
+                try:
+                    current = json.loads(
+                        decrypt_token_json(row["token_json_encrypted"])
+                    )
+                except (TokenEncryptionError, ValueError, KeyError, TypeError):
+                    current = None
+                if current and _token_is_fresh(current):
+                    logger.debug(
+                        "jira-lookup: another caller refreshed %s while we waited",
+                        company_id,
+                    )
+                    return current
+                if current and current.get("refresh_token"):
+                    refresh_token = current["refresh_token"]
+
+            new_json_str = token_payload_to_store(refresh_access_token(refresh_token))
+            db.update_connection_tokens(
+                company_id, "jira", encrypt_token_json(new_json_str)
+            )
+            logger.info("jira-lookup: refreshed access token for %s", company_id)
+            return json.loads(new_json_str)
     except Exception:  # noqa: BLE001 — refresh is best-effort
         logger.warning(
             "jira-lookup: token refresh failed for %s — surfacing reconnect",
