@@ -138,12 +138,39 @@ def test_ask_system_documents_addendum_length_bounds():
     Without (f) the failure path collapses back into exactly the false denial
     this work exists to remove.
 
-    4300 is ~8% above the current 3973 — room for wording repairs, not room
-    for another feature's worth of instructions. This string is prepended to
-    the system prompt of every ask that renders a document block, so its size
-    is a per-request cost and the ceiling is the thing that keeps it honest.
+    The third raise, 4300 -> 5000, pays for the two clauses that make
+    REFERENCE RESOLUTION mean anything. Selection can now do more than rank:
+    it can resolve the specific document a message refers to — named, or
+    established earlier in the thread and pointed at with "it" — and it can
+    decline to. Both halves need saying, and neither is polish.
+
+    (g) marks the resolved document and tells the model to answer FROM it,
+    explicitly overriding rule 6 for that one entry. Without it a resolved
+    referent is indistinguishable from the two topical documents beside it,
+    and rule 6's ignore-if-irrelevant invites the model to skip the very
+    document that was asked for.
+
+    (h) is the abstention, and it is the clause the whole stage exists for.
+    When a reference is ambiguous the block says so and lists the
+    possibilities; this tells the model to ASK rather than pick the
+    closest-looking one. Without it the section renders and the model is free
+    to ignore it, which is worse than never abstaining — it looks careful and
+    answers about the wrong document anyway. Deliberately loaded language
+    ("a confidently wrong document is worse than one short question") because
+    the failure it prevents is a confident answer, not a missing one.
+
+    Both were cut hard before this raise was taken: 1039 characters of first
+    drafts became 601 by deleting restatement, not contract. What is left is
+    the marker, the instruction, the rule-6 override and the ask-instead-of-
+    guess rule, with no sentence that only rephrases another.
+
+    5000 is ~7% above the current 4666 — again room for wording repairs, not
+    room for another feature's worth of instructions. This string is prepended
+    to the system prompt of every ask that renders a document block, so its
+    size is a per-request cost and the ceiling is the thing that keeps it
+    honest.
     """
-    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 4300
+    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 5000
 
 
 def test_ask_system_documents_addendum_required_content():

@@ -970,7 +970,23 @@ def _answer_single_shot(
     # This path loads no corpus, so without this every skill-routed question
     # stays blind to uploads and reproduces the incident on that half of the
     # traffic (compose_ask_answer's direct path is the other half).
-    docs_block, documents = document_grounding(enterprise_id, question)
+    # `history` is what lets document selection resolve a thread-dependent
+    # follow-up ("what does it say about pricing?") against the document
+    # established earlier, instead of ranking on the leftover verbs and landing
+    # on whichever document happens to mention pricing.
+    #
+    # `question_embedding` is deliberately NOT passed. It is left at its
+    # default so `document_grounding` reads it from the request-scoped
+    # ContextVar that PR #1046 introduces — that PR fixes this exact call being
+    # positional (and therefore semantically blind) as one of its two root
+    # causes, and it does so with zero edits to this file on purpose: threading
+    # the parameter through `answer() -> _answer_single_shot -> ...` is the
+    # four-edit change the ContextVar exists to avoid. An earlier revision of
+    # this branch threaded it here; that was a duplicate fix of someone else's
+    # root cause, in the shape they had explicitly designed around.
+    docs_block, documents = document_grounding(
+        enterprise_id, question, history=history
+    )
     system = (
         ASK_SYSTEM
         + today_line()

@@ -2238,7 +2238,7 @@ def test_the_question_is_embedded_once_and_shared_by_both_consumers(
     seen = {}
     real_grounding = ask_runner.document_grounding
 
-    def _spy_grounding(eid, q, conversation_id=None, *, question_embedding=None):
+    def _spy_grounding(eid, q, conversation_id=None, *, question_embedding=None, **kw):
         seen["documents"] = question_embedding
         return real_grounding(
             eid, q, conversation_id, question_embedding=question_embedding
@@ -2506,7 +2506,12 @@ def test_confluence_fetch_failure_degrades_to_summary_only(
         m for m in manifest if m["file_id"] == f"confluence:{_CONFLUENCE_PAGE_ID}"
     )
     assert entry["loaded"] is False
-    assert entry["match"] == "topic"
+    # Was "topic" before Stage R existed. The question names this page in two
+    # whole words ("release", "notes") against the only document that has
+    # them, so reference resolution now claims it and reports the evidence it
+    # used. WHICH document is selected, and every existence/loaded assertion
+    # around it, is unchanged — only the audit label moved.
+    assert entry["match"] == "named"
 
     # Nothing in the block may read as absence.
     lowered = block.lower()
