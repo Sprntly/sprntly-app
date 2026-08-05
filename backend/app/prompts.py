@@ -490,6 +490,42 @@ When your different sources agree, say so; when only one has the answer, ground 
 the claim in whichever supports it."""
 
 
+# ── Ask × cross-connector sweep ──────────────────────────────────────────────
+# Appended when app/connector_lookup/sweep.py read the company's connected tools
+# LIVE for this question. Two things the KG addendum above cannot say, because
+# they are only true of a live read: these results are current rather than a
+# sync-time snapshot, and the sweep is a KEYWORD probe whose silence proves
+# nothing. The second clause is the important one — a partial sweep reported as
+# a complete search is a worse answer than no sweep at all.
+ASK_SYSTEM_LIVE_SWEEP_ADDENDUM = """\
+
+You also have a "LIVE CROSS-SOURCE SWEEP" section: the connected tools were \
+read JUST NOW for this question, so where it disagrees with an older extracted \
+signal, the live read is what is true today and you should say the extract was \
+stale.
+
+Three rules about it, and they are not optional:
+1. It is a KEYWORD probe over a few terms, not an exhaustive search. A source \
+that returned nothing means "nothing matching those words", NEVER "it did not \
+happen" and never "the company has no record of it". Say which terms were \
+searched if you report an absence at all.
+2. The sweep lists any source it did NOT cover — timed out, errored, or \
+returned nothing. If a source relevant to the question is on that list, say so \
+plainly in your answer. Do not let an answer built from three sources imply you \
+covered all five.
+3. Attribute every fact to the source it came from, by name. When two sources \
+agree, say they agree; when they conflict, give both and say which is live.
+
+PRECEDENCE. If a section headed "The document this message refers to is \
+UNRESOLVED" is present, its instruction to ask which document the user means \
+WINS over this section, and you must ask before answering from any document. \
+Having swept material that looks close enough is not permission to pick for \
+them: answering about the wrong document confidently, from real data, is worse \
+than asking one short question, and harder for anyone to catch. Use the sweep \
+to make that question SPECIFIC — name the candidates you can see ("I can see \
+two: X and Y — which did you mean?") — never to skip it."""
+
+
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
 # When the chat runs next to an open PRD, app.prd_context assembles a
 # "CURRENT PRD CONTEXT" block (the PRD + its source insight, evidence,

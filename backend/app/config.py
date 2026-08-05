@@ -353,6 +353,15 @@ class Settings(BaseSettings):
     # empty => unrouted connectors are log-only.
     connector_health_alert_email: str = ""
 
+    # Cross-connector chat sweep (app/connector_lookup/sweep.py). A GLOBAL kill
+    # switch, separate from the per-company `chat_cross_connector_sweep` feature
+    # flag: the flag is the product control (one company opts out in the staff
+    # panel), this is the operational one. The sweep adds a bounded round of I/O
+    # to the default chat answer, so if it ever costs more latency than it earns
+    # we need an off switch that does not require a DB write per company.
+    # Setting it false disables the sweep for EVERY company regardless of flags.
+    chat_cross_connector_sweep: bool = True
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via

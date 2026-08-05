@@ -781,7 +781,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1146,7 +1146,7 @@ def test_on_route_reports_none_when_no_skill_is_routed(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1355,7 +1355,7 @@ def test_answer_prd_id_grounds_direct_answer(monkeypatch):
     )
     seen = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
         seen.update(question=q, prd_context=prd_context)
         return {"answer": "generic", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -1381,7 +1381,7 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "plain", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1431,7 +1431,7 @@ def test_answer_does_not_route_attached_document_to_tracker(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "grounded", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1485,7 +1485,7 @@ def test_named_document_question_reaches_route_in_scope(monkeypatch):
     # answer-generation call so an in-scope result returns fast.
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "grounded", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1522,7 +1522,7 @@ def test_route_input_carries_a_document_name_from_the_measured_case(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1549,7 +1549,7 @@ def test_routing_text_stops_at_marker_grounding_keeps_full_question(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     seen_grounding_arg = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
         seen_grounding_arg["question"] = q
         return {"answer": "ok", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -1603,7 +1603,7 @@ def test_route_input_carries_filenames_and_never_a_document_body(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1627,7 +1627,7 @@ def test_empty_document_index_leaves_routing_unchanged(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1675,7 +1675,7 @@ def test_no_interceptor_ever_sees_the_filename_augmented_string(monkeypatch):
     )
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1705,7 +1705,7 @@ def test_tracker_lookup_requires_capability(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer about the launch", "key_points": [],
             "citations": [], "confidence": 0.5, "unanswered": "",
         },
@@ -1728,7 +1728,7 @@ def test_data_analysis_requires_tabular_data(monkeypatch, tmp_path):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1756,7 +1756,7 @@ def test_call_index_listing_already_gates_on_call_source(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1782,7 +1782,7 @@ def test_declined_precondition_falls_through_to_a_real_answer(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "the launch board has 12 open items", "key_points": [],
             "citations": [], "confidence": 0.5, "unanswered": "",
         },
