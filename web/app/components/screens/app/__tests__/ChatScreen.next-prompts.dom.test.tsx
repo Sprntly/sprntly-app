@@ -128,6 +128,12 @@ const REPLY = {
   sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
 }
 
+/** Suggestions seeded on turn 1 for the clear-on-send table below. */
+const SEEDED = [
+  "Break the promo code bug into tickets",
+  "Draft a PRD for Apple Pay on mobile",
+]
+
 const strip = () => document.querySelector('[data-testid="next-prompt-suggestions"]')
 const chips = () =>
   Array.from(strip()?.querySelectorAll("button") ?? []).map((b) => b.textContent)
@@ -301,5 +307,56 @@ describe("ChatScreen — next-prompt suggestions", () => {
     expect(runAskGeneration.mock.calls[1][0]).toBe("Break the promo code bug into tickets")
     // …and the chips are gone the moment it is sent.
     expect(strip()).toBeNull()
+  })
+
+  // ── Both entry points, tested EQUALLY ────────────────────────────────────
+  //
+  // The staging defect (2026-08-05): typed sends cleared the strip, chip clicks
+  // did not. The clear sat after the intent-envelope round trip and after
+  // eighteen early returns, so it only ran on sends that resolved to `answer`.
+  // A chip click hits a command branch far more often, because a suggestion is
+  // frequently phrased as exactly the sort of request the envelope routes away
+  // from the ask path — and every one of those branches returned early.
+  //
+  // The lesson, and the reason this is a table rather than two tests: the two
+  // send routes were not covered equivalently, so a bug could live in the one
+  // that wasn't. Anything added here now runs against BOTH by construction.
+  describe.each([
+    ["typed send", async () => { await typeAndSend("break that down by week") }],
+    ["chip click", async () => {
+      await act(async () => {
+        fireEvent.click(within(strip() as HTMLElement).getByText(SEEDED[0]))
+      })
+    }],
+  ])("clear-on-send via %s", (_label, send) => {
+    it("clears the strip BEFORE the intent decision is even made", async () => {
+      const ask = deferAsk()
+      nextSuggestions.mockResolvedValue({ suggestions: SEEDED })
+      renderChat()
+      await typeAndSend("what are the top complaints about checkout?")
+      await ask.release(REPLY)
+      await waitFor(() => expect(strip()).toBeTruthy())
+
+      // Hold the envelope open: the dispatch decision cannot complete, so
+      // whichever branch it would eventually take is irrelevant. If the strip
+      // is gone at this point it is gone for EVERY branch — which is the whole
+      // property, rather than enumerating the eighteen ways out of submitAsk.
+      let releaseEnvelope!: () => void
+      resolveIntent.mockImplementation(
+        () => new Promise((res) => { releaseEnvelope = () => res(ANSWER_ENVELOPE) }),
+      )
+      deferAsk()
+
+      await send()
+
+      expect(strip()).toBeNull()
+      // …and nothing has actually been dispatched yet, proving the clear is not
+      // riding on the send completing.
+      expect(runAskGeneration).toHaveBeenCalledTimes(1)
+
+      await act(async () => { releaseEnvelope() })
+      await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(2))
+      expect(strip()).toBeNull()
+    })
   })
 })

@@ -34,7 +34,28 @@ export function NextPromptSuggestions({
   if (!suggestions.length) return null
 
   return (
-    <div className={styles.strip} data-testid="next-prompt-suggestions" role="list">
+    // Keyed on the suggestion SET, so replacing the list remounts the whole
+    // strip and every chip inside it.
+    //
+    // Without this, React reconciles chip-by-chip and any DOM state riding a
+    // surviving node rides with it — focus most of all. A replaced list then
+    // renders a brand-new suggestion wearing the leftover styling of the one
+    // the user actually clicked, which reads as "you already asked this" about
+    // a prompt they have never seen (staging, 2026-08-05). Remounting makes
+    // that structurally impossible rather than something to remember to reset.
+    //
+    // Note the chips were ALREADY keyed by identity (the prompt text) rather
+    // than by index, so a stale highlight could only ever land on a genuinely
+    // repeated suggestion; the far more visible half of that report was pure
+    // CSS `:hover` following a stationary cursor onto whatever chip replaced
+    // the one under it. Hover is honest and stays — see the stylesheet, where
+    // it is now clearly a hover rather than anything that reads as selected.
+    <div
+      key={suggestions.join("\n")}
+      className={styles.strip}
+      data-testid="next-prompt-suggestions"
+      role="list"
+    >
       {suggestions.map((prompt) => (
         <button
           key={prompt}
