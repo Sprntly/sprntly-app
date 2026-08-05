@@ -368,6 +368,67 @@ def _asked_which_of(original: str, *titles: str) -> list[dict]:
     ]
 
 
+@pytest.mark.parametrize("phrasing", [
+    # Six ways a model might obey prompt rule 11. The detector keys on the
+    # SHAPE the rule produces — candidate titles named, and a question — not
+    # on any one wording, because the wording is the model's choice.
+    "I can see two documents that could match: Q3 Pricing Teardown and "
+    "Q4 Pricing Teardown — which did you mean?",
+    "There are two possibilities here. Did you mean Q3 Pricing Teardown, or "
+    "Q4 Pricing Teardown?",
+    "Q3 Pricing Teardown and Q4 Pricing Teardown both look like candidates. "
+    "Which one should I read?",
+    "Before I answer — Q3 Pricing Teardown or Q4 Pricing Teardown?",
+    "* Q3 Pricing Teardown\n* Q4 Pricing Teardown\n\nWhich of these did you "
+    "have in mind?",
+    "I found more than one match (Q3 Pricing Teardown, Q4 Pricing Teardown). "
+    "Which would you like?",
+])
+def test_the_clarification_detector_survives_how_a_model_phrases_it(phrasing):
+    """The detector rests on an ASSUMPTION about model output, and that is
+    worth being explicit about rather than hiding behind one fixture.
+
+    It no longer looks for an internal marker — that was the dead-in-production
+    bug. It looks for the shape prompt rule 11 asks for: the candidate titles
+    named, and a question. These are six plausible obediences of that rule;
+    all must be read as a clarification.
+
+    THE FAILURE MODE IS SAFE, which is what makes the assumption acceptable.
+    If a phrasing slips past the detector, step 0 does not fire, the reply
+    falls to cold resolution, and the worst outcome is an unhelpful turn — we
+    ask again. It cannot produce a WRONG document, because narrowing only ever
+    runs over titles the assistant actually named."""
+    from app.document_reference import resolve_documents
+
+    docs = [_Doc("Q3 Pricing Teardown"), _Doc("Q4 Pricing Teardown")]
+    history = [
+        _turn("user", "what does the pricing teardown say about discounts?"),
+        _turn("assistant", phrasing),
+    ]
+    ref = resolve_documents("the Q4 one", docs, history=history)
+
+    assert [d.title for d in ref.documents] == ["Q4 Pricing Teardown"], (
+        f"this phrasing was not read as a clarifying question: {phrasing!r}"
+    )
+
+
+def test_an_undetected_clarification_degrades_safely_not_wrongly():
+    """The explicit statement of the failure mode above. An assistant turn
+    that names the candidates but asks NOTHING is not treated as a
+    clarification — and the result is silence, never a guess."""
+    from app.document_reference import resolve_documents
+
+    docs = [_Doc("Q3 Pricing Teardown"), _Doc("Q4 Pricing Teardown")]
+    history = [
+        _turn("user", "what does the pricing teardown say?"),
+        _turn("assistant",
+              "Q3 Pricing Teardown and Q4 Pricing Teardown both exist."),
+    ]
+    ref = resolve_documents("the Q4 one", docs, history=history)
+
+    assert ref.documents == [], "an undetected clarification produced a pin"
+
+
 @pytest.mark.parametrize("reply,expected", [
     ("the Q4 one", "Q4 Pricing Teardown"),
     ("Q4", "Q4 Pricing Teardown"),
@@ -876,10 +937,10 @@ def confluence_bodies(monkeypatch):
 
     pages: dict[str, str] = {}
 
-    def _open_session(enterprise_id):
+    def _open_session(enterprise_id, **kw):
         return object()
 
-    def _get_page(session, page_id):
+    def _get_page(session, page_id, **kw):
         if page_id in pages:
             return {"id": page_id, "text": pages[page_id]}
         return None
@@ -894,10 +955,10 @@ def confluence_outage(monkeypatch):
     """A wiki that is connected but unreachable — the fetch raises."""
     from app.connectors import confluence_fetch
 
-    def _boom(session, page_id):
+    def _boom(session, page_id, **kw):
         raise RuntimeError("auth expired")
 
-    monkeypatch.setattr(confluence_fetch, "open_session", lambda eid: object())
+    monkeypatch.setattr(confluence_fetch, "open_session", lambda eid, **kw: object())
     monkeypatch.setattr(confluence_fetch, "get_page", _boom)
 
 
