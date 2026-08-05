@@ -89,6 +89,25 @@ describe("ZoomConfigSlotView — sync summary", () => {
   })
 })
 
+describe("ZoomConfigSlotView — audio-transcript hint", () => {
+  it("always renders, with a link to Zoom's recording settings, regardless of sync state", () => {
+    for (const override of [
+      {},
+      { meetings: undefined, transcripts: undefined },
+      { meetings: 0, transcripts: 0 },
+      { meetings: 12, transcripts: 12 },
+      { meetings: 12, transcripts: 0 },
+      { syncState: "never" as const },
+    ]) {
+      const html = render(override)
+      expect(html).toContain("Audio transcript")
+      expect(html).toContain('href="https://zoom.us/profile/setting?tab=recording"')
+      expect(html).toContain('target="_blank"')
+      expect(html).toContain('rel="noopener noreferrer"')
+    }
+  })
+})
+
 describe("ZoomConfigSlotView — no-transcripts warning", () => {
   it("fires only when meetings were found and no transcripts read", () => {
     const html = render({ meetings: 12, transcripts: 0 })

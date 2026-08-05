@@ -5,8 +5,9 @@
  *
  *   1. the auth-expired block (conditional) — the connection stopped syncing
  *   2. the sync summary — last sync, meetings found, transcripts read
- *   3. the no-transcripts warning (conditional)
- *   4. the host picker
+ *   3. the audio-transcript hint — ALWAYS shown, not conditional
+ *   4. the no-transcripts warning (conditional)
+ *   5. the host picker
  *
  * EVERY SUMMARY ROW ALWAYS RENDERS. A blank value is not a signal to drop the
  * line: "Transcripts read: —" tells a user we have not counted yet, while a
@@ -19,6 +20,13 @@
  * The counters are absent (undefined), not zero, until a sync completes. Those
  * are different states and the warning notice only fires on the first: a run
  * that has never happened must not be reported as a run that found nothing.
+ *
+ * The audio-transcript hint (3) exists because the warning (4) is reactive —
+ * it only fires AFTER a sync has already found meetings with no transcript,
+ * meaning at least one recording's transcript is already permanently lost:
+ * Zoom does not retroactively transcribe. The hint says the same thing BEFORE
+ * that happens, on every visit to this screen, with a link straight to the
+ * Zoom setting, so the fix can land before the first recording that needs it.
  *
  * Pure View pattern (props in, JSX out) for unit testing via
  * renderToStaticMarkup, plus a hooks-wired wrapper.
@@ -140,13 +148,26 @@ export function ZoomConfigSlotView({
         </div>
       </div>
 
+      <p className="conn-slack-hint">
+        Zoom only creates a transcript for calls recorded after{" "}
+        <strong>Audio transcript</strong> is turned on for the account.{" "}
+        <a
+          href="https://zoom.us/profile/setting?tab=recording"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Turn it on in Zoom&rsquo;s Recording settings
+        </a>
+        .
+      </p>
+
       {showNoTranscripts ? (
         <p className="conn-zoom-notice conn-zoom-notice--warn" role="status">
           <strong>Recordings found, but no transcripts.</strong> Sprntly synced{" "}
-          {meetings} meetings from Zoom and found no transcript files. Turn on{" "}
-          <strong>Audio transcript</strong> in Zoom&rsquo;s Recording settings —
-          Zoom only creates transcripts for calls recorded after it&rsquo;s
-          switched on.
+          {meetings} meetings from Zoom and found no transcript files — the
+          setting above was most likely still off when they were recorded.
+          Zoom does not transcribe a recording after the fact, so this covers
+          calls going forward only.
         </p>
       ) : null}
 
