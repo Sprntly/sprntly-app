@@ -46,15 +46,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(ids).not.toContain("msteams")
   })
 
-  it("totals 43 connector rows — one row per connector, nothing dual-placed", () => {
+  it("totals 44 connector rows — one row per connector, nothing dual-placed", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43)
+    expect(total).toBe(44)
     // Rows === distinct connectors: Slack's second (Communications) placement
     // is gone, so no id appears on two shelves.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(43)
+    expect(distinct.size).toBe(44)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -133,12 +133,15 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Zoom, Slack", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Zoom, Google Meet, Slack", () => {
     // Slack's one and only card since 2026-08-04 — it is on this shelf because
     // what a PM connects it FOR is the customer signal in its channels.
+    // Google Meet sits next to Zoom: both are meetings sources, and putting
+    // them side by side is deliberate even though Meet's coverage is narrower
+    // (the connect modal is where that difference is spelled out).
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Zoom", "Slack",
+      "Fireflies", "Gong", "Zoom", "Google Meet", "Slack",
     ])
   })
 
@@ -200,7 +203,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "confluence", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr", "zoom",
+        "google_meet", "hubspot", "jira", "slack", "sprinklr", "zoom",
       ].sort(),
     )
   })
@@ -232,6 +235,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "fireflies",
         "github",
         "google_drive",
+        "google_meet",
         "hubspot",
         "jira",
         "slack",
@@ -300,6 +304,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "fireflies",
         "github",
         "google_drive",
+        "google_meet",
         "hubspot",
         "jira",
         "slack",
@@ -320,7 +325,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Analytics")).toEqual(["superset"])
     // Slack (OAuth-wired, dual-typed) is visible here and ONLY here.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "zoom", "slack",
+      "sprinklr", "fireflies", "zoom", "google_meet", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
@@ -391,6 +396,37 @@ describe("Zoom", () => {
     )!
     expect(zoom.logoSvg).toBe("/connectors/zoom.svg")
     expect(zoom.logoSvg?.startsWith("http")).toBe(false)
+  })
+})
+
+describe("Google Meet", () => {
+  it("sits on the Voice shelf, OAuth-wired and typed as meetings", () => {
+    // The type is what makes it evidence-bearing (it mirrors catalog.py), so a
+    // drift here silently changes whether Meet alone can drive a brief.
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const meet = voice.items.find((i) => i.id === "google_meet")!
+    expect(meet).toBeTruthy()
+    expect(meet.name).toBe("Google Meet")
+    expect(meet.oauth).toBe(true)
+    expect(meet.types).toEqual(["meetings"])
+  })
+
+  it("is a distinct connector from Google Drive, not a second Drive row", () => {
+    // They share a Cloud project and an OAuth client on the backend, which is
+    // exactly why the CATALOG must keep them apart: one id, one connection row,
+    // one card each. A collision here would make disconnecting one appear to
+    // disconnect the other.
+    const ids = CONNECTOR_CATALOG.flatMap((c) => c.items).map((i) => i.id)
+    expect(ids.filter((id) => id === "google_meet")).toHaveLength(1)
+    expect(ids).toContain("google_drive")
+  })
+
+  it("bundles its mark locally rather than hotlinking the provider", () => {
+    const meet = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "google_meet",
+    )!
+    expect(meet.logoSvg).toBe("/connectors/google_meet.svg")
+    expect(meet.logoSvg?.startsWith("http")).toBe(false)
   })
 })
 

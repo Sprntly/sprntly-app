@@ -448,6 +448,69 @@ def test_zoom_refresh_keeps_the_stored_refresh_token_if_zoom_omits_it(monkeypatc
     assert _json.loads(persisted["enc"])["refresh_token"] == "keep-me"
 
 
+def test_google_meet_is_in_the_refresh_provider_set(monkeypatch):
+    """Meet access tokens live 1h. Left out of this set a connection would 403
+    on every sync from the second hour onward and read as "reconnect required"
+    while the stored refresh token was perfectly good."""
+    called = {}
+
+    import app.connectors.google_meet as google_meet
+    import app.connectors.tokens as toks
+
+    def _refresh(rt):
+        called["refreshed"] = rt
+        # Exactly what Google returns: no refresh_token in the response.
+        return {"access_token": "NEW", "expires_in": 3599}
+
+    monkeypatch.setattr(google_meet, "refresh_access_token", _refresh)
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: called.update(cid=cid, prov=prov, enc=enc))
+
+    tj = {"access_token": "OLD", "refresh_token": "r1",
+          "obtained_at": 1, "expires_in": 3600}
+    out = auto_sync._maybe_refresh_token("co-9", "google_meet", tj)
+
+    assert out["access_token"] == "NEW"
+    assert called["refreshed"] == "r1"
+    assert called["prov"] == "google_meet"
+
+
+def test_google_meet_refresh_preserves_company_id_and_the_refresh_token(
+    monkeypatch,
+):
+    """Two things must survive the rewrite, and Google makes one of them easy to
+    get wrong. Its refresh response omits `refresh_token` ENTIRELY (the stored
+    one stays valid — Google does not rotate), so persisting the response
+    verbatim BLANKS the credential and the connection dies at the next cycle.
+    And company_id is what `token_for("google_meet", ...)` reads, so dropping it
+    breaks the NEXT sync rather than this refresh."""
+    import json as _json
+
+    import app.connectors.google_meet as google_meet
+    import app.connectors.tokens as toks
+
+    persisted: dict = {}
+    monkeypatch.setattr(
+        google_meet, "refresh_access_token",
+        lambda rt: {"access_token": "NEW", "expires_in": 3599},
+    )
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: persisted.update(enc=enc))
+
+    out = auto_sync._maybe_refresh_token(
+        "co-9", "google_meet",
+        {"access_token": "OLD", "refresh_token": "the-only-refresh-token",
+         "obtained_at": 1, "expires_in": 3600},
+    )
+
+    stored = _json.loads(persisted["enc"])
+    assert stored["refresh_token"] == "the-only-refresh-token"
+    assert stored["company_id"] == "co-9"
+    assert out["company_id"] == "co-9"
+
+
 # ---------- kickoff fires from the connect callback ----------
 
 def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):

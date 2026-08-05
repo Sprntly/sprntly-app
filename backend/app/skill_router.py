@@ -879,6 +879,21 @@ _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
         r"\b(google\s+drive|g\s?drive|my\s+drive|drive\s+(?:files?|docs?|folder)|"
         r"google\s+docs?)\b", re.I,
     ),
+    # STRONG tier, but only ever as a MULTI-WORD name — the pattern can never
+    # match a bare "meet". That distinction is the whole design here, and it is
+    # the opposite of how `zoom` is handled one dict down.
+    #
+    # `zoom` sits in the ambiguous tier because "zoom in on the churn numbers"
+    # is ordinary product-analysis English, and a read-context gate plus an
+    # in/out veto is enough to rescue it. "meet" cannot be rescued the same way:
+    # `_CONNECTOR_READ_CONTEXT` matches `meetings?`, `calls?`, `find` and
+    # `check`, so "can we meet to go over the tickets" would satisfy BOTH halves
+    # of the ambiguous gate and get hijacked into a connector lookup — turning a
+    # scheduling question into "Google Meet syncs into your knowledge graph, but
+    # I can't query it live". Requiring the qualifier makes the false positive
+    # impossible rather than merely unlikely. The cost is that a bare "meet"
+    # never routes here, which is correct: nobody names this product that way.
+    "google_meet": re.compile(r"\b(google\s+meet|g[\s-]?meet)\b", re.I),
     "asana": re.compile(r"\basana\b", re.I),
     "zendesk": re.compile(r"\bzen\s?desk\b", re.I),
     "gong": re.compile(r"\bgong\b", re.I),

@@ -1056,7 +1056,7 @@ _VOC_KG_SYSTEM = (
 
 
 def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
-    """Voice-of-customer answered from the KG when no live call source exists.
+    """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
     section order, a radar SVG and a schema the model filled in. Reports are
@@ -1064,9 +1064,17 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     same budget-capped KG bundle the direct Ask path uses — the GROUNDING is
     what made this path worth having, not the layout.
 
+    NARROWED 2026-08-05. This was the "no live call source" half of an either/or
+    that hid the knowledge graph from any company with Zoom or Fireflies
+    connected. An unpinned VoC turn now goes to `call_digest.answer`, which
+    retrieves this same bundle (`_retrieve_kg_bundle` + `render_context_section`
+    — deliberately the same pair, so the two cannot drift) and merges it with
+    the live calls. What still reaches here is a turn that PINNED
+    `voice-of-customer-report`, whose behaviour is unchanged: the KG bundle,
+    no live fetch.
+
     Returns None when the KG yields nothing, so the caller falls through to the
-    generic answer (which explains what to connect). The live-calls path
-    (call_digest) takes precedence and is handled upstream in `answer`.
+    generic answer (which explains what to connect).
     """
     from app.graph.retrieval import render_context_section
 
@@ -1865,18 +1873,33 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
-    # VoC routed by ANY stage — including the haiku intent router. Prefer the
-    # SAME live call digest the phrase fast-paths use when a call source is
-    # connected, so a phrasing only the LLM router understands ("what is the
-    # number 1 user complaint from today's conversations?") gets the identical
-    # answer path as a regex-matched one. Intent decides; phrases are only a
-    # latency shortcut (decision 2026-07-27). Without a call source, render the
-    # pinned HTML report from KG signal when there is any; else fall through to
-    # the generic answer (which explains what to connect).
+    # VoC routed by ANY stage — including the haiku intent router. One path
+    # answers it, and that path reads BOTH halves of the evidence: the live call
+    # sources and the knowledge graph. A phrasing only the LLM router
+    # understands ("what is the number 1 user complaint from today's
+    # conversations?") therefore gets the identical answer path as a
+    # regex-matched one. Intent decides; phrases are only a latency shortcut
+    # (decision 2026-07-27).
+    #
+    # `has_call_source` USED TO GATE THIS BRANCH, AND THAT WAS THE BUG. It made
+    # the two halves an either/or: with a call source the digest ran and the KG
+    # was never read, without one `_answer_voc_report` ran and the calls were
+    # never fetched. So connecting Zoom silently took Slack, tickets and every
+    # other synced source out of every voice-of-customer answer — reported live,
+    # "what are customers feedback" answered from three Zoom calls with Slack
+    # connected and populated. `call_digest.answer` now merges both and degrades
+    # per-source on its own, which leaves nothing for a capability gate here to
+    # decide: a company with no call source but a populated graph belongs on the
+    # merged path (it degrades to KG-only), and a company with neither gets the
+    # digest's own what-to-connect message.
+    #
+    # `_answer_voc_report` is kept for the PINNED case only — `/voice-of-
+    # customer-report` is a pipeline id, so it survives `_invocable` and reaches
+    # here with `pinned_skill` set. Pinning behaviour is unchanged.
     if decision.skill_id == "voice-of-customer-report":
         from app import call_digest
 
-        if not pinned_skill and call_digest.has_call_source(enterprise_id):
+        if not pinned_skill:
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )

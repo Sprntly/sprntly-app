@@ -29,6 +29,7 @@ def test_every_connectable_provider_is_classified():
     connectable = [
         "jira", "clickup", "google_drive", "hubspot",
         "github", "figma", "slack", "fireflies", "confluence", "zoom",
+        "google_meet",
     ]
     for provider in connectable:
         assert types_for(provider), f"{provider} has no types"
@@ -85,6 +86,23 @@ def test_zoom_is_a_meetings_source_and_bears_evidence():
     assert has_type("zoom", MEETINGS)
     assert is_evidence_provider("zoom") is True
     assert {"fireflies", "gong", "zoom"} <= set(providers_with_type(MEETINGS))
+
+
+def test_google_meet_is_a_meetings_source_and_bears_evidence():
+    """Meet transcripts sit with Zoom, Fireflies and Gong. Its COVERAGE is
+    narrower than Zoom's — Google exposes only meetings the connected account
+    organized, and only for 30 days — but that is a question of how much
+    evidence it brings, not of whether it is evidence, so it can open the
+    brief's data-source gate on its own exactly like Zoom."""
+    from app.connectors.catalog import MEETINGS
+
+    assert types_for("google_meet") == [MEETINGS]
+    assert has_type("google_meet", MEETINGS)
+    assert is_evidence_provider("google_meet") is True
+    assert "google_meet" in providers_with_type(MEETINGS)
+    # Distinct from the Drive connector it shares an OAuth client with, which is
+    # `documents` and deliberately NOT evidence.
+    assert types_for("google_drive") != types_for("google_meet")
 
 
 def test_providers_with_type_and_has_type():

@@ -10,8 +10,14 @@ This module runs the dedicated path instead:
   2. fetch EVERY call in that window live from EVERY connected live source —
      Fireflies and Zoom — distilled summary plus a bounded sample of transient
      verbatim quotes (never persisted to the KG),
-  3. assemble one merged corpus and run a single voice-of-customer pass over it,
+  3. retrieve the knowledge graph's stored customer signal for the same question
+     — Slack, support tickets, HubSpot, Jira and every other synced source,
+  4. assemble one merged corpus and run a single voice-of-customer pass over it,
      so the answer has real counts, themes, and sourced quotes.
+
+Step 3 is not optional and not a fallback. A voice-of-customer answer draws on
+live calls AND stored signal TOGETHER — see the "Knowledge-graph signal" section
+below for the either/or bug that rule replaced.
 
 The question never has to name a connector. That is this path's whole point and
 it is what separates it from the other two mechanisms that can answer a calls
@@ -81,6 +87,10 @@ _AUTOWIDEN_DAYS = (30, 90)
 _CORPUS_CHAR_BUDGET = 300_000
 # Quote-trim ladder for the adaptive fit; 0 = distilled summary only.
 _QUOTE_CAPS = (60, 30, 15, 8, 4, 0)
+# The knowledge-graph section's OWN char budget — see the "Knowledge-graph
+# signal" block below for why it is a SEPARATE constant and not a slice of
+# _CORPUS_CHAR_BUDGET.
+_KG_CHAR_BUDGET = 60_000
 
 _ZOOM_PROVIDER = "zoom"
 #: Display names for the live sources, for the coverage line and the
@@ -715,6 +725,222 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     )
 
 
+# ── Knowledge-graph signal (the OTHER half of voice-of-customer) ─────────────
+#
+# WHY THIS EXISTS. Until 2026-08-05 this module and `qa_agent._answer_voc_report`
+# were an either/or: qa_agent ran the digest when `has_call_source()` was True
+# and the KG answer only when it was False. So the moment a company connected
+# Zoom or Fireflies, every VoC-classified question stopped seeing Slack, support
+# tickets, and every other KG-synced source. A real user asked "what are
+# customers feedback" and got an answer built from three Zoom calls while Slack
+# sat connected and populated — and the pre-Zoom answer HAD included it, so
+# connecting a call source visibly took data away. Neither half is the whole
+# voice of the customer; the corpus now carries both.
+#
+# THE TWO BUDGETS ARE SEPARATE ON PURPOSE. `_CORPUS_CHAR_BUDGET` still governs
+# live calls + uploaded docs alone and is unchanged, so a calls-only company's
+# corpus is byte-identical to what it was. The KG gets `_KG_CHAR_BUDGET` of its
+# own ON TOP (20% of the call budget; ~90k tokens all-in, still well inside the
+# answer model's window). Two independent budgets rather than one shared pool is
+# what makes starvation impossible BY CONSTRUCTION rather than by careful
+# arithmetic: 200 calls cannot squeeze the KG to nothing, because `_fit_corpus`
+# trims quotes inside the CALL budget and never sees this one; and a huge KG
+# cannot evict a single call, because it is capped before the two are joined. In
+# practice this ceiling almost never binds — `_retrieve_kg_bundle` caps the
+# bundle at retrieval's own DEFAULT_TOKEN_BUDGET (2200 tokens, ~9k chars) — so
+# it is a backstop against a budget change upstream, not the day-to-day trim.
+#
+# DOUBLE-COUNTING, and why the filter is provider-shaped. Fireflies and Zoom
+# calls ALSO sync into the KG through their own pullers, so one conversation can
+# reach the model twice: once as a live transcript here, once as a distilled
+# signal there. A model handed both reads them as two accounts corroborating
+# each other and inflates every theme size the answer derives.
+#
+# An id-based filter is NOT available. The KG's extraction is per-BATCH, not
+# per-call (`kg_ingest/runner.sync_provider` passes
+# `doc_name=f"{provider}-sync-batch-{i}"`), so an extracted signal carries no
+# call external_id to match against — `graph/extractor.extract_document` stamps
+# only `{"source": "extractor", "doc": <batch name>, ...}`. What the batch name
+# DOES identify is the provider, which pins the whole duplicate class exactly.
+# So when the live fetch actually returned calls, signals distilled from those
+# same two providers are dropped from the KG section outright: a live transcript
+# is strictly richer than a distillation of it, and dropping the poorer copy is
+# safer than asking a prompt to remember which of two similar-looking claims it
+# already counted. When the live fetch returned NOTHING (empty window, expired
+# grant, no source connected), they are KEPT — they are then the only record of
+# those calls in existence, and dropping them would recreate the bug in mirror.
+# The section is ALSO tagged for the model (`_KG_SECTION_HEADER`), because
+# residual restatement the provider filter cannot see — a Slack thread quoting a
+# call — is a prompt-level problem, not a provenance one.
+
+#: Provider keys whose KG signals are distillations of the same calls the live
+#: fetch reads. Kept in step with `_SOURCE_LABELS` / `kg_ingest.runner.PULLERS`.
+_CALL_PROVIDERS = ("fireflies", _ZOOM_PROVIDER)
+
+#: `kg_ingest.runner.sync_provider`'s doc_name shape. Group 1 is the provider,
+#: which is the only per-signal attribution a connector sync leaves behind.
+_SYNC_BATCH_DOC = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
+
+#: How many distinct source names the coverage line may list before it stops
+#: naming them. Six is enough to prove Slack was read without turning the
+#: caveat into an inventory.
+_KG_MAX_NAMED_SOURCES = 6
+
+#: Prefixed to the rendered bundle. `render_context_section` writes a header of
+#: its own ("LIVE CONTEXT FROM CONNECTED SOURCES"); this says the two things
+#: that header cannot know — that live transcripts sit above it in the same
+#: prompt, and that this material is ranked by relevance rather than filtered to
+#: the asked window.
+_KG_SECTION_HEADER = (
+    "=== STORED SIGNAL FROM YOUR OTHER CONNECTED SOURCES ===\n"
+    "Distilled signal already synced from this company's connected sources "
+    "(support tickets, chat, CRM, trackers, uploaded documents). Read it "
+    "ALONGSIDE any customer calls above, not instead of them, and note two "
+    "limits when you count anything:\n"
+    "- It is selected by relevance to the question, NOT filtered to the time "
+    "window above — do not date a signal you cannot date, and do not report it "
+    "as having happened inside the window.\n"
+    "- A signal here may restate something already said on a call above. Where "
+    "two entries plainly describe the same conversation, count them ONCE; "
+    "corroboration means two different accounts, not one account twice."
+)
+
+
+@dataclass
+class KgContext:
+    """The knowledge-graph half of the corpus, already rendered and capped."""
+    text: str = ""
+    #: Signals actually rendered (after the call-provider drop and the cap).
+    signal_count: int = 0
+    #: Distinct source names behind them, for the coverage line — the thing a
+    #: user reads to check whether Slack was really consulted.
+    sources: list[str] = field(default_factory=list)
+    #: Call-derived signals dropped because the live transcript is already here.
+    deduped: int = 0
+    #: True when the render overflowed `_KG_CHAR_BUDGET` and was cut.
+    truncated: bool = False
+
+    @property
+    def present(self) -> bool:
+        return bool(self.text)
+
+
+def _kg_signal_provider(signal: dict) -> str:
+    """The connector a KG signal came from, or "" when it wasn't a connector
+    sync (corpus documents, agent findings and web research all land here)."""
+    prov = signal.get("provenance") or {}
+    m = _SYNC_BATCH_DOC.match(str(prov.get("doc") or "").strip())
+    return m.group(1) if m else ""
+
+
+def _kg_source_label(signal: dict) -> str:
+    """A name a user would recognise for where a signal came from.
+
+    Connector syncs give up their provider; a corpus document gives up its own
+    filename (Slack's company sync writes `slack_channels.md`, so this reads
+    "slack_channels" — recognisably Slack, which is the whole point). Anything
+    else falls back to the signal's source_type."""
+    provider = _kg_signal_provider(signal)
+    if provider:
+        return provider
+    prov = signal.get("provenance") or {}
+    doc = str(prov.get("doc") or "").strip()
+    return doc or str(signal.get("source_type") or "").strip() or "connected sources"
+
+
+def _cap_kg_text(text: str) -> tuple[str, bool]:
+    """Trim a rendered bundle to `_KG_CHAR_BUDGET` on a line boundary, so the
+    cut never lands mid-signal and leaves a half-quote the model may complete
+    from imagination. Returns (text, was_truncated)."""
+    if len(text) <= _KG_CHAR_BUDGET:
+        return text, False
+    head = text[:_KG_CHAR_BUDGET]
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[:cut]
+    return head + "\n\n[…stored signal truncated to fit…]", True
+
+
+def build_kg_context(
+    enterprise_id: str, question: str, *, live_calls: bool
+) -> KgContext:
+    """Retrieve and render this company's stored customer signal for `question`.
+
+    Reuses `ask_runner._retrieve_kg_bundle` + `retrieval.render_context_section`
+    — the SAME pair `qa_agent._answer_voc_report` runs — rather than a second
+    retrieval of its own, so the merged path and the KG-only path can never
+    drift apart in what they consider relevant. Imported lazily for the reason
+    every other import in this module is: `ask_runner` imports back into the
+    chat stack.
+
+    `live_calls` says whether the live fetch returned transcripts; it is what
+    switches the call-provider dedupe on (see the section comment above).
+
+    NEVER RAISES. The KG is one half of the corpus, so a KG that cannot be read
+    must cost the answer its calls no more than a dead Zoom grant costs it the
+    knowledge graph — the same per-source isolation `build_corpus` already holds
+    between Fireflies and Zoom."""
+    if not enterprise_id:
+        return KgContext()
+    try:
+        from app.ask_runner import _retrieve_kg_bundle
+        from app.graph.retrieval import render_context_section
+
+        bundle = _retrieve_kg_bundle(enterprise_id, question)
+        if not bundle:
+            return KgContext()
+
+        signals = list(bundle.get("signals") or [])
+        kept: list[dict] = []
+        deduped = 0
+        for sig in signals:
+            if live_calls and _kg_signal_provider(sig) in _CALL_PROVIDERS:
+                deduped += 1
+                continue
+            kept.append(sig)
+
+        # Themes and the §2 ledger spine ride along with the signals; a bundle
+        # holding only those is still worth rendering, but one left completely
+        # empty by the dedupe must not become a header with nothing under it.
+        has_other = any(
+            bundle.get(k) for k in ("themes", "decisions", "hypotheses", "outcomes")
+        )
+        if not kept and not has_other:
+            return KgContext(deduped=deduped)
+
+        rendered = render_context_section({**bundle, "signals": kept})
+        if not rendered.strip():
+            return KgContext(deduped=deduped)
+        body, truncated = _cap_kg_text(rendered)
+
+        names: list[str] = []
+        for sig in kept:
+            label = _kg_source_label(sig)
+            if label and label not in names:
+                names.append(label)
+        return KgContext(
+            text=f"{_KG_SECTION_HEADER}\n\n{body}",
+            signal_count=len(kept), sources=names,
+            deduped=deduped, truncated=truncated,
+        )
+    except Exception:  # noqa: BLE001 — one half of the corpus must never break the other
+        logger.exception(
+            "call-digest: knowledge-graph retrieval failed for %s", enterprise_id
+        )
+        return KgContext()
+
+
+def _merge_corpus_text(corpus: DigestCorpus, kg: KgContext) -> str:
+    """Live calls + uploaded docs first, stored signal after — the ordering the
+    corpus already uses for calls-then-docs, extended one step. Richest material
+    first, and a KG-only corpus is simply the tail with nothing ahead of it."""
+    if not kg.text:
+        return corpus.text
+    if not corpus.text:
+        return kg.text
+    return f"{corpus.text}\n\n{kg.text}"
+
+
 # ── Answer assembly ──────────────────────────────────────────────────────────
 
 def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
@@ -785,8 +1011,15 @@ def is_voc_query(question: str) -> bool:
 
 _QUERY_SYSTEM = (
     "You answer a pointed question about the user's own customer feedback "
-    "from the CUSTOMER CALLS / UPLOADED DOCUMENTS provided — never from "
-    "general knowledge. Rules:\n"
+    "from the CUSTOMER CALLS / UPLOADED DOCUMENTS / STORED SIGNAL provided — "
+    "never from general knowledge. Rules:\n"
+    "- Use EVERY section provided. Calls and stored signal from the other "
+    "connected sources are one body of evidence, not alternatives: an answer "
+    "built from the calls alone while support and chat signal sits below them "
+    "is wrong even when the calls agree with it.\n"
+    "- Stored signal is ranked by relevance, NOT filtered to the window. Do "
+    "not assign it a date it does not carry, and keep windowed counts to the "
+    "records that are actually dated.\n"
     "- Every count is over the captured calls/records shown, never all "
     "customers — say so when giving any count.\n"
     "- For increase/decrease/trend questions, bucket the records by their "
@@ -816,9 +1049,18 @@ _QUERY_SYSTEM = (
 # an ordinary chat answer now, so its structure is the model's to choose and its
 # honesty is still ours to specify.
 _REPORT_SYSTEM = (
-    "You answer a voice-of-customer question over the customer calls and "
-    "uploaded documents provided below. Write it as a clear, well-organised "
-    "answer in markdown — no HTML, no CSS, no invented chart.\n"
+    "You answer a voice-of-customer question over the customer calls, uploaded "
+    "documents and stored signal from the company's other connected sources "
+    "provided below. Write it as a clear, well-organised answer in markdown — "
+    "no HTML, no CSS, no invented chart.\n"
+    "- USE EVERY SECTION PROVIDED. Live calls and the stored signal from other "
+    "connected sources (support, chat, CRM, trackers) are ONE body of evidence, "
+    "not competing versions of it. A report drawn from the calls alone while "
+    "other signal sits below them is incomplete, however consistent the calls "
+    "are. Say which sources a theme was heard on.\n"
+    "- Stored signal is selected by relevance, NOT filtered to the window "
+    "stated above. Never date it into that window, and never count an undated "
+    "signal toward a per-period total.\n"
     "- CAPTURE BEFORE YOU COUNT: read every call in full and register each "
     "mention with how firmly it was said before you size anything. Mentions "
     "that are speculative, second-hand, or undetermined do NOT count toward a "
@@ -861,11 +1103,17 @@ def _render_history_tail(history: list[dict] | None) -> str:
 
 
 def _answer_query(
-    *, enterprise_id: str, question: str, corpus: DigestCorpus,
+    *, enterprise_id: str, question: str, corpus_text: str, source_line: str,
     window: Window, compare_boundary: str | None,
-    history: list[dict] | None,
+    history: list[dict] | None, kg: KgContext | None = None,
 ) -> dict:
-    """Answer a query-shaped ask directly from the corpus text."""
+    """Answer a query-shaped ask directly from the merged corpus text.
+
+    Takes the assembled `corpus_text` rather than the `DigestCorpus` it used to,
+    because the text handed to the model is now calls + uploaded docs + stored
+    KG signal and no single dataclass owns all three. `source_line` is the same
+    coverage banner the report pass prints — carried here so a pointed answer
+    discloses what it read just as loudly as a report does."""
     from app.ask_runner import _ASK_RESPONSE_SCHEMA
     from app.graph.gateway import llm_call
 
@@ -887,7 +1135,8 @@ def _answer_query(
         input=(_render_history_tail(history)
                + f"Question: {question}\n"
                + f"Window fetched: {window.label}{boundary_note}\n\n"
-               + corpus.text),
+               + f"{source_line}\n\n"
+               + corpus_text),
         prompt_version="qa-voc-query-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=_VOC_SKILL,
@@ -899,20 +1148,126 @@ def _answer_query(
     }
     payload.update({
         "_skill": _VOC_SKILL,
-        "_skill_action": f"Voice of customer · answered from {window.label}",
+        "_skill_action": (
+            f"Voice of customer · answered from {window.label}"
+            + (f" + {kg.signal_count} stored signals" if kg and kg.present else "")
+        ),
         "_skill_source": "voc-query",
     })
     return payload
 
 
-def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict:
-    """Run the on-demand call digest and return an Ask-shaped payload.
+def _coverage_line(corpus: DigestCorpus, kg: KgContext, window: Window) -> str:
+    """The `=== … ===` banner stating exactly what the answer was built from.
 
-    Parses the window, fetches the calls live, and — when there are calls —
-    either runs the full voice-of-customer pass over the complete corpus
-    (report-shaped asks) or answers the question directly FROM the corpus
-    (query-shaped asks: "did complaints about exports increase this week").
-    Connection/empty/error cases return a helpful plain message instead."""
+    This is the single most important observable in the merged path. A user has
+    to be able to read one line and tell whether Slack was actually consulted —
+    before this merge a company with Zoom connected got an answer built from
+    Zoom alone, and nothing in the output said so. It is emitted on BOTH answer
+    modes (the report pass and the pointed query), because the reported question
+    ("what are customers feedback") is query-shaped and a disclosure only the
+    report path carried would not have covered it.
+
+    Everything about the calls/docs half is unchanged, including the rule that a
+    single-source corpus discloses no split.
+    """
+    # Disclose any fit applied so the answer can state real coverage
+    # instead of implying every word of every call is present.
+    coverage = f"{corpus.count} calls"
+    if corpus.total > corpus.count:
+        coverage = (
+            f"most recent {corpus.count} of {corpus.total} calls — older calls "
+            "omitted for space; note this as a coverage caveat"
+        )
+    elif corpus.quote_cap is not None:
+        coverage += (
+            f"; verbatim quotes sampled to ~{corpus.quote_cap} per call to fit "
+            "every call in — distilled summaries are complete"
+        )
+    # Name the split only when the corpus genuinely came from more than one live
+    # source, so the answer can attribute a theme to where it was heard. A
+    # single-source corpus learns nothing from this line, and leaving it off
+    # keeps the Fireflies-only source line exactly as it was.
+    per_source = Counter(c.provider for c in corpus.calls)
+    if len(per_source) > 1:
+        coverage += " (" + ", ".join(
+            f"{n} {_SOURCE_LABELS.get(p, p)}" for p, n in per_source.most_common()
+        ) + ")"
+    if corpus.doc_count:
+        docs_part = (
+            f"{corpus.doc_count} uploaded voice document"
+            f"{'s' if corpus.doc_count != 1 else ''} (window = upload date)"
+        )
+        coverage = f"{coverage} + {docs_part}" if corpus.count else docs_part
+    if not corpus.count and not corpus.doc_count:
+        # KG-only: there is no call count worth printing, and "0 calls" invites
+        # the model to report a quiet window it never actually established. Say
+        # WHY the live half is absent instead — the error case is covered by the
+        # failed_sources caveat below and is deliberately not repeated here.
+        if corpus.status == "not_connected":
+            coverage = "no call source connected"
+        elif corpus.status == "no_calls":
+            coverage = f"no calls or uploaded documents found in {window.label}"
+        else:
+            coverage = "no calls available"
+    if corpus.failed_sources:
+        # A source that fell over while another answered: the corpus is real but
+        # it is NOT the full picture, and a report that implies otherwise is the
+        # failure mode this whole path exists to avoid. Appended LAST because a
+        # docs-only corpus rewrites `coverage` wholesale above, and the caveat
+        # must survive that — a docs-only answer standing in for a dead
+        # connector is exactly when the caveat matters most.
+        coverage += (
+            f"; {_sources_phrase(corpus.failed_sources)} could not be reached "
+            "for this window, so its calls are missing — state this as a "
+            "coverage caveat"
+        )
+    if kg.present:
+        # The KG clause. Named sources, not just a count: "23 stored signals" is
+        # not something a user can check, and "slack_channels, jira" is.
+        named = ", ".join(kg.sources[:_KG_MAX_NAMED_SOURCES])
+        more = len(kg.sources) - _KG_MAX_NAMED_SOURCES
+        if more > 0:
+            named += f" +{more} more"
+        coverage += (
+            f" + {kg.signal_count} stored signal"
+            f"{'s' if kg.signal_count != 1 else ''} from your other connected "
+            f"sources ({named or 'connected sources'}) — ranked by relevance, "
+            "NOT limited to this window"
+        )
+        if kg.deduped:
+            coverage += (
+                f"; {kg.deduped} stored signal"
+                f"{'s' if kg.deduped != 1 else ''} distilled from the same call "
+                "sources were excluded so the calls above are not counted twice"
+            )
+        if kg.truncated:
+            coverage += "; stored signal truncated for space"
+    header_parts = []
+    if corpus.count:
+        header_parts.append("CUSTOMER CALLS")
+    if corpus.doc_count:
+        header_parts.append("UPLOADED VOICE DOCUMENTS" if not corpus.count
+                            else "UPLOADED DOCUMENTS")
+    if kg.present:
+        header_parts.append("CONNECTED-SOURCE SIGNAL")
+    header = " + ".join(header_parts) or "CUSTOMER CALLS"
+    return f"=== {header} — {window.label} ({coverage}) ==="
+
+
+def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict:
+    """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
+
+    Parses the window, fetches the calls live, retrieves the knowledge graph's
+    stored signal for the same question, MERGES the two, and then either runs
+    the full voice-of-customer pass over that corpus (report-shaped asks) or
+    answers the question directly from it (query-shaped asks: "did complaints
+    about exports increase this week"). Only when BOTH halves are empty does a
+    plain connection/empty/error message come back instead.
+
+    The two halves degrade independently, the same way Fireflies and Zoom
+    already do inside `build_corpus`: an empty KG still answers from calls, and
+    calls that could not be fetched still answer from the KG — saying so."""
     window = parse_window(question)
     query_mode = is_voc_query(question)
     compare_boundary: str | None = None
@@ -950,7 +1305,16 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             if corpus.status != "no_calls":
                 break
 
-    if corpus.status == "not_connected":
+    # The OTHER half of the corpus. Retrieved after the auto-widen loop because
+    # `live_calls` — which decides whether call-derived signals are dropped as
+    # duplicates — is only known once the live fetch has finally settled.
+    kg = build_kg_context(enterprise_id, question, live_calls=bool(corpus.calls))
+
+    # Each of the three live-source dead ends now yields to the KG when the KG
+    # has something: an expired Zoom grant is a reason to caveat an answer, not
+    # to withhold one built from Slack and the ticket queue. With BOTH halves
+    # empty these messages are exactly what they were.
+    if corpus.status == "not_connected" and not kg.present:
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "
             "yet. Connect **Fireflies** or **Zoom** in Settings → Connectors, or "
@@ -958,7 +1322,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "& Support** category there, and I'll synthesize them into a "
             "voice-of-customer report."
         )
-    if corpus.status == "error":
+    if corpus.status == "error" and not kg.present:
         # Names the source that actually failed. A Zoom-only company being told
         # to check its Fireflies API key is a dead end it cannot act on.
         broke = _sources_phrase(corpus.failed_sources)
@@ -967,7 +1331,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "just now. Please retry in a moment — if it keeps failing, that "
             "connection may need reconnecting in Settings → Connectors."
         )
-    if corpus.status == "no_calls":
+    if corpus.status == "no_calls" and not kg.present:
         connected = _sources_phrase(corpus.sources)
         if window.explicit:
             return _plain_payload(
@@ -983,75 +1347,39 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             f"{connected} (Settings → Connectors)."
         )
 
-    # status == ok, query-shaped ask → answer the question directly from the
-    # dated corpus (counts bucketed by period, quotes with account+date) —
-    # the report artifact stays one "give me the report" away.
+    # One corpus from here down: live calls + uploaded docs + stored signal.
+    source_line = _coverage_line(corpus, kg, window)
+    merged_text = _merge_corpus_text(corpus, kg)
+
+    # Query-shaped ask → answer the question directly from the corpus (counts
+    # bucketed by period, quotes with account+date) — the report artifact stays
+    # one "give me the report" away.
+    #
+    # The merge matters MORE here than on the report path, not less: the
+    # question that triggered this fix ("what are customers feedback") is
+    # query-shaped by `is_voc_query` — it matches the which/what + customers
+    # rule — so a merge wired only into the report pass would have left the
+    # reported bug exactly where it was.
     if query_mode:
         try:
             return _answer_query(
-                enterprise_id=enterprise_id, question=question, corpus=corpus,
+                enterprise_id=enterprise_id, question=question,
+                corpus_text=merged_text, source_line=source_line,
                 window=window, compare_boundary=compare_boundary,
-                history=history,
+                history=history, kg=kg,
             )
         except Exception:  # noqa: BLE001 — degrade to the report, never a dead end
             logger.exception("voc query-mode answer failed; falling back to report")
 
-    # status == ok → answer over the COMPLETE corpus.
+    # Report-shaped ask → answer over the COMPLETE corpus.
     #
     # This used to build `app.voc_report`'s pinned HTML template: a schema the
     # model filled in, a radar SVG, a fixed section order, rendered into a
     # sandboxed iframe. The template is gone — a report is an ordinary chat
     # answer now — but everything that made this path worth taking is not: the
     # live fetch from every connected source, the windowing, the full-corpus
-    # pass, and the coverage disclosure below. Those are capability; the layout
+    # pass, and the coverage disclosure above. Those are capability; the layout
     # was format.
-
-    # Disclose any fit applied so the answer can state real coverage
-    # instead of implying every word of every call is present.
-    coverage = f"{corpus.count} calls"
-    if corpus.total > corpus.count:
-        coverage = (
-            f"most recent {corpus.count} of {corpus.total} calls — older calls "
-            "omitted for space; note this as a coverage caveat"
-        )
-    elif corpus.quote_cap is not None:
-        coverage += (
-            f"; verbatim quotes sampled to ~{corpus.quote_cap} per call to fit "
-            "every call in — distilled summaries are complete"
-        )
-    # Name the split only when the corpus genuinely came from more than one live
-    # source, so the answer can attribute a theme to where it was heard. A
-    # single-source corpus learns nothing from this line, and leaving it off
-    # keeps the Fireflies-only source line exactly as it was.
-    per_source = Counter(c.provider for c in corpus.calls)
-    if len(per_source) > 1:
-        coverage += " (" + ", ".join(
-            f"{n} {_SOURCE_LABELS.get(p, p)}" for p, n in per_source.most_common()
-        ) + ")"
-    if corpus.doc_count:
-        docs_part = (
-            f"{corpus.doc_count} uploaded voice document"
-            f"{'s' if corpus.doc_count != 1 else ''} (window = upload date)"
-        )
-        coverage = f"{coverage} + {docs_part}" if corpus.count else docs_part
-    if corpus.failed_sources:
-        # A source that fell over while another answered: the corpus is real but
-        # it is NOT the full picture, and a report that implies otherwise is the
-        # failure mode this whole path exists to avoid. Appended LAST because a
-        # docs-only corpus rewrites `coverage` wholesale above, and the caveat
-        # must survive that — a docs-only answer standing in for a dead
-        # connector is exactly when the caveat matters most.
-        coverage += (
-            f"; {_sources_phrase(corpus.failed_sources)} could not be reached "
-            "for this window, so its calls are missing — state this as a "
-            "coverage caveat"
-        )
-    header = ("CUSTOMER CALLS + UPLOADED DOCUMENTS" if corpus.count and corpus.doc_count
-              else "UPLOADED VOICE DOCUMENTS" if corpus.doc_count
-              else "CUSTOMER CALLS")
-    source_line = (
-        f"=== {header} — {window.label} ({coverage}) ==="
-    )
     try:
         from app.ask_runner import _ASK_RESPONSE_SCHEMA
         from app.graph.gateway import llm_call
@@ -1064,7 +1392,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             system=_REPORT_SYSTEM,
             input=(
                 _render_history(history)
-                + f"Question: {question}\n\n{source_line}\n\n{corpus.text}"
+                + f"Question: {question}\n\n{source_line}\n\n{merged_text}"
             ),
             # v3: the pinned HTML template and its filling schema are gone; this
             # is a prose answer over the same corpus. A v3 row is not comparable
@@ -1081,15 +1409,26 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("call-digest: VoC run failed for %s", enterprise_id)
         return _plain_payload(
-            f"I gathered {corpus.count} call(s) and {corpus.doc_count} uploaded "
-            f"document(s) for {window.label} but hit an error synthesizing the "
-            "answer. Please retry."
+            f"I gathered {corpus.count} call(s), {corpus.doc_count} uploaded "
+            f"document(s) and {kg.signal_count} stored signal(s) for "
+            f"{window.label} but hit an error synthesizing the answer. "
+            "Please retry."
         )
 
+    # The run line under the answer. It names the KG contribution for the same
+    # reason the coverage banner does: this is where a user checks that
+    # connecting Zoom did not quietly cost them Slack.
     sources = f"{corpus.count} calls"
     if corpus.doc_count:
         docs_label = f"{corpus.doc_count} uploaded doc{'s' if corpus.doc_count != 1 else ''}"
         sources = f"{sources} + {docs_label}" if corpus.count else docs_label
+    if kg.present:
+        kg_label = (
+            f"{kg.signal_count} stored signal"
+            f"{'s' if kg.signal_count != 1 else ''}"
+        )
+        sources = (f"{sources} + {kg_label}"
+                   if (corpus.count or corpus.doc_count) else kg_label)
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",

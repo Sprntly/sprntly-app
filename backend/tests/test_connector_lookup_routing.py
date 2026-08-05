@@ -143,6 +143,84 @@ def test_zoom_has_a_live_lookup_adapter_not_absent_or_deferred():
     assert provider is not None and provider.provider == "zoom"
 
 
+def test_meet_the_verb_never_routes_to_google_meet_the_connector():
+    """"Meet" is far more dangerous than "zoom" was, and it is why this provider
+    is STRONG-tier with a multi-word pattern rather than ambiguous-tier.
+
+    The ambiguous tier requires a read-context match — but
+    `_CONNECTOR_READ_CONTEXT` includes `meetings?`, `calls?`, `find` and
+    `check`, so "can we meet to go over the tickets" would satisfy BOTH halves
+    of that gate and be hijacked, turning a scheduling question into "Google
+    Meet syncs into your knowledge graph, but I can't query it live". Requiring
+    the "google"/"g" qualifier makes that impossible rather than unlikely."""
+    for question in [
+        "can we meet to go over the tickets",
+        "let's meet tomorrow to check the release",
+        "who should meet with the customer about this",
+        "find a time to meet about the roadmap",
+        "we meet every monday to review open issues",
+        "should we meet or just send the doc",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
+def test_google_meet_the_source_is_intercepted():
+    """A genuine ask about the transcripts still has to reach the connector —
+    false negatives are the expensive failure on the other side."""
+    for question in [
+        "what did we say in google meet yesterday",
+        "check google meet for the call with acme",
+        "pull the gmeet transcript about pricing",
+        "what came up in the g-meet call last week",
+    ]:
+        assert is_connector_lookup(question) == {"google_meet"}, question
+
+
+def test_google_meet_is_not_confused_with_google_drive():
+    """Two providers sharing a first word and an OAuth client. Naming one must
+    never return the other — a Drive answer to a meetings question reads as a
+    confidently wrong search."""
+    assert is_connector_lookup(
+        "what did we say in google meet yesterday") == {"google_meet"}
+    assert is_connector_lookup(
+        "find the google drive doc about pricing") == {"google_drive"}
+
+
+def test_building_the_google_meet_integration_is_not_a_lookup():
+    """The artifact veto. A customer who BUILDS integrations asks this shape
+    constantly, and answering "Google Meet syncs into your KG but I can't query
+    it live" is a dead end with the skill that does answer it never reached."""
+    for question in [
+        "should we build the google meet integration",
+        "how long would the google meet connector take",
+    ]:
+        assert is_connector_lookup(question) is None, question
+    # And the comparison veto, for the same reason.
+    assert is_connector_lookup(
+        "how does google meet compare to zoom for our customers") is None
+
+
+def test_google_meet_syncs_but_has_no_live_adapter_yet():
+    """Meet connects and syncs into the KG (kg_ingest/pullers/google_meet.py)
+    but has no live-read adapter in this PR — so it belongs in DEFERRED, whose
+    copy says exactly that. Absent from every tier it would fall to the generic
+    path and be answered with a KG-flavoured guess; in NO_CONNECTOR it would be
+    told, falsely, that Sprntly has no Meet connector at all."""
+    from app.connector_lookup.registry import (
+        DEFERRED,
+        LOOKUP_PROVIDERS,
+        NO_CONNECTOR,
+        display_name,
+        provider_for,
+    )
+
+    assert "google_meet" in DEFERRED
+    assert "google_meet" not in LOOKUP_PROVIDERS
+    assert "google_meet" not in NO_CONNECTOR
+    assert display_name("google_meet") == "Google Meet"
+    assert provider_for("google_meet") is None
+
+
 def test_zoom_recordings_still_belong_to_the_voice_of_customer_skill():
     """`zoom recordings` is a VoC skill trigger and has been since before this
     connector existed. The two do not fight: qa_agent.answer runs the VoC
@@ -478,19 +556,44 @@ def test_a_pin_or_a_slash_never_triggers_the_suppression(monkeypatch):
 
 def test_the_call_digest_now_needs_a_call_source_like_its_neighbours(monkeypatch):
     """The digest was the only interceptor on the ladder claiming its turn
-    unconditionally. With no corpus it answered from nothing; now it declines
-    and the question falls through to routing that can serve it."""
+    unconditionally. With no corpus it declines and the question falls through
+    to routing that can serve it.
+
+    CHANGED 2026-08-05 with the voice-of-customer merge. This used to assert the
+    stronger consequence — that the answer never came back from the digest at
+    all — which held only because the VoC dispatch downstream was ALSO gated on
+    `has_call_source`. That second gate was the reported bug: it made live calls
+    and the knowledge graph an either/or, so connecting Zoom silently dropped
+    Slack out of every voice-of-customer answer. The dispatch now runs the
+    merged path unconditionally and degrades per-source inside
+    `call_digest.answer`.
+
+    What the INTERCEPTION's capability gate still buys is unchanged, and is what
+    this pins: it yields the turn to the router rather than short-circuiting
+    ahead of it, so a company skill or another pipeline still gets its say.
+    """
     import app.call_digest as cd
 
     _slack_connected(monkeypatch, providers=())
     monkeypatch.setattr(cd, "has_call_source", lambda eid: False)
-    monkeypatch.setattr(cd, "answer", lambda **k: (_ for _ in ()).throw(
-        AssertionError("digest ran with no call source")))
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    routed: list = []
+    real_route = qa.route
+    monkeypatch.setattr(
+        qa, "route", lambda q, **k: routed.append(q) or real_route(q, **k)
+    )
     monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
-    out = qa.answer(enterprise_id="ent",
-                    question="summarize the customer calls from last week",
-                    dataset="acme")
-    assert out.get("_skill_source") != "call-digest"
+
+    qa.answer(enterprise_id="ent",
+              question="summarize the customer calls from last week",
+              dataset="acme")
+
+    # The interception declined and the router got the question — the whole
+    # point of the gate. Where routing then sends it is routing's call.
+    assert routed == ["summarize the customer calls from last week"]
 
 
 def test_an_unreadable_capability_check_keeps_the_digest(monkeypatch):

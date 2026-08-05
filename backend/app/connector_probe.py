@@ -31,6 +31,7 @@ from app.connectors import (
     figma_oauth,
     fireflies_apikey,
     github_app,
+    google_meet,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
@@ -341,6 +342,84 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
                 zoom_oauth.account_label_from(raw_user)
                 or row.get("account_label")
                 or "Zoom account"
+            ),
+        }
+    elif provider == google_meet.GOOGLE_MEET_PROVIDER:
+        # Google Meet: 1h access tokens with NON-rotating refresh tokens. The
+        # rotation hazard Zoom and Atlassian have is absent — but Google's
+        # refresh response omits `refresh_token` entirely, so persisting it
+        # verbatim would blank the stored one and kill the connection at the
+        # next cycle. Hence keep_refresh_token, which is load-bearing here even
+        # though it is a fallback elsewhere. Same company_id obligation as
+        # Confluence and Zoom: it is the credential the kg_ingest puller
+        # receives (see google_meet.token_payload_to_store).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = google_meet.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    google_meet.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    google_meet.GOOGLE_MEET_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except google_meet.MeetAuthExpiredError as e:
+                raise ProbeError(
+                    f"Google Meet token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Google Meet probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        # Probe with the call the CONNECTOR actually depends on, not a cheap
+        # identity endpoint. Google's userinfo answers on `userinfo.email` while
+        # every meeting read answers on `meetings.space.readonly` — and those
+        # scopes can genuinely come apart, because the Meet API has to be
+        # ENABLED on the Cloud project and can be turned off for a Workspace by
+        # its admin, neither of which touches sign-in. An identity-only probe
+        # would therefore report a healthy connection whose every sync 403s.
+        # That is not hypothetical: it is the second defect of the Confluence
+        # granular-scopes incident (a1e16c40), where a green probe concealed a
+        # wholly broken connector. Listing ONE conference record costs the same
+        # round trip and proves the thing that matters.
+        #
+        # An EMPTY list is healthy, and saying so matters more here than on any
+        # other connector: coverage is organizer-only over a 30-day window, so a
+        # PM who chairs no meetings legitimately has nothing — calling that
+        # disconnected would send a customer to reconnect something that works.
+        try:
+            google_meet.list_conference_records(
+                access_token, page_size=1, max_pages=1,
+            )
+        except google_meet.MeetAuthExpiredError as e:
+            raise ProbeError(
+                f"Google Meet rejected the token: {e}", reason="rejected"
+            ) from e
+        raw_user = google_meet.fetch_current_user(access_token) or {}
+        # The read check above passed, so the connection IS healthy even when
+        # the identity lookup comes back empty. Fall back to the label stored at
+        # connect so this never reads as a rejected credential.
+        user_obj = {
+            "email": raw_user.get("email"),
+            "name": (
+                google_meet.account_label_from(raw_user)
+                or row.get("account_label")
+                or "Google Meet account"
             ),
         }
     elif provider == slack_oauth.SLACK_PROVIDER:

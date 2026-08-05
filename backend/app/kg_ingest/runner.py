@@ -33,6 +33,7 @@ from app.kg_ingest.pullers import (
     confluence,
     fireflies,
     github,
+    google_meet,
     hubspot,
     jira,
     sprinklr,
@@ -56,6 +57,10 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     # pull needs the picked hosts and the incremental cursor off the connection
     # row, and token_for can only hand a puller one field.
     "zoom":      (zoom.pull,      "company_id",   "customer_voice / communication (Zoom cloud-recorded meeting transcripts, speaker-attributed: what customers, prospects and the team actually SAID on a call — treat a quoted line as first-party evidence of that person's view, not as a decision. A record whose text states no transcript was available is a recording we could not read, NOT an empty meeting)"),
+    # Like zoom/uploads/confluence, the "credential" is the company id — a Meet
+    # pull needs the connected account's identity off the connection row, and
+    # token_for can only hand a puller one field.
+    "google_meet": (google_meet.pull, "company_id", "customer_voice / communication (Google Meet transcripts, speaker-attributed: what customers, prospects and the team actually SAID on a call — treat a quoted line as first-party evidence of that person's view, not as a decision. COVERAGE IS ONE PERSON'S CALENDAR: Google only exposes meetings the connected account ORGANIZED, and only for 30 days, so absence of a meeting is never evidence it did not happen. A record whose text states no transcript was available is a call we could not read, NOT an empty meeting)"),
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
     "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),
