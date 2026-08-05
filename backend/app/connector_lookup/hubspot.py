@@ -295,10 +295,15 @@ def _deal_row_to_record(row: dict) -> "RawRecord":
         never in the requested property list.
 
     Closing any of these needs a wider `properties`/`associations` request on
-    the search call, or a follow-up `hubspot_get` per hit — either a materially
-    different request or a new HTTP call, both out of scope per the ticket. See
-    the AC4 test for the assertion that this record and the puller's record for
-    the same deal do NOT collide.
+    the search call, or a follow-up `hubspot_get`-shaped fetch per hit — a
+    materially different request either way, and one this module's OWN
+    `dispatch`/`dispatch_records` still may not make (sweep.py's latency
+    contract). `enrich_record` below closes it anyway, from the sweep-persist
+    background thread ONLY, where that contract does not apply — see
+    connector_lookup/sweep_persist.py's module docstring. See the AC4 test
+    for the assertion that THIS record and the puller's record for the same
+    deal do NOT collide (the lean, sweep-time shape); the enrichment test
+    proves the ENRICHED one does.
     """
     from app.kg_ingest.types import RawRecord
 
@@ -319,6 +324,80 @@ def _deal_row_to_record(row: dict) -> "RawRecord":
         },
         timestamp=props.get("hs_lastmodifieddate"),
     )
+
+
+def _get_deal_full(token: str, deal_id: str) -> dict | None:
+    """One deal in full — the SAME property set and `associations=companies`
+    the puller (`kg_ingest.pullers.hubspot._pull_deals`) requests, via the
+    single-object GET so the sweep's persist-thread enrichment (AC-A1) can
+    build a puller-shaped record without waiting for the next scheduled
+    sync. `None` on 404 (the deal no longer exists, or isn't visible to this
+    token any more).
+    """
+    from app.kg_ingest.pullers.hubspot import _DEAL_PROPS
+
+    resp = requests.get(
+        f"{API}/crm/v3/objects/deals/{deal_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"properties": _DEAL_PROPS, "associations": "companies"},
+        timeout=HTTP_TIMEOUT,
+    )
+    if resp.status_code == 404:
+        return None
+    _raise_for_status(resp)
+    return resp.json() or {}
+
+
+def _deal_to_puller_record(d: dict) -> "RawRecord":
+    """One full deal object (`_get_deal_full`) -> the SAME `RawRecord`
+    `kg_ingest.pullers.hubspot._pull_deals` builds for it: field-for-field
+    copy of that puller's construction — same `properties` KEYS/ORDER, same
+    `company_ids` derivation off `associations.companies.results`.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    p = d.get("properties") or {}
+    company_ids = [
+        a.get("id")
+        for a in ((d.get("associations") or {}).get("companies") or {}).get(
+            "results", []
+        )
+    ]
+    return RawRecord(
+        provider="hubspot",
+        kind="deal",
+        external_id=str(d["id"]),
+        title=p.get("dealname", "") or "",
+        text=(p.get("description") or "")[:2000],
+        properties={
+            "amount_usd": p.get("amount"),
+            "stage": p.get("dealstage"),
+            "pipeline": p.get("pipeline"),
+            "close_date": p.get("closedate"),
+            "owner_id": p.get("hubspot_owner_id"),
+            "company_ids": company_ids,
+        },
+        timestamp=p.get("hs_lastmodifieddate"),
+    )
+
+
+def enrich_record(session: LookupSession, record: "RawRecord") -> "RawRecord":
+    """PERSIST-THREAD ONLY (see connector_lookup/sweep_persist.py's module
+    docstring for why a per-hit fetch is safe here and NOT in
+    `dispatch`/`dispatch_records`, which stay bound by sweep.py's own
+    latency contract). One `hubspot_get`(deal)-equivalent fetch with
+    `associations=companies` and the two extra properties
+    `_deal_row_to_record` could not carry (AC-A1).
+
+    Raises on any failure other than "deal no longer reachable" (404),
+    handled below by falling back to the lean record. The caller
+    (`sweep_persist._enrich_source`) is what isolates a per-hit failure from
+    the rest of the source/run (AC-A4).
+    """
+    deal = _get_deal_full(session.handle, record.external_id)
+    if deal is None:
+        return record  # 404/gone since the search — keep the lean record
+    return _deal_to_puller_record(deal)
 
 
 def _raise_for_status(resp) -> None:

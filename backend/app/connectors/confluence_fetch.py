@@ -216,14 +216,16 @@ def list_pages(
     return rows
 
 
-def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
-    """One page or blogpost in full, body included. None when it doesn't exist
-    or the connected account can't read it.
+def _fetch_page_body(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
+    """Raw v2 page/blogpost GET, tried as a page then a blogpost. Shared by
+    `get_page` (the chat tool's shaped result) and `get_page_raw` (the
+    sweep-persist enrichment path — connector_lookup/confluence.py), so both
+    always agree on WHICH collection answered for a given id.
 
     Tries /pages then /blogposts: v2 gives the two collections separate
     endpoints and an id from the wrong one 404s, so a blogpost surfaced by
-    list_pages would otherwise be listed and then unreadable — the model would
-    report the page as missing while looking straight at its id.
+    list_pages would otherwise be listed and then unreadable — the model
+    would report the page as missing while looking straight at its id.
     """
     ctx = session.ctx
     body: dict[str, Any] | None = None
@@ -236,7 +238,15 @@ def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
         except Exception:  # noqa: BLE001 — a 404 here just means "try the other"
             body = None
         if body and body.get("id"):
-            break
+            return body
+    return None
+
+
+def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
+    """One page or blogpost in full, body included. None when it doesn't exist
+    or the connected account can't read it."""
+    ctx = session.ctx
+    body = _fetch_page_body(session, page_id)
     if not body or not body.get("id"):
         return None
     return {
@@ -248,6 +258,17 @@ def get_page(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
         "url": _page_url(ctx, body),
         "text": cap_text(_body_text(body), limit=PAGE_BODY_CHARS),
     }
+
+
+def get_page_raw(session: ConfluenceSession, page_id: str) -> dict[str, Any] | None:
+    """The bare v2 page/blogpost response — `spaceId`, `parentId`, `authorId`
+    included, none of which `get_page` above keeps (that function shapes the
+    chat tool's OWN result). Used ONLY by the sweep-persist enrichment path
+    (connector_lookup/confluence.py, persist-thread only — see
+    connector_lookup/sweep_persist.py's module docstring) to build a record
+    matching kg_ingest.pullers.confluence._to_record's shape field-for-field.
+    """
+    return _fetch_page_body(session, page_id)
 
 
 # ── Rendering ────────────────────────────────────────────────────────────────
@@ -301,6 +322,6 @@ def cap(rows: list[dict]) -> tuple[list[dict], str]:
 
 __all__ = [
     "ConfluenceSession", "open_session", "spaces", "search_pages", "list_pages",
-    "get_page", "render_rows", "render_page", "render_spaces", "cap",
+    "get_page", "get_page_raw", "render_rows", "render_page", "render_spaces", "cap",
     "HTTP_TIMEOUT", "SEARCH_LIMIT",
 ]

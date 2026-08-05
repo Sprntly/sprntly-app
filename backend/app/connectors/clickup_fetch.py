@@ -251,6 +251,32 @@ def get_task(session: ClickUpSession, task_id: str) -> dict | None:
     return row
 
 
+def get_task_raw(session: ClickUpSession, task_id: str) -> dict[str, Any] | None:
+    """The bare ClickUp task object — no shaping, no markdown-description
+    preference, no comment fetch. Used ONLY by the sweep-persist enrichment
+    path (connector_lookup/clickup.py, persist-thread only — see
+    connector_lookup/sweep_persist.py's module docstring) to build a record
+    matching kg_ingest.pullers.clickup.pull's shape field-for-field: that
+    puller reads `text_content`/`description` and the raw `date_updated`
+    epoch-ms STRING off the team task-list endpoint. Requesting this
+    single-task endpoint WITHOUT `include_markdown_description` (unlike
+    `get_task` above, which asks for it on purpose to give the chat tool the
+    nicest available body) keeps those fields identically shaped rather than
+    upgrading `description` to `markdown_description` — a byte-identity
+    difference `get_task`'s processed row would silently introduce.
+    """
+    try:
+        data = _get(session, f"/task/{task_id}")
+    except requests.HTTPError as e:
+        resp = getattr(e, "response", None)
+        if resp is not None and resp.status_code in (404, 410):
+            return None
+        raise
+    if not data.get("id"):
+        return None
+    return data
+
+
 def _get_comments(session: ClickUpSession, task_id: str) -> list[dict]:
     """Newest comments on a task, bounded. Best-effort: comments are extra
     context, never the reason a lookup fails."""

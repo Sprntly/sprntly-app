@@ -159,9 +159,14 @@ def _row_to_record(row: dict) -> "RawRecord":
         `version.createdAt` — two different endpoints' own notion of "when",
         not guaranteed to agree in value or format.
 
-    Closing any of these needs `confluence_get_page` per hit — the new HTTP
-    call this ticket says not to add. See the AC4 test for the assertion that
-    this record and the puller's record for the same page do NOT collide.
+    Closing any of these needs `confluence_get_page` per hit — a new HTTP
+    call this module's OWN `dispatch`/`dispatch_records` still may not make
+    (sweep.py's latency contract). `enrich_record` below closes it anyway,
+    from the sweep-persist background thread ONLY, where that contract does
+    not apply — see connector_lookup/sweep_persist.py's module docstring.
+    See the AC4 test for the assertion that THIS record and the puller's
+    record for the same page do NOT collide (the lean, sweep-time shape);
+    the enrichment test proves the ENRICHED one does.
     """
     from app.kg_ingest.types import RawRecord
 
@@ -266,6 +271,85 @@ class ConfluenceProvider:
         )
         records = [_row_to_record(r) for r in kept] if kept else None
         return text, records
+
+
+#: Body-text slice — matches `kg_ingest.pullers.confluence._TEXT_CHARS`
+#: exactly, so a page's enriched record carries the same `text` cap the
+#: scheduled pull would have used.
+_PULLER_TEXT_CHARS = 4000
+
+
+def _space_for_id(handle: "confluence_fetch.ConfluenceSession", space_id) -> dict:
+    """Best-effort space lookup by id — the v2 page GET carries only
+    `spaceId`, never the space's display name, which the puller-shaped
+    record needs for `space_name`. One extra `spaces()` listing per enriched
+    hit; simplicity here beats a cross-call cache for the small, top-K-bound
+    number of hits sweep_persist ever enriches in one run."""
+    if not space_id:
+        return {}
+    for s in confluence_fetch.spaces(handle):
+        if str(s.get("id")) == str(space_id):
+            return s
+    return {}
+
+
+def _page_to_puller_record(
+    handle: "confluence_fetch.ConfluenceSession", kind: str, item: dict
+) -> "RawRecord":
+    """Raw v2 page (`confluence_fetch.get_page_raw`) -> the SAME `RawRecord`
+    `kg_ingest.pullers.confluence._to_record` builds for it: same
+    `properties` KEYS in the SAME order, same `_PULLER_TEXT_CHARS` body
+    slice via the SAME `_text_from_body` HTML/ADF-to-markdown conversion,
+    same external_id/timestamp fallback.
+    """
+    from app.kg_ingest.pullers.confluence import _text_from_body
+    from app.kg_ingest.types import RawRecord
+
+    ctx = handle.ctx
+    page_id = item.get("id")
+    title = item.get("title") or ""
+    text = _text_from_body(item.get("body"))[:_PULLER_TEXT_CHARS]
+    webui = ((item.get("_links") or {}).get("webui")) or ""
+    version = item.get("version") or {}
+    space = _space_for_id(handle, item.get("spaceId"))
+    return RawRecord(
+        provider="confluence",
+        kind=kind,
+        external_id=str(page_id),
+        title=title,
+        text=text,
+        properties={
+            "space_key": space.get("key"),
+            "space_name": space.get("name"),
+            "url": f"{ctx.site_url}{webui}" if (ctx.site_url and webui) else None,
+            "status": item.get("status"),
+            "version": version.get("number"),
+            "parent_id": item.get("parentId"),
+            "author_id": item.get("authorId"),
+        },
+        timestamp=version.get("createdAt") or item.get("createdAt"),
+    )
+
+
+def enrich_record(session: LookupSession, record: "RawRecord") -> "RawRecord":
+    """PERSIST-THREAD ONLY (see connector_lookup/sweep_persist.py's module
+    docstring for why a per-hit fetch is safe here and NOT in
+    `dispatch`/`dispatch_records`, which stay bound by sweep.py's own
+    latency contract). One `confluence_get_page`-equivalent raw fetch
+    (`confluence_fetch.get_page_raw`, not `get_page` — that one drops
+    `spaceId`/`parentId`/`authorId` building the chat tool's own shape) plus
+    one `spaces()` listing to resolve `space_name` (AC-A1).
+
+    Raises on any failure other than "page no longer reachable", which is
+    handled below by falling back to the lean record. The caller
+    (`sweep_persist._enrich_source`) is what isolates a per-hit failure from
+    the rest of the source/run (AC-A4).
+    """
+    handle = session.handle
+    raw = confluence_fetch.get_page_raw(handle, record.external_id)
+    if raw is None:
+        return record  # gone/unreachable since the search — keep the lean record
+    return _page_to_puller_record(handle, record.kind, raw)
 
 
 PROVIDER = ConfluenceProvider()

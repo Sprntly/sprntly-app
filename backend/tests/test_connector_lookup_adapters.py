@@ -845,6 +845,78 @@ def test_hubspot_dispatch_records_ac4_not_byte_identical_to_the_puller(monkeypat
     assert sweep_record.text == ""
 
 
+# ── HubSpot — AC-A1 persist-thread enrichment achieves byte-identity ───────
+
+
+def test_hubspot_enrich_record_achieves_byte_identity_with_the_real_puller(monkeypatch):
+    """AC-A1: after `enrich_record` (persist-thread only), the sweep's record
+    DOES render byte-identical to the real puller's
+    (`kg_ingest.pullers.hubspot._pull_deals`) record for the same deal —
+    proven against the real puller, not a hand-reconstruction."""
+    from app.connector_lookup.hubspot import enrich_record
+    from app.kg_ingest.pullers import hubspot as hubspot_puller
+
+    deal_obj = {
+        "id": "501",
+        "properties": {
+            "dealname": "Acme expansion", "amount": "12000",
+            "dealstage": "contract", "pipeline": "default",
+            "closedate": "2026-09-01", "hs_lastmodifieddate": "2026-08-01T00:00:00Z",
+            "hubspot_owner_id": "42", "description": "Renewal conversation notes",
+        },
+        "associations": {"companies": {"results": [
+            {"id": "9001", "type": "deal_to_company"},
+        ]}},
+    }
+
+    def fake_puller_get(token, path, params=None):
+        assert path == "/crm/v3/objects/deals"
+        assert params["associations"] == "companies"
+        return {"results": [deal_obj], "paging": {}}
+
+    monkeypatch.setattr(hubspot_puller, "_get", fake_puller_get)
+    pull_record = next(hubspot_puller._pull_deals("tok"))
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    _text, records = HUBSPOT.dispatch_records(
+        _hs_session(), "hubspot_search", {"object_type": "deals", "query": "acme"}
+    )
+    lean_record = records[0]
+
+    # Persist-thread enrichment: one deal GET with associations=companies +
+    # the SAME `_DEAL_PROPS` the puller requests.
+    def fake_get(url, headers=None, params=None, timeout=None):
+        assert url.endswith("/crm/v3/objects/deals/501")
+        assert params["associations"] == "companies"
+        assert params["properties"] == hubspot_puller._DEAL_PROPS
+        return _Resp(deal_obj)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    enriched = enrich_record(_hs_session(), lean_record)
+
+    assert enriched.render() == pull_record.render(), (
+        "AC-A1: the ENRICHED record must render byte-identical to the real "
+        "puller's record for the same deal"
+    )
+    assert enriched.external_id == pull_record.external_id == "501"
+
+
+def test_hubspot_enrich_record_falls_back_to_the_lean_record_on_404(monkeypatch):
+    """AC-A4: a deal that vanished between the search and the enrichment
+    fetch (404) is not an error — enrichment falls back to the lean record."""
+    from app.connector_lookup.hubspot import enrich_record
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    _text, records = HUBSPOT.dispatch_records(
+        _hs_session(), "hubspot_search", {"object_type": "deals", "query": "acme"}
+    )
+    lean_record = records[0]
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp({}, status=404))
+    out = enrich_record(_hs_session(), lean_record)
+    assert out is lean_record
+
+
 # ── Google Drive ─────────────────────────────────────────────────────────────
 
 def _drive_session(picked=None):

@@ -803,6 +803,27 @@ def _match_to_record(match: dict, users: dict[str, str]) -> "RawRecord":
     second, differently-worded sweep skips re-extracting a message a prior
     sweep already paid for. That is real, if narrower, value: sweep-to-sweep
     dedup, not sweep-to-pull dedup.
+
+    NOR IS MAKING THEM COLLIDE ON THE TABLE (recorded here so nobody reopens
+    it — see the amendment to the sweep-persist ticket this closed). Doing so
+    would mean per-message Slack ingestion: `slack_extract._chunk_hash`
+    hashes `_CHUNK_CHARS`-sized (6,000-char) chunks of a channel's
+    CONCATENATED synced markdown, capped at `_MAX_KG_CHARS` (60,000) per
+    channel — a message becoming its own hashable unit is a different
+    ingestion shape entirely, not a fix to this one. At
+    `slack_sync.MAX_CHANNELS` (50) x `MAX_MESSAGES_PER_CHANNEL` (200) that is
+    up to ~10,000 extraction calls where today's per-channel-chunk ingestion
+    pays for at most 50 x (60,000 / 6,000) = 500 — roughly 20x, to enable
+    dedupe on a feature whose own value (the sweep's live hit rate) is still
+    unmeasured. Not worth it.
+
+    What actually bounds Slack's persistence cost instead is the
+    per-(company, provider) cooldown in sweep_persist.py (AC-A2): without a
+    puller to collide with, Slack has NO dedupe at all against a repeated,
+    differently-worded sweep beyond the sweep-to-sweep case above, so the
+    cooldown — not the content-hash ledger — is the only thing standing
+    between Slack and a fresh batch of message-sized extraction calls on
+    every question that happens to sweep it.
     """
     from app.kg_ingest.types import RawRecord
 

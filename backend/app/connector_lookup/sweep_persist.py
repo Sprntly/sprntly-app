@@ -42,6 +42,46 @@ prompt block the answer call will use — this function cannot add latency to
 that render because nothing here participates in producing it. The thread's
 own work (ledger read, triage, extraction, KG write) happens strictly after
 the caller returns.
+
+PER-HIT ENRICHMENT, PERSIST-THREAD ONLY (added after the first build hit
+byte-identity for Jira alone). AC4 byte-identity needs a sweep's record and
+the scheduled pull's record for the same item to render EQUAL — and for
+three of five live legs (clickup, confluence, hubspot) the sweep's own lean
+search-hit shape genuinely lacks fields only the puller's full fetch carries
+(see each adapter's `_row_to_record`/`_deal_row_to_record` docstring for the
+exact gaps). Closing that gap needs one extra fetch per hit, which
+`sweep.py`'s own module docstring forbids — correctly, for THAT module: its
+wall-clock budget is shared across every live leg in flight for one chat
+answer, and a fetch-per-hit there would blow it. That constraint does not
+hold HERE: this thread starts AFTER the prompt block sweep.py rendered is
+already in the model's hands, and `open_session(enterprise_id)` resolves
+credentials from the DB the same way on this thread as on the request
+thread — nothing about running in the background makes it unsafe. So
+per-hit enrichment is allowed in this module, and ONLY this module:
+`_enrich_source` below turns each eligible source's lean records into
+puller-shaped ones (`clickup.enrich_record`, `confluence.enrich_record`,
+`hubspot.enrich_record`) before hashing, bounded to
+`_ENRICH_MAX_PER_SOURCE` hits and isolated per hit — a 404/timeout/other
+failure drops just that one record back to its lean form rather than
+aborting the source. Jira needs none of this (its own sweep-time single-hit
+branch already fetches the full issue). Slack has no puller-shaped record to
+enrich TOWARD at all — see connector_lookup/slack.py's `_match_to_record`
+for why, and for what bounds its cost instead of hashing.
+
+PER-PROVIDER COOLDOWN (`sweep_persist_cooldown`, `app/db/`). Enrichment adds
+real HTTP cost against a customer's own API, paid on every question that
+happens to sweep a source — and it happens BEFORE the ledger hash check
+below, so the content-hash ledger alone cannot prevent paying for a fetch
+about to be discarded as a duplicate. `_run` now checks the cooldown before
+doing ANYTHING for a source — enrichment, hashing, extraction — and skips it
+entirely when it was processed within `settings.pipeline_interval_hours`
+(6h). This applies to all five providers, not just the three enrichable
+ones: it is the ONLY mechanism that bounds Slack's cost (Slack cannot dedupe
+against the pull at all), and it protects the other four on top of the
+ledger. Persisted, not in-process (`app.db.sweep_persist_cooldown` — a
+Supabase table, not a module-level dict), so it survives a restart; see that
+module's docstring for why it is a separate table from `kg_ingest_ledger`
+rather than a reuse of one.
 """
 from __future__ import annotations
 
@@ -54,6 +94,18 @@ if TYPE_CHECKING:
     from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
+
+#: Top-K hits enriched per source per persistence run (AC-A3). Bounds the
+#: persist thread's own fan-out against a customer's API — enrichment costs
+#: one extra HTTP call per hit (the whole point of the amendment above), and
+#: a broad sweep can surface more hits than that is worth paying for on a
+#: background thread every time someone asks a fuzzy question. Five, chosen
+#: to comfortably cover a focused sweep result without turning "what's the
+#: status of the pricing project" into fifteen ClickUp/Confluence/HubSpot
+#: fetches behind the scenes. A hit past this cap is NOT dropped — it is
+#: hashed/extracted in its lean, un-enriched form, same as before this
+#: amendment (AC6's fallback still applies per-record, not just per-source).
+_ENRICH_MAX_PER_SOURCE = 5
 
 # Per-company locks so two asks that both trigger a sweep around the same time
 # serialize their persistence instead of extracting the same fresh content in
@@ -112,18 +164,92 @@ def _content_hash(rendered: str) -> str:
 
 
 def _hashable_units(
-    source: "SourceResult",
+    records: "list[RawRecord] | None", text: str
 ) -> "list[tuple[str, RawRecord | None]]":
     """`[(rendered, record_or_None), ...]` — one entry per thing `_run` will
-    hash/extract for this source. A source with records yields one entry PER
-    RECORD (AC6: records are used when present); a source without yields one
-    entry for the whole `source.text` (AC6: falls back to today's behaviour).
-    Never both — records, when present, REPLACE text-hashing for that source
-    rather than adding to it, so a source is never double-counted.
+    hash/extract for one source. `records` (when present) yields one entry
+    PER RECORD (AC6: records are used when present); their absence yields one
+    entry for the whole `text` (AC6: falls back to today's behaviour). Never
+    both — records, when present, REPLACE text-hashing rather than adding to
+    it, so a source is never double-counted.
+
+    Takes `records`/`text` directly rather than a `SourceResult` so the
+    caller can pass the ENRICHED record list (`_enrich_source`) without
+    mutating the `SourceResult` itself — see that function's docstring.
     """
-    if source.records:
-        return [(record.render(), record) for record in source.records]
-    return [(source.text, None)]
+    if records:
+        return [(record.render(), record) for record in records]
+    return [(text, None)]
+
+
+def _enrichers() -> "dict[str, object]":
+    """Provider key -> `enrich_record(session, record) -> RawRecord`, for the
+    three providers whose sweep-time record is genuinely leaner than the
+    puller's (AC-A1). Lazily imported — same reason `_run` imports its own
+    dependencies lazily: this module stays cheap to import for callers that
+    never trigger persistence, and it sidesteps any import-order coupling
+    with the adapter modules.
+    """
+    from app.connector_lookup import clickup, confluence, hubspot
+
+    return {
+        "clickup": clickup.enrich_record,
+        "confluence": confluence.enrich_record,
+        "hubspot": hubspot.enrich_record,
+    }
+
+
+def _enrich_source(
+    enterprise_id: str, source: "SourceResult"
+) -> "list[RawRecord] | None":
+    """`source.records`, with persist-thread-only per-hit enrichment applied
+    where this provider has one (AC-A1). Never mutates `source.records`
+    itself — sweep_persist runs concurrently with nothing else touching this
+    SweepResult, but the SourceResult objects are shared with whatever
+    already rendered the prompt block, and mutating them in place is
+    unnecessary risk for no benefit.
+
+    Bounded to `_ENRICH_MAX_PER_SOURCE` (AC-A3) and per-hit isolated
+    (AC-A4): a hit past the cap, or one whose fetch raises, is returned
+    UNENRICHED (the original lean record) rather than dropped or aborting
+    the source — the run keeps going either way.
+    """
+    records = source.records
+    if not records:
+        return records
+    enrich = _enrichers().get(source.key)
+    if enrich is None:
+        return records
+    from app.connector_lookup import registry
+
+    adapter = registry.provider_for(source.key)
+    if adapter is None:
+        return records
+    try:
+        session = adapter.open_session(enterprise_id)
+    except Exception:  # noqa: BLE001 — a session that can't open enriches nothing
+        logger.warning(
+            "sweep-persist: enrichment session failed to open for %s/%s",
+            enterprise_id, source.key, exc_info=True,
+        )
+        return records
+    if session is None:
+        return records
+    out: list = []
+    for i, record in enumerate(records):
+        if i >= _ENRICH_MAX_PER_SOURCE:
+            out.append(record)  # past the cap — unenriched, not dropped (AC-A3)
+            continue
+        try:
+            out.append(enrich(session, record))
+        except Exception:  # noqa: BLE001 — one hit's failure must not drop the rest (AC-A4)
+            logger.info(
+                "sweep-persist: enrichment failed for %s/%s/%s (keeping the "
+                "lean record)",
+                enterprise_id, source.key, record.external_id, exc_info=True,
+            )
+            out.append(record)
+    return out
 
 
 def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
@@ -136,6 +262,8 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
     nothing here can reach the user regardless of where it fails. Serialized
     per company via `_lock_for` (see above).
     """
+    from app.config import settings
+    from app.db import sweep_persist_cooldown as cooldown
     from app.db.kg_ingest_ledger import record_hashes, seen_hashes
     from app.graph.extractor import extract_document
     from app.graph.facade import GraphFacade
@@ -143,12 +271,41 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
     lock = _lock_for(enterprise_id)
     with lock:
         try:
+            # Per-(company, provider) cooldown, ALL FIVE providers (AC-A2):
+            # a source processed within the last `pipeline_interval_hours`
+            # is skipped ENTIRELY — no enrichment fetch, no ledger read, no
+            # extraction (AC-A5) — before anything else in this run touches
+            # it. Checked (and fail-open) per source, not once for the whole
+            # run, so one company sweeping jira+clickup in the same minute
+            # doesn't have clickup's cooldown gate jira's turn too.
+            interval_hours = getattr(settings, "pipeline_interval_hours", 6)
+            active_sources: list = []
+            cooled_providers: list[str] = []
+            for source in sources:
+                if cooldown.in_cooldown(
+                    enterprise_id, source.key, hours=interval_hours
+                ):
+                    cooled_providers.append(source.key)
+                    continue
+                active_sources.append(source)
+            if cooled_providers:
+                logger.info(
+                    "sweep-persist: %s provider(s) %s in cooldown "
+                    "(< %sh since their last run) — zero enrichment, zero "
+                    "extraction this run",
+                    enterprise_id, ",".join(cooled_providers), interval_hours,
+                )
+
             # One item per record when a source has records (AC6), else one
-            # item for the whole source text — see `_hashable_units`.
+            # item for the whole source text — see `_hashable_units`. Records
+            # are the PERSIST-THREAD-ENRICHED list (AC-A1), not
+            # `source.records` directly — see `_enrich_source`.
             items = [
                 (source, record, _content_hash(rendered))
-                for source in sources
-                for rendered, record in _hashable_units(source)
+                for source in active_sources
+                for rendered, record in _hashable_units(
+                    _enrich_source(enterprise_id, source), source.text
+                )
             ]
             try:
                 # Fail-open, matching the ledger's own contract: a read error
@@ -205,10 +362,17 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
                         "sweep-persist: extraction failed for %s/%s",
                         enterprise_id, source.key,
                     )
+            # Mark cooldown for every source actually processed this run —
+            # regardless of whether it ended up written, skipped, or a mix.
+            # Best-effort per source, so one write failure doesn't stop the
+            # rest from being marked.
+            for source in active_sources:
+                cooldown.mark_run(enterprise_id, source.key)
             logger.info(
                 "sweep-persist: %s written=%d skipped=%d of %d item(s) "
-                "across %d source(s)",
-                enterprise_id, written, skipped, len(items), len(sources),
+                "across %d/%d source(s) (%d in cooldown)",
+                enterprise_id, written, skipped, len(items),
+                len(active_sources), len(sources), len(cooled_providers),
             )
         except Exception:  # noqa: BLE001 — fully isolated, see docstring
             logger.exception("sweep-persist: run failed for %s", enterprise_id)

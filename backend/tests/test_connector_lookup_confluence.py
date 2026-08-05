@@ -283,6 +283,99 @@ def test_dispatch_records_ac4_not_byte_identical_to_the_puller(monkeypatch):
     )
 
 
+# ── AC-A1 — persist-thread enrichment achieves byte-identity ───────────────
+
+
+def test_enrich_record_achieves_byte_identity_with_the_real_puller(monkeypatch):
+    """AC-A1: after `enrich_record` (persist-thread only), the sweep's record
+    DOES render byte-identical to the real puller's
+    (`kg_ingest.pullers.confluence.pull`) record for the same page — proven
+    against the real puller, not a hand-reconstruction."""
+    from app.connector_lookup.confluence import enrich_record
+    from app.kg_ingest.pullers import confluence as confluence_puller
+
+    v2_item = {
+        "id": "111", "title": "Onboarding spec", "status": "current",
+        "spaceId": "s1",
+        "body": {"storage": {
+            "value": "<p>New users land on the <b>welcome</b> screen</p>",
+            "representation": "storage",
+        }},
+        "_links": {"webui": "/spaces/ENG/pages/111"},
+        "version": {"number": 3, "createdAt": "2026-07-30T09:00:00Z"},
+        "parentId": "100", "authorId": "acc-1",
+    }
+
+    def _puller_api_get(tok, url, params=None, *, what="read"):
+        return {"results": [v2_item]}
+
+    monkeypatch.setattr(confluence_puller, "sync_context", lambda cid: _ctx())
+    monkeypatch.setattr(confluence_puller, "list_spaces", lambda tok, cloud: [_ENG])
+    monkeypatch.setattr(confluence_puller, "api_get", _puller_api_get)
+    pull_record = next(confluence_puller.pull("co-1"))
+
+    def _search_api_get(tok, url, params=None, *, what="read"):
+        return {"results": [{
+            "content": {"id": "111", "title": "Onboarding spec", "type": "page",
+                        "space": {"key": "ENG"}},
+            "excerpt": "New users land on the welcome screen",
+            "url": "/spaces/ENG/pages/111",
+            "lastModified": "2026-07-30T10:00:00Z",
+        }]}
+
+    monkeypatch.setattr(confluence_fetch, "api_get", _search_api_get)
+    _text, records = CONFLUENCE.dispatch_records(
+        _session(), "confluence_search", {"text": "onboarding"}
+    )
+    lean_record = records[0]
+
+    # Persist-thread enrichment: one v2 page GET (get_page_raw), returning
+    # `spaceId`/`parentId`/`authorId` the search response never carries, plus
+    # one `spaces()` listing to resolve the space's display name.
+    def _get_api_get(tok, url, params=None, *, what="read"):
+        assert "/api/v2/pages/111" in url
+        return v2_item
+
+    monkeypatch.setattr(confluence_fetch, "api_get", _get_api_get)
+    monkeypatch.setattr(confluence_fetch, "list_spaces", lambda tok, cloud: [_ENG])
+
+    enriched = enrich_record(_session(), lean_record)
+
+    assert enriched.render() == pull_record.render(), (
+        "AC-A1: the ENRICHED record must render byte-identical to the real "
+        "puller's record for the same page"
+    )
+    assert enriched.external_id == pull_record.external_id == "111"
+
+
+def test_enrich_record_falls_back_to_the_lean_record_when_unreachable(monkeypatch):
+    """AC-A4: a page that 404s on both /pages and /blogposts since the search
+    ran is not an error — enrichment falls back to the lean record."""
+    from app.connector_lookup.confluence import enrich_record
+
+    def _search_api_get(tok, url, params=None, *, what="read"):
+        return {"results": [{
+            "content": {"id": "111", "title": "Onboarding spec", "type": "page",
+                        "space": {"key": "ENG"}},
+            "excerpt": "excerpt",
+            "url": "/spaces/ENG/pages/111",
+            "lastModified": "2026-07-30T10:00:00Z",
+        }]}
+
+    monkeypatch.setattr(confluence_fetch, "api_get", _search_api_get)
+    _text, records = CONFLUENCE.dispatch_records(
+        _session(), "confluence_search", {"text": "onboarding"}
+    )
+    lean_record = records[0]
+
+    def _gone(tok, url, params=None, *, what="read"):
+        raise RuntimeError("404")
+
+    monkeypatch.setattr(confluence_fetch, "api_get", _gone)
+    out = enrich_record(_session(), lean_record)
+    assert out is lean_record
+
+
 # ── Listing + page fetch ─────────────────────────────────────────────────────
 
 

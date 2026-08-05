@@ -540,3 +540,244 @@ def test_sweep_over_content_the_scheduled_pull_already_ingested_is_skipped(monke
         "the sweep's record must collide with the pull's ledger entry — "
         "nothing should be re-extracted, i.e. skipped > 0"
     )
+
+
+# ═══════════════ AMENDMENT: AC-A1..A5 — persist-thread enrichment ═══════════
+
+
+class _FakeAdapter:
+    """Stand-in for a LookupProvider — only `open_session` matters here;
+    `_enrich_source` never calls anything else on it."""
+
+    def open_session(self, enterprise_id):
+        return "SESSION"
+
+
+def _mock_ledger(monkeypatch, seen=None):
+    from app.db import kg_ingest_ledger as ledger
+
+    seen = seen or set()
+    monkeypatch.setattr(ledger, "seen_hashes", lambda eid, hashes: seen)
+    recorded = []
+    monkeypatch.setattr(
+        ledger, "record_hashes",
+        lambda eid, provider, hashes: recorded.append((provider, hashes)),
+    )
+    return recorded
+
+
+def _mock_facade_and_extractor(monkeypatch):
+    from app.graph import extractor
+    from app.graph import facade as facade_mod
+
+    monkeypatch.setattr(facade_mod, "GraphFacade", lambda: "FACADE")
+    calls = []
+    monkeypatch.setattr(
+        extractor, "extract_document",
+        lambda facade, eid, *, doc_name, text, **k:
+            calls.append((doc_name, text)) or {"signals": 1, "themes": 0, "skipped": 0},
+    )
+    return calls
+
+
+def _mock_cooldown(monkeypatch, *, cooled: set[str] | None = None):
+    from app.db import sweep_persist_cooldown as cooldown
+
+    cooled = cooled or set()
+    monkeypatch.setattr(
+        cooldown, "in_cooldown", lambda eid, provider, hours: provider in cooled
+    )
+    marked: list[str] = []
+    monkeypatch.setattr(
+        cooldown, "mark_run", lambda eid, provider: marked.append(provider)
+    )
+    return marked
+
+
+def test_only_the_three_lean_providers_are_enrichable():
+    """AC-A1's scope: jira (already byte-identical at sweep time) and slack
+    (no puller-shaped record to enrich toward) are deliberately absent."""
+    assert set(sp._enrichers()) == {"clickup", "confluence", "hubspot"}
+
+
+def test_enrichment_runs_before_hashing_so_the_enriched_render_is_what_extracts(
+    monkeypatch,
+):
+    """AC-A1: the ENRICHED record's render() is what gets hashed/extracted,
+    not the lean sweep-time one — proving enrichment happens BEFORE the
+    ledger check, not after."""
+    from app.connector_lookup import registry
+    from app.kg_ingest.types import RawRecord
+
+    lean = RawRecord(provider="clickup", kind="task", external_id="t1",
+                     title="lean", text="", properties={})
+    enriched = RawRecord(provider="clickup", kind="task", external_id="t1",
+                         title="enriched (full task)", text="full body",
+                         properties={"tags": ["urgent"]})
+    assert lean.render() != enriched.render()
+
+    monkeypatch.setattr(
+        sp, "_enrichers", lambda: {"clickup": lambda session, record: enriched}
+    )
+    monkeypatch.setattr(registry, "provider_for", lambda key: _FakeAdapter())
+    _mock_cooldown(monkeypatch)
+    _mock_ledger(monkeypatch)
+    extract_calls = _mock_facade_and_extractor(monkeypatch)
+
+    source = _source("clickup", text="stale clickup prose — never hashed")
+    source.records = [lean]
+
+    sp._run("ent-A", [source])
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0][1] == enriched.render()
+    assert extract_calls[0][1] != lean.render()
+
+
+def test_enrichment_is_bounded_to_the_top_k_cap(monkeypatch):
+    """AC-A3: a source with more hits than the cap enriches only the first
+    `_ENRICH_MAX_PER_SOURCE` — the rest pass through UNENRICHED, not
+    dropped."""
+    from app.connector_lookup import registry
+    from app.kg_ingest.types import RawRecord
+
+    n = sp._ENRICH_MAX_PER_SOURCE + 3
+    records = [
+        RawRecord(provider="clickup", kind="task", external_id=f"t{i}",
+                  title=f"lean {i}", text="", properties={})
+        for i in range(n)
+    ]
+    enrich_calls: list[str] = []
+
+    def fake_enrich(session, record):
+        enrich_calls.append(record.external_id)
+        return RawRecord(provider="clickup", kind="task",
+                         external_id=record.external_id,
+                         title=f"enriched {record.external_id}", text="full",
+                         properties={})
+
+    monkeypatch.setattr(sp, "_enrichers", lambda: {"clickup": fake_enrich})
+    monkeypatch.setattr(registry, "provider_for", lambda key: _FakeAdapter())
+
+    source = _source("clickup", text="prose")
+    source.records = records
+
+    out = sp._enrich_source("ent-A", source)
+
+    assert len(enrich_calls) == sp._ENRICH_MAX_PER_SOURCE
+    assert len(out) == n
+    # Past the cap: still present, still the LEAN record — not dropped.
+    assert out[sp._ENRICH_MAX_PER_SOURCE].title == f"lean {sp._ENRICH_MAX_PER_SOURCE}"
+
+
+def test_enrichment_failure_is_isolated_per_hit(monkeypatch):
+    """AC-A4: one hit's 404/timeout drops just that record back to its lean
+    form — it never aborts the source or the run."""
+    from app.connector_lookup import registry
+    from app.kg_ingest.types import RawRecord
+
+    r1 = RawRecord(provider="clickup", kind="task", external_id="t1",
+                   title="lean1", text="", properties={})
+    r2 = RawRecord(provider="clickup", kind="task", external_id="t2",
+                   title="lean2", text="", properties={})
+
+    def flaky_enrich(session, record):
+        if record.external_id == "t1":
+            raise TimeoutError("boom")
+        return RawRecord(provider="clickup", kind="task", external_id="t2",
+                         title="enriched2", text="full", properties={})
+
+    monkeypatch.setattr(sp, "_enrichers", lambda: {"clickup": flaky_enrich})
+    monkeypatch.setattr(registry, "provider_for", lambda key: _FakeAdapter())
+
+    source = _source("clickup", text="prose")
+    source.records = [r1, r2]
+
+    out = sp._enrich_source("ent-A", source)
+
+    assert out[0] is r1, "a failed enrichment falls back to the lean record"
+    assert out[1].title == "enriched2"
+
+
+def test_provider_in_cooldown_skips_enrichment_and_extraction_entirely(monkeypatch):
+    """AC-A5: a provider processed within the cooldown window gets ZERO
+    enrichment fetches and ZERO extraction on the next sweep."""
+    from app.connector_lookup import registry
+    from app.kg_ingest.types import RawRecord
+
+    enrich_calls: list[str] = []
+
+    def fake_enrich(session, record):
+        enrich_calls.append(record.external_id)
+        return record
+
+    monkeypatch.setattr(sp, "_enrichers", lambda: {"clickup": fake_enrich})
+    monkeypatch.setattr(registry, "provider_for", lambda key: _FakeAdapter())
+    marked = _mock_cooldown(monkeypatch, cooled={"clickup"})
+    _mock_ledger(monkeypatch)
+    extract_calls = _mock_facade_and_extractor(monkeypatch)
+
+    source = _source("clickup", text="prose")
+    source.records = [
+        RawRecord(provider="clickup", kind="task", external_id="t1",
+                  title="x", text="", properties={})
+    ]
+
+    sp._run("ent-A", [source])
+
+    assert enrich_calls == [], "zero enrichment fetches while in cooldown"
+    assert extract_calls == [], "zero extraction while in cooldown"
+    assert marked == [], "a cooled-down source is not re-marked — it never ran"
+
+
+def test_mark_run_called_only_for_processed_sources_not_cooled_ones(monkeypatch):
+    """AC-A2/A6: cooldown is marked per source actually processed this run —
+    a source skipped for being in cooldown is not re-marked."""
+    marked = _mock_cooldown(monkeypatch, cooled={"confluence"})
+    _mock_ledger(monkeypatch)
+    _mock_facade_and_extractor(monkeypatch)
+
+    sp._run("ent-A", [_source("jira", "a"), _source("confluence", "b")])
+
+    assert marked == ["jira"]
+
+
+def test_cooldown_check_uses_the_configured_pipeline_interval(monkeypatch):
+    """The cooldown window is `settings.pipeline_interval_hours` — the SAME
+    knob the scheduled pull itself runs on (AC-A2)."""
+    from app.config import settings
+    from app.db import sweep_persist_cooldown as cooldown
+
+    monkeypatch.setattr(settings, "pipeline_interval_hours", 3, raising=False)
+    seen_hours: list[float] = []
+    monkeypatch.setattr(
+        cooldown, "in_cooldown",
+        lambda eid, provider, hours: seen_hours.append(hours) or False,
+    )
+    monkeypatch.setattr(cooldown, "mark_run", lambda eid, provider: None)
+    _mock_ledger(monkeypatch)
+    _mock_facade_and_extractor(monkeypatch)
+
+    sp._run("ent-A", [_source("jira", "a")])
+    assert seen_hours == [3]
+
+
+def test_sweep_module_never_references_enrichment_or_cooldown(monkeypatch):
+    """AC-A2, structural half: enrichment/cooldown must live ONLY in this
+    module's background-thread path — `sweep.py` (the fast, latency-bound
+    fan-out `qa_agent` calls synchronously) must not import or call any of
+    it. Complements the file-level proof (`git diff` shows sweep.py
+    byte-identical to the branch base) with something that survives future
+    edits to either file.
+    """
+    import inspect
+
+    src = inspect.getsource(cs)
+    for forbidden in (
+        "enrich_record", "_enrich_source", "sweep_persist_cooldown",
+        "_ENRICH_MAX_PER_SOURCE",
+    ):
+        assert forbidden not in src, (
+            f"sweep.py must not reference {forbidden!r} — enrichment/cooldown "
+            "belong to the persist thread only"
+        )

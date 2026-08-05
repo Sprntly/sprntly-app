@@ -299,6 +299,77 @@ def test_dispatch_records_ac4_not_byte_identical_to_the_puller(monkeypatch):
     assert sweep_record.timestamp != pull_record.timestamp
 
 
+# ── AC-A1 — persist-thread enrichment achieves byte-identity ───────────────
+
+
+def test_enrich_record_achieves_byte_identity_with_the_real_puller(monkeypatch):
+    """AC-A1: after `enrich_record` (persist-thread only), the sweep's record
+    DOES render byte-identical to the real puller's
+    (`kg_ingest.pullers.clickup.pull`) record for the same task — proven
+    against the real puller, not a hand-reconstruction."""
+    from app.connector_lookup.clickup import enrich_record
+    from app.kg_ingest.pullers import clickup as clickup_puller
+
+    raw_task = _task(
+        "a1", "Fix checkout",
+        tags=[{"name": "urgent"}],
+        assignees=[{"username": "ada"}, {"username": "bob"}],
+    )
+
+    def fake_get_team(url, params=None, headers=None, timeout=None):
+        if url.endswith("/team"):
+            return _Resp({"teams": [{"id": "T1", "name": "Acme"}]})
+        return _Resp({"tasks": [raw_task] if params.get("page") == 0 else [],
+                     "last_page": True})
+
+    monkeypatch.setattr(clickup_puller.requests, "get", fake_get_team)
+    pull_record = next(clickup_puller.pull("tok"))
+
+    # The sweep's LEAN record from the search hit — same fixture as the AC4
+    # (not-byte-identical) test above.
+    monkeypatch.setattr(cf.requests, "get", lambda *a, **k: _Resp(
+        {"tasks": [raw_task], "last_page": True}))
+    _text, records = PROVIDER.dispatch_records(
+        _wrapped_session(), "clickup_search_tasks", {"text": "checkout"}
+    )
+    lean_record = records[0]
+
+    # Persist-thread enrichment: one `/task/{id}` GET, WITHOUT
+    # include_markdown_description (get_task_raw, not get_task) — returning
+    # the same raw task object the list endpoint would carry.
+    def fake_get_task(url, params=None, headers=None, timeout=None):
+        assert url.endswith(f"/task/{raw_task['id']}")
+        assert "include_markdown_description" not in (params or {})
+        return _Resp(raw_task)
+
+    monkeypatch.setattr(cf.requests, "get", fake_get_task)
+    enriched_record = enrich_record(_wrapped_session(), lean_record)
+
+    assert enriched_record.render() == pull_record.render(), (
+        "AC-A1: the ENRICHED record must render byte-identical to the real "
+        "puller's record for the same task"
+    )
+    assert enriched_record.external_id == pull_record.external_id == "a1"
+
+
+def test_enrich_record_falls_back_to_the_lean_record_on_404(monkeypatch):
+    """AC-A4: a task that vanished between the search and the enrichment
+    fetch (404) is not an error — enrichment falls back to the lean record
+    rather than raising."""
+    from app.connector_lookup.clickup import enrich_record
+
+    monkeypatch.setattr(cf.requests, "get", lambda *a, **k: _Resp(
+        {"tasks": [_task("a1", "Fix checkout")], "last_page": True}))
+    _text, records = PROVIDER.dispatch_records(
+        _wrapped_session(), "clickup_search_tasks", {"text": "checkout"}
+    )
+    lean_record = records[0]
+
+    monkeypatch.setattr(cf.requests, "get", lambda *a, **k: _Resp({}, status=404))
+    out = enrich_record(_wrapped_session(), lean_record)
+    assert out is lean_record
+
+
 def test_get_task_full_parse_with_comments(monkeypatch):
     def fake_get(url, params=None, headers=None, timeout=None):
         if url.endswith("/comment"):
