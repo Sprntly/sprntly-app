@@ -1,4 +1,4 @@
-"""On-demand customer-call digest — chat → Fireflies (live) → voice-of-customer.
+"""On-demand customer-call digest — chat → live call sources → voice-of-customer.
 
 When a user asks the chat to "summarize the customer calls from last week", the
 generic Ask path answers it badly: KG retrieval is semantic + token-capped, so
@@ -7,10 +7,23 @@ This module runs the dedicated path instead:
 
   1. parse the time window from the question (default: last 7 days, auto-widened
      to 30 then 90 days when no window was named and the default finds nothing),
-  2. fetch EVERY call in that window live from Fireflies — distilled summary plus
-     a bounded sample of transient verbatim quotes (never persisted to the KG),
-  3. assemble a complete corpus and run one voice-of-customer pass over it, so
-     the answer has real counts, themes, and sourced quotes.
+  2. fetch EVERY call in that window live from EVERY connected live source —
+     Fireflies and Zoom — distilled summary plus a bounded sample of transient
+     verbatim quotes (never persisted to the KG),
+  3. assemble one merged corpus and run a single voice-of-customer pass over it,
+     so the answer has real counts, themes, and sourced quotes.
+
+The question never has to name a connector. That is this path's whole point and
+it is what separates it from the other two mechanisms that can answer a calls
+question:
+
+  • connector_lookup/zoom.py + /fireflies.py — a live search-then-read adapter
+    that fires only when the message NAMES the provider ("what did zoom record
+    on Tuesday"). Precise, but useless to "what are customers saying".
+  • call_index.py — one Postgres table indexing both sources, no name needed,
+    but only as fresh as the last 6-hourly sync and metadata-only.
+  • this module — no name needed AND live at question time, which is why it is
+    the one that fetches whole transcripts on demand.
 
 The answer is markdown. It used to be a pinned HTML template (`app.voc_report`,
 deleted): the LIVE FETCH and the complete corpus are what this path exists for,
@@ -24,12 +37,29 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from app.prompt_history import clamp_turn_text
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+from app.connectors.zoom_oauth import (
+    ZoomAuthExpiredError,
+    ZoomContext,
+    ZoomNotConnectedError,
+    fetch_transcript_text,
+    list_user_recordings,
+    sync_windows,
+)
+from app.connectors.zoom_oauth import sync_context as zoom_sync_context
 from app.kg_ingest.pullers.fireflies import CallTranscript, fetch_calls
+# Private names on purpose: host selection and "which file is the transcript"
+# are two rules that would look right and drift wrong in a third copy, so the
+# digest reuses the SAME ones the KG puller and the live lookup adapter share
+# (connector_lookup/zoom.py imports these two identically).
+from app.kg_ingest.pullers.zoom import _hosts as _zoom_hosts
+from app.kg_ingest.pullers.zoom import _transcript_for as _zoom_transcript_for
+from app.kg_ingest.pullers.zoom import parse_vtt
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +81,11 @@ _AUTOWIDEN_DAYS = (30, 90)
 _CORPUS_CHAR_BUDGET = 300_000
 # Quote-trim ladder for the adaptive fit; 0 = distilled summary only.
 _QUOTE_CAPS = (60, 30, 15, 8, 4, 0)
+
+_ZOOM_PROVIDER = "zoom"
+#: Display names for the live sources, for the coverage line and the
+#: not-connected / empty / error messages. Keyed by CallTranscript.provider.
+_SOURCE_LABELS = {"fireflies": "Fireflies", _ZOOM_PROVIDER: "Zoom"}
 
 
 @dataclass
@@ -91,6 +126,15 @@ class DigestCorpus:
     # Docs uploaded into the voice category and dated inside the window —
     # merged into `text` after the calls (see build_corpus).
     docs: list[UploadedVoiceDoc] = field(default_factory=list)
+    #: Display names of the LIVE sources this build consulted (["Fireflies",
+    #: "Zoom"]). Lets the empty/error messages name the connector the user
+    #: actually has instead of guessing at one — a Zoom-only company being told
+    #: to check Fireflies is the exact confusion this field removes.
+    sources: list[str] = field(default_factory=list)
+    #: Of `sources`, the ones that failed this window. A subset, not a status:
+    #: one source failing while the other answers is an `ok` corpus with a
+    #: coverage caveat, not an error.
+    failed_sources: list[str] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -247,14 +291,308 @@ def _voice_docs(company_id: str, window: Window | None) -> list[UploadedVoiceDoc
         return []
 
 
+# ── Zoom (the second live source) ────────────────────────────────────────────
+#
+# Assembled from the SAME building blocks the KG puller and the live lookup
+# adapter use, never re-derived. The two rules worth stating out loud:
+#
+#   WINDOWING IS NOT OPTIONAL. Zoom caps a recordings query at a ONE-MONTH span
+#   and does NOT error past it — a wider from/to is silently clamped, so a naive
+#   "last 90 days" request returns a month and reads as a quiet quarter. Every
+#   window here goes through `zoom_oauth.sync_windows`, and a longer reach is
+#   explicitly several requests. (Confirmed against Zoom's own docs for
+#   GET /users/{userId}/recordings, which document the one-month `from`/`to`
+#   span: https://developers.zoom.us/docs/api/meetings/ — the same constraint
+#   `zoom_oauth.window_bounds` was written for.)
+#
+#   COVERAGE IS THE HOST PICKER'S. `_hosts` uses a non-empty `sync_user_ids`
+#   selection verbatim and treats an empty one as every licensed host, so the
+#   digest can never read a host an admin excluded, nor miss one they chose.
+
+#: Windows one digest fetch may walk, per host. Six covers the widest window the
+#: digest can ask for: a comparative question over "the last 90 days" doubles
+#: back to 180. Anything older than that is not what "recent calls" means.
+_ZOOM_MAX_WINDOWS = 6
+#: Recordings requested per host per window, single page. A host with more than
+#: this many recordings in one month is in back-to-back calls all day, and the
+#: newest 50 is a better answer inside one chat turn than a multi-page sweep.
+_ZOOM_PAGE_SIZE = 50
+#: Total Zoom calls one digest assembles. Deliberately far below the Fireflies
+#: digest cap (300) for a mechanical reason, not a product one: Fireflies
+#: returns a call's sentences inside the same GraphQL response, while every Zoom
+#: transcript is its own file download. So this is a LATENCY bound on a live
+#: chat turn — the corpus fit (_fit_corpus) is what bounds context.
+_ZOOM_MAX_CALLS = 40
+#: Per-call quote cap, matching the Fireflies puller's `_QUOTES_PER_CALL`, and a
+#: per-quote char cap. parse_vtt merges consecutive cues from one speaker into a
+#: paragraph, so one Zoom "quote" is a whole uninterrupted turn where a
+#: Fireflies one is a sentence; an unbounded turn would otherwise eat a whole
+#: call's share of the corpus before the fit ladder (which trims by COUNT) could
+#: do anything about it.
+_ZOOM_QUOTES_PER_CALL = 60
+_ZOOM_QUOTE_CHARS = 1200
+
+#: Said in words on a recording we could not read, rather than dropping it. Kept
+#: verbatim in step with `pullers/zoom._to_record` and `connector_lookup/zoom`:
+#: the commonest cause is audio transcription being switched off in the
+#: customer's own Zoom account, which is a setting they can change — and
+#: silently skipping those meetings presents a half-empty corpus as a complete
+#: one with nothing anywhere to explain the gap.
+_ZOOM_NO_TRANSCRIPT = (
+    "No transcript available for this recording. The meeting was recorded to "
+    "the Zoom cloud but no readable transcript file was found — the commonest "
+    "cause is audio transcription being turned off for the account, or Zoom "
+    "still processing the recording."
+)
+
+#: Sort floor for a call whose start time is missing or unreadable — it sinks to
+#: the end of a merged corpus rather than jumping to the front of it.
+_UNDATED = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _started_at(raw: str | None) -> datetime | None:
+    """An ISO-8601 call start as an aware UTC datetime, or None when the source
+    gave us nothing readable. Fireflies renders epoch millis to ISO with a
+    +00:00 offset; Zoom writes `2026-06-24T10:00:00Z`, which `fromisoformat`
+    only accepts from 3.11 onward with the Z spelled out as an offset."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _zoom_context(company_id: str) -> ZoomContext | None:
+    """A refreshed ZoomContext for a company, or None when Zoom isn't connected
+    or its credential can't be read.
+
+    NEVER RAISES — mirrors `connector_lookup.zoom._load_context` for the same
+    reason: this is consulted on the chat path, including from a capability
+    check that decides whether to divert at all, and a dead connector must
+    degrade to "no Zoom" rather than to a stack trace on the user's turn."""
+    try:
+        return zoom_sync_context(company_id)
+    except ZoomNotConnectedError:
+        return None
+    except ZoomAuthExpiredError:
+        logger.info(
+            "call-digest: zoom token rejected for %s — reconnect needed", company_id
+        )
+        return None
+    except Exception:  # noqa: BLE001 — a source check must never break chat
+        logger.exception("call-digest: could not open a zoom context for %s", company_id)
+        return None
+
+
+def _zoom_windows(window: Window) -> list[tuple[str, str]]:
+    """The `(from, to)` date pairs covering the digest's window, newest first.
+
+    Delegates to the shared `sync_windows` rather than passing the window's own
+    bounds straight to Zoom: a digest window is routinely wider than a month
+    ("the last 90 days", or any comparative question that doubles back), and
+    that is precisely the request Zoom answers with a month and no error."""
+    days = max(1, (window.until.date() - window.since.date()).days)
+    return sync_windows(
+        window.since.date().isoformat(),
+        today=window.until.date(),
+        max_windows=min(_ZOOM_MAX_WINDOWS, -(-days // 30)),  # ceil(days / 30)
+    )
+
+
+def _zoom_in_window(raw: str | None, window: Window) -> bool:
+    """True when a recording started inside the digest's window.
+
+    Zoom's `from`/`to` are DATES read in the account's own timezone, so a
+    correctly-formed ≤1-month request still returns calls from the day either
+    side of what the user asked for. Filtering on the real start time keeps both
+    sources answering the same question — a merged corpus where Fireflies obeys
+    the window and Zoom doesn't reports counts that neither source agrees with.
+
+    A recording whose start time won't parse is KEPT: an unreadable timestamp is
+    a reason to include and caveat, never to silently drop a real call."""
+    started = _started_at(raw)
+    return True if started is None else window.since <= started <= window.until
+
+
+def _zoom_quotes(text: str, speakers: list[str]) -> list[dict]:
+    """`parse_vtt`'s speaker-merged paragraphs → the corpus's quote shape.
+
+    Only a prefix that matches a speaker parse_vtt actually identified is read
+    as attribution; anything else stays whole under "?" rather than being split
+    on the first colon it happens to contain (a line like "the problem is this:
+    nobody can log in" must not become a speaker named "the problem is this")."""
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        who, sep, said = line.partition(": ")
+        if not sep or who not in speakers:
+            who, said = "?", line
+        said = said.strip()
+        if not said:
+            continue
+        out.append({"speaker": who, "text": said[:_ZOOM_QUOTE_CHARS]})
+        if len(out) >= _ZOOM_QUOTES_PER_CALL:
+            break
+    return out
+
+
+def _zoom_call(
+    ctx: ZoomContext, host: dict, meeting: dict
+) -> CallTranscript | None:
+    """One Zoom cloud recording → the shared CallTranscript, or None when the
+    meeting carries no usable identity.
+
+    A recording WITHOUT a readable transcript still yields a call whose `note`
+    says so — see `_ZOOM_NO_TRANSCRIPT`."""
+    uuid = meeting.get("uuid") or meeting.get("id")
+    if not uuid:
+        return None
+
+    text, speakers = "", []
+    entry = _zoom_transcript_for(ctx, meeting)
+    if entry:
+        # The download_url is a credential-bearing link to customer
+        # conversation. Handed to the fetcher, never logged and never rendered.
+        raw = fetch_transcript_text(ctx.access_token, entry.get("download_url") or "")
+        if raw:
+            text, speakers = parse_vtt(raw)
+
+    # Zoom's recordings listing carries no attendee list — that needs a
+    # per-meeting /past_meetings call, i.e. an N+1 across the whole window. The
+    # host plus the transcript's own speakers is the same information for a
+    # recorded call and costs nothing, which is the trade both the puller and
+    # call_index already make off this listing.
+    host_email = meeting.get("host_email") or host.get("email") or ""
+    participants: list[str] = []
+    for who in [host_email, *speakers]:
+        if who and who not in participants:
+            participants.append(who)
+
+    return CallTranscript(
+        external_id=str(uuid),
+        title=str(meeting.get("topic") or "").strip() or "(untitled Zoom meeting)",
+        date=str(meeting.get("start_time") or ""),
+        participants=participants,
+        # Zoom writes no summary of its own. Left EMPTY rather than filled with
+        # the topic: the corpus already renders the title, and a summary field
+        # that merely repeats it reads to a model as a summary saying nothing
+        # happened. call_index left the same field empty for the same reason.
+        overview="",
+        quotes=_zoom_quotes(text, speakers) if text else [],
+        provider=_ZOOM_PROVIDER,
+        note="" if text else _ZOOM_NO_TRANSCRIPT,
+    )
+
+
+def fetch_zoom_calls(ctx: ZoomContext, window: Window) -> list[CallTranscript]:
+    """Every Zoom cloud recording in `window` across the company's synced hosts,
+    newest window first, as the same CallTranscript the Fireflies fetch returns.
+
+    Per-host isolated: a host that 404s or throws is skipped, because a
+    recording deleted or moved to trash between the listing and the read is a
+    normal race on a live account. An expired grant stops the walk and returns
+    what was already gathered — a reconnect is not a reason to lose the calls we
+    did read. But if EVERY host failed and nothing came back, the last error is
+    re-raised, so `build_corpus` can say "I couldn't reach Zoom" instead of
+    reporting a revoked grant as a quiet week."""
+    hosts = _zoom_hosts(ctx)
+    if not hosts:
+        logger.info("call-digest: no zoom hosts to read for %s", ctx.company_id)
+        return []
+
+    windows = _zoom_windows(window)
+    out: list[CallTranscript] = []
+    seen: set[str] = set()
+    last_error: Exception | None = None
+    capped = False
+
+    for host in hosts:
+        if capped:
+            break
+        try:
+            for frm, to in windows:
+                if capped:
+                    break
+                meetings = list_user_recordings(
+                    ctx.access_token, str(host["id"]), frm=frm, to=to,
+                    page_size=_ZOOM_PAGE_SIZE, max_pages=1,
+                )
+                for meeting in meetings:
+                    if len(out) >= _ZOOM_MAX_CALLS:
+                        logger.info(
+                            "call-digest: hit the %d-call zoom cap for %s — pick "
+                            "specific hosts in Settings to narrow the window",
+                            _ZOOM_MAX_CALLS, ctx.company_id,
+                        )
+                        capped = True
+                        break
+                    uid = str(meeting.get("uuid") or meeting.get("id") or "")
+                    # A recurring meeting surfaces in two adjacent windows.
+                    if not uid or uid in seen:
+                        continue
+                    if not _zoom_in_window(meeting.get("start_time"), window):
+                        continue
+                    seen.add(uid)
+                    call = _zoom_call(ctx, host, meeting)
+                    if call is not None:
+                        out.append(call)
+        except ZoomAuthExpiredError:
+            logger.info(
+                "call-digest: zoom token rejected mid-fetch for %s", ctx.company_id
+            )
+            last_error = last_error or ZoomAuthExpiredError(
+                "the Zoom connection needs reconnecting"
+            )
+            break
+        except Exception as e:  # noqa: BLE001 — one bad host must not end the fetch
+            logger.info(
+                "call-digest: skipping zoom host %s: %s",
+                host.get("email") or host.get("id"), e,
+            )
+            last_error = e
+
+    if not out and last_error is not None:
+        raise last_error
+    return out
+
+
+# ── Source capability ────────────────────────────────────────────────────────
+
+def _sources_phrase(names: list[str], fallback: str = "your call source") -> str:
+    """'Fireflies', 'Fireflies and Zoom', or the fallback for an empty list."""
+    if not names:
+        return fallback
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def has_call_source(company_id: str) -> bool:
-    """True when a live call source (Fireflies) is connected and its credential
-    is readable, OR documents have been uploaded into the Customer Voice &
-    Support connector category — i.e. build_corpus can assemble a real corpus.
-    Lets the router divert a bare 'voice of customer' request to the digest
-    only when it will find data; with neither, the caller falls through to the
-    skill's what-to-connect guidance instead."""
-    return _load_api_key(company_id) is not None or bool(_voice_docs(company_id, None))
+    """True when this company has anything the digest can build a corpus from:
+    a LIVE call source connected with a readable credential — Fireflies' API key
+    or a Zoom grant — OR documents uploaded into the Customer Voice & Support
+    connector category. I.e. build_corpus can assemble a real corpus.
+
+    Lets the router divert a bare 'voice of customer' request to the digest only
+    when it will find data; with none of the three, the caller falls through to
+    the skill's what-to-connect guidance instead.
+
+    Ordered cheapest-first and short-circuiting. Zoom is checked LAST because it
+    is the only branch that can make an outbound request: `sync_context`
+    refreshes an access token within two minutes of expiring. That work is not
+    wasted — the refresh is persisted, and `build_corpus` needs the same context
+    moments later — but a company that already answered True from Fireflies or
+    an upload should never pay for it."""
+    if _load_api_key(company_id) is not None:
+        return True
+    if _voice_docs(company_id, None):
+        return True
+    return _zoom_context(company_id) is not None
 
 
 def _fit_corpus(
@@ -286,35 +624,73 @@ def _fit_corpus(
 
 
 def build_corpus(company_id: str, window: Window) -> DigestCorpus:
-    """Assemble the voice corpus for the window: every Fireflies call (when
-    connected) MERGED with documents uploaded into the Customer Voice & Support
-    category (upload-dated inside the window).
+    """Assemble the voice corpus for the window: every call from every connected
+    LIVE source — Fireflies and/or Zoom — MERGED with documents uploaded into the
+    Customer Voice & Support category (upload-dated inside the window).
 
     Returns a DigestCorpus whose `status` tells the caller what happened:
-    not_connected (no Fireflies AND no voice docs at all), no_calls (both
-    sources empty for this window), error (API failed and no docs to fall back
-    on), or ok (corpus ready). Never raises — the chat answer degrades
-    gracefully."""
+    not_connected (no live source AND no voice docs at all), no_calls (every
+    source empty for this window), error (every source that could have answered
+    failed, with no docs to fall back on), or ok (corpus ready). Never raises —
+    the chat answer degrades gracefully.
+
+    THE SOURCES ARE ISOLATED FROM EACH OTHER. A Fireflies outage must not cost a
+    company its Zoom calls and vice versa — the rule `call_index` already holds
+    for these same two sources, for the same reason: a partial corpus that says
+    it is partial is strictly better than no answer at all. A failure is only
+    fatal when nothing else made it in."""
     api_key = _load_api_key(company_id)
+    zoom_ctx = _zoom_context(company_id)
     docs = _voice_docs(company_id, window)
-    if not api_key and not docs and not _voice_docs(company_id, None):
+    if not api_key and zoom_ctx is None and not docs and not _voice_docs(company_id, None):
         return DigestCorpus(status="not_connected", window=window)
 
-    calls: list[CallTranscript] = []
-    fetch_error = ""
-    if api_key:
-        try:
-            calls = fetch_calls(api_key, since=window.since, until=window.until)
-        except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
-            logger.warning("call-digest: fireflies fetch failed for %s: %s", company_id, e)
-            # With uploaded docs available the digest still has a corpus —
-            # degrade to docs-only instead of erroring the whole answer.
-            if not docs:
-                return DigestCorpus(status="error", window=window, error=str(e))
-            fetch_error = str(e)
+    sources: list[str] = []
+    failed: list[str] = []
+    errors: list[str] = []
+    fireflies_calls: list[CallTranscript] = []
+    zoom_calls: list[CallTranscript] = []
 
+    if api_key:
+        sources.append(_SOURCE_LABELS["fireflies"])
+        try:
+            fireflies_calls = fetch_calls(
+                api_key, since=window.since, until=window.until
+            )
+        except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
+            logger.warning(
+                "call-digest: fireflies fetch failed for %s: %s", company_id, e
+            )
+            failed.append(_SOURCE_LABELS["fireflies"])
+            errors.append(f"Fireflies: {e}")
+
+    if zoom_ctx is not None:
+        sources.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
+        try:
+            zoom_calls = fetch_zoom_calls(zoom_ctx, window)
+        except Exception as e:  # noqa: BLE001 — same contract as Fireflies above
+            logger.warning("call-digest: zoom fetch failed for %s: %s", company_id, e)
+            failed.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
+            errors.append(f"Zoom: {e}")
+
+    calls = fireflies_calls + zoom_calls
+    if fireflies_calls and zoom_calls:
+        # Interleave by recency ONLY when both sources contributed. Each source
+        # already returns newest-first on its own, so re-sorting a single-source
+        # list could not change the order of anything except calls whose date is
+        # missing or unreadable — which means a Fireflies-only corpus is left
+        # exactly as it was before Zoom existed.
+        calls.sort(key=lambda c: _started_at(c.date) or _UNDATED, reverse=True)
+
+    fetch_error = "; ".join(errors)
+    if errors and not calls and not docs:
+        # Everything that could have answered failed and nothing else is here.
+        return DigestCorpus(
+            status="error", window=window, error=fetch_error,
+            sources=sources, failed_sources=failed,
+        )
     if not calls and not docs:
-        return DigestCorpus(status="no_calls", window=window)
+        return DigestCorpus(status="no_calls", window=window, sources=sources)
 
     text, quote_cap, total = "", None, len(calls)
     if calls:
@@ -335,7 +711,7 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     return DigestCorpus(
         status="ok", window=window, calls=calls, text=text,
         total=total, quote_cap=quote_cap, docs=kept_docs,
-        error=fetch_error,
+        error=fetch_error, sources=sources, failed_sources=failed,
     )
 
 
@@ -577,30 +953,34 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     if corpus.status == "not_connected":
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "
-            "yet. Connect **Fireflies** in Settings → Connectors (paste your "
-            "Fireflies API key), or upload call transcripts / support exports "
-            "into the **Customer Voice & Support** category there, and I'll "
-            "synthesize them into a voice-of-customer report."
+            "yet. Connect **Fireflies** or **Zoom** in Settings → Connectors, or "
+            "upload call transcripts / support exports into the **Customer Voice "
+            "& Support** category there, and I'll synthesize them into a "
+            "voice-of-customer report."
         )
     if corpus.status == "error":
+        # Names the source that actually failed. A Zoom-only company being told
+        # to check its Fireflies API key is a dead end it cannot act on.
+        broke = _sources_phrase(corpus.failed_sources)
         return _plain_payload(
-            f"I couldn't reach Fireflies to pull your calls for {window.label} "
-            "just now. Please retry in a moment — if it keeps failing, your "
-            "Fireflies API key may need reconnecting in Settings → Connectors."
+            f"I couldn't reach {broke} to pull your calls for {window.label} "
+            "just now. Please retry in a moment — if it keeps failing, that "
+            "connection may need reconnecting in Settings → Connectors."
         )
     if corpus.status == "no_calls":
+        connected = _sources_phrase(corpus.sources)
         if window.explicit:
             return _plain_payload(
                 f"No customer calls or uploaded voice documents found for "
                 f"{window.label}. Try a wider window (e.g. \"summarize calls "
                 "from the last 30 days\"), or check that your meetings are "
-                "syncing to Fireflies."
+                f"syncing to {connected}."
             )
         # Already auto-widened to the last step — a wider window won't help.
         return _plain_payload(
             f"No customer calls or uploaded voice documents found in "
-            f"{window.label}. Check that your meetings are syncing to Fireflies "
-            "(Settings → Connectors)."
+            f"{window.label}. Check that your meetings are syncing to "
+            f"{connected} (Settings → Connectors)."
         )
 
     # status == ok, query-shaped ask → answer the question directly from the
@@ -622,8 +1002,9 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # model filled in, a radar SVG, a fixed section order, rendered into a
     # sandboxed iframe. The template is gone — a report is an ordinary chat
     # answer now — but everything that made this path worth taking is not: the
-    # live Fireflies fetch, the windowing, the full-corpus pass, and the
-    # coverage disclosure below. Those are capability; the layout was format.
+    # live fetch from every connected source, the windowing, the full-corpus
+    # pass, and the coverage disclosure below. Those are capability; the layout
+    # was format.
 
     # Disclose any fit applied so the answer can state real coverage
     # instead of implying every word of every call is present.
@@ -638,12 +1019,33 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             f"; verbatim quotes sampled to ~{corpus.quote_cap} per call to fit "
             "every call in — distilled summaries are complete"
         )
+    # Name the split only when the corpus genuinely came from more than one live
+    # source, so the answer can attribute a theme to where it was heard. A
+    # single-source corpus learns nothing from this line, and leaving it off
+    # keeps the Fireflies-only source line exactly as it was.
+    per_source = Counter(c.provider for c in corpus.calls)
+    if len(per_source) > 1:
+        coverage += " (" + ", ".join(
+            f"{n} {_SOURCE_LABELS.get(p, p)}" for p, n in per_source.most_common()
+        ) + ")"
     if corpus.doc_count:
         docs_part = (
             f"{corpus.doc_count} uploaded voice document"
             f"{'s' if corpus.doc_count != 1 else ''} (window = upload date)"
         )
         coverage = f"{coverage} + {docs_part}" if corpus.count else docs_part
+    if corpus.failed_sources:
+        # A source that fell over while another answered: the corpus is real but
+        # it is NOT the full picture, and a report that implies otherwise is the
+        # failure mode this whole path exists to avoid. Appended LAST because a
+        # docs-only corpus rewrites `coverage` wholesale above, and the caveat
+        # must survive that — a docs-only answer standing in for a dead
+        # connector is exactly when the caveat matters most.
+        coverage += (
+            f"; {_sources_phrase(corpus.failed_sources)} could not be reached "
+            "for this window, so its calls are missing — state this as a "
+            "coverage caveat"
+        )
     header = ("CUSTOMER CALLS + UPLOADED DOCUMENTS" if corpus.count and corpus.doc_count
               else "UPLOADED VOICE DOCUMENTS" if corpus.doc_count
               else "CUSTOMER CALLS")

@@ -76,9 +76,23 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
 """
 
 
+#: The source a CallTranscript came from when nothing says otherwise. A DEFAULT
+#: rather than a required field so every existing construction site — this
+#: puller, connector_lookup/fireflies — is untouched, exactly as
+#: `call_index.CallRow.provider` was introduced for the same two sources.
+PROVIDER = "fireflies"
+
+
 @dataclass
 class CallTranscript:
-    """One Fireflies meeting, distilled + a bounded sample of verbatim quotes.
+    """One recorded customer call, distilled + a bounded sample of verbatim quotes.
+
+    Fireflies-shaped by history, PROVIDER-AGNOSTIC by contract: the on-demand
+    call digest (app/call_digest.py) fills this same record from Zoom cloud
+    recordings and merges both sources into one corpus, so nothing here may
+    assume a field only Fireflies can populate. It still lives in this module
+    because this is where it is populated most, and moving it would churn three
+    import sites for no behaviour change.
 
     Lives only for the duration of a digest request — never persisted. The
     `quotes` are the transient verbatim material the VoC skill mines; everything
@@ -92,6 +106,15 @@ class CallTranscript:
     action_items: str = ""
     keywords: list[str] = field(default_factory=list)
     quotes: list[dict] = field(default_factory=list)  # [{"speaker", "text"}]
+    #: Which source issued `external_id` — meaningful only to that provider.
+    #: Defaulted and placed last so every existing call site stays as it was.
+    provider: str = PROVIDER
+    #: An honest caveat about THIS call, rendered ahead of its content: a Zoom
+    #: recording whose account has audio transcription switched off still enters
+    #: the corpus saying so, rather than being dropped and leaving a gap nothing
+    #: explains. Empty for a call that needs no caveat — which is every
+    #: Fireflies call, since Fireflies only returns transcribed meetings.
+    note: str = ""
 
     def render(self, max_quotes: Optional[int] = None) -> str:
         """Render one call into the skill's input corpus — header, distilled
@@ -100,10 +123,16 @@ class CallTranscript:
         (0 = summary only) so the digest runner can fit every call in a big
         window into its corpus budget instead of dropping whole calls."""
         who = ", ".join(self.participants) if self.participants else "unknown"
-        parts = [
-            f"## Call: {self.title or '(untitled)'}",
-            f"date: {self.date or 'unknown'} · participants: {who}",
-        ]
+        head = f"date: {self.date or 'unknown'} · participants: {who}"
+        if self.provider and self.provider != PROVIDER:
+            # Only a NON-Fireflies call carries a source tag, so a corpus built
+            # from Fireflies alone renders byte-identically to before the digest
+            # learned about a second source — and a mixed corpus can still
+            # attribute every theme to where it was heard.
+            head += f" · source: {self.provider}"
+        parts = [f"## Call: {self.title or '(untitled)'}", head]
+        if self.note:
+            parts.append(f"note: {self.note}")
         if self.overview:
             parts.append(f"summary: {self.overview}")
         if self.action_items:
