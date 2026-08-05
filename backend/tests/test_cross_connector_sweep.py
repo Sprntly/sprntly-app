@@ -620,6 +620,46 @@ def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fak
     assert "never to skip it" in system
 
 
+def test_braces_in_swept_content_are_never_interpreted_as_a_format_field(
+    isolated_settings, fake_llm
+):
+    """Swept text is USER-AUTHORED — a Slack message, a Jira description, a
+    Confluence page — and can contain braces: JSON, code, a literal
+    "{question}". It reaches the prompt through
+    `ASK_USER_TEMPLATE_WITH_KG.format(kg_context=...)`, where it is a substituted
+    VALUE and so is never re-scanned for fields.
+
+    Pinned because the failure mode if that ever changes is bad in both
+    directions: a stray `{}` raises IndexError and kills the answer, while a
+    `{question}` would interpolate other prompt state into a block the model is
+    told to trust as fetched data. Any refactor that starts formatting the
+    assembled user string instead breaks this test.
+    """
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [],
+        "confidence": 0.5, "unanswered": "",
+    }
+    hostile = (
+        "LIVE CROSS-SOURCE SWEEP — searched for: deploy\n"
+        "### Slack\n"
+        'ada: retry payload was {"id": 1, "state": "{queued}"} — see {question} {0} {}'
+    )
+
+    ask_runner.compose_ask_answer(
+        "asurion", "what happened to the deploy?", enterprise_id=None,
+        live_context=hostile,
+    )
+
+    user = fake_llm["calls"][0]["user"]
+    assert '{"id": 1, "state": "{queued}"}' in user
+    assert "{question} {0} {}" in user, "braces must survive verbatim"
+
+
 def test_no_live_block_leaves_the_prompt_untouched(isolated_settings, fake_llm):
     """Additive: a company with nothing swept gets byte-identical composition to
     before this feature."""
