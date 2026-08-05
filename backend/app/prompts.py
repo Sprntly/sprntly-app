@@ -514,7 +514,15 @@ returned nothing. If a source relevant to the question is on that list, say so \
 plainly in your answer. Do not let an answer built from three sources imply you \
 covered all five.
 3. Attribute every fact to the source it came from, by name. When two sources \
-agree, say they agree; when they conflict, give both and say which is live."""
+agree, say they agree; when they conflict, give both and say which is live.
+
+PRECEDENCE. If another section of this prompt reports a reference it could NOT \
+resolve — an ambiguous document, a name matching several things — and asks you \
+to check which one the user meant, that instruction WINS over this section. \
+Having swept material that looks close enough is not permission to pick for \
+them: answering the wrong document confidently, from real data, is worse than \
+asking one short question. Use the sweep to make the question specific ("I can \
+see two — did you mean X or Y?"), never to skip it."""
 
 
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────

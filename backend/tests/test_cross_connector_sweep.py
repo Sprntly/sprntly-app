@@ -561,6 +561,40 @@ def test_live_block_reaches_the_prompt_but_not_the_cache_prefix(
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in call["system"]
 
 
+def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fake_llm):
+    """Both blocks land in one prompt on the direct path: the document grounding
+    can report a reference it could not resolve and ask the user which document
+    they meant, while this section tells the model to answer from live data.
+
+    The sweep must lose that contest. Having swept material that looks close
+    enough is not permission to pick a document for the user — a confident
+    answer about the wrong document, built from real data, is worse than one
+    short clarifying question.
+    """
+    from app import ask_runner
+    from app.prompts import ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+
+    assert "PRECEDENCE" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+    assert "WINS over this section" in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [],
+        "confidence": 0.5, "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "what does the spec say?", enterprise_id=None,
+        live_context="LIVE CROSS-SOURCE SWEEP — ...\n### Confluence\nTwo specs",
+    )
+
+    system = fake_llm["calls"][0]["system"]
+    assert "could NOT resolve" in system
+    assert "never to skip it" in system
+
+
 def test_no_live_block_leaves_the_prompt_untouched(isolated_settings, fake_llm):
     """Additive: a company with nothing swept gets byte-identical composition to
     before this feature."""
