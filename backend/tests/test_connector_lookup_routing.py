@@ -478,19 +478,44 @@ def test_a_pin_or_a_slash_never_triggers_the_suppression(monkeypatch):
 
 def test_the_call_digest_now_needs_a_call_source_like_its_neighbours(monkeypatch):
     """The digest was the only interceptor on the ladder claiming its turn
-    unconditionally. With no corpus it answered from nothing; now it declines
-    and the question falls through to routing that can serve it."""
+    unconditionally. With no corpus it declines and the question falls through
+    to routing that can serve it.
+
+    CHANGED 2026-08-05 with the voice-of-customer merge. This used to assert the
+    stronger consequence — that the answer never came back from the digest at
+    all — which held only because the VoC dispatch downstream was ALSO gated on
+    `has_call_source`. That second gate was the reported bug: it made live calls
+    and the knowledge graph an either/or, so connecting Zoom silently dropped
+    Slack out of every voice-of-customer answer. The dispatch now runs the
+    merged path unconditionally and degrades per-source inside
+    `call_digest.answer`.
+
+    What the INTERCEPTION's capability gate still buys is unchanged, and is what
+    this pins: it yields the turn to the router rather than short-circuiting
+    ahead of it, so a company skill or another pipeline still gets its say.
+    """
     import app.call_digest as cd
 
     _slack_connected(monkeypatch, providers=())
     monkeypatch.setattr(cd, "has_call_source", lambda eid: False)
-    monkeypatch.setattr(cd, "answer", lambda **k: (_ for _ in ()).throw(
-        AssertionError("digest ran with no call source")))
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    routed: list = []
+    real_route = qa.route
+    monkeypatch.setattr(
+        qa, "route", lambda q, **k: routed.append(q) or real_route(q, **k)
+    )
     monkeypatch.setattr(qa, "llm_call", lambda **k: _skill_answer())
-    out = qa.answer(enterprise_id="ent",
-                    question="summarize the customer calls from last week",
-                    dataset="acme")
-    assert out.get("_skill_source") != "call-digest"
+
+    qa.answer(enterprise_id="ent",
+              question="summarize the customer calls from last week",
+              dataset="acme")
+
+    # The interception declined and the router got the question — the whole
+    # point of the gate. Where routing then sends it is routing's call.
+    assert routed == ["summarize the customer calls from last week"]
 
 
 def test_an_unreadable_capability_check_keeps_the_digest(monkeypatch):
