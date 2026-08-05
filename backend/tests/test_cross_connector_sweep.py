@@ -427,6 +427,44 @@ def test_calls_leg_reports_index_size_on_a_keyword_miss(monkeypatch, wire):
     assert "not transcripts" in block
 
 
+def test_zoom_sweeps_through_the_call_index_not_its_live_adapter(monkeypatch, wire):
+    """Zoom gained a live adapter on main (#1075), so "sweep Zoom" now has two
+    plausible readers and the choice is no longer obvious.
+
+    The sweep must keep using the call index: it holds Fireflies AND Zoom, it is
+    a plain DB read, and it is the reason listing went 168s → 4s. Zoom's live
+    adapter stays reachable — a question that NAMES Zoom can still win a tool
+    slot and drill into a transcript — but breadth goes through the index.
+    """
+    from app import call_index
+
+    class _Call:
+        call_date, title, account, summary = "2026-08-04", "Acme sync", "Acme", "renewal"
+
+    wire({}, connected=["zoom"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [_Call()])
+
+    result = cs.sweep("ent-1", "what did Acme say about renewal?", only={"zoom"})
+
+    assert [s.key for s in result.read] == ["calls"]
+    # The index covers both call providers, so naming either one is satisfied.
+    assert result.covered_providers() == {"fireflies", "zoom"}
+    assert "Acme sync" in result.render()
+
+
+def test_google_meet_is_not_sweepable_and_stays_honest():
+    """Google Meet arrived on main (#1078) as a DEFERRED connector — it syncs to
+    the KG but has no live adapter. The sweep must not claim it: `can_sweep` is
+    False, so `answer_for_hints` keeps it in the honest not-supported copy
+    instead of quietly reporting it as covered."""
+    from app.connector_lookup import registry
+
+    assert cs.can_sweep("google_meet") is False
+    assert "google_meet" in registry.DEFERRED
+    assert "google_meet" not in registry.LOOKUP_PROVIDERS
+
+
 def test_github_leg_matches_open_prs_by_title(monkeypatch, wire):
     from app import db
 
