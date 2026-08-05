@@ -301,6 +301,14 @@ def user_can_act_in_workspace(
     obtain a WorkspaceContext at all?", which is what
     `list_workspaces_for_user` answers.
 
+    That null branch is not hypothetical: measured 2026-08-05, 68 of 93
+    `datasets` rows are unbound and 448 PRDs hang off them, including two
+    live tenants (210 and 70 PRDs). It had zero currently-affected users
+    only because the break additionally requires a caller who is
+    `role='member'` AND holds no `workspace_members` row — every member of
+    those tenants happened to be owner/admin or already granted. One
+    domain-matched fresh signup on either tenant arms it.
+
     Every other unresolvable case fails CLOSED (missing workspace, or one
     belonging to a different company): returning False only ever costs the
     caller the guest viewer they already get, whereas a wrong True routes

@@ -336,16 +336,73 @@ def test_proof(isolated_settings, monkeypatch):
     #     CURRENT behaviour deliberately — if someone later scopes tickets
     #     to the workspace, this proof fails loudly and the finding gets
     #     re-reported rather than silently going stale.
+    _GAP_TICKET_SCOPE = (
+        "\n"
+        "=========================================================\n"
+        "THIS FAILURE IS EXPECTED IF YOU JUST FIXED TICKET SCOPING.\n"
+        "=========================================================\n"
+        "GAP: 'tickets are company-scoped, not workspace-scoped'.\n"
+        "  Every route in backend/app/routes/tickets.py filters on\n"
+        "  company.company_id and never reads ctx.workspace_id, even though\n"
+        "  it depends on require_workspace. A member of ANY workspace in a\n"
+        "  company could therefore read and write ANY ticket in it.\n"
+        "  Recorded as a known gap by PR #1061 / #1085 and pinned HERE on\n"
+        "  purpose, so that changing it notifies someone instead of passing\n"
+        "  silently.\n"
+        "\n"
+        "IF YOU INTENDED THIS CHANGE — you have closed the gap. Good.\n"
+        "  1. Update the assertions in this block to the new behaviour\n"
+        "     (E, a member of another workspace, should now be REFUSED).\n"
+        "  2. Update the '--- FINDING' block printed above it.\n"
+        "  3. Tell Apurva the gap is closed — it was an open scope call,\n"
+        "     not merely a bug, so its closure is a product change.\n"
+        "\n"
+        "IF YOU DID NOT INTEND IT — something narrowed ticket access and\n"
+        "  existing users may have lost tickets they could previously see.\n"
+        "  Check what touched routes/tickets.py or require_workspace.\n"
+    )
     for label, code in results["E"].items():
         if "/v1/tickets/" in label:
             assert 200 <= code < 300, (
-                "KNOWN GAP CHANGED: tickets used to be company-scoped and E "
-                f"could write them; now {label} returns {code}. Re-report."
+                f"KNOWN GAP CHANGED (write): {label} returned {code} for a "
+                f"member of ANOTHER workspace; it used to be a 2xx."
+                + _GAP_TICKET_SCOPE
             )
     assert read_results["E"]["open ticket       GET  /v1/tickets/{key}/data"] == 200, (
-        "KNOWN GAP CHANGED: E could previously READ a ticket from another "
-        "workspace. Re-report."
+        "KNOWN GAP CHANGED (read): GET /v1/tickets/{key}/data refused a "
+        "member of ANOTHER workspace; it used to return 200."
+        + _GAP_TICKET_SCOPE
     )
+    # 3c. THE SECOND KNOWN GAP: role='viewer' is not read-only. Printed by
+    #     the report above but, until now, never ASSERTED — so closing the
+    #     gap would have notified nobody, which is the whole failure mode
+    #     this file exists to avoid. Pinned for the same reason as the
+    #     ticket one.
+    _GAP_VIEWER_ROLE = (
+        "\n"
+        "=======================================================\n"
+        "THIS FAILURE IS EXPECTED IF YOU JUST MADE 'viewer' READ-ONLY.\n"
+        "=======================================================\n"
+        "GAP: 'no role is read-only for artifacts'.\n"
+        "  Settings -> Team & roles says \"Roles govern what they can edit\",\n"
+        "  but nothing in backend/app/routes/{tickets,prd}.py denies a write\n"
+        "  by role. A company_members/workspace_members role='viewer' can\n"
+        "  edit PRDs and tickets exactly like a member. Recorded as a known\n"
+        "  gap by PR #1061 / #1085 and pinned HERE on purpose.\n"
+        "\n"
+        "IF YOU INTENDED THIS CHANGE — update the assertion below and the\n"
+        "  '--- D' block in the report, and tell Apurva: making viewer\n"
+        "  read-only is a product decision he has open, not just a fix.\n"
+        "\n"
+        "IF YOU DID NOT INTEND IT — a role check appeared somewhere on the\n"
+        "  artifact write path and may be refusing legitimate editors.\n"
+    )
+    for label, code in results["D"].items():
+        assert 200 <= code < 300, (
+            f"KNOWN GAP CHANGED: {label} returned {code} for role='viewer'; "
+            f"it used to be a 2xx." + _GAP_VIEWER_ROLE
+        )
+
     a_row = [r for r in c_rows if r["company_id"] == company]
     assert len(a_row) == 1, "expected exactly one ticket_edits row in A's company"
     # The loop order is A, B, C, D, E — so E writes last, and whoever the LAST
