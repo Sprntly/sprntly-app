@@ -76,6 +76,7 @@ PROVIDER_UPLOADS = "uploads"
 PROVIDER_GOOGLE_DRIVE = "google_drive"
 PROVIDER_CONFLUENCE = "confluence"
 PROVIDER_CHAT_ATTACHMENT = "chat_attachment"
+PROVIDER_SLACK = "slack"
 
 #: Columns every read selects. `body_text` and `embedding` are excluded on
 #: purpose: a listing must stay cheap enough to build on every ask, and the
