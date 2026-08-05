@@ -630,15 +630,14 @@ def test_sweep_addendum_defers_to_an_unresolved_reference(isolated_settings, fak
     # while the prompt text quietly went stale, which is the failure it exists
     # to catch.
     #
-    # Guarded because the constant lands with #1059; delete the guard, keep the
-    # assertion, once that has merged.
-    heading = getattr(ask_runner, "UNRESOLVED_REFERENCE_HEADING", None)
-    if heading is not None:
-        assert heading in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM, (
-            "#1059 reworded UNRESOLVED_REFERENCE_HEADING; the PRECEDENCE clause "
-            "in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM quotes it literally and must be "
-            "updated to match, or the sweep stops deferring to it."
-        )
+    # The guard this carried while #1059 was unmerged is GONE, as its author
+    # intended: the constant now exists, so the assertion is unconditional and
+    # a reword fails loudly instead of skipping.
+    assert ask_runner.UNRESOLVED_REFERENCE_HEADING in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM, (
+        "#1059 reworded UNRESOLVED_REFERENCE_HEADING; the PRECEDENCE clause "
+        "in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM quotes it literally and must be "
+        "updated to match, or the sweep stops deferring to it."
+    )
 
     ds = isolated_settings["data_dir"] / "asurion"
     ds.mkdir(exist_ok=True)

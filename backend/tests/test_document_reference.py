@@ -1098,6 +1098,79 @@ def test_abstention_block_renders_the_contracted_heading(
     assert f"## {UNRESOLVED_REFERENCE_HEADING}" in block
 
 
+def test_an_abstention_and_a_live_sweep_compose_into_ONE_coherent_prompt(
+    isolated_settings, catalog_candidates, confluence_bodies, fake_llm
+):
+    """The cross-PR interaction, exercised in a single build for the first time.
+
+    #1060's connector sweep and this PR's abstention were written apart and
+    pull in opposite directions. The sweep's addendum tells the model to answer
+    from live cross-source material and attribute it; the UNRESOLVED section
+    tells it to ask which document was meant. If the sweep happens to surface
+    something plausible for an ambiguous document reference, a model that
+    satisfies the sweep and skips the abstention produces the worst available
+    answer: confident, about the wrong document, and assembled from genuinely
+    real data — which is what makes it hard for anyone to catch.
+
+    #1060 anticipated this and shipped a PRECEDENCE clause naming this PR's
+    heading verbatim, phrased conditionally so it was inert while this branch
+    was unmerged. It goes live the moment this lands, and until now the two
+    have never been in one prompt. This asserts the wiring actually holds:
+    both sections present, the precedence clause present, and the heading it
+    names identical to the one that was rendered.
+
+    What a model DOES with the combined prompt is live-verification's
+    question. What is mechanically checkable — and is the part that would
+    silently rot — is that the clause and the section it defers to are both
+    there and still agree on the string.
+    """
+    from app.ask_runner import UNRESOLVED_REFERENCE_HEADING, compose_ask_answer
+    from app.prompts import (
+        ASK_SYSTEM_DOCUMENTS_ADDENDUM,
+        ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
+    )
+
+    db = isolated_settings["supabase"]
+    for external_id, title in (
+        ("page-q3", "Q3 Pricing Teardown"), ("page-q4", "Q4 Pricing Teardown")
+    ):
+        _seed_catalog_row(
+            db, provider="confluence", external_id=external_id, title=title,
+            source_name="Product wiki", summary="Pricing analysis.",
+        )
+        confluence_bodies[external_id] = f"BODY OF {title}"
+    catalog_candidates([])
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    compose_ask_answer(
+        "asurion",
+        "what does the pricing teardown say about discounts?",
+        enterprise_id=_CID,
+        live_context="LIVE SWEEP: a Slack thread about discounting.",
+    )
+
+    call = fake_llm["calls"][0]
+    system = call["kwargs"].get("system") or call["system"]
+    prefix = call["kwargs"]["user_cacheable_prefix"] or ""
+
+    # The abstention reached the prompt...
+    assert f"## {UNRESOLVED_REFERENCE_HEADING}" in prefix
+    # ...both addenda are in the system prompt together...
+    assert ASK_SYSTEM_LIVE_SWEEP_ADDENDUM in system, "the sweep addendum is absent"
+    assert ASK_SYSTEM_DOCUMENTS_ADDENDUM in system, "the documents addendum is absent"
+    # ...and the precedence clause names the heading that was actually rendered.
+    assert "PRECEDENCE" in system
+    assert UNRESOLVED_REFERENCE_HEADING in ASK_SYSTEM_LIVE_SWEEP_ADDENDUM, (
+        "the sweep's precedence clause no longer quotes the heading this "
+        "module renders — the sweep would stop deferring to the abstention"
+    )
+    # And no document was pinned, so nothing invites answering from one.
+    assert "[THIS is the document the user's message refers to]" not in prefix
+
+
 def test_manifest_labels_a_named_resolution_named(
     isolated_settings, catalog_candidates, confluence_bodies
 ):
