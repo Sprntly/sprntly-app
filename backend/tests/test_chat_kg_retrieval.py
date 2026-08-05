@@ -80,10 +80,19 @@ def _patch_candidates(theme_scores):
 
 
 def _patch_embed():
-    """Patch the embeddings call retrieval imports lazily."""
+    """Patch the embeddings call retrieval imports lazily.
+
+    Full `EMBEDDING_DIM` length (not a short stand-in): `retrieve_context` now
+    has a defence-in-depth check that drops any vector of the wrong length
+    before it reaches `find_candidates` (mirrors `document_catalog.py`), so a
+    fixture vector shorter than that would be silently treated as no
+    embedding and every theme-matching test below would stop exercising the
+    kNN branch it's meant to."""
+    from app.graph.embeddings import EMBEDDING_DIM
+
     return patch(
         "app.graph.embeddings.embed_texts",
-        side_effect=lambda texts, **k: [[0.1] * 4 for _ in texts],
+        side_effect=lambda texts, **k: [[0.1] * EMBEDDING_DIM for _ in texts],
     )
 
 
@@ -670,6 +679,153 @@ def test_existing_theme_scores_in_this_suite_are_all_above_the_floor():
     from app.graph.retrieval import _MIN_THEME_SCORE
 
     assert _MIN_THEME_SCORE <= 0.8
+
+
+# ──────────────── the sentinel: "no embedding" vs "compute one" ────────────
+#
+# `question_embedding=None` means "compute it yourself" — it does NOT mean
+# "there is no embedding". A caller that already knows its embedding is
+# unusable (no key, or an all-zero vector) must say so explicitly via
+# `skip_semantic=True`; passing `None` unconditionally re-triggers a self-embed
+# that, with no key, returns the same unusable zero vector. Defence-in-depth:
+# a zero or wrong-dimension vector reaching `qvec` by ANY route (a caller
+# passing one directly, or the self-embed above) is dropped before it can
+# reach `find_candidates` — mirrors `document_catalog.py`'s exact check.
+
+
+def test_zero_vector_never_reaches_find_candidates(facade):
+    """A zero vector passed directly as `question_embedding` must not reach
+    `find_candidates` — the defence-in-depth check mirrors
+    `document_catalog.py`'s `embedding is not None and (len(...) !=
+    EMBEDDING_DIM or not any(...))`. RED before the fix: nothing rejected a
+    zero vector once it arrived at `qvec`."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        retrieve_context(
+            facade, "ent-A", "q", question_embedding=[0.0] * EMBEDDING_DIM,
+        )
+
+    assert calls == [], f"find_candidates was called with a zero vector: {calls}"
+
+
+def test_wrong_dimension_vector_is_treated_as_no_embedding(facade):
+    """A vector of the wrong length is dropped, mirroring
+    `document_catalog.py`'s length check — not just an all-zero vector."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=[0.5, 0.5, 0.5])
+
+    assert calls == []
+
+
+def test_empty_list_embedding_is_treated_as_no_embedding(facade, monkeypatch):
+    """`[]` is not confused with "compute one" — it is a caller-supplied
+    value (not `None`), so no self-embed fires, and it fails the dimension
+    check, so no kNN call is made either."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    embed_calls: list = []
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: embed_calls.append(texts)
+        or [[0.1] * EMBEDDING_DIM for _ in texts],
+    )
+    knn_calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: knn_calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=[])
+
+    assert knn_calls == []
+    assert embed_calls == [], "an empty list must not trigger a self-embed"
+
+
+def test_usable_key_knn_vector_is_byte_identical_to_prefix(facade):
+    """With a real caller-supplied vector, theme kNN runs exactly as it does
+    today — `find_candidates` receives the SAME vector, unmodified."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    vec = [0.01 * i for i in range(1536)]
+    seen: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, v, k=10: seen.append(v) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=vec)
+
+    assert seen == [vec]
+
+
+def test_retrieve_context_without_embedding_still_self_embeds(facade, monkeypatch):
+    """A non-Ask caller passing no `question_embedding` and no
+    `skip_semantic` keeps the ORIGINAL self-contained behaviour: it embeds
+    for itself and still runs kNN when a key is configured.
+    `retrieve_context`'s five non-Ask callers depend on this default staying
+    exactly as it was — the sentinel is opt-in, never the default."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    embed_calls: list = []
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: embed_calls.append(texts)
+        or [[0.05] * EMBEDDING_DIM for _ in texts],
+    )
+    knn_calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: knn_calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q")
+
+    assert len(embed_calls) == 1
+    assert len(knn_calls) == 1
+
+
+def test_no_question_or_key_in_logs(facade, caplog):
+    """No log line emitted anywhere in `retrieve_context` — across the
+    self-embed branch, the defence-in-depth drop, and the noise-floor drop —
+    contains the question text, a theme label, a signal body, or an API key
+    value."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "SENTINEL-THEME-LABEL-DO-NOT-LOG",
+        [("revenue", "deal_blocker", "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG", {}, 0)],
+    )
+    question = "SENTINEL-QUESTION-TEXT-DO-NOT-LOG"
+    fake_key = "sk-SENTINEL-KEY-VALUE-DO-NOT-LOG"
+    with caplog.at_level(logging.INFO):
+        # No key configured: exercises the self-embed → zero-vector →
+        # defence-in-depth-drop path, which is the one most likely to log
+        # something derived from the question or the (absent) key.
+        retrieve_context(facade, "ent-A", question)
+        # A caller-supplied zero vector: the other route to the same drop.
+        retrieve_context(facade, "ent-A", question, question_embedding=[0.0] * 1536)
+
+    all_msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert question not in all_msgs
+    assert "SENTINEL-THEME-LABEL-DO-NOT-LOG" not in all_msgs
+    assert "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG" not in all_msgs
+    assert fake_key not in all_msgs
 
 
 # ─────────────────────────── tenant isolation ───────────────────────────
