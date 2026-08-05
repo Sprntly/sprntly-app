@@ -132,8 +132,11 @@ describe("hero pick under an active insight-type filter", () => {
   it("leads with pool order, not the highest-confidence match", () => {
     const brief = briefWithPool([lowFirst, highSecond], [lowFirst, highSecond])
     expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("low but preferred")
-    // ...and without a filter the old confidence rule is untouched.
-    expect(briefToBriefV2State(brief, []).hero?.title).toBe("high and preferred")
+    // ...and with NO selection the lead still wins. This is the path the
+    // backend deliberately skips (it leaves the model's ranking and does not
+    // rewrite is_headline when nothing matched), so a confidence fallback here
+    // would reintroduce the browser/email drift on exactly that path.
+    expect(briefToBriefV2State(brief, []).hero?.title).toBe("low but preferred")
   })
 
   it("outranks a stale is_headline flag on a demoted finding", () => {
@@ -232,5 +235,62 @@ describe("card pill uses the preference vocabulary", () => {
     const state = briefToBriefV2State(briefWithPool([a, b], [a, b]), [])
     expect(state.hero?.skillLabel).toBe("Reliability")
     expect(state.supporting.map((s) => s.skillLabel)).toEqual(["Competitor moves"])
+  })
+})
+
+// PRODUCTION CALL SHAPE. `briefToContentPatch` (brief-adapter.ts) is the only
+// path that builds content.briefV2, and it calls briefToBriefV2State(brief)
+// with NO second argument — so every behaviour that depends on a selection has
+// to source it from the payload or it is dead code in the app. These tests use
+// that exact shape: one argument, selection supplied only via `_insight_prefs`.
+describe("selection sourced from the brief payload (production call shape)", () => {
+  function briefWithPrefs(insights: Insight[], selected: string[] | null): Brief {
+    const b = briefWithPool(insights, insights)
+    if (selected) b._insight_prefs = { selected, matched: selected.length }
+    return b
+  }
+
+  it("names cards from _insight_prefs with no argument passed", () => {
+    // Primary is user_feedback, which the reader did NOT pick; reliability_signals
+    // is the one they asked for, so that is what the card must say.
+    const f = finding("A", ["user_feedback", "reliability_signals"])
+    const b = briefWithPrefs([f], ["top_problems", "build_priorities", "reliability_signals"])
+    expect(briefToBriefV2State(b).hero?.skillLabel).toBe("Reliability")
+  })
+
+  it("matches what the email renders for the same finding", () => {
+    // The emailed pill reads the identical field, so both surfaces agree by
+    // construction. This is the drift the PR exists to remove.
+    const f = finding("A", ["top_problems", "wins"])
+    expect(briefToBriefV2State(briefWithPrefs([f], ["wins"])).hero?.skillLabel).toBe("Win")
+    expect(briefToBriefV2State(briefWithPrefs([f], [])).hero?.skillLabel).toBe("Top problem")
+  })
+
+  it("falls back to the primary type when the brief predates _insight_prefs", () => {
+    // Legacy payloads have no `_insight_prefs`; they render primary types until
+    // regenerated, which is honest rather than guessed.
+    const f = finding("A", ["user_feedback", "reliability_signals"])
+    expect(briefToBriefV2State(briefWithPrefs([f], null)).hero?.skillLabel)
+      .toBe("User feedback")
+  })
+
+  it("picks the hero from _insight_prefs with no argument passed", () => {
+    const other = finding("not preferred", ["user_feedback"], 0.99)
+    const preferred = finding("preferred", ["wins"], 0.1)
+    const b = briefWithPrefs([other, preferred], ["wins"])
+    expect(briefToBriefV2State(b).hero?.title).toBe("preferred")
+  })
+
+  it("lets an explicit argument override the payload", () => {
+    const f = finding("A", ["top_problems", "wins"])
+    const b = briefWithPrefs([f], ["wins"])
+    expect(briefToBriefV2State(b, ["top_problems"]).hero?.skillLabel).toBe("Top problem")
+  })
+
+  it("ignores junk in _insight_prefs.selected", () => {
+    const f = finding("A", ["top_problems", "wins"])
+    const b = briefWithPool([f], [f])
+    b._insight_prefs = { selected: ["drive_metric", "nonsense"], matched: 0 }
+    expect(briefToBriefV2State(b).hero?.skillLabel).toBe("Top problem")
   })
 })

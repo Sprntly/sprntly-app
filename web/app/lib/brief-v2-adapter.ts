@@ -2,8 +2,8 @@
  * Brief v2 adapter — turns the raw `/v1/brief/current` payload into the
  * narrative-shaped state the BriefV2Render component consumes:
  *
- *   - one hero finding (LLM picks via `is_headline`; fallback: highest
- *     confidence) with an inline chart + optional verbatim quote
+ *   - one hero finding (the lead of the composed order — see pickHeroIndex)
+ *     with an inline chart + optional verbatim quote
  *   - 0–2 compact supporting findings
  *   - 3-tile KPI strip at the top (total at risk / recoverable / sources)
  *   - convergence chips with strength badges per finding
@@ -21,7 +21,7 @@ import type {
 } from "../types/content"
 import type { Brief, BriefSkillCta, BriefSkillType, ChartHint, Insight } from "./api"
 import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
-import { INSIGHT_TYPE_BADGES, displayInsightType } from "./insight-types"
+import { INSIGHT_TYPE_BADGES, cleanInsightTypes, displayInsightType } from "./insight-types"
 
 // ---- Types ----------------------------------------------------------------
 
@@ -188,17 +188,25 @@ function isHeadlineFlag(insight: Insight): boolean {
   return flag === true
 }
 
+/** The hero is the LEAD OF THE ORDERED LIST — never a confidence re-sort.
+ *
+ *  The list arriving here is already in the order the brief was composed in:
+ *  the backend stable-partitions the pool by the reader's selection before
+ *  slicing the canonical top 3, and re-points `is_headline` at the new lead.
+ *  Re-sorting by confidence here would undo that and put the browser out of
+ *  step with the emailed and Slacked brief, which both render `insights[0]`
+ *  first — the original drift this whole change exists to remove.
+ *
+ *  1) an active selection ⇒ the first finding that matches it,
+ *  2) exactly one `is_headline` ⇒ that one,
+ *  3) otherwise index 0.
+ *
+ *  (3) matters as much as (1). When the reader's selection matched nothing, the
+ *  backend deliberately leaves the model's ranking alone and does NOT rewrite
+ *  `is_headline` — so without an index-0 floor this would fall through to
+ *  confidence and reintroduce the drift on exactly the path the backend chose
+ *  to skip. */
 function pickHeroIndex(insights: Insight[], selectedTypes: string[] = []): number {
-  // 0) With an active insight-type selection, the list reaching this point is
-  //    already preference-ordered (the backend stable-partitions the pool at
-  //    generation time; selectFindingsForTypes keeps that order), so the lead
-  //    IS the hero — the reader asked for these types, and rank within them is
-  //    the ranking we computed. Taking highest-confidence here instead would
-  //    silently re-sort that away and put the browser out of step with the
-  //    emailed and Slacked brief, which lead with insights[0].
-  //    Confined to findings that actually match: when the selection matched
-  //    nothing this week the list is the unfiltered top 3 (the never-blank
-  //    fallback), and the model's own hero pick below is the honest answer.
   if (selectedTypes.length > 0) {
     const wanted = new Set(selectedTypes)
     const firstMatch = insights.findIndex(
@@ -206,17 +214,11 @@ function pickHeroIndex(insights: Insight[], selectedTypes: string[] = []): numbe
     )
     if (firstMatch >= 0) return firstMatch
   }
-  // 1) Exactly one marked is_headline → take it.
-  // 2) If zero or multiple are marked → highest confidence wins.
   const marked = insights
     .map((ins, i) => (isHeadlineFlag(ins) ? i : -1))
     .filter((i) => i >= 0)
   if (marked.length === 1) return marked[0]
-  let best = 0
-  for (let i = 1; i < insights.length; i++) {
-    if ((insights[i].confidence ?? 0) > (insights[best].confidence ?? 0)) best = i
-  }
-  return best
+  return 0
 }
 
 function rankWithinTag(insights: Insight[]): Map<number, number> {
@@ -585,8 +587,34 @@ export function selectFindingsForTypes(brief: Brief, selectedTypes: string[]): I
   return (matched.length ? matched : topThree).slice(0, MAX_RENDERED_FINDINGS)
 }
 
+/** The insight-type selection the brief was GENERATED under, read off the
+ *  payload the backend persisted (`_insight_prefs.selected`).
+ *
+ *  This is the same field, from the same source, that the emailed card reads
+ *  (`email_delivery._pill_for`), so the two surfaces name a finding identically
+ *  BY CONSTRUCTION rather than by coincidence. Deliberately NOT the reader's
+ *  live selection: the brief's findings were ranked and sliced under the
+ *  generation-time selection, so labelling them against a newer one would give
+ *  cards ordered by the old preference and named by the new.
+ *
+ *  Empty for briefs generated before `_insight_prefs` existed — those render
+ *  each finding's primary type until they are next regenerated. */
+function generationSelection(brief: Brief): string[] {
+  return cleanInsightTypes(brief._insight_prefs?.selected)
+}
+
 export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []): BriefV2State {
+  // WHICH findings render is unchanged and still driven by the explicit
+  // argument — which production never passes (`brief-adapter.ts`
+  // briefToContentPatch calls this with the brief alone). Live filtering stays
+  // where it already is, in BriefChat's `visibleFindings`; this function does
+  // not take it over.
   const insights = selectFindingsForTypes(brief, selectedTypes)
+  // HOW each finding names itself, and which one leads, come from the
+  // generation-time selection on the payload. An explicit argument still wins
+  // when a caller supplies one, so a surface that genuinely has a live
+  // selection can pass it.
+  const namedBy = selectedTypes.length > 0 ? selectedTypes : generationSelection(brief)
   const insufficientEvidence = brief._insufficient_evidence === true
   const emptyReason = brief._empty_reason?.trim() || null
   const empty: BriefV2State = {
@@ -606,10 +634,10 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
   if (insights.length === 0) return empty
 
   const rankMap = rankWithinTag(insights)
-  const heroIdx = pickHeroIndex(insights, selectedTypes)
+  const heroIdx = pickHeroIndex(insights, namedBy)
   const heroInsight = insights[heroIdx]
   const heroRank = rankMap.get(heroIdx) ?? 1
-  const hero = buildHero(heroInsight, heroRank, selectedTypes)
+  const hero = buildHero(heroInsight, heroRank, namedBy)
 
   const supporting: BriefV2CompactFinding[] = []
   let supportingIdx = 0
@@ -617,7 +645,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     if (i === heroIdx) return
     const r = rankMap.get(i) ?? 1
     supportingIdx += 1
-    supporting.push(buildCompact(ins, r, `P${supportingIdx}`, selectedTypes))
+    supporting.push(buildCompact(ins, r, `P${supportingIdx}`, namedBy))
   })
 
   const productArea =
@@ -631,7 +659,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     generatedAt: brief.generated_at ?? null,
     company: companyLabel(brief),
     productArea,
-    kpiTiles: buildKpiTiles(insights, selectedTypes),
+    kpiTiles: buildKpiTiles(insights, namedBy),
     hero,
     supporting,
     sourcesLine: buildSourcesLine(insights),

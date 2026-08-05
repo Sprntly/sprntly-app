@@ -144,17 +144,23 @@ describe("briefToBriefV2State", () => {
     expect(out.hero?.title).toBe("New B")
   })
 
-  it("falls back to highest confidence when no headline is flagged", () => {
+  it("falls back to the LEAD, not highest confidence, when no headline is flagged", () => {
+    // Changed 2026-08-05. The hero is the lead of the composed order; the
+    // backend ranks and slices the top 3, and re-sorting by confidence here
+    // put the browser out of step with the emailed and Slacked brief, which
+    // both render insights[0] first. B has the highest confidence and is
+    // deliberately NOT the hero.
     const insights = [
       makeInsight({ tag: "something_broken", title: "A", confidence: 0.4 }),
       makeInsight({ tag: "something_better", title: "B", confidence: 0.9 }),
       makeInsight({ tag: "something_new", title: "C", confidence: 0.6 }),
     ]
     const out = briefToBriefV2State(makeBrief(insights))
-    expect(out.hero?.title).toBe("B")
+    expect(out.hero?.title).toBe("A")
   })
 
-  it("falls back to highest confidence when two insights are flagged", () => {
+  it("falls back to the LEAD when two insights are flagged", () => {
+    // An ambiguous flag is no signal at all, so the composed order decides.
     const insights = [
       makeInsight({ tag: "something_broken", title: "A", confidence: 0.4 }),
       makeInsight({ tag: "something_better", title: "B", confidence: 0.9 }),
@@ -162,7 +168,7 @@ describe("briefToBriefV2State", () => {
     ;(insights[0] as unknown as { is_headline: boolean }).is_headline = true
     ;(insights[1] as unknown as { is_headline: boolean }).is_headline = true
     const out = briefToBriefV2State(makeBrief(insights))
-    expect(out.hero?.title).toBe("B")
+    expect(out.hero?.title).toBe("A")
   })
 
   it("attaches an inline chart and quote to the hero when present", () => {
@@ -214,10 +220,17 @@ describe("briefToBriefV2State", () => {
       makeInsight({ tag: "something_better", title: "C", confidence: 0.99 }),
     ]
     const out = briefToBriefV2State(makeBrief(insights))
-    // C has highest confidence → hero
-    expect(out.hero?.detailKey).toBe("double-1")
-    // The two broken insights become supporting with rank 1 and 2.
-    expect(out.supporting.map((s) => s.detailKey)).toEqual(["fix-1", "fix-2"])
+    // A leads (composed order), so it is the hero and carries fix-1.
+    expect(out.hero?.detailKey).toBe("fix-1")
+    // The rest keep their own tag-rank keys, unchanged by which one is hero:
+    // B is the second `something_broken`, C the first `something_better`.
+    expect(out.supporting.map((s) => s.detailKey)).toEqual(["fix-2", "double-1"])
+    // Parity with the v1 adapter is a property of the KEY, not of the hero
+    // pick: v1's briefToDetailMap assigns `${tagType}-${rankWithinTag}` to
+    // every insight independently. Changing which finding is hero re-labels
+    // no key, so View-evidence routing is unaffected — assert the full set.
+    const allKeys = [out.hero?.detailKey, ...out.supporting.map((s) => s.detailKey)]
+    expect(new Set(allKeys)).toEqual(new Set(["fix-1", "fix-2", "double-1"]))
   })
 
   it("builds a KPI strip from the hero's first two metrics — no source count tile", () => {
