@@ -1420,9 +1420,19 @@ def compose_ask_answer(
     # above so it rides EVERY branch's cacheable prefix, first — a long corpus
     # or PRD block can never push it out. facts == "" ⇒ cacheable/system are
     # byte-identical to the pre-fix composition (including the None case).
-    # Documents sit after facts and before the corpus/PRD/KG block.
+    #
+    # `docs_block` trails the corpus/PRD/KG block, not the other way around.
+    # Prompt caching is prefix-matched: it hits only up to the first differing
+    # byte. `docs_block` is stamped with a per-question "[loaded for this
+    # question]"/"[not loaded]" marker on every catalogued document
+    # (`_index_line`) and carries the selected bodies themselves, so it is
+    # volatile on every single ask. `facts` and the corpus/PRD block are
+    # stable (per tenant, per dataset/PRD respectively). Putting the volatile
+    # block last means the shared prefix — the whole stable part — still
+    # matches across two different questions in the same dataset; putting it
+    # first (the old order) invalidated the cache on every ask.
     cacheable = (
-        "\n\n---\n\n".join(p for p in (facts, docs_block, cacheable) if p) or None
+        "\n\n---\n\n".join(p for p in (facts, cacheable, docs_block) if p) or None
     )
     if facts:
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
@@ -1433,6 +1443,12 @@ def compose_ask_answer(
     # (non-gateway) answer call. See app.llm_keys.
     from app.llm_keys import company_llm_key
 
+    # Best-effort cache/usage telemetry for the answer decision-log row below
+    # — makes the cache-prefix reorder's win measurable rather than asserted.
+    # `call_json` populates this from the provider's usage object; it stays
+    # `{}` (and every counter below defaults to 0) if the provider returns
+    # none.
+    meta_out: dict = {}
     with company_llm_key(enterprise_id):
         payload = call_json(
             system=system,
@@ -1440,6 +1456,7 @@ def compose_ask_answer(
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
+            meta_out=meta_out,
             # Token-streaming a chat answer implies the streaming transport
             # (and its long read timeout) — same pattern as the gateway.
             stream=on_delta is not None,
@@ -1488,6 +1505,18 @@ def compose_ask_answer(
                     # because the system keeps answering — slightly worse —
                     # and nothing else in the record would say why.
                     "retrieval_embedding_degraded": embedding_degraded,
+                    # Cache/usage counts only — never text (see the rule
+                    # above this block). Makes the cacheable-prefix ordering
+                    # measurable: a healthy cache hit shows up here as a
+                    # non-zero `cache_read_input_tokens` on the second+ ask
+                    # in a dataset within the cache TTL.
+                    "cache_read_input_tokens": meta_out.get(
+                        "cache_read_input_tokens", 0
+                    ),
+                    "cache_creation_input_tokens": meta_out.get(
+                        "cache_creation_input_tokens", 0
+                    ),
+                    "input_tokens": meta_out.get("input_tokens", 0),
                 },
                 output={
                     "key_points": payload.get("key_points", []),

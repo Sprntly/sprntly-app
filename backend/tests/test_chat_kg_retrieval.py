@@ -1155,6 +1155,43 @@ def test_compose_ask_answer_prd_prefix_stable_across_turns(
     assert first["user"] != second["user"]
 
 
+def test_prd_branch_documents_trail_the_prd_block(isolated_settings, fake_llm):
+    """On the PRD branch, `user_cacheable_prefix` orders `facts` ->
+    `prd_context` -> `docs_block`: the ~26K-token PRD block (byte-stable
+    across turns of one conversation) precedes the per-question document
+    index, same treatment as the corpus branch. (AC2)"""
+    from tests.test_ask_document_retrieval import _seed_file, _seed_source
+
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-prd-order", "slug": "slug-co-prd-order", "display_name": "Sprntly"}
+    ).execute()
+    db.table("products").insert(
+        {"id": "prod-co-prd-order", "company_id": "co-prd-order", "name": "Sprntly",
+         "website": "https://sprntly.ai", "is_primary": 1}
+    ).execute()
+    src = _seed_source(db, "src-prd-order", company_id="co-prd-order")
+    _seed_file(db, "f-prd-order", src, company_id="co-prd-order",
+               filename="Prd_Order_Report.docx",
+               extracted_text="THE PRD-BRANCH DOCUMENT BODY")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "About Prd_Order_Report", enterprise_id="co-prd-order",
+        prd_context="=== CURRENT PRD CONTEXT ===\nTHE PRD BODY.",
+    )
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix.index(WORKSPACE_CONFIG_HEADER) < prefix.index("THE PRD BODY")
+    assert prefix.index("THE PRD BODY") < prefix.index("THE PRD-BRANCH DOCUMENT BODY")
+
+
 # ────────────────────── compose_ask_answer × workspace configuration ────────
 
 
