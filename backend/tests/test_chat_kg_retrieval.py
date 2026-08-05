@@ -17,6 +17,7 @@ Two layers:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -403,6 +404,259 @@ def test_kg_refs_collects_signal_theme_and_entity_ids(facade):
     assert sigs[0].id in bundle["kg_refs"]
     assert theme.id in bundle["kg_refs"]
     assert dec.id in bundle["kg_refs"]
+
+
+# ─────────────────────────── noise floor ───────────────────────────
+
+
+def test_retrieve_context_drops_themes_below_the_noise_floor(facade):
+    """`find_candidates` is a pure kNN — nearest, not relevant. A theme whose
+    score is indistinguishable from noise must not reach the bundle."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["themes"] == []
+
+
+def test_render_context_section_omits_below_floor_themes(facade):
+    from app.graph.retrieval import render_context_section, retrieve_context
+    from app.graph.types import Signal
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    # An independent recent signal keeps the bundle non-empty so this test
+    # proves the theme block is specifically omitted, not that render()
+    # short-circuits on an empty bundle.
+    facade.write_signal(
+        "ent-A",
+        Signal(
+            enterprise_id="ent-A",
+            source_type="analytics",
+            kind="metric_shift",
+            content="unrelated recent signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+    text = render_context_section(bundle)
+
+    assert bundle["empty"] is False
+    assert "relevance 0.03" not in text
+    assert "## Relevant themes" not in text
+
+
+def test_below_floor_theme_signals_do_not_reach_the_bundle(facade):
+    """Signals reachable ONLY through a below-floor theme edge never enter
+    the bundle. Aged past the recency window so the theme edge is the only
+    path in — otherwise the independent recency path would smuggle them
+    back in and this test would prove nothing."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [
+            ("revenue", "deal_blocker", "stale noise 1", {}, 40),
+            ("revenue", "deal_blocker", "stale noise 2", {}, 40),
+            ("revenue", "deal_blocker", "stale noise 3", {}, 40),
+        ],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["signals"] == []
+
+
+def test_retrieve_context_keeps_themes_above_the_noise_floor(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Pipeline health",
+        [("revenue", "deal_blocker", "sig", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["themes"] == [
+        {"entity_id": theme.id, "label": "Pipeline health", "score": 0.9}
+    ]
+
+
+def test_find_candidates_still_called_with_the_full_candidate_window(facade):
+    """The noise floor changes admission, not the candidate window — the kNN
+    primitive is still asked for k=_DEFAULT_THEME_K candidates."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import _DEFAULT_THEME_K, retrieve_context
+
+    seen_k: list[int] = []
+
+    def spy(self, ent, typ, vec, k=10):
+        seen_k.append(k)
+        return []
+
+    with _patch_embed(), patch.object(GraphFacade, "find_candidates", spy):
+        retrieve_context(facade, "ent-A", "q")
+
+    assert seen_k == [_DEFAULT_THEME_K]
+
+
+def test_theme_at_exactly_the_floor_is_kept(facade):
+    """The comparison is `>=`: a score exactly at the floor is kept, not
+    dropped."""
+    from app.graph.retrieval import _MIN_THEME_SCORE, retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Borderline theme",
+        [("revenue", "deal_blocker", "sig", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, _MIN_THEME_SCORE)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [t["label"] for t in bundle["themes"]] == ["Borderline theme"]
+
+
+def test_recent_signal_survives_when_its_theme_is_filtered(facade):
+    """A signal wired to a below-floor theme but also independently recent
+    still reaches the bundle — sourced from the recency path, not the
+    (now-filtered) theme walk, so `theme` is None."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, sigs = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "dual-path signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [s["content"] for s in bundle["signals"]] == ["dual-path signal"]
+    assert bundle["signals"][0]["signal_id"] == sigs[0].id
+    assert bundle["signals"][0]["theme"] is None
+
+
+def test_all_themes_below_floor_and_nothing_else_yields_empty_bundle(facade):
+    """All candidates filtered, no recent signals, no session context → the
+    pre-#18 corpus-only fallback: `empty` is True and render is blank, not a
+    crash and not an empty header."""
+    from app.graph.retrieval import render_context_section, retrieve_context
+    from app.graph.types import Entity
+
+    theme = Entity(enterprise_id="ent-A", type="theme", canonical_label="Noise theme")
+    facade.create_entity("ent-A", theme)
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["empty"] is True
+    assert render_context_section(bundle) == ""
+
+
+def test_all_themes_below_floor_still_returns_recent_signals(facade):
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Entity, Signal
+
+    theme = Entity(enterprise_id="ent-A", type="theme", canonical_label="Noise theme")
+    facade.create_entity("ent-A", theme)
+    facade.write_signal(
+        "ent-A",
+        Signal(
+            enterprise_id="ent-A",
+            source_type="analytics",
+            kind="metric_shift",
+            content="unrelated recent signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["empty"] is False
+    assert [s["content"] for s in bundle["signals"]] == ["unrelated recent signal"]
+
+
+def test_mixed_scores_keep_only_the_above_floor_theme(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme_a, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Relevant theme",
+        [("revenue", "deal_blocker", "relevant signal", {}, 0)],
+    )
+    theme_b, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 40)],
+    )
+    with _patch_embed(), _patch_candidates([(theme_a, 0.9), (theme_b, 0.04)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [t["label"] for t in bundle["themes"]] == ["Relevant theme"]
+    assert [s["content"] for s in bundle["signals"]] == ["relevant signal"]
+
+
+def test_kg_refs_excludes_below_floor_theme_ids(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert theme.id not in bundle["kg_refs"]
+
+
+def test_noise_floor_drop_logs_counts_only(facade, caplog):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with caplog.at_level(logging.INFO, logger="app.graph.retrieval"):
+        with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+            retrieve_context(facade, "ent-A", "q")
+
+    drops = [r for r in caplog.records if "noise floor dropped" in r.getMessage()]
+    assert len(drops) == 1
+    msg = drops[0].getMessage()
+    assert "enterprise_id=ent-A" in msg
+    assert "returned=1" in msg
+    assert "kept=0" in msg
+    assert "floor=0.15" in msg
+    assert "top_score=0.03" in msg
+
+
+def test_noise_floor_log_never_contains_theme_labels_or_signal_content(facade, caplog):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "SENTINEL-THEME-LABEL-DO-NOT-LOG",
+        [("revenue", "deal_blocker", "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG", {}, 0)],
+    )
+    with caplog.at_level(logging.INFO, logger="app.graph.retrieval"):
+        with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+            retrieve_context(facade, "ent-A", "q")
+
+    all_msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "SENTINEL-THEME-LABEL-DO-NOT-LOG" not in all_msgs
+    assert "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG" not in all_msgs
+
+
+def test_existing_theme_scores_in_this_suite_are_all_above_the_floor():
+    """Guard: every `_patch_candidates` call site in this suite uses a score
+    drawn from {0.8, 0.9, 0.92} (verified at ticket time). If a future floor
+    raise pushes `_MIN_THEME_SCORE` above 0.8 it would silently invalidate
+    those 23 call sites — fail loudly here instead of leaving them green for
+    the wrong reason."""
+    from app.graph.retrieval import _MIN_THEME_SCORE
+
+    assert _MIN_THEME_SCORE <= 0.8
 
 
 # ─────────────────────────── tenant isolation ───────────────────────────

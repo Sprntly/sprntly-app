@@ -48,6 +48,14 @@ _SIGNALS_PER_THEME = 6
 # fresh connector data not yet wired to a resolved theme).
 _RECENT_SIGNALS = 8
 
+#: Cosine similarity below which a theme match is indistinguishable from
+#: noise. `kg_find_candidates` is a pure kNN (ORDER BY <=> ... LIMIT k) — it
+#: returns the NEAREST themes, never the RELEVANT ones, so on a KG with >= k
+#: themes every question matched all k. text-embedding-3-small places
+#: unrelated English text pairs near 0.0-0.1; a genuine topical match sits
+#: well above 0.15. This is a noise gate, not a tuned relevance knob.
+_MIN_THEME_SCORE = 0.15
+
 
 def _recency_factor(signal: Signal, now: datetime) -> float:
     """Half-life decay using the per-source_type staleness window (#1).
@@ -190,14 +198,18 @@ def retrieve_context(
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     question_embedding: Optional[list[float]] = None,
+    min_theme_score: float = _MIN_THEME_SCORE,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
 
     Steps:
       1. Embed the question (best-effort; if embeddings are unavailable we
          skip the kNN theme match and fall back to recent signals only).
-      2. `find_candidates(type="theme")` → the question-relevant themes.
-      3. For each candidate theme, gather its inbound signal edges
+      2. `find_candidates(type="theme")` → the k nearest themes, then drop
+         anything scoring below `min_theme_score` (default `_MIN_THEME_SCORE`)
+         — the kNN primitive returns nearest, not relevant, so this is the
+         gate that keeps noise themes out of the bundle entirely.
+      3. For each surviving candidate theme, gather its inbound signal edges
          (`edges_to`, source_kind == "signal"), boosted by the theme's
          similarity score.
       4. Fold in recent non-stale `active_signals` (fresh connector data not
@@ -260,6 +272,38 @@ def retrieve_context(
         except Exception as exc:  # noqa: BLE001
             logger.info("Ask KG retrieval: find_candidates failed (%s)", exc)
             matched_themes = []
+
+    # 2b) Noise floor. `find_candidates` is a pure kNN — nearest, not
+    #     relevant — so on a KG with >= k themes every question returns all
+    #     k candidates regardless of topical fit. Drop anything below
+    #     `min_theme_score` here, before a theme's label is rendered as
+    #     first-class evidence and before its signals are pulled into the
+    #     budget below; everything downstream (the signal walk, kg_refs,
+    #     themes_out) reads the filtered list, so admission is fixed, not
+    #     just rendering.
+    returned_count = len(matched_themes)
+    top_score = 0.0
+    for _, score in matched_themes:
+        try:
+            top_score = max(top_score, float(score))
+        except (TypeError, ValueError):
+            continue
+
+    def _clears_floor(score: Any) -> bool:
+        try:
+            return float(score) >= min_theme_score
+        except (TypeError, ValueError):
+            return False
+
+    matched_themes = [(theme, score) for theme, score in matched_themes if _clears_floor(score)]
+
+    if len(matched_themes) < returned_count:
+        logger.info(
+            "Ask KG retrieval: theme candidates below noise floor dropped "
+            "enterprise_id=%s returned=%d kept=%d floor=%s top_score=%s",
+            enterprise_id, returned_count, len(matched_themes), min_theme_score,
+            round(top_score, 4),
+        )
 
     # 3) Per-theme inbound signals, boosted by theme similarity.
     #    by_id dedupes; we keep the highest rank seen for any signal.
