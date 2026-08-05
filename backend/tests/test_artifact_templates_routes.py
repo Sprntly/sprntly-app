@@ -1,0 +1,676 @@
+"""Artifact format template routes (routes/artifact_templates.py).
+
+Templates are COMPANY-scoped: all workspaces in a company share one library and
+one active format per artifact type. The uploading workspace is stamped on the
+row and never queried.
+
+Covered:
+- create from BOTH shapes the one route accepts — pasted JSON and a multipart
+  `.md` upload — and the server-side validation ladder for each: missing or
+  over-limit name (422), missing/unknown artifact type (422), non-`.md`
+  extension (422), empty source (400), over 2 MB (413), over the character cap
+  (413)
+- list: newest-first metadata, company-isolated, `?type=` filtered, and the
+  TOP-LEVEL `generation_enabled` map that tells a screen which generators
+  actually honour a custom format yet
+- the list payload reads nothing the list SELECT doesn't fetch (the SQLite fake
+  can't catch that, so it is asserted directly)
+- detail + preview: full row, and the explicit `format` discriminator so a
+  client never sniffs HTML from a leading `<`
+- **404-not-403 on a foreign id for GET, PATCH, DELETE, compile, preview,
+  activate and deactivate** — a foreign tenant must not be able to tell "exists
+  but not yours" from "doesn't exist"
+- every mutating route 403s without an `Origin` header (the CSRF backstop)
+- activation: 409 until the format has compiled clean, admin-only, deactivates
+  the outgoing sibling, and never crosses a tenant
+- delete: open to any member for a non-active format, admin-only (403) for the
+  ACTIVE one, and reports the fallback to the built-in
+"""
+from __future__ import annotations
+
+import uuid
+
+_SOURCE = "# Acme PRD\n\n## Context\n\n## Requirements\n"
+_URL = "/v1/artifact-templates"
+
+
+def _create(client, *, name="Acme PRD v3", artifact_type="prd", source_md=_SOURCE,
+            **kw):
+    return client.post(
+        _URL,
+        json={"name": name, "artifact_type": artifact_type, "source_md": source_md},
+        **kw,
+    )
+
+
+def _upload(client, *, filename="acme-prd.md", data=_SOURCE.encode(),
+            artifact_type="prd", name=None):
+    form = {"artifact_type": artifact_type}
+    if name is not None:
+        form["name"] = name
+    return client.post(
+        _URL,
+        files={"file": (filename, data, "text/markdown")},
+        data=form,
+    )
+
+
+def _make_ready(company_id: str, template_id: str) -> None:
+    """Bring a template to the one state activation accepts.
+
+    Written through the real DB API rather than a route, because NOTHING in
+    milestone 1 compiles — the compiler is a later milestone, so `ready` is not
+    reachable through the API yet and the activation path would otherwise be
+    untestable."""
+    from app import db
+
+    db.set_compile_result(
+        company_id=company_id,
+        template_id=template_id,
+        compile_status="ready",
+        compiled="<html><style></style><h1>Acme PRD</h1></html>",
+        section_map={
+            "sections": [
+                {"id": "s1", "house": "Context", "customer": "Background",
+                 "order": 1, "form": "prose"}
+            ],
+            "unmapped_house": ["Riskiest assumption"],
+            "extra_sections": ["Launch checklist"],
+        },
+        compile_notes=[],
+    )
+
+
+def _member(tenant_client, t) -> dict:
+    """Auth header for a SECOND user in the same company with the plain
+    `member` role.
+
+    Two rows are needed, not one: company_members carries the role the admin
+    gate reads, and workspace_members is what require_workspace demands of
+    anybody who is not a company owner/admin (auth.py::_resolve_workspace)."""
+    from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
+
+    uid = "member-" + uuid.uuid4().hex[:8]
+    c = require_client()
+    c.table("company_members").insert(
+        {"id": f"cm-{t.company_id}-{uid}", "company_id": t.company_id,
+         "user_id": uid, "role": "member"}
+    ).execute()
+    if not c.table("profiles").select("id").eq("id", uid).execute().data:
+        c.table("profiles").insert({"id": uid}).execute()
+    ws = ensure_default_workspace(t.company_id)
+    c.table("workspace_members").insert(
+        {"id": f"wm-{ws['id']}-{uid}", "workspace_id": ws["id"],
+         "user_id": uid, "role": "member"}
+    ).execute()
+    return tenant_client.bearer(uid)
+
+
+# ─── create ──────────────────────────────────────────────────────────────────
+
+
+def test_create_from_pasted_markdown(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = _create(t.client)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    assert body["name"] == "Acme PRD v3"
+    assert body["artifact_type"] == "prd"
+    # A new format is listed and governs nothing: queued, not checked, not in use.
+    assert body["compile_status"] == "pending"
+    assert body["is_active"] is False
+    assert body["compile_notes"] == []
+    assert body["compile_summary"] is None
+    assert body["compile_note_count"] == 0
+    assert body["source_chars"] == len(_SOURCE)
+    assert body["source_md"] == _SOURCE
+    # Every metadata line renders even when blank — uploader_name comes from the
+    # session's JWT claims, which the minted test token doesn't carry.
+    assert "uploader_name" in body
+    assert body["created_at"]
+    # The three mapping blocks are always present, so the preview panel never
+    # silently omits one (an omitted block reads as "nothing to report").
+    assert body["section_map"] == {
+        "sections": [], "unmapped_house": [], "extra_sections": []
+    }
+
+
+def test_create_from_an_uploaded_md_file(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = _upload(t.client, name="Acme PRD v3")
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["source_md"] == _SOURCE
+
+
+def test_upload_without_a_name_falls_back_to_the_filename(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = _upload(t.client, filename="Acme PRD v3.md", name=None)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["name"] == "Acme PRD v3"
+
+
+def test_two_formats_may_share_a_name(tenant_client):
+    # Names are free text, not invocation triggers — none of the custom-skills
+    # slug deconfliction applies, and neither upload replaces the other.
+    t = tenant_client.make(slug="acme")
+    first = _create(t.client).json()
+    second = _create(t.client).json()
+    assert first["id"] != second["id"]
+    assert [r["name"] for r in t.client.get(_URL).json()["templates"]] == [
+        "Acme PRD v3", "Acme PRD v3"
+    ]
+
+
+# ─── the validation ladder ───────────────────────────────────────────────────
+
+
+def test_missing_name_is_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _create(t.client, name="  ").status_code == 422
+
+
+def test_over_limit_name_is_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _create(t.client, name="x" * 121).status_code == 422
+
+
+def test_missing_or_unknown_artifact_type_is_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _create(t.client, artifact_type="").status_code == 422
+    assert _create(t.client, artifact_type="roadmap").status_code == 422
+
+
+def test_empty_source_is_400(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _create(t.client, source_md="   \n  ").status_code == 400
+
+
+def test_source_over_the_character_cap_is_413(tenant_client, monkeypatch):
+    t = tenant_client.make(slug="acme")
+    import app.routes.artifact_templates as routes_mod
+
+    # Patched on the ROUTE module, which is where the cap is resolved and handed
+    # to the store — the same shape routes/custom_skills.py uses.
+    monkeypatch.setattr(routes_mod, "MAX_TEMPLATE_SOURCE_CHARS", 20)
+    resp = _create(t.client, source_md="#" * 21)
+    assert resp.status_code == 413, resp.text
+    assert "20" in resp.json()["detail"]
+
+
+def test_non_md_upload_is_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = _upload(t.client, filename="format.docx", data=b"binary-ish")
+    assert resp.status_code == 422
+    assert ".md" in resp.json()["detail"]
+
+
+def test_empty_upload_is_400(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _upload(t.client, data=b"").status_code == 400
+
+
+def test_upload_over_two_megabytes_is_413(tenant_client, monkeypatch):
+    t = tenant_client.make(slug="acme")
+    import app.routes.artifact_templates as routes_mod
+
+    monkeypatch.setattr(routes_mod, "MAX_TEMPLATE_UPLOAD_BYTES", 32)
+    resp = _upload(t.client, data=b"#" * 64)
+    assert resp.status_code == 413
+
+
+def test_a_malformed_json_body_is_400_not_a_500(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        _URL, content=b"{not json", headers={"content-type": "application/json"}
+    )
+    assert resp.status_code == 400
+
+
+# ─── list ────────────────────────────────────────────────────────────────────
+
+
+def test_list_is_newest_first_and_type_filtered(tenant_client):
+    t = tenant_client.make(slug="acme")
+    _create(t.client, name="Old PRD")
+    _create(t.client, name="New PRD")
+    _create(t.client, name="Ticket form", artifact_type="tickets")
+
+    rows = t.client.get(_URL).json()["templates"]
+    assert [r["name"] for r in rows] == ["Ticket form", "New PRD", "Old PRD"]
+    assert [r["name"] for r in t.client.get(f"{_URL}?type=prd").json()["templates"]] == [
+        "New PRD", "Old PRD"
+    ]
+
+
+def test_list_rejects_an_unknown_type_filter(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert t.client.get(f"{_URL}?type=roadmap").status_code == 422
+
+
+def test_generation_enabled_is_top_level_and_present_on_an_empty_library(
+    tenant_client,
+):
+    """The state most companies are in is zero rows, and the screen still
+    renders all three group headers — a per-row flag would have nothing to hang
+    off. All three are False in this milestone because NOTHING reads the table
+    on any generation path yet; a screen that hardcoded `prd: true` would tell a
+    user their PRDs changed when no PRD prompt has moved."""
+    t = tenant_client.make(slug="acme")
+    body = t.client.get(_URL).json()
+
+    assert body["templates"] == []
+    assert body["generation_enabled"] == {
+        "prd": False, "tickets": False, "impl_spec": False
+    }
+
+
+def test_list_row_carries_the_note_summary_and_count(tenant_client):
+    # The row copy is "…we couldn't find where your format lists evidence. See
+    # all 3", so the summary alone is not enough — the count cannot be derived
+    # from it, and without it the client either hides that more problems exist
+    # or opens the preview to count them.
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    db.set_compile_result(
+        company_id=t.company_id, template_id=tid, compile_status="needs_review",
+        compile_notes=[
+            {"code": "missing_evidence_list", "message": "No evidence list."},
+            {"code": "missing_hypothesis", "message": "No hypothesis."},
+            {"code": "missing_input_questions", "message": "No open questions."},
+        ],
+    )
+    row = t.client.get(_URL).json()["templates"][0]
+    assert row["compile_status"] == "needs_review"
+    assert row["compile_summary"] == "No evidence list."
+    assert row["compile_note_count"] == 3
+
+
+def test_the_list_payload_reads_nothing_the_list_select_omits(isolated_settings):
+    """Guard for a bug the fake Supabase structurally cannot catch.
+
+    `list_templates` selects a narrow column set (no `source_md`, no
+    `compiled`, no `section_map`), but the SQLite fake ignores `.select(cols)`
+    and always returns every column — so a list payload that reached for
+    `source_md` would pass every route test here and KeyError against real
+    Postgres. Build a row containing ONLY the selected columns and put it
+    through the real payload builder."""
+    from app.db.artifact_templates import _LIST_COLUMNS
+    from app.routes.artifact_templates import _list_item
+
+    cols = [c.strip() for c in _LIST_COLUMNS.split(",")]
+    row = {c: None for c in cols}
+    row["id"] = "t-1"
+    row["compile_notes"] = []
+    item = _list_item(row)
+
+    assert item["id"] == "t-1"
+    # Blank values still produce their line — never dropped (house rule).
+    assert item["name"] == ""
+    assert item["uploader_name"] == ""
+    assert item["created_at"] is None
+    assert item["source_chars"] == 0
+    assert item["compile_status"] == "pending"
+    assert item["is_active"] is False
+    assert item["compile_summary"] is None
+    assert item["compile_note_count"] == 0
+
+
+# ─── tenant isolation: 404, never 403 ────────────────────────────────────────
+
+
+def test_another_companys_template_is_absent_from_the_library(tenant_client):
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="beta")
+    _create(a.client, name="Acme PRD v3")
+    _create(b.client, name="Acme PRD v3")
+
+    a_rows = a.client.get(_URL).json()["templates"]
+    b_rows = b.client.get(_URL).json()["templates"]
+    assert len(a_rows) == 1 and len(b_rows) == 1
+    assert a_rows[0]["id"] != b_rows[0]["id"]
+
+
+def test_a_foreign_id_is_404_on_every_route(tenant_client):
+    """A foreign id and a missing id must be indistinguishable. Both callers
+    here are company OWNERS, so nothing is masked by a role gate — a 403 on any
+    of these would leak that the id names somebody else's real row."""
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="beta")
+    theirs = _create(b.client).json()["id"]
+    _make_ready(b.company_id, theirs)
+    missing = str(uuid.uuid4())
+
+    for tid in (theirs, missing):
+        assert a.client.get(f"{_URL}/{tid}").status_code == 404
+        assert a.client.get(f"{_URL}/{tid}/preview").status_code == 404
+        assert a.client.patch(f"{_URL}/{tid}", json={"name": "x"}).status_code == 404
+        assert a.client.post(f"{_URL}/{tid}/compile").status_code == 404
+        assert a.client.post(f"{_URL}/{tid}/activate").status_code == 404
+        assert a.client.post(f"{_URL}/{tid}/deactivate").status_code == 404
+        assert a.client.delete(f"{_URL}/{tid}").status_code == 404
+
+    # And nothing was written to the other tenant's row along the way.
+    still = b.client.get(f"{_URL}/{theirs}").json()
+    assert still["name"] == "Acme PRD v3"
+    assert still["compile_status"] == "ready"
+    assert still["is_active"] is False
+
+
+def test_activating_your_own_format_leaves_the_other_tenants_alone(tenant_client):
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="beta")
+    mine = _create(a.client).json()["id"]
+    theirs = _create(b.client).json()["id"]
+    _make_ready(a.company_id, mine)
+    _make_ready(b.company_id, theirs)
+
+    assert a.client.post(f"{_URL}/{mine}/activate").status_code == 200
+    assert b.client.get(f"{_URL}/{theirs}").json()["is_active"] is False
+    # Both companies may hold an active PRD format at the same time.
+    assert b.client.post(f"{_URL}/{theirs}/activate").status_code == 200
+    assert a.client.get(f"{_URL}/{mine}").json()["is_active"] is True
+
+
+# ─── CSRF backstop ───────────────────────────────────────────────────────────
+
+
+def test_every_mutating_route_403s_without_an_origin_header(tenant_client):
+    """The test clients default a same-origin `Origin` (conftest.py:36-60), so
+    a route missing `Depends(require_same_origin)` would pass every other test
+    in this file and still 403 a real browser. Sending Origin: null is the only
+    way to see it."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    bad = {"origin": "https://evil.example"}
+
+    assert t.client.post(_URL, json={}, headers=bad).status_code == 403
+    assert t.client.patch(f"{_URL}/{tid}", json={"name": "x"}, headers=bad).status_code == 403
+    assert t.client.post(f"{_URL}/{tid}/compile", headers=bad).status_code == 403
+    assert t.client.post(f"{_URL}/{tid}/activate", headers=bad).status_code == 403
+    assert t.client.post(f"{_URL}/{tid}/deactivate", headers=bad).status_code == 403
+    assert t.client.delete(f"{_URL}/{tid}", headers=bad).status_code == 403
+    # The read routes are unaffected — they mutate nothing.
+    assert t.client.get(_URL, headers=bad).status_code == 200
+    assert t.client.get(f"{_URL}/{tid}", headers=bad).status_code == 200
+
+
+# ─── detail + preview ────────────────────────────────────────────────────────
+
+
+def test_preview_names_its_format_explicitly(tenant_client):
+    """`format` is an explicit discriminator, never sniffed from a leading `<`:
+    a markdown format that happens to open with a `<br>` would otherwise render
+    as raw HTML."""
+    t = tenant_client.make(slug="acme")
+    prd = _create(t.client, name="P").json()["id"]
+    tickets = _create(t.client, name="T", artifact_type="tickets").json()["id"]
+    spec = _create(t.client, name="S", artifact_type="impl_spec").json()["id"]
+
+    assert t.client.get(f"{_URL}/{prd}/preview").json()["format"] == "html"
+    assert t.client.get(f"{_URL}/{tickets}/preview").json()["format"] == "markdown"
+    assert t.client.get(f"{_URL}/{spec}/preview").json()["format"] == "markdown"
+
+
+def test_preview_of_an_unchecked_format_is_an_empty_body_not_an_error(tenant_client):
+    # The preview is the primary diagnostic for a format that hasn't mapped
+    # cleanly, so refusing it for a non-ready row would remove the diagnosis
+    # exactly when it is needed. All three mapping blocks still render.
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    body = t.client.get(f"{_URL}/{tid}/preview").json()
+
+    assert body["compile_status"] == "pending"
+    assert body["body"] == ""
+    assert body["section_map"] == {
+        "sections": [], "unmapped_house": [], "extra_sections": []
+    }
+
+
+def test_preview_carries_the_compiled_skeleton_and_the_map(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    body = t.client.get(f"{_URL}/{tid}/preview").json()
+
+    assert body["compile_status"] == "ready"
+    assert "<h1>Acme PRD</h1>" in body["body"]
+    assert body["section_map"]["sections"][0]["customer"] == "Background"
+    assert body["section_map"]["unmapped_house"] == ["Riskiest assumption"]
+    assert body["section_map"]["extra_sections"] == ["Launch checklist"]
+
+
+# ─── edit ────────────────────────────────────────────────────────────────────
+
+
+def test_rename_leaves_the_source_and_the_status_alone(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+
+    body = t.client.patch(f"{_URL}/{tid}", json={"name": "Acme PRD v4"}).json()
+    assert body["name"] == "Acme PRD v4"
+    assert body["source_md"] == _SOURCE
+    # A rename is not a re-upload — it must not send a checked format back to
+    # the queue and out of use.
+    assert body["compile_status"] == "ready"
+
+
+def test_replacing_the_source_requeues_but_keeps_the_last_good_skeleton(
+    tenant_client,
+):
+    """The recompile invariant, through the route.
+
+    An ACTIVE format whose source is replaced stays active and keeps its
+    compiled skeleton, so generation goes on using the last good version while
+    the new one is checked. Blanking it would silently reformat every document
+    the company generated for the duration, with nothing to connect the two."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    t.client.post(f"{_URL}/{tid}/activate")
+
+    body = t.client.patch(f"{_URL}/{tid}", json={"source_md": "# New form\n"}).json()
+    assert body["source_md"] == "# New form\n"
+    assert body["compile_status"] == "pending"
+    assert body["is_active"] is True
+    assert "<h1>Acme PRD</h1>" in t.client.get(f"{_URL}/{tid}/preview").json()["body"]
+
+
+def test_an_empty_patch_is_422(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    assert t.client.patch(f"{_URL}/{tid}", json={}).status_code == 422
+
+
+def test_patch_runs_the_same_validation_ladder_as_create(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    assert t.client.patch(f"{_URL}/{tid}", json={"name": "  "}).status_code == 422
+    assert t.client.patch(f"{_URL}/{tid}", json={"name": "x" * 121}).status_code == 422
+    assert t.client.patch(f"{_URL}/{tid}", json={"source_md": " "}).status_code == 400
+
+
+# ─── compile (queued only in this milestone) ─────────────────────────────────
+
+
+def test_compile_requeues_the_row_and_clears_its_old_notes(tenant_client):
+    """No compiler exists yet, so this parks the row back at `pending` and
+    answers the preview shape — exactly what "queued, nothing has picked it up"
+    should look like. The screen's polling contract is written against this from
+    milestone 1 so it does not change when the compiler lands."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    db.set_compile_result(
+        company_id=t.company_id, template_id=tid, compile_status="needs_review",
+        compiled="<html><style></style><h1>Old</h1></html>",
+        compile_notes=[{"code": "missing_evidence_list", "message": "No evidence list."}],
+    )
+
+    body = t.client.post(f"{_URL}/{tid}/compile").json()
+    assert body["compile_status"] == "pending"
+    assert body["compile_notes"] == []
+    # The previous skeleton is not blanked by asking for a recheck.
+    assert "<h1>Old</h1>" in body["body"]
+
+
+# ─── activation ──────────────────────────────────────────────────────────────
+
+
+def test_activating_an_unchecked_format_is_409_with_its_notes(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    db.set_compile_result(
+        company_id=t.company_id, template_id=tid, compile_status="needs_review",
+        compile_notes=[{"code": "missing_evidence_list", "message": "No evidence list."}],
+    )
+
+    resp = t.client.post(f"{_URL}/{tid}/activate")
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    # Same {code, message} vocabulary as compile_notes, so the client translates
+    # one set of codes rather than two.
+    assert detail["code"] == "not_ready"
+    assert detail["notes"] == [
+        {"code": "missing_evidence_list", "message": "No evidence list."}
+    ]
+    assert t.client.get(f"{_URL}/{tid}").json()["is_active"] is False
+
+
+def test_activate_switches_the_active_format_over(tenant_client):
+    t = tenant_client.make(slug="acme")
+    v2 = _create(t.client, name="Acme PRD v2").json()["id"]
+    v3 = _create(t.client, name="Acme PRD v3").json()["id"]
+    _make_ready(t.company_id, v2)
+    _make_ready(t.company_id, v3)
+
+    assert t.client.post(f"{_URL}/{v2}/activate").json()["is_active"] is True
+    assert t.client.post(f"{_URL}/{v3}/activate").json()["is_active"] is True
+
+    rows = {r["id"]: r for r in t.client.get(_URL).json()["templates"]}
+    assert rows[v3]["is_active"] is True
+    # The outgoing format stays in the library — switching back is one click.
+    assert rows[v2]["is_active"] is False
+
+
+def test_deactivate_returns_the_type_to_the_builtin(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    t.client.post(f"{_URL}/{tid}/activate")
+
+    assert t.client.post(f"{_URL}/{tid}/deactivate").json()["is_active"] is False
+    # Idempotent — a double-click is not an error.
+    assert t.client.post(f"{_URL}/{tid}/deactivate").status_code == 200
+    from app import db
+
+    assert db.get_active_template(t.company_id, "prd") is None
+
+
+def test_a_plain_member_cannot_change_the_teams_format(tenant_client):
+    """403, not 404. `_owned_or_404` has already run, so the caller can see
+    this row in their own library — there is no existence left to protect, and
+    a 404 would tell a member their own company's format had vanished. This is
+    a ROLE check; ownership mismatches on the same routes still 404."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    member = _member(tenant_client, t)
+
+    denied = t.client.post(f"{_URL}/{tid}/activate", headers=member)
+    assert denied.status_code == 403
+    # Assert the REASON, not just the status: require_workspace answers 403 too
+    # ("Not a member of this workspace"), so a broken fixture would otherwise
+    # make this test pass for entirely the wrong reason.
+    assert denied.json()["detail"] == "Only an admin can change your team's format."
+    denied = t.client.post(f"{_URL}/{tid}/deactivate", headers=member)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Only an admin can change your team's format."
+    # Reading is never role-gated — a member still sees what's in use.
+    assert t.client.get(_URL, headers=member).status_code == 200
+    assert t.client.get(f"{_URL}/{tid}/preview", headers=member).status_code == 200
+    assert t.client.get(f"{_URL}/{tid}").json()["is_active"] is False
+
+
+def test_a_member_may_still_add_rename_and_recheck_a_format(tenant_client):
+    t = tenant_client.make(slug="acme")
+    member = _member(tenant_client, t)
+
+    created = _create(t.client, headers=member)
+    assert created.status_code == 201, created.text
+    tid = created.json()["id"]
+    assert t.client.patch(f"{_URL}/{tid}", json={"name": "Renamed"},
+                          headers=member).status_code == 200
+    assert t.client.post(f"{_URL}/{tid}/compile", headers=member).status_code == 200
+
+
+# ─── delete ──────────────────────────────────────────────────────────────────
+
+
+def test_a_member_may_delete_a_format_nobody_is_using(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    member = _member(tenant_client, t)
+
+    body = t.client.delete(f"{_URL}/{tid}", headers=member).json()
+    assert body["deleted"] is True
+    assert body["fell_back_to_builtin"] is False
+    assert t.client.get(_URL).json()["templates"] == []
+
+
+def test_a_member_cannot_delete_the_format_the_team_is_using(tenant_client):
+    """Falling back to the built-in is byte-for-byte the effect of
+    deactivating, which is admin-gated — leaving delete open would let a plain
+    member reset company-wide formatting through the side door."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    t.client.post(f"{_URL}/{tid}/activate")
+    member = _member(tenant_client, t)
+
+    denied = t.client.delete(f"{_URL}/{tid}", headers=member)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == (
+        "Only an admin can delete the format your team is using."
+    )
+    assert t.client.get(f"{_URL}/{tid}").json()["is_active"] is True
+
+
+def test_an_admin_deleting_the_active_format_reports_the_fallback(tenant_client):
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    t.client.post(f"{_URL}/{tid}/activate")
+
+    body = t.client.delete(f"{_URL}/{tid}").json()
+    assert body["fell_back_to_builtin"] is True
+    assert body["artifact_type"] == "prd"
+    from app import db
+
+    assert db.get_active_template(t.company_id, "prd") is None
+    assert t.client.get(_URL).json()["templates"] == []
+
+
+# ─── the inertness this milestone promises ───────────────────────────────────
+
+
+def test_nothing_on_the_generation_path_reads_this_table(tenant_client):
+    """Milestone 1 ships a store with no reader. The PRD runner still loads its
+    template from the vendored skill, so an active custom format changes no
+    generated document at all — and `generation_enabled` says so."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    _make_ready(t.company_id, tid)
+    t.client.post(f"{_URL}/{tid}/activate")
+
+    import app.prd_runner as prd_runner
+
+    assert prd_runner._load_part_a_template()
+    assert t.client.get(_URL).json()["generation_enabled"]["prd"] is False

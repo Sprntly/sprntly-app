@@ -1548,6 +1548,207 @@ export const templatesApi = {
     ),
 }
 
+// ---- artifact format templates ----------------------------------------------
+//
+// The company's own PRD / ticket / engineering-spec FORMS. Distinct from
+// `templatesApi` directly above, which is the "what good looks like" exemplar
+// library — additive prose the prd-author skill reads as voice guidance. These
+// are a GOVERNING skeleton: at most one active per artifact type, and every
+// document of that type gets written into it. The two coexist.
+//
+// Mirrors backend/app/routes/artifact_templates.py. `X-Workspace-Id` is
+// injected centrally in this file's `request()` — never add it per call.
+
+/** Which generator a format governs. `impl_spec` is the implementation-spec
+ *  skill's Part B (the markdown the ticket generator consumes). */
+export type ArtifactTemplateType = "prd" | "tickets" | "impl_spec"
+
+/** Where a format is in the checking pipeline.
+ *    pending      — queued, nothing has checked it yet
+ *    compiling    — being checked right now
+ *    ready        — checked clean; can be activated
+ *    needs_review — checked, but something in it has no home; see compile_notes
+ *    failed       — could not be read at all */
+export type CompileStatus =
+  | "pending"
+  | "compiling"
+  | "ready"
+  | "needs_review"
+  | "failed"
+
+/** One problem found while checking a format. NEVER rendered raw — `code` keys
+ *  the translation table in lib/compileNotes.ts, because the backend's own
+ *  wording names CSS classes (`ul.ev`) that must never reach a screen.
+ *  `message` is plain-language and is the fallback for an unknown code. */
+export type CompileNote = {
+  code: string
+  message: string
+}
+
+/** How a section of the customer's format is written. Closed set, validated
+ *  server-side at compile time so one concept never gets two labels. */
+export type SectionForm = "prose" | "bullets" | "table" | "stories"
+
+/** One row of "how we mapped your format": the customer's section name, what
+ *  Sprntly writes into it, and the shape it takes. */
+export type SectionMapEntry = {
+  id: string
+  /** The Sprntly concept that lands here (plain words). */
+  house: string
+  /** The customer's own name for the section. */
+  customer: string
+  order: number
+  form: SectionForm
+}
+
+export type SectionMap = {
+  sections: SectionMapEntry[]
+  /** Sprntly elements the format has no section for — placed where they fit. */
+  unmapped_house: string[]
+  /** Sections that are the customer's alone, filled from their evidence. */
+  extra_sections: string[]
+}
+
+/** One library row. Carries everything the list screen renders, so no row ever
+ *  needs a detail fetch to display. */
+export type ArtifactTemplate = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  uploader_name: string
+  created_at: string | null
+  updated_at: string | null
+  compile_status: CompileStatus
+  is_active: boolean
+  /** Characters in the uploaded markdown. */
+  source_chars: number
+  /** The FIRST compile note's message, or null. */
+  compile_summary: string | null
+  /** How many notes there are — the "See all 3" affordance needs the count,
+   *  and it cannot be derived from `compile_summary`. */
+  compile_note_count: number
+}
+
+/** A row PLUS its uploaded source and full mapping — the edit form's source. */
+export type ArtifactTemplateDetail = ArtifactTemplate & {
+  source_md: string
+  content_hash: string
+  compile_notes: CompileNote[]
+  section_map: SectionMap
+}
+
+/** What the preview modal renders. `format` is an EXPLICIT discriminator —
+ *  never sniff a leading `<`, which is guesswork on model output. `body` is ""
+ *  until a compiler has run, which renders as "we couldn't build a preview
+ *  from this format yet", not as an error. */
+export type ArtifactTemplatePreview = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  compile_status: CompileStatus
+  compile_notes: CompileNote[]
+  format: "html" | "markdown"
+  body: string
+  section_map: SectionMap
+}
+
+/** Which generators actually honour a custom format yet — TOP-LEVEL on the list
+ *  response, not per row, because the common state is zero rows and the screen
+ *  still renders all three group headers. Never hardcode this client-side. */
+export type GenerationEnabled = Record<ArtifactTemplateType, boolean>
+
+export type ArtifactTemplateList = {
+  templates: ArtifactTemplate[]
+  generation_enabled: GenerationEnabled
+}
+
+export type ArtifactTemplateDeleteResult = {
+  deleted: true
+  id: string
+  artifact_type: ArtifactTemplateType
+  /** True when this delete dropped the company back to the built-in format. */
+  fell_back_to_builtin: boolean
+}
+
+export const artifactTemplatesApi = {
+  /** The company's format library, newest first, optionally one type only.
+   *  Poll THIS (not each row) while anything is compiling — one request covers
+   *  every in-flight row. */
+  list: (type?: ArtifactTemplateType) => {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : ""
+    return api.get<ArtifactTemplateList>(`/v1/artifact-templates${qs}`)
+  },
+  /** One format WITH its markdown source and mapping. 404s on a foreign or
+   *  unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+  /** Add a format from PASTED markdown. The server is the authoritative
+   *  validator (422 name/type, 400 empty, 413 over 50,000 characters); the
+   *  modal mirrors the cheap checks. Names are free text and are NOT
+   *  deconflicted — two formats may share a name and neither replaces the
+   *  other. */
+  create: (body: {
+    name: string
+    artifact_type: ArtifactTemplateType
+    source_md: string
+  }) => api.post<ArtifactTemplateDetail>("/v1/artifact-templates", body),
+  /** Add a format from an uploaded `.md` (≤ 2 MB). Same route as `create`,
+   *  multipart instead of JSON; the name defaults to the filename when
+   *  omitted. */
+  upload: (file: File, artifactType: ArtifactTemplateType, name?: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("artifact_type", artifactType)
+    if (name) form.append("name", name)
+    return api.post<ArtifactTemplateDetail>("/v1/artifact-templates", form)
+  },
+  /** Rename a format and/or replace its markdown. Send only what changed — an
+   *  omitted field is left alone, so the rename modal never blanks a source it
+   *  didn't render. Replacing the source re-queues the check; an ACTIVE format
+   *  stays active and keeps serving its last good skeleton meanwhile. */
+  update: (id: string, patch: { name?: string; source_md?: string }) =>
+    api.patch<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+      patch,
+    ),
+  /** Queue a (re)check of this format. Answers the preview shape with the row's
+   *  new status, so the caller can restart polling from the response. */
+  compile: (id: string) =>
+    api.post<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/compile`,
+    ),
+  /** The compiled skeleton + how we mapped the format onto it. Available at
+   *  every status — it is the diagnostic for a format that didn't map
+   *  cleanly. */
+  preview: (id: string) =>
+    api.get<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/preview`,
+    ),
+  /** Make this THE format for its type, company-wide. Admin only (403
+   *  otherwise). 409 with a `{message, code, notes}` detail when the format
+   *  hasn't compiled clean — translate those notes, never print them. */
+  activate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/activate`,
+    ),
+  /** Go back to Sprntly's built-in format for this type. The format stays in
+   *  the library. Admin only (403 otherwise); idempotent. */
+  deactivate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/deactivate`,
+    ),
+  /** Remove a format for the whole company. Deleting the ACTIVE one is admin
+   *  only (403) — it falls back to the built-in, which is what deactivating
+   *  does, and that is admin-gated. `fell_back_to_builtin` says whether it did,
+   *  so the toast can name it. */
+  remove: (id: string) =>
+    api.delete<ArtifactTemplateDeleteResult>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+}
+
 // ---- company documents (onboarding strategy step — scene onbstrat) ----------
 //
 // The strategy/context files a PM uploads on the FINAL onboarding step: a typed

@@ -1184,6 +1184,46 @@ CREATE TABLE custom_skills (
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
 
+-- Artifact format templates (mirrors 20260805120000_artifact_templates.sql,
+-- SQLite-ized). COMPANY-scoped uploaded PRD / ticket / engineering-spec FORMS
+-- (all workspaces in a company share one library and one active format per
+-- type; workspace_id records the uploading workspace only and is never a query
+-- filter). section_map / compile_notes are JSON-encoded TEXT, matching the real
+-- column type. No company/workspace FKs, matching the workspaces-table note:
+-- route tests fabricate tenant ids that have no parent rows.
+--
+-- `is_active INTEGER` + the PARTIAL unique index below are the load-bearing
+-- part of this mirror: they are what makes activate_template's
+-- deactivate-siblings-then-activate order testable, because the other order
+-- trips the constraint here exactly as it does in Postgres.
+CREATE TABLE artifact_templates (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL,
+    workspace_id   TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL
+                     CHECK (artifact_type IN ('prd', 'tickets', 'impl_spec')),
+    name           TEXT NOT NULL,
+    source_md      TEXT NOT NULL,
+    source_chars   INTEGER NOT NULL DEFAULT 0,
+    compiled       TEXT NOT NULL DEFAULT '',
+    section_map    TEXT NOT NULL DEFAULT '{}',
+    compile_status TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (compile_status IN
+                            ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
+    compile_notes  TEXT NOT NULL DEFAULT '[]',
+    content_hash   TEXT NOT NULL DEFAULT '',
+    is_active      INTEGER NOT NULL DEFAULT 0,
+    uploader_id    TEXT NOT NULL,
+    uploader_name  TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX artifact_templates_company_id_idx ON artifact_templates (company_id);
+CREATE INDEX artifact_templates_company_type_idx
+    ON artifact_templates (company_id, artifact_type);
+CREATE UNIQUE INDEX artifact_templates_active_uniq
+    ON artifact_templates (company_id, artifact_type) WHERE is_active = 1;
+
 -- Captured HTML report documents (mirrors 20260730120000_reports.sql,
 -- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
 -- library; workspace_id records the generating workspace and may be NULL).

@@ -1,0 +1,592 @@
+"""Artifact format templates — the library a company keeps its own PRD, ticket
+and engineering-spec FORMS in.
+
+  POST   /v1/artifact-templates                -> add a format (.md upload OR pasted markdown)
+  GET    /v1/artifact-templates?type=prd       -> the library (metadata only) + generation_enabled
+  GET    /v1/artifact-templates/{id}           -> one format WITH its source and mapping
+  GET    /v1/artifact-templates/{id}/preview   -> the compiled skeleton + how we mapped it
+  PATCH  /v1/artifact-templates/{id}           -> rename and/or replace the source
+  POST   /v1/artifact-templates/{id}/compile   -> queue a (re)check of this format
+  POST   /v1/artifact-templates/{id}/activate  -> make it THE format for its type (admin)
+  POST   /v1/artifact-templates/{id}/deactivate-> fall back to Sprntly's built-in (admin)
+  DELETE /v1/artifact-templates/{id}           -> remove it (admin when it is the active one)
+
+**Nothing reads this table on any generation path yet.** The library stores,
+lists, compiles-to-pending and activates; `prd_runner._load_part_a_template()`
+and its impl-spec sibling are untouched, so every generated document is
+byte-identical to what it was before this shipped. `generation_enabled` on the
+list response says so honestly, per type, so a screen can never imply otherwise
+(app/artifact_templates/store.py::GENERATION_ENABLED). Shipping an inert store
+ahead of its reader is the posture routes/company.py:257 already takes with
+company documents.
+
+Templates are COMPANY-SCOPED: all workspaces in a company share one library and
+one active format per artifact type, so every read filters by company_id. The
+uploading workspace is stamped on the row and never queried. Every id lookup
+goes through the company-filtered `db.get_template_by_id`, so a foreign id and a
+missing id both raise `HTTPException(404, "Format not found.")` — **404, never
+403, on ownership**, because a foreign tenant must not be able to tell "exists
+but not yours" from "doesn't exist".
+
+Error ladder (mirrors routes/custom_skills.py's, because the same values end up
+in the same columns): missing/over-limit name → 422, missing or unknown
+artifact type → 422, non-`.md` extension → 422, empty source → 400, upload over
+2 MB → 413, source over MAX_TEMPLATE_SOURCE_CHARS → 413, activating a format
+that has not compiled clean → 409 with the compile notes in `detail`.
+
+Three actions are ADMIN-ONLY, not one: activate, deactivate, and delete OF THE
+ROW THAT IS CURRENTLY ACTIVE. All three change the format the whole company
+writes in; the third does it through the side door, since falling back to the
+built-in is byte-for-byte the effect of deactivating. Those refusals are 403,
+not 404 — see `_require_company_admin` for why that does not contradict the
+ownership rule above.
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+
+from app import db
+from app.artifact_templates.store import (
+    ARTIFACT_TYPES,
+    GENERATION_ENABLED,
+    MAX_TEMPLATE_SOURCE_CHARS,
+    MAX_TEMPLATE_UPLOAD_BYTES,
+    PREVIEW_FORMATS,
+    TemplateNameRequired,
+    TemplateNameTooLong,
+    TemplateNotReady,
+    TemplateSourceEmpty,
+    TemplateSourceTooLarge,
+    TemplateStoreError,
+    TemplateTypeUnknown,
+    assert_activatable,
+    edit_template,
+    normalize_section_map,
+    store_template,
+)
+from app.auth import WorkspaceContext, require_workspace
+from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/artifact-templates", tags=["artifact-templates"])
+
+# Extensions the upload path accepts. A format is markdown — there is no archive
+# form, because a template is one document and not a directory of them.
+_ACCEPTED_EXTS = ("md", "markdown")
+
+
+# ─── payload shapes ──────────────────────────────────────────────────────────
+
+
+def _list_item(row: dict) -> dict:
+    """One library row, as the list renders it.
+
+    Carries everything the screen needs so it never has to fetch a row's detail
+    to fill a list: the badge reads `compile_status`, the reason line reads
+    `compile_summary`, and the "See all 3" affordance reads
+    `compile_note_count`. Deriving that count client-side from `compile_summary`
+    is impossible, and omitting it would either hide that more problems exist or
+    force the preview open just to count them.
+
+    Every field is emitted even when empty — a blank `uploader_name` or a null
+    `created_at` still renders its labelled line on the row (house rule)."""
+    notes = row.get("compile_notes") or []
+    notes = notes if isinstance(notes, list) else []
+    first = notes[0] if notes else None
+    return {
+        "id": row["id"],
+        "name": row.get("name") or "",
+        "artifact_type": row.get("artifact_type") or "",
+        "uploader_name": row.get("uploader_name") or "",
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "compile_status": row.get("compile_status") or "pending",
+        "is_active": bool(row.get("is_active")),
+        "source_chars": int(row.get("source_chars") or 0),
+        # The FIRST note's message, already plain-language. `code` never reaches
+        # the row copy — the client translates it — but the message is the
+        # fallback if a code arrives that the client's table doesn't know.
+        "compile_summary": (first or {}).get("message") if isinstance(first, dict) else None,
+        "compile_note_count": len(notes),
+    }
+
+
+def _detail(row: dict) -> dict:
+    """The list payload PLUS the uploaded source and the full mapping — what the
+    edit form and the preview's mapping panel read.
+
+    Split from the list deliberately: `source_md` runs to 50k characters, and
+    shipping every format's full text to render a library would be absurd."""
+    return {
+        **_list_item(row),
+        "source_md": row.get("source_md") or "",
+        "content_hash": row.get("content_hash") or "",
+        "compile_notes": row.get("compile_notes") or [],
+        "section_map": normalize_section_map(row.get("section_map")),
+    }
+
+
+def _preview(row: dict) -> dict:
+    """The compiled skeleton plus how we mapped the customer's format onto it.
+
+    `format` is an EXPLICIT discriminator rather than something the client
+    sniffs from a leading `<`: sniffing model output renders a markdown format
+    as raw HTML the first time one opens with a `<br>`. PRD skeletons are HTML
+    (a v3 PRD is a self-contained HTML page); tickets and engineering specs are
+    markdown.
+
+    Available at ANY compile status, including `failed` — the preview is the
+    primary diagnostic for a format that didn't map cleanly, so refusing it for
+    a non-ready row would take the diagnosis away exactly when it is needed.
+    `body` is "" until a compiler has run; the client renders that as "we
+    couldn't build a preview from this format yet", not as an error."""
+    artifact_type = row.get("artifact_type") or ""
+    return {
+        "id": row["id"],
+        "name": row.get("name") or "",
+        "artifact_type": artifact_type,
+        "compile_status": row.get("compile_status") or "pending",
+        "compile_notes": row.get("compile_notes") or [],
+        "format": PREVIEW_FORMATS.get(artifact_type, "markdown"),
+        "body": row.get("compiled") or "",
+        "section_map": normalize_section_map(row.get("section_map")),
+    }
+
+
+def _store_error_status(exc: TemplateStoreError) -> int:
+    """The status each store refusal answers with, kept in one place because
+    both create and edit raise the same ladder."""
+    if isinstance(exc, (TemplateSourceTooLarge,)):
+        return 413
+    if isinstance(exc, (TemplateNameRequired, TemplateNameTooLong, TemplateTypeUnknown)):
+        return 422
+    if isinstance(exc, TemplateNotReady):
+        return 409
+    if isinstance(exc, TemplateSourceEmpty):
+        return 400
+    return 400
+
+
+# ─── tenancy + role gates ────────────────────────────────────────────────────
+
+
+def _owned_or_404(company: WorkspaceContext, template_id: str) -> dict:
+    """This company's template by id, or 404.
+
+    The lookup is company-filtered, so a template belonging to another tenant is
+    indistinguishable from one that never existed — no 403 anywhere on this
+    path, because a 403 would confirm the id names a real row somebody else
+    owns."""
+    row = db.get_template_by_id(company.company_id, template_id)
+    if row is None:
+        raise HTTPException(404, "Format not found.")
+    return row
+
+
+def _require_company_admin(company: WorkspaceContext, message: str) -> None:
+    """Gate the three actions that change what the WHOLE COMPANY writes in.
+
+    403, and deliberately not the 404 the ownership rule uses. The two are
+    different checks: `_owned_or_404` hides whether a row exists, this one
+    refuses an action on a row the caller can ALREADY SEE listed. There is no
+    existence left to protect, and answering 404 would tell a member that their
+    own company's format had vanished — a worse lie than the honest refusal.
+    Ownership mismatches on these same routes still 404, because
+    `_owned_or_404` runs on its own.
+
+    The gate is COMPANY role, not workspace role: the library is company-scoped,
+    so a workspace admin who is a plain company member must not be able to
+    reformat every workspace's documents from their own."""
+    if company.role not in ("owner", "admin"):
+        raise HTTPException(403, message)
+
+
+# ─── create ──────────────────────────────────────────────────────────────────
+
+
+async def _read_create_payload(request: Request) -> tuple[str, str, str]:
+    """(name, artifact_type, source_md) from EITHER a multipart .md upload or a
+    JSON body.
+
+    One route, two content types, because a format lives in Confluence or a
+    Google Doc at least as often as it lives on disk — the upload modal defaults
+    to paste and offers a file picker beside it, and forcing the paste path
+    through a synthesized File object client-side would be worse. FastAPI can't
+    declare both shapes on one signature, so the body is read here and the
+    handler stays declarative about everything else. The cost is no OpenAPI body
+    schema for this one route; the tests cover both shapes instead.
+    """
+    ctype = (request.headers.get("content-type") or "").lower()
+    if not ctype.startswith("multipart/form-data"):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — any malformed body is one 400
+            raise HTTPException(400, "Send a JSON body or a multipart .md upload.")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Send a JSON body or a multipart .md upload.")
+        return (
+            str(body.get("name") or ""),
+            str(body.get("artifact_type") or ""),
+            str(body.get("source_md") or ""),
+        )
+
+    form = await request.form()
+    name = str(form.get("name") or "")
+    artifact_type = str(form.get("artifact_type") or "")
+    upload = form.get("file")
+    if upload is None or isinstance(upload, str):
+        raise HTTPException(400, "There's nothing to read yet — attach a .md file.")
+
+    filename = getattr(upload, "filename", "") or ""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in _ACCEPTED_EXTS:
+        raise HTTPException(
+            422,
+            "Only .md files are accepted. Paste the Markdown instead if your "
+            "format is in another app.",
+        )
+    data = await upload.read()
+    if not data:
+        raise HTTPException(400, "There's nothing to read yet — that file is empty.")
+    if len(data) > MAX_TEMPLATE_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            "That file is larger than 2 MB. Formats are usually a few pages of "
+            "Markdown — check you picked the right file.",
+        )
+    try:
+        source_md = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            400,
+            "That file isn't readable as text. Formats must be plain Markdown.",
+        )
+    if not name:
+        # Pre-fill from the filename minus its extension, the way the modal
+        # does, so an upload without a typed name still lands with a usable one
+        # instead of a 422 the user has to go back and fix.
+        stem = filename.rsplit("/", 1)[-1]
+        name = stem[: -(len(ext) + 1)] if ext else stem
+    return name, artifact_type, source_md
+
+
+@router.post(
+    "",
+    status_code=201,
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def create_template(
+    request: Request,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Add a format to the company's library — a pasted markdown body or an
+    uploaded `.md` (≤ 2 MB, ≤ 50,000 characters).
+
+    Lands at `compile_status: "pending"` and governs nothing: a format has to be
+    checked and then activated by an admin before any document is written in it.
+
+    Names are free text and are NOT deconflicted. Two PRD formats called "Acme
+    PRD v3" both list, both keep their own id, and neither replaces the other —
+    the screen shows a non-blocking notice, and there is no trigger to collide
+    the way a custom skill's would."""
+    name, artifact_type, source_md = await _read_create_payload(request)
+    try:
+        row = store_template(
+            company_id=company.company_id,
+            workspace_id=company.workspace_id,
+            uploader_id=company.user_id,
+            uploader_name=company.user_name or company.user_email or "",
+            name=name,
+            artifact_type=artifact_type,
+            source_md=source_md,
+            # Resolved HERE, from this module's imports, so the cap the suite
+            # monkeypatches is the cap the store enforces.
+            max_source_chars=MAX_TEMPLATE_SOURCE_CHARS,
+        )
+    except TemplateStoreError as e:
+        raise HTTPException(_store_error_status(e), str(e))
+    return _detail(row)
+
+
+# ─── read ────────────────────────────────────────────────────────────────────
+#
+# Anything added here with a LITERAL first segment (a `/builtin` preview of the
+# formats Sprntly ships, say) must be declared ABOVE the `/{template_id}` family
+# below: FastAPI matches in declaration order, so a literal under them is
+# swallowed by the catch-all and answers "Format not found." for a path that has
+# nothing to do with an id. Same trap routes/custom_skills.py's `/github/*`
+# routes document.
+
+
+@router.get("")
+def list_templates_route(
+    type: str | None = None,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """The COMPANY's format library, newest first — shared across all of the
+    company's workspaces. `?type=prd|tickets|impl_spec` narrows it.
+
+    `generation_enabled` is TOP-LEVEL and per artifact type, not per row. The
+    state most companies are in is zero rows: the screen still renders all three
+    group headers, and a type whose generator doesn't honour a custom format yet
+    has to say so with no row to hang a flag off. It is served from one backend
+    constant so a client can never claim a customer's tickets changed when
+    nothing reads a ticket format."""
+    if type is not None and type not in ARTIFACT_TYPES:
+        raise HTTPException(
+            422, "Unknown format type. Use prd, tickets, or impl_spec."
+        )
+    rows = db.list_templates(company.company_id, type)
+    return {
+        "templates": [_list_item(r) for r in rows],
+        "generation_enabled": dict(GENERATION_ENABLED),
+    }
+
+
+@router.get("/{template_id}")
+def get_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """One format WITH its uploaded source and its mapping — the edit form's
+    source. 404 on a foreign or missing id, made indistinguishable by the
+    company-filtered lookup."""
+    return _detail(_owned_or_404(company, template_id))
+
+
+@router.get("/{template_id}/preview")
+def preview_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """The compiled skeleton this format produces, plus the section-by-section
+    map. Available at every compile status — it is the diagnostic for a format
+    that didn't map cleanly. 404 on a foreign or missing id."""
+    return _preview(_owned_or_404(company, template_id))
+
+
+# ─── edit ────────────────────────────────────────────────────────────────────
+
+
+class TemplateEditIn(BaseModel):
+    """PATCH body — rename, replace the source, or both.
+
+    Both fields DEFAULT TO None meaning "not sent", so the rename modal can send
+    a name alone without blanking the source it never rendered. That is the
+    opposite of SkillEditIn, which requires its whole trio: there the form owns
+    every field it shows, here two genuinely separate affordances (Rename, and
+    Replace the file) write to one row."""
+
+    name: str | None = None
+    source_md: str | None = None
+
+
+@router.patch(
+    "/{template_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def edit_template_route(
+    template_id: str,
+    body: TemplateEditIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Rename a format and/or replace its markdown, in place on the same row.
+
+    Replacing the source sends the row back to `pending` and drops the notes
+    about the old text — but NOT the compiled skeleton. If this template is the
+    active one, it stays active and keeps serving its last good skeleton while
+    the new source is checked; the alternative silently reformats every document
+    the company generates for the duration of the recompile, and nobody would
+    connect the two events. `is_active = true` with a non-`ready` status is
+    therefore not a defensive edge case — it IS the recompile case, and this is
+    the only path that reaches it.
+
+    The artifact type is not editable: a compiled skeleton is written in the
+    vocabulary of one generator, and moving a format between them would strand
+    it. 404 on a foreign or missing id."""
+    row = _owned_or_404(company, template_id)
+    if body.name is None and body.source_md is None:
+        raise HTTPException(422, "Nothing to change — send a name or a new format.")
+    try:
+        updated = edit_template(
+            company_id=company.company_id,
+            template_id=template_id,
+            row=row,
+            name=body.name,
+            source_md=body.source_md,
+            workspace_id=company.workspace_id,
+            uploader_id=company.user_id,
+            uploader_name=company.user_name or company.user_email or "",
+            max_source_chars=MAX_TEMPLATE_SOURCE_CHARS,
+        )
+    except TemplateStoreError as e:
+        raise HTTPException(_store_error_status(e), str(e))
+    if updated is None:
+        # The row vanished between the read and the write (a concurrent delete).
+        raise HTTPException(404, "Format not found.")
+    return _detail(updated)
+
+
+@router.post(
+    "/{template_id}/compile",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def compile_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Queue a (re)check of this format against what a Sprntly document needs.
+
+    **The compiler itself is not built yet.** This route puts the row back to
+    `pending` with its old notes cleared and answers the same shape the finished
+    version will, so the screen's polling contract, its badges and its "Check
+    again" button are written against a stable contract from the first
+    milestone. A row parked at `pending` is exactly what "queued, nothing has
+    picked it up" should look like, so the answer is honest rather than a stub.
+
+    Not admin-gated: checking a format changes nothing about what the company
+    writes in. 404 on a foreign or missing id."""
+    _owned_or_404(company, template_id)
+    updated = db.set_compile_result(
+        company_id=company.company_id,
+        template_id=template_id,
+        compile_status="pending",
+        # `compiled` and `section_map` are deliberately NOT passed: the last
+        # good skeleton stays standing while a recheck is pending, so an active
+        # format never blanks out mid-check.
+        compile_notes=[],
+    )
+    if updated is None:
+        raise HTTPException(404, "Format not found.")
+    return _preview(updated)
+
+
+# ─── activation ──────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/{template_id}/activate",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def activate_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Make this format THE one every document of its type is written in, for
+    the whole company and every workspace in it.
+
+    Admin-only (403). Refuses with 409 unless the format has compiled clean:
+    activating a `needs_review` format turns downstream features off silently —
+    a PRD with no evidence list loses "View more evidence", one with no input
+    questions loses every answer button in its chat — and nobody attributes that
+    to a format they activated weeks earlier. The refusal carries the compile
+    notes in `detail` so the client can translate them into the same sentences
+    the row's badge shows, rather than inventing a second vocabulary.
+
+    404 on a foreign or missing id, checked independently of the role gate."""
+    _require_company_admin(company, "Only an admin can change your team's format.")
+    row = _owned_or_404(company, template_id)
+    try:
+        assert_activatable(row)
+    except TemplateNotReady as e:
+        # Same {code, message} vocabulary as compile_notes, so the client
+        # translates one set of codes and never prints a raw note.
+        raise HTTPException(
+            409, {"message": str(e), "code": "not_ready", "notes": e.notes}
+        )
+    try:
+        updated = db.activate_template(
+            company.company_id, row["artifact_type"], template_id
+        )
+    except db.ActiveTemplateConflict:
+        raise HTTPException(
+            409,
+            {
+                "message": "Another format just became your team's "
+                           f"{row.get('artifact_type') or 'document'} format. "
+                           "Refresh and try again.",
+                "code": "activation_raced",
+                "notes": [],
+            },
+        )
+    if updated is None:
+        raise HTTPException(404, "Format not found.")
+    return _detail(updated)
+
+
+@router.post(
+    "/{template_id}/deactivate",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def deactivate_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Go back to Sprntly's built-in format for this artifact type. The format
+    stays in the library; only its active flag is cleared.
+
+    Admin-only (403), for the same reason activate is: it changes what the whole
+    company writes in. Idempotent — deactivating an already-inactive format
+    answers 200 with the row, so a double-click is not an error. 404 on a
+    foreign or missing id."""
+    _require_company_admin(company, "Only an admin can change your team's format.")
+    _owned_or_404(company, template_id)
+    updated = db.deactivate_template(company.company_id, template_id)
+    if updated is None:
+        raise HTTPException(404, "Format not found.")
+    return _detail(updated)
+
+
+# ─── delete ──────────────────────────────────────────────────────────────────
+
+
+@router.delete(
+    "/{template_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def delete_template_route(
+    template_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Remove a format from the company's library, for everyone. Documents
+    already written with it are unchanged.
+
+    Deleting the ACTIVE format is admin-only; deleting any other is open to any
+    member. Falling back to the built-in is byte-for-byte the effect of
+    deactivating, and that is admin-gated — leaving delete open would let a
+    plain member reset company-wide formatting through the side door.
+
+    That refusal is 403, NOT the 404 this repo's ownership rule mandates, and
+    the difference is deliberate: `_owned_or_404` has already run, so the caller
+    demonstrably can see this row in their own library. There is no existence
+    left to protect, and a 404 here would tell a member their own company's
+    format had vanished. Ownership mismatches on this route still 404.
+
+    The response says whether the company just fell back to the built-in, so the
+    client can name that in its confirmation rather than guessing from a list it
+    is about to refetch."""
+    row = _owned_or_404(company, template_id)
+    was_active = bool(row.get("is_active"))
+    if was_active:
+        _require_company_admin(
+            company, "Only an admin can delete the format your team is using."
+        )
+    deleted = db.delete_template(company.company_id, template_id)
+    if deleted is None:
+        raise HTTPException(404, "Format not found.")
+    logger.info(
+        "artifact_template_deleted company_present=%s type=%s was_active=%s",
+        bool(company.company_id), row.get("artifact_type"), was_active,
+    )
+    return {
+        "deleted": True,
+        "id": template_id,
+        "artifact_type": row.get("artifact_type") or "",
+        # True when this delete dropped the company back to the built-in format
+        # for that artifact type.
+        "fell_back_to_builtin": was_active,
+    }
