@@ -2805,20 +2805,23 @@ def slack_disconnect(
     row = db.get_slack_connection(company.company_id, company.user_id)
     owned_by_caller = row is not None
 
-    # This member has no personal Slack row of their own. The only Slack
-    # connection they can even SEE is the shared company sync row (see
-    # _company_slack_row_sanitized / resolve_company_slack_row) — someone
-    # else's install doing double duty as the company's voice-of-customer
-    # source — or a pre-per-user-migration orphan (user_id IS NULL). Both
-    # are workspace-scoped, not personal, so an admin/owner may tear them
-    # down on the company's behalf. A non-admin member gets the same 404 as
-    # before: they may never reach, let alone delete, another member's
-    # personal connection.
+    # This member has no personal Slack row of their own. If the only Slack
+    # connection visible to them is the shared company sync row (see
+    # _company_slack_row_sanitized / resolve_company_slack_row), that row is
+    # STILL someone else's personal install, only promoted to also serve the
+    # company's voice-of-customer sync — it is NOT workspace-scoped, and
+    # Slack is dual-typed (catalog.py), so deleting it would also kill that
+    # owner's own DM/brief delivery, not just the company's channel sync.
+    # That case stays owner-only, same as any other personal connection —
+    # an admin gets no special reach into it.
+    #
+    # The one shape with no other remedy is a pre-per-user-migration orphan
+    # (user_id IS NULL): no owner exists to disconnect it themselves, so an
+    # admin/owner may clear it on the company's behalf. Everyone else
+    # (including an admin facing another member's promoted personal row)
+    # gets the same 404 as before.
     if row is None and company.role in ("owner", "admin"):
-        from app.connectors.slack_company import resolve_company_slack_row
-
-        row = resolve_company_slack_row(company.company_id) \
-            or db.get_orphan_slack_connection(company.company_id)
+        row = db.get_orphan_slack_connection(company.company_id)
 
     if not row:
         raise HTTPException(404, "Slack is not connected")

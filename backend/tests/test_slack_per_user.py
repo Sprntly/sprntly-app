@@ -380,17 +380,19 @@ def test_member_b_disconnect_does_not_kill_member_a_slack(slack_env, monkeypatch
     assert db.get_slack_connection(ctx.company_id, ctx.user_a) is None
 
 
-def test_admin_disconnects_company_slack_row_without_personal_install(
+def test_admin_without_personal_install_cannot_disconnect_promoted_personal_row(
     slack_env, monkeypatch
 ):
-    """The stuck-connector reproduction: an admin who never personally
-    installed Slack still sees the shared company connection (flagged
-    `company_connection: true`) and must be able to tear it down. Before the
-    fix, the per-user lookup only ever looked for the CALLER's own row, so
-    this always 404'd and the row survived untouched."""
+    """An admin/owner with no personal Slack install of their own still
+    cannot tear down another member's row just because it's the one
+    promoted to serve the company's voice-of-customer sync — that row is
+    STILL that member's personal connection (Slack is dual-typed: the same
+    row also carries their DM/brief delivery), so it stays owner-only, same
+    as A2. Admin reach is limited to true orphans (user_id IS NULL) — see
+    test_admin_disconnects_legacy_null_user_row."""
     ctx = _two_user_company(monkeypatch)
     # Only B (a regular member) installed Slack; A (owner) has no personal
-    # row of their own — exactly the "unrecoverable" shape reported live.
+    # row of their own, so A sees B's row as the flagged company connection.
     seed_connection(company_id=ctx.company_id, user_id=ctx.user_b,
                     provider="slack", token_blob={"access_token": "xoxb-B"})
 
@@ -399,32 +401,10 @@ def test_admin_disconnects_company_slack_row_without_personal_install(
     assert slack_a["config"]["company_connection"] is True
 
     r = ctx.client_a.delete("/v1/connectors/slack")
-    assert r.status_code == 200
+    assert r.status_code == 404
 
     from app import db
-    assert db.get_slack_connection(ctx.company_id, ctx.user_b) is None
-    listed_after = ctx.client_a.get("/v1/connectors").json()
-    assert not any(c["provider"] == "slack" for c in listed_after["connections"])
-
-
-def test_plain_admin_role_also_disconnects_company_row(slack_env, monkeypatch):
-    """`admin` (not just `owner`) counts as having connector permissions —
-    matches the existing admin gate every other org-wide connector's
-    disconnect route already enforces."""
-    ctx = _two_user_company(monkeypatch)
-    user_c = "user-c-" + uuid.uuid4().hex[:6]
-    _seed_member(ctx.company_id, user_c, "admin")
-    client_c = TestClient(
-        __import__("app.main", fromlist=["app"]).app, headers=supabase_bearer(user_c)
-    )
-    seed_connection(company_id=ctx.company_id, user_id=ctx.user_a,
-                    provider="slack", token_blob={"access_token": "xoxb-A"})
-
-    r = client_c.delete("/v1/connectors/slack")
-    assert r.status_code == 200
-
-    from app import db
-    assert db.get_slack_connection(ctx.company_id, ctx.user_a) is None
+    assert db.get_slack_connection(ctx.company_id, ctx.user_b) is not None
 
 
 def test_admin_disconnects_legacy_null_user_row(slack_env, monkeypatch):
@@ -452,6 +432,42 @@ def test_admin_disconnects_legacy_null_user_row(slack_env, monkeypatch):
     ).execute()
 
     r = ctx.client_a.delete("/v1/connectors/slack")
+    assert r.status_code == 200
+
+    remaining = c.table("connections").select("id").eq("id", row_id).execute()
+    assert remaining.data == []
+
+
+def test_plain_admin_role_also_disconnects_orphan_row(slack_env, monkeypatch):
+    """`admin` (not just `owner`) counts as having connector permissions for
+    the one case that still reaches beyond the caller's own row — a true
+    orphan with no owner to disconnect it themselves."""
+    ctx = _two_user_company(monkeypatch)
+    user_c = "user-c-" + uuid.uuid4().hex[:6]
+    _seed_member(ctx.company_id, user_c, "admin")
+    client_c = TestClient(
+        __import__("app.main", fromlist=["app"]).app, headers=supabase_bearer(user_c)
+    )
+    from app.connectors.tokens import encrypt_token_json
+    from app.db.client import require_client
+
+    enc = encrypt_token_json(json.dumps({"access_token": "xoxb-legacy"}))
+    row_id = uuid.uuid4().hex
+    c = require_client()
+    c.table("connections").insert(
+        {
+            "id": row_id,
+            "company_id": ctx.company_id,
+            "user_id": None,
+            "provider": "slack",
+            "status": "active",
+            "scopes": "",
+            "token_json_encrypted": enc,
+            "config": "{}",
+        }
+    ).execute()
+
+    r = client_c.delete("/v1/connectors/slack")
     assert r.status_code == 200
 
     remaining = c.table("connections").select("id").eq("id", row_id).execute()
