@@ -164,6 +164,24 @@ type GenerateFlowDeps = {
    *  ready-completion sub via `buildReadySub`. Optional — every existing
    *  caller that omits it keeps today's generic fallback copy. */
   prdTitle?: string | null
+  /** Fires when the kickoff POST itself throws (the `catch` block below),
+   *  i.e. before a `prototype_id` ever existed — distinct from `onGenerated`,
+   *  which only fires after a SUCCESSFUL kickoff once the background poll
+   *  settles. Callers that own an overlay lifecycle driven by `onGenStart` /
+   *  `onKickoff` (the GenerateModal call sites, via useGeneratePrototype) pass
+   *  this so a kickoff failure reaches the SAME terminal-outcome handling a
+   *  post-kickoff failure does, instead of leaving the overlay with no signal
+   *  to react to. When supplied, it REPLACES the raw `showToast("Generate
+   *  failed", message)` below — the caller owns showing the error via its own
+   *  curated path — AND the catch now also calls `onOpenChange(false)` before
+   *  invoking it, so a caller-owned "generating" surface (the GenerateModal
+   *  loading card) never outlives the failed request; a caller with no such
+   *  surface to close still gets this for free (its `onOpenChange` no-ops or
+   *  is the same close it already wants). Omit (as the legacy drawer does —
+   *  it has no overlay to signal into and deliberately leaves itself open
+   *  with this raw toast as its only failure surface) to keep today's
+   *  behaviour exactly: no close call, no signal. */
+  onKickoffFailed?: (message: string) => void
 }
 
 /**
@@ -269,6 +287,7 @@ export async function runGenerateFlow({
   onGenerated,
   onKickoff,
   prdTitle,
+  onKickoffFailed,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -322,7 +341,23 @@ export async function runGenerateFlow({
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error"
-    showToast("Generate failed", message)
+    if (onKickoffFailed) {
+      // Deliberately NOT an unconditional `onOpenChange(false)` — that would
+      // silently reverse the legacy drawer's documented stay-open-on-failure
+      // exception (see the call site that omits `onKickoffFailed`, below).
+      // Gating the close on `onKickoffFailed`'s presence routes it through
+      // the caller-supplied signal instead: only a caller that opted in to
+      // owning the failure (GenerateModal, via its overlay wiring) gets a
+      // close call, and it fires BEFORE the caller's own handler so a
+      // caller-owned "generating" surface never renders stale after this
+      // returns. The caller owns the overlay lifecycle and will surface its
+      // own curated error — do not ALSO raw-toast here, or a kickoff failure
+      // would show two failure toasts back to back.
+      onOpenChange(false)
+      onKickoffFailed(message)
+    } else {
+      showToast("Generate failed", message)
+    }
   } finally {
     setSubmitting(false)
   }
@@ -515,6 +550,13 @@ export function DesignAgentDrawerView({
       showToast,
       setSubmitting,
       notifyOnReady,
+      // Deliberately NOT wiring onKickoffFailed here: this view has zero
+      // production mounts (see the file-header status note) and, unlike the
+      // GenerateModal call sites, never introduces a full-screen overlay a
+      // failure signal needs to reach — on a failed kickoff it correctly
+      // stays open with the raw `showToast("Generate failed", …)` above as
+      // its only (and sufficient) failure surface. Considered and left
+      // unchanged deliberately, not by omission.
       onGenerated,
       onKickoff,
     })
