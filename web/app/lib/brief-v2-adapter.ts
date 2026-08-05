@@ -21,6 +21,7 @@ import type {
 } from "../types/content"
 import type { Brief, BriefSkillCta, BriefSkillType, ChartHint, Insight } from "./api"
 import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
+import { INSIGHT_TYPE_BADGES, displayInsightType } from "./insight-types"
 
 // ---- Types ----------------------------------------------------------------
 
@@ -407,8 +408,15 @@ function buildCardBase(
   insight: Insight,
   rank: number,
   priority: string,
+  selectedTypes: string[] = [],
 ): BriefV2CardBase {
   const m = metaFor(insight.tag)
+  // The card pill names the finding in the READER'S vocabulary — the same six
+  // types the picker offers — so a brief visibly answers "did this honour what
+  // I selected". Falls back to the skill taxonomy's own label only for legacy
+  // findings that carry no `insight_types` (see displayInsightType).
+  const prefSlug = displayInsightType(insight.insight_types, selectedTypes)
+  const prefBadge = prefSlug ? INSIGHT_TYPE_BADGES[prefSlug] : null
   return {
     detailKey: detailKeyFor(m.tagType, rank),
     actionAccent: m.actionAccent,
@@ -416,8 +424,8 @@ function buildCardBase(
     tagType: m.tagType,
     tagLabel: m.tagLabel,
     skillType: resolveSkillType(insight),
-    skillAccent: accentForInsight(insight),
-    skillLabel: labelForInsight(insight),
+    skillAccent: prefBadge ? prefBadge.accent : accentForInsight(insight),
+    skillLabel: prefBadge ? prefBadge.badge : labelForInsight(insight),
     skillState: insight._card?.state === "updated" ? "updated" : null,
     insightTypes: Array.isArray(insight.insight_types) ? insight.insight_types : [],
     ctas: Array.isArray(insight._card?.ctas) ? insight._card!.ctas : [],
@@ -444,18 +452,22 @@ function buildCardBase(
   }
 }
 
-function buildHero(insight: Insight, rank: number): BriefV2HeroFinding {
+function buildHero(
+  insight: Insight, rank: number, selectedTypes: string[] = [],
+): BriefV2HeroFinding {
   return {
     kind: "hero",
-    ...buildCardBase(insight, rank, "P0"),
+    ...buildCardBase(insight, rank, "P0", selectedTypes),
     quote: pickHeroQuote(insight),
   }
 }
 
 const COMPACT_CHIP_CAP = 2
 
-function buildCompact(insight: Insight, rank: number, priority: string): BriefV2CompactFinding {
-  const base = buildCardBase(insight, rank, priority)
+function buildCompact(
+  insight: Insight, rank: number, priority: string, selectedTypes: string[] = [],
+): BriefV2CompactFinding {
+  const base = buildCardBase(insight, rank, priority, selectedTypes)
   const trimmed = base.convergence.slice(0, COMPACT_CHIP_CAP)
   return {
     kind: "compact",
@@ -597,7 +609,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
   const heroIdx = pickHeroIndex(insights, selectedTypes)
   const heroInsight = insights[heroIdx]
   const heroRank = rankMap.get(heroIdx) ?? 1
-  const hero = buildHero(heroInsight, heroRank)
+  const hero = buildHero(heroInsight, heroRank, selectedTypes)
 
   const supporting: BriefV2CompactFinding[] = []
   let supportingIdx = 0
@@ -605,7 +617,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     if (i === heroIdx) return
     const r = rankMap.get(i) ?? 1
     supportingIdx += 1
-    supporting.push(buildCompact(ins, r, `P${supportingIdx}`))
+    supporting.push(buildCompact(ins, r, `P${supportingIdx}`, selectedTypes))
   })
 
   const productArea =

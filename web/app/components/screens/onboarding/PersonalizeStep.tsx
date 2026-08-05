@@ -268,9 +268,13 @@ export function PersonalizeStep() {
       {error && <div className="onb-form-error">{error}</div>}
 
       <div className="onb-section">
+        {/* Wording is kept identical to Settings → Comms & Brief: the two
+            screens write the same key, so they must also state the same rule.
+            "Leave empty for everything" is load-bearing — an empty selection is
+            a real choice (no filtering), not an unfinished form. */}
         <div className="onb-section-h">
           What should your workspace surface?{" "}
-          <span className="opt">— pick any</span>
+          <span className="opt">— pick any, or leave empty for everything</span>
         </div>
       </div>
 

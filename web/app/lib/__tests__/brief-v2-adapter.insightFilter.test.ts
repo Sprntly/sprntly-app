@@ -161,3 +161,76 @@ describe("hero pick under an active insight-type filter", () => {
     expect(state.kpiTiles.length).toBeGreaterThan(0)
   })
 })
+
+// The pill a reader sees must name the finding in the SAME vocabulary the
+// picker offers. Before 2026-08-05 it showed the skill taxonomy's own 8 types
+// (Reliability, Growth, Demand, …) — "Growth" isn't even a preference type —
+// so a brief gave no way to tell whether a selection had been honoured.
+describe("card pill uses the preference vocabulary", () => {
+  it("labels a card with its own insight type, not the skill type", () => {
+    // tag `something_broken` ⇒ skill type `reliability` ⇒ old pill "Reliability".
+    const f = finding("A", ["wins"])
+    const state = briefToBriefV2State(briefWithPool([f], [f]), [])
+    expect(state.hero?.skillLabel).toBe("Win")
+    expect(state.hero?.skillAccent).toBe("#0f7d70")
+    // The underlying skill type is still carried for anything that needs it.
+    expect(state.hero?.skillType).toBe("reliability")
+  })
+
+  it("surfaces the selected type when the finding's PRIMARY wasn't picked", () => {
+    // Primary is top_problems, but the reader asked only for user_feedback —
+    // the card must say so, otherwise it can't evidence the selection.
+    const f = finding("A", ["top_problems", "user_feedback"])
+    const brief = briefWithPool([f], [f])
+    expect(briefToBriefV2State(brief, ["user_feedback"]).hero?.skillLabel).toBe("User feedback")
+    expect(briefToBriefV2State(brief, []).hero?.skillLabel).toBe("Top problem")
+  })
+
+  it("keeps the finding's PRIMARY type when both of its types were picked", () => {
+    // Walking the SELECTION order instead of the finding's would let the
+    // reader's first chip override every card's primary — on a real staging
+    // brief that collapsed two distinct findings to the same "Top problem"
+    // pill. The finding's own order wins; the selection only breaks the tie.
+    const a = finding("A", ["top_problems", "reliability_signals"])
+    const b = finding("B", ["build_priorities", "top_problems"])
+    const sel = ["top_problems", "build_priorities", "reliability_signals"]
+    const state = briefToBriefV2State(briefWithPool([a, b], [a, b]), sel)
+    expect(state.hero?.skillLabel).toBe("Top problem")
+    expect(state.supporting.map((s) => s.skillLabel)).toEqual(["What to build"])
+  })
+
+  it("covers every selectable type with a distinct pill", () => {
+    const expected: Record<string, string> = {
+      top_problems: "Top problem",
+      build_priorities: "What to build",
+      user_feedback: "User feedback",
+      competitor_moves: "Competitor moves",
+      reliability_signals: "Reliability",
+      wins: "Win",
+    }
+    for (const [slug, label] of Object.entries(expected)) {
+      const f = finding(slug, [slug])
+      expect(briefToBriefV2State(briefWithPool([f], [f]), []).hero?.skillLabel).toBe(label)
+    }
+    // Distinct labels, so two differently-typed cards never read the same.
+    expect(new Set(Object.values(expected)).size).toBe(6)
+  })
+
+  it("keeps the skill label on a LEGACY finding with no insight_types", () => {
+    // 8 skill types do not map onto 6 preference slugs (retention, demand,
+    // engagement, compliance have no faithful counterpart), so rather than
+    // invent one we leave pre-classifier briefs exactly as they render today.
+    const legacy = { ...finding("old", []), insight_types: undefined } as Insight
+    const state = briefToBriefV2State(briefWithPool([legacy], [legacy]), [])
+    expect(state.hero?.skillLabel).toBe("Reliability") // from tag → skill type
+    expect(state.hero?.skillAccent).toBe("#c0473c")
+  })
+
+  it("labels supporting cards the same way as the hero", () => {
+    const a = finding("A", ["reliability_signals"])
+    const b = finding("B", ["competitor_moves"])
+    const state = briefToBriefV2State(briefWithPool([a, b], [a, b]), [])
+    expect(state.hero?.skillLabel).toBe("Reliability")
+    expect(state.supporting.map((s) => s.skillLabel)).toEqual(["Competitor moves"])
+  })
+})

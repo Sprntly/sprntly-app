@@ -97,6 +97,22 @@ def _type_label(skill_type: str) -> str:
     return t[:1].upper() + t[1:] if t else "Insight"
 
 
+def _pill_for(ins: dict, selected: "list[str] | None") -> "tuple[str, str] | None":
+    """(label, accent) for a finding's pill, named in the READER'S vocabulary.
+
+    The pill used to show the skill taxonomy's own 8 types, which the preference
+    picker does not offer — so the emailed card gave no way to tell whether the
+    reader's selection had been honoured. It now names the finding's
+    `insight_types`, preferring the type the reader actually picked. Returns
+    None for a legacy finding with no `insight_types`, and the caller keeps the
+    old skill label rather than inventing a mapping.
+    """
+    from app.insight_types import INSIGHT_TYPE_BADGES, display_insight_type
+
+    slug = display_insight_type(ins.get("insight_types"), selected)
+    return INSIGHT_TYPE_BADGES.get(slug) if slug else None
+
+
 def render_brief_email(brief: dict) -> tuple[str, str, str]:
     """Render (subject, html_body, text_body) for a brief payload.
 
@@ -115,6 +131,11 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
     week = brief.get("week_label", "")
     insights = (brief.get("insights") or [])[:MAX_INSIGHTS_IN_EMAIL]
     url = _app_brief_url()
+    # The reader's stored insight-type selection, persisted on the brief at
+    # generation time — used to name each pill in the vocabulary they picked
+    # from. Absent on briefs generated before the preference reorder.
+    selected = ((brief.get("_insight_prefs") or {}).get("selected")
+                if isinstance(brief.get("_insight_prefs"), dict) else None)
 
     subject = f"Top Insights — {week}: {headline}" if week else f"Top Insights: {headline}"
 
@@ -124,7 +145,8 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
         for i, ins in enumerate(insights):
             card = ins.get("_card") if isinstance(ins.get("_card"), dict) else None
             if card:
-                label = _type_label(card.get("type") or "")
+                pill = _pill_for(ins, selected)
+                label = pill[0] if pill else _type_label(card.get("type") or "")
                 title = (card.get("title") or ins.get("title") or "").strip()
                 sources = [str(s).strip() for s in (card.get("sources") or []) if str(s).strip()]
             else:
@@ -150,7 +172,7 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
     def esc(s: str) -> str:
         return html.escape(s if isinstance(s, str) else (str(s) if s is not None else ""))
 
-    cards_html = [_render_card_html(ins, esc) for ins in insights]
+    cards_html = [_render_card_html(ins, esc, selected) for ins in insights]
     if not cards_html:
         cards_html.append(
             f'<div style="color:{_INK_SOFT};font-size:15px;'
@@ -197,7 +219,7 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
     return subject, html_body, text_body
 
 
-def _render_card_html(ins: dict, esc) -> str:
+def _render_card_html(ins: dict, esc, selected: "list[str] | None" = None) -> str:
     """Render one insight as a skill-style card. Falls back to the legacy
     tag/title/subtitle layout when the insight carries no `_card`. Never
     raises on missing fields."""
@@ -209,6 +231,10 @@ def _render_card_html(ins: dict, esc) -> str:
         # model can mismatch. Unknown types fall back to the brand green.
         accent = accent_for_skill_type(skill_type) or _GREEN
         label = _type_label(skill_type)
+        # Prefer the reader's own vocabulary when the finding carries one.
+        pill = _pill_for(ins, selected)
+        if pill:
+            label, accent = pill
         title = (card.get("title") or ins.get("title") or "").strip()
         body = (card.get("body") or "").strip()
         sources = [str(s).strip() for s in (card.get("sources") or []) if str(s).strip()]
