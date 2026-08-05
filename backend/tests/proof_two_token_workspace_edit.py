@@ -36,6 +36,17 @@ FOUR IDENTITIES
                      measurement instead of a grep. This branch does not
                      touch role handling, so D's row reads the same before
                      and after.
+  E  the OTHER-WS  — same COMPANY, but a member of a DIFFERENT workspace
+                     only, acting with `X-Workspace-Id: <that other ws>`.
+                     Apurva's unit of access is the WORKSPACE, so this is
+                     the isolation case that actually matters: "any user in
+                     workspace" means a user who is NOT in it gets nothing.
+
+The PRD's dataset is deliberately BOUND to workspace 1 (a real `datasets`
+row with workspace_id). Without that binding `_dataset_in_workspace` takes
+its legacy-rollout fallback — an unbound dataset is reachable from any
+workspace of the owning company — and E's isolation result would be
+meaningless.
 
 Tokens are Supabase-signed JWTs minted by tests/_company_helpers.py's
 `supabase_bearer`, the same helper the existing suite uses. No password is
@@ -140,6 +151,24 @@ def test_proof(isolated_settings, monkeypatch):
     upsert_workspace_member(ws["id"], d_id, "viewer")
     d = supabase_bearer(d_id)
 
+    # E: same company, but only in a SECOND workspace, and acting in it.
+    from app.db.workspaces import create_workspace
+
+    ws2 = create_workspace(company, "Notifications")
+    e_id = "userE-otherws-" + uuid.uuid4().hex[:6]
+    require_client().table("company_members").insert(
+        {"id": uuid.uuid4().hex, "company_id": company, "user_id": e_id,
+         "role": "member"}
+    ).execute()
+    upsert_workspace_member(ws2["id"], e_id, "member")
+    e = {**supabase_bearer(e_id), "X-Workspace-Id": ws2["id"]}
+
+    # Bind the dataset to workspace 1, so workspace scoping is REAL and E's
+    # refusal below is not an artifact of the unbound-dataset fallback.
+    require_client().table("datasets").insert(
+        {"slug": "proofco", "display_name": "Proofco", "workspace_id": ws["id"]}
+    ).execute()
+
     brief_id = db.save_brief("proofco", "W", {"insights": []}, schema_version=1)
     prd = db.start_prd(brief_id=brief_id, insight_index=0, title="Created by A",
                        template_version=1, variant="v2")
@@ -163,12 +192,32 @@ def test_proof(isolated_settings, monkeypatch):
     say(f"D VIEWER     {d_id}   role='viewer', same workspace (roles fact-check)")
     say(f"PRD id {prd}     ticket {key}")
 
+    # ── NON-SHARE PATH, READS. "Open the PRD from the sidebar" is these
+    #    calls: the ordinary company-scoped routes, no ?share= anywhere.
+    reads = [
+        ("open PRD          GET  /v1/prd/{prd}", "/v1/prd/{prd}"),
+        ("PRD versions      GET  /v1/prd/{prd}/versions", "/v1/prd/{prd}/versions"),
+        ("open ticket       GET  /v1/tickets/{key}/data", "/v1/tickets/{key}/data"),
+    ]
+    say("")
+    say("--- NON-SHARE PATH, READS (the 'open it from the sidebar' route)")
+    read_results: dict[str, dict[str, int]] = {}
+    for who, headers in (("A", a), ("B", b), ("C", c), ("E", e)):
+        read_results[who] = {}
+        codes = []
+        for label, path in reads:
+            r = client.get(path.format(prd=prd, key=key), headers=headers)
+            read_results[who][label] = r.status_code
+            codes.append(f"{r.status_code} {label.split()[0]}-{label.split()[1]}")
+        say(f"    {who}: " + "   ".join(codes))
+
     results: dict[str, dict[str, int]] = {}
     for who, headers, expect in (
         ("A", a, "expect 2xx — creator, no regression"),
-        ("B", b, "expect 2xx — THE REQUIREMENT"),
-        ("C", c, "expect refusal or a write that cannot touch A's rows"),
+        ("B", b, "expect 2xx — THE REQUIREMENT (non-creator, same workspace)"),
+        ("C", c, "different COMPANY — expect refusal / no reach into A's rows"),
         ("D", d, "role='viewer' — FACT-CHECK ONLY, unchanged by this branch"),
+        ("E", e, "same company, DIFFERENT workspace — the workspace boundary"),
     ):
         say("")
         say(f"--- {who}  ({expect})")
@@ -215,6 +264,21 @@ def test_proof(isolated_settings, monkeypatch):
     c_rows = (require_client().table("ticket_edits").select("company_id, title")
               .eq("ticket_key", key).execute().data or [])
     say("")
+    say("--- FINDING: the workspace boundary holds for PRDs, NOT for tickets")
+    say("    E is in a DIFFERENT workspace of the SAME company.")
+    say(f"    PRD  write : {results['E']['PRD autosave/save   PUT  /v1/prd/{prd}']}"
+        "  <- refused, correct")
+    say(f"    PRD  read  : {read_results['E']['open PRD          GET  /v1/prd/{prd}']}"
+        "  <- refused, correct")
+    say(f"    tkt  write : {results['E']['Ticket fields       PUT  /v1/tickets/{key}/fields']}"
+        "  <- ALLOWED, and it landed on A's row")
+    say(f"    tkt  read  : {read_results['E']['open ticket       GET  /v1/tickets/{key}/data']}"
+        "  <- ALLOWED")
+    say("    Cause: every route in app/routes/tickets.py scopes on")
+    say("    company.company_id and never reads ctx.workspace_id.")
+    say("    PRE-EXISTING — identical on origin/main. Not caused by this branch.")
+
+    say("")
     say("--- what C's ticket 200s actually wrote (ticket_edits rows for this key)")
     for row in c_rows:
         owner = ("A+B's company" if row["company_id"] == company
@@ -230,7 +294,10 @@ def test_proof(isolated_settings, monkeypatch):
 
     # ── Assertions, so a wrong story fails loudly instead of printing ──────
 
-    # 1. THE REQUIREMENT: the non-creator colleague can edit both artifacts.
+    # 1. THE REQUIREMENT, on the NON-SHARE path: the non-creator colleague
+    #    can OPEN and EDIT both artifacts through the ordinary routes.
+    for label, code in read_results["B"].items():
+        assert 200 <= code < 300, f"colleague B could not OPEN via {label}: {code}"
     for label, code in results["B"].items():
         assert 200 <= code < 300, f"colleague B was REFUSED by {label}: {code}"
 
@@ -244,6 +311,39 @@ def test_proof(isolated_settings, monkeypatch):
     for label, code in results["C"].items():
         if "/v1/prd/" in label:
             assert code == 404, f"ISOLATION BREACH: outsider C got {code} on {label}"
+
+    # 3b. THE WORKSPACE BOUNDARY (Apurva's unit of access).
+    #     PRDs honour it: E, a member of a DIFFERENT workspace in the same
+    #     company, is refused.
+    for label, code in results["E"].items():
+        if "/v1/prd/" in label:
+            assert code == 404, (
+                f"WORKSPACE BREACH: E (other workspace) got {code} on {label}"
+            )
+    for label, code in read_results["E"].items():
+        if "/v1/prd/" in label:
+            assert code == 404, (
+                f"WORKSPACE BREACH: E (other workspace) could read via {label}"
+            )
+
+    #     TICKETS DO NOT. This is a PRE-EXISTING gap, not something this
+    #     branch introduces: every route in app/routes/tickets.py scopes on
+    #     `company.company_id` alone and never consults
+    #     `ctx.workspace_id`, so a member of ANY workspace in the company
+    #     can read and write ANY ticket in it. The assertions below pin the
+    #     CURRENT behaviour deliberately — if someone later scopes tickets
+    #     to the workspace, this proof fails loudly and the finding gets
+    #     re-reported rather than silently going stale.
+    for label, code in results["E"].items():
+        if "/v1/tickets/" in label:
+            assert 200 <= code < 300, (
+                "KNOWN GAP CHANGED: tickets used to be company-scoped and E "
+                f"could write them; now {label} returns {code}. Re-report."
+            )
+    assert read_results["E"]["open ticket       GET  /v1/tickets/{key}/data"] == 200, (
+        "KNOWN GAP CHANGED: E could previously READ a ticket from another "
+        "workspace. Re-report."
+    )
     a_row = [r for r in c_rows if r["company_id"] == company]
     assert len(a_row) == 1, "expected exactly one ticket_edits row in A's company"
     # D (viewer) writes after C in the loop above, so whoever the LAST
