@@ -143,8 +143,15 @@ import { ChatScreen } from "../ChatScreen"
  *  rendered by AppShell, not by ChatScreen. */
 function Probe() {
   const { content } = useContent()
-  const { contentPanelTab } = useNavigation()
+  const { contentPanelTab, closeContentPanel } = useNavigation()
   return (
+    <>
+    {/* OUTSIDE the probe node: `probeState` parses that node's textContent, so
+        anything else rendered inside it lands in the JSON and breaks the parse.
+        The panel's own close button lives in ContentPanel, which AppShell
+        renders and these tests do not — so the strip's reopen affordance (only
+        shown while the panel is CLOSED) needs a way to get there. */}
+    <button type="button" data-testid="probe-close-panel" onClick={closeContentPanel}>close</button>
     <div data-testid="probe" data-panel={contentPanelTab ?? ""}>
       {JSON.stringify({
         generating: !!content.ticketSetGenerating,
@@ -158,6 +165,7 @@ function Probe() {
           : null,
       })}
     </div>
+    </>
   )
 }
 
@@ -408,5 +416,102 @@ describe("ChatScreen — reopening a thread that produced tickets", () => {
     await waitFor(() => expect(byConversation).toHaveBeenCalledWith(42))
     expect(panelTab()).toBe("")
     expect(screen.queryByTestId("chat-ticket-set-cta")).toBeNull()
+  })
+})
+
+describe("ChatScreen — the strip's way back to a closed ticket panel", () => {
+  it("offers the reopen button once the panel is closed, and reopens on tickets", async () => {
+    // The in-chat CTA sits on the turn that produced the set, so it scrolls away
+    // as the thread grows. The strip button does not move — it is the affordance
+    // a PRD and a report already have, and a ticket set had none.
+    byConversation.mockResolvedValue({
+      ticket_sets: [{ id: 7, title: "Webhook retries", status: "ready", created_at: null }],
+    })
+    seedThreadTab()
+    await act(async () => { renderChat() })
+
+    await waitFor(() => expect(panelTab()).toBe("tickets"))
+    // Hidden while the panel is open — it has its own close.
+    expect(screen.queryByTestId("chat-reopen-artifact")).toBeNull()
+
+    await act(async () => { fireEvent.click(screen.getByTestId("probe-close-panel")) })
+    const reopen = await waitFor(() => screen.getByTestId("chat-reopen-artifact"))
+    expect(reopen.getAttribute("aria-label")).toBe("View Tickets")
+
+    getSet.mockClear()
+    await act(async () => { fireEvent.click(reopen) })
+    await waitFor(() => expect(panelTab()).toBe("tickets"))
+    // Re-read rather than trusting shared content — the panel is global.
+    await waitFor(() => expect(getSet).toHaveBeenCalledWith(7))
+  })
+
+  it("does not offer it for a FAILED set — the footer's retry owns that", async () => {
+    byConversation.mockResolvedValue({
+      ticket_sets: [{ id: 3, title: "", status: "failed", created_at: null }],
+    })
+    seedThreadTab()
+    await act(async () => { renderChat() })
+
+    await waitFor(() => expect(screen.getByTestId("chat-ticket-set-cta").textContent).toContain("Retry tickets"))
+    expect(panelTab()).toBe("")
+    // The strip reopens things that exist; it is not a second retry button.
+    expect(screen.queryByTestId("chat-reopen-artifact")).toBeNull()
+  })
+})
+
+describe("ChatScreen — a set belongs to ONE thread", () => {
+  it("drops another thread's set when switching tabs", async () => {
+    // `content.ticketSet` is global, but it is also what makes the Tickets tab
+    // APPEAR. Carried across a switch it lands on the wrong thread — and on a
+    // thread with a PRD it displaces that PRD's own tickets. `handleOpenPrd`
+    // clears it, but only when opening an EXISTING PRD; a new chat that
+    // GENERATES one never goes through there, which is how a stale set showed
+    // up on a freshly generated PRD and then "fixed itself" moments later.
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+      { id: "tab-a", title: "Webhook failures", dbConvId: 42, briefMeta: null, prdId: null, thread: [] },
+      { id: "tab-b", title: "Something else", dbConvId: 43, briefMeta: null, prdId: null, thread: [] },
+    ]))
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
+    byConversation.mockImplementation(async (cid: number) =>
+      cid === 42
+        ? { ticket_sets: [{ id: 7, title: "Webhook retries", status: "ready", created_at: null }] }
+        : { ticket_sets: [] })
+
+    await act(async () => { renderChat() })
+    await waitFor(() => expect(probeState().set).toMatchObject({ id: 7 }))
+
+    const tabB = Array.from(document.querySelectorAll(".chat-tab"))
+      .find((el) => (el.textContent || "").includes("Something else")) as HTMLElement
+    expect(tabB).toBeTruthy()
+    await act(async () => { fireEvent.click(tabB) })
+
+    // Thread B produced no tickets, so it must show none.
+    await waitFor(() => expect(probeState().set).toBeNull())
+    expect(probeState().generating).toBe(false)
+  })
+
+  it("keeps a set when switching BACK to the thread that owns it", async () => {
+    // The mirror case: clearing indiscriminately would flicker the panel every
+    // time the owning tab regained focus.
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+      { id: "tab-a", title: "Webhook failures", dbConvId: 42, briefMeta: null, prdId: null, thread: [] },
+      { id: "tab-b", title: "Something else", dbConvId: 43, briefMeta: null, prdId: null, thread: [] },
+    ]))
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
+    byConversation.mockImplementation(async (cid: number) =>
+      cid === 42
+        ? { ticket_sets: [{ id: 7, title: "Webhook retries", status: "ready", created_at: null }] }
+        : { ticket_sets: [] })
+
+    await act(async () => { renderChat() })
+    await waitFor(() => expect(probeState().set).toMatchObject({ id: 7 }))
+
+    const tab = (name: string) => Array.from(document.querySelectorAll(".chat-tab"))
+      .find((el) => (el.textContent || "").includes(name)) as HTMLElement
+    await act(async () => { fireEvent.click(tab("Something else")) })
+    await waitFor(() => expect(probeState().set).toBeNull())
+
+    await act(async () => { fireEvent.click(tab("Webhook failures")) })
+    await waitFor(() => expect(probeState().set).toMatchObject({ id: 7, status: "ready" }))
   })
 })

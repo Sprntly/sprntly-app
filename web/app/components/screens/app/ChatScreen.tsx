@@ -1243,6 +1243,15 @@ export function ChatScreen() {
   // hundred milliseconds later when a fetch comes back.
   const contentPanelTabRef = useRef(contentPanelTab)
   contentPanelTabRef.current = contentPanelTab
+  // Which ticket set the SHARED panel is currently holding, for the tab-switch
+  // reconcile. A ref rather than a dependency: taking `content` would re-run
+  // that reconcile on every content write, when the only thing it reacts to is
+  // the active tab changing.
+  const ticketSetShownRef = useRef<{ id: number | null; busy: boolean }>({ id: null, busy: false })
+  ticketSetShownRef.current = {
+    id: content.ticketSet?.id ?? null,
+    busy: !!content.ticketSetGenerating,
+  }
   // True while this ChatScreen is mounted. Detached Ask polls read it to stop
   // (and LEAVE their persisted ask_id in place) when the user navigates to
   // another screen — so a background completion isn't dropped by a no-op state
@@ -4365,6 +4374,34 @@ export function ChatScreen() {
         ticketSetAutoOpenedRef.current.delete(prevTabForPanelRef.current)
       }
     }
+    // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
+    // any of the early returns below — a set left on screen is wrong on every
+    // switch, including the ones this reconcile then declines to act on.
+    //
+    // `content.ticketSet` is global but a set belongs to ONE thread, and it is
+    // not merely what the Tickets tab renders: it is what makes that tab APPEAR
+    // (ContentPanel's hidden gate). Left behind, thread A's set shows up on
+    // thread B — and on a thread that has a PRD it displaces the PRD's own
+    // tickets, which is what the glitch looked like from the outside.
+    //
+    // `handleOpenPrd` already clears it, but only on the open-an-EXISTING-PRD
+    // path. A brand-new chat that GENERATES a PRD never goes through it, so the
+    // stale set survived until some later effect happened to fire — hence a
+    // wrong panel that "fixed itself after a moment".
+    if (switchedTab) {
+      const shown = ticketSetShownRef.current
+      if (shown.id != null || shown.busy) {
+        const arriving = tabsRef.current.find((t) => t.id === activeTabId)
+        // The arriving tab's OWN set stays put (re-reading it would flicker),
+        // and so does a run in flight there. Anything else belongs to a thread
+        // the user just left.
+        const ownsIt = !!arriving?.ticketSetRunning
+          || (arriving?.ticketSetId != null && arriving.ticketSetId === shown.id)
+        if (!ownsIt) {
+          setContent({ ticketSet: null, ticketSetGenerating: false, ticketSetStandalone: false })
+        }
+      }
+    }
     prevTabForPanelRef.current = activeTabId
     // `pendingReportFocus` suppresses the reconcile for the same reason
     // `prdPanelPending` does: a report opened from Artifacts resumes its thread,
@@ -5349,11 +5386,27 @@ export function ChatScreen() {
       }
     }
     if (prdInScope) return { label: "View PRD", onClick: handleOpenPrd }
+    // A thread whose artifact is a standalone ticket set gets the same way back
+    // as a PRD or a report. Without this, closing the panel on a PRD-less chat
+    // left the tickets reachable only by scrolling the transcript back to the
+    // turn that produced them — the strip button is the one affordance that
+    // does not move as the thread grows.
+    //
+    // A FAILED set is excluded on purpose: the reply footer's "Retry tickets"
+    // owns that state, and the strip is for reopening something that exists.
+    // Note a thread holding both a report and a set shows the report — the
+    // newest-wins comparison above needs a timestamp, and the tab carries only
+    // the set's id, not when it was written.
+    if (activeTab?.ticketSetId != null && activeTab.ticketSetStatus !== "failed") {
+      const tabId = activeTab.id
+      return { label: "View Tickets", onClick: () => handleTicketSetAction(tabId) }
+    }
     if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
     return null
   }, [
     isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
     activeTab?.prdGenerating, activeTab?.prdLoading, activeTab?.prd?.generatedAt,
+    activeTab?.id, activeTab?.ticketSetId, activeTab?.ticketSetStatus, handleTicketSetAction,
     handleOpenPrd, handleOpenEvidence, threadReports, setContent, openContentPanel,
   ])
 
