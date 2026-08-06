@@ -820,3 +820,45 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     expect(document.body.textContent).not.toContain(MARKER)
   })
 })
+
+// Selecting a tab must leave the cursor in that tab's composer. Before this,
+// focus stayed on the document body, so arriving at a chat cost a second click
+// in the text box before you could type a single character.
+describe("ChatScreen tab selection focuses the composer", () => {
+  it("puts the cursor in the thread composer when a chat tab is clicked", async () => {
+    seedThreadTab()
+    renderScreen()
+
+    // Nothing is focused on mount — the focus below is the click's doing.
+    const before = document.querySelector(".cx-input") as HTMLTextAreaElement
+    expect(before).toBeTruthy()
+    expect(document.activeElement).not.toBe(before)
+
+    const strip = screen.getByTestId("chat-tab-bar")
+    await act(async () => { fireEvent.click(within(strip).getByText("Seeded chat")) })
+
+    // Focus lands a frame after the click (the composer can remount as the view
+    // swaps between the landing and the thread dock), hence waitFor.
+    await waitFor(() => {
+      const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+      expect(document.activeElement).toBe(ta)
+    })
+  })
+
+  it("puts the cursor in the landing composer when + opens a new tab", async () => {
+    seedThreadTab()
+    renderScreen()
+
+    // Scoped to the strip: the sidebar advertises a "New chat" control too.
+    const strip = screen.getByTestId("chat-tab-bar")
+    await act(async () => { fireEvent.click(within(strip).getByLabelText("New chat")) })
+
+    // The fresh tab has no thread, so this is the LANDING composer — a different
+    // mount point than the one that was on screen when the button was clicked.
+    await waitFor(() => {
+      expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+      const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+      expect(document.activeElement).toBe(ta)
+    })
+  })
+})
