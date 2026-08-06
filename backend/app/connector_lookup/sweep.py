@@ -99,15 +99,24 @@ MAX_TERMS = 8
 
 #: Terms a message must yield before ANY source is probed.
 #:
-#: Two, not one, and the second one is doing real work. A single surviving
-#: content word is as often an instruction about the answer ("make it punchier")
-#: or a bare acknowledgement as it is a topic, and the probe is far cheaper to
-#: skip than to run and discard. The cost is honest and worth stating: a
-#: one-noun question ("anything on Acme?") does not sweep. It still answers from
-#: corpus + KG exactly as it did before, and naming a source or asking a fuller
-#: question both reach the live read — so the failure mode is "no better than
-#: yesterday", never "worse".
-MIN_TERMS = 2
+#: ONE, lowered from two, and only because two other things changed first.
+#:
+#: A count is a bad proxy for "is this a topic". At two it blocked real
+#: questions — "How is onboarding going?" and "anything on Acme?" both yield a
+#: single noun and both deserve a sweep — while still passing "add more detail"
+#: and "change the title", which yield two words that name nothing. It was
+#: filtering on the wrong axis, so it leaked and over-blocked at the same time.
+#:
+#: The vocabulary above now does that job directly, and a keyword MISS is no
+#: longer `usable` (see LegMiss), so a false positive costs one bounded parallel
+#: probe and renders nothing. That asymmetry is what makes the looser floor
+#: safe: over-sweeping is now cheap, under-sweeping is still a feature that
+#: silently does not work.
+#:
+#: Measured over 12 formatting follow-ups and 7 real questions: 0/12 leak, 7/7
+#: caught. At two it was 0/12 and 5/7. Honest limit — this is lexical, so it
+#: will never be exact; LegMiss is what keeps the inexactness cheap.
+MIN_TERMS = 1
 
 #: Live-readable providers this sweep probes, in render priority order. Each is
 #: gated on an actual connection before anything is opened.
@@ -136,6 +145,18 @@ _STOPWORDS = frozenset({
     "month", "year", "recent", "recently", "latest", "new", "old", "status",
     "update", "updates", "summary", "summarize", "summarise", "anything",
     "everything", "something", "nothing", "one", "two", "sprntly",
+    # Words that shape the ANSWER or the DOCUMENT, not the company. A review of
+    # 28 realistic turns found the gate leaking mostly here: "add more detail"
+    # ("add", "detail"), "change the title", "put the risks first", "sounds
+    # good, ship it" all cleared it and swept every connector for vocabulary
+    # that names nothing. In a working thread these are a large share of all
+    # turns, so they were a large share of all sweeps.
+    "add", "detail", "details", "change", "title", "heading", "section",
+    "risk", "risks", "put", "move", "reorder", "swap", "first", "last", "top",
+    "bottom", "above", "below", "ship", "sounds", "fine", "done", "same",
+    "another", "again", "version", "point", "points", "line", "lines", "word",
+    "words", "text", "copy", "wording", "format", "formatting", "style",
+    "but", "good", "cool", "right", "time", "times", "bit", "little",
     # Words about the ANSWER rather than about the company. Without these,
     # "make it shorter and punchier" clears MIN_TERMS on two words that name
     # nothing, and every connector gets searched for "shorter punchier". These
@@ -189,11 +210,21 @@ STATUS_DROPPED = "dropped"
 #: different sentences in the answer, and collapsing them would have the model
 #: report an unopened source as a searched one.
 STATUS_UNAVAILABLE = "unavailable"
+#: Skipped because opening it would have rotated the tenant's OAuth token.
+#: A healthy connector we declined to touch — not a broken one.
+STATUS_REFRESH_DUE = "refresh_due"
 
 
 class _SessionUnavailable(Exception):
     """A leg's connector could not be opened. Carried as an exception so it
     crosses the worker-thread boundary distinctly from an empty result."""
+
+
+class _RefreshWouldBeRequired(Exception):
+    """Opening this session would rotate and persist the tenant's OAuth token,
+    so the sweep declines. Distinct from _SessionUnavailable because the user-
+    facing reason differs: the connector is healthy, we simply refuse to be the
+    caller that mutates its credential."""
 
 
 @dataclass
@@ -216,6 +247,12 @@ class SourceResult:
             return "did not answer within the time budget"
         if self.status == STATUS_ERROR:
             return self.detail or "could not be read just now"
+        if self.status == STATUS_REFRESH_DUE:
+            return (
+                "was NOT searched — its access token is due for renewal, and "
+                "this cross-source sweep deliberately never renews one. Ask "
+                "about this source directly and it will be read live"
+            )
         if self.status == STATUS_UNAVAILABLE:
             return (
                 "is connected but could not be opened — it was NOT searched, and "
@@ -321,6 +358,12 @@ class _AdapterLeg:
         adapter = registry.provider_for(self.provider)
         if adapter is None:
             raise _SessionUnavailable(self.provider)
+        # Checked BEFORE open_session, because open_session is where the write
+        # happens. See _credential_is_refresh_free.
+        if self.provider in _REFRESHES_ON_OPEN and not _credential_is_refresh_free(
+            enterprise_id, self.provider
+        ):
+            raise _RefreshWouldBeRequired(self.provider)
         session = adapter.open_session(enterprise_id)
         if session is None:
             raise _SessionUnavailable(self.provider)
@@ -371,11 +414,10 @@ def _leg_calls(enterprise_id: str, terms: list[str]) -> str:
         total = call_index.count_calls(enterprise_id)
         if not total:
             return ""
-        return (
-            f"{total} recorded calls are indexed for this workspace, but none of "
-            "their titles or accounts match these terms. That says nothing about "
-            "what was SAID on them — the index holds titles, dates and accounts, "
-            "not transcripts."
+        return LegMiss(
+            f"{total} recorded calls are indexed, but no title or account matches "
+            "these terms — the index holds titles, dates and accounts, not "
+            "transcripts, so this says nothing about what was SAID on them"
         )
     rows = [
         f"- {c.call_date or 'undated'} · {c.title or 'untitled'}"
@@ -409,10 +451,9 @@ def _leg_github(enterprise_id: str, terms: list[str]) -> str:
                for t in lowered)
     ]
     if not hits:
-        return (
-            f"{len(rows)} open pull request(s) are synced for this workspace, none "
-            "whose title mentions these terms. Only PR titles are matched here, "
-            "not diffs or comments."
+        return LegMiss(
+            f"{len(rows)} open pull requests are synced, none whose TITLE mentions "
+            "these terms — only titles are matched here, not diffs or comments"
         )
     rows_out = [
         f"- {r.get('repo_full_name') or 'repo'}#{r.get('pr_number')} · "
@@ -424,6 +465,29 @@ def _leg_github(enterprise_id: str, terms: list[str]) -> str:
     if len(hits) > 10:
         head += " (showing 10)"
     return head + ":\n" + "\n".join(rows_out)
+
+
+@dataclass(frozen=True)
+class LegMiss:
+    """A leg that ran fine and matched NOTHING, plus the honest detail.
+
+    Distinct from returning the detail as content, which is the bug this type
+    exists to prevent. `_leg_calls` and `_leg_github` know something worth
+    saying on a miss — "40 calls are indexed, none match these terms" — and
+    returning that as the leg's TEXT made the source `usable`, so `render()`
+    could never return "" for any company with a call index or synced PRs.
+
+    A user typing "add more detail" then got a prompt announcing that five
+    sources had been searched and found nothing, which steered the model into
+    asserting an absence from a keyword probe — precisely what `render()`'s own
+    docstring exists to prevent, and it falsified this feature's claim that an
+    empty sweep composes identically to before.
+
+    So a miss is now UNREAD, and the detail rides the unread line where it
+    belongs: it is context for an answer, never an answer.
+    """
+
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -496,12 +560,13 @@ def enabled_for(enterprise_id: str) -> bool:
     put it. This shipped gated at `qa_agent._sweep_context` only, and
     `registry.answer_for_hints`'s priming call — added in the same PR — had no
     check at all, so `CHAT_CROSS_CONNECTOR_SWEEP=false` silently left half the
-    feature running. A kill switch covering one of two entry points is not a
+    feature running. A kill switch that covers one of two entry points is not a
     kill switch, and the next entry point would have missed it too.
 
-    `sweep()` consults this itself, so the gate cannot be bypassed by forgetting
-    it. Callers may still check early as a cheap short-circuit; they can no
-    longer be the only thing between a disabled flag and a fan-out.
+    `sweep()` now consults this itself, so the gate cannot be bypassed by
+    forgetting it. Callers may still check early as a cheap short-circuit; they
+    can no longer be the only thing standing between a disabled flag and a
+    fan-out.
 
     Two levers, global first:
       * `settings.chat_cross_connector_sweep` — operational, off everywhere
@@ -527,6 +592,75 @@ def enabled_for(enterprise_id: str) -> bool:
             "cross-connector sweep: flag read failed for %s", enterprise_id
         )
         return True
+
+
+#: Providers whose `open_session` is a WRITE path: it notices a near-expiry
+#: access token, POSTs the refresh token and PERSISTS what comes back.
+#:
+#: That is the whole reason this guard exists. Those refresh tokens ROTATE, so
+#: two callers reading one stale row present the SAME token; providers keep a
+#: reuse grace window precisely because clients race, so both can succeed and
+#: return different new tokens, and whichever write lands LAST wins the row. If
+#: that is the earlier-issued payload, the stored credential is one the provider
+#: has already retired — the tenant's connector is dead until a human
+#: reconnects, surfacing only as a later 401.
+_REFRESHES_ON_OPEN: frozenset[str] = frozenset({"jira", "confluence", "hubspot"})
+
+#: Skew, in seconds, before expiry at which we treat a credential as too close
+#: to refresh to touch. Must be >= the LARGEST skew any guarded provider uses,
+#: or we would open a session inside their refresh window and trigger the very
+#: write this avoids: jira 300 (jira_fetch._TOKEN_REFRESH_SKEW_S), confluence
+#: 120, hubspot 120. 300 is therefore the floor, not a preference.
+CREDENTIAL_SKEW_S = 300
+
+
+def _credential_is_refresh_free(enterprise_id: str, provider: str) -> bool:
+    """True when opening this session will NOT rotate the stored token.
+
+    THE SWEEP MUST NEVER BE THE THING THAT MUTATES AUTH STATE. It is
+    opportunistic breadth on an ordinary chat turn, running several sources in
+    parallel with no coordination — the worst possible caller to hand a rotating
+    credential to. Refreshing stays the job of the paths that are
+    user-intent-driven or scheduled: the named connector-lookup path and
+    `auto_sync`.
+
+    So the sweep reads the row itself and declines when a refresh is due, rather
+    than letting `open_session` decide. The result is that a stale-token source
+    is SKIPPED and reported honestly, which costs one unread source on one turn.
+    The alternative cost is a bricked connector. That trade is not close.
+
+    Fails CLOSED — anything unreadable, unparseable or unexpected returns False,
+    because the safe answer to "I cannot tell whether opening this will write"
+    is not to open it. An unguarded provider (Slack, ClickUp: no refresh on
+    open) never reaches here.
+    """
+    import json
+    import time
+
+    from app import db
+    from app.connectors.tokens import decrypt_token_json
+
+    try:
+        row = db.get_connection(enterprise_id, provider)
+        if not row:
+            return False
+        token = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        obtained_at = token.get("obtained_at")
+        expires_in = token.get("expires_in")
+        if not isinstance(obtained_at, (int, float)) or not isinstance(
+            expires_in, (int, float)
+        ):
+            # Freshness cannot be proven, so every guarded provider would
+            # refresh. Decline.
+            return False
+        return time.time() < obtained_at + expires_in - CREDENTIAL_SKEW_S
+    except Exception:  # noqa: BLE001 — unreadable credential ⇒ do not touch it
+        logger.warning(
+            "cross-connector sweep: could not check %s credential freshness for "
+            "%s — skipping rather than risking a token rotation",
+            provider, enterprise_id, exc_info=True,
+        )
+        return False
 
 
 def can_sweep(provider: str) -> bool:
@@ -574,9 +708,14 @@ def _run_local(
             if time.monotonic() > deadline:
                 result.status = STATUS_TIMEOUT
             else:
-                text = leg.run(enterprise_id, terms)
-                if text.strip():
-                    result.status, result.text = STATUS_OK, text
+                produced = leg.run(enterprise_id, terms)
+                if isinstance(produced, LegMiss):
+                    # Ran fine, matched nothing. Stays UNREAD so it cannot make
+                    # `render()` produce a block on its own — the detail is
+                    # context for an answer, never an answer.
+                    result.detail = produced.detail
+                elif produced.strip():
+                    result.status, result.text = STATUS_OK, produced
         except Exception as exc:  # noqa: BLE001 — a leg degrades, never breaks chat
             logger.warning(
                 "cross-connector sweep: local leg %s failed for %s",
@@ -627,6 +766,13 @@ def _run_live(
             result = SourceResult(key=provider, display_name=_display(provider))
             try:
                 text = future.result()
+            except _RefreshWouldBeRequired:
+                logger.info(
+                    "cross-connector sweep: skipped %s for %s — refresh due, and "
+                    "the sweep does not rotate tokens",
+                    provider, enterprise_id,
+                )
+                result.status = STATUS_REFRESH_DUE
             except _SessionUnavailable:
                 logger.info(
                     "cross-connector sweep: %s connected but not openable for %s",
