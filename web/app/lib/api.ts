@@ -3462,6 +3462,19 @@ export type StoryCache = {
   generated_at?: string
 }
 
+/** What POST /v1/stories/generate hands back on both paths.
+ *
+ *  `ticket_set_id` is present ONLY on the insight (no-PRD) path: the backend
+ *  creates the durable `ticket_sets` row at kick-off, BEFORE scheduling the
+ *  job, and the client never posts stories back — which is what makes a
+ *  double-poll or a StrictMode double-effect unable to produce two sets. A
+ *  re-attaching call (the in-flight dedupe) returns the SAME set id. */
+export type StoryGenerateStart = {
+  job_id: number
+  status: string
+  ticket_set_id?: number
+}
+
 export const storiesApi = {
   /** Persisted tickets for a PRD + whether they're still fresh. Read this first;
    *  only regenerate when missing/stale (`fresh` false). No LLM call. */
@@ -3470,7 +3483,22 @@ export const storiesApi = {
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
    *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
-    api.post<{ job_id: number; status: string }>("/v1/stories/generate", { prd_id: prdId }),
+    api.post<StoryGenerateStart>("/v1/stories/generate", { prd_id: prdId }),
+  /** Kick off tickets from a free-form INSIGHT instead of a PRD — the chat's
+   *  "generate tickets" ask in a thread that has no PRD. Same job contract as
+   *  `generate` (poll `getJob`), plus a `ticket_set_id` for the durable
+   *  `ticket_sets` row the run fills. `conversationId` stamps the thread the
+   *  set was born in so it can be reopened from there; the backend 404s a
+   *  conversation that isn't the caller's company's.
+   *
+   *  Callers should go through `lib/runTicketSetGeneration.ts` rather than
+   *  calling this directly — it owns the kick-off/poll/publish arc, and one
+   *  owner is what keeps the panel from starting a second run of its own. */
+  generateFromInsight: (insight: string, conversationId?: number | null) =>
+    api.post<StoryGenerateStart>("/v1/stories/generate", {
+      insight,
+      ...(conversationId != null ? { conversation_id: conversationId } : {}),
+    }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */
   getJob: (jobId: number) =>
     api.get<StoryJob>(`/v1/stories/jobs/${jobId}`),
@@ -3533,6 +3561,63 @@ export const storiesApi = {
       destination_id: string | null
       meta: TrackerMeta | null
     }>(`/v1/stories/sync/${prdId}/tracker-meta${refresh ? "?refresh=1" : ""}`),
+}
+
+// ── Standalone ticket sets ───────────────────────────────────────────────────
+// Tickets generated from a chat with NO PRD behind them (backend:
+// app/routes/ticket_sets.py). A set is a durable artifact, not a chat bubble:
+// it is created by POST /v1/stories/generate's insight path (see
+// `storiesApi.generateFromInsight`), and these routes are the read + tracker
+// surface over the result.
+//
+// The tracker routes MIRROR the per-PRD ones exactly and share the backend
+// implementation (app/stories/sync_control.py), so a set syncs two-way with
+// Jira / ClickUp / Asana on identical terms — same first-push binding, same
+// interval auto-sync, same last-writer-wins reconciliation. The shapes below
+// are therefore the same shapes the per-PRD calls return.
+
+/** One ticket set with its tickets (GET /v1/ticket-sets/{id}).
+ *  `title` and `source_text` come back even when empty — the API does not
+ *  decide that a blank line should disappear; the panel renders its own
+ *  fallback copy. DELETED tickets are already dropped and EXCLUDED ones tagged,
+ *  exactly as `getForPrd` does. */
+export type TicketSetRecord = {
+  id: number
+  title: string
+  /** "generating" | "ready" | "failed" */
+  status: string
+  stories: GeneratedStory[]
+  ticket_count: number
+  conversation_id: number | null
+  source_text: string
+  created_at?: string | null
+}
+
+export const ticketSetsApi = {
+  /** One ticket set with its tickets. 404 for an unknown id AND for another
+   *  tenant's — deliberately indistinguishable, so never surface the
+   *  difference in copy. */
+  get: (setId: number) => api.get<TicketSetRecord>(`/v1/ticket-sets/${setId}`),
+  /** This set's tracker-sync state. Same shape as `storiesApi.getSyncState`. */
+  getSyncState: (setId: number) =>
+    api.get<TicketSyncState>(`/v1/ticket-sets/${setId}/sync`),
+  /** Run a two-way sync pass in the background. Pass `dest` on the FIRST push
+   *  (or to switch tool/destination); omit it to re-sync the configured one. */
+  triggerSync: (setId: number, dest?: {
+    provider: TrackerProvider; destination_id: string; destination_name?: string
+  }) =>
+    api.post<{ status: "syncing" }>(`/v1/ticket-sets/${setId}/sync`, dest ?? {}),
+  /** The destination's vocabulary (statuses/priorities/issue types/custom
+   *  fields). Same three-way contract as the PRD route: bound → the bound
+   *  destination's meta, unbound-but-connected → the connect-time warm cache,
+   *  no tracker → all-null and the web keeps its defaults. */
+  getTrackerMeta: (setId: number, refresh = false) =>
+    api.get<{
+      configured: boolean
+      provider: TrackerProvider | null
+      destination_id: string | null
+      meta: TrackerMeta | null
+    }>(`/v1/ticket-sets/${setId}/tracker-meta${refresh ? "?refresh=1" : ""}`),
 }
 
 export type ClickUpTicketState = {

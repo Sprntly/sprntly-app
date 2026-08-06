@@ -17,14 +17,15 @@ import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvide
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { useRouter } from "next/navigation"
 import {
-  ApiError, storiesApi,
+  ApiError, storiesApi, ticketSetsApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
   type JiraProject, type TicketLifecycle, type TicketStub,
   type TicketSyncState, type TrackerMeta, type TrackerProvider,
 } from "../../lib/api"
+import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
-import { EVIDENCE_GEN, TICKET_GEN } from "./generationPhases"
+import { EVIDENCE_GEN, STANDALONE_TICKET_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
@@ -40,7 +41,9 @@ import { buildCombinedHtml } from "../../lib/combinedExport"
 import { documentsApi } from "../../lib/api"
 import { artifactShareApi } from "../../lib/artifactShareApi"
 import { saveBlob } from "../../lib/saveBlob"
-import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
+import type {
+  PrdState, PrdContent, PrdDesignBlock, AppContentState, TicketSetFailureKind,
+} from "../../types/content"
 import { prdInScopeFor } from "../../lib/panelPrdScope"
 
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
@@ -350,7 +353,12 @@ export function ContentPanel() {
   const hidden: Record<(typeof TABS)[number]["id"], boolean> = {
     evidence: evidenceHidden,
     prd: !pipelineInScope,
-    tickets: !pipelineInScope,
+    // A standalone ticket set is a Tickets tab with no pipeline behind it: the
+    // tickets came out of a chat, not a PRD. ONLY the tickets key relaxes —
+    // `prd` stays hidden, because there is no PRD to open and a tab that
+    // resolves one on click (handleTabClick) would generate a document nobody
+    // asked for.
+    tickets: !pipelineInScope && !content.ticketSet,
     reports: reportsHidden,
   }
   // The tab currently being shown is never pulled out from under the reader —
@@ -574,7 +582,13 @@ export function ContentPanel() {
             <span className="cpanel-main-name">
               {activeTab === "reports"
                 ? "Reports"
-                : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
+                // A standalone set has no PRD to name, and naming one anyway
+                // ("PRD") would label the panel with a document that does not
+                // exist. The line is always rendered — a set still being
+                // written just falls back to what it is.
+                : activeTab === "tickets" && content.ticketSet
+                  ? `Tickets · ${content.ticketSet.title || "from this conversation"}`
+                  : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
             </span>
           <div className="cpanel-head-actions">
             {/* The header Share menu exports the Evidence + PRD pair, so it has no
@@ -611,7 +625,14 @@ export function ContentPanel() {
             mutation/generation triggers (Generate PRD, Generate Prototype) a
             read-only guest is never entitled to fire. */}
         {activeTab === "evidence" && !guestSession && <EvidenceBottomBar />}
-        {activeTab === "tickets" && !guestSession && <TicketsBottomBar />}
+        {/* The Tickets bar launches the PROTOTYPE, which is generated from a
+            PRD. A standalone ticket set has none and never will, so the bar is
+            withheld entirely rather than rendered with a permanently disabled
+            button — a control that can never be used is worse than no control.
+            Deliberately keyed on the SET, not on "no PRD in scope": a tickets
+            tab whose PRD was cleared by evidenceOpenScopePatch keeps its
+            disabled CTA (that pipeline can still get a PRD; this one cannot). */}
+        {activeTab === "tickets" && !guestSession && !content.ticketSet && <TicketsBottomBar />}
       </aside>
     </>
   )
@@ -1012,14 +1033,69 @@ export function relTime(iso: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
+/** What the four ways a standalone ticket-set run can end badly SAY.
+ *
+ *  The raw backend message never reaches this map — `content.ticketSet.error`
+ *  is a classified kind, so a stack trace, a provider error or a fetch
+ *  exception cannot be printed at the user. Each entry states what happened to
+ *  their work, because "nothing was saved" and "the run may still be going"
+ *  call for opposite next moves.
+ *
+ *  The 404 case gets no retry: re-running would create a DIFFERENT set, which
+ *  is not what "try again" promises on a set that is gone. It also says
+ *  nothing about access — a foreign tenant's set and a deleted one are the same
+ *  404 by design, and the copy must not let them be told apart. */
+const SET_ERROR_COPY: Record<
+  TicketSetFailureKind, { lead: string; body: string; retry: boolean }
+> = {
+  timeout: {
+    lead: "The ticket run took too long and stopped.",
+    body: "Nothing was saved. Try again — a shorter, more specific ask usually finishes.",
+    retry: true,
+  },
+  failed: {
+    lead: "Couldn’t write the tickets.",
+    body: "The run stopped before finishing and nothing was saved. Try again.",
+    retry: true,
+  },
+  network: {
+    lead: "Lost connection while the tickets were being written.",
+    body: "The run may still be going — reopen this chat in a minute to check.",
+    retry: true,
+  },
+  notfound: {
+    lead: "This ticket set isn’t available.",
+    body: "It may have been deleted.",
+    retry: false,
+  },
+}
+
 export function TicketsTab() {
   const { showToast } = useNavigation()
-  const { content } = useContent()
+  const { content, setContent } = useContent()
   const guestSession = useGuestSession()
   const router = useRouter()
-  const prd = content.prd
+  // ── Which artifact's tickets are these? ──────────────────────────────────
+  // A PRD's, or a standalone set generated from a chat with no PRD. The two
+  // share this whole surface — list, detail, tracker sync — and differ only in
+  // the id the backend routes are keyed on, because the sync ENGINE is one
+  // engine (app/stories/scope.py::TicketScope).
+  //
+  // The PRD comes from prdInScopeFor, not from `content.prd`: with a set on
+  // screen that returns null, which is what keeps a leftover PRD from this
+  // panel's previous occupant driving the header, the generation effect and
+  // the tracker calls.
+  const ticketSet = content.ticketSet ?? null
+  const setId = ticketSet?.id ?? null
+  const ticketSetGenerating = Boolean(content.ticketSetGenerating)
+  const setStories = ticketSet?.stories ?? []
+  const setStubs = ticketSet?.stubs ?? []
+  const prd = prdInScopeFor(content, "tickets")
   const prdId = prd?.prd_id ?? null
   const prdTitle = prd?.title ?? "PRD"
+  // Rendered whenever a set is on screen — a set whose naming leg hasn't landed
+  // yet still gets a header line rather than a collapsed one.
+  const setTitle = ticketSet?.title?.trim() || "Tickets from this conversation"
   // Which task-management tools this workspace has connected — drives the sync
   // button's label (one tool), its dropdown (several), or the connectors
   // redirect (none).
@@ -1113,6 +1189,28 @@ export function TicketsTab() {
     // generation, which must never fire for an unentitled viewer.
     if (guestSession) {
       setGenState({ kind: "ready", stories: content.guestTickets ?? [] })
+      return
+    }
+    // A STANDALONE ticket set is already in content: lib/runTicketSetGeneration
+    // owns its kick-off and its polling, and republishes the slice as fan-out
+    // batches land. Like the guest branch above, this one must NEVER call
+    // storiesApi.generate / getJob / getForPrd — but for a different reason.
+    // There, the calls are unauthorized; here, the panel polling too would be a
+    // SECOND generation: the insight path does not dedupe two phrasings of one
+    // ask, so a panel-side kick would write a second `ticket_sets` row and a
+    // second multi-minute LLM bill for tickets the user asked for once. Reading
+    // is the whole contract.
+    if (ticketSet) {
+      setGenState({
+        kind: "ready",
+        stories: ticketSet.stories,
+        // Reuses the fan-out streaming machinery below verbatim — the banner,
+        // the batch counter and the skeleton rows are the same states the PRD
+        // path already renders, because it is the same generator underneath.
+        streaming: ticketSetGenerating,
+        progress: ticketSet.progress ?? undefined,
+        pendingStubs: ticketSet.stubs,
+      })
       return
     }
     if (prdId == null) {
@@ -1239,7 +1337,8 @@ export function TicketsTab() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [prdId, regenNonce, guestSession, content.guestTickets])
+  }, [prdId, regenNonce, guestSession, content.guestTickets,
+      content.ticketSet, content.ticketSetGenerating])
 
   // ── Sync state: load per PRD, poll while a sync runs ─────────────────────
   // True while a push/registration flow is mid-flight (destination chosen but
@@ -1254,20 +1353,28 @@ export function TicketsTab() {
     // effects above) and meaningless for a guest anyway — a guest can never
     // reach the push/sync UI that would populate it (withheld above).
     if (guestSession) return
-    if (prdId == null) return
-    storiesApi.getSyncState(prdId)
+    // A standalone set syncs two-way on exactly the same terms as a PRD's
+    // tickets — same engine, same binding, same reconciliation — so the only
+    // difference is which route carries the scope.
+    const read = setId != null
+      ? ticketSetsApi.getSyncState(setId)
+      : prdId != null
+        ? storiesApi.getSyncState(prdId)
+        : null
+    if (read == null) return
+    read
       .then((s) => {
         if (registeringRef.current) return
         setSyncState(s)
       })
       // Transient fetch failure must not downgrade a known-configured state.
       .catch(() => setSyncState((prev) => prev ?? { configured: false }))
-  }, [prdId, guestSession])
+  }, [prdId, setId, guestSession])
 
   useEffect(() => {
     setSyncState(null)
     refreshSync()
-  }, [prdId, refreshSync])
+  }, [prdId, setId, refreshSync])
 
   const syncing = syncState?.sync_status === "syncing"
 
@@ -1316,9 +1423,14 @@ export function TicketsTab() {
   useEffect(() => {
     // Same authed-gated class as refreshSync above — never fetch for a guest.
     if (guestSession) { setTrackerMeta(null); return }
-    if (prdId == null) { setTrackerMeta(null); return }
+    const read = setId != null
+      ? ticketSetsApi.getTrackerMeta(setId)
+      : prdId != null
+        ? storiesApi.getTrackerMeta(prdId)
+        : null
+    if (read == null) { setTrackerMeta(null); return }
     let cancelled = false
-    storiesApi.getTrackerMeta(prdId)
+    read
       .then((r) => {
         if (cancelled) return
         setTrackerMeta(r.meta && r.provider ? { provider: r.provider, meta: r.meta } : null)
@@ -1327,17 +1439,36 @@ export function TicketsTab() {
     return () => { cancelled = true }
     // last_synced_at: every completed sync also re-pulled the vocabulary
     // server-side — re-read the cache so the UI shows workspace changes.
-  }, [prdId, guestSession, syncState?.configured, syncState?.destination_id, syncState?.last_synced_at])
+  }, [prdId, setId, guestSession, syncState?.configured, syncState?.destination_id, syncState?.last_synced_at])
+
+  /** Register / re-sync this artifact's destination. One call for both owners:
+   *  `/v1/ticket-sets/{id}/sync` and `/v1/stories/sync/{prd_id}` are the same
+   *  backend function (app/stories/sync_control.trigger_scope_sync) behind two
+   *  tenant gates. */
+  const triggerScopeSync = (dest?: {
+    provider: TrackerProvider; destination_id: string; destination_name?: string
+  }) => {
+    // The re-sync call passes no destination AT ALL rather than an explicit
+    // undefined — "re-sync what's bound" is a different request from "bind
+    // this", and the wire shape should say so.
+    if (setId != null) {
+      return dest ? ticketSetsApi.triggerSync(setId, dest) : ticketSetsApi.triggerSync(setId)
+    }
+    if (prdId != null) {
+      return dest ? storiesApi.triggerSync(prdId, dest) : storiesApi.triggerSync(prdId)
+    }
+    return Promise.reject(new Error("No ticket owner in scope"))
+  }
 
   /** Ad-hoc sync of the already-configured destination (the button click). */
   const syncNow = async () => {
-    if (prdId == null || syncing || !syncState?.configured) return
+    if ((prdId == null && setId == null) || syncing || !syncState?.configured) return
     // Hold the optimistic "Syncing…" against polls until the backend has
     // actually marked the run (triggerSync returning), then let polling own it.
     registeringRef.current = true
     setSyncState((s) => (s ? { ...s, sync_status: "syncing" } : s))
     try {
-      await storiesApi.triggerSync(prdId)
+      await triggerScopeSync()
       registeringRef.current = false
       refreshSync()
     } catch (e) {
@@ -1390,7 +1521,7 @@ export function TicketsTab() {
   /** Destination chosen → register it server-side and run the first sync.
    *  From here on the backend auto-syncs this PRD on an interval. */
   const confirmDestination = async () => {
-    if (prdId == null || pickState.kind !== "picking") return
+    if ((prdId == null && setId == null) || pickState.kind !== "picking") return
     const list = pickState.lists.find((l) => l.id === selectedListId)
     if (!list) return
     const provider = pickState.provider
@@ -1401,7 +1532,7 @@ export function TicketsTab() {
       destination_id: list.id, destination_name: list.name, sync_status: "syncing",
     }))
     try {
-      await storiesApi.triggerSync(prdId, {
+      await triggerScopeSync({
         provider, destination_id: list.id, destination_name: list.name,
       })
       registeringRef.current = false
@@ -1423,7 +1554,7 @@ export function TicketsTab() {
    *  updates content/status idempotently and never writes assignee, so the
    *  assignments persist. */
   const confirmJiraPush = async (choice: JiraPushChoice) => {
-    if (prdId == null || pickState.kind !== "picking-jira") return
+    if ((prdId == null && setId == null) || pickState.kind !== "picking-jira") return
     const project = pickState.projects.find((p) => p.key === choice.projectKey)
     const destinationName = project?.name ?? choice.projectKey
     setPickState({ kind: "idle" })
@@ -1446,7 +1577,7 @@ export function TicketsTab() {
       if (result.errors.length > 0) {
         showToast("Jira push partial", `${result.created.length} created, ${result.errors.length} failed.`)
       }
-      await storiesApi.triggerSync(prdId, {
+      await triggerScopeSync({
         provider: "jira", destination_id: choice.projectKey, destination_name: destinationName,
       })
       registeringRef.current = false
@@ -1461,7 +1592,87 @@ export function TicketsTab() {
   /** No tracker connected → the button takes the user to the connectors page. */
   const goToConnectors = () => router.push("/settings?section=connectors")
 
-  if (prdId == null) {
+  /** Re-run this set's generation from the request that produced it.
+   *
+   *  The runner owns the whole arc (kick-off, poll, terminal write) — this only
+   *  hands it the task again, which is also why the chat's own retry button
+   *  (Part 2) and this one cannot race into two sets. */
+  const retryTicketSet = () => {
+    const task = ticketSet?.sourceText?.trim()
+    if (!task) return
+    void runTicketSetGeneration(task, ticketSet?.conversationId ?? null, setContent)
+  }
+
+  const retryButton = (
+    <button
+      type="button"
+      className="tkv2-btn tkv2-btn--regen"
+      style={{ marginTop: 12 }}
+      onClick={retryTicketSet}
+      disabled={!ticketSet?.sourceText?.trim()}
+      title={ticketSet?.sourceText?.trim()
+        ? undefined
+        : "Ask again in the chat — the original request isn’t available here."}
+    >
+      <IconRefresh size={15} /> Try again
+    </button>
+  )
+
+  // ── Standalone ticket set: working state ─────────────────────────────────
+  // Before anything exists to show. Once the plan roster or the first batch
+  // lands, the run falls through to the list below with a streaming banner —
+  // the same treatment as the PRD path, because it is the same fan-out.
+  if (ticketSetGenerating && setStories.length === 0 && setStubs.length === 0) {
+    return (
+      <div className="tkv2 tkt-list-wrap">
+        <GeneratingPane
+          {...STANDALONE_TICKET_GEN}
+          testId="standalone-tickets-generating"
+          icon={<IconTicket size={19} />}
+          // Same element either way, so the title swaps in place when the set
+          // gets its name instead of remounting the pane and restarting the
+          // phase rotation under the reader.
+          title={ticketSet?.title?.trim()
+            ? <>Writing <em>{ticketSet.title.trim()}</em>…</>
+            : "Turning this conversation into tickets…"}
+          skeleton="rows"
+        />
+      </div>
+    )
+  }
+
+  // Failure. The KIND is what's stored (never the backend's words), and each
+  // one says what happened to the work — see SET_ERROR_COPY.
+  if (ticketSet && !ticketSetGenerating
+      && (ticketSet.error || ticketSet.status === "failed")) {
+    const copy = SET_ERROR_COPY[ticketSet.error ?? "failed"]
+    return (
+      <div className="cpanel-empty" role="alert" data-testid="standalone-tickets-error">
+        <IconSparkle size={20} />
+        <p><strong>{copy.lead}</strong></p>
+        <p>{copy.body}</p>
+        {copy.retry ? retryButton : null}
+      </div>
+    )
+  }
+
+  // A settled run that produced nothing. Not a "0 tickets" success — say what
+  // to change about the ask, because a thin conversation is the usual cause.
+  if (ticketSet && !ticketSetGenerating && setStories.length === 0) {
+    return (
+      <div className="cpanel-empty" data-testid="standalone-tickets-empty">
+        <IconSparkle size={20} />
+        <p><strong>No tickets came back from that run</strong></p>
+        <p>
+          The conversation may not have had enough detail to break into work
+          items. Add the specifics — what’s broken, for whom — and ask again.
+        </p>
+        {retryButton}
+      </div>
+    )
+  }
+
+  if (prdId == null && !ticketSet) {
     return (
       <div className="cpanel-empty">
         <IconSparkle size={20} />
@@ -1574,7 +1785,7 @@ export function TicketsTab() {
 
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
-  if (selectedStory && prdId != null) {
+  if (selectedStory && (prdId != null || ticketSet)) {
     // Linked issues reference sibling tickets BY TITLE (the generator's
     // blocked_by/blocks contract) — resolve the title to its story in this
     // PRD's set and open it in place.
@@ -1588,10 +1799,15 @@ export function TicketsTab() {
         <TicketDetail
           // Remount per ticket: a linked-issue jump swaps the story prop on a
           // mounted detail, and its useState seeds would otherwise stay stale.
-          key={`tk-${prdId}-${selectedIndex}`}
+          // The owner is part of the key too — `set-` and `prd-` tickets are
+          // different rows behind the same index.
+          key={setId != null ? `tk-set-${setId}-${selectedIndex}` : `tk-${prdId}-${selectedIndex}`}
           story={selectedStory}
           index={selectedIndex as number}
-          prdId={prdId}
+          // Exactly one owner: a set's tickets are keyed `set-{id}-{story}`,
+          // a namespace disjoint from the PRD's, so passing both would be
+          // ambiguous about which row the edits land on.
+          {...(setId != null ? { setId } : { prdId: prdId as number })}
           onBack={() => setSelectedIndex(null)}
           onOpenLinked={openLinked}
           tracker={trackerMeta ? {
@@ -1613,15 +1829,27 @@ export function TicketsTab() {
           synced automatically from then on. Regeneration has no button — a
           PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
-        <h2>Tickets from <em>{prdTitle}</em></h2>
+        {/* A set is named after itself, not after a PRD it doesn't have. The
+            line always renders — an unnamed set falls back rather than
+            collapsing the header. */}
+        <h2>{ticketSet ? setTitle : <>Tickets from <em>{prdTitle}</em></>}</h2>
         {/* The subline must never read as a finished count while a run is in
             flight — that's the whole reason the old treatment went unnoticed. */}
         <div className="tkv2-sub">
-          {refreshing
-            ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
-            : streaming
+          {ticketSet
+            ? streaming
               ? `Writing tickets · ${stories.length} ready so far`
-              : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
+              // The chat a set came from can be deleted without taking the set
+              // with it — the set survives on its own and says so, rather than
+              // silently claiming a thread that no longer exists.
+              : content.ticketSetStandalone
+                ? `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · the chat this came from was deleted`
+                : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · from this conversation`
+            : refreshing
+              ? `Regenerating from the edited PRD · showing the previous ${stories.length} ticket${stories.length !== 1 ? "s" : ""}`
+              : streaming
+                ? `Writing tickets · ${stories.length} ready so far`
+                : `${stories.length} ticket${stories.length !== 1 ? "s" : ""} · generated from the PRD`}
         </div>
         {/* The tracker connect/push/sync button is withheld entirely in guest
             mode — it's exactly the "tracker-push" affordance AC15 requires
@@ -1741,11 +1969,21 @@ export function TicketsTab() {
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
         <div>
-          {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
-          {/* While streaming, count the whole planned set (landed + skeletons)
-              so the number doesn't creep up batch by batch. */}
-          <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD.{" "}
+          {ticketSet ? (
+            <>
+              {streaming ? "I’m turning" : "I’ve turned"} this conversation into{" "}
+              <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
+              prioritized from what was discussed.{" "}
+            </>
+          ) : (
+            <>
+              {streaming ? "I’m breaking" : "I’ve broken"} <em>{prdTitle}</em> into{" "}
+              {/* While streaming, count the whole planned set (landed +
+                  skeletons) so the number doesn't creep up batch by batch. */}
+              <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
+              prioritized from the PRD.{" "}
+            </>
+          )}
           {streaming
             ? "The rest are landing now."
             : "Review, then push to your tracker."}
@@ -1782,8 +2020,14 @@ export function TicketsTab() {
         ))}
       </div>
 
+      {/* The two-way sentence is stated VERBATIM for both owners because it is
+          equally true for both: a standalone set binds a destination, auto-syncs
+          on the same interval and reconciles the same last-writer-wins way (one
+          engine — app/stories/sync.py takes a TicketScope, not a prd_id). */}
       <div className="tkv2-foot">
-        Tickets are generated from the PRD.
+        {ticketSet
+          ? "Tickets are generated from this conversation."
+          : "Tickets are generated from the PRD."}
         {connectedTrackers.length === 0 && " Connect ClickUp or Jira to push them — the button above takes you there."}
         {syncState?.configured && ` Synced with ${currentTool} every few minutes — edits and status changes flow both ways, newest edit wins.`}
       </div>
