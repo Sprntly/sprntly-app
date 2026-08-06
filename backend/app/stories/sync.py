@@ -65,6 +65,7 @@ from app.db.ticket_sync import (
     save_sync_result,
 )
 from app.stories.generate import Story
+from app.stories.layout import resolve_layout
 from app.stories.scope import (  # noqa: F401 — title_slug re-exported for callers
     TicketScope,
     prd_scope,
@@ -157,18 +158,28 @@ def _apply_edit(story: Story, edit: dict[str, Any]) -> Story:
 def story_editable_text(s: Story) -> str:
     """The story's description in the labeled-text form the web edits and the
     override column stores (mirror of the web's storyToEditableText). Used to
-    compare an imported tracker description against the current local one."""
+    compare an imported tracker description against the current local one.
+
+    LAYOUT-DRIVEN, and byte-identical under the default layout: DEFAULT_LAYOUT
+    carries the same five EDIT labels this used to hard-code, including the
+    `scope` → "The ticket must cover" rename. This and `to_description` are two
+    renderings of ONE list — if they ever disagree about a label, the sync sees
+    a permanent phantom diff on every ticket."""
     parts: list[str] = []
-    if s.what:
-        parts.append(f"What\n{s.what}")
-    if s.why_now:
-        parts.append(f"Why now\n{s.why_now}")
-    if s.user_story:
-        parts.append(f"User story\n{s.user_story}")
-    if s.scope:
-        parts.append("The ticket must cover\n" + "\n".join(f"- {x}" for x in s.scope))
-    if s.out_of_scope:
-        parts.append(f"Out of scope\n{s.out_of_scope}")
+    for entry in resolve_layout(s.description_layout):
+        value = s.section_value(entry)
+        # `user_story` deliberately does NOT fall back to `body` here, unlike in
+        # to_description: the trailing `or s.body` below is the freeform case,
+        # and letting the section absorb the body would double it.
+        if entry.source == "user_story":
+            value = s.user_story
+        if not value:
+            continue
+        body = (
+            "\n".join(f"- {x}" for x in value)
+            if isinstance(value, list) else str(value)
+        )
+        parts.append(f"{entry.edit_label}\n{body}")
     return "\n\n".join(parts) if parts else (s.body or "")
 
 
@@ -240,13 +251,21 @@ def merged_stories_for_set(company_id: str, set_id: int) -> list[Story]:
 # Section labels as the push renders them (bold markdown) → the labeled-text
 # form parseDescBlocks recognizes. "Scope" is renamed on the way out, so map
 # it back on the way in.
-_IMPORT_LABELS = {
-    "**What**": "What",
-    "**Why now**": "Why now",
-    "**User story**": "User story",
-    "**Scope**": "The ticket must cover",
-    "**Out of scope**": "Out of scope",
-}
+#
+# DERIVED from the layout, never written out again: this map has to agree with
+# whatever `to_description` just pushed, and the one way to guarantee that is
+# for both to read the same list. `import_labels_for(None)` reproduces the
+# hard-coded map this used to be, byte for byte.
+
+
+def import_labels_for(layout) -> dict[str, str]:
+    """`{"**<push label>**": "<edit label>"}` for one story's layout."""
+    return {
+        f"**{e.push_label}**": e.edit_label for e in resolve_layout(layout)
+    }
+
+
+_IMPORT_LABELS = import_labels_for(None)
 
 # Sections the push APPENDS to the description render (they live as their own
 # fields in Sprntly). On import, everything from the first of these on is cut
@@ -256,16 +275,23 @@ _GENERATED_TAIL = re.compile(
 )
 
 
-def normalize_imported_description(text: str) -> str:
+def normalize_imported_description(text: str, layout=None) -> str:
     """A tracker-side description → the labeled-text override form: cut the
     generated tail sections (AC / child issues / provenance), and turn the
-    bold section headers the push rendered back into plain labels."""
+    bold section headers the push rendered back into plain labels.
+
+    `layout` is the STORY'S OWN layout (None = the default), so a ticket written
+    under a format the company has since changed still normalises under the
+    labels it was actually pushed with. Getting this wrong is the phantom-diff
+    bug: the labels would not match, `content_hash` would differ on every pass,
+    and the sync would report every ticket as remotely changed forever."""
+    labels = import_labels_for(layout)
     lines: list[str] = []
     for line in (text or "").splitlines():
         stripped = line.strip()
         if _GENERATED_TAIL.match(stripped):
             break
-        lines.append(_IMPORT_LABELS.get(stripped, line))
+        lines.append(labels.get(stripped, line))
     return "\n".join(lines).strip()
 
 
@@ -1337,7 +1363,10 @@ def _two_way_pass(
 
         if direction == "import":
             remote_title = (remote.get("title") or "").strip()
-            remote_text = normalize_imported_description(remote.get("description") or "")
+            remote_text = normalize_imported_description(
+                remote.get("description") or "",
+                c["merged"].description_layout,
+            )
             if remote_title and remote_title != c["merged"].title:
                 import_fields["title"] = remote_title
             if remote_text and remote_text != story_editable_text(c["merged"]):
