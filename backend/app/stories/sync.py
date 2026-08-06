@@ -1,6 +1,13 @@
-"""TWO-WAY ticket sync between a PRD's tickets and its tracker (ClickUp/Jira).
+"""TWO-WAY ticket sync between an artifact's tickets and its tracker.
 
-One `run_prd_sync` call is one full sync pass for one PRD. Per ticket, the
+The artifact is a `TicketScope` (app/stories/scope.py): a PRD, or a standalone
+ticket set generated from a chat with no PRD behind it. Both own tickets with
+identical downstream behaviour, so the engine takes a scope rather than a bare
+`prd_id` and everything below — the `_Tracker` adapter, push, status pull-back,
+comments, removal — is owner-agnostic. `run_prd_sync` / `run_set_sync` are the
+two named entry points; `run_ticket_sync` is the shared core.
+
+One such call is one full sync pass for one artifact. Per ticket, the
 pass reconciles BOTH directions with last-writer-wins:
 
   Sprntly → tracker   Local edits (web panel + MCP tools, stored in
@@ -14,7 +21,7 @@ pass reconciles BOTH directions with last-writer-wins:
 
 Change detection: each pass stores, per ticket, a `content_hash` of the
 tracker's title+description and the pass timestamp (`synced_at`) on the
-prd_ticket_sync row. Next pass, "remote changed" = tracker hash differs from
+sync-destination row. Next pass, "remote changed" = tracker hash differs from
 the stored one; "local changed" = the ticket_edits row is newer than
 `synced_at`. Both changed → the newer side wins (timestamps). Neither → no
 API writes at all, so the 15-minute cadence stays cheap.
@@ -32,9 +39,9 @@ window it would first have been pushed is never pushed at all. Because the
 work is driven by the mapping row rather than a one-shot flag, a removal that
 fails is simply retried on the next pass.
 
-The sync destination (`prd_ticket_sync` row) is created by the first manual
-push from the web; the scheduler's ticket_sync job then runs this for every
-auto_sync row on an interval, and the web's sync button runs it ad-hoc.
+The sync destination row is created by the first manual push from the web; the
+scheduler's ticket_sync job then runs this for every auto_sync row on an
+interval, and the web's sync button runs it ad-hoc.
 """
 from __future__ import annotations
 
@@ -50,7 +57,6 @@ from app.db.asana_sync import delete_asana_task_gid, get_asana_task_gid
 from app.db.clickup_sync import delete_clickup_task_id, get_clickup_task_id
 from app.db.client import require_client, utc_now
 from app.db.jira_sync import delete_jira_issue_key, get_jira_issue_key
-from app.db.prd_tickets import get_tickets
 from app.db.ticket_lifecycle import is_active
 from app.db.ticket_sync import (
     STALE_SYNC_MINUTES,
@@ -60,6 +66,14 @@ from app.db.ticket_sync import (
 )
 from app.stories.generate import Story
 from app.stories.layout import resolve_layout
+from app.stories.scope import (  # noqa: F401 — title_slug re-exported for callers
+    TicketScope,
+    prd_scope,
+    scope_from_key,
+    set_scope,
+    split_key,
+    title_slug,
+)
 from app.stories.push import (
     _asana_creds,
     _clickup_access_token,
@@ -93,27 +107,24 @@ def ticket_sync_providers() -> tuple[str, ...]:
 
 
 class TicketSyncNotConfiguredError(LookupError):
-    """Raised when a PRD has no sync destination yet (never pushed)."""
+    """Raised when an artifact has no sync destination yet (never pushed)."""
 
 
 # ── Ticket keys (web/MCP parity) ─────────────────────────────────────────────
-
-
-def title_slug(title: str | None) -> str:
-    """The web's legacy ticket-key slug fallback (ticketKeyFor mirror):
-    lowercase, non-alphanumeric runs → '-', trimmed, first 60 chars."""
-    slug = re.sub(r"[^a-z0-9]+", "-", (title or "ticket").lower()).strip("-")[:60]
-    return slug or "ticket"
+#
+# `title_slug` and the key composition itself live in app/stories/scope.py so
+# the db layer can use them without importing this module. The PRD-shaped
+# helper below stays because a dozen call sites legitimately hold a bare
+# prd_id and reading `ticket_key_for(prd_id, story)` at those sites is clearer
+# than constructing a scope inline.
 
 
 def ticket_key_for(prd_id: int, story: dict[str, Any]) -> str:
     """The composed ticket key ("prd-{prd_id}-{story_id}") every ticket_edits /
     ticket_comments row is stored under — the same format the web's
-    ticketKeyFor and the MCP surface compose."""
-    sid = story.get("id")
-    if sid:
-        return f"prd-{prd_id}-{sid}"
-    return f"prd-{prd_id}-{title_slug(story.get('title'))}"
+    ticketKeyFor and the MCP surface compose. Sets use `set-{set_id}-{story_id}`
+    via `TicketScope.ticket_key`."""
+    return prd_scope(prd_id).ticket_key(story)
 
 
 # ── Local (Sprntly-side) content forms ───────────────────────────────────────
@@ -172,11 +183,15 @@ def story_editable_text(s: Story) -> str:
     return "\n\n".join(parts) if parts else (s.body or "")
 
 
-def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
+def _ticket_contexts(company_id: str, scope: TicketScope) -> list[dict[str, Any]]:
     """Per-ticket sync context: the stored base story, its ticket_edits row
-    (None when untouched), and the merged Story that pushes render from."""
-    row = get_tickets(company_id, prd_id)
-    raw = [s for s in (row.get("stories") if row else None) or [] if isinstance(s, dict)]
+    (None when untouched), and the merged Story that pushes render from.
+
+    `scope.stories()` reads prd_tickets or ticket_sets as appropriate, and the
+    edits LIKE uses `scope.key_prefix` — which carries its own trailing '-', so
+    scope ('prd', 1) can never sweep up ('prd', 12)'s edit rows.
+    """
+    raw = scope.stories(company_id)
     if not raw:
         return []
 
@@ -184,7 +199,7 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
         require_client().table("ticket_edits")
         .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, assignee, lifecycle, updated_at")
         .eq("company_id", company_id)
-        .like("ticket_key", f"prd-{prd_id}-%")
+        .like("ticket_key", f"{scope.key_prefix}%")
         .execute()
         .data
         or []
@@ -193,7 +208,7 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
 
     out: list[dict[str, Any]] = []
     for s in raw:
-        key = ticket_key_for(prd_id, s)
+        key = scope.ticket_key(s)
         edit = edit_by_key.get(key)
         story = Story.from_dict(s)  # pins the stored id
         if edit:
@@ -213,12 +228,22 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
     return out
 
 
+def merged_stories_for_scope(company_id: str, scope: TicketScope) -> list[Story]:
+    """The artifact's stored tickets with every saved override applied — what
+    the user (or an MCP client) last saw/edited, not the generator's first
+    draft. Deleted and excluded tickets are left out: this feeds surfaces that
+    render "this artifact's tickets", and a removed one is not one of them."""
+    return [c["merged"] for c in _ticket_contexts(company_id, scope) if c["active"]]
+
+
 def merged_stories_for_prd(company_id: str, prd_id: int) -> list[Story]:
-    """The PRD's stored tickets with every saved override applied — what the
-    user (or an MCP client) last saw/edited, not the generator's first draft.
-    Deleted and excluded tickets are left out: this feeds surfaces that render
-    "the PRD's tickets", and a removed one is not one of them."""
-    return [c["merged"] for c in _ticket_contexts(company_id, prd_id) if c["active"]]
+    """`merged_stories_for_scope` for a PRD."""
+    return merged_stories_for_scope(company_id, prd_scope(prd_id))
+
+
+def merged_stories_for_set(company_id: str, set_id: int) -> list[Story]:
+    """`merged_stories_for_scope` for a standalone ticket set."""
+    return merged_stories_for_scope(company_id, set_scope(set_id))
 
 
 # ── Import normalization (tracker → Sprntly) ─────────────────────────────────
@@ -950,28 +975,30 @@ def _write_import(
 # ── Instant push (edit → tracker, no waiting for the scheduler) ─────────────
 
 
-def kick_prd_sync_from_key(company_id: str, ticket_key: str) -> bool:
-    """Fire-and-forget a sync pass for the PRD a just-saved ticket belongs to,
-    so a Sprntly-side edit (status, priority, custom fields, description, …)
+def kick_sync_from_key(company_id: str, ticket_key: str) -> bool:
+    """Fire-and-forget a sync pass for the artifact a just-saved ticket belongs
+    to, so a Sprntly-side edit (status, priority, custom fields, description, …)
     lands in the tracker IMMEDIATELY instead of at the next scheduler tick.
 
-    Safe to call after EVERY save: unbound PRDs and malformed keys are a
+    Works for `prd-*` and `set-*` keys alike — a standalone set's edits reach
+    the tracker on exactly the same latency as a PRD's.
+
+    Safe to call after EVERY save: unbound artifacts and malformed keys are a
     no-op, and a pass already in flight is skipped (single-flight — the
     running pass or the next tick picks the edit up; rapid autosaves don't
     stampede the tracker API). Runs in a daemon thread because the save
     routes are sync-def (threadpool) with no event loop to schedule on.
     Returns True when a pass was actually started."""
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+    scope = scope_from_key(ticket_key)
+    if scope is None:
         return False
-    prd_id = int(parts[1])
     try:
-        cfg = get_sync_config(company_id, prd_id)
+        cfg = get_sync_config(company_id, scope)
         if cfg is None or sync_in_flight(cfg):
             return False
         # Mark before spawning so a second save in the same instant reads
         # "syncing" and skips (mirrors the trigger_sync route).
-        mark_syncing(company_id, prd_id)
+        mark_syncing(company_id, scope)
     except Exception:  # noqa: BLE001 — instant push is an enhancement only
         logger.warning("instant sync kick failed for %s", ticket_key)
         return False
@@ -980,12 +1007,13 @@ def kick_prd_sync_from_key(company_id: str, ticket_key: str) -> bool:
 
     def _run() -> None:
         try:
-            run_prd_sync(company_id, prd_id)
-        except Exception:  # noqa: BLE001 — recorded on the row by run_prd_sync
-            logger.exception("instant ticket sync failed for prd %s", prd_id)
+            run_ticket_sync(company_id, scope)
+        except Exception:  # noqa: BLE001 — recorded on the row by run_ticket_sync
+            logger.exception("instant ticket sync failed for %s %s",
+                             scope.kind, scope.id)
 
     threading.Thread(
-        target=_run, daemon=True, name=f"ticket-sync-{prd_id}"
+        target=_run, daemon=True, name=f"ticket-sync-{scope.kind}-{scope.id}"
     ).start()
     return True
 
@@ -1013,13 +1041,13 @@ def kick_comment_push(
     company_id: str, ticket_key: str, comment_id: int, author: str, body: str
 ) -> bool:
     """Fire-and-forget push of one fresh comment to the bound tracker.
-    No-op (False) for unbound PRDs, malformed keys, or never-pushed tickets;
-    a failed push stays unmarked and the next sync pass retries it."""
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+    No-op (False) for unbound artifacts, malformed keys, or never-pushed
+    tickets; a failed push stays unmarked and the next sync pass retries it."""
+    scope, story_ref = split_key(ticket_key)
+    if scope is None:
         return False
     try:
-        cfg = get_sync_config(company_id, int(parts[1]))
+        cfg = get_sync_config(company_id, scope)
     except Exception:  # noqa: BLE001 — comment push is an enhancement only
         return False
     if cfg is None:
@@ -1032,7 +1060,7 @@ def kick_comment_push(
             tracker = _Tracker(
                 cfg["provider"], company_id, cfg["destination_id"]
             )
-            ref = tracker.task_ref(parts[2])
+            ref = tracker.task_ref(story_ref)
             if ref is None:
                 return  # never pushed — the pass creates it, then catches up
             tracker_cid = tracker.add_comment(ref, _comment_text(author, body))
@@ -1070,16 +1098,16 @@ def kick_comment_delete(
     this is called with the tracker id read BEFORE the local delete, and a
     failure here is final: logged, not retried.
 
-    No-op (False) for unbound PRDs, malformed keys, or a comment that was never
-    pushed.
+    No-op (False) for unbound artifacts, malformed keys, or a comment that was
+    never pushed.
     """
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+    scope, story_ref = split_key(ticket_key)
+    if scope is None:
         return False
     if not tracker_comment_id:
         return False
     try:
-        cfg = get_sync_config(company_id, int(parts[1]))
+        cfg = get_sync_config(company_id, scope)
     except Exception:  # noqa: BLE001 — comment delete is best-effort only
         return False
     if cfg is None:
@@ -1090,7 +1118,7 @@ def kick_comment_delete(
     def _run() -> None:
         try:
             tracker = _Tracker(cfg["provider"], company_id, cfg["destination_id"])
-            ref = tracker.task_ref(parts[2])
+            ref = tracker.task_ref(story_ref)
             if ref is None:
                 return  # the ticket itself was never pushed — nothing to delete
             if not tracker.delete_comment(ref, tracker_comment_id):
@@ -1110,16 +1138,16 @@ def kick_comment_delete(
 
 
 def _unpushed_comments(
-    company_id: str, prd_id: int, bound_since: Any
+    company_id: str, scope: TicketScope, bound_since: Any
 ) -> dict[str, list[dict[str, Any]]]:
     """Unpushed comments per ticket_key, restricted to comments created AFTER
-    the PRD was bound — pre-binding history must never flood the tracker
+    the artifact was bound — pre-binding history must never flood the tracker
     (it already travels in the pushed description's Notes section)."""
     rows = (
         require_client().table("ticket_comments")
         .select("id, ticket_key, author, body, tracker_comment_id, created_at")
         .eq("company_id", company_id)
-        .like("ticket_key", f"prd-{prd_id}-%")
+        .like("ticket_key", f"{scope.key_prefix}%")
         .order("created_at")
         .execute().data
         or []
@@ -1139,23 +1167,25 @@ def _unpushed_comments(
 # ── The pass ─────────────────────────────────────────────────────────────────
 
 
-def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
-    """One full two-way sync pass for one PRD (see module docstring).
+def run_ticket_sync(company_id: str, scope: TicketScope) -> dict[str, Any]:
+    """One full two-way sync pass for one artifact (see module docstring).
 
-    Raises TicketSyncNotConfiguredError when the PRD was never pushed. Any
+    Raises TicketSyncNotConfiguredError when the artifact was never pushed. Any
     other failure is recorded on the sync row (last_error) and re-raised.
     Returns `{"pushed", "imported", "push_errors", "statuses", "removed"}`.
     """
-    cfg = get_sync_config(company_id, prd_id)
+    cfg = get_sync_config(company_id, scope)
     if cfg is None:
-        raise TicketSyncNotConfiguredError(f"PRD {prd_id} has no sync destination")
+        raise TicketSyncNotConfiguredError(
+            f"{scope.kind} {scope.id} has no sync destination"
+        )
     provider = cfg.get("provider") or ""
     destination = cfg.get("destination_id") or ""
 
-    mark_syncing(company_id, prd_id)
+    mark_syncing(company_id, scope)
     try:
         result = _two_way_pass(
-            company_id, prd_id, provider, destination,
+            company_id, scope, provider, destination,
             prev_statuses=cfg.get("statuses") or {},
             bound_since=cfg.get("created_at"),
         )
@@ -1164,17 +1194,28 @@ def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
             if result["push_errors"] else None
         )
         save_sync_result(
-            company_id, prd_id, statuses=result["statuses"], error=error
+            company_id, scope, statuses=result["statuses"], error=error
         )
         return result
     except Exception as e:
         # Leave the row idle with the failure recorded so the UI shows it and
         # the next tick retries; then let the caller see the real exception.
         try:
-            save_sync_result(company_id, prd_id, error=str(e)[:500])
+            save_sync_result(company_id, scope, error=str(e)[:500])
         except Exception:  # noqa: BLE001 — never mask the original failure
-            logger.exception("ticket sync: failed to record error for prd %s", prd_id)
+            logger.exception("ticket sync: failed to record error for %s %s",
+                             scope.kind, scope.id)
         raise
+
+
+def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
+    """One full two-way sync pass for one PRD's tickets."""
+    return run_ticket_sync(company_id, prd_scope(prd_id))
+
+
+def run_set_sync(company_id: str, set_id: int) -> dict[str, Any]:
+    """One full two-way sync pass for one standalone ticket set's tickets."""
+    return run_ticket_sync(company_id, set_scope(set_id))
 
 
 def _remove_off_tracker(tracker: "_Tracker", ctxs: list[dict[str, Any]]) -> int:
@@ -1202,14 +1243,14 @@ def _remove_off_tracker(tracker: "_Tracker", ctxs: list[dict[str, Any]]) -> int:
 
 def _two_way_pass(
     company_id: str,
-    prd_id: int,
+    scope: TicketScope,
     provider: str,
     destination: str,
     *,
     prev_statuses: dict[str, Any],
     bound_since: Any = None,
 ) -> dict[str, Any]:
-    all_ctxs = _ticket_contexts(company_id, prd_id)
+    all_ctxs = _ticket_contexts(company_id, scope)
     if not all_ctxs:
         return {"pushed": 0, "imported": 0, "push_errors": 0, "statuses": {},
                 "removed": 0}
@@ -1238,7 +1279,7 @@ def _two_way_pass(
     # Comments not yet pushed (instant push failed / made while the pass ran),
     # post-binding only — see _unpushed_comments.
     try:
-        pending_comments = _unpushed_comments(company_id, prd_id, bound_since)
+        pending_comments = _unpushed_comments(company_id, scope, bound_since)
     except Exception:  # noqa: BLE001 — comment catch-up never blocks a pass
         pending_comments = {}
     statuses: dict[str, Any] = {}

@@ -136,7 +136,7 @@ def complete_prd(prd_id: int, title: str, md: str) -> None:
 
 def set_prd_artifact_template(prd_id: int, artifact_template_id: str | None) -> None:
     """Record WHICH uploaded format produced this PRD (migration
-    20260806120000_prds_artifact_template.sql).
+    20260806160000_prds_artifact_template.sql).
 
     A separate write rather than a new `complete_prd` argument: `complete_prd`
     has many callers on paths that have nothing to do with formats (imports,

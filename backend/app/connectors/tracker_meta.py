@@ -605,9 +605,15 @@ def validate_fields_against_meta(
     resolved (exact-cased) names are returned in a copy of the patch, and an
     unresolvable value raises 422 listing the allowed names (so both the web
     and MCP agents can self-correct). `custom_fields` entries must name an
-    editable field and carry an encodable value. Unbound PRDs / no meta /
+    editable field and carry an encodable value. Unbound artifacts / no meta /
     malformed keys return the patch untouched — exactly the legacy free-text
-    behavior."""
+    behavior.
+
+    Resolves the owning artifact through `scope_from_key`, so a STANDALONE
+    TICKET SET's edits validate against its own destination's vocabulary just
+    as a PRD's do. Left on the old `prd-` prefix test, every `set-*` key would
+    have fallen through to the free-text branch — letting a status the
+    workspace does not have be saved locally and only fail later, on push."""
     if not fields or (
         fields.get("status") is None
         and fields.get("priority") is None
@@ -615,14 +621,17 @@ def validate_fields_against_meta(
         and not fields.get("custom_fields")
     ):
         return fields
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+
+    from app.stories.scope import scope_from_key
+
+    scope = scope_from_key(ticket_key)
+    if scope is None:
         return fields
 
     from app.db.ticket_sync import get_sync_config
     from app.db.tracker_meta import get_cached_meta
 
-    cfg = get_sync_config(company_id, int(parts[1]))
+    cfg = get_sync_config(company_id, scope)
     if not cfg:
         return fields
     try:
@@ -641,7 +650,7 @@ def validate_fields_against_meta(
             allowed = [s.get("name") for s in meta.get("statuses") or []]
             raise HTTPException(422, {
                 "message": f"Unknown status {fields['status']!r} for this "
-                           f"PRD's {cfg['provider']} destination",
+                           f"ticket's {cfg['provider']} destination",
                 "allowed_statuses": allowed,
             })
         out["status"] = resolved
@@ -651,7 +660,7 @@ def validate_fields_against_meta(
             allowed = [p.get("name") for p in meta.get("priorities") or []]
             raise HTTPException(422, {
                 "message": f"Unknown priority {fields['priority']!r} for this "
-                           f"PRD's {cfg['provider']} destination",
+                           f"ticket's {cfg['provider']} destination",
                 "allowed_priorities": allowed,
             })
         out["priority"] = resolved
@@ -664,7 +673,7 @@ def validate_fields_against_meta(
             ]
             raise HTTPException(422, {
                 "message": f"Unknown issue type {fields['issue_type']!r} for "
-                           f"this PRD's {cfg['provider']} destination",
+                           f"this ticket's {cfg['provider']} destination",
                 "allowed_issue_types": allowed,
             })
         out["issue_type"] = resolved

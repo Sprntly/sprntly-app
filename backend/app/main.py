@@ -77,6 +77,7 @@ from app.routes import (
     stories,
     synthesis,
     team,
+    ticket_sets,
     tickets,
     transcripts,
     usage as usage_routes,
@@ -394,6 +395,10 @@ app.include_router(chat.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)
+# Standalone ticket sets (chat-born tickets with no PRD). Registered before
+# tickets.router only for readability — the prefixes (/v1/ticket-sets vs
+# /v1/tickets) are disjoint, so order carries no routing consequence here.
+app.include_router(ticket_sets.router)
 app.include_router(jira_write.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)

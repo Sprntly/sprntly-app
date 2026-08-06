@@ -102,6 +102,9 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks", "custom_fields"},
     "prd_tickets":       {"stories"},
+    # Standalone ticket sets carry the same `stories` payload shape as
+    # prd_tickets — the whole point of the second home.
+    "ticket_sets":       {"stories"},
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},

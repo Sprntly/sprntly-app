@@ -1107,11 +1107,90 @@ def generate_from_input(
     return stories
 
 
+# ── Naming a standalone ticket set ───────────────────────────────────────────
+
+TITLE_PROMPT_VERSION = "ticket-set-title-v1"
+
+_TITLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "description": (
+                "A short, specific name for this batch of tickets — what the "
+                "work IS, in 3-7 words. Title case, no trailing period, no "
+                "'Tickets for' prefix."
+            ),
+        }
+    },
+    "required": ["title"],
+}
+
+_TITLE_SYSTEM = (
+    "Name a batch of engineering tickets so a product manager can pick it out "
+    "of a list of artifacts weeks later. Use the CONCRETE subject of the work "
+    "(the feature, surface or defect), never a generic label like 'Tickets' or "
+    "'Engineering Work'. 3-7 words, Title Case, no trailing period. Do not "
+    "prefix with 'Tickets for' — the surface already says these are tickets."
+)
+
+# A set title is a short label, so the whole naming leg is bounded tight: it
+# runs AFTER the tickets are in hand, and it must never be the reason a
+# finished generation is lost.
+_TITLE_MAX_TOKENS = 200
+
+
+def name_ticket_set(
+    enterprise_id: str, *, source_text: str, stories: list[Story]
+) -> str:
+    """A human title for a standalone ticket set.
+
+    One gateway call (never the Anthropic SDK directly — see
+    app/graph/gateway.py), logged under agent="user_stories" with its own
+    purpose so the naming leg is separable from generation in the decision log.
+
+    Falls back to the FIRST TICKET'S TITLE rather than a generic string: an
+    artifacts library where every standalone set reads "Tickets" cannot be
+    navigated, and the first ticket is at least about the right subject.
+    """
+    fallback = next(
+        (s.title.strip() for s in stories if s.title and s.title.strip()),
+        "Tickets from this conversation",
+    )
+    roster = "\n".join(f"- {s.title}" for s in stories[:20] if s.title)
+    try:
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="user_stories",
+            purpose="ticket_set_title",
+            prompt_version=TITLE_PROMPT_VERSION,
+            system=_TITLE_SYSTEM,
+            input=(
+                f"## What was asked for\n{(source_text or '').strip()[:2000]}\n\n"
+                f"## The tickets that were written\n{roster}"
+            ),
+            json_schema=_TITLE_SCHEMA,
+            temperature=0,
+            max_tokens=_TITLE_MAX_TOKENS,
+        )
+        title = str(((result.output or {}) if result else {}).get("title") or "").strip()
+    except Exception:  # noqa: BLE001 — a naming failure never loses the tickets
+        logger.exception("ticket-set title generation failed (using fallback)")
+        return fallback
+    # Guard the two ways the model can still hand back something unusable: an
+    # empty string, or an essay. Truncating beats rejecting — a long-but-right
+    # title still identifies the set.
+    if not title:
+        return fallback
+    return title[:120]
+
+
 def generate_user_stories(
     enterprise_id: str,
     *,
     prd_id: Optional[int] = None,
     insight: Optional[str] = None,
+    ticket_set_id: Optional[int] = None,
     model: Optional[str] = None,
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -1125,6 +1204,10 @@ def generate_user_stories(
     Exactly one of `prd_id` / `insight` must be given. The call is bound to the
     ticket skill and logged (agent="user_stories"). Returns a list of
     `Story`; this NEVER writes to a tracker — that's app.stories.push.
+
+    `ticket_set_id` (insight path only) is a pre-created `ticket_sets` row to
+    persist the finished batch into, named by `name_ticket_set`. The row already
+    exists — the route creates it at kick-off — so this only ever completes it.
 
     `strategy` selects the generation path: "single" (baseline, one big call) or
     "fanout" (decompose then enrich batches in parallel). Output contract is
@@ -1199,6 +1282,33 @@ def generate_user_stories(
             "ticket generation returned 0 tickets for prd_id=%s — not caching so "
             "the next open retries", prd_id,
         )
+
+    # Persist a STANDALONE set (the insight path). Same never-break-generation
+    # posture as the PRD branch above: the stories are returned either way.
+    #
+    # Unlike the PRD branch this does NOT skip an empty result. `prd_tickets` is
+    # a content-hash cache whose empty row wedges the tab forever, so there the
+    # skip is what lets the next open retry. A `ticket_sets` row is the artifact
+    # itself with no next open to retry, so an empty run is recorded as such and
+    # the panel offers the user the retry instead. The naming leg is skipped for
+    # an empty set — there is nothing to name.
+    if ticket_set_id is not None:
+        try:
+            from app.db.ticket_sets import finish_set
+
+            title = (
+                name_ticket_set(
+                    enterprise_id, source_text=insight or "", stories=stories
+                )
+                if stories
+                else ""
+            )
+            finish_set(
+                ticket_set_id, title=title, stories=[s.to_dict() for s in stories]
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("persisting ticket_set %s failed (continuing)",
+                             ticket_set_id)
 
     # Record the semantic decision (what was produced) alongside the gateway's
     # own llm_call telemetry row. Never let an audit-write break generation.

@@ -556,18 +556,23 @@ async def _run_scheduled_cycle() -> None:
 
 
 async def _run_ticket_sync_cycle() -> None:
-    """Two-way ticket sync tick: for every PRD whose tickets were pushed to a
-    tracker (prd_ticket_sync rows with auto_sync=true), push local edits (web +
-    MCP, merged from ticket_edits) and pull tracker status back.
+    """Two-way ticket sync tick: for every ARTIFACT whose tickets were pushed to
+    a tracker (prd_ticket_sync rows with auto_sync=true — PRDs and standalone
+    ticket sets alike), push local edits (web + MCP, merged from ticket_edits)
+    and pull tracker status back.
 
-    Per-row isolated: one PRD failing (disconnected tracker, deleted list,
+    Per-row isolated: one artifact failing (disconnected tracker, deleted list,
     rate limit) records last_error on its row and the loop moves on. Rows with
     a recent in-flight sync (an ad-hoc button run) are skipped, not doubled.
     The blocking tracker HTTP work runs off the event loop, one row at a time —
     deliberately serial so a big tenant can't burst-hammer tracker APIs; the
-    interval (TICKET_SYNC_INTERVAL_MINUTES) is the rate-limit relief valve."""
-    from app.db.ticket_sync import list_auto_sync_configs
-    from app.stories.sync import run_prd_sync, sync_in_flight
+    interval (TICKET_SYNC_INTERVAL_MINUTES) is the rate-limit relief valve.
+
+    The row says which artifact it belongs to (`scope_of_config`); a row naming
+    neither owner is skipped rather than guessed at, so malformed data can never
+    send one artifact's edits into another's tracker project."""
+    from app.db.ticket_sync import list_auto_sync_configs, scope_of_config
+    from app.stories.sync import run_ticket_sync, sync_in_flight
 
     try:
         configs = list_auto_sync_configs() or []
@@ -576,20 +581,22 @@ async def _run_ticket_sync_cycle() -> None:
         return
 
     for cfg in configs:
-        company_id, prd_id = cfg.get("company_id"), cfg.get("prd_id")
-        if not company_id or prd_id is None:
+        company_id = cfg.get("company_id")
+        scope = scope_of_config(cfg)
+        if not company_id or scope is None:
             continue
         if sync_in_flight(cfg):
             continue
         try:
-            result = await asyncio.to_thread(run_prd_sync, company_id, prd_id)
+            result = await asyncio.to_thread(run_ticket_sync, company_id, scope)
             logger.info(
-                "ticket sync: prd=%s provider=%s → pushed=%s errors=%s",
-                prd_id, cfg.get("provider"),
+                "ticket sync: %s=%s provider=%s → pushed=%s errors=%s",
+                scope.kind, scope.id, cfg.get("provider"),
                 result.get("pushed"), result.get("push_errors"),
             )
         except Exception as exc:  # noqa: BLE001 — per-row isolation
-            logger.warning("ticket sync failed for prd %s: %s", prd_id, exc)
+            logger.warning("ticket sync failed for %s %s: %s",
+                           scope.kind, scope.id, exc)
 
 
 def _run_orphan_ask_job_sweep() -> None:

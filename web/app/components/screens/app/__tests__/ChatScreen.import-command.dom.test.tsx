@@ -309,7 +309,13 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
       .toContain("Draft PRD")
   })
 
-  it("a tickets phrasing with NO document falls through to the ask agent", async () => {
+  it("a tickets QUESTION with no document is still answered, not built", async () => {
+    // `isTicketsCommand` is a bare verb-near-noun regex, so an interrogative
+    // matches it. That was harmless while a no-PRD tickets phrasing fell
+    // through to the ask agent; now that the same phrasing writes a standalone
+    // ticket set (feat/tickets/standalone-from-chat), TICKETS_QUESTION_RE keeps
+    // a question a question — the alternative is a multi-minute generation
+    // nobody asked for, every time someone wonders about tickets out loud.
     renderChat()
     await typeAndSend("How should I create tickets for a migration project?")
 
