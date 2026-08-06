@@ -614,6 +614,63 @@ def test_global_setting_beats_the_per_company_flag(monkeypatch):
     assert qa_agent._cross_connector_sweep_enabled("ent-1") is True
 
 
+def test_global_switch_stops_the_sweep_itself_not_just_one_caller(monkeypatch, wire):
+    """REGRESSION. The gate shipped in `qa_agent._sweep_context` only, so
+    `registry.answer_for_hints`'s priming call — added in the same PR — swept
+    with no check at all. `CHAT_CROSS_CONNECTOR_SWEEP=false` therefore disabled
+    the direct path and left priming running: a kill switch that does not kill.
+
+    The gate now lives inside `sweep()`, so it holds for every caller including
+    ones not written yet. Asserted against `sweep()` DIRECTLY — asserting via a
+    caller is what let the second entry point go uncovered in the first place.
+    """
+    from app.config import settings
+
+    jira = FakeAdapter("jira", result="PROJ-1")
+    wire({"jira": jira})
+    monkeypatch.setattr(settings, "chat_cross_connector_sweep", False)
+
+    result = cs.sweep("ent-1", "what is the state of the billing migration?")
+
+    assert result.sources == []
+    assert result.render() == ""
+    assert jira.opened_with == [], "a disabled sweep must open no sessions"
+    assert cs.enabled_for("ent-1") is False
+
+
+def test_disabled_sweep_opens_no_session(monkeypatch, wire):
+    """Why the switch matters beyond latency: `open_session` is a WRITE path for
+    Jira, Confluence and HubSpot — it refreshes and persists a rotating OAuth
+    token. With the sweep off, no session is opened at all, so the sweep cannot
+    contribute to that write. That is what makes the flag a containment lever
+    rather than merely a latency control."""
+    from app.config import settings
+
+    adapters = {p: FakeAdapter(p, result="x") for p in cs.LIVE_PROVIDERS}
+    wire(adapters)
+    monkeypatch.setattr(settings, "chat_cross_connector_sweep", False)
+
+    cs.sweep("ent-1", "what is the state of the billing migration?", only={"jira"})
+
+    assert all(a.opened_with == [] for a in adapters.values())
+
+
+def test_per_company_flag_still_opts_one_company_out(monkeypatch, wire):
+    """The global switch is not the only lever — the per-company flag must still
+    work through the same choke point."""
+    jira = FakeAdapter("jira", result="PROJ-1")
+    wire({"jira": jira})
+    monkeypatch.setattr(
+        "app.entitlements.read_feature_flags",
+        lambda cid: {"chat_cross_connector_sweep": False},
+    )
+
+    result = cs.sweep("ent-1", "what is the state of the billing migration?")
+
+    assert result.sources == []
+    assert jira.opened_with == []
+
+
 def test_sweep_context_never_raises(monkeypatch):
     from app import qa_agent
 
