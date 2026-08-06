@@ -55,6 +55,7 @@ vi.mock("../../../../connectors/SlackChannelPicker", () => ({
 import { NotificationsSettings } from "../NotificationsSettings"
 import {
   DEFAULT_INSIGHT_TYPES,
+  INSIGHT_TYPE_SLUGS,
   insightTypeLabel,
 } from "../../../../../lib/insight-types"
 
@@ -345,9 +346,9 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
   })
 
   it("persists the workspace selection under brief_insight_types, merging existing keys", async () => {
-    // Explicit `[]` — a workspace that HAS chosen "surface everything", so the
-    // shared default is not seeded and the assertion below stays exact.
-    mountWith({ email_recipients: ["a@co.com"], brief_insight_types: [] })
+    // One slug stored, so the assertion below stays exact whatever the shared
+    // default happens to be.
+    mountWith({ email_recipients: ["a@co.com"], brief_insight_types: ["top_problems"] })
     await act(async () => {
       fireEvent.click(insightChip("Competitor & market moves"))
     })
@@ -357,7 +358,7 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
     const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
     const ns = patch.notification_settings as Notif
-    expect(ns.brief_insight_types).toEqual(["competitor_moves"])
+    expect(ns.brief_insight_types).toEqual(["top_problems", "competitor_moves"])
     // The free-text override is gone from the pane; the key is left untouched
     // rather than written as null, so an older stored note isn't destroyed.
     expect("brief_insight_note" in ns).toBe(false)
@@ -379,12 +380,12 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     expect(document.querySelector("#comms-insight-note")).toBeNull()
   })
 
-  it("states the empty-selection rule in the same words as onboarding", () => {
+  it("states the clear-for-everything rule in the same words as onboarding", () => {
     // Paired with the matching assertion in PersonalizeStep.dom.test — the two
     // screens write the same key and must describe it identically.
     mountWith({})
     expect(document.body.textContent).toContain(
-      "pick any, or leave empty for everything",
+      "pick any; clear them all for everything",
     )
   })
 
@@ -402,15 +403,33 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     expect(pressed).toEqual(DEFAULT_INSIGHT_TYPES.map(insightTypeLabel))
   })
 
-  it("honours a stored [] as a real choice rather than re-seeding the default", () => {
-    // "Surface everything" is a decision, not an unfinished form. Re-seeding
-    // the default here would silently re-filter the brief for a PM who had
-    // cleared their chips, with no way to make the clear stick.
+  it("shows a legacy stored [] as EVERY type, never as an empty picker", () => {
+    // [] was how "surface everything" used to be written; it still means that,
+    // so it renders as every chip on. Rows already holding [] need no backfill.
     mountWith({ brief_insight_types: [] })
     const pressed = Array.from(
       document.querySelectorAll('[data-field="insight-types"] button'),
     ).filter((b) => b.getAttribute("aria-pressed") === "true")
-    expect(pressed).toHaveLength(0)
+    expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
+  })
+
+  it("turning off the LAST chip re-arms every type and saves the full set", async () => {
+    mountWith({ brief_insight_types: ["competitor_moves"] })
+    await act(async () => {
+      fireEvent.click(insightChip("Competitor & market moves")) // the only one on
+    })
+    const pressed = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    ).filter((b) => b.getAttribute("aria-pressed") === "true")
+    expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }))
+    })
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
+    const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
+    const ns = patch.notification_settings as Notif
+    expect(ns.brief_insight_types).toEqual([...INSIGHT_TYPE_SLUGS])
   })
 
   it("ignores stored slugs that are no longer offered, along with unknown ones", () => {

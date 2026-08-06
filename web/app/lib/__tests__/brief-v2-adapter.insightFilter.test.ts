@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State, selectFindingsForTypes } from "../brief-v2-adapter"
+import {
+  briefToBriefV2State,
+  orderPoolForTypes,
+  selectFindingsForTypes,
+} from "../brief-v2-adapter"
+import { INSIGHT_TYPE_SLUGS } from "../insight-types"
 
 // Minimal finding: only the fields the pool filter reads (title + insight_types)
 // plus the shape briefToBriefV2State needs to build a card.
@@ -102,6 +107,36 @@ describe("selectFindingsForTypes", () => {
     expect(selectFindingsForTypes(legacy, ["top_problems"]).map((i) => i.title)).toEqual([
       "C problems",
     ])
+  })
+})
+
+describe("selecting every type behaves exactly like selecting none", () => {
+  // "Cleared" resolves to the FULL set in both pickers, so this is the shape
+  // that actually arrives. It is NOT redundant with the empty case: a legacy
+  // finding carries no `insight_types`, so it intersects nothing and an
+  // explicit all-types filter would drop it. 30 of the 90 findings rendered
+  // across the live briefs are legacy — this is what keeps "clear the chips to
+  // see everything" from showing LESS.
+  const legacy = { ...finding("legacy", []), insight_types: undefined } as Insight
+  const ALL = [...INSIGHT_TYPE_SLUGS]
+
+  it("selectFindingsForTypes returns the canonical top 3, legacy finding included", () => {
+    const brief = briefWithPool([legacy, A, B], [legacy, A, B, C, D, E, F])
+    expect(selectFindingsForTypes(brief, ALL).map((i) => i.title))
+      .toEqual(selectFindingsForTypes(brief, []).map((i) => i.title))
+    expect(selectFindingsForTypes(brief, ALL).map((i) => i.title)).toContain("legacy")
+  })
+
+  it("orderPoolForTypes leaves the pool untouched rather than demoting the legacy card", () => {
+    const pool = [legacy, A, B, C]
+    expect(orderPoolForTypes(pool, ALL)).toEqual(pool)
+    expect(orderPoolForTypes(pool, ALL)[0].title).toBe("legacy")
+  })
+
+  it("the hero is the same either way", () => {
+    const brief = briefWithPool([legacy, A, B], [legacy, A, B])
+    expect(briefToBriefV2State(brief, ALL).hero?.title)
+      .toBe(briefToBriefV2State(brief, []).hero?.title)
   })
 })
 

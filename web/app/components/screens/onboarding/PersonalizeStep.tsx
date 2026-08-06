@@ -11,8 +11,8 @@ import { updateWorkspace } from "../../../lib/onboarding/store"
 import {
   DEFAULT_INSIGHT_TYPES,
   INSIGHT_TYPES,
-  cleanInsightTypes,
-  seedInsightTypes,
+  INSIGHT_TYPE_SLUGS,
+  resolveInsightTypes,
 } from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
@@ -50,7 +50,8 @@ const DRAFT_KEY = "personalize-step"
 // the two screens open in the same state for the same workspace. The selection
 // is WORKSPACE-level — persisted on
 // companies.notification_settings.brief_insight_types — so it orders the whole
-// workspace's brief. Empty is a real choice meaning "surface everything".
+// workspace's brief. It is NEVER empty: clearing every chip resolves to ALL
+// types, which every reader treats as "no filter".
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -123,15 +124,15 @@ export function PersonalizeStep() {
   // Settings shows. A local draft still wins.
   //
   // This used to be `if (saved.length) setSurfaces(saved)`, which ignored a
-  // stored `[]` and left the default preselected. A PM who cleared every chip
-  // in Settings and came back here found them switched on again, and Continue
-  // would write them back — the clear could not be made to stick. Going through
-  // `seedInsightTypes` keeps absent (nobody has chosen) distinct from `[]`
-  // (chosen: everything), which is the whole difference between the two.
+  // stored `[]` and left the default preselected — a PM who cleared their chips
+  // in Settings and came back found them switched on again, and Continue wrote
+  // them straight back. `resolveInsightTypes` settles all three cases in one
+  // place: absent => the shared default, cleared => every type, otherwise the
+  // stored selection.
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}
-    setSurfaces(seedInsightTypes(n.brief_insight_types))
+    setSurfaces(resolveInsightTypes(n.brief_insight_types))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -195,10 +196,17 @@ export function PersonalizeStep() {
     [timezone, weekday, hour, frequency],
   )
 
+  // Turning off the LAST chip means "stop filtering", not "show me nothing", so
+  // the picker fills back up instead of emptying. The selection is never empty
+  // in the UI or in the row, and "all selected" is treated as no filter
+  // everywhere it is read.
   function toggleSurface(value: string) {
-    setSurfaces((prev) =>
-      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
-    )
+    setSurfaces((prev) => {
+      const next = prev.includes(value)
+        ? prev.filter((v) => v !== value)
+        : [...prev, value]
+      return next.length ? next : [...INSIGHT_TYPE_SLUGS]
+    })
   }
 
   async function save() {
@@ -219,7 +227,7 @@ export function PersonalizeStep() {
           // check. brief_insight_note is deliberately not written — the
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
-          brief_insight_types: cleanInsightTypes(surfaces),
+          brief_insight_types: resolveInsightTypes(surfaces),
           brief_channel: destination,
           email_enabled: destination === "email",
           brief_frequency: frequency,
@@ -285,7 +293,7 @@ export function PersonalizeStep() {
             a real choice (no filtering), not an unfinished form. */}
         <div className="onb-section-h">
           What should your workspace surface?{" "}
-          <span className="opt">— pick any, or leave empty for everything</span>
+          <span className="opt">— pick any; clear them all for everything</span>
         </div>
       </div>
 

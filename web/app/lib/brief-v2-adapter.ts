@@ -21,7 +21,12 @@ import type {
 } from "../types/content"
 import type { Brief, BriefSkillCta, BriefSkillType, ChartHint, Insight } from "./api"
 import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
-import { INSIGHT_TYPE_BADGES, cleanInsightTypes, displayInsightType } from "./insight-types"
+import {
+  INSIGHT_TYPE_BADGES,
+  cleanInsightTypes,
+  coversEveryInsightType,
+  displayInsightType,
+} from "./insight-types"
 
 // ---- Types ----------------------------------------------------------------
 
@@ -205,9 +210,15 @@ function isHeadlineFlag(insight: Insight): boolean {
  *  backend deliberately leaves the model's ranking alone and does NOT rewrite
  *  `is_headline` — so without an index-0 floor this would fall through to
  *  confidence and reintroduce the drift on exactly the path the backend chose
- *  to skip. */
+ *  to skip.
+ *
+ *  An ALL-TYPES selection is not "active" — it is how a cleared picker is
+ *  stored, and it means no preference. Treating it as active would skip past a
+ *  LEGACY finding (no `insight_types` to match) to hero the first classified
+ *  one, so clearing the chips would change the hero. Caught by the paired
+ *  all-vs-none test rather than by inspection. */
 function pickHeroIndex(insights: Insight[], selectedTypes: string[] = []): number {
-  if (selectedTypes.length > 0) {
+  if (selectedTypes.length > 0 && !coversEveryInsightType(selectedTypes)) {
     const wanted = new Set(selectedTypes)
     const firstMatch = insights.findIndex(
       (ins) => Array.isArray(ins.insight_types) && ins.insight_types.some((t) => wanted.has(t)),
@@ -555,7 +566,13 @@ const MAX_RENDERED_FINDINGS = 3
 // same array) — this is the identity case callers rely on to skip reordering
 // entirely when the reader hasn't picked anything.
 export function orderPoolForTypes(insights: Insight[], selectedTypes: string[]): Insight[] {
+  // Nothing selected, or everything selected — both mean "no preference", so
+  // the model's own ranking stands. The all-types case is NOT redundant: a
+  // legacy finding carries no `insight_types`, so it would sort into `rest` and
+  // be demoted below every classified finding by a selection that was supposed
+  // to express no preference at all.
   if (!selectedTypes || selectedTypes.length === 0) return insights
+  if (coversEveryInsightType(selectedTypes)) return insights
   const wanted = new Set(selectedTypes)
   const matching: Insight[] = []
   const rest: Insight[] = []
@@ -571,7 +588,12 @@ export function orderPoolForTypes(insights: Insight[], selectedTypes: string[]):
 
 export function selectFindingsForTypes(brief: Brief, selectedTypes: string[]): Insight[] {
   const topThree = (brief.insights || []).filter((i): i is Insight => Boolean(i))
+  // Same equivalence as orderPoolForTypes, and here it is the one that keeps
+  // "cleared = use all" honest: filtering by an explicit all-types list would
+  // drop every LEGACY finding (no `insight_types` to intersect), so a PM who
+  // cleared their chips to see more would see less.
   if (!selectedTypes || selectedTypes.length === 0) return topThree
+  if (coversEveryInsightType(selectedTypes)) return topThree
   const pool = ((brief._pool && brief._pool.length ? brief._pool : brief.insights) || []).filter(
     (i): i is Insight => Boolean(i),
   )

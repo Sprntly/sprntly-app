@@ -26,8 +26,8 @@ import {
 import { updateWorkspace } from "../../../../lib/onboarding/store"
 import {
   INSIGHT_TYPES,
-  cleanInsightTypes,
-  seedInsightTypes,
+  INSIGHT_TYPE_SLUGS,
+  resolveInsightTypes,
 } from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
@@ -92,13 +92,10 @@ export function NotificationsSettings() {
       hour: typeof n.brief_hour === "number" ? n.brief_hour : 6,
       timezone:
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
-      // Same seed as onboarding step 09, from the same constant: a workspace
-      // that has never picked opens with DEFAULT_INSIGHT_TYPES on BOTH screens
-      // rather than preselected in one and blank in the other. A stored `[]` is
-      // honoured as the real choice it is ("surface everything"), and a stored
-      // slug with no chip is dropped — invisible state the admin could neither
-      // see nor clear.
-      insightTypes: seedInsightTypes(n.brief_insight_types),
+      // Same resolver as onboarding step 09: absent => the shared default (so
+      // the two screens open in one state), cleared => every type, otherwise
+      // the stored selection with unknown slugs dropped. Never empty.
+      insightTypes: resolveInsightTypes(n.brief_insight_types),
     }
     setEmailDigest(loaded.emailDigest)
     setFrequency(loaded.frequency)
@@ -119,10 +116,15 @@ export function NotificationsSettings() {
       timezone !== snapshot.timezone ||
       typesKey(insightTypes) !== typesKey(snapshot.insightTypes))
 
+  // Turning off the LAST chip means "stop filtering", not "show me nothing", so
+  // the picker fills back up instead of emptying. Mirrors onboarding step 09.
   function toggleInsightType(value: string) {
-    setInsightTypes((prev) =>
-      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
-    )
+    setInsightTypes((prev) => {
+      const next = prev.includes(value)
+        ? prev.filter((v) => v !== value)
+        : [...prev, value]
+      return next.length ? next : [...INSIGHT_TYPE_SLUGS]
+    })
     setSaved(false)
   }
 
@@ -219,7 +221,7 @@ export function NotificationsSettings() {
           // constraint. brief_insight_note is deliberately not written — the
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
-          brief_insight_types: cleanInsightTypes(insightTypes),
+          brief_insight_types: resolveInsightTypes(insightTypes),
         },
       })
       setStoredAnchor(anchor)
@@ -311,7 +313,7 @@ export function NotificationsSettings() {
             <div className="pset-card-head">
               <h3 className="pset-card-title">Top Insights</h3>
               <span className="pset-card-hint">
-                · what your workspace should surface — pick any, or leave empty for everything
+                · what your workspace should surface — pick any; clear them all for everything
               </span>
             </div>
             <div className="metric-chips" data-field="insight-types">

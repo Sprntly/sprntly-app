@@ -53,7 +53,10 @@ def selected_insight_types(enterprise_id: str) -> "list[str]":
     """The workspace's stored insight-type selection, cleaned to known slugs.
 
     [] means "no preference" — the readers' documented default of surfacing
-    everything in the model's own rank order.
+    everything in the model's own rank order. Since 2026-08-06 the pickers
+    resolve a cleared selection to the FULL set rather than to [], which
+    `order_pool_for_types` treats identically; both shapes therefore arrive and
+    both mean the same thing. Legacy rows holding [] need no backfill.
     """
     try:
         from app.insight_types import clean_insight_types

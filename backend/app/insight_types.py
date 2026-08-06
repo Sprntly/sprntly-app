@@ -163,7 +163,15 @@ def order_pool_for_types(
     pool is the identity and the two surfaces cannot disagree.
     """
     wanted = {s for s in selected if s in INSIGHT_TYPES}
-    if not wanted:
+    # Nothing selected, or EVERYTHING selected — both mean "no preference", so
+    # the model's own ranking stands. The all-types case is not redundant: a
+    # legacy finding carries no `insight_types`, so it intersects no selection
+    # and would be demoted below every classified finding by a selection that
+    # was meant to express no preference at all. The pickers now resolve a
+    # cleared selection to the full set rather than to [], so this is the shape
+    # that actually arrives. Mirrors coversEveryInsightType in the frontend's
+    # lib/insight-types.
+    if not wanted or wanted >= set(INSIGHT_TYPES):
         return pool, 0
     matching: list[dict] = []
     rest: list[dict] = []

@@ -151,19 +151,37 @@ export const DEFAULT_INSIGHT_TYPES: InsightTypeSlug[] = [
   "build_priorities",
 ]
 
-/** Seed a picker from the stored value.
+/** Does this selection already cover every type we know about?
  *
- *  The distinction that matters is ABSENT vs EXPLICITLY EMPTY:
- *    - key absent / not an array  => nobody has chosen yet  => the default
- *    - `[]`                       => chosen: "surface everything" => `[]`
+ *  Load-bearing, not cosmetic. "All types selected" and "nothing selected" MUST
+ *  behave identically, and they do not do so by accident: a legacy finding
+ *  carries no `insight_types` at all, so it intersects no selection and would be
+ *  filtered OUT by an explicit all-types list while an empty list keeps it. 30
+ *  of the 90 findings rendered across the live briefs are in that state, so
+ *  treating the two as the same thing is what makes "cleared = use all" safe. */
+export function coversEveryInsightType(selection: readonly string[]): boolean {
+  const picked = new Set(cleanInsightTypes(selection))
+  return INSIGHT_TYPE_SLUGS.every((slug) => picked.has(slug))
+}
+
+/** Resolve the stored value into what the picker shows and the readers use.
  *
- *  Resurrecting the default from a stored `[]` would silently re-filter a brief
- *  for a PM who had deliberately cleared their chips, and they would have no
- *  way to make it stick. Anything else goes through `cleanInsightTypes`, so a
- *  retired slug still degrades rather than rendering a phantom chip. */
-export function seedInsightTypes(values: unknown): InsightTypeSlug[] {
+ *  THE SELECTION IS NEVER EMPTY. Three cases:
+ *    - key absent / not an array  => nobody has chosen yet => DEFAULT_INSIGHT_TYPES
+ *    - cleans to nothing          => cleared => EVERY type ("use all")
+ *    - otherwise                  => the cleaned selection
+ *
+ *  Clearing every chip is a request to stop filtering, not a request for an
+ *  empty brief, so it resolves to the full set rather than to `[]`. That keeps
+ *  the state legible — the picker always shows what you will get, and a stored
+ *  row always says it outright instead of encoding "everything" as absence.
+ *
+ *  Legacy rows holding `[]` (written before this rule) resolve the same way, so
+ *  they need no backfill: they already meant "everything". */
+export function resolveInsightTypes(values: unknown): InsightTypeSlug[] {
   if (!Array.isArray(values)) return [...DEFAULT_INSIGHT_TYPES]
-  return cleanInsightTypes(values)
+  const cleaned = cleanInsightTypes(values)
+  return cleaned.length ? cleaned : [...INSIGHT_TYPE_SLUGS]
 }
 
 export function insightTypeLabel(slug: string): string {

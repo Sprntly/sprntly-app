@@ -61,6 +61,7 @@ vi.mock("../../../connectors/SlackChannelPicker", () => ({
 import { PersonalizeStep } from "../PersonalizeStep"
 import {
   DEFAULT_INSIGHT_TYPES,
+  INSIGHT_TYPE_SLUGS,
   insightTypeLabel,
 } from "../../../../lib/insight-types"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
@@ -158,11 +159,10 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
-  it("shows a stored [] as cleared instead of re-arming the default", async () => {
-    // The PM cleared every chip in Settings. Coming back here must not switch
-    // them on again — the old seeding effect ran `if (saved.length)`, so a
-    // stored [] was ignored, the default stayed lit, and Continue wrote it
-    // straight back. The clear could not be made to stick.
+  it("shows a legacy stored [] as EVERY type, never as an empty picker", async () => {
+    // [] was how "surface everything" used to be written. It still means that,
+    // so it renders as every chip on — the preference is never shown cleared.
+    // No backfill needed for rows already holding [].
     analyticsConnected()
     const { container } = mount(
       makeWorkspace({ onboarding_step: 9, notification_settings: { brief_insight_types: [] } }),
@@ -171,8 +171,37 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
       const pressed = Array.from(
         container.querySelectorAll('[data-field="surfaces"] button'),
       ).filter((b) => b.getAttribute("aria-pressed") === "true")
-      expect(pressed).toHaveLength(0)
+      expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
     })
+  })
+
+  it("turning off the LAST chip re-arms every type instead of emptying", async () => {
+    // Clearing is a request to stop filtering, not for an empty brief. The
+    // picker refills, and Continue writes the full set — never [].
+    analyticsConnected()
+    mount(
+      makeWorkspace({
+        onboarding_step: 9,
+        notification_settings: { brief_insight_types: ["competitor_moves"] },
+      }),
+    )
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+    await waitFor(() =>
+      expect(chip("Competitor & market moves").getAttribute("aria-pressed")).toBe("true"),
+    )
+
+    fireEvent.click(chip("Competitor & market moves")) // the only one on
+
+    const pressed = Array.from(
+      document.querySelectorAll('[data-field="surfaces"] button'),
+    ).filter((b) => b.getAttribute("aria-pressed") === "true")
+    expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
+
+    await act(async () => {
+      continueBtn().click()
+    })
+    const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
+    expect(ns.brief_insight_types).toEqual([...INSIGHT_TYPE_SLUGS])
   })
 
   it("shows a selection saved in Settings, not the default", async () => {
@@ -193,15 +222,14 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     })
   })
 
-  it("states the empty-selection rule in the same words as Settings", async () => {
+  it("states the clear-for-everything rule in the same words as Settings", async () => {
     // Onboarding and Settings → Comms & Brief write the SAME key
     // (notification_settings.brief_insight_types), so they must present the
-    // same rule. An empty selection means "everything" — a real choice, not an
-    // unfinished form — and onboarding used to omit that, so the two screens
-    // described the same control differently.
+    // same rule. The copy says what actually happens now: clearing every chip
+    // means everything, and the picker refills rather than sitting empty.
     analyticsConnected()
     const { container } = mount()
-    expect(container.textContent).toContain("pick any, or leave empty for everything")
+    expect(container.textContent).toContain("pick any; clear them all for everything")
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 

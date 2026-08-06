@@ -154,6 +154,28 @@ def test_order_pool_ignores_unknown_slugs_and_missing_types():
     assert matched == 1
 
 
+def test_selecting_every_type_is_the_same_as_selecting_none():
+    """"Cleared" resolves to the FULL set in the pickers, so this is the shape
+    that actually arrives — and it must behave exactly like no preference.
+
+    Not redundant with the empty case: a LEGACY finding carries no
+    `insight_types`, so it intersects nothing and a naive all-types partition
+    would demote it below every classified finding. 30 of the 90 findings
+    rendered across the live briefs are legacy, so this is the assertion that
+    keeps "clear it to see everything" from showing LESS."""
+    from app.insight_types import INSIGHT_TYPE_SLUGS, order_pool_for_types
+
+    legacy = {"title": "legacy, unclassified"}
+    pool = [legacy, *_mixed_pool()]
+
+    ordered, matched = order_pool_for_types(pool, list(INSIGHT_TYPE_SLUGS))
+    assert ordered == pool, "all-types must not reorder"
+    assert matched == 0, "all-types must read as 'no preference', not 'all matched'"
+    assert ordered[0] is legacy, "the legacy finding must not be demoted"
+    # Identical to the empty selection, which is the whole point.
+    assert ordered == order_pool_for_types(pool, [])[0]
+
+
 def test_order_pool_never_drops_a_finding():
     """Preferences REORDER, they never exclude (SKILL.md step 4b) — the pool
     that comes out is a permutation of the pool that went in."""
