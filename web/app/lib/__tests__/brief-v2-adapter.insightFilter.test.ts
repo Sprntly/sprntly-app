@@ -39,20 +39,22 @@ function briefWithPool(top: Insight[], pool: Insight[]): Brief {
   }
 }
 
-const A = finding("A reliability", ["reliability_signals"], 0.9)
-const B = finding("B feedback", ["user_feedback"], 0.85)
+// Only D carries `competitor_moves`, and it sits at rank 4 — that is what makes
+// "pulls a match up from below the top 3" a real test rather than a tautology.
+const A = finding("A build", ["build_priorities"], 0.9)
+const B = finding("B build two", ["build_priorities"], 0.85)
 const C = finding("C problems", ["top_problems"], 0.8)
 const D = finding("D competitive", ["competitor_moves"], 0.7)
-const E = finding("E wins", ["wins"], 0.6)
-const F = finding("F build", ["build_priorities"], 0.55)
+const E = finding("E problems two", ["top_problems"], 0.6)
+const F = finding("F build three", ["build_priorities"], 0.55)
 
 describe("selectFindingsForTypes", () => {
   const brief = briefWithPool([A, B, C], [A, B, C, D, E, F])
 
   it("no filter → the canonical top 3, untouched", () => {
     expect(selectFindingsForTypes(brief, []).map((i) => i.title)).toEqual([
-      "A reliability",
-      "B feedback",
+      "A build",
+      "B build two",
       "C problems",
     ])
   })
@@ -67,14 +69,14 @@ describe("selectFindingsForTypes", () => {
   it("keeps pool order (best-first) and caps at 3 across multiple types", () => {
     const picked = selectFindingsForTypes(
       brief,
-      ["wins", "build_priorities", "reliability_signals", "top_problems"],
+      ["build_priorities", "top_problems"],
     ).map((i) => i.title)
-    // Matches A, C, E, F in pool order → capped to the first 3.
-    expect(picked).toEqual(["A reliability", "C problems", "E wins"])
+    // Matches A, B, C, E, F in pool order → capped to the first 3.
+    expect(picked).toEqual(["A build", "B build two", "C problems"])
   })
 
   it("matches when a finding carries the type as one of two", () => {
-    const multi = finding("multi", ["reliability_signals", "competitor_moves"])
+    const multi = finding("multi", ["build_priorities", "competitor_moves"])
     const b = briefWithPool([multi], [multi])
     expect(selectFindingsForTypes(b, ["competitor_moves"]).map((i) => i.title)).toEqual(["multi"])
   })
@@ -82,8 +84,8 @@ describe("selectFindingsForTypes", () => {
   it("falls back to the top 3 when a filter matches nothing this week", () => {
     const noComp = briefWithPool([A, B, C], [A, B, C]) // no competitor finding at all
     expect(selectFindingsForTypes(noComp, ["competitor_moves"]).map((i) => i.title)).toEqual([
-      "A reliability",
-      "B feedback",
+      "A build",
+      "B build two",
       "C problems",
     ])
   })
@@ -97,8 +99,8 @@ describe("selectFindingsForTypes", () => {
       summary_headline: "H",
       insights: [A, B, C], // no _pool
     }
-    expect(selectFindingsForTypes(legacy, ["user_feedback"]).map((i) => i.title)).toEqual([
-      "B feedback",
+    expect(selectFindingsForTypes(legacy, ["top_problems"]).map((i) => i.title)).toEqual([
+      "C problems",
     ])
   })
 })
@@ -115,8 +117,8 @@ describe("briefToBriefV2State with a filter", () => {
     const brief = briefWithPool([A, B, C], [A, B, C, D, E, F])
     const state = briefToBriefV2State(brief)
     // A has the highest confidence (0.9) so it's the hero by fallback.
-    expect(state.hero?.title).toBe("A reliability")
-    expect(state.supporting.map((s) => s.title)).toEqual(["B feedback", "C problems"])
+    expect(state.hero?.title).toBe("A build")
+    expect(state.supporting.map((s) => s.title)).toEqual(["B build two", "C problems"])
   })
 })
 
@@ -126,12 +128,12 @@ describe("briefToBriefV2State with a filter", () => {
 // its lead — otherwise the browser re-sorts by confidence and disagrees with
 // the emailed and Slacked brief, which both render insights[0] first.
 describe("hero pick under an active insight-type filter", () => {
-  const lowFirst = finding("low but preferred", ["wins"], 0.4)
-  const highSecond = finding("high and preferred", ["wins"], 0.95)
+  const lowFirst = finding("low but preferred", ["competitor_moves"], 0.4)
+  const highSecond = finding("high and preferred", ["competitor_moves"], 0.95)
 
   it("leads with pool order, not the highest-confidence match", () => {
     const brief = briefWithPool([lowFirst, highSecond], [lowFirst, highSecond])
-    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("low but preferred")
+    expect(briefToBriefV2State(brief, ["competitor_moves"]).hero?.title).toBe("low but preferred")
     // ...and with NO selection the lead still wins. This is the path the
     // backend deliberately skips (it leaves the model's ranking and does not
     // rewrite is_headline when nothing matched), so a confidence fallback here
@@ -145,7 +147,7 @@ describe("hero pick under an active insight-type filter", () => {
     // current preference order no longer leads with.
     const stale = { ...highSecond, is_headline: true } as Insight
     const brief = briefWithPool([lowFirst, stale], [lowFirst, stale])
-    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("low but preferred")
+    expect(briefToBriefV2State(brief, ["competitor_moves"]).hero?.title).toBe("low but preferred")
   })
 
   it("keeps the model's own hero when the selection matched nothing", () => {
@@ -154,12 +156,12 @@ describe("hero pick under an active insight-type filter", () => {
     // answer rather than an arbitrary first element.
     const flagged = { ...C, is_headline: true } as Insight
     const brief = briefWithPool([A, B, flagged], [A, B, flagged])
-    expect(briefToBriefV2State(brief, ["wins"]).hero?.title).toBe("C problems")
+    expect(briefToBriefV2State(brief, ["competitor_moves"]).hero?.title).toBe("C problems")
   })
 
   it("drives the KPI tiles off the same hero", () => {
     const brief = briefWithPool([lowFirst, highSecond], [lowFirst, highSecond])
-    const state = briefToBriefV2State(brief, ["wins"])
+    const state = briefToBriefV2State(brief, ["competitor_moves"])
     expect(state.hero?.title).toBe("low but preferred")
     expect(state.kpiTiles.length).toBeGreaterThan(0)
   })
@@ -172,20 +174,20 @@ describe("hero pick under an active insight-type filter", () => {
 describe("card pill uses the preference vocabulary", () => {
   it("labels a card with its own insight type, not the skill type", () => {
     // tag `something_broken` ⇒ skill type `reliability` ⇒ old pill "Reliability".
-    const f = finding("A", ["wins"])
+    const f = finding("A", ["competitor_moves"])
     const state = briefToBriefV2State(briefWithPool([f], [f]), [])
-    expect(state.hero?.skillLabel).toBe("Win")
-    expect(state.hero?.skillAccent).toBe("#0f7d70")
+    expect(state.hero?.skillLabel).toBe("Competitor moves")
+    expect(state.hero?.skillAccent).toBe("#b07a2e")
     // The underlying skill type is still carried for anything that needs it.
     expect(state.hero?.skillType).toBe("reliability")
   })
 
   it("surfaces the selected type when the finding's PRIMARY wasn't picked", () => {
-    // Primary is top_problems, but the reader asked only for user_feedback —
+    // Primary is top_problems, but the reader asked only for build_priorities —
     // the card must say so, otherwise it can't evidence the selection.
-    const f = finding("A", ["top_problems", "user_feedback"])
+    const f = finding("A", ["top_problems", "build_priorities"])
     const brief = briefWithPool([f], [f])
-    expect(briefToBriefV2State(brief, ["user_feedback"]).hero?.skillLabel).toBe("User feedback")
+    expect(briefToBriefV2State(brief, ["build_priorities"]).hero?.skillLabel).toBe("What to build")
     expect(briefToBriefV2State(brief, []).hero?.skillLabel).toBe("Top problem")
   })
 
@@ -194,9 +196,9 @@ describe("card pill uses the preference vocabulary", () => {
     // reader's first chip override every card's primary — on a real staging
     // brief that collapsed two distinct findings to the same "Top problem"
     // pill. The finding's own order wins; the selection only breaks the tie.
-    const a = finding("A", ["top_problems", "reliability_signals"])
+    const a = finding("A", ["top_problems", "competitor_moves"])
     const b = finding("B", ["build_priorities", "top_problems"])
-    const sel = ["top_problems", "build_priorities", "reliability_signals"]
+    const sel = ["top_problems", "build_priorities", "competitor_moves"]
     const state = briefToBriefV2State(briefWithPool([a, b], [a, b]), sel)
     expect(state.hero?.skillLabel).toBe("Top problem")
     expect(state.supporting.map((s) => s.skillLabel)).toEqual(["What to build"])
@@ -205,22 +207,19 @@ describe("card pill uses the preference vocabulary", () => {
   it("covers every selectable type with a distinct pill", () => {
     const expected: Record<string, string> = {
       top_problems: "Top problem",
-      build_priorities: "What to build",
-      user_feedback: "User feedback",
       competitor_moves: "Competitor moves",
-      reliability_signals: "Reliability",
-      wins: "Win",
+      build_priorities: "What to build",
     }
     for (const [slug, label] of Object.entries(expected)) {
       const f = finding(slug, [slug])
       expect(briefToBriefV2State(briefWithPool([f], [f]), []).hero?.skillLabel).toBe(label)
     }
     // Distinct labels, so two differently-typed cards never read the same.
-    expect(new Set(Object.values(expected)).size).toBe(6)
+    expect(new Set(Object.values(expected)).size).toBe(3)
   })
 
   it("keeps the skill label on a LEGACY finding with no insight_types", () => {
-    // 8 skill types do not map onto 6 preference slugs (retention, demand,
+    // 8 skill types do not map onto 3 preference slugs (retention, demand,
     // engagement, compliance have no faithful counterpart), so rather than
     // invent one we leave pre-classifier briefs exactly as they render today.
     const legacy = { ...finding("old", []), insight_types: undefined } as Insight
@@ -230,11 +229,11 @@ describe("card pill uses the preference vocabulary", () => {
   })
 
   it("labels supporting cards the same way as the hero", () => {
-    const a = finding("A", ["reliability_signals"])
-    const b = finding("B", ["competitor_moves"])
+    const a = finding("A", ["competitor_moves"])
+    const b = finding("B", ["build_priorities"])
     const state = briefToBriefV2State(briefWithPool([a, b], [a, b]), [])
-    expect(state.hero?.skillLabel).toBe("Reliability")
-    expect(state.supporting.map((s) => s.skillLabel)).toEqual(["Competitor moves"])
+    expect(state.hero?.skillLabel).toBe("Competitor moves")
+    expect(state.supporting.map((s) => s.skillLabel)).toEqual(["What to build"])
   })
 })
 
@@ -251,46 +250,49 @@ describe("selection sourced from the brief payload (production call shape)", () 
   }
 
   it("names cards from _insight_prefs with no argument passed", () => {
-    // Primary is user_feedback, which the reader did NOT pick; reliability_signals
-    // is the one they asked for, so that is what the card must say.
-    const f = finding("A", ["user_feedback", "reliability_signals"])
-    const b = briefWithPrefs([f], ["top_problems", "build_priorities", "reliability_signals"])
-    expect(briefToBriefV2State(b).hero?.skillLabel).toBe("Reliability")
+    // Primary is build_priorities, which the reader did NOT pick;
+    // competitor_moves is the one they asked for, so that is what the card says.
+    const f = finding("A", ["build_priorities", "competitor_moves"])
+    const b = briefWithPrefs([f], ["top_problems", "competitor_moves"])
+    expect(briefToBriefV2State(b).hero?.skillLabel).toBe("Competitor moves")
   })
 
   it("matches what the email renders for the same finding", () => {
     // The emailed pill reads the identical field, so both surfaces agree by
     // construction. This is the drift the PR exists to remove.
-    const f = finding("A", ["top_problems", "wins"])
-    expect(briefToBriefV2State(briefWithPrefs([f], ["wins"])).hero?.skillLabel).toBe("Win")
+    const f = finding("A", ["top_problems", "competitor_moves"])
+    expect(briefToBriefV2State(briefWithPrefs([f], ["competitor_moves"])).hero?.skillLabel)
+      .toBe("Competitor moves")
     expect(briefToBriefV2State(briefWithPrefs([f], [])).hero?.skillLabel).toBe("Top problem")
   })
 
   it("falls back to the primary type when the brief predates _insight_prefs", () => {
     // Legacy payloads have no `_insight_prefs`; they render primary types until
     // regenerated, which is honest rather than guessed.
-    const f = finding("A", ["user_feedback", "reliability_signals"])
+    const f = finding("A", ["build_priorities", "competitor_moves"])
     expect(briefToBriefV2State(briefWithPrefs([f], null)).hero?.skillLabel)
-      .toBe("User feedback")
+      .toBe("What to build")
   })
 
   it("picks the hero from _insight_prefs with no argument passed", () => {
-    const other = finding("not preferred", ["user_feedback"], 0.99)
-    const preferred = finding("preferred", ["wins"], 0.1)
-    const b = briefWithPrefs([other, preferred], ["wins"])
+    const other = finding("not preferred", ["build_priorities"], 0.99)
+    const preferred = finding("preferred", ["competitor_moves"], 0.1)
+    const b = briefWithPrefs([other, preferred], ["competitor_moves"])
     expect(briefToBriefV2State(b).hero?.title).toBe("preferred")
   })
 
   it("lets an explicit argument override the payload", () => {
-    const f = finding("A", ["top_problems", "wins"])
-    const b = briefWithPrefs([f], ["wins"])
+    const f = finding("A", ["top_problems", "competitor_moves"])
+    const b = briefWithPrefs([f], ["competitor_moves"])
     expect(briefToBriefV2State(b, ["top_problems"]).hero?.skillLabel).toBe("Top problem")
   })
 
   it("ignores junk in _insight_prefs.selected", () => {
-    const f = finding("A", ["top_problems", "wins"])
+    const f = finding("A", ["top_problems", "competitor_moves"])
     const b = briefWithPool([f], [f])
-    b._insight_prefs = { selected: ["drive_metric", "nonsense"], matched: 0 }
+    // `drive_metric` retired 2026-07-23, `wins` 2026-08-05 — both still pass the
+    // DB constraint, so a stored selection can really hold them.
+    b._insight_prefs = { selected: ["drive_metric", "wins", "nonsense"], matched: 0 }
     expect(briefToBriefV2State(b).hero?.skillLabel).toBe("Top problem")
   })
 })

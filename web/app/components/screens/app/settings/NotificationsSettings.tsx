@@ -25,8 +25,8 @@ import {
 } from "../../../../lib/briefSchedule"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
 import {
-  SELECTABLE_INSIGHT_TYPES,
-  selectableInsightTypes,
+  INSIGHT_TYPES,
+  cleanInsightTypes,
 } from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
@@ -93,7 +93,7 @@ export function NotificationsSettings() {
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
       // Narrowed to the offered types: a stored slug with no chip would be
       // invisible state the admin can neither see nor clear.
-      insightTypes: selectableInsightTypes(n.brief_insight_types),
+      insightTypes: cleanInsightTypes(n.brief_insight_types),
     }
     setEmailDigest(loaded.emailDigest)
     setFrequency(loaded.frequency)
@@ -214,7 +214,7 @@ export function NotificationsSettings() {
           // constraint. brief_insight_note is deliberately not written — the
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
-          brief_insight_types: selectableInsightTypes(insightTypes),
+          brief_insight_types: cleanInsightTypes(insightTypes),
         },
       })
       setStoredAnchor(anchor)
@@ -310,7 +310,7 @@ export function NotificationsSettings() {
               </span>
             </div>
             <div className="metric-chips" data-field="insight-types">
-              {SELECTABLE_INSIGHT_TYPES.map((opt) => {
+              {INSIGHT_TYPES.map((opt) => {
                 const isSel = insightTypes.includes(opt.value)
                 return (
                   <button

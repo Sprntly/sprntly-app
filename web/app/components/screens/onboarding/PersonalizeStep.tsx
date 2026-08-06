@@ -9,8 +9,8 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import {
-  SELECTABLE_INSIGHT_TYPES,
-  selectableInsightTypes,
+  INSIGHT_TYPES,
+  cleanInsightTypes,
 } from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
@@ -119,7 +119,7 @@ export function PersonalizeStep() {
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}
-    const saved = selectableInsightTypes(n.brief_insight_types)
+    const saved = cleanInsightTypes(n.brief_insight_types)
     if (saved.length) setSurfaces(saved)
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -208,7 +208,7 @@ export function PersonalizeStep() {
           // check. brief_insight_note is deliberately not written — the
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
-          brief_insight_types: selectableInsightTypes(surfaces),
+          brief_insight_types: cleanInsightTypes(surfaces),
           brief_channel: destination,
           email_enabled: destination === "email",
           brief_frequency: frequency,
@@ -279,7 +279,7 @@ export function PersonalizeStep() {
       </div>
 
       <div className="metric-chips" data-field="surfaces">
-        {SELECTABLE_INSIGHT_TYPES.map((opt) => {
+        {INSIGHT_TYPES.map((opt) => {
           const isSel = surfaces.includes(opt.value)
           return (
             <button

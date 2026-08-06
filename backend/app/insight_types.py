@@ -12,13 +12,31 @@ Single source of truth on the backend for:
 Mirrors the frontend list in web/app/lib/insight-types.ts. Adding, removing, or
 renaming a type means changing BOTH sides AND the DB constraint(s).
 
-History: merged from the original 6 onboarding chips + 3 client-requested
-report types (2026-07-23). All three requested types turned out to be
-duplicates of an existing chip, so the merged set is still six. Two slugs were
-renamed because their meaning broadened in the merge:
+THE TWO LISTS MUST BE THE SAME LENGTH. A type the backend can classify a
+finding into, but the frontend does not render, is worse than no type at all:
+the compose prompt promotes a finding under it and the browser then filters
+that finding out of view, with nothing on either surface saying why. Between
+2026-07-27 and 2026-08-05 exactly that held — the backend counted six, the
+picker offered three — and the extra three were invisible state. Apurva's
+ruling on 2026-08-05: a backend insight type is either wired through to the
+web or it does not exist.
+
+History: the original 6 onboarding chips merged with 3 client-requested report
+types (2026-07-23; all three were duplicates, so the merged set stayed six),
+then narrowed to the THREE the picker actually offers (2026-08-05). The three
+dropped — user_feedback, reliability_signals, wins — had no skill configured to
+produce them and no chip to select them. Two slugs were renamed in the 07-23
+merge as their meaning broadened:
   drive_metric        -> build_priorities
-  emerging_complaints -> user_feedback
+  emerging_complaints -> user_feedback (since dropped)
 See the accompanying migration for the data remap.
+
+The DB CHECK constraints deliberately still accept the wider vocabulary. A
+constraint that is a strict superset of the code is safe — nothing can write a
+slug this module does not know — whereas narrowing it needs a migration and a
+data remap for rows that already hold a dropped slug. `clean_insight_types`
+drops those on read, which degrades to "surface everything", the same default
+as no preference at all.
 """
 from __future__ import annotations
 
@@ -26,34 +44,23 @@ from __future__ import annotations
 #: prompt verbatim so the model classifies each finding into the exact same
 #: categories the user selects from, making the per-user filter precise rather
 #: than a fuzzy mapping off the internal 7-way skill taxonomy.
+#: Order is the picker's chip order, so the prompt, the chips and the settings
+#: rows all read the same way round.
 INSIGHT_TYPES: "dict[str, tuple[str, str]]" = {
     "top_problems": (
         "Top user problems & opportunities",
         "The most pressing user/product problems and the biggest opportunities "
         "surfaced across all signals.",
     ),
-    "build_priorities": (
-        "Most important to build",
-        "The highest-priority things to build next, synthesizing every signal "
-        "(metric movement, user demand, revenue, strategy).",
-    ),
-    "user_feedback": (
-        "User feedback & complaints",
-        "What users are actually saying: emerging complaints, recurring feedback "
-        "themes, and frequently-requested changes.",
-    ),
     "competitor_moves": (
         "Competitor & market moves",
         "Competitive and market developments the team should react to "
         "(launches, pricing, positioning, category shifts).",
     ),
-    "reliability_signals": (
-        "Reliability & incident signals",
-        "Reliability problems, incidents, errors, latency, and stability risks.",
-    ),
-    "wins": (
-        "Wins to celebrate",
-        "Positive movements, milestones, and wins worth recognizing.",
+    "build_priorities": (
+        "Most important to build",
+        "The highest-priority things to build next, synthesizing every signal "
+        "(metric movement, user demand, revenue, strategy).",
     ),
 }
 
@@ -77,12 +84,9 @@ INSIGHT_TYPE_SLUGS: "tuple[str, ...]" = tuple(INSIGHT_TYPES.keys())
 #: skill taxonomy's existing palette — no new colours are introduced, each slug
 #: simply claims the hex whose meaning already matched it.
 INSIGHT_TYPE_BADGES: "dict[str, tuple[str, str]]" = {
-    "top_problems":        ("Top problem",      "#b23b52"),  # rose
-    "build_priorities":    ("What to build",    "#1a8a52"),  # green
-    "user_feedback":       ("User feedback",    "#5f57a6"),  # iris
-    "competitor_moves":    ("Competitor moves", "#b07a2e"),  # ochre
-    "reliability_signals": ("Reliability",      "#c0473c"),  # clay
-    "wins":                ("Win",              "#0f7d70"),  # teal
+    "top_problems":     ("Top problem",      "#b23b52"),  # rose
+    "competitor_moves": ("Competitor moves", "#b07a2e"),  # ochre
+    "build_priorities": ("What to build",    "#1a8a52"),  # green
 }
 
 
@@ -106,7 +110,7 @@ def display_insight_type(
     Returns None when the finding carries no known type, which
     is the legacy case: briefs composed before the classifier existed have no
     `insight_types` at all, and the caller must keep its old skill-taxonomy label
-    rather than invent one (the 8 skill types do not map cleanly onto the 6
+    rather than invent one (the 8 skill types do not map cleanly onto the 3
     preference slugs — retention, demand, engagement and compliance each have no
     faithful counterpart).
     """

@@ -125,28 +125,29 @@ def _pill_brief(insight_types, selected=None, card_type="competitive"):
 
 
 def test_email_pill_uses_the_reader_vocabulary(isolated_settings):
-    """The emailed pill names the finding in the SAME six types the picker
-    offers, not the skill taxonomy's own 8. Before 2026-08-05 a card classified
-    `reliability_signals` was emailed as "Competitive" (its skill type), so the
-    email could not evidence the reader's selection."""
+    """The emailed pill names the finding in the SAME types the picker offers,
+    not the skill taxonomy's own 8. Before 2026-08-05 a card classified
+    `competitor_moves` was emailed under its skill type, so the email could not
+    evidence the reader's selection."""
     from app.synthesis.email_delivery import render_brief_email
 
     _s, html_body, text_body = render_brief_email(
-        _pill_brief(["reliability_signals"]))
+        _pill_brief(["competitor_moves"]))
 
-    assert "Reliability" in html_body and "Reliability" in text_body
-    assert "Competitive" not in html_body  # the skill type is no longer shown
-    assert "#c0473c" in html_body          # clay, the reliability accent
+    assert "Competitor moves" in html_body and "Competitor moves" in text_body
+    assert "#b07a2e" in html_body          # ochre, the competitor-moves accent
 
 
 def test_email_pill_surfaces_the_selected_type_over_an_unpicked_primary(
         isolated_settings):
-    """Primary is top_problems but the reader asked only for wins — show wins."""
+    """Primary is top_problems but the reader asked only for what-to-build —
+    show what-to-build."""
     from app.synthesis.email_delivery import render_brief_email
 
-    both = ["top_problems", "wins"]
-    _s, picked, _t = render_brief_email(_pill_brief(both, selected=["wins"]))
-    assert "Win" in picked and "#0f7d70" in picked
+    both = ["top_problems", "build_priorities"]
+    _s, picked, _t = render_brief_email(
+        _pill_brief(both, selected=["build_priorities"]))
+    assert "What to build" in picked and "#1a8a52" in picked
 
     _s, unpicked, _t = render_brief_email(_pill_brief(both, selected=[]))
     assert "Top problem" in unpicked and "#b23b52" in unpicked

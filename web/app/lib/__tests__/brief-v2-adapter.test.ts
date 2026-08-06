@@ -453,7 +453,7 @@ describe("orderPoolForTypes", () => {
 
   it("stable-partitions matches before non-matches, preserving relative order within each group", () => {
     const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"])
-    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["competitor_moves"])
     const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
     const d = withTypes(makeInsight({ tag: "something_broken", title: "D" }), ["build_priorities"])
     const e = withTypes(makeInsight({ tag: "something_broken", title: "E" }), ["top_problems"])
@@ -462,10 +462,10 @@ describe("orderPoolForTypes", () => {
   })
 
   it("matches on any intersecting type, not just an exact single-type match", () => {
-    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["competitor_moves"])
     const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), [
       "top_problems",
-      "wins",
+      "competitor_moves",
     ])
     const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
     const ordered = orderPoolForTypes([a, b, c], ["top_problems"])
@@ -475,13 +475,13 @@ describe("orderPoolForTypes", () => {
   it("returns the input unchanged (same order, same reference) when there is no selection", () => {
     const insights = [
       withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"]),
-      withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"]),
+      withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["competitor_moves"]),
     ]
     expect(orderPoolForTypes(insights, [])).toBe(insights)
   })
 
   it("leaves order unchanged when nothing matches the selection", () => {
-    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["competitor_moves"])
     const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["build_priorities"])
     expect(orderPoolForTypes([a, b], ["top_problems"]).map((i) => i.title)).toEqual(["A", "B"])
   })
@@ -495,7 +495,7 @@ describe("orderPoolForTypes", () => {
       "top_problems",
     ])
     const b = withTypes(makeInsight({ tag: "something_broken", title: "B", confidence: 0.85 }), [
-      "wins",
+      "build_priorities",
     ])
     const c = withTypes(makeInsight({ tag: "something_broken", title: "C", confidence: 0.8 }), [
       "top_problems",
@@ -512,7 +512,7 @@ describe("orderPoolForTypes", () => {
       insights: [a, b, c],
       _pool: [a, b, c, d],
     }
-    const picked = selectFindingsForTypes(brief, ["top_problems", "wins"]).map((i) => i.title)
+    const picked = selectFindingsForTypes(brief, ["top_problems", "build_priorities"]).map((i) => i.title)
     // Matches A, B, C (pool order) — D (competitor_moves) never matched, so it
     // never enters the reordered/matched result.
     expect(picked).toEqual(["A", "B", "C"])

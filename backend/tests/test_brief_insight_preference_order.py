@@ -100,17 +100,14 @@ def _run_with_insights(facade, insights, *, ent="ent-A", slug="acme"):
 
 
 # A pool where the model's own rank 0 is `top_problems` and each of the other
-# five types sits strictly BELOW it — so for any single-type preference other
+# two types sits strictly BELOW it — so for any single-type preference other
 # than top_problems, a correct implementation must promote a lower-ranked
-# finding to the lead.
+# finding to the lead. One finding per selectable type, in picker order.
 def _mixed_pool():
     return [
         _insight(0, insight_types=["top_problems"], is_headline=True),
         _insight(1, insight_types=["build_priorities"]),
-        _insight(2, insight_types=["user_feedback"]),
-        _insight(3, insight_types=["competitor_moves"]),
-        _insight(4, insight_types=["reliability_signals"]),
-        _insight(5, insight_types=["wins"]),
+        _insight(2, insight_types=["competitor_moves"]),
     ]
 
 
@@ -122,12 +119,12 @@ def test_order_pool_is_a_stable_partition():
     from app.insight_types import order_pool_for_types
 
     pool = [
-        {"title": "a", "insight_types": ["wins"]},
+        {"title": "a", "insight_types": ["competitor_moves"]},
         {"title": "b", "insight_types": ["top_problems"]},
-        {"title": "c", "insight_types": ["wins", "user_feedback"]},
+        {"title": "c", "insight_types": ["competitor_moves", "build_priorities"]},
         {"title": "d", "insight_types": ["top_problems"]},
     ]
-    ordered, matched = order_pool_for_types(pool, ["wins"])
+    ordered, matched = order_pool_for_types(pool, ["competitor_moves"])
     assert [i["title"] for i in ordered] == ["a", "c", "b", "d"]
     assert matched == 2
 
@@ -147,10 +144,12 @@ def test_order_pool_ignores_unknown_slugs_and_missing_types():
     nothing, and a finding with no insight_types is never treated as a match."""
     from app.insight_types import order_pool_for_types
 
-    pool = [{"title": "a"}, {"title": "b", "insight_types": ["wins"]}]
-    ordered, matched = order_pool_for_types(pool, ["not_a_type"])
+    pool = [{"title": "a"}, {"title": "b", "insight_types": ["competitor_moves"]}]
+    # `wins` was a real slug until 2026-08-05 and is now unknown — a stored
+    # selection holding one must degrade, not filter the brief to nothing.
+    ordered, matched = order_pool_for_types(pool, ["not_a_type", "wins"])
     assert ordered == pool and matched == 0
-    ordered, matched = order_pool_for_types(pool, ["wins"])
+    ordered, matched = order_pool_for_types(pool, ["competitor_moves"])
     assert [i["title"] for i in ordered] == ["b", "a"]
     assert matched == 1
 
@@ -161,25 +160,38 @@ def test_order_pool_never_drops_a_finding():
     from app.insight_types import order_pool_for_types
 
     pool = _mixed_pool()
-    ordered, _ = order_pool_for_types(pool, ["wins"])
+    ordered, _ = order_pool_for_types(pool, ["competitor_moves"])
     assert len(ordered) == len(pool)
     assert sorted(i["title"] for i in ordered) == sorted(i["title"] for i in pool)
 
 
 # ---------- each preference value steers the composed brief ----------
 
-@pytest.mark.parametrize("slug,expected_title", [
+#: One case per selectable type. Pinned to `_mixed_pool`'s composition, which is
+#: why it is written out rather than derived — the guard below keeps it honest.
+_PREFERENCE_CASES = [
     ("top_problems", "Finding 0"),
     ("build_priorities", "Finding 1"),
-    ("user_feedback", "Finding 2"),
-    ("competitor_moves", "Finding 3"),
-    ("reliability_signals", "Finding 4"),
-    ("wins", "Finding 5"),
-])
+    ("competitor_moves", "Finding 2"),
+]
+
+
+def test_every_selectable_type_has_a_preference_case():
+    """The parametrisation below must cover the WHOLE vocabulary. Adding a type
+    to `INSIGHT_TYPES` without a case here would ship an unexercised preference
+    — which is how the 6-vs-3 divergence went unnoticed for nine days."""
+    from app.insight_types import INSIGHT_TYPE_SLUGS
+
+    # Order-insensitive: the cases follow `_mixed_pool`'s rank order, the slugs
+    # follow the picker's display order, and neither has to chase the other.
+    assert sorted(slug for slug, _ in _PREFERENCE_CASES) == sorted(INSIGHT_TYPE_SLUGS)
+
+
+@pytest.mark.parametrize("slug,expected_title", _PREFERENCE_CASES)
 def test_each_preference_decides_the_top_insight(
         facade, isolated_settings, slug, expected_title):
-    """Every one of the six selectable types promotes its own finding to the
-    lead of the CANONICAL brief — the array the email and Slack render from."""
+    """Every selectable type promotes its own finding to the lead of the
+    CANONICAL brief — the array the email and Slack render from."""
     _set_prefs(isolated_settings, [slug])
     brief = _run_with_insights(facade, _mixed_pool())
 
@@ -195,21 +207,22 @@ def test_multi_type_preference_keeps_pool_rank_among_matches(
         facade, isolated_settings):
     """With several types picked, the matches lead in the model's own
     best-first order — the preference chooses the SET, our ranking orders it."""
-    _set_prefs(isolated_settings, ["wins", "user_feedback"])
+    _set_prefs(isolated_settings, ["competitor_moves", "build_priorities"])
     brief = _run_with_insights(facade, _mixed_pool())
 
-    # Finding 2 (user_feedback) outranks Finding 5 (wins) in the model's pool.
-    assert [i["title"] for i in brief["insights"][:2]] == ["Finding 2", "Finding 5"]
+    # Finding 1 (build_priorities) outranks Finding 2 (competitor_moves) in the
+    # model's pool, and keeps that order despite being picked second.
+    assert [i["title"] for i in brief["insights"][:2]] == ["Finding 1", "Finding 2"]
 
 
 def test_preference_reorders_the_persisted_pool_too(facade, isolated_settings):
     """`_pool` is saved in preference order, so the browser's own partition of
     it is the identity — the web hero and the emailed lead cannot diverge."""
-    _set_prefs(isolated_settings, ["wins"])
+    _set_prefs(isolated_settings, ["competitor_moves"])
     brief = _run_with_insights(facade, _mixed_pool())
 
-    assert brief["_pool"][0]["title"] == "Finding 5"
-    assert len(brief["_pool"]) == 6  # nothing dropped
+    assert brief["_pool"][0]["title"] == "Finding 2"
+    assert len(brief["_pool"]) == 3  # nothing dropped
     assert brief["insights"][0]["title"] == brief["_pool"][0]["title"]
 
 
@@ -218,22 +231,22 @@ def test_headline_flag_follows_the_new_lead(facade, isolated_settings):
     another finding, the flag moves with it — workspace-brief's headline pick
     and prd_runner's ordering both read that flag and would otherwise point at
     a demoted card."""
-    _set_prefs(isolated_settings, ["reliability_signals"])
+    _set_prefs(isolated_settings, ["competitor_moves"])
     brief = _run_with_insights(facade, _mixed_pool())
 
-    assert brief["insights"][0]["title"] == "Finding 4"
+    assert brief["insights"][0]["title"] == "Finding 2"
     assert brief["insights"][0]["is_headline"] is True
-    assert [i["title"] for i in brief["_pool"] if i.get("is_headline")] == ["Finding 4"]
+    assert [i["title"] for i in brief["_pool"] if i.get("is_headline")] == ["Finding 2"]
 
 
 def test_preference_audit_is_recorded_on_the_brief(facade, isolated_settings):
     """The brief carries what the selection was and how much of the pool it
     matched, so "why is this my top insight" is answerable after the fact."""
-    _set_prefs(isolated_settings, ["wins", "user_feedback"])
+    _set_prefs(isolated_settings, ["competitor_moves", "build_priorities"])
     brief = _run_with_insights(facade, _mixed_pool())
 
     assert brief["_insight_prefs"] == {
-        "selected": ["wins", "user_feedback"], "matched": 2}
+        "selected": ["competitor_moves", "build_priorities"], "matched": 2}
 
 
 # ---------- an updated preference changes the NEXT brief ----------
@@ -243,18 +256,18 @@ def test_changing_the_selection_changes_the_next_brief(facade, isolated_settings
     generation — the whole point of the feature."""
     from app.synthesis import agent as synth
 
-    _set_prefs(isolated_settings, ["wins"])
+    _set_prefs(isolated_settings, ["competitor_moves"])
     first = _run_with_insights(facade, _mixed_pool())
-    assert first["insights"][0]["title"] == "Finding 5"
+    assert first["insights"][0]["title"] == "Finding 2"
 
-    # The PM reopens Settings -> Comms & Brief and switches to reliability.
-    _set_prefs(isolated_settings, ["reliability_signals"])
+    # The PM reopens Settings -> Comms & Brief and switches to what-to-build.
+    _set_prefs(isolated_settings, ["build_priorities"])
     ranked = {"summary_headline": "H", "insights": _mixed_pool()}
     with patch.object(synth, "llm_call", return_value=_llm_result(ranked)):
         second = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
 
-    assert second["insights"][0]["title"] == "Finding 4"
-    assert second["_insight_prefs"]["selected"] == ["reliability_signals"]
+    assert second["insights"][0]["title"] == "Finding 1"
+    assert second["_insight_prefs"]["selected"] == ["build_priorities"]
 
 
 def test_clearing_the_selection_restores_model_rank(facade, isolated_settings):
@@ -262,8 +275,8 @@ def test_clearing_the_selection_restores_model_rank(facade, isolated_settings):
     ranking, not a stuck previous preference."""
     from app.synthesis import agent as synth
 
-    _set_prefs(isolated_settings, ["wins"])
-    assert _run_with_insights(facade, _mixed_pool())["insights"][0]["title"] == "Finding 5"
+    _set_prefs(isolated_settings, ["competitor_moves"])
+    assert _run_with_insights(facade, _mixed_pool())["insights"][0]["title"] == "Finding 2"
 
     _set_prefs(isolated_settings, [])
     ranked = {"summary_headline": "H", "insights": _mixed_pool()}
@@ -289,25 +302,29 @@ def test_preference_matching_nothing_falls_back_to_model_rank(
         facade, isolated_settings):
     """A type with no findings this week must not blank or reshuffle the brief
     — preferences never exclude, so the strongest findings still lead."""
-    _set_prefs(isolated_settings, ["wins"])
+    _set_prefs(isolated_settings, ["competitor_moves"])
     pool = [
         _insight(0, insight_types=["top_problems"], is_headline=True),
         _insight(1, insight_types=["build_priorities"]),
-        _insight(2, insight_types=["user_feedback"]),
+        _insight(2, insight_types=["build_priorities"]),
     ]
     brief = _run_with_insights(facade, pool)
 
     assert [i["title"] for i in brief["insights"]] == [
         "Finding 0", "Finding 1", "Finding 2"]
-    assert brief["_insight_prefs"] == {"selected": ["wins"], "matched": 0}
+    assert brief["_insight_prefs"] == {"selected": ["competitor_moves"], "matched": 0}
     # No match => the model's own headline pick is left alone.
     assert brief["insights"][0]["is_headline"] is True
 
 
 def test_stored_junk_selection_degrades_to_no_preference(
         facade, isolated_settings):
-    """A retired/hand-edited slug must not silently filter the brief."""
-    _set_prefs(isolated_settings, ["drive_metric", "not_a_type"])
+    """A retired/hand-edited slug must not silently filter the brief.
+
+    `drive_metric` was retired in the 2026-07-23 rename; `wins` in the
+    2026-08-05 narrowing. Both are still accepted by the DB CHECK constraint,
+    which is deliberately wider than the code, so rows holding them are real."""
+    _set_prefs(isolated_settings, ["drive_metric", "wins", "not_a_type"])
     brief = _run_with_insights(facade, _mixed_pool())
     assert brief["insights"][0]["title"] == "Finding 0"
     assert brief["_insight_prefs"] == {"selected": [], "matched": 0}
@@ -331,7 +348,7 @@ def test_selection_still_reaches_the_compose_prompt(facade, isolated_settings):
     it — the model still gets to phrase the brief around the preference."""
     from app.synthesis import agent as synth
 
-    _set_prefs(isolated_settings, ["reliability_signals"],
+    _set_prefs(isolated_settings, ["competitor_moves"],
                note="Latency on enterprise accounts matters most")
     _seed_multi_source_theme(facade, "ent-A", "SSO")
     captured = {}
@@ -344,7 +361,7 @@ def test_selection_still_reaches_the_compose_prompt(facade, isolated_settings):
         synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
 
     assert "READER PREFERENCES" in captured["input"]
-    assert "Reliability & incident signals" in captured["input"]
+    assert "Competitor & market moves" in captured["input"]
     assert "Latency on enterprise accounts matters most" in captured["input"]
 
 
@@ -357,7 +374,7 @@ def test_preference_does_not_bypass_the_evidence_gate(facade, isolated_settings)
     from app.synthesis import agent as synth
     from app.graph.types import Entity, Relationship, Signal
 
-    _set_prefs(isolated_settings, ["wins"], ent="ent-B")
+    _set_prefs(isolated_settings, ["competitor_moves"], ent="ent-B")
     # project_mgmt only — a NON_EVIDENCE_TYPES source (Jira-shaped company).
     theme = Entity(enterprise_id="ent-B", type="theme", canonical_label="Rollout")
     facade.create_entity("ent-B", theme)

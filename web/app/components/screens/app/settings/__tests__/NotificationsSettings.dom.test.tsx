@@ -365,7 +365,7 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     const labels = Array.from(
       document.querySelectorAll('[data-field="insight-types"] button'),
     ).map((b) => (b.textContent ?? "").trim())
-    // Same labels and order as the onboarding step — both read SELECTABLE_INSIGHT_TYPES.
+    // Same labels and order as the onboarding step — both read INSIGHT_TYPES, which is now the ONLY list.
     expect(labels).toEqual([
       "Top Customer Problem",
       "Competitor & market moves",

@@ -112,11 +112,11 @@ def test_top3_is_the_brief_full_set_is_the_pool(facade, isolated_settings):
     six, so a per-user filter has ranks 4–6 to draw on."""
     insights = [
         _insight(0, insight_types=["top_problems"], is_headline=True),
-        _insight(1, insight_types=["reliability_signals"]),
-        _insight(2, insight_types=["user_feedback"]),
+        _insight(1, insight_types=["competitor_moves"]),
+        _insight(2, insight_types=["build_priorities"]),
         _insight(3, insight_types=["competitor_moves"]),
         _insight(4, insight_types=["build_priorities"]),
-        _insight(5, insight_types=["wins"]),
+        _insight(5, insight_types=["top_problems"]),
     ]
     brief = _run_with_insights(facade, insights)
 

@@ -416,7 +416,7 @@ def test_reader_preferences_block_feeds_composition(facade, isolated_settings):
         ).execute()
     db.table("companies").update({
         "notification_settings": {
-            "brief_insight_types": ["reliability_signals", "competitor_moves"],
+            "brief_insight_types": ["competitor_moves", "build_priorities"],
             "brief_insight_note": "Latency on enterprise accounts matters most",
         }
     }).eq("id", "ent-A").execute()
@@ -439,7 +439,7 @@ def test_reader_preferences_block_feeds_composition(facade, isolated_settings):
 
     composed = captured["input"]
     assert "READER PREFERENCES" in composed
-    assert "Reliability & incident signals" in composed
+    assert "Competitor & market moves" in composed
     assert "Competitor & market moves" in composed
     assert "Latency on enterprise accounts matters most" in composed
     # Reorder-only contract stated in-prompt.
