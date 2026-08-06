@@ -53,6 +53,10 @@ vi.mock("../../../../connectors/SlackChannelPicker", () => ({
 }))
 
 import { NotificationsSettings } from "../NotificationsSettings"
+import {
+  DEFAULT_INSIGHT_TYPES,
+  insightTypeLabel,
+} from "../../../../../lib/insight-types"
 
 type Notif = Record<string, unknown>
 
@@ -341,8 +345,9 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
   })
 
   it("persists the workspace selection under brief_insight_types, merging existing keys", async () => {
-    mountWith({ email_recipients: ["a@co.com"] })
-    // Empty by default — pick one type to arm Save.
+    // Explicit `[]` — a workspace that HAS chosen "surface everything", so the
+    // shared default is not seeded and the assertion below stays exact.
+    mountWith({ email_recipients: ["a@co.com"], brief_insight_types: [] })
     await act(async () => {
       fireEvent.click(insightChip("Competitor & market moves"))
     })
@@ -381,6 +386,31 @@ describe("NotificationsSettings — workspace Top Insights filter", () => {
     expect(document.body.textContent).toContain(
       "pick any, or leave empty for everything",
     )
+  })
+
+  it("seeds the SAME default as onboarding when nobody has picked yet", () => {
+    // The two screens write one key, so they must open in one state. Onboarding
+    // step 09 seeded ["top_problems","build_priorities"] while this pane seeded
+    // [] — and since [] means "surface everything", they were not merely
+    // different but opposite. Both now read DEFAULT_INSIGHT_TYPES.
+    mountWith({})
+    const pressed = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    )
+      .filter((b) => b.getAttribute("aria-pressed") === "true")
+      .map((b) => (b.textContent ?? "").trim())
+    expect(pressed).toEqual(DEFAULT_INSIGHT_TYPES.map(insightTypeLabel))
+  })
+
+  it("honours a stored [] as a real choice rather than re-seeding the default", () => {
+    // "Surface everything" is a decision, not an unfinished form. Re-seeding
+    // the default here would silently re-filter the brief for a PM who had
+    // cleared their chips, with no way to make the clear stick.
+    mountWith({ brief_insight_types: [] })
+    const pressed = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    ).filter((b) => b.getAttribute("aria-pressed") === "true")
+    expect(pressed).toHaveLength(0)
   })
 
   it("ignores stored slugs that are no longer offered, along with unknown ones", () => {

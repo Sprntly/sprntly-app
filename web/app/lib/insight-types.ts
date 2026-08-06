@@ -138,6 +138,34 @@ export function cleanInsightTypes(values: unknown): InsightTypeSlug[] {
   return out
 }
 
+/** What a workspace starts with before anyone has picked. ONE constant, read by
+ *  both screens that write `brief_insight_types` — onboarding step 09 and
+ *  Settings → Comms & Brief.
+ *
+ *  They used to disagree: onboarding seeded these two, Settings seeded []. Same
+ *  key, two different starting states, and since [] means "surface everything"
+ *  they were not just different but OPPOSITE — one screen opened filtered, the
+ *  other unfiltered, for a workspace in the identical state. */
+export const DEFAULT_INSIGHT_TYPES: InsightTypeSlug[] = [
+  "top_problems",
+  "build_priorities",
+]
+
+/** Seed a picker from the stored value.
+ *
+ *  The distinction that matters is ABSENT vs EXPLICITLY EMPTY:
+ *    - key absent / not an array  => nobody has chosen yet  => the default
+ *    - `[]`                       => chosen: "surface everything" => `[]`
+ *
+ *  Resurrecting the default from a stored `[]` would silently re-filter a brief
+ *  for a PM who had deliberately cleared their chips, and they would have no
+ *  way to make it stick. Anything else goes through `cleanInsightTypes`, so a
+ *  retired slug still degrades rather than rendering a phantom chip. */
+export function seedInsightTypes(values: unknown): InsightTypeSlug[] {
+  if (!Array.isArray(values)) return [...DEFAULT_INSIGHT_TYPES]
+  return cleanInsightTypes(values)
+}
+
 export function insightTypeLabel(slug: string): string {
   return LABEL_BY_SLUG[slug] ?? slug
 }

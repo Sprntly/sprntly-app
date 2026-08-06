@@ -27,6 +27,7 @@ import { updateWorkspace } from "../../../../lib/onboarding/store"
 import {
   INSIGHT_TYPES,
   cleanInsightTypes,
+  seedInsightTypes,
 } from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
@@ -91,9 +92,13 @@ export function NotificationsSettings() {
       hour: typeof n.brief_hour === "number" ? n.brief_hour : 6,
       timezone:
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
-      // Narrowed to the offered types: a stored slug with no chip would be
-      // invisible state the admin can neither see nor clear.
-      insightTypes: cleanInsightTypes(n.brief_insight_types),
+      // Same seed as onboarding step 09, from the same constant: a workspace
+      // that has never picked opens with DEFAULT_INSIGHT_TYPES on BOTH screens
+      // rather than preselected in one and blank in the other. A stored `[]` is
+      // honoured as the real choice it is ("surface everything"), and a stored
+      // slug with no chip is dropped — invisible state the admin could neither
+      // see nor clear.
+      insightTypes: seedInsightTypes(n.brief_insight_types),
     }
     setEmailDigest(loaded.emailDigest)
     setFrequency(loaded.frequency)

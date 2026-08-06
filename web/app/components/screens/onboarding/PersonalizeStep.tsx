@@ -9,8 +9,10 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import {
+  DEFAULT_INSIGHT_TYPES,
   INSIGHT_TYPES,
   cleanInsightTypes,
+  seedInsightTypes,
 } from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
@@ -43,10 +45,12 @@ const DRAFT_KEY = "personalize-step"
 
 // The insight-type chips come from INSIGHT_TYPES (lib/insight-types) — the ONE
 // list, shared with Settings → Comms & Brief and mirrored by
-// backend/app/insight_types.py, so no surface can offer a type another can't
-// produce or render. The selection is WORKSPACE-level — persisted on
-// companies.notification_settings.brief_insight_types — so the whole
-// workspace's brief is ordered by what the admin picks here. Empty = no filter.
+// backend/app/insight_types.py, so no surface can offer a type another cannot
+// produce or render. The seed comes from DEFAULT_INSIGHT_TYPES, also shared, so
+// the two screens open in the same state for the same workspace. The selection
+// is WORKSPACE-level — persisted on
+// companies.notification_settings.brief_insight_types — so it orders the whole
+// workspace's brief. Empty is a real choice meaning "surface everything".
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -81,18 +85,11 @@ export function PersonalizeStep() {
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
-  // Starts EMPTY, like Settings -> Comms & Brief, and like this step's own copy
-  // ("pick any, or leave empty for everything") has always claimed.
-  //
-  // It used to preselect ["top_problems","build_priorities"]. That made the
-  // form arrive already filtered while telling the PM it wasn't, and — because
-  // almost nobody changes a prefilled multi-select — it is why every company
-  // carries `top_problems` and why the preference read as inert: a stored
-  // selection was indistinguishable from a default nobody chose. Empty is a
-  // real, documented choice meaning "no filtering", so it is the honest seed;
-  // a non-empty selection now always means the PM picked it.
+  // DEFAULT_INSIGHT_TYPES, not a literal — Settings → Comms & Brief seeds from
+  // the same constant, so the two screens cannot open in different states for
+  // the same workspace.
   const [surfaces, setSurfaces] = useState<string[]>(
-    (draft?.surfaces as string[]) ?? [],
+    (draft?.surfaces as string[]) ?? [...DEFAULT_INSIGHT_TYPES],
   )
 
   const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
@@ -120,17 +117,21 @@ export function PersonalizeStep() {
     if (typeof n.brief_channel === "string") setDestination(n.brief_channel)
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Seed the insight-type selection from the workspace's saved default
-  // (notification_settings.brief_insight_types), so returning to the step (or
-  // having set it in Settings) doesn't reset it. A local draft wins. An empty
-  // or absent saved selection leaves the chips empty, which is now the same
-  // thing the seed says: no filter. Cleaned to the offered types — a saved slug
-  // with no chip would be invisible state the PM can't see or clear.
+  // Seed the insight-type selection from what the workspace has stored
+  // (notification_settings.brief_insight_types), so returning to the step — or
+  // having set it in Settings → Comms & Brief first — shows the SAME chips
+  // Settings shows. A local draft still wins.
+  //
+  // This used to be `if (saved.length) setSurfaces(saved)`, which ignored a
+  // stored `[]` and left the default preselected. A PM who cleared every chip
+  // in Settings and came back here found them switched on again, and Continue
+  // would write them back — the clear could not be made to stick. Going through
+  // `seedInsightTypes` keeps absent (nobody has chosen) distinct from `[]`
+  // (chosen: everything), which is the whole difference between the two.
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}
-    const saved = cleanInsightTypes(n.brief_insight_types)
-    if (saved.length) setSurfaces(saved)
+    setSurfaces(seedInsightTypes(n.brief_insight_types))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
