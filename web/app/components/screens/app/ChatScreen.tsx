@@ -813,6 +813,24 @@ function ChatComposer({
     items?.[menuActiveIndex]?.focus()
   }, [menuOpen, menuActiveIndex])
 
+  // A chat surface exists to be typed into, so the composer takes the cursor the
+  // moment it is on screen — landing on the page counts, not just clicking a tab.
+  //
+  // This lives on the COMPOSER, not on the tab click, because it is the composer
+  // being on screen that the rule is about. Both mount points run it (the landing
+  // box and the thread dock are separate mounts of this one component), so the
+  // swap between them — sending the first message, switching between an empty tab
+  // and a threaded one — carries the cursor across instead of dropping it on the
+  // body. Focus is never taken from a surface WITHOUT a composer: the pinned Top
+  // Insights tab renders BriefChat instead, and nothing here mounts.
+  //
+  // `preventScroll` because focus must not double as navigation: the dock sits
+  // under a long transcript, and yanking someone who arrived to READ a thread
+  // down to its end is a worse bug than the missing focus this fixes.
+  useEffect(() => {
+    composerRef.current?.focus({ preventScroll: true })
+  }, [composerRef])
+
   const canSend = draft.trim().length >= DRAFT_MIN_CHARS
   const showCount = draft.length >= DRAFT_COUNTER_FROM
   const hasHead = !!pinnedSkill || attachments.length > 0
