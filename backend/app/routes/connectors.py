@@ -2615,9 +2615,10 @@ def sprinklr_disconnect(
 
 # ─────────────────────── Asana ───────────────────────
 #
-# OAuth connect ONLY for now: no KG puller (kickoff_sync no-ops until an
-# `asana` entry lands in kg_ingest PULLERS) and no ticket-sync branch, so
-# Asana never appears on the sync button (stories/sync.py SYNC_PROVIDERS).
+# OAuth connect, two-way ticket sync (stories/sync.py SYNC_PROVIDERS) and KG
+# ingestion (kickoff_sync → kg_ingest PULLERS["asana"]) are all wired — a
+# connected Asana workspace shows up on the sync button and feeds the KG on
+# the usual 6-hourly schedule, same as ClickUp/Jira.
 
 
 @router.get("/asana/callback")

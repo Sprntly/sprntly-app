@@ -29,7 +29,10 @@ Enforced caps (why each exists):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 #: Per-HTTP-call timeout for every connector read reached from chat. New
 #: adapters MUST pass this to `requests` (Jira's own client predates the
@@ -99,6 +102,52 @@ class LookupProvider(Protocol):
     def system_block(self) -> str:
         """What the model must know about this source: its tools, and its HONEST
         limits (what it cannot see, and how to say so)."""
+
+
+@runtime_checkable
+class RecordsCapable(Protocol):
+    """OPTIONAL capability, checked with `isinstance(adapter, RecordsCapable)`
+    (this Protocol is `runtime_checkable`, so that checks for the method's
+    presence only — not a full LookupProvider re-implementation).
+
+    An adapter that implements this can hand back the structured `RawRecord`s
+    behind ONE tool call, when it already has the rows in hand before it
+    renders them to prose for `dispatch`. It sits ALONGSIDE `dispatch`, never
+    instead of it: `dispatch() -> str` is the named-source path's only
+    contract, and this ticket does not touch it. An adapter that does not
+    implement `dispatch_records` is a complete, working `LookupProvider` on
+    its own — the caller (the cross-connector sweep) falls back to `dispatch`'s
+    prose, exactly as it did before this capability existed.
+
+    Why records at all: the scheduled 6-hourly pull hashes `RawRecord.render()`
+    to dedupe against re-extracting content it already ingested. A live lookup
+    that only ever produces prose can never hash to the same value, even when
+    it read the identical item — see `connector_lookup/sweep_persist.py` for
+    where that hash is spent.
+    """
+
+    def dispatch_records(
+        self, session: "LookupSession", name: str, inp: dict
+    ) -> tuple[str, "list[RawRecord] | None"] | None:
+        """Run one tool call and return `(text, records)`, or `None` when this
+        provider/tool combination has nothing to add.
+
+        `text` MUST be byte-identical to what `dispatch(session, name, inp)`
+        would return for the same call — callers that find this method use it
+        IN PLACE OF `dispatch`, precisely so the fetch happens once, not twice.
+        The safe way to guarantee that equality is to build `text` from the
+        same public render function `dispatch` itself calls, not to
+        re-implement rendering here.
+
+        `records` is `None` when the data behind this particular call is too
+        lean to build an honest `RawRecord` from without a second HTTP call
+        (e.g. a search hit missing a field the full puller fetch includes) —
+        never fabricated to fill the gap. A non-empty list does not promise
+        byte-identity with the scheduled pull's own record for that item;
+        it promises only that no new network call was made to build it.
+        Never raises — a caller building records opportunistically must be
+        able to treat a failure here as "no records available".
+        """
 
 
 def cap_text(text: str, *, limit: int = DEFAULT_RESULT_CHARS) -> str:

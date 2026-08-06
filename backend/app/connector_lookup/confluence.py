@@ -13,8 +13,13 @@ one it is holding.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.connector_lookup.base import LookupSession
 from app.connectors import confluence_fetch
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 DISPLAY_NAME = "Confluence"
 
@@ -129,6 +134,61 @@ SEARCH_UNAVAILABLE = (
 )
 
 
+def _row_to_record(row: dict) -> "RawRecord":
+    """One `confluence_fetch.search_pages` row → the CLOSEST `RawRecord` it can
+    build with NO new HTTP call.
+
+    NOT byte-identical to `kg_ingest.pullers.confluence.pull`'s record for the
+    same page — property KEYS are kept matching the puller's for readability,
+    but four of the seven are structurally unavailable from a CQL search hit
+    and carry `None` (which `RawRecord.render()` then drops, same as an absent
+    key):
+
+      - `space_name`, `status`, `version`, `parent_id`, `author_id` — none of
+        these ride the `/rest/api/search` response at all; only the v2
+        `/pages`/`/blogposts` GETs the puller and `confluence_get_page` use
+        carry them.
+      - `text`: a ~240-char CQL `excerpt` (already HTML-stripped, but a
+        snippet built by Confluence's own search ranking), not the puller's
+        up-to-4,000-char converted page body — a different EXTRACTION, not a
+        truncation of the same one.
+      - `url`: built from the search result's own `url` field, which is a
+        different response field than the puller's `_links.webui` — usually
+        the same destination, not guaranteed the same exact path string.
+      - `timestamp`: the search API's `lastModified` vs the v2 API's
+        `version.createdAt` — two different endpoints' own notion of "when",
+        not guaranteed to agree in value or format.
+
+    Closing any of these needs `confluence_get_page` per hit — a new HTTP
+    call this module's OWN `dispatch`/`dispatch_records` still may not make
+    (sweep.py's latency contract). `enrich_record` below closes it anyway,
+    from the sweep-persist background thread ONLY, where that contract does
+    not apply — see connector_lookup/sweep_persist.py's module docstring.
+    See the AC4 test for the assertion that THIS record and the puller's
+    record for the same page do NOT collide (the lean, sweep-time shape);
+    the enrichment test proves the ENRICHED one does.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(
+        provider="confluence",
+        kind=row.get("kind") or "page",
+        external_id=str(row.get("id") or ""),
+        title=row.get("title") or "",
+        text=row.get("excerpt") or "",
+        properties={
+            "space_key": row.get("space"),
+            "space_name": None,
+            "url": row.get("url"),
+            "status": None,
+            "version": None,
+            "parent_id": None,
+            "author_id": None,
+        },
+        timestamp=row.get("last_modified"),
+    )
+
+
 class ConfluenceProvider:
     """LookupProvider over app/connectors/confluence_fetch.py."""
 
@@ -185,6 +245,111 @@ class ConfluenceProvider:
                 return f"(no Confluence page found with id {page_id})"
             return confluence_fetch.render_page(page)
         return f"(unknown tool {name})"
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `confluence_search`, `None` for anything else
+        (and `None` when search itself is UNAVAILABLE for this connection —
+        there is nothing to build records from). Calls
+        `confluence_fetch.search_pages` / `render_rows` exactly as `dispatch`
+        does above, so `text` is byte-identical to `dispatch`'s own output by
+        construction. See `_row_to_record` for why the records themselves are
+        NOT byte-identical to the scheduled pull's."""
+        if name != "confluence_search":
+            return None
+        handle = session.handle
+        text_in = (inp.get("text") or "").strip()
+        if not text_in:
+            return "(confluence_search: 'text' is required)", None
+        rows, available = confluence_fetch.search_pages(
+            handle, text=text_in, space_key=inp.get("space_key"),
+        )
+        if not available:
+            return SEARCH_UNAVAILABLE, None
+        kept, marker = confluence_fetch.cap(rows)
+        text = confluence_fetch.render_rows(
+            kept, header=f'Confluence search for "{text_in}":', truncation=marker,
+        )
+        records = [_row_to_record(r) for r in kept] if kept else None
+        return text, records
+
+
+#: Body-text slice — matches `kg_ingest.pullers.confluence._TEXT_CHARS`
+#: exactly, so a page's enriched record carries the same `text` cap the
+#: scheduled pull would have used.
+_PULLER_TEXT_CHARS = 4000
+
+
+def _space_for_id(handle: "confluence_fetch.ConfluenceSession", space_id) -> dict:
+    """Best-effort space lookup by id — the v2 page GET carries only
+    `spaceId`, never the space's display name, which the puller-shaped
+    record needs for `space_name`. One extra `spaces()` listing per enriched
+    hit; simplicity here beats a cross-call cache for the small, top-K-bound
+    number of hits sweep_persist ever enriches in one run."""
+    if not space_id:
+        return {}
+    for s in confluence_fetch.spaces(handle):
+        if str(s.get("id")) == str(space_id):
+            return s
+    return {}
+
+
+def _page_to_puller_record(
+    handle: "confluence_fetch.ConfluenceSession", kind: str, item: dict
+) -> "RawRecord":
+    """Raw v2 page (`confluence_fetch.get_page_raw`) -> the SAME `RawRecord`
+    `kg_ingest.pullers.confluence._to_record` builds for it: same
+    `properties` KEYS in the SAME order, same `_PULLER_TEXT_CHARS` body
+    slice via the SAME `_text_from_body` HTML/ADF-to-markdown conversion,
+    same external_id/timestamp fallback.
+    """
+    from app.kg_ingest.pullers.confluence import _text_from_body
+    from app.kg_ingest.types import RawRecord
+
+    ctx = handle.ctx
+    page_id = item.get("id")
+    title = item.get("title") or ""
+    text = _text_from_body(item.get("body"))[:_PULLER_TEXT_CHARS]
+    webui = ((item.get("_links") or {}).get("webui")) or ""
+    version = item.get("version") or {}
+    space = _space_for_id(handle, item.get("spaceId"))
+    return RawRecord(
+        provider="confluence",
+        kind=kind,
+        external_id=str(page_id),
+        title=title,
+        text=text,
+        properties={
+            "space_key": space.get("key"),
+            "space_name": space.get("name"),
+            "url": f"{ctx.site_url}{webui}" if (ctx.site_url and webui) else None,
+            "status": item.get("status"),
+            "version": version.get("number"),
+            "parent_id": item.get("parentId"),
+            "author_id": item.get("authorId"),
+        },
+        timestamp=version.get("createdAt") or item.get("createdAt"),
+    )
+
+
+def enrich_record(session: LookupSession, record: "RawRecord") -> "RawRecord":
+    """PERSIST-THREAD ONLY (see connector_lookup/sweep_persist.py's module
+    docstring for why a per-hit fetch is safe here and NOT in
+    `dispatch`/`dispatch_records`, which stay bound by sweep.py's own
+    latency contract). One `confluence_get_page`-equivalent raw fetch
+    (`confluence_fetch.get_page_raw`, not `get_page` — that one drops
+    `spaceId`/`parentId`/`authorId` building the chat tool's own shape) plus
+    one `spaces()` listing to resolve `space_name` (AC-A1).
+
+    Raises on any failure other than "page no longer reachable", which is
+    handled below by falling back to the lean record. The caller
+    (`sweep_persist._enrich_source`) is what isolates a per-hit failure from
+    the rest of the source/run (AC-A4).
+    """
+    handle = session.handle
+    raw = confluence_fetch.get_page_raw(handle, record.external_id)
+    if raw is None:
+        return record  # gone/unreachable since the search — keep the lean record
+    return _page_to_puller_record(handle, record.kind, raw)
 
 
 PROVIDER = ConfluenceProvider()
