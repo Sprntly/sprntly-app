@@ -1514,6 +1514,19 @@ export function ChatScreen() {
   // when a fresh ask starts on that tab so a stop never leaks into the next ask.
   const stoppedTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  // Landing on a chat tab means you can just start typing. Selecting a tab — or
+  // opening one with "+" — used to leave focus on the document body, so every
+  // switch cost an extra click in the composer before the first keystroke.
+  //
+  // Deferred a frame ON PURPOSE. There is one <textarea> with two mount points
+  // (the landing composer and the thread dock), and a tab switch can move it
+  // between them or, coming from the pinned brief tab, mount it for the first
+  // time — so the node `composerRef` holds when the click fires is often not the
+  // one that ends up on screen. React flushes a click's state updates before the
+  // next frame, so by the time this runs the ref points at the live composer.
+  const focusComposerNextFrame = useCallback(() => {
+    requestAnimationFrame(() => composerRef.current?.focus())
+  }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
   // The scrolling thread viewport, so a new question (and the assistant's
   // thinking/answer under it) is scrolled into view instead of staying hidden
@@ -5084,8 +5097,12 @@ export function ChatScreen() {
     setActiveTabId(targetId)
     setDraft("")
     setActiveConv(null)
+    // A new tab is opened to say something, so put the cursor where that starts.
+    // Covers the sidebar's "New chat" too — it routes through `/?new=1`, which
+    // lands here.
+    focusComposerNextFrame()
     // No shared conv-id to reset — each tab tracks its own dbConvId.
-  }, [])
+  }, [focusComposerNextFrame])
 
   // ── "New chat" hand-off (`/?new=1`) ───────────────────────────────────────
   // The sidebar's "New chat" affordance pushes `/?new=1` (goToNewChat). The home
@@ -5735,7 +5752,7 @@ export function ChatScreen() {
                     key={tab.id}
                     className="chat-tab"
                     data-tab-active={isActive ? "true" : undefined}
-                    onClick={() => { setActiveTabId(tab.id); setDraft("") }}
+                    onClick={() => { setActiveTabId(tab.id); setDraft(""); focusComposerNextFrame() }}
                     style={{
                       // Positioned so the separator / shoulder pseudo-elements
                       // anchor to it; raised when active so its shoulders, which
