@@ -523,11 +523,13 @@ describe("GoogleDrivePicker — folders are pickable", () => {
     }
   })
 
-  it("shows folders for browsing but does NOT let them be selected", async () => {
+  it("shows folders for browsing but does NOT let them be selected by default", async () => {
     // Both are needed and they are different settings: showing folders only
     // makes them navigable, which is the behaviour we already had. Selecting is
     // what turns a folder into a source — and into a standing one, since the
-    // sync re-expands it on every run.
+    // sync re-expands it on every run. `folderSelectEnabled` defaults to
+    // false when the caller doesn't pass it, so every existing call site
+    // (drive.file connections) behaves exactly as before this change.
     const builder = installMockPicker()
     renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
     fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
@@ -536,6 +538,30 @@ describe("GoogleDrivePicker — folders are pickable", () => {
 
     expect(docsView.setIncludeFolders).toHaveBeenCalledWith(true)
     expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it("still blocks folder selection when explicitly gated off", async () => {
+    const builder = installMockPicker()
+    renderDom(
+      <GoogleDrivePicker dataset="acme" savedFiles={[]} folderSelectEnabled={false} />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
+
+    await waitFor(() => expect(builder.build).toHaveBeenCalled())
+
+    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it("enables folder selection once the connection is gated on (post-CASA drive.readonly)", async () => {
+    const builder = installMockPicker()
+    renderDom(
+      <GoogleDrivePicker dataset="acme" savedFiles={[]} folderSelectEnabled={true} />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
+
+    await waitFor(() => expect(builder.build).toHaveBeenCalled())
+
+    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(true)
   })
 
   it("a picked folder is saved like any other entry", async () => {
@@ -619,14 +645,62 @@ describe("GoogleDrivePickerView — a connected folder shows what is inside it",
         folderContents: { folder1: [] },
       }),
     )
-    expect(html).toContain("no readable files")
-    expect(html).toContain("select the files themselves")
+    expect(html).toContain("no readable files inside it")
   })
 
   it("a plain file is not rendered as a folder", () => {
     const html = render()
     expect(html).not.toContain("conn-drive-folder")
     expect(html).toContain("Product Plan")
+  })
+
+  it("renders a nested sub-folder as its own disclosure, not hoisted flat", () => {
+    // The tree-shape regression, at the render layer: a sub-folder's files
+    // must nest UNDER the sub-folder's own <details>, not appear as direct
+    // siblings of the root folder's other children.
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDrivePickerView, {
+        savedFiles: FOLDER,
+        configured: true,
+        busy: false,
+        error: null,
+        onAddFiles: noop,
+        onRemoveFile: noop,
+        removingId: null,
+        folderContents: {
+          folder1: [
+            {
+              id: "sub1",
+              name: "Backend",
+              mimeType: "application/vnd.google-apps.folder",
+              parentId: "folder1",
+            },
+            {
+              id: "root-file",
+              name: "readme.md",
+              mimeType: "text/plain",
+              parentId: "folder1",
+            },
+            {
+              id: "sub-file",
+              name: "api.md",
+              mimeType: "text/plain",
+              parentId: "sub1",
+            },
+          ],
+        },
+      }),
+    )
+    expect(html).toContain("Backend")
+    expect(html).toContain("readme.md")
+    expect(html).toContain("api.md")
+    // The sub-folder file's <li> comes AFTER the sub-folder's own <details>
+    // opening tag — i.e. nested inside it, not a root-level sibling.
+    const backendIdx = html.indexOf("Backend")
+    const apiIdx = html.indexOf("api.md")
+    expect(apiIdx).toBeGreaterThan(backendIdx)
+    // Count only real files (2) in the summary, not the sub-folder itself.
+    expect(html).toContain("2 files, 1 folder")
   })
 
   it("a folder can still be removed", () => {

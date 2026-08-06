@@ -33,6 +33,7 @@ import { ConnectorLogo } from "./ConnectorLogo"
 import type { CredentialsValues } from "./CredentialsPromptModal"
 import { openOauthTab } from "../../lib/connectorsOauth"
 import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
+import { driveFolderSelectEnabled } from "./ConfigureConnectorDrawer"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
@@ -696,6 +697,7 @@ export function ConnectorConnectModal({
           dataset={activeCompany}
           savedFiles={connection.config?.files}
           folderContents={connection.config?.folder_contents}
+          folderSelectEnabled={driveFolderSelectEnabled(connection)}
           onSaved={onConnected}
         />
       )

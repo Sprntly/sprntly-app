@@ -4,10 +4,12 @@ Under the drive.file scope there is still no Drive-wide listing — the Picker
 frontend hands us explicit IDs which we store in config["files"] and sync.
 
 A picked ID may be a FILE or a FOLDER, and only Drive metadata says which. A
-folder is expanded to the files beneath it on every sync (so files added later
-arrive on their own), bounded by depth and count, with what it expanded to
-recorded in config["folder_contents"] for the UI.
+folder is recursively expanded to every descendant file on every sync (so
+files added later arrive on their own without re-opening the Picker), bounded
+by depth and count, with the SUBTREE SHAPE (not a flat list) recorded in
+config["folder_contents"] for the UI.
 """
+import re
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,11 +19,16 @@ from cryptography.fernet import Fernet
 
 from app import db
 from app.connectors import google_oauth
+from app.connectors import google_drive_sync
 from app.connectors.google_drive_sync import (
+    GOOGLE_FOLDER,
     MAX_SYNC_BYTES,
     SyncConfigError,
     SyncResult,
+    _list_folder_children,
     drive_http_error_message,
+    expand_folder,
+    get_file_metadata,
     normalize_picked_files,
     sync_google_drive,
 )
@@ -329,13 +336,43 @@ def test_sync_stores_picked_files_passed_in(drive_connected):
 # ─── Fail-loud: a picked item that can't be ingested is never a silent skip ──
 
 
-def _folder_meta(name: str = "Xometry", modified: str = "2026-05-20T12:00:00.000Z") -> dict:
+def _folder_meta(
+    name: str = "Xometry",
+    modified: str = "2026-05-20T12:00:00.000Z",
+    folder_id: str = "folder0001",
+) -> dict:
     return {
-        "id": "folder0001",
+        "id": folder_id,
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",
         "modifiedTime": modified,
     }
+
+
+def _drive_service_with_children(children_by_folder: dict[str, list[dict]]) -> MagicMock:
+    """A mocked Drive service whose ``files().list(q="'<id>' in parents...")``
+    returns ``children_by_folder[<id>]`` — the shape `_list_folder_children` /
+    `expand_folder` walk against. Every ``list(...)`` call's kwargs are
+    recorded on ``service._list_calls`` so a test can assert the shared-drive
+    params were passed."""
+    service = MagicMock()
+    calls: list[dict] = []
+
+    def _list(**kwargs):
+        calls.append(kwargs)
+        q = kwargs.get("q", "")
+        m = re.match(r"'([^']+)' in parents", q)
+        fid = m.group(1) if m else ""
+        resp = MagicMock()
+        resp.execute.return_value = {
+            "files": children_by_folder.get(fid, []),
+            "nextPageToken": None,
+        }
+        return resp
+
+    service.files.return_value.list.side_effect = _list
+    service._list_calls = calls
+    return service
 
 
 def test_unsupported_type_is_error_not_skip(drive_connected, kg_kickoff):
@@ -601,22 +638,123 @@ def test_sync_result_to_dict_keys_unchanged():
 
 # ── Folders ──────────────────────────────────────────────────────────────────
 #
-# The Picker shows folders so a user can browse INTO one and pick the files
-# inside, but does not let a folder itself be selected. Verified against a live
-# Drive on 2026-08-03: under drive.file the Picker grants the folder OBJECT and
-# nothing beneath it — the folder's metadata reads fine while files.list on it
-# returns zero children, not a 403. A connected folder is undetectably inert.
-#
-# These cover the entries that predate that change and are still in config.
+# A picked folder is stored exactly like a picked file. Every sync recursively
+# re-walks its whole subtree (expand_folder), and every descendant FILE found
+# flows through the same download + dedup + KG-ingest path as a directly
+# picked file. Whether the walk finds anything depends on the connection's
+# granted OAuth scope: under drive.file it legitimately comes back empty (a
+# reportable, non-error outcome), which is why the frontend gates folder
+# SELECTION on the connection actually holding drive.readonly.
 
 
-def test_a_connected_folder_is_skipped_with_copy_that_helps(
+# ── expand_folder / _list_folder_children: pure walk logic, mocked at the
+# service.files().list() boundary ──────────────────────────────────────────
+
+
+def test_list_folder_children_passes_shared_drive_params():
+    """Without supportsAllDrives/includeItemsFromAllDrives, files.list only
+    searches My Drive — a folder living in a Shared Drive would silently
+    return 0 children regardless of OAuth scope."""
+    service = _drive_service_with_children({"folder0001": []})
+    _list_folder_children(service, "folder0001")
+    assert len(service._list_calls) == 1
+    call = service._list_calls[0]
+    assert call["supportsAllDrives"] is True
+    assert call["includeItemsFromAllDrives"] is True
+    assert "'folder0001' in parents" in call["q"]
+
+
+def test_get_file_metadata_passes_shared_drive_params():
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {"id": "f1"}
+    get_file_metadata(service, "f1")
+    _, kwargs = service.files.return_value.get.call_args
+    assert kwargs["supportsAllDrives"] is True
+
+
+def test_expand_folder_walks_multi_level_nesting():
+    root, sub = "folder-root", "folder-sub"
+    children = {
+        root: [
+            {"id": sub, "name": "Sub", "mimeType": GOOGLE_FOLDER},
+            {"id": "file-root-1", "name": "root.txt", "mimeType": "text/plain"},
+        ],
+        sub: [
+            {"id": "file-sub-1", "name": "sub.txt", "mimeType": "text/plain"},
+        ],
+    }
+    service = _drive_service_with_children(children)
+    files, tree_nodes = expand_folder(service, root, "Root")
+
+    assert {f["id"] for f in files} == {"file-root-1", "file-sub-1"}
+    # The folder object itself is never in `files` — only its descendants.
+    assert sub not in {f["id"] for f in files}
+
+
+def test_expand_folder_preserves_subtree_shape_not_flattened():
+    """The flatten-bug regression: a subfolder's files stay parented to the
+    SUBFOLDER in the returned tree_nodes, not hoisted to the picked root."""
+    root, sub = "folder-root", "folder-sub"
+    children = {
+        root: [{"id": sub, "name": "Sub", "mimeType": GOOGLE_FOLDER}],
+        sub: [{"id": "file-sub-1", "name": "sub.txt", "mimeType": "text/plain"}],
+    }
+    service = _drive_service_with_children(children)
+    _, tree_nodes = expand_folder(service, root, "Root")
+
+    by_id = {n["id"]: n for n in tree_nodes}
+    assert by_id[sub]["parentId"] == root
+    # This is the assertion the old flat-list storage got wrong: the
+    # sub-folder's file must be parented to the SUB-folder, not the root.
+    assert by_id["file-sub-1"]["parentId"] == sub
+    assert by_id["file-sub-1"]["parentId"] != root
+
+
+def test_expand_folder_enforces_max_depth(monkeypatch):
+    monkeypatch.setattr(google_drive_sync, "_MAX_FOLDER_DEPTH", 2)
+    # root(depth0) -> f1(depth1) -> f2(depth2) -> f3(depth3, must NOT be
+    # descended into — its child file is unreachable).
+    children = {
+        "root": [{"id": "f1", "name": "f1", "mimeType": GOOGLE_FOLDER}],
+        "f1": [{"id": "f2", "name": "f2", "mimeType": GOOGLE_FOLDER}],
+        "f2": [{"id": "f3", "name": "f3", "mimeType": GOOGLE_FOLDER}],
+        "f3": [{"id": "toodeep.txt", "name": "toodeep.txt", "mimeType": "text/plain"}],
+    }
+    service = _drive_service_with_children(children)
+    files, tree_nodes = expand_folder(service, "root", "Root")
+
+    # f3 is SEEN (listed as a child of f2, so it shows in the tree)...
+    assert any(n["id"] == "f3" for n in tree_nodes)
+    # ...but never walked INTO, so its child never appears anywhere.
+    assert not any(n["id"] == "toodeep.txt" for n in tree_nodes)
+    assert files == []
+
+
+def test_expand_folder_enforces_max_files(monkeypatch):
+    monkeypatch.setattr(google_drive_sync, "_MAX_FOLDER_FILES", 3)
+    kids = [
+        {"id": f"file{i}", "name": f"file{i}.txt", "mimeType": "text/plain"}
+        for i in range(10)
+    ]
+    service = _drive_service_with_children({"root": kids})
+    files, _ = expand_folder(service, "root", "Root")
+    assert len(files) == 3
+
+
+# ── sync_google_drive: the folder branch, end to end ───────────────────────
+
+
+def test_a_folder_that_expands_to_nothing_is_skipped_with_the_honest_message(
     drive_connected, kg_kickoff
 ):
+    """The drive.file no-cascade case: the walk legitimately finds nothing.
+    Not an error — nothing went wrong, the grant simply does not reach
+    inside — but reported, not silently connected-and-inert."""
     company_id = drive_connected
+    service = _drive_service_with_children({"folder0001": []})
     patches = (
         patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
+              return_value=service),
         patch("app.connectors.google_drive_sync.get_file_metadata",
               return_value=_folder_meta()),
         patch("app.connectors.google_drive_sync._refresh_credentials",
@@ -633,24 +771,24 @@ def test_a_connected_folder_is_skipped_with_copy_that_helps(
         for p in patches:
             p.stop()
 
-    # Not an error — nothing went wrong, the grant simply does not reach inside.
     assert result.errors == []
     assert result.synced == []
     assert len(result.skipped) == 1
     reason = result.skipped[0]["reason"]
-    assert "picked directly" in reason
-    # The copy has to say what WORKS, not just what didn't.
-    assert "select the files inside" in reason
+    assert "returned no files" in reason
+    assert "pick the files inside" in reason
 
 
-def test_a_folder_is_never_downloaded(drive_connected, kg_kickoff):
+def test_a_folder_object_is_never_downloaded(drive_connected, kg_kickoff):
     """A folder has no bytes; asking Drive to export one is an error the user
-    would see for an action they did not take."""
+    would see for an action they did not take. (Its descendants, if any, DO
+    get downloaded — covered by the parity test below.)"""
     company_id = drive_connected
+    service = _drive_service_with_children({"folder0001": []})
     download_mock = MagicMock(return_value=("x.txt", b"x"))
     patches = (
         patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
+              return_value=service),
         patch("app.connectors.google_drive_sync.get_file_metadata",
               return_value=_folder_meta()),
         patch("app.connectors.google_drive_sync.download_file_content",
@@ -671,20 +809,32 @@ def test_a_folder_is_never_downloaded(drive_connected, kg_kickoff):
     download_mock.assert_not_called()
 
 
-def test_a_folder_is_marked_as_one_so_the_ui_can_say_so(
+def test_folder_contents_stores_subtree_shape_not_flat_list(
     drive_connected, kg_kickoff
 ):
-    """`folder_contents` is how the UI tells a folder from a file. Without the
-    key a stale folder row renders as an ordinary file that mysteriously never
-    syncs."""
+    """`folder_contents` is how the UI tells a folder from a file, and how it
+    renders the nested tree. A subfolder's files must stay parented to the
+    subfolder — the flatten-bug regression, exercised through the full sync
+    path this time (not just expand_folder in isolation)."""
     import json as _json
 
     company_id = drive_connected
+    root_id, sub_id, subfile_id = "folder0001", "subfolder01", "subfile001"
+    children = {
+        root_id: [{"id": sub_id, "name": "Sub", "mimeType": GOOGLE_FOLDER}],
+        sub_id: [{
+            "id": subfile_id, "name": "in-sub.txt", "mimeType": "text/plain",
+            "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+        }],
+    }
+    service = _drive_service_with_children(children)
     patches = (
         patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
+              return_value=service),
         patch("app.connectors.google_drive_sync.get_file_metadata",
-              return_value=_folder_meta()),
+              return_value=_folder_meta(folder_id=root_id)),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("in-sub.txt", b"hello")),
         patch("app.connectors.google_drive_sync._refresh_credentials",
               return_value=MagicMock()),
     )
@@ -693,16 +843,17 @@ def test_a_folder_is_marked_as_one_so_the_ui_can_say_so(
     try:
         sync_google_drive(
             company_id=company_id,
-            files=[{"id": "folder0001", "name": "Xometry"}],
+            files=[{"id": root_id, "name": "Xometry"}],
         )
     finally:
         for p in patches:
             p.stop()
 
     row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    assert _json.loads(row["config_json"])["folder_contents"] == {
-        "folder0001": []
-    }
+    contents = _json.loads(row["config_json"])["folder_contents"][root_id]
+    by_id = {n["id"]: n for n in contents}
+    assert by_id[sub_id]["parentId"] == root_id
+    assert by_id[subfile_id]["parentId"] == sub_id  # NOT root_id
 
 
 def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
@@ -715,9 +866,10 @@ def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
     cfg["folder_contents"] = {"goneforever": []}
     db.patch_connection_config(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg)
 
+    service = _drive_service_with_children({"folder0001": []})
     patches = (
         patch("app.connectors.google_drive_sync.build_drive_service",
-              return_value=MagicMock()),
+              return_value=service),
         patch("app.connectors.google_drive_sync.get_file_metadata",
               return_value=_folder_meta()),
         patch("app.connectors.google_drive_sync._refresh_credentials",
@@ -738,6 +890,120 @@ def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
     contents = _json.loads(row["config_json"])["folder_contents"]
     assert "goneforever" not in contents
     assert contents == {"folder0001": []}
+
+
+def test_folder_descendant_hits_same_target_processing_as_a_picked_file(
+    drive_connected, kg_kickoff
+):
+    """Parity: a file discovered by walking a picked folder must flow through
+    the IDENTICAL corpus-ingest + KG-queue path as a directly-picked file —
+    no separate, lesser handling for a walked descendant."""
+    company_id = drive_connected
+    root_id, child_id = "folder0001", "descfile01"
+    children = {
+        root_id: [{
+            "id": child_id, "name": "descendant.txt", "mimeType": "text/plain",
+            "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+        }],
+    }
+    service = _drive_service_with_children(children)
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=service),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta(folder_id=root_id)),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("descendant.txt", b"hello from subtree")),
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = sync_google_drive(
+            company_id=company_id,
+            files=[{"id": root_id, "name": "Xometry"}],
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+    # Same outcome shape a directly-picked file's success takes: corpus-synced
+    # and queued for KG extraction.
+    assert len(result.synced) == 1
+    assert result.kg_queued == ["descendant"]
+    assert len(kg_kickoff) == 1
+    assert kg_kickoff[0][0].file_id == child_id
+
+
+def test_folder_change_detection_add_update_remove(drive_connected, kg_kickoff):
+    """Across successive syncs of the same picked folder: a file Drive adds to
+    it is ingested on the next sync; a file whose mtime changes is
+    re-ingested; a file removed from the folder is simply no longer a walk
+    target (never re-downloaded). Its prior KG rows are NOT purged by this —
+    they decay, same as every other connector's remove behaviour; not
+    re-fixed here."""
+    company_id = drive_connected
+    root_id = "folder0001"
+    file_a = {
+        "id": "filea01", "name": "a.txt", "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+    }
+    file_b = {
+        "id": "fileb01", "name": "b.txt", "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+    }
+    children: dict[str, list[dict]] = {root_id: [dict(file_a)]}
+    service = _drive_service_with_children(children)
+
+    downloaded: list[str] = []
+
+    def _download(service, meta):
+        downloaded.append(meta["name"])
+        return meta["name"], f"content of {meta['name']}".encode()
+
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=service),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=_folder_meta(folder_id=root_id)),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              side_effect=_download),
+    )
+    for p in patches:
+        p.start()
+    try:
+        # 1) Only file A is in the folder.
+        r1 = sync_google_drive(
+            company_id=company_id, files=[{"id": root_id, "name": "Xometry"}]
+        )
+        assert {s["filename"] for s in r1.synced} == {"a.txt"}
+
+        # 2) ADD: Drive gains file B — the next walk sees it, unprompted. Only
+        # the NEW file is corpus-synced; A's unchanged corpus copy is not
+        # rewritten (it may still be re-queued for KG — see the grandfathering
+        # test above; that is a KG-freshness nuance, not a corpus re-sync).
+        children[root_id] = [dict(file_a), dict(file_b)]
+        r2 = sync_google_drive(company_id=company_id)
+        assert {s["filename"] for s in r2.synced} == {"b.txt"}
+
+        # 3) UPDATE: file A's mtime changes — re-ingested; B untouched.
+        children[root_id][0] = {**file_a, "modifiedTime": "2026-06-01T00:00:00.000Z"}
+        r3 = sync_google_drive(company_id=company_id)
+        assert {s["filename"] for s in r3.synced} == {"a.txt"}
+
+        # 4) REMOVE: file B is gone from Drive — the next walk never lists it,
+        # so it's not downloaded and not a sync target at all.
+        children[root_id] = [children[root_id][0]]  # only (updated) A remains
+        downloaded.clear()
+        r4 = sync_google_drive(company_id=company_id)
+        assert "b.txt" not in downloaded
+        assert all(s["filename"] != "b.txt" for s in r4.synced)
+    finally:
+        for p in patches:
+            p.stop()
 
 
 def test_sync_tells_the_extractor_where_it_wrote_the_markdown(

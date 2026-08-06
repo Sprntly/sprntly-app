@@ -5,7 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ConfigureConnectorDrawerView } from "../ConfigureConnectorDrawer"
+import {
+  ConfigureConnectorDrawerView,
+  driveFolderSelectEnabled,
+} from "../ConfigureConnectorDrawer"
 import type { ConnectionSummary } from "../../../lib/api"
 import type { ConnectorItemRow } from "../../../types/content"
 
@@ -161,5 +164,37 @@ describe("ConfigureConnectorDrawerView", () => {
     const html = render({ connection: null, status: { kind: "disconnected", message: "Not connected" } })
     expect(html).toContain("Figma")
     expect(html).toContain("Disconnected")
+  })
+})
+
+describe("driveFolderSelectEnabled", () => {
+  // The load-bearing gate: folder selection in the Drive Picker is only
+  // offered once the connection's granted scope actually includes
+  // drive.readonly — never on today's default drive.file grant.
+  it("is false for a drive.file connection (today's default)", () => {
+    expect(
+      driveFolderSelectEnabled({
+        ...activeConn("google_drive"),
+        scopes: "https://www.googleapis.com/auth/drive.file openid",
+      }),
+    ).toBe(false)
+  })
+
+  it("is false when scopes is empty", () => {
+    expect(driveFolderSelectEnabled({ ...activeConn("google_drive"), scopes: "" })).toBe(false)
+  })
+
+  it("is false when connection is null or undefined", () => {
+    expect(driveFolderSelectEnabled(null)).toBe(false)
+    expect(driveFolderSelectEnabled(undefined)).toBe(false)
+  })
+
+  it("is true once the connection's granted scope includes drive.readonly", () => {
+    expect(
+      driveFolderSelectEnabled({
+        ...activeConn("google_drive"),
+        scopes: "https://www.googleapis.com/auth/drive.readonly openid",
+      }),
+    ).toBe(true)
   })
 })
