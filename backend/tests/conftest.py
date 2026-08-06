@@ -180,7 +180,14 @@ CREATE TABLE prds (
     -- defaults this via gen_random_uuid(), which sqlite has no equivalent
     -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
     -- stamp a real uuid4 explicitly via an UPDATE after seeding.
-    public_id        TEXT
+    public_id        TEXT,
+    -- Which uploaded FORMAT produced this PRD (mirrors
+    -- 20260806120000_prds_artifact_template.sql). NULL = Sprntly's built-in
+    -- format, which is every pre-existing row and every PRD from a company that
+    -- never uploads one. Deliberately NOT a foreign key in either engine: a
+    -- format is deletable, and an FK would either erase this PRD's provenance
+    -- when the library is tidied or make the format undeletable.
+    artifact_template_id TEXT
 );
 
 CREATE TABLE evidences (

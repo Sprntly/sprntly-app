@@ -134,6 +134,27 @@ def complete_prd(prd_id: int, title: str, md: str) -> None:
     }).eq("id", prd_id).execute()
 
 
+def set_prd_artifact_template(prd_id: int, artifact_template_id: str | None) -> None:
+    """Record WHICH uploaded format produced this PRD (migration
+    20260806120000_prds_artifact_template.sql).
+
+    A separate write rather than a new `complete_prd` argument: `complete_prd`
+    has many callers on paths that have nothing to do with formats (imports,
+    restores, the 2-part variant), and this is only ever known on the generation
+    path. Best-effort by construction — the caller treats a failure here as
+    losing a provenance stamp, never as failing a finished PRD.
+
+    Called with None on the built-in path, which is a no-op write: NULL is
+    already what the column holds and what "written in Sprntly's own format"
+    means, so nothing is stamped and nothing needs to be cleared."""
+    if artifact_template_id is None:
+        return
+    c = require_client()
+    c.table("prds").update(
+        {"artifact_template_id": artifact_template_id}
+    ).eq("id", prd_id).execute()
+
+
 def complete_prd_2part(prd_id: int, title: str, human_md: str, llm_part: str) -> None:
     """Complete a 2-part PRD (prd-author skill): Part A (human-readable) goes to
     `payload_md` — what the frontend renders, unchanged — and Part B (the

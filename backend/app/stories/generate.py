@@ -13,7 +13,7 @@ model and let the skill decide.
 
 The output contract mirrors the skill's *canonical ticket*: a five-section
 structured description (What / Why now / User story / Scope / Out of scope),
-the trace spine (`Part A §5 R# → Part B EARS → tests`), inherited acceptance
+the trace spine (`PRD requirement id → Part B EARS → tests`), inherited acceptance
 criteria carrying inline `[failure]`/`[edge]` tags, child issues (subtasks),
 blocked-by/blocks dependencies, the stakes-gate route, and ticket-type
 (build / decision / spike) so decision tickets and spikes render distinctly.
@@ -121,8 +121,12 @@ _SCHEMA: dict[str, Any] = {
                     "prd_section": {
                         "type": "string",
                         "description": (
-                            "Provenance anchor, e.g. 'Part A §5 R3'. Empty when "
-                            "generated from prose without a §5 table."
+                            "Provenance anchor into the PRD's requirements "
+                            "section, whatever that section is called: cite the "
+                            "requirement by the id the PRD ITSELF gives it (e.g. "
+                            "'R3', 'FR-12', 'Story 4'), qualified by the "
+                            "section's own heading when it has one. Empty when "
+                            "the PRD numbers nothing."
                         ),
                     },
                     "ears_ids": {
@@ -133,7 +137,10 @@ _SCHEMA: dict[str, Any] = {
                     "signals": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Signal/Source citations from Part A §5.",
+                        "description": (
+                            "Signal/Source citations carried by the PRD's "
+                            "requirements section."
+                        ),
                     },
                     # ── Acceptance ──
                     "acceptance_criteria": {
@@ -186,9 +193,10 @@ _SCHEMA: dict[str, Any] = {
                     "activity": {
                         "type": "string",
                         "description": (
-                            "The Part A §4 user activity this ticket serves "
-                            "(story-map backbone column). Empty when the sizing "
-                            "gate says tickets-only."
+                            "The user activity this ticket serves, taken from "
+                            "wherever the PRD describes users and their "
+                            "activities (story-map backbone column). Empty when "
+                            "the sizing gate says tickets-only."
                         ),
                     },
                     "release": {
@@ -211,7 +219,10 @@ _SCHEMA: dict[str, Any] = {
                     "priority": {
                         "type": "string",
                         "enum": ["urgent", "high", "normal", "low"],
-                        "description": "Priority from the Part A §5 Priority column.",
+                        "description": (
+                            "Priority as the PRD's requirements section states "
+                            "it, if it states one at all."
+                        ),
                     },
                     "route": {
                         "type": "string",
@@ -232,12 +243,15 @@ _SCHEMA: dict[str, Any] = {
 _SYSTEM = (
     "You are the Ticket agent. Apply the bound skill (the METHOD above) to turn "
     "the given PRD (or insight) into the skill's CANONICAL tickets — one or more "
-    "per Part A §5 requirement row.\n"
+    "per requirement in the PRD's requirements section — whatever that "
+    "section is called, and whatever shape it takes (a table, a bulleted "
+    "list, or user stories).\n"
     "For each BUILD ticket, populate the five-section description (what, "
     "why_now, user_story, scope, out_of_scope), the trace spine (prd_section "
-    "like 'Part A §5 R3', ears_ids, signals), child issues (subtasks; prefix "
-    "parallel-safe ones with '[P]'), dependencies (blocked_by / blocks by "
-    "title), priority (from the §5 Priority column), and the stakes-gate route.\n"
+    "— cite each requirement by the id the PRD itself gives it; ears_ids; "
+    "signals), child issues (subtasks; prefix parallel-safe ones with "
+    "'[P]'), dependencies (blocked_by / blocks by title), priority (as the "
+    "PRD states it, if it does), and the stakes-gate route.\n"
     "ACCEPTANCE CRITERIA: when a machine-readable Part B is provided, INHERIT "
     "them verbatim from its spec-first tests and set ac_inherited=true; render "
     "failure branches prefixed '[failure]' and edge cases '[edge]'. With prose "
@@ -252,7 +266,8 @@ _SYSTEM = (
     "no rollout section) — Release 1 is always the walking skeleton (the "
     "minimal end-to-end path) — and stamp every ticket's `release` with its "
     "phase label ('Release 1 — walking skeleton', 'Release 2 — <short scope "
-    "name>', …) and `activity` with the Part A §4 user activity it serves. "
+    "name>', …) and `activity` with the user activity it serves, as the PRD "
+    "describes its users. "
     "Phase labels name scope only — never invent dates, audiences, or exit "
     "criteria. If a machine-readable Part B provides a release plan, use its "
     "phases verbatim instead of synthesizing. When the gate says tickets-only, "
@@ -280,8 +295,9 @@ _PLAN_SCHEMA: dict[str, Any] = {
         "stubs": {
             "type": "array",
             "description": (
-                "The COMPLETE set of BUILD tickets for this PRD — one or more per "
-                "Part A §5 requirement row. Exhaustive: every §5 row is covered."
+                "The COMPLETE set of BUILD tickets for this PRD — one or more "
+                "per requirement in the PRD's requirements section, whatever it "
+                "is called. Exhaustive: every requirement is covered."
             ),
             "items": {
                 "type": "object",
@@ -296,7 +312,10 @@ _PLAN_SCHEMA: dict[str, Any] = {
                     },
                     "prd_section": {
                         "type": "string",
-                        "description": "Provenance anchor, e.g. 'Part A §5 R3' (empty if none).",
+                        "description": (
+                            "Provenance anchor: the requirement's own id as the "
+                            "PRD gives it (empty if the PRD numbers nothing)."
+                        ),
                     },
                     "ears_ids": {
                         "type": "array",
@@ -306,9 +325,9 @@ _PLAN_SCHEMA: dict[str, Any] = {
                     "activity": {
                         "type": "string",
                         "description": (
-                            "Part A §4 user activity this ticket serves (story-"
-                            "map backbone). Empty when the sizing gate says "
-                            "tickets-only."
+                            "The user activity this ticket serves, as the PRD "
+                            "describes its users (story-map backbone). Empty "
+                            "when the sizing gate says tickets-only."
                         ),
                     },
                     "release": {
@@ -330,11 +349,13 @@ _PLAN_SCHEMA: dict[str, Any] = {
 _PLAN_SYSTEM = (
     "You are the Ticket planner. Apply the bound skill (the METHOD above) to "
     "decompose the given PRD (or insight) into the COMPLETE list of BUILD "
-    "tickets — one or more per Part A §5 requirement row. Output ONLY a "
+    "tickets — one or more per requirement in the PRD's requirements section, "
+    "whatever that section is called. Output ONLY a "
     "lightweight STUB for each: title, one-line summary, the provenance anchor "
-    "(prd_section like 'Part A §5 R3'), and any Part B EARS ids it traces to. "
+    "(prd_section — the requirement's own id as the PRD gives it), and any "
+    "Part B EARS ids it traces to. "
     "Do NOT write descriptions, acceptance criteria, scope, or subtasks yet — "
-    "that happens in a later step. Be EXHAUSTIVE: every §5 requirement must be "
+    "that happens in a later step. Be EXHAUSTIVE: every requirement must be "
     "covered by at least one stub, and titles must be unique. Every ticket is a "
     "BUILD ticket.\n"
     "STORY-MAP PLACEMENT (decided HERE, where the whole set is visible): run "
@@ -343,7 +364,8 @@ _PLAN_SYSTEM = (
     "PRD carries no rollout section) — Release 1 is always the walking "
     "skeleton — and stamp every stub's `release` with its phase label "
     "('Release 1 — walking skeleton', 'Release 2 — <short scope name>', …) "
-    "and `activity` with the Part A §4 user activity it serves. Phase labels "
+    "and `activity` with the user activity it serves, as the PRD describes "
+    "its users. Phase labels "
     "name scope only — never invent dates, audiences, or exit criteria. If "
     "Part B provides a release plan, use its phases verbatim. When the gate "
     "says tickets-only, leave both empty on every stub. Return only the stubs."

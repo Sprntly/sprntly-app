@@ -45,14 +45,18 @@ ARTIFACT_TYPE_LABELS: dict[str, str] = {
 # rows: the library screen still renders all three group headers, and the two
 # that aren't wired need to say so with no row to hang a flag off.
 #
-# All three are False here because MILESTONE 1 IS INERT — nothing reads
-# artifact_templates on any generation path. `prd` flips true when
-# resolve_prd_template replaces _load_part_a_template(); `impl_spec` when
-# _load_part_b_template() goes the same way; `tickets` when the description
-# layout lands. Flip them HERE and nowhere else — a client that hardcodes this
+# `prd` is TRUE from the milestone that made `prd_runner.resolve_prd_template`
+# replace `_load_part_a_template()` at its call site: an active PRD format with
+# a compiled skeleton now genuinely governs every PRD the company generates,
+# and the PRD row records which format wrote it (prds.artifact_template_id).
+#
+# The other two are still false because nothing reads them: the
+# implementation-spec skeleton (`prd_runner._load_part_b_template`) and the
+# ticket description layout are their own milestones. Flip each one HERE, in the
+# milestone that makes it true, and nowhere else — a client that hardcodes this
 # tells a user their tickets changed when nothing did.
 GENERATION_ENABLED: dict[str, bool] = {
-    "prd": False,
+    "prd": True,
     "tickets": False,
     "impl_spec": False,
 }

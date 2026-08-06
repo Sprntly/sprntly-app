@@ -318,15 +318,20 @@ def test_generation_enabled_is_top_level_and_present_on_an_empty_library(
 ):
     """The state most companies are in is zero rows, and the screen still
     renders all three group headers — a per-row flag would have nothing to hang
-    off. All three are False in this milestone because NOTHING reads the table
-    on any generation path yet; a screen that hardcoded `prd: true` would tell a
-    user their PRDs changed when no PRD prompt has moved."""
+    off, which is why this is top-level.
+
+    `prd` is now TRUE: `prd_runner.resolve_prd_template` genuinely reads this
+    table, and an active PRD format governs every PRD the company generates. The
+    other two are still FALSE because nothing reads them — the
+    implementation-spec skeleton and the ticket description layout are later
+    milestones. The map is served from ONE backend constant precisely so a
+    screen can never tell a user their tickets changed when nothing did."""
     t = tenant_client.make(slug="acme")
     body = t.client.get(_URL).json()
 
     assert body["templates"] == []
     assert body["generation_enabled"] == {
-        "prd": False, "tickets": False, "impl_spec": False
+        "prd": True, "tickets": False, "impl_spec": False
     }
 
 
@@ -826,13 +831,21 @@ def test_an_admin_deleting_the_active_format_reports_the_fallback(tenant_client)
     assert t.client.get(_URL).json()["templates"] == []
 
 
-# ─── the inertness this milestone promises ───────────────────────────────────
+# ─── what generation actually honours ────────────────────────────────────────
 
 
-def test_nothing_on_the_generation_path_reads_this_table(tenant_client):
-    """Milestone 1 ships a store with no reader. The PRD runner still loads its
-    template from the vendored skill, so an active custom format changes no
-    generated document at all — and `generation_enabled` says so."""
+def test_activating_a_prd_format_really_changes_what_generation_uses(tenant_client):
+    """This library stopped being inert.
+
+    Activating a PRD format now genuinely changes the skeleton every PRD in the
+    company is written into — `prd_runner.resolve_prd_template` resolves it, and
+    the prompt-level proof lives in test_prd_runner.py. What this asserts is the
+    contract between the two: the row the route activated is the row the runner
+    resolves, and `generation_enabled` tells the truth about it.
+
+    The vendored template is untouched and remains the fallback for every
+    company without a format — see
+    test_prd_runner.py::test_no_active_format_leaves_the_part_a_prompt_byte_identical."""
     t = tenant_client.make(slug="acme")
     tid = _create(t.client).json()["id"]
     _make_ready(t.company_id, tid)
@@ -840,5 +853,29 @@ def test_nothing_on_the_generation_path_reads_this_table(tenant_client):
 
     import app.prd_runner as prd_runner
 
-    assert prd_runner._load_part_a_template()
-    assert t.client.get(_URL).json()["generation_enabled"]["prd"] is False
+    template, template_id = prd_runner.resolve_prd_template(t.company_id)
+    assert template_id == tid
+    assert "<h1>Acme PRD</h1>" in template
+    assert template != prd_runner._load_part_a_template()
+    assert t.client.get(_URL).json()["generation_enabled"]["prd"] is True
+
+
+def test_tickets_and_impl_spec_are_still_inert(tenant_client):
+    """The other two types have a full library, checks and activation — and no
+    reader. `generation_enabled` is what stops a screen implying otherwise, so
+    it has to stay false until the milestone that makes each true."""
+    t = tenant_client.make(slug="acme")
+    for artifact_type in ("tickets", "impl_spec"):
+        tid = _create(t.client, name=f"{artifact_type} form",
+                      artifact_type=artifact_type).json()["id"]
+        _make_ready(t.company_id, tid)
+        assert t.client.post(f"{_URL}/{tid}/activate").status_code == 200
+
+    enabled = t.client.get(_URL).json()["generation_enabled"]
+    assert enabled["tickets"] is False
+    assert enabled["impl_spec"] is False
+
+    # The impl-spec generator still loads the vendored B0-B9 skeleton.
+    import app.prd_runner as prd_runner
+
+    assert "B0" in prd_runner._load_part_b_template()
