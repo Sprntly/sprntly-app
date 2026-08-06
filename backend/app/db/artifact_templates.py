@@ -320,6 +320,20 @@ def activate_template(
     built-in format. That is the correct degradation (a built-in PRD, not a
     failed one) and it is why this is not worth a lock.
 
+    THE WINDOW MUST NOT BECOME PERMANENT. The two statements are not in one
+    transaction, so anything that fails the second write — a 23505 race, a
+    dropped connection, a statement timeout — used to leave the company with the
+    outgoing format switched off and the incoming one never switched on: zero
+    active templates, every future document silently back on the built-in, and
+    the only signal a failed button click. So the previously-active row is read
+    BEFORE the deactivate and put back best-effort on any failure of the
+    activate, before the exception propagates.
+
+    The restore is deliberately allowed to fail silently. On a genuine 23505
+    race another caller legitimately holds the slot, and re-activating the old
+    row would trip the same partial unique index — leaving the winner in place
+    is the correct outcome, not an error to report.
+
     A 23505 on the second statement means another caller activated a different
     template inside that window; it surfaces as ActiveTemplateConflict → 409."""
     row = get_template_by_id(company_id, template_id)
@@ -327,6 +341,10 @@ def activate_template(
         return None
     c = require_client()
     now = _now_iso()
+    # Read the outgoing format BEFORE switching it off — it is the only thing
+    # that can put the company back where it started if the activate fails.
+    prior = get_active_template(company_id, artifact_type)
+    prior_id = prior["id"] if prior and prior["id"] != template_id else None
     # Company- AND type-filtered: another tenant's active format, and this
     # company's format for a DIFFERENT artifact type, are both untouched.
     (
@@ -345,6 +363,7 @@ def activate_template(
             .execute()
         )
     except Exception as exc:  # noqa: BLE001 — narrowed to unique-violation below
+        _restore_active(c, company_id, prior_id)
         if _is_unique_violation(exc):
             raise ActiveTemplateConflict(artifact_type) from exc
         raise
@@ -353,6 +372,28 @@ def activate_template(
         bool(company_id), artifact_type,
     )
     return _decode(resp.data[0] if resp.data else {**row, "is_active": True})
+
+
+def _restore_active(c, company_id: str, prior_id: str | None) -> None:
+    """Put the outgoing format back after a failed activation. Best-effort by
+    design — see activate_template's docstring for why a failure here is the
+    right outcome rather than something to raise."""
+    if not prior_id:
+        return
+    try:
+        (
+            c.table("artifact_templates")
+            .update({"is_active": True, "updated_at": _now_iso()})
+            .eq("company_id", company_id)
+            .eq("id", prior_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — the original failure is what matters
+        logger.warning(
+            "artifact_template_activation_rollback_failed company_present=%s "
+            "— the company may have no active template for this type",
+            bool(company_id),
+        )
 
 
 def deactivate_template(company_id: str, template_id: str) -> dict | None:
@@ -409,7 +450,15 @@ def get_active_template(company_id: str, artifact_type: str) -> dict | None:
     quietly reverting to the built-in with nothing logged.
 
     The partial unique index guarantees at most one match; if a legacy row ever
-    slipped past it, the newest wins (the list is ordered newest-first)."""
+    slipped past it, the newest wins (the list is ordered newest-first).
+
+    Returns the row WHATEVER its compile_status, deliberately: the generation-time
+    resolver has to gate on whether a usable skeleton exists, not on the status,
+    or a recompile of the active format drops the whole company to the built-in
+    for its duration. **The predicate that resolver wants is `compiled != ""`,
+    not `compiled IS NOT NULL`** — the column is `text not null default ''`
+    (migration :64), so a NULL check is always true and would hand generation an
+    empty skeleton the moment a format was uploaded but never compiled."""
     c = require_client()
     resp = (
         c.table("artifact_templates")

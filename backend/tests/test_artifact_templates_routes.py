@@ -220,6 +220,70 @@ def test_upload_over_two_megabytes_is_413(tenant_client, monkeypatch):
     assert resp.status_code == 413
 
 
+def test_the_upload_read_is_bounded_by_the_cap(tenant_client, monkeypatch):
+    """Read ONE byte past the cap and no further.
+
+    nginx bounds the request at 50 MB, so reading the whole body before checking
+    a 2 MB cap enforced that cap 25x looser than it read — an oversize upload
+    was fully resident in memory before being rejected."""
+    from starlette.datastructures import UploadFile
+
+    from app.artifact_templates.store import MAX_TEMPLATE_UPLOAD_BYTES
+
+    t = tenant_client.make(slug="acme")
+    sizes: list[int] = []
+    real_read = UploadFile.read
+
+    async def _spy(self, size=-1):
+        sizes.append(size)
+        return await real_read(self, size)
+
+    monkeypatch.setattr(UploadFile, "read", _spy)
+    assert _upload(t.client).status_code == 201
+    assert MAX_TEMPLATE_UPLOAD_BYTES + 1 in sizes
+    # Never an unbounded read of the request body.
+    assert -1 not in sizes
+
+
+def test_a_nul_byte_in_an_upload_is_400_not_a_500(tenant_client):
+    """A UTF-16LE file saved WITHOUT a BOM decodes as valid UTF-8 — U+0000 is a
+    legal code point — so every character-level check passes and the NUL lands
+    in `source_md`. Postgres `text` cannot hold one (SQLSTATE 22P05), so the
+    user would get a 500 rather than the readable 400 this route already has
+    for the undecodable case.
+
+    NOTE this can only ever be asserted at the ROUTE: the SQLite fake stores
+    NUL happily, so nothing downstream of the guard can fail in this suite."""
+    t = tenant_client.make(slug="acme")
+    utf16_no_bom = "# Acme PRD\n".encode("utf-16-le")
+    assert b"\x00" in utf16_no_bom
+
+    resp = _upload(t.client, data=utf16_no_bom)
+    assert resp.status_code == 400, resp.text
+    assert "text" in resp.json()["detail"].lower()
+
+
+def test_a_nul_byte_in_pasted_or_patched_markdown_is_400(tenant_client):
+    # The paste path never touches the upload route's byte-level guard, and
+    # PATCH doesn't either — so the check lives in the store as well, where
+    # both reach it.
+    t = tenant_client.make(slug="acme")
+    assert _create(t.client, source_md="# Acme\x00PRD\n").status_code == 400
+
+    tid = _create(t.client).json()["id"]
+    resp = t.client.patch(f"{_URL}/{tid}", json={"source_md": "# Acme\x00PRD\n"})
+    assert resp.status_code == 400
+    # And the row keeps the good source it already had.
+    from app import db
+
+    assert "\x00" not in db.get_template_by_id(t.company_id, tid)["source_md"]
+
+
+def test_an_undecodable_upload_is_still_400(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert _upload(t.client, data=b"\xff\xfe\xfd bad bytes").status_code == 400
+
+
 def test_a_malformed_json_body_is_400_not_a_500(tenant_client):
     t = tenant_client.make(slug="acme")
     resp = t.client.post(
@@ -359,6 +423,22 @@ def test_a_foreign_id_is_404_on_every_route(tenant_client):
     assert still["compile_status"] == "ready"
     assert still["is_active"] is False
 
+    # A NON-ADMIN hitting a foreign id gets the 404 too, not the role gate's
+    # 403. Nothing leaks either way — the 403 is uniform across every id for a
+    # member — but the client maps the two to different outcomes: a 404 drops
+    # the row from the list, a 403 leaves it there with a denial line. Answering
+    # 403 for a row a teammate just deleted strands a phantom nobody can
+    # dismiss, so ownership is checked first on every route that has both gates.
+    member = _member(tenant_client, a)
+    for tid in (theirs, missing):
+        assert a.client.post(
+            f"{_URL}/{tid}/activate", headers=member
+        ).status_code == 404
+        assert a.client.post(
+            f"{_URL}/{tid}/deactivate", headers=member
+        ).status_code == 404
+        assert a.client.delete(f"{_URL}/{tid}", headers=member).status_code == 404
+
 
 def test_activating_your_own_format_leaves_the_other_tenants_alone(tenant_client):
     a = tenant_client.make(slug="acme")
@@ -457,6 +537,52 @@ def test_rename_leaves_the_source_and_the_status_alone(tenant_client):
     # A rename is not a re-upload — it must not send a checked format back to
     # the queue and out of use.
     assert body["compile_status"] == "ready"
+
+
+def test_a_rename_by_someone_else_does_not_rewrite_who_uploaded_it(tenant_client):
+    """Provenance moves with the CONTENT, never with a rename.
+
+    The route sends workspace_id and the uploader fields on every PATCH; the
+    store now forwards them only when the source actually changed. Without that
+    gate any member could take over the attribution of any format in the
+    company just by renaming it — the row's "Uploaded by Ada" line silently
+    became "Uploaded by whoever last fixed a typo" — and workspace_id started
+    claiming a format originated in whichever workspace last renamed it, which
+    is exactly what the migration header promises it does not do."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    before = db.get_template_by_id(t.company_id, tid)
+    member = _member(tenant_client, t)
+
+    resp = t.client.patch(f"{_URL}/{tid}", json={"name": "Renamed"}, headers=member)
+    assert resp.status_code == 200, resp.text
+
+    after = db.get_template_by_id(t.company_id, tid)
+    assert after["name"] == "Renamed"
+    assert after["uploader_id"] == before["uploader_id"]
+    assert after["uploader_name"] == before["uploader_name"]
+    assert after["workspace_id"] == before["workspace_id"]
+
+
+def test_replacing_the_source_does_move_the_provenance(tenant_client):
+    # The other half of the same rule: a re-upload IS a new version of the
+    # format, so the row records who supplied it and from where.
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    before = db.get_template_by_id(t.company_id, tid)
+    member = _member(tenant_client, t)
+
+    resp = t.client.patch(
+        f"{_URL}/{tid}", json={"source_md": "# A different form\n"}, headers=member
+    )
+    assert resp.status_code == 200, resp.text
+
+    after = db.get_template_by_id(t.company_id, tid)
+    assert after["uploader_id"] != before["uploader_id"]
 
 
 def test_replacing_the_source_requeues_but_keeps_the_last_good_skeleton(
@@ -558,6 +684,28 @@ def test_activate_switches_the_active_format_over(tenant_client):
     assert rows[v3]["is_active"] is True
     # The outgoing format stays in the library — switching back is one click.
     assert rows[v2]["is_active"] is False
+
+
+def test_the_raced_409_never_prints_the_raw_enum(tenant_client, monkeypatch):
+    """`impl_spec` is a column value, not a word anybody typed. The refusal
+    reads "your team's engineering spec format" — ARTIFACT_TYPE_LABELS exists
+    for exactly this and assert_activatable's refusal already uses it."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client, artifact_type="impl_spec").json()["id"]
+    _make_ready(t.company_id, tid)
+
+    import app.routes.artifact_templates as routes_mod
+
+    def _raced(*a, **k):
+        raise routes_mod.db.ActiveTemplateConflict("impl_spec")
+
+    monkeypatch.setattr(routes_mod.db, "activate_template", _raced)
+
+    resp = t.client.post(f"{_URL}/{tid}/activate")
+    assert resp.status_code == 409
+    message = resp.json()["detail"]["message"]
+    assert "engineering spec" in message
+    assert "impl_spec" not in message
 
 
 def test_deactivate_returns_the_type_to_the_builtin(tenant_client):

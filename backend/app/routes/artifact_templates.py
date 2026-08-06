@@ -50,6 +50,7 @@ from pydantic import BaseModel
 
 from app import db
 from app.artifact_templates.store import (
+    ARTIFACT_TYPE_LABELS,
     ARTIFACT_TYPES,
     GENERATION_ENABLED,
     MAX_TEMPLATE_SOURCE_CHARS,
@@ -59,6 +60,7 @@ from app.artifact_templates.store import (
     TemplateNameTooLong,
     TemplateNotReady,
     TemplateSourceEmpty,
+    TemplateSourceNotText,
     TemplateSourceTooLarge,
     TemplateStoreError,
     TemplateTypeUnknown,
@@ -69,6 +71,10 @@ from app.artifact_templates.store import (
 )
 from app.auth import WorkspaceContext, require_workspace
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
+# The same "is this text or binary?" gate the file-ingest path uses. Reused
+# rather than re-derived so the two answers can never drift: it does the NUL
+# sniff AND the UTF-8 decode check as one call.
+from app.ingest import _looks_textual
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +172,7 @@ def _store_error_status(exc: TemplateStoreError) -> int:
         return 422
     if isinstance(exc, TemplateNotReady):
         return 409
-    if isinstance(exc, TemplateSourceEmpty):
+    if isinstance(exc, (TemplateSourceEmpty, TemplateSourceNotText)):
         return 400
     return 400
 
@@ -195,8 +201,13 @@ def _require_company_admin(company: WorkspaceContext, message: str) -> None:
     refuses an action on a row the caller can ALREADY SEE listed. There is no
     existence left to protect, and answering 404 would tell a member that their
     own company's format had vanished — a worse lie than the honest refusal.
-    Ownership mismatches on these same routes still 404, because
-    `_owned_or_404` runs on its own.
+
+    **Every caller runs `_owned_or_404` FIRST**, which is what makes the
+    sentence above true rather than aspirational: a foreign or deleted id 404s
+    before this gate is reached, so the 403 only ever answers for a row that
+    genuinely exists in the caller's own library. Ordering it the other way
+    leaks nothing (the 403 is uniform across ids for a non-admin) but hands the
+    client the wrong outcome for a row a teammate just deleted.
 
     The gate is COMPANY role, not workspace role: the library is company-scoped,
     so a workspace admin who is a plain company member must not be able to
@@ -249,7 +260,11 @@ async def _read_create_payload(request: Request) -> tuple[str, str, str]:
             "Only .md files are accepted. Paste the Markdown instead if your "
             "format is in another app.",
         )
-    data = await upload.read()
+    # Read ONE BYTE past the cap and no further: an oversize upload is rejected
+    # without ever being held whole in memory. nginx bounds the request at 50 MB,
+    # so reading it all before checking a 2 MB cap enforced the cap 25× looser
+    # than it read.
+    data = await upload.read(MAX_TEMPLATE_UPLOAD_BYTES + 1)
     if not data:
         raise HTTPException(400, "There's nothing to read yet — that file is empty.")
     if len(data) > MAX_TEMPLATE_UPLOAD_BYTES:
@@ -258,13 +273,20 @@ async def _read_create_payload(request: Request) -> tuple[str, str, str]:
             "That file is larger than 2 MB. Formats are usually a few pages of "
             "Markdown — check you picked the right file.",
         )
-    try:
-        source_md = data.decode("utf-8")
-    except UnicodeDecodeError:
+    # `_looks_textual` catches BOTH failure modes in one call: an undecodable
+    # byte sequence, and a NUL byte. The NUL half matters more than it looks —
+    # U+0000 is valid UTF-8, so a UTF-16LE file saved without a BOM decodes
+    # cleanly here and then 500s on the INSERT, because Postgres `text` cannot
+    # hold a NUL (SQLSTATE 22P05). store.validate_new_template repeats the NUL
+    # check over the whole string, since this heuristic only sniffs the first
+    # 8 KB and the paste path never comes through here at all.
+    if not _looks_textual(data):
         raise HTTPException(
             400,
-            "That file isn't readable as text. Formats must be plain Markdown.",
+            "That file isn't readable as text. Formats must be plain Markdown "
+            "— if you exported it from another app, try saving it as UTF-8 first.",
         )
+    source_md = data.decode("utf-8")
     if not name:
         # Pre-fill from the filename minus its extension, the way the modal
         # does, so an upload without a typed name still lands with a usable one
@@ -487,9 +509,14 @@ def activate_template_route(
     notes in `detail` so the client can translate them into the same sentences
     the row's badge shows, rather than inventing a second vocabulary.
 
-    404 on a foreign or missing id, checked independently of the role gate."""
-    _require_company_admin(company, "Only an admin can change your team's format.")
+    404 on a foreign or missing id, and OWNERSHIP IS CHECKED FIRST. A non-admin
+    acting on a row a teammate deleted a second ago has to get the 404, not the
+    403: the client maps the two to different outcomes — 404 drops the row from
+    the list, 403 leaves it there with a denial line — so the wrong one strands
+    a phantom row nobody can dismiss. Nothing leaks by ordering it this way; the
+    403 is uniform across every id for a non-admin either way."""
     row = _owned_or_404(company, template_id)
+    _require_company_admin(company, "Only an admin can change your team's format.")
     try:
         assert_activatable(row)
     except TemplateNotReady as e:
@@ -503,12 +530,15 @@ def activate_template_route(
             company.company_id, row["artifact_type"], template_id
         )
     except db.ActiveTemplateConflict:
+        # ARTIFACT_TYPE_LABELS, not the raw column value — a user who uploaded
+        # an engineering-spec format should never be shown the word
+        # "impl_spec". Same table assert_activatable's refusal uses.
+        label = ARTIFACT_TYPE_LABELS.get(row.get("artifact_type") or "", "document")
         raise HTTPException(
             409,
             {
-                "message": "Another format just became your team's "
-                           f"{row.get('artifact_type') or 'document'} format. "
-                           "Refresh and try again.",
+                "message": f"Another format just became your team's {label} "
+                           "format. Refresh and try again.",
                 "code": "activation_raced",
                 "notes": [],
             },
@@ -532,9 +562,10 @@ def deactivate_template_route(
     Admin-only (403), for the same reason activate is: it changes what the whole
     company writes in. Idempotent — deactivating an already-inactive format
     answers 200 with the row, so a double-click is not an error. 404 on a
-    foreign or missing id."""
-    _require_company_admin(company, "Only an admin can change your team's format.")
+    foreign or missing id, checked BEFORE the role gate for the reason
+    activate's docstring gives."""
     _owned_or_404(company, template_id)
+    _require_company_admin(company, "Only an admin can change your team's format.")
     updated = db.deactivate_template(company.company_id, template_id)
     if updated is None:
         raise HTTPException(404, "Format not found.")

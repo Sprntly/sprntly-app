@@ -278,21 +278,30 @@ def test_the_partial_unique_index_really_refuses_the_other_order(isolated_settin
     assert "unique" in str(exc.value).lower()
 
 
-def test_a_race_inside_the_activation_window_raises_the_409(isolated_settings, monkeypatch):
-    """Another caller takes the active slot between the deactivate and the
-    activate. Postgres answers 23505; the route turns this into a 409 telling
-    the user to refresh, which is the only thing they can act on."""
-    _seed_company(isolated_settings["supabase"], "co-1")
-    row = _ready("co-1", _add("co-1")["id"])
+def _break_nth_update(monkeypatch, exc: Exception, n: int = 2, sticky: bool = False):
+    """Make the Nth `update()` in app.db.artifact_templates raise `exc`.
 
+    activate_template issues its updates in a fixed order — 1 deactivate the
+    siblings, 2 activate the target, 3 (only on failure) put the outgoing one
+    back — so N=2 injects a failure into exactly the non-transactional gap the
+    rollback exists to close, and leaves update 3 free to run. `sticky=True`
+    breaks update N and every one after it, which is how the rollback itself is
+    made to fail. Everything else, including every SELECT, goes to the real fake
+    client untouched.
+
+    Returns a `restore()` that puts the module's own `require_client` back.
+    Callers MUST use it rather than `monkeypatch.undo()`: `monkeypatch` is ONE
+    function-scoped instance shared with `isolated_settings`, so undoing
+    everything also un-wires the fake Supabase and the next read tries to reach
+    the real project over the network (httpx.ConnectError, not a useful
+    failure)."""
     import app.db.artifact_templates as mod
 
     real_client = mod.require_client()
 
-    class _RaceQuery:
-        """Fluent proxy that lets everything through except the SECOND update's
-        execute(), which raises the unique violation the loser of the race
-        gets."""
+    class _Query:
+        """Fluent proxy: `update`/`execute` are intercepted, every other
+        builder method is forwarded and re-wrapped so the chain stays fluent."""
 
         def __init__(self, inner, owner):
             self._inner = inner
@@ -301,16 +310,14 @@ def test_a_race_inside_the_activation_window_raises_the_409(isolated_settings, m
 
         def update(self, patch):
             self._owner.updates += 1
-            self._doomed = self._owner.updates >= 2
+            seen = self._owner.updates
+            self._doomed = seen >= n if sticky else seen == n
             self._inner = self._inner.update(patch)
             return self
 
         def execute(self):
             if self._doomed:
-                raise sqlite3.IntegrityError(
-                    "UNIQUE constraint failed: index "
-                    "'artifact_templates_active_uniq'"
-                )
+                raise exc
             return self._inner.execute()
 
         def __getattr__(self, name):
@@ -324,17 +331,124 @@ def test_a_race_inside_the_activation_window_raises_the_409(isolated_settings, m
 
             return call
 
-    class _RaceClient:
+    class _Client:
         def __init__(self):
             self.updates = 0
 
         def table(self, name):
-            return _RaceQuery(real_client.table(name), self)
+            return _Query(real_client.table(name), self)
 
-    monkeypatch.setattr(mod, "require_client", lambda: _RaceClient())
+    original = mod.require_client
+    monkeypatch.setattr(mod, "require_client", lambda: _Client())
+
+    def restore() -> None:
+        monkeypatch.setattr(mod, "require_client", original)
+
+    return restore
+
+
+def test_a_race_inside_the_activation_window_raises_the_409(isolated_settings, monkeypatch):
+    """Another caller takes the active slot between the deactivate and the
+    activate. Postgres answers 23505; the route turns this into a 409 telling
+    the user to refresh, which is the only thing they can act on."""
+    _seed_company(isolated_settings["supabase"], "co-1")
+    row = _ready("co-1", _add("co-1")["id"])
+    _break_nth_update(
+        monkeypatch,
+        sqlite3.IntegrityError(
+            "UNIQUE constraint failed: index 'artifact_templates_active_uniq'"
+        ),
+    )
 
     with pytest.raises(ActiveTemplateConflict):
         activate_template("co-1", "prd", row["id"])
+
+
+def test_a_failed_activation_puts_the_outgoing_format_back(
+    isolated_settings, monkeypatch
+):
+    """The two statements are not in one transaction, so ANY failure of the
+    second used to leave the company with zero active formats: v2 switched off,
+    v3 never switched on, every future document silently back on the built-in,
+    and the only signal a failed button click. The outgoing row is read before
+    the deactivate and restored before the exception propagates."""
+    _seed_company(isolated_settings["supabase"], "co-1")
+    v2 = _ready("co-1", _add("co-1", name="Acme PRD v2")["id"])
+    v3 = _ready("co-1", _add("co-1", name="Acme PRD v3")["id"])
+    activate_template("co-1", "prd", v2["id"])
+
+    # Not a unique violation — a dropped connection or a statement timeout,
+    # which is the case the old `except` re-raised with nothing re-activated.
+    restore = _break_nth_update(
+        monkeypatch, sqlite3.OperationalError("connection lost")
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        activate_template("co-1", "prd", v3["id"])
+
+    restore()  # read through the real fake client again
+    active = get_active_template("co-1", "prd")
+    assert active is not None, "the company was left with NO active PRD format"
+    assert active["id"] == v2["id"]
+    assert get_template_by_id("co-1", v3["id"])["is_active"] is False
+
+
+def test_the_raced_409_also_leaves_an_active_format_behind(
+    isolated_settings, monkeypatch
+):
+    """The 409 path exits through the same rollback. Here nobody actually holds
+    the slot, so the restore succeeds and the company keeps v2; in a real race
+    the winner holds it and the restore trips the same partial unique index and
+    is swallowed, which is the correct outcome — the winner stays."""
+    _seed_company(isolated_settings["supabase"], "co-1")
+    v2 = _ready("co-1", _add("co-1", name="Acme PRD v2")["id"])
+    v3 = _ready("co-1", _add("co-1", name="Acme PRD v3")["id"])
+    activate_template("co-1", "prd", v2["id"])
+    restore = _break_nth_update(
+        monkeypatch,
+        sqlite3.IntegrityError(
+            "UNIQUE constraint failed: index 'artifact_templates_active_uniq'"
+        ),
+    )
+
+    with pytest.raises(ActiveTemplateConflict):
+        activate_template("co-1", "prd", v3["id"])
+
+    restore()
+    assert get_active_template("co-1", "prd")["id"] == v2["id"]
+
+
+def test_a_rollback_that_itself_fails_is_swallowed_not_raised(
+    isolated_settings, monkeypatch
+):
+    """The caller has to see the ORIGINAL failure. A rollback that cannot land
+    (the winner of a real race already holds the slot) must not replace the
+    exception the caller needs with one about the rollback."""
+    _seed_company(isolated_settings["supabase"], "co-1")
+    v2 = _ready("co-1", _add("co-1", name="Acme PRD v2")["id"])
+    v3 = _ready("co-1", _add("co-1", name="Acme PRD v3")["id"])
+    activate_template("co-1", "prd", v2["id"])
+    # sticky: break the activate (update 2) AND the rollback (update 3), which
+    # is what a real 23505 race looks like from the rollback's point of view.
+    _break_nth_update(
+        monkeypatch, sqlite3.OperationalError("still down"), n=2, sticky=True
+    )
+
+    import app.db.artifact_templates as mod
+
+    original = mod._restore_active
+    calls = []
+
+    def _boom(c, company_id, prior_id):
+        calls.append(prior_id)
+        return original(c, company_id, prior_id)
+
+    monkeypatch.setattr(mod, "_restore_active", _boom)
+
+    with pytest.raises(sqlite3.OperationalError) as exc:
+        activate_template("co-1", "prd", v3["id"])
+    assert "still down" in str(exc.value)
+    assert calls == [v2["id"]]
 
 
 def test_deactivate_leaves_the_type_on_the_builtin(isolated_settings):
@@ -423,6 +537,17 @@ def test_rename_touches_nothing_else(isolated_settings):
     assert renamed["is_active"] is True
     # created_at is never patched, so the library order does not reshuffle.
     assert renamed["created_at"] == row["created_at"]
+    # PROVENANCE. A patch that doesn't carry these must not move them — the
+    # row's "Uploaded by Ada" line has to stay true after somebody else fixes a
+    # typo in the name, and workspace_id has to keep saying where the format
+    # CAME FROM or the migration's "a query change, not a backfill" promise is
+    # worthless. (This asserts db.update_template's own contract; the bug this
+    # guards actually lived one layer up, in store.edit_template — see
+    # test_artifact_templates_routes.py::test_a_rename_by_someone_else_does_not
+    # _rewrite_who_uploaded_it, which is the reproduction.)
+    assert renamed["uploader_id"] == "user-1"
+    assert renamed["uploader_name"] == "Ada"
+    assert renamed["workspace_id"] == "ws-1"
 
 
 def test_undecodable_json_degrades_to_empty_rather_than_raising(isolated_settings):

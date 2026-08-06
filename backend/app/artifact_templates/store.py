@@ -132,6 +132,18 @@ class TemplateSourceEmpty(TemplateStoreError):
     """Nothing to read — an empty paste or an empty file (400)."""
 
 
+class TemplateSourceNotText(TemplateStoreError):
+    """The source carries a NUL byte, so it is not markdown (400).
+
+    Not paranoia about binary uploads — `U+0000` is VALID UTF-8, so a UTF-16LE
+    file saved without a BOM decodes without error and every character-level
+    check passes. Postgres `text` cannot store a NUL: PostgREST answers SQLSTATE
+    22P05 and the caller gets a 500 instead of the readable 400 the route
+    already has for the undecodable case. The SQLite fake stores NUL happily, so
+    no test in this suite can catch it downstream of here — this check is the
+    only thing standing between a mis-saved file and a 500."""
+
+
 class TemplateSourceTooLarge(TemplateStoreError):
     """Source past the character cap (413)."""
 
@@ -209,6 +221,15 @@ def validate_new_template(
         raise TemplateSourceEmpty(
             "There's nothing to read yet — paste your format or pick a .md file."
         )
+    # Checked HERE rather than only at the upload route, so the JSON paste path
+    # and PATCH are covered too — `{"name": "Acme", "source_md": "a\\x00b"}`
+    # otherwise reaches the INSERT and 500s against real Postgres.
+    if "\x00" in source_md:
+        raise TemplateSourceNotText(
+            "That format isn't readable as text. Formats must be plain "
+            "Markdown — if you exported it from another app, try saving it as "
+            "UTF-8 first."
+        )
     if len(source_md) > max_source_chars:
         raise TemplateSourceTooLarge(
             f"This format is longer than the {max_source_chars:,} character limit. "
@@ -280,8 +301,18 @@ def edit_template(
     notes about the old text, but deliberately leaves `compiled` standing so an
     ACTIVE template being re-uploaded keeps serving its last good skeleton while
     the new one is checked (db.update_template's docstring has the full
-    reasoning). The uploader fields are refreshed: the row describes the version
-    it now holds, so it records who last changed it and from where."""
+    reasoning).
+
+    PROVENANCE MOVES ONLY WITH THE CONTENT. `workspace_id`, `uploader_id` and
+    `uploader_name` are refreshed when — and only when — the source is actually
+    replaced, gated on `source_changed` exactly as `content_hash` is. Sending
+    them on every PATCH meant a pure rename rewrote all three: the row's
+    "Uploaded by Ada" line became "Uploaded by whoever last fixed a typo", and
+    any member of the company could take over the attribution of any format by
+    renaming it. `workspace_id` is worse than cosmetic — the migration header
+    promises that column makes a future narrowing to workspace scope "a query
+    change, not a backfill", and that promise only holds if the column keeps
+    saying where a format CAME FROM rather than where it was last renamed."""
     next_name = row.get("name") if name is None else name
     next_source = row.get("source_md") if source_md is None else source_md
     next_name, _type, next_source = validate_new_template(
@@ -297,9 +328,11 @@ def edit_template(
         name=next_name,
         source_md=next_source if source_changed else None,
         content_hash=content_hash_for(next_source) if source_changed else None,
-        workspace_id=workspace_id,
-        uploader_id=uploader_id,
-        uploader_name=uploader_name,
+        # None means "leave this column alone" in db.update_template — that
+        # contract is untouched; this is the caller deciding not to send them.
+        workspace_id=workspace_id if source_changed else None,
+        uploader_id=uploader_id if source_changed else None,
+        uploader_name=uploader_name if source_changed else None,
     )
 
 
