@@ -317,6 +317,16 @@ export function TemplatesScreen() {
     <AppLayout mainClassName="main--templates">
       <div className="tplpage">
         <ArtifactFormatsSection />
+        {/* §2 "Examples we learn from" — HIDDEN, not deleted (owner, 2026-08-06).
+            The exemplar library still works and is still wired end to end; it is
+            withheld from the screen while the governing formats library above
+            settles, so there is only one thing on /templates to understand at a
+            time. Everything it needs is still built and tested — `TemplatesView`
+            and its own suite are untouched, and the fetch/upload/remove handlers
+            above it still run — so restoring it is uncommenting this block and
+            nothing else. Do NOT delete the surrounding state: `visible`,
+            `activeFilter`, `onPickFile`, `onRemove` and `fileInputRef` exist
+            only for this and would have to be rebuilt.
         <TemplatesView
           templates={visible}
           loading={loading}
@@ -331,6 +341,7 @@ export function TemplatesScreen() {
           fileInputRef={fileInputRef}
           onFileChange={(e) => void onFileChange(e)}
         />
+        */}
       </div>
     </AppLayout>
   )

@@ -150,12 +150,35 @@ afterEach(() => {
 })
 
 describe("first load", () => {
-  it("renders all three groups off one list call", async () => {
+  it("renders every visible group off one list call", async () => {
     await mount()
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
-    expect(screen.getByText("PRD")).toBeTruthy()
-    expect(screen.getByText("Tickets")).toBeTruthy()
-    expect(screen.getByText("Engineering spec")).toBeTruthy()
+    // Queried as HEADINGS, not by bare text: each type name now appears twice —
+    // once as a tab and once as its group heading — and a bare getByText would
+    // be ambiguous. The heading is the one that proves the group rendered.
+    expect(screen.getByRole("heading", { name: "PRD" })).toBeTruthy()
+    expect(screen.getByRole("heading", { name: "Tickets" })).toBeTruthy()
+    // Engineering spec is withheld from the UI for now (HIDDEN_TYPES) — the
+    // backend still accepts, compiles and generates from those formats.
+    expect(screen.queryByRole("heading", { name: "Engineering spec" })).toBeNull()
+  })
+
+  it("defaults to All, and a type tab narrows to that group alone", async () => {
+    await mount()
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
+
+    // "All" is the default so the three-way relationship is visible first.
+    expect(
+      screen.getByRole("tab", { name: /^All/ }).getAttribute("aria-selected"),
+    ).toBe("true")
+
+    fireEvent.click(screen.getByRole("tab", { name: /^Tickets/ }))
+    expect(screen.getByRole("heading", { name: "Tickets" })).toBeTruthy()
+    expect(screen.queryByRole("heading", { name: "PRD" })).toBeNull()
+    expect(screen.queryByRole("heading", { name: "Engineering spec" })).toBeNull()
+
+    // Filtering is client-side over one fetch — switching tabs must not refetch.
+    expect(listMock).toHaveBeenCalledTimes(1)
   })
 
   it("renders the tickets 'not wired yet' note with the whole library empty", async () => {
@@ -420,7 +443,7 @@ describe("delete", () => {
     await mount()
     await waitFor(() => expect(screen.getByText("Acme PRD v3")).toBeTruthy())
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+      fireEvent.click(screen.getByRole("button", { name: /^Delete / }))
     })
     expect(screen.getByText(/Delete .Acme PRD v3.\?/)).toBeTruthy()
     expect(screen.getByText(/It's removed for everyone at Acme\./)).toBeTruthy()
@@ -443,7 +466,7 @@ describe("delete", () => {
     await mount()
     await waitFor(() => expect(rowNames()).toEqual(["Acme PRD v3"]))
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+      fireEvent.click(screen.getByRole("button", { name: /^Delete / }))
     })
     expect(
       screen.getByText(/Delete .Acme PRD v3. — the format you're using\?/),
@@ -467,7 +490,7 @@ describe("delete", () => {
     await mount()
     await waitFor(() => expect(screen.getByText("Acme PRD v3")).toBeTruthy())
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+      fireEvent.click(screen.getByRole("button", { name: /^Delete / }))
     })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Delete format" }))
@@ -495,7 +518,7 @@ describe("role gating — three actions, not one", () => {
     listMock.mockResolvedValue(listOf([row()], PRD_LIVE))
     await mount()
     await waitFor(() => expect(screen.getByText("Acme PRD v3")).toBeTruthy())
-    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /^Delete / })).toBeTruthy()
     expect(
       screen.queryByText("Only an admin can delete the format your team is using."),
     ).toBeNull()
@@ -509,7 +532,7 @@ describe("role gating — three actions, not one", () => {
     expect(
       screen.getByText("Only an admin can delete the format your team is using."),
     ).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull()
+    expect(screen.queryByRole("button", { name: /^Delete / })).toBeNull()
     // Information is never role-gated — only the action. The PRD group header
     // still tells a member exactly what is in use.
     const prdGroup = document
@@ -634,7 +657,7 @@ describe("rename", () => {
     await mount()
     await waitFor(() => expect(screen.getByText("Acme PRD v3")).toBeTruthy())
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Rename" }))
+      fireEvent.click(screen.getByRole("button", { name: /^Rename / }))
     })
     await act(async () => {
       fireEvent.change(screen.getByLabelText(/Rename Acme PRD v3/), {

@@ -102,15 +102,22 @@ describe("ArtifactFormatsView — the section", () => {
   })
 })
 
-describe("ArtifactFormatsView — three groups, always", () => {
-  it("renders all three groups even when every one of them is empty", () => {
+// Every VISIBLE group renders, always — engineering spec is withheld from the
+// UI for now (HIDDEN_TYPES), so "always" means the two on offer. What must not
+// regress is that an EMPTY visible group still renders: its header is the "what
+// governs this document right now" statement, and hiding it would make
+// one-active-per-type unlearnable.
+describe("ArtifactFormatsView — every visible group, always", () => {
+  it("renders every visible group even when all of them are empty", () => {
     const html = render()
     expect(html).toMatch(/id="afmt-group-prd"/)
     expect(html).toMatch(/id="afmt-group-tickets"/)
-    expect(html).toMatch(/id="afmt-group-impl_spec"/)
     expect(html).toMatch(/>PRD</)
     expect(html).toMatch(/>Tickets</)
-    expect(html).toMatch(/>Engineering spec</)
+    // Withheld from the UI, not from the product: the backend still accepts,
+    // compiles and generates from engineering-spec formats.
+    expect(html).not.toMatch(/id="afmt-group-impl_spec"/)
+    expect(html).not.toMatch(/>Engineering spec</)
     // Never the raw column value.
     expect(html).not.toMatch(/>impl_spec</)
   })
@@ -119,18 +126,18 @@ describe("ArtifactFormatsView — three groups, always", () => {
     const html = render()
     expect(html).toMatch(/Now using: Sprntly&#x27;s built-in PRD format/)
     expect(html).toMatch(/Now using: Sprntly&#x27;s built-in ticket format/)
-    expect(html).toMatch(/Now using: Sprntly&#x27;s built-in engineering-spec format/)
-    expect(html.match(/tag tag-impact/g) ?? []).toHaveLength(3)
+    expect(html).not.toMatch(/built-in engineering-spec format/)
+    expect(html.match(/tag tag-impact/g) ?? []).toHaveLength(2)
   })
 
   it("an empty group says so in words and still offers its own Add action", () => {
     const html = render()
     expect(html).toMatch(/No PRD format uploaded — Sprntly uses its own\./)
     expect(html).toMatch(/Add a PRD format/)
-    expect(html).toMatch(/Add an engineering-spec format/)
+    expect(html).toMatch(/Add a ticket format/)
   })
 
-  it("all three empty adds the explainer that frames the built-in as chosen", () => {
+  it("every visible group empty adds the explainer that frames the built-in as chosen", () => {
     const html = render()
     expect(html).toMatch(
       /Sprntly writes in its own format — until you give it yours\./,
@@ -148,8 +155,8 @@ describe("ArtifactFormatsView — three groups, always", () => {
     const html = render({ loading: true })
     expect(html).toMatch(/Checking which format is in use…/)
     expect(html).not.toMatch(/Now using:/)
-    // Two dashed skeleton rows per group.
-    expect(html.match(/afmt-row--skel/g) ?? []).toHaveLength(6)
+    // Two dashed skeleton rows per VISIBLE group.
+    expect(html.match(/afmt-row--skel/g) ?? []).toHaveLength(4)
   })
 
   it("names the ACTIVE format in the group header, tagged as the team's own", () => {
@@ -341,7 +348,11 @@ describe("ArtifactFormatsView — role gating", () => {
       orgRole: "member",
       groups: { ...EMPTY, prd: [row()] },
     })
-    expect(html).toMatch(/>Delete</)
+    // Delete is an icon button now, so the word lives in `aria-label` rather
+    // than in the text. Asserted there deliberately: that attribute IS the
+    // control's name for anyone not looking at a trash glyph, so a change that
+    // dropped it would be a real regression and not a cosmetic one.
+    expect(html).toMatch(/aria-label="Delete /)
     expect(html).not.toMatch(/Only an admin can delete/)
   })
 
@@ -380,8 +391,10 @@ describe("ArtifactFormatsView — generation not wired yet", () => {
   it("notes the type on its group even with the whole library empty", () => {
     const html = render({ liveTypes: new Set(["prd"]) })
     expect(html).toMatch(/Sprntly doesn&#x27;t write tickets from a custom format yet/)
-    expect(html).toMatch(/Sprntly doesn&#x27;t write engineering specs from a custom format yet/)
     expect(html).not.toMatch(/Sprntly doesn&#x27;t write PRDs/)
+    // The engineering-spec group is withheld from the UI, so its note has no
+    // group to render on. Nothing about the note's own wiring changed.
+    expect(html).not.toMatch(/write engineering specs from a custom format yet/)
   })
 
   it("all-false — today's real backend state — notes all three", () => {

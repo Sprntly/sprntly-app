@@ -100,7 +100,18 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("TemplatesScreen", () => {
+// SKIPPED because §2 "Examples we learn from" is commented out of
+// TemplatesScreen (owner, 2026-08-06) — hidden, not deleted. Every one of these
+// exercises the exemplar library THROUGH the screen, so with the block absent
+// they assert markup that is deliberately not rendered. They are skipped rather
+// than deleted for the same reason the block is commented rather than removed:
+// uncommenting it must restore its coverage in one move, and rewriting these
+// from scratch later would silently lose the upload/remove/filter cases.
+//
+// The exemplar component itself is NOT skipped — TemplatesView.test.tsx still
+// runs in full, so the library's own markup and behaviour stay covered while
+// only its mounting is withheld.
+describe.skip("TemplatesScreen — exemplar library (hidden, see comment above)", () => {
   it("lists templates fetched from templatesApi.list on mount", async () => {
     await act(async () => {
       render(React.createElement(TemplatesScreen))
@@ -174,27 +185,25 @@ describe("TemplatesScreen", () => {
   })
 })
 
-// ── the two libraries on one screen ──────────────────────────────────────────
-describe("TemplatesScreen — formats above examples", () => {
-  it("mounts BOTH sections, governing library first, in one scroller", async () => {
+// ── what the screen mounts ───────────────────────────────────────────────────
+describe("TemplatesScreen — the formats library", () => {
+  it("mounts the governing library, alone, inside the one scroller", async () => {
     const { container } = render(React.createElement(TemplatesScreen))
     await act(async () => {})
     await waitFor(() => expect(formatsListMock).toHaveBeenCalled())
 
-    const page = container.querySelector(".tplpage")
-    expect(page).toBeTruthy()
-    // Order is the design: the silhouette does the work before a word is read,
-    // and the governing library has to be the one on top.
+    expect(container.querySelector(".tplpage")).toBeTruthy()
     expect(container.querySelector(".tplpage > .afmt")).toBeTruthy()
-    const html = container.innerHTML
-    expect(html.indexOf("Formats we write in")).toBeLessThan(
-      html.indexOf("Examples we learn from"),
-    )
+    expect(screen.getByText(/Formats we write in/)).toBeTruthy()
+
+    // §2 is commented out of the screen for now (hidden, not deleted). Asserted
+    // rather than left implicit: if someone uncomments the block, this fails and
+    // makes them revisit the tests that were skipped alongside it, instead of
+    // the exemplar library quietly reappearing with no coverage behind it.
+    expect(screen.queryByText(/Examples we learn from/)).toBeNull()
   })
 
-  it("each section fetches independently — a formats failure leaves examples intact", async () => {
-    // §2 is a separate fetch on purpose: one library being unreachable must not
-    // take the other off screen.
+  it("shows the formats error in place, with nothing else on screen to confuse it", async () => {
     formatsListMock.mockRejectedValue(new Error("formats down"))
     await act(async () => {
       render(React.createElement(TemplatesScreen))
@@ -202,6 +211,20 @@ describe("TemplatesScreen — formats above examples", () => {
     await waitFor(() =>
       expect(screen.getByText(/We couldn't load your document formats/)).toBeTruthy(),
     )
-    expect(screen.getByText("Guest Deal Alerts — PRD")).toBeTruthy()
+  })
+
+  it("offers All, PRD and Tickets — engineering spec is withheld for now", async () => {
+    render(React.createElement(TemplatesScreen))
+    await act(async () => {})
+    await waitFor(() => expect(formatsListMock).toHaveBeenCalled())
+
+    expect(screen.getByRole("tab", { name: /^All/ })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: /^PRD/ })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: /^Tickets/ })).toBeTruthy()
+    // Hidden in the UI only — the backend still accepts, compiles and generates
+    // from engineering-spec formats, and a company that already activated one
+    // keeps using it. This asserts the tab is absent, NOT that the feature is.
+    expect(screen.queryByRole("tab", { name: /Engineering spec/ })).toBeNull()
+    expect(screen.queryByRole("heading", { name: "Engineering spec" })).toBeNull()
   })
 })

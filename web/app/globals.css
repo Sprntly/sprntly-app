@@ -21460,6 +21460,72 @@
 .afmt-act { white-space: nowrap; }
 .afmt-act-del:hover:not(:disabled) { color: var(--danger-ink); border-color: var(--danger-border); background: var(--danger-soft); }
 
+/* Square icon-only action. Used for Rename and Delete, which are the two
+   secondary controls in a row of five — turning them into glyphs stops the
+   action cluster reading as a wall of equally-weighted words, so the primary
+   ("Use this format") is found first. Both keep aria-label + title, so the word
+   is still there for a screen reader and for anyone hovering to be sure. */
+.btn-icon {
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+/* Type tabs. Same chip vocabulary as .tpl-filter below so the two filter rows
+   on this screen read as one mechanism rather than two. */
+.afmt-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 2px;
+}
+
+.afmt-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.afmt-tab:hover { border-color: var(--line-strong); }
+
+.afmt-tab.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* The count rides inside the chip rather than beside it, so a tab is one target
+   and one visual object. Tinted against its own chip in both states. */
+.afmt-tab-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 17px;
+  text-align: center;
+}
+
+.afmt-tab.on .afmt-tab-count {
+  background: rgba(255, 255, 255, 0.24);
+  color: #fff;
+}
+
 /* A denied action is REPLACED by its reason, never left as a disabled button —
    a dimmed trash icon reads as a bug rather than as a rule. */
 .afmt-denied {

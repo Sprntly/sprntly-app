@@ -12,11 +12,13 @@
 //
 // Three things about this surface that are not obvious from the markup:
 //
-//   * THREE GROUPS ALWAYS RENDER, even with zero rows in all of them. The group
-//     header is the "what governs this document right now" statement; hiding an
-//     empty group hides two thirds of the feature and makes "one active per
-//     type" unlearnable. The empty state is not "no data" — it is the built-in
-//     being active, and it reads that way.
+//   * THREE GROUPS ALWAYS RENDER ON "ALL", even with zero rows in all of them.
+//     The group header is the "what governs this document right now" statement;
+//     hiding an empty group hides two thirds of the feature and makes "one
+//     active per type" unlearnable. The empty state is not "no data" — it is the
+//     built-in being active, and it reads that way. The type TABS narrow the
+//     view to one document type, but "All" is the default precisely so the
+//     three-way relationship is visible before anyone filters it away.
 //
 //   * THREE ACTIONS ARE ADMIN-GATED, not one: activate, deactivate, and delete
 //     OF THE ROW THAT IS CURRENTLY ACTIVE. All three change the format the
@@ -41,6 +43,8 @@ import {
   IconCircleCheck,
   IconLayoutList,
   IconLoader2,
+  IconPencil,
+  IconTrash,
   IconUpload,
 } from "@tabler/icons-react"
 import { ConfirmDialog } from "../../shared/ConfirmDialog"
@@ -79,6 +83,25 @@ import {
   useArtifactTemplates,
   type ArtifactTemplateGroups,
 } from "../../../lib/useArtifactTemplates"
+
+/** Document types withheld from the UI (owner, 2026-08-06) — HIDDEN, not
+ *  removed. Engineering-spec formats are built end to end: the routes accept
+ *  them, the compiler compiles them, `resolve_impl_spec_template` reads them and
+ *  `GENERATION_ENABLED.impl_spec` is true. Only the tab and its group are
+ *  withheld, so /templates asks a user to understand two document types instead
+ *  of three while this settles.
+ *
+ *  Restoring it is emptying this set. Nothing else — no route, no test of the
+ *  backend behaviour, and no data — is conditioned on it, and a company that
+ *  already activated an engineering-spec format keeps generating into it. That
+ *  is deliberate: hiding a surface must never silently change what the product
+ *  produces. */
+const HIDDEN_TYPES = new Set<ArtifactTemplateType>(["impl_spec"])
+
+/** The types this screen offers. Derived, so the tab row and the group list can
+ *  never disagree about what is on screen. */
+export const VISIBLE_TYPE_IDS: readonly ArtifactTemplateType[] =
+  ARTIFACT_TYPE_IDS.filter((t) => !HIDDEN_TYPES.has(t))
 
 /** The denial lines. Two, not one — activate/deactivate and deleting the active
  *  row are different actions and saying the same thing for both would leave a
@@ -285,7 +308,17 @@ export function ArtifactFormatsView({
   // Distinct from `!isAdmin`: until the workspaces list lands we know nothing,
   // and guessing "member" flashes a denial at an admin.
   const roleKnown = orgRole !== null
-  const allEmpty = ARTIFACT_TYPE_IDS.every((t) => (groups[t] ?? []).length === 0)
+  const allEmpty = VISIBLE_TYPE_IDS.every((t) => (groups[t] ?? []).length === 0)
+
+  // Which document type is on screen. Local rather than a prop because nothing
+  // outside this section needs it and nothing server-side changes with it — the
+  // list is fetched once for all types, so switching tabs never refetches. The
+  // view stays testable through the tabs themselves.
+  const [tab, setTab] = useState<"all" | ArtifactTemplateType>("all")
+
+  // Uploading from a type tab should pre-select that type; from "All" there is
+  // nothing to infer, so it opens on PRD as it always has.
+  const uploadType: ArtifactTemplateType = tab === "all" ? "prd" : tab
 
   /** The activate/deactivate slot for one row. Returns a control, a reason, or
    *  a disabled placeholder — never a disabled button with no explanation and
@@ -382,11 +415,12 @@ export function ArtifactFormatsView({
       return (
         <button
           type="button"
-          className="btn btn-sm afmt-act afmt-act-del"
+          className="btn btn-sm btn-icon afmt-act afmt-act-del"
           disabled
           aria-busy="true"
+          aria-label="Delete"
         >
-          Delete
+          <IconTrash size={15} aria-hidden />
         </button>
       )
     }
@@ -397,15 +431,25 @@ export function ArtifactFormatsView({
         </span>
       )
     }
+    // Icon, not a word: Delete is the one destructive control in a row of five,
+    // and a trash glyph separates it from its neighbours faster than reading
+    // does. `aria-label` and `title` carry the word, so nothing is lost to a
+    // screen reader or to anyone hovering to be sure.
     return (
       <button
         type="button"
         id={`afmt-delete-${row.id}`}
-        className="btn btn-sm afmt-act afmt-act-del"
+        className="btn btn-sm btn-icon afmt-act afmt-act-del"
         onClick={() => onDeleteRequest(row.id)}
         disabled={deletingId === row.id}
+        aria-label={deletingId === row.id ? "Deleting…" : `Delete ${row.name}`}
+        title="Delete"
       >
-        {deletingId === row.id ? "Deleting…" : "Delete"}
+        {deletingId === row.id ? (
+          <IconLoader2 size={15} className="icon-spin" aria-hidden />
+        ) : (
+          <IconTrash size={15} aria-hidden />
+        )}
       </button>
     )
   }
@@ -552,7 +596,9 @@ export function ArtifactFormatsView({
               Replace the file
               <input
                 type="file"
-                accept=".md,.markdown"
+                // No `accept` filter — the server takes any type it can read
+                // text out of, so narrowing here would grey out files that
+                // would have worked. Matches UploadFormatModal.
                 className="afmt-replace-input"
                 aria-label={`Replace the file behind ${row.name}`}
                 onChange={(e) => {
@@ -568,10 +614,12 @@ export function ArtifactFormatsView({
             <button
               type="button"
               id={`afmt-rename-${row.id}`}
-              className="btn btn-sm afmt-act"
+              className="btn btn-sm btn-icon afmt-act"
               onClick={() => onRenameRequest(row.id)}
+              aria-label={`Rename ${row.name}`}
+              title="Rename"
             >
-              Rename
+              <IconPencil size={15} aria-hidden />
             </button>
           ) : null}
 
@@ -600,7 +648,7 @@ export function ArtifactFormatsView({
         <button
           type="button"
           className="btn btn-primary afmt-upload"
-          onClick={() => onAddFormat("prd")}
+          onClick={() => onAddFormat(uploadType)}
         >
           <IconUpload size={14} aria-hidden />
           Upload a format
@@ -619,6 +667,42 @@ export function ArtifactFormatsView({
             wording. Upload a Markdown copy of the format your team already
             uses, and Sprntly writes into it.
           </span>
+        </div>
+
+        {/* Type tabs. Same chip vocabulary as the exemplar filters below, on
+            purpose: two different-looking filter rows on one screen would read
+            as two unrelated mechanisms. The counts are load-bearing — they are
+            what tells you a type has formats without opening its tab, which is
+            the thing the stacked layout used to say by simply being long.
+            "All" stays the default so the three-way relationship is visible
+            before anyone narrows it. */}
+        <div className="afmt-tabs" role="tablist" aria-label="Document types">
+          {(["all", ...VISIBLE_TYPE_IDS] as const).map((id) => {
+            const count =
+              id === "all"
+                ? VISIBLE_TYPE_IDS.reduce(
+                    (n, t) => n + (groups[t]?.length ?? 0),
+                    0,
+                  )
+                : (groups[id]?.length ?? 0)
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                className={`afmt-tab${tab === id ? " on" : ""}`}
+                onClick={() => setTab(id)}
+              >
+                {id === "all" ? "All" : ARTIFACT_TYPE_LABELS[id]}
+                {/* Hidden while loading rather than showing 0 — a count of zero
+                    we haven't confirmed is a claim, same rule as "Now using". */}
+                {loading ? null : (
+                  <span className="afmt-tab-count">{count}</span>
+                )}
+              </button>
+            )
+          })}
         </div>
 
         {/* ONE live region for the whole section. Per-row would produce N of
@@ -667,7 +751,7 @@ export function ArtifactFormatsView({
           </div>
         ) : null}
 
-        {ARTIFACT_TYPE_IDS.map((type) => {
+        {VISIBLE_TYPE_IDS.filter((t) => tab === "all" || t === tab).map((type) => {
           const rows = groups[type] ?? []
           const active = rows.find((r) => r.is_active) ?? null
           return (
