@@ -77,11 +77,14 @@ GENERATION_ENABLED: dict[str, bool] = {
 # it bounds prompt cost. Distinct from the byte cap on the raw file below.
 MAX_TEMPLATE_SOURCE_CHARS = 50_000
 
-# Byte cap on an uploaded .md. Far below the 20 MB skills accept, because a
-# format is a few pages of markdown and never an archive — anything larger is a
-# mis-picked file, and saying so early is kinder than a character-cap error
-# after a 20 MB upload.
-MAX_TEMPLATE_UPLOAD_BYTES = 2 * 1024 * 1024
+# Byte cap on an uploaded file. Matches routes/prd.py's _MAX_IMPORT_BYTES rather
+# than the old 2 MB, because uploads are no longer markdown-only: a .docx with
+# embedded images or a scanned-ish PDF is routinely tens of times larger than the
+# few kilobytes of text inside it, and a cap sized for markdown rejected real
+# formats before anyone could see whether we could read them. The CHARACTER cap
+# above still bounds what actually reaches a prompt, and it is applied to the
+# EXTRACTED text — so a 20 MB PDF holding four pages of prose passes both.
+MAX_TEMPLATE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 # Matches the upload modal's `maxLength={120}` on the name field.
 MAX_TEMPLATE_NAME_CHARS = 120

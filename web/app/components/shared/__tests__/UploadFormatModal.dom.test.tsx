@@ -15,11 +15,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   FORMAT_CAP_ERROR,
-  FORMAT_EXT_ERROR,
   FORMAT_SIZE_ERROR,
   MAX_FORMAT_FILE_BYTES,
   MAX_FORMAT_SOURCE_CHARS,
   UploadFormatModal,
+  fidelityNotice,
   formatFileError,
   nameFromFilename,
 } from "../UploadFormatModal"
@@ -49,7 +49,7 @@ function submitBtn(): HTMLButtonElement {
 }
 
 function fileInput(): HTMLInputElement {
-  return screen.getByLabelText("Choose a format file (.md)") as HTMLInputElement
+  return screen.getByLabelText("Choose a format file") as HTMLInputElement
 }
 
 /** jsdom won't let `size` be set on a File literal; define it. */
@@ -60,14 +60,37 @@ function fileOfSize(name: string, size: number): File {
 }
 
 describe("pure helpers", () => {
-  it("mirrors the server's extension gate — .md and .markdown only", () => {
+  it("gates on NOTHING but size — every file type is accepted", () => {
+    // Deliberately no extension gate. The server takes any type and decides by
+    // whether it could extract text, so refusing one here would reject files
+    // that would have worked — a scanned .pdf and a rich .docx share an
+    // extension class but not an outcome.
     expect(formatFileError(new File(["#"], "a.md"))).toBeNull()
     expect(formatFileError(new File(["#"], "a.MARKDOWN"))).toBeNull()
-    expect(formatFileError(new File(["#"], "a.txt"))).toBe(FORMAT_EXT_ERROR)
-    expect(formatFileError(new File(["#"], "noextension"))).toBe(FORMAT_EXT_ERROR)
+    expect(formatFileError(new File(["#"], "a.txt"))).toBeNull()
+    expect(formatFileError(new File(["#"], "a.pdf"))).toBeNull()
+    expect(formatFileError(new File(["#"], "a.docx"))).toBeNull()
+    expect(formatFileError(new File(["#"], "noextension"))).toBeNull()
   })
 
-  it("mirrors the 2 MB byte cap", () => {
+  it("warns about lossy types without blocking them, and says why per type", () => {
+    // .docx and .md keep heading levels; a PDF does not.
+    expect(fidelityNotice("acme.docx", "prd")).toBeNull()
+    expect(fidelityNotice("acme.md", "tickets")).toBeNull()
+
+    const prdNote = fidelityNotice("acme.pdf", "prd")
+    expect(prdNote).toBeTruthy()
+    expect(prdNote).toContain("infer")
+
+    // Tickets compile through a deterministic heading parser, so a headingless
+    // file fails differently and the copy has to say so.
+    const ticketNote = fidelityNotice("acme.pdf", "tickets")
+    expect(ticketNote).toBeTruthy()
+    expect(ticketNote).toContain("headings")
+    expect(ticketNote).not.toBe(prdNote)
+  })
+
+  it("mirrors the 25 MB byte cap", () => {
     expect(formatFileError(fileOfSize("a.md", MAX_FORMAT_FILE_BYTES))).toBeNull()
     expect(formatFileError(fileOfSize("a.md", MAX_FORMAT_FILE_BYTES + 1))).toBe(
       FORMAT_SIZE_ERROR,
@@ -118,7 +141,7 @@ describe("the form", () => {
 
   it("gates submit on a picked file in the file branch", () => {
     mount()
-    fireEvent.click(screen.getByRole("button", { name: "Upload a .md file" }))
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
     fireEvent.change(screen.getByLabelText(/Name it/), {
       target: { value: "Acme PRD v3" },
     })
@@ -162,19 +185,27 @@ describe("the form", () => {
 })
 
 describe("client mirrors of the server caps", () => {
-  it("a .txt pick shows the mirrored error and never calls the API", async () => {
+  it("a PDF pick is accepted but carries an advisory notice", async () => {
     const { onSubmit } = mount()
-    fireEvent.click(screen.getByRole("button", { name: "Upload a .md file" }))
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
     fireEvent.change(fileInput(), {
-      target: { files: [new File(["hello"], "format.txt", { type: "text/plain" })] },
+      target: { files: [new File(["%PDF-1.4"], "format.pdf", { type: "application/pdf" })] },
     })
-    expect(screen.getByText(FORMAT_EXT_ERROR)).toBeTruthy()
-    expect(onSubmit).not.toHaveBeenCalled()
+    // Advisory, not an error: role="status", and submit stays available.
+    expect(screen.getByRole("status").textContent).toContain("Heads up")
+    expect(screen.queryByRole("alert")).toBeNull()
+    expect(onSubmit).not.toHaveBeenCalled() // not submitted YET — nothing blocked it
   })
 
-  it("an oversize file shows the 2 MB error without transmitting a byte", () => {
+  it("tells everyone which types map best, before anything is picked", () => {
     mount()
-    fireEvent.click(screen.getByRole("button", { name: "Upload a .md file" }))
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
+    expect(screen.getByText(/works best/i)).toBeTruthy()
+  })
+
+  it("an oversize file shows the 25 MB error without transmitting a byte", () => {
+    mount()
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
     fireEvent.change(fileInput(), {
       target: { files: [fileOfSize("huge.md", MAX_FORMAT_FILE_BYTES + 1)] },
     })
@@ -198,7 +229,7 @@ describe("client mirrors of the server caps", () => {
 
   it("pre-fills the name from the filename but never over what the user typed", () => {
     mount()
-    fireEvent.click(screen.getByRole("button", { name: "Upload a .md file" }))
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
     fireEvent.change(fileInput(), {
       target: { files: [new File(["# x"], "acme-prd-v3.md", { type: "text/markdown" })] },
     })
@@ -208,7 +239,7 @@ describe("client mirrors of the server caps", () => {
 
     cleanup()
     mount()
-    fireEvent.click(screen.getByRole("button", { name: "Upload a .md file" }))
+    fireEvent.click(screen.getByRole("button", { name: "Upload a file" }))
     fireEvent.change(screen.getByLabelText(/Name it/), {
       target: { value: "My own name" },
     })

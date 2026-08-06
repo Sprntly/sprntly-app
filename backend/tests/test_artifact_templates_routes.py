@@ -232,11 +232,43 @@ def test_source_over_the_character_cap_is_413(tenant_client, monkeypatch):
     assert "20" in resp.json()["detail"]
 
 
-def test_non_md_upload_is_422(tenant_client):
+def test_a_file_we_cannot_read_any_text_out_of_is_422(tenant_client):
+    """The gate is what came OUT, not the extension.
+
+    A team's format lives in Word or a PDF at least as often as in Markdown, so
+    every type is accepted and `ingest.convert` decides. What fails is a file
+    with no text to extract — a real .docx here would parse, but these bytes
+    are not a zip container, so python-docx yields nothing and the row would
+    otherwise be a format made of nothing. The message has to name the fix
+    (export it differently) rather than say "unsupported", because to the user
+    this looked like an ordinary document.
+    """
     t = tenant_client.make(slug="acme")
     resp = _upload(t.client, filename="format.docx", data=b"binary-ish")
     assert resp.status_code == 422
-    assert ".md" in resp.json()["detail"]
+    assert "couldn't read any text" in resp.json()["detail"]
+
+
+def test_a_pdf_or_word_upload_is_accepted_and_stored_as_extracted_text(tenant_client):
+    """The point of the change: a non-Markdown format lands as a real row.
+
+    `.html` is used rather than a synthesized PDF because it exercises the same
+    path — an extension with a dedicated converter, extracted server-side —
+    without needing a binary fixture in the repo. What is stored is the
+    EXTRACTED text, never the raw file: everything downstream (the compiler, the
+    validator, the character cap) only ever sees markdown.
+    """
+    t = tenant_client.make(slug="acme")
+    resp = _upload(
+        t.client,
+        filename="acme-format.html",
+        data=b"<html><body><h1>Acme PRD</h1><p>Context goes here.</p></body></html>",
+        name="Acme PRD from HTML",
+    )
+    assert resp.status_code == 201, resp.text
+    detail = t.client.get(f"{_URL}/{resp.json()['id']}").json()
+    assert "Acme PRD" in detail["source_md"]
+    assert "<html>" not in detail["source_md"]  # extracted, not stored raw
 
 
 def test_empty_upload_is_400(tenant_client):

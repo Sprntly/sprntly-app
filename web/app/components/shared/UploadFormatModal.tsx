@@ -33,38 +33,77 @@ import {
   ARTIFACT_TYPE_NOUN,
 } from "../../lib/compileNotes"
 
-/** 2 MB — mirrors store.MAX_TEMPLATE_UPLOAD_BYTES. Far below the 20 MB skills
- *  accept: a format is a few pages of Markdown and never an archive, so a
- *  larger file is a mis-pick and saying so early is kinder than a character-cap
- *  error after a 20 MB upload. */
-export const MAX_FORMAT_FILE_BYTES = 2 * 1024 * 1024
+/** 25 MB — mirrors store.MAX_TEMPLATE_UPLOAD_BYTES. Sized for a real document
+ *  rather than for Markdown: a .docx with embedded images or a heavy PDF is
+ *  routinely tens of times larger than the few kilobytes of text inside it. The
+ *  CHARACTER cap below is the one that bounds what reaches a prompt, and the
+ *  server applies it to the EXTRACTED text. */
+export const MAX_FORMAT_FILE_BYTES = 25 * 1024 * 1024
 
-/** Characters of Markdown — mirrors store.MAX_TEMPLATE_SOURCE_CHARS. */
+/** Characters of EXTRACTED text — mirrors store.MAX_TEMPLATE_SOURCE_CHARS. */
 export const MAX_FORMAT_SOURCE_CHARS = 50_000
 
 /** Mirrors store.MAX_TEMPLATE_NAME_CHARS. */
 export const MAX_FORMAT_NAME_CHARS = 120
 
 /** The server's own strings, mirrored so one problem never has two wordings. */
-export const FORMAT_EXT_ERROR =
-  "Only .md files are accepted. Paste the Markdown instead if your format is " +
-  "in another app."
 export const FORMAT_SIZE_ERROR =
-  "That file is larger than 2 MB. Formats are usually a few pages of Markdown " +
-  "— check you picked the right file."
+  "That file is larger than 25 MB. A format is a few pages of a document — " +
+  "check you picked the right file."
 export const FORMAT_CAP_ERROR =
   "This format is longer than the 50,000 character limit. Trim it and try again."
 export const FORMAT_EMPTY_ERROR =
-  "There's nothing to read yet — paste your format or pick a .md file."
+  "There's nothing to read yet — paste your format or pick a file."
 
 export type FormatSource = "paste" | "file"
 
-/** Client mirror of the server's extension gate (`_ACCEPTED_EXTS`). */
-export function formatFileError(file: File): string | null {
-  const ext = file.name.includes(".")
-    ? file.name.split(".").pop()!.toLowerCase()
+/** How well a file type's STRUCTURE survives extraction. Not a gate — every
+ *  type is accepted and the server decides by whether it got text out — but the
+ *  ranking is real, so the picker says which will do best rather than letting
+ *  someone upload a scan and wonder why the mapping is poor.
+ *
+ *  Markdown and .docx keep heading levels, so a compiled skeleton gets the
+ *  customer's real section hierarchy. A PDF has no heading concept: it extracts
+ *  as a flat run of lines, and "## 6. What we're building" arrives looking like
+ *  body text. That matters most for TICKET formats, whose compiler is a
+ *  deterministic heading parser rather than a model — hence the per-type note. */
+export const FIDELITY_BEST = ["md", "markdown", "docx"] as const
+export const FIDELITY_LOSSY = ["pdf", "pptx", "xlsx", "csv"] as const
+
+export function fileFidelity(filename: string): "best" | "lossy" | "ok" {
+  const ext = filename.includes(".")
+    ? filename.split(".").pop()!.toLowerCase()
     : ""
-  if (ext !== "md" && ext !== "markdown") return FORMAT_EXT_ERROR
+  if ((FIDELITY_BEST as readonly string[]).includes(ext)) return "best"
+  if ((FIDELITY_LOSSY as readonly string[]).includes(ext)) return "lossy"
+  return "ok"
+}
+
+/** Advisory, never blocking. Returned for a picked file whose structure will
+ *  survive poorly, so the warning arrives BEFORE the upload rather than as a
+ *  needs-review badge afterwards. */
+export function fidelityNotice(
+  filename: string,
+  type: ArtifactTemplateType,
+): string | null {
+  if (fileFidelity(filename) !== "lossy") return null
+  if (type === "tickets") {
+    return (
+      "Heads up — we read tickets formats by their headings, and a PDF or " +
+      "slide deck doesn't keep any. This will probably need a look afterwards. " +
+      "A .docx or Markdown copy works far better."
+    )
+  }
+  return (
+    "Heads up — this file type doesn't keep heading levels, so we'll infer your " +
+    "structure from the text. A .docx or Markdown copy maps more accurately."
+  )
+}
+
+/** Client mirror of the server's size gate. There is deliberately NO extension
+ *  gate: the server accepts every type and decides by whether it could extract
+ *  text, so refusing one here would reject files that would have worked. */
+export function formatFileError(file: File): string | null {
   if (file.size > MAX_FORMAT_FILE_BYTES) return FORMAT_SIZE_ERROR
   return null
 }
@@ -200,7 +239,7 @@ export function UploadFormatModalView({
                   disabled={submitting}
                   onClick={() => onSourceChange("file")}
                 >
-                  Upload a .md file
+                  Upload a file
                 </button>
               </div>
 
@@ -248,14 +287,18 @@ export function UploadFormatModalView({
                   <span className="muted">
                     {file
                       ? "Click to choose a different file"
-                      : ".md only · up to 2 MB"}
+                      : "Word, Markdown, PDF, slides or text · up to 25 MB"}
                   </span>
                   <input
                     type="file"
-                    accept=".md,.markdown"
+                    // No `accept` filter. The server takes every type and
+                    // decides by whether it could extract text, so filtering
+                    // here would hide files that would have worked — and the
+                    // greyed-out file a user cannot select is the least
+                    // explicable failure of the three.
                     disabled={submitting}
                     className="afmt-upload-input"
-                    aria-label="Choose a format file (.md)"
+                    aria-label="Choose a format file"
                     onChange={(e) => {
                       const picked = e.target.files?.[0] ?? null
                       if (picked) onFileChange(picked)
@@ -266,6 +309,28 @@ export function UploadFormatModalView({
                   />
                 </label>
               )}
+
+              {/* Always rendered on the file tab, before anything is picked —
+                  guidance that only appears after a poor choice is a reprimand,
+                  not help. */}
+              {source === "file" ? (
+                <p className="field-hint afmt-fidelity-hint">
+                  <strong>Markdown or Word (.docx) works best</strong> — they
+                  keep your heading levels, so we map your sections exactly. We
+                  read PDFs, slides and spreadsheets too, but they arrive as
+                  flat text and we have to infer the structure.
+                </p>
+              ) : null}
+
+              {/* Advisory, never blocking: the picked file WILL upload. Said
+                  here so it arrives before the wait, not as a needs-review
+                  badge afterwards. `role="status"` not `alert` — nothing is
+                  wrong yet. */}
+              {source === "file" && file && fidelityNotice(file.name, type) ? (
+                <p className="afmt-note afmt-fidelity-note" role="status">
+                  {fidelityNotice(file.name, type)}
+                </p>
+              ) : null}
 
               {sourceMissing ? (
                 <p className="settings-msg settings-msg-error" role="alert">

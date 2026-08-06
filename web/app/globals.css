@@ -21340,6 +21340,22 @@
   color: var(--ink-2);
 }
 
+/* Which file types map best. Always visible on the file tab, before anything is
+   picked — guidance that only appears after a poor choice reads as a reprimand.
+   Deliberately quieter than .afmt-note: this is orientation, not a warning. */
+.afmt-fidelity-hint {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+/* The advisory that fires when a picked file's structure will survive poorly.
+   Reuses .afmt-note's info tint rather than a warning colour: the upload is
+   going to work, it just maps less precisely, and painting that amber would
+   train people to ignore amber where it does mean something. */
+.afmt-fidelity-note {
+  margin-top: 8px;
+}
+
 .afmt-group-empty {
   margin: 0;
   padding: 12px 14px;

@@ -1,7 +1,7 @@
 """Artifact format templates — the library a company keeps its own PRD, ticket
 and engineering-spec FORMS in.
 
-  POST   /v1/artifact-templates                -> add a format (.md upload OR pasted markdown)
+  POST   /v1/artifact-templates                -> add a format (file upload OR pasted markdown)
   GET    /v1/artifact-templates?type=prd       -> the library (metadata only) + generation_enabled
   GET    /v1/artifact-templates/{id}           -> one format WITH its source and mapping
   GET    /v1/artifact-templates/{id}/preview   -> the compiled skeleton + how we mapped it
@@ -37,8 +37,8 @@ but not yours" from "doesn't exist".
 
 Error ladder (mirrors routes/custom_skills.py's, because the same values end up
 in the same columns): missing/over-limit name → 422, missing or unknown
-artifact type → 422, non-`.md` extension → 422, empty source → 400, upload over
-2 MB → 413, source over MAX_TEMPLATE_SOURCE_CHARS → 413, activating a format
+artifact type → 422, a file we can extract no text from → 422, empty source →
+400, upload over 25 MB → 413, source over MAX_TEMPLATE_SOURCE_CHARS → 413, activating a format
 that has not compiled clean → 409 with the compile notes in `detail`.
 
 Three actions are ADMIN-ONLY, not one: activate, deactivate, and delete OF THE
@@ -50,6 +50,7 @@ ownership rule above.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -80,18 +81,40 @@ from app.artifact_templates.store import (
 from app.artifact_templates.compile_prd import schedule_compile
 from app.auth import WorkspaceContext, require_workspace
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
-# The same "is this text or binary?" gate the file-ingest path uses. Reused
-# rather than re-derived so the two answers can never drift: it does the NUL
-# sniff AND the UTF-8 decode check as one call.
-from app.ingest import _looks_textual
+# The same ingest path the PRD importer uses, reused rather than re-derived so
+# the two never drift. `convert` dispatches by extension (pdf/docx/pptx/xlsx/
+# csv/html/rtf/txt/md) and falls back to a textual read for anything else;
+# `is_unparsed_stub` detects the placeholder it returns for binary it can't
+# read; `_looks_textual` does the NUL sniff and the UTF-8 check as one call.
+from app.ingest import _looks_textual, convert, is_unparsed_stub
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/artifact-templates", tags=["artifact-templates"])
 
-# Extensions the upload path accepts. A format is markdown — there is no archive
-# form, because a template is one document and not a directory of them.
-_ACCEPTED_EXTS = ("md", "markdown")
+# Types whose STRUCTURE survives extraction well enough to be worth recommending
+# in the UI. Not a gate — every type is accepted — but the ranking is real and
+# it is why the upload modal says what it says. Markdown and .docx keep their
+# heading levels (python-docx reads paragraph styles), so a compiled skeleton
+# gets the customer's real section hierarchy. A PDF has no heading concept at
+# all: pypdf yields a flat run of lines, and a "## 6. What we're building"
+# arrives indistinguishable from body text. The PRD and engineering-spec
+# compilers are LLM-backed and infer structure from flat text acceptably, but
+# the TICKET compiler is a deterministic heading parser — feed it a PDF and it
+# finds nothing to key on. Hence the per-type guidance rather than one message.
+FIDELITY_BEST = ("md", "markdown", "docx")
+FIDELITY_OK = ("txt", "html", "htm", "rtf")
+FIDELITY_LOSSY = ("pdf", "pptx", "xlsx", "csv")
+
+# Types whose BYTES are already text and only need decoding — as opposed to the
+# binary containers we extract from. The distinction is load-bearing, not
+# cosmetic: `ingest.txt_to_md` decodes with `errors="replace"`, so an undecodable
+# .md would come back as a page of U+FFFD and get stored as a "format" rather
+# than rejected. These are therefore checked as RAW BYTES before extraction,
+# preserving the 400 they have always received. A PDF cannot be checked that way
+# — its bytes are not text and never will be — so binary types are judged only
+# by whether extraction produced anything usable.
+TEXT_NATIVE_EXTS = ("md", "markdown", "txt", "csv", "html", "htm", "rtf", "")
 
 
 # ─── payload shapes ──────────────────────────────────────────────────────────
@@ -250,7 +273,7 @@ def _require_company_admin(company: WorkspaceContext, message: str) -> None:
 
 
 async def _read_create_payload(request: Request) -> tuple[str, str, str]:
-    """(name, artifact_type, source_md) from EITHER a multipart .md upload or a
+    """(name, artifact_type, source_md) from EITHER a multipart file upload or a
     JSON body.
 
     One route, two content types, because a format lives in Confluence or a
@@ -266,9 +289,9 @@ async def _read_create_payload(request: Request) -> tuple[str, str, str]:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 — any malformed body is one 400
-            raise HTTPException(400, "Send a JSON body or a multipart .md upload.")
+            raise HTTPException(400, "Send a JSON body or a multipart file upload.")
         if not isinstance(body, dict):
-            raise HTTPException(400, "Send a JSON body or a multipart .md upload.")
+            raise HTTPException(400, "Send a JSON body or a multipart file upload.")
         return (
             str(body.get("name") or ""),
             str(body.get("artifact_type") or ""),
@@ -280,43 +303,84 @@ async def _read_create_payload(request: Request) -> tuple[str, str, str]:
     artifact_type = str(form.get("artifact_type") or "")
     upload = form.get("file")
     if upload is None or isinstance(upload, str):
-        raise HTTPException(400, "There's nothing to read yet — attach a .md file.")
+        raise HTTPException(400, "There's nothing to read yet — attach a file.")
 
     filename = getattr(upload, "filename", "") or ""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in _ACCEPTED_EXTS:
-        raise HTTPException(
-            422,
-            "Only .md files are accepted. Paste the Markdown instead if your "
-            "format is in another app.",
-        )
+    # NO extension gate. Every type `ingest.convert` knows is accepted, and
+    # anything it doesn't know falls back to a textual read — so a .yaml or a
+    # .text lands fine instead of being refused for not being on a list. What
+    # decides acceptance is whether we got usable text OUT, checked below; a
+    # gate on the extension would reject files we can read and accept files we
+    # can't (a scanned .pdf has a valid extension and no text at all).
+    #
     # Read ONE BYTE past the cap and no further: an oversize upload is rejected
-    # without ever being held whole in memory. nginx bounds the request at 50 MB,
-    # so reading it all before checking a 2 MB cap enforced the cap 25× looser
-    # than it read.
+    # without ever being held whole in memory.
     data = await upload.read(MAX_TEMPLATE_UPLOAD_BYTES + 1)
     if not data:
         raise HTTPException(400, "There's nothing to read yet — that file is empty.")
     if len(data) > MAX_TEMPLATE_UPLOAD_BYTES:
         raise HTTPException(
             413,
-            "That file is larger than 2 MB. Formats are usually a few pages of "
-            "Markdown — check you picked the right file.",
+            "That file is larger than 25 MB. A format is a few pages of a "
+            "document — check you picked the right file.",
         )
-    # `_looks_textual` catches BOTH failure modes in one call: an undecodable
-    # byte sequence, and a NUL byte. The NUL half matters more than it looks —
-    # U+0000 is valid UTF-8, so a UTF-16LE file saved without a BOM decodes
-    # cleanly here and then 500s on the INSERT, because Postgres `text` cannot
-    # hold a NUL (SQLSTATE 22P05). store.validate_new_template repeats the NUL
-    # check over the whole string, since this heuristic only sniffs the first
-    # 8 KB and the paste path never comes through here at all.
-    if not _looks_textual(data):
+
+    # A file that is SUPPOSED to be text is judged on its raw bytes, before
+    # extraction. `_looks_textual` catches an undecodable byte sequence and a NUL
+    # in one call, and both matter: `txt_to_md` would decode the former to
+    # U+FFFD mojibake and store it, and U+0000 is valid UTF-8 so it survives a
+    # decode and then 500s on the INSERT (Postgres `text` cannot hold it,
+    # SQLSTATE 22P05). Binary types are exempt by necessity and are judged below
+    # on what came out instead.
+    if ext in TEXT_NATIVE_EXTS and not _looks_textual(data):
         raise HTTPException(
             400,
-            "That file isn't readable as text. Formats must be plain Markdown "
-            "— if you exported it from another app, try saving it as UTF-8 first.",
+            "That file isn't readable as text. If you exported it from another "
+            "app, try saving it as UTF-8 — or upload the original .docx or PDF "
+            "and we'll read it directly.",
         )
-    source_md = data.decode("utf-8")
+
+    # Extract in a worker thread: pypdf/python-docx/python-pptx all block, and a
+    # 20 MB PDF would otherwise stall the event loop for every other request.
+    #
+    # `convert` is only no-raise for an unknown EXTENSION — it falls back to a
+    # textual read there. A known extension whose bytes are malformed goes
+    # straight to that type's parser and raises out: a .docx that is not a zip
+    # container throws BadZipFile, a truncated PDF throws out of pypdf. Uncaught,
+    # every one of those is a 500 on a file the user picked by hand, so they all
+    # collapse into the same 422 below.
+    try:
+        source_md = await asyncio.to_thread(convert, filename or "upload", data)
+    except Exception:  # noqa: BLE001 — every parser failure is one 422
+        logger.info("artifact template extraction failed for %r", filename, exc_info=True)
+        source_md = ""
+
+    if is_unparsed_stub(source_md) or not source_md.strip():
+        # The three ways extraction produces nothing usable: a binary type with
+        # no converter (.doc, .pages, an image), a PDF with no text layer — a
+        # scan, or an export-as-image — and a corrupt container that raised
+        # above. All three look like an ordinary document to the user, so the
+        # message names the actual fix instead of saying "unsupported".
+        raise HTTPException(
+            422,
+            "We couldn't read any text out of that file. Scanned or image-only "
+            "PDFs, legacy .doc/.ppt files, and damaged documents have no text to "
+            "extract — export it as PDF, .docx or Markdown and try again.",
+        )
+
+    # Second pass, on the EXTRACTED text, for the binary types that skipped the
+    # check above: an extractor can still emit a NUL out of a malformed
+    # container, and that 500s on the INSERT rather than failing here.
+    # store.validate_new_template repeats it over the whole string, since this
+    # heuristic only sniffs the first 8 KB.
+    if "\x00" in source_md[:8192]:
+        raise HTTPException(
+            400,
+            "We read that file but the text came back malformed. Try exporting "
+            "it again, or paste the format instead.",
+        )
+
     if not name:
         # Pre-fill from the filename minus its extension, the way the modal
         # does, so an upload without a typed name still lands with a usable one
@@ -336,7 +400,8 @@ async def create_template(
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Add a format to the company's library — a pasted markdown body or an
-    uploaded `.md` (≤ 2 MB, ≤ 50,000 characters).
+    uploaded document of any readable type (≤ 25 MB, and ≤ 50,000 characters of
+    EXTRACTED text).
 
     The check starts immediately and runs in the background: the 201 comes back
     at `compiling`, and the client polls the LIST until nothing is in flight.
