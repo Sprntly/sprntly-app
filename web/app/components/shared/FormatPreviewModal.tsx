@@ -24,13 +24,15 @@
  */
 "use client"
 
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import type {
-  ArtifactTemplatePreview,
-  SectionForm,
-  SectionMap,
+import {
+  ApiError,
+  artifactTemplatesApi,
+  type ArtifactTemplatePreview,
+  type SectionForm,
+  type SectionMap,
 } from "../../lib/api"
 import { translateCompileNotes } from "../../lib/compileNotes"
 
@@ -455,11 +457,17 @@ export function FormatPreviewModal({
   onNotFound,
   onClose,
 }: Props) {
-  const [detail, setDetail] = useStateSafe<ArtifactTemplatePreview | null>(null)
-  const [loading, setLoading] = useStateSafe(false)
-  const [error, setError] = useStateSafe<string | null>(null)
-  const [notFound, setNotFound] = useStateSafe(false)
-  const [attempt, setAttempt] = useStateSafe(0)
+  const [detail, setDetail] = useState<ArtifactTemplatePreview | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notFound, setNotFound] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+
+  // `onNotFound` is read through a ref rather than listed as a dependency: the
+  // section passes an inline closure, so depending on it would re-fetch the
+  // preview on every parent render.
+  const onNotFoundRef = useRef(onNotFound)
+  onNotFoundRef.current = onNotFound
 
   useEffect(() => {
     if (!templateId) return
@@ -468,34 +476,32 @@ export function FormatPreviewModal({
     setError(null)
     setNotFound(false)
     setLoading(true)
-    void import("../../lib/api").then(({ artifactTemplatesApi, ApiError }) =>
-      artifactTemplatesApi
-        .preview(templateId)
-        .then((payload) => {
-          if (!cancelled) setDetail(payload)
-        })
-        .catch((e: unknown) => {
-          if (cancelled) return
-          // 404 renders as NOT FOUND, full stop — never "you don't have
-          // access". The row is already listed to this caller, so there is no
-          // existence left to protect and a wrong word here would tell a
-          // teammate their own company's format was hidden from them.
-          if (e instanceof ApiError && e.status === 404) {
-            setNotFound(true)
-            setError("That format isn't here anymore.")
-            onNotFound(templateId)
-            return
-          }
-          setError("We couldn't load this preview.")
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        }),
-    )
+    artifactTemplatesApi
+      .preview(templateId)
+      .then((payload) => {
+        if (!cancelled) setDetail(payload)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        // 404 renders as NOT FOUND, full stop — never "you don't have
+        // access". The row is already listed to this caller, so there is no
+        // existence left to protect, and the wrong word here would tell a
+        // teammate their own company's format was hidden from them.
+        if (e instanceof ApiError && e.status === 404) {
+          setNotFound(true)
+          setError("That format isn't here anymore.")
+          onNotFoundRef.current(templateId)
+          return
+        }
+        setError("We couldn't load this preview.")
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [templateId, attempt, onNotFound, setDetail, setError, setNotFound, setLoading])
+  }, [templateId, attempt])
 
   return (
     <FormatPreviewModalView
@@ -518,11 +524,4 @@ export function FormatPreviewModal({
       onClose={onClose}
     />
   )
-}
-
-/** `useState` with a stable setter identity for the effect dependency list —
- *  React already guarantees that, this alias just documents why the setters
- *  appear in the deps above rather than being suppressed with a lint escape. */
-function useStateSafe<T>(initial: T) {
-  return useStateImpl<T>(initial)
 }

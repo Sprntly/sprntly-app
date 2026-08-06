@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 //
-// Round-trip tests for the Templates screen ("what good looks like"): it lists
-// the company's gold-standard templates, uploads a new one (calling
-// templatesApi.upload), and removes one (calling templatesApi.remove) — then
-// re-fetches via templatesApi.list each time.
+// Round-trip tests for the EXEMPLAR half of the Templates screen ("what good
+// looks like"): it lists the company's gold-standard examples, uploads a new
+// one (calling templatesApi.upload), and removes one (calling
+// templatesApi.remove) — then re-fetches via templatesApi.list each time.
+//
+// The screen now mounts a SECOND section above this one — ArtifactFormatsSection,
+// the governing format library — so this file's api mock has to carry
+// `artifactTemplatesApi` and the two contexts that section reads. Without them
+// the mount throws and every test here fails for a reason that has nothing to
+// do with exemplars. The last describe guards the one thing about the pairing
+// that belongs in this file: both sections render, formats on top.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -13,13 +20,42 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const listMock = vi.fn()
 const uploadMock = vi.fn()
 const removeMock = vi.fn()
+const formatsListMock = vi.fn()
 
 vi.mock("../../../../lib/api", () => ({
+  ApiError: class ApiError extends Error {
+    status = 0
+    body: unknown = null
+  },
   templatesApi: {
     list: (...a: unknown[]) => listMock(...a),
     upload: (...a: unknown[]) => uploadMock(...a),
     remove: (...a: unknown[]) => removeMock(...a),
   },
+  artifactTemplatesApi: {
+    list: (...a: unknown[]) => formatsListMock(...a),
+    create: vi.fn(),
+    upload: vi.fn(),
+    update: vi.fn(),
+    compile: vi.fn(),
+    preview: vi.fn(),
+    activate: vi.fn(),
+    deactivate: vi.fn(),
+    remove: vi.fn(),
+    get: vi.fn(),
+  },
+}))
+
+vi.mock("../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    orgRole: "admin",
+    activeWorkspace: { id: "ws-1" },
+    workspace: { display_name: "Acme" },
+  }),
+}))
+
+vi.mock("../../../../context/NavigationContext", () => ({
+  useNavigation: () => ({ showToast: vi.fn() }),
 }))
 
 // AppLayout drags in app contexts; the screen logic under test doesn't need it.
@@ -53,6 +89,10 @@ beforeEach(() => {
   listMock.mockResolvedValue([T1])
   uploadMock.mockResolvedValue({ ok: true, ...T1, id: "t2", filename: "new.md" })
   removeMock.mockResolvedValue({ ok: true, id: "t1" })
+  formatsListMock.mockResolvedValue({
+    templates: [],
+    generation_enabled: { prd: false, tickets: false, impl_spec: false },
+  })
 })
 
 afterEach(() => {
@@ -131,5 +171,37 @@ describe("TemplatesScreen", () => {
       render(React.createElement(TemplatesScreen))
     })
     await waitFor(() => expect(screen.getByText(/network down/i)).toBeTruthy())
+  })
+})
+
+// ── the two libraries on one screen ──────────────────────────────────────────
+describe("TemplatesScreen — formats above examples", () => {
+  it("mounts BOTH sections, governing library first, in one scroller", async () => {
+    const { container } = render(React.createElement(TemplatesScreen))
+    await act(async () => {})
+    await waitFor(() => expect(formatsListMock).toHaveBeenCalled())
+
+    const page = container.querySelector(".tplpage")
+    expect(page).toBeTruthy()
+    // Order is the design: the silhouette does the work before a word is read,
+    // and the governing library has to be the one on top.
+    expect(container.querySelector(".tplpage > .afmt")).toBeTruthy()
+    const html = container.innerHTML
+    expect(html.indexOf("Formats we write in")).toBeLessThan(
+      html.indexOf("Examples we learn from"),
+    )
+  })
+
+  it("each section fetches independently — a formats failure leaves examples intact", async () => {
+    // §2 is a separate fetch on purpose: one library being unreachable must not
+    // take the other off screen.
+    formatsListMock.mockRejectedValue(new Error("formats down"))
+    await act(async () => {
+      render(React.createElement(TemplatesScreen))
+    })
+    await waitFor(() =>
+      expect(screen.getByText(/We couldn't load your document formats/)).toBeTruthy(),
+    )
+    expect(screen.getByText("Guest Deal Alerts — PRD")).toBeTruthy()
   })
 })

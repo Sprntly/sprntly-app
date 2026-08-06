@@ -66,6 +66,15 @@ export const ARTIFACT_TYPE_PLURAL: Record<ArtifactTemplateType, string> = {
   impl_spec: "engineering specs",
 }
 
+/** The DOCUMENT, unhyphenated — "Write every engineering spec in this format?".
+ *  Distinct from ARTIFACT_TYPE_NOUN, which is the first half of a compound
+ *  ("engineering-spec format") and reads wrong standing alone. */
+export const ARTIFACT_TYPE_DOC: Record<ArtifactTemplateType, string> = {
+  prd: "PRD",
+  tickets: "ticket",
+  impl_spec: "engineering spec",
+}
+
 /** The article-correct "Add a …" label. "Engineering spec" needs "an". */
 export function addFormatLabel(type: ArtifactTemplateType): string {
   return type === "impl_spec"
