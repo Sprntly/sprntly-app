@@ -583,6 +583,50 @@ describe("recompile", () => {
   })
 })
 
+// The highest-consequence state on this surface: the format the whole company
+// writes in is being re-checked. Settled 2026-08-06 —`resolve_prd_template`
+// gates on `compiled != ''`, so the last good skeleton keeps serving and the
+// reassuring copy is also the honest copy.
+describe("the active format being re-checked", () => {
+  it("says the previous version is still serving, and stops saying so once the check lands", async () => {
+    listMock.mockResolvedValue(
+      listOf([row({ is_active: true, compile_status: "compiling" })], PRD_LIVE),
+    )
+    await mount()
+    await waitFor(() => expect(rowNames()).toEqual(["Acme PRD v3"]))
+
+    expect(
+      screen.getByText(
+        /Still writing PRDs in the version you had — we'll switch to your edit once it checks out\./,
+      ),
+    ).toBeTruthy()
+    // Both signals stay on the row; the line explains the pair rather than
+    // hiding either half of it.
+    expect(screen.getByText("Active — in use now")).toBeTruthy()
+    expect(screen.getByText("Checking…")).toBeTruthy()
+
+    // The PRD group must not claim the built-in has taken over.
+    const prdGroup = document
+      .getElementById("afmt-group-prd")!
+      .closest("section") as HTMLElement
+    expect(within(prdGroup).queryByText(/Now using: Sprntly's built-in/)).toBeNull()
+    expect(within(prdGroup).getByText(/Now using:/).textContent).toContain(
+      "Acme PRD v3",
+    )
+
+    // The poll lands: the reassurance has done its job and goes away.
+    listMock.mockResolvedValue(
+      listOf([row({ is_active: true, compile_status: "ready" })], PRD_LIVE),
+    )
+    await waitFor(() => expect(screen.getByText("Ready")).toBeTruthy(), {
+      timeout: 10_000,
+    })
+    expect(
+      screen.queryByText(/Still writing PRDs in the version you had/),
+    ).toBeNull()
+  }, 20_000)
+})
+
 describe("rename", () => {
   it("PATCHes only the name and swaps the row in place", async () => {
     listMock.mockResolvedValue(listOf([row()], PRD_LIVE))

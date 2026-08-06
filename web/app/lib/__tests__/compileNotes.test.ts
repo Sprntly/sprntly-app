@@ -17,6 +17,8 @@ import {
   addFormatLabel,
   builtinFormatName,
   notWiredNote,
+  notWiredShort,
+  recompilingActiveNote,
   translateCompileNote,
   translateCompileNotes,
 } from "../compileNotes"
@@ -204,5 +206,39 @@ describe("type copy", () => {
       /Sprntly doesn't write tickets from a custom format yet/,
     )
     expect(notWiredNote("prd")).toMatch(/Sprntly doesn't write PRDs/)
+  })
+
+  it("the short not-wired form is the fact WITHOUT the instruction", () => {
+    // The long form's second sentence tells the user what to do, so it belongs
+    // exactly once per group (under the header). Rows carry the fact only, and
+    // the two must never drift into two different claims.
+    for (const t of ARTIFACT_TYPE_IDS) {
+      expect(notWiredNote(t).startsWith(notWiredShort(t))).toBe(true)
+      expect(notWiredShort(t)).not.toMatch(/Upload and preview one now/)
+      expect(notWiredNote(t)).toMatch(/Upload and preview one now/)
+    }
+  })
+})
+
+describe("recompilingActiveNote — the active format being re-checked", () => {
+  // Settled 2026-08-06: `resolve_prd_template` gates on `compiled != ''`, so a
+  // recompile keeps serving the last good skeleton. The reassuring string is
+  // therefore also the true one; the alarming alternative ("PRDs are using
+  // Sprntly's built-in format until this finishes checking") would be a lie.
+  it("says the previous version is still serving, per type", () => {
+    expect(recompilingActiveNote("prd")).toBe(
+      "Still writing PRDs in the version you had — we'll switch to your edit once it checks out.",
+    )
+    expect(recompilingActiveNote("tickets")).toMatch(/Still writing tickets in the version you had/)
+    expect(recompilingActiveNote("impl_spec")).toMatch(
+      /Still writing engineering specs in the version you had/,
+    )
+  })
+
+  it("never implies the built-in has taken over", () => {
+    for (const t of ARTIFACT_TYPE_IDS) {
+      expect(recompilingActiveNote(t)).not.toMatch(/built-in/i)
+      expect(recompilingActiveNote(t)).not.toMatch(/Sprntly's own/i)
+    }
   })
 })

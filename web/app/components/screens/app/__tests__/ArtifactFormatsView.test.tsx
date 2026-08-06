@@ -35,6 +35,20 @@ function row(over: Partial<ArtifactTemplate> = {}): ArtifactTemplate {
 
 const EMPTY = { prd: [], tickets: [], impl_spec: [] }
 
+/** Just ONE group's markup.
+ *
+ *  Needed because the other two groups legitimately say "built-in" — nothing of
+ *  their type is active — so a whole-document assertion about the built-in
+ *  claim would pass or fail for the wrong reason. */
+function groupHtml(html: string, type: "prd" | "tickets" | "impl_spec"): string {
+  const start = html.indexOf(`id="afmt-group-${type}"`)
+  expect(start, `group ${type} not rendered`).toBeGreaterThan(-1)
+  const order = ["prd", "tickets", "impl_spec"]
+  const nextType = order[order.indexOf(type) + 1]
+  const end = nextType ? html.indexOf(`id="afmt-group-${nextType}"`) : -1
+  return end === -1 ? html.slice(start) : html.slice(start, end)
+}
+
 function render(
   over: Partial<React.ComponentProps<typeof ArtifactFormatsView>> = {},
 ): string {
@@ -375,13 +389,128 @@ describe("ArtifactFormatsView — generation not wired yet", () => {
     expect(html).toMatch(/Sprntly doesn&#x27;t write PRDs from a custom format yet/)
   })
 
-  it("replaces Activate with the note on a ready row of an unwired type", () => {
+  it("replaces Activate with the SHORT form on a ready row of an unwired type", () => {
     const html = render({
       liveTypes: new Set(),
       groups: { ...EMPTY, prd: [row()] },
     })
-    expect(html).not.toMatch(/>Use this format</)
-    expect(html).toMatch(/you&#x27;ll be able to switch it on when support lands/)
+    const prd = groupHtml(html, "prd")
+    expect(prd).not.toMatch(/>Use this format</)
+    expect(prd).toMatch(/Sprntly doesn&#x27;t write PRDs from a custom format yet\./)
+    // The instruction half is an instruction, so it renders EXACTLY once per
+    // group — under the header — not again on every row beneath it.
+    expect(
+      prd.match(/you&#x27;ll be able to switch it on when support lands/g) ?? [],
+    ).toHaveLength(1)
+  })
+
+  it("keeps the instruction once even with several rows in the group", () => {
+    const html = render({
+      liveTypes: new Set(),
+      groups: {
+        ...EMPTY,
+        prd: [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })],
+      },
+    })
+    const prd = groupHtml(html, "prd")
+    expect(
+      prd.match(/you&#x27;ll be able to switch it on when support lands/g) ?? [],
+    ).toHaveLength(1)
+    // …while every row still says why it has no Activate control.
+    expect(
+      prd.match(/Sprntly doesn&#x27;t write PRDs from a custom format yet\./g) ?? [],
+    ).toHaveLength(4) // 1 group note + 3 rows
+  })
+})
+
+// ── the active format being re-checked (settled 2026-08-06) ─────────────────
+// `resolve_prd_template` gates on `compiled != ''`, so the last good skeleton
+// keeps serving through a recompile. The row shows an "Active — in use now"
+// pill AND a "Checking…" badge at once, which read together say "nobody knows
+// what my next PRD will look like" — this line is the only thing that answers
+// that, and it must never imply the built-in has taken over.
+describe("ArtifactFormatsView — active + recompiling", () => {
+  for (const status of ["compiling", "pending"] as const) {
+    it(`says the previous version is still serving while ${status}`, () => {
+      const html = render({
+        groups: {
+          ...EMPTY,
+          prd: [row({ is_active: true, compile_status: status })],
+        },
+      })
+      const prd = groupHtml(html, "prd")
+      expect(prd).toMatch(
+        /Still writing PRDs in the version you had — we&#x27;ll switch to your edit once it checks out\./,
+      )
+      // Both signals are still on the row — the line explains them, it does
+      // not hide them.
+      expect(prd).toContain("Active — in use now")
+      expect(prd).toMatch(status === "compiling" ? /Checking…/ : /Queued/)
+    })
+  }
+
+  it("never implies the built-in has taken over for that type", () => {
+    const html = render({
+      groups: {
+        ...EMPTY,
+        prd: [row({ is_active: true, compile_status: "compiling" })],
+      },
+    })
+    const prd = groupHtml(html, "prd")
+    // The reason line is the claim under test. The row ALSO carries a
+    // "Use Sprntly's built-in format instead" control, which is an offer, not a
+    // statement about what is running — so the assertion is scoped to the line
+    // that makes the claim.
+    const reason = prd.match(/<p class="afmt-reason">(.*?)<\/p>/s)?.[1] ?? ""
+    expect(reason).toMatch(/Still writing PRDs in the version you had/)
+    expect(reason).not.toMatch(/built-in/i)
+    // The rejected alternative wording, which would only have been honest if
+    // the resolver gated on `compile_status == "ready"`. It doesn't.
+    expect(prd).not.toMatch(/until this finishes checking/i)
+    // And the header keeps naming the customer's format, because that IS what
+    // is being served.
+    expect(prd).toMatch(/Now using: <strong>Acme PRD v3<\/strong>/)
+    expect(prd).not.toMatch(/Now using: Sprntly&#x27;s built-in/)
+  })
+
+  it("a slow check keeps the reassurance and still offers Check again", () => {
+    const html = render({
+      groups: {
+        ...EMPTY,
+        prd: [row({ is_active: true, compile_status: "compiling" })],
+      },
+      stalledIds: new Set(["t1"]),
+    })
+    const prd = groupHtml(html, "prd")
+    expect(prd).toMatch(/Still writing PRDs in the version you had/)
+    // A slow check does not change what is being served, so the reason line
+    // does not swap — but the escape hatch still appears.
+    expect(prd).not.toMatch(/this is taking longer than usual/)
+    expect(prd).toMatch(/Check again/)
+  })
+
+  it("leaves a NON-active row's checking copy exactly as it was", () => {
+    const html = render({
+      groups: { ...EMPTY, prd: [row({ compile_status: "compiling" })] },
+    })
+    const prd = groupHtml(html, "prd")
+    expect(prd).toMatch(/Checking your format against what a Sprntly document needs…/)
+    expect(prd).not.toMatch(/Still writing PRDs/)
+  })
+
+  it("reasonLine keys the copy on the row's own type", () => {
+    expect(
+      reasonLine(
+        row({ is_active: true, compile_status: "compiling", artifact_type: "tickets" }),
+        false,
+      ),
+    ).toMatch(/Still writing tickets in the version you had/)
+    expect(
+      reasonLine(
+        row({ is_active: true, compile_status: "pending", artifact_type: "impl_spec" }),
+        false,
+      ),
+    ).toMatch(/Still writing engineering specs in the version you had/)
   })
 })
 

@@ -87,16 +87,49 @@ export function builtinFormatName(type: ArtifactTemplateType): string {
   return `Sprntly's built-in ${ARTIFACT_TYPE_NOUN[type]} format`
 }
 
-/** Shown when this type's GENERATOR doesn't honour a custom format yet
- *  (`generation_enabled` is a top-level field of the list response and is the
- *  only source of truth for it — never hardcode which types are wired). Stands
- *  in place of the Activate control, and renders once under the group header so
- *  it is readable with zero rows, which is the state most companies are in. */
+/** The FACT, on its own: this type's generator doesn't honour a custom format
+ *  yet. Used where the note has to sit beside a control rather than stand as a
+ *  paragraph — a row's Activate slot, and the preview's footer. */
+export function notWiredShort(type: ArtifactTemplateType): string {
+  return `Sprntly doesn't write ${ARTIFACT_TYPE_PLURAL[type]} from a custom format yet.`
+}
+
+/** The fact PLUS what to do about it. Renders once per group, under the header,
+ *  so it is readable with ZERO rows — the state most companies are in, and the
+ *  reason this can't live only on a row.
+ *
+ *  `generation_enabled` is a top-level field of the list response and is the
+ *  only source of truth for which types are wired — never hardcode it. The
+ *  second sentence is an instruction, so it belongs exactly once on the screen;
+ *  rows use `notWiredShort` and inherit the instruction from above them. */
 export function notWiredNote(type: ArtifactTemplateType): string {
   return (
-    `Sprntly doesn't write ${ARTIFACT_TYPE_PLURAL[type]} from a custom format ` +
-    `yet. Upload and preview one now — you'll be able to switch it on when ` +
-    `support lands.`
+    `${notWiredShort(type)} Upload and preview one now — you'll be able to ` +
+    `switch it on when support lands.`
+  )
+}
+
+/**
+ * What the company is writing in RIGHT NOW while its active format is being
+ * re-checked.
+ *
+ * Settled 2026-08-06 (open question 1). `resolve_prd_template` gates on
+ * `compiled != ''`, not on `compile_status == "ready"`, and milestone 2 proved
+ * the storage invariant behind that three ways: a gateway exception, an empty
+ * skeleton, and a skeleton rejected for `<script>` all leave `compiled`
+ * byte-identical with the row still active. So a recompile never drops the
+ * company to the built-in, and this string — the reassuring one — is also the
+ * true one.
+ *
+ * It exists because the row shows two signals that read as contradictory when
+ * they sit side by side: an "Active — in use now" pill and a "Checking…" badge.
+ * Without this line the honest reading of that pair is "nobody knows what my
+ * next PRD will look like".
+ */
+export function recompilingActiveNote(type: ArtifactTemplateType): string {
+  return (
+    `Still writing ${ARTIFACT_TYPE_PLURAL[type]} in the version you had — ` +
+    `we'll switch to your edit once it checks out.`
   )
 }
 

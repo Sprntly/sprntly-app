@@ -71,6 +71,8 @@ import {
   addFormatLabel,
   builtinFormatName,
   notWiredNote,
+  notWiredShort,
+  recompilingActiveNote,
   translateCompileNote,
 } from "../../../lib/compileNotes"
 import {
@@ -163,8 +165,26 @@ export function metaParts(row: ArtifactTemplate): string[] {
  * reaches a person, and it goes through `translateCompileNote` to get there:
  * the backend's own wording names CSS classes, and `ul.ev` on a screen reads as
  * a crash.
+ *
+ * ONE state overrides the compile status: the ACTIVE format being re-checked.
+ * That row shows an "Active — in use now" pill and a "Checking…" badge at the
+ * same time, and read together those say "nobody knows what my next PRD will
+ * look like". They can both be true — `resolve_prd_template` gates on
+ * `compiled != ''`, so the last good skeleton keeps serving throughout — and
+ * this line is the only thing on the surface that says so. It replaces the
+ * generic checking copy rather than joining it, because the generic line
+ * answers a question ("what are we doing?") nobody is asking while their
+ * company-wide format is in flight.
  */
 export function reasonLine(row: ArtifactTemplate, stalled: boolean): string {
+  const inFlight =
+    row.compile_status === "pending" || row.compile_status === "compiling"
+  if (row.is_active && inFlight) {
+    // Deliberately NOT varied by `stalled`. A slow check does not change what
+    // is being served, and the "Check again" control still appears beside it —
+    // so the affordance survives without inventing a second sentence.
+    return recompilingActiveNote(row.artifact_type)
+  }
   switch (row.compile_status) {
     case "pending":
       return stalled
@@ -314,9 +334,13 @@ export function ArtifactFormatsView({
     }
     if (row.compile_status !== "ready") return null
     if (!liveTypes.has(type)) {
+      // The FACT only. The group header directly above carries the same
+      // sentence plus what to do about it, and repeating a two-sentence
+      // instruction on every row of a group turns the note into wallpaper. An
+      // empty slot here would read as merely broken, so the fact stays.
       return (
         <span className="afmt-denied" role="note">
-          {notWiredNote(type)}
+          {notWiredShort(type)}
         </span>
       )
     }
