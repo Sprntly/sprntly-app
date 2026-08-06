@@ -956,15 +956,46 @@ CREATE TABLE prd_tickets (
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
--- Per-PRD tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql).
--- One row per (company, prd): the ClickUp list / Jira project the PRD's
--- tickets sync with, the last sync outcome, and the pulled per-ticket
--- tracker statuses (jsonb → TEXT here).
+-- Standalone ticket sets (mirrors 20260806120000_ticket_sets.sql): tickets
+-- generated from a chat with NO PRD behind them. Same `stories` JSON payload
+-- shape as prd_tickets; its tickets are keyed `set-{id}-{story_id}` so they
+-- share ticket_edits / ticket_comments / ticket_attachments with PRD tickets
+-- while staying in a disjoint key namespace.
+CREATE TABLE ticket_sets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    title           TEXT NOT NULL DEFAULT '',
+    source_text     TEXT NOT NULL DEFAULT '',
+    stories         TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'generating',
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX ticket_sets_company_idx ON ticket_sets (company_id, id DESC);
+CREATE INDEX ticket_sets_conversation_idx ON ticket_sets (conversation_id);
+
+-- Per-artifact tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql
+-- + 20260806120000_ticket_sets.sql). One row per (company, PRD) OR
+-- (company, ticket set): the ClickUp list / Jira project that artifact's
+-- tickets sync with, the last sync outcome, and the pulled per-ticket tracker
+-- statuses (jsonb → TEXT here).
+--
+-- prd_id is NULLABLE here exactly as the migration leaves it, and
+-- ticket_set_id is its mutually-exclusive counterpart. Both UNIQUE constraints
+-- are non-partial and rely on SQLite treating NULLs as distinct — the same
+-- property Postgres has — so a set row (prd_id NULL) never collides with the
+-- PRD constraint and vice versa. The fake client translates upsert
+-- on_conflict= into a real SQLite ON CONFLICT target, so both indexes have to
+-- exist for upsert_sync_config to resolve on either owner.
 CREATE TABLE prd_ticket_sync (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id       TEXT NOT NULL,
     workspace_id     TEXT,
-    prd_id           INTEGER NOT NULL,
+    prd_id           INTEGER,
+    ticket_set_id    INTEGER,
     provider         TEXT NOT NULL,
     destination_id   TEXT NOT NULL,
     destination_name TEXT,
@@ -976,7 +1007,8 @@ CREATE TABLE prd_ticket_sync (
     statuses         TEXT NOT NULL DEFAULT '{}',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id, prd_id)
+    UNIQUE (company_id, prd_id),
+    UNIQUE (company_id, ticket_set_id)
 );
 
 -- Idempotent Jira push mapping (mirrors 20260708120000_jira_issue_map.sql).

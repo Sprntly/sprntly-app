@@ -12,6 +12,7 @@ import pytest
 
 from app.auth import CompanyContext
 from app.stories.generate import Story
+from app.stories.scope import prd_scope
 
 # Pin every test that touches this shared CID / FakeTracker / prd_id fixture
 # family to the SAME xdist worker (requires `--dist=loadgroup`), run as one
@@ -339,7 +340,7 @@ def _sync_cfg(prd_id: int, statuses: dict | None = None) -> None:
     from app.db.client import require_client
     from app.db.ticket_sync import upsert_sync_config
 
-    upsert_sync_config(CID, prd_id, provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(prd_id), provider="clickup", destination_id="L1")
     if statuses is not None:
         require_client().table("prd_ticket_sync").update(
             {"statuses": statuses}
@@ -368,7 +369,7 @@ def test_first_sync_bulk_creates_and_baselines(isolated_settings, fake_tracker):
     tracker = fake_tracker.instances[0]
     assert tracker.created == ["Login"]
     assert result["pushed"] == 1 and result["imported"] == 0
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     entry = cfg["statuses"][base["id"]]
     # Baselined: tracker content fingerprint + pass timestamp recorded.
     assert entry["content_hash"] and entry["synced_at"]
@@ -404,7 +405,7 @@ def test_tracker_side_deletion_repushes(isolated_settings, fake_tracker):
     assert "Login" in tracker.created
     assert result["pushed"] >= 1
     # It re-baselines cleanly: a fresh fingerprint is recorded again.
-    cfg = get_sync_config(CID, 30)
+    cfg = get_sync_config(CID, prd_scope(30))
     assert cfg["statuses"][tid]["content_hash"] and cfg["statuses"][tid]["synced_at"]
 
 
@@ -631,7 +632,7 @@ def test_assignee_resolves_by_email_and_pushes_out(isolated_settings, fake_track
     tracker = fake_tracker.instances[0]
     # Matched case-insensitively → the tracker issue is assigned by accountId.
     assert tracker.assignee_sets == [(f"ref-{tid}", "acct-sam")]
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     assert cfg["statuses"][tid]["assignee_account_id"] == "acct-sam"
 
     # Second pass, nothing changed → the already-set assignee is NOT re-pushed.
@@ -675,7 +676,7 @@ def test_run_prd_sync_records_failure_and_reraises(isolated_settings, monkeypatc
     from app.stories.push import ClickUpNotConnectedError
 
     _seed_prd_tickets(CID, 7, [Story(title="T", body="B").to_dict()])
-    upsert_sync_config(CID, 7, provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(7), provider="clickup", destination_id="L1")
 
     def _boom(*a, **k):
         raise ClickUpNotConnectedError("ClickUp is not connected")
@@ -684,7 +685,7 @@ def test_run_prd_sync_records_failure_and_reraises(isolated_settings, monkeypatc
     with pytest.raises(ClickUpNotConnectedError):
         sync_mod.run_prd_sync(CID, 7)
 
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     assert cfg["sync_status"] == "idle"  # never wedged in 'syncing'
     assert "not connected" in cfg["last_error"]
     assert cfg["last_synced_at"] is None
@@ -781,10 +782,10 @@ def test_sync_state_unconfigured(isolated_settings):
 def test_trigger_sync_registers_destination_and_runs(isolated_settings, monkeypatch):
     from app.routes import stories as routes
 
-    ran: list[tuple[str, int]] = []
+    ran: list[tuple[str, object]] = []
     monkeypatch.setattr(
-        "app.stories.sync.run_prd_sync",
-        lambda cid, prd_id: ran.append((cid, prd_id)) or {"pushed": 0},
+        "app.stories.sync.run_ticket_sync",
+        lambda cid, scope: ran.append((cid, scope)) or {"pushed": 0},
     )
 
     async def _flow():
@@ -803,7 +804,7 @@ def test_trigger_sync_registers_destination_and_runs(isolated_settings, monkeypa
             await asyncio.sleep(0.01)
 
     asyncio.run(_flow())
-    assert ran == [(CID, 7)]
+    assert ran == [(CID, prd_scope(7))]
 
     state = routes.sync_state(7, _ctx())
     assert state["configured"] is True
@@ -858,12 +859,12 @@ def test_trigger_sync_is_idempotent_while_in_flight(isolated_settings, monkeypat
     from app.db.ticket_sync import get_sync_config, mark_syncing, upsert_sync_config
     from app.routes import stories as routes
 
-    upsert_sync_config(CID, 7, provider="clickup", destination_id="L1")
-    mark_syncing(CID, 7)
+    upsert_sync_config(CID, prd_scope(7), provider="clickup", destination_id="L1")
+    mark_syncing(CID, prd_scope(7))
 
     called = []
     monkeypatch.setattr(
-        "app.stories.sync.run_prd_sync", lambda *a: called.append(a)
+        "app.stories.sync.run_ticket_sync", lambda *a: called.append(a)
     )
 
     async def _flow():
@@ -872,7 +873,7 @@ def test_trigger_sync_is_idempotent_while_in_flight(isolated_settings, monkeypat
 
     asyncio.run(_flow())
     assert called == []
-    assert get_sync_config(CID, 7)["sync_status"] == "syncing"
+    assert get_sync_config(CID, prd_scope(7))["sync_status"] == "syncing"
 
 
 # ── Scheduler cycle ──────────────────────────────────────────────────────────
@@ -884,19 +885,45 @@ def test_scheduler_cycle_syncs_each_auto_row_isolated(isolated_settings, monkeyp
     from app.db.ticket_sync import mark_syncing, upsert_sync_config
     from app import scheduler as sched
 
-    upsert_sync_config(CID, 1, provider="clickup", destination_id="L1")
-    upsert_sync_config(CID, 2, provider="jira", destination_id="SPR")
-    upsert_sync_config(CID, 3, provider="clickup", destination_id="L3")
-    mark_syncing(CID, 3)  # in flight → skipped
+    upsert_sync_config(CID, prd_scope(1), provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(2), provider="jira", destination_id="SPR")
+    upsert_sync_config(CID, prd_scope(3), provider="clickup", destination_id="L3")
+    mark_syncing(CID, prd_scope(3))  # in flight → skipped
 
     ran: list[int] = []
 
-    def _run(cid, prd_id):
-        if prd_id == 1:
+    def _run(cid, scope):
+        if scope.id == 1:
             raise RuntimeError("boom")
-        ran.append(prd_id)
+        ran.append(scope.id)
         return {"pushed": 0, "push_errors": 0}
 
-    monkeypatch.setattr("app.stories.sync.run_prd_sync", _run)
+    monkeypatch.setattr("app.stories.sync.run_ticket_sync", _run)
     asyncio.run(sched._run_ticket_sync_cycle())
     assert ran == [2]  # prd 1 failed (isolated), prd 3 skipped, prd 2 ran
+
+
+def test_scheduler_cycle_also_syncs_standalone_ticket_sets(
+    isolated_settings, monkeypatch
+):
+    """A set-owned sync row is scheduler work exactly like a PRD-owned one.
+
+    The row identifies its artifact by which owner column is populated, so a
+    set row must NOT be skipped as "no prd_id" — the bug the old
+    `if prd_id is None: continue` guard would have introduced silently, leaving
+    standalone sets bound to a tracker but never auto-syncing."""
+    from app.db.ticket_sync import upsert_sync_config
+    from app.stories.scope import set_scope
+    from app import scheduler as sched
+
+    upsert_sync_config(CID, prd_scope(4), provider="clickup", destination_id="L4")
+    upsert_sync_config(CID, set_scope(9), provider="jira", destination_id="KAN")
+
+    ran: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "app.stories.sync.run_ticket_sync",
+        lambda cid, scope: ran.append((scope.kind, scope.id))
+        or {"pushed": 0, "push_errors": 0},
+    )
+    asyncio.run(sched._run_ticket_sync_cycle())
+    assert sorted(ran) == [("prd", 4), ("set", 9)]

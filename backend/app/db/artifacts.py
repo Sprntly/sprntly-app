@@ -1,8 +1,8 @@
 """Aggregated artifact listing for the All-Chats "Artifacts" tab.
 
-A read-only fan-out over the four generated-artifact tables — PRDs, prototypes,
-evidence, and reports — unified into one recency-sorted list for a single
-company.
+A read-only fan-out over the five generated-artifact tables — PRDs, prototypes,
+evidence, reports, and standalone ticket sets — unified into one recency-sorted
+list for a single company.
 
 Tenant scoping is split because the surfaces key off the tenant differently
 (verified against the existing queries):
@@ -19,6 +19,9 @@ Tenant scoping is split because the surfaces key off the tenant differently
   - Reports are scoped by `company_id` (the company UUID) — captured that way by
     app/report_capture.py so every workspace in a company shares one report
     library (the db/custom_skills.py posture).
+
+  - Ticket sets are scoped by `company_id` too, for the same reason and by the
+    same decision (see supabase/migrations/20260806120000_ticket_sets.sql).
 
 The route passes BOTH (the slug for PRDs/evidence, the UUID for prototypes and
 reports) so each surface is scoped the way its own writers scoped it. Joins are
@@ -233,6 +236,12 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     #
     #    A report has no lifecycle — capture happens after the answer is complete
     #    — so `status` is always empty rather than a state the UI must interpret.
+    #
+    #    Hoisted out of the reports block because the ticket-set block below
+    #    shares it: both artifact types name the chat they were born in, and
+    #    two independent conversation lookups for one listing is a wasted
+    #    round-trip.
+    convo_title_by_id: dict[int, str] = {}
     report_rows = (
         c.table("reports")
         .select(
@@ -259,7 +268,6 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
         convo_ids = sorted(
             {r["conversation_id"] for r in report_rows if r.get("conversation_id") is not None}
         )
-        convo_title_by_id: dict[int, str] = {}
         if convo_ids:
             convo_rows = (
                 c.table("conversations")
@@ -269,7 +277,7 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 .data
                 or []
             )
-            convo_title_by_id = {r["id"]: r.get("title") for r in convo_rows}
+            convo_title_by_id.update({r["id"]: r.get("title") for r in convo_rows})
         for r in report_rows:
             cid, pid = r.get("conversation_id"), r.get("prd_id")
             items.append({
@@ -294,6 +302,73 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                     "prd_title": rep_prd_titles.get(pid) if pid else None,
                 },
                 "open": {"report_id": r["id"]},
+            })
+
+    # ── Standalone ticket sets (company_id = company UUID). Tickets generated
+    #    from a chat with NO PRD behind them — see app/db/ticket_sets.py.
+    #
+    #    `stories` IS selected (unlike the reports listing's `html`) purely to
+    #    COUNT the tickets, and is dropped before the item is appended: the row
+    #    needs "6 tickets" as its count affordance, and the alternative — a
+    #    per-set count query — is N round-trips for one integer. Nothing here
+    #    ships the ticket bodies to the client.
+    #
+    #    'generating' sets ARE listed (like in-progress prototypes above): a set
+    #    the user just asked for should appear immediately, marked as building
+    #    and not clickable, rather than materialising minutes later. 'failed'
+    #    ones are excluded — a run that produced nothing is not an artifact.
+    set_rows = (
+        c.table("ticket_sets")
+        .select("id, title, source_text, status, created_at, conversation_id, stories")
+        .eq("company_id", company_id)
+        .in_("status", ["generating", "ready"])
+        .order("id", desc=True)
+        .limit(_LIST_CAP)
+        .execute()
+        .data
+        or []
+    )
+    if set_rows:
+        # Reuse the conversation-title lookup the reports block may already have
+        # built, filling in any ids it didn't need. One query serves both types.
+        set_convo_ids = sorted(
+            {
+                r["conversation_id"] for r in set_rows
+                if r.get("conversation_id") is not None
+                and r["conversation_id"] not in convo_title_by_id
+            }
+        )
+        if set_convo_ids:
+            for r in (
+                c.table("conversations")
+                .select("id, title")
+                .in_("id", set_convo_ids)
+                .execute()
+                .data
+                or []
+            ):
+                convo_title_by_id[r["id"]] = r.get("title")
+        for r in set_rows:
+            cid = r.get("conversation_id")
+            stories = [s for s in (r.get("stories") or []) if isinstance(s, dict)]
+            items.append({
+                "type": "ticket_set",
+                "id": r["id"],
+                # Empty until the naming leg lands; the web renders its own
+                # "Tickets from this conversation" rather than a fabricated one.
+                "title": r.get("title") or "",
+                "status": r.get("status") or "",
+                "created_at": r.get("created_at"),
+                "ticket_count": len(stories),
+                "source": {
+                    "conversation_id": cid,
+                    # None when the chat was deleted (`on delete set null`); the
+                    # row then omits the "from <chat>" clause rather than
+                    # inventing a label for a thread that no longer exists.
+                    "conversation_title": convo_title_by_id.get(cid) if cid else None,
+                    "question": r.get("source_text") or "",
+                },
+                "open": {"ticket_set_id": r["id"]},
             })
 
     # Recency sort (newest first). created_at is an ISO-8601 string; lexical

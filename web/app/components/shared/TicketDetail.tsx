@@ -101,6 +101,20 @@ export function ticketKeyFor(prdId: number, story: GeneratedStory): string {
   return `prd-${prdId}-${slug || "ticket"}`
 }
 
+/** The same key for a ticket that belongs to a STANDALONE SET instead of a PRD.
+ *
+ *  The `set-` namespace is deliberately disjoint from `prd-` (backend:
+ *  app/stories/scope.py), which is what makes stale code fail CLOSED — a set
+ *  key handed to the PRD-only paths is rejected rather than resolved onto some
+ *  other artifact's tickets. The slug fallback mirrors `ticketKeyFor` exactly,
+ *  because the backend's `title_slug` mirrors both. */
+export function ticketKeyForSet(setId: number, story: GeneratedStory): string {
+  if (story.id) return `set-${setId}-${story.id}`
+  const slug = (story.title || "ticket")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)
+  return `set-${setId}-${slug || "ticket"}`
+}
+
 type Attachment = { id: number; label: string; sub: string }
 type Comment = { id: number; author: string; body: string; time: string }
 
@@ -355,8 +369,16 @@ function providerName(
  *  anatomy): full-width five-section description over a two-column zone (main
  *  story column + Details rail). Structured fields drive it; legacy/thin
  *  tickets fall back to the plain description + a generated-AC flag. */
-export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracker, onLifecycleChange }: {
-  story: GeneratedStory; index: number; prdId: number; onBack: () => void
+export function TicketDetail({ story, index, prdId, setId, onBack, onOpenLinked, tracker, onLifecycleChange }: {
+  story: GeneratedStory; index: number; onBack: () => void
+  /** The PRD this ticket was broken out of — the owner for a pipeline ticket.
+   *  Exactly one of `prdId`/`setId` is passed; they name the two artifacts a
+   *  ticket can belong to and they decide the ticket key everything downstream
+   *  (edits, comments, lifecycle, tracker sync) is stored under. */
+  prdId?: number
+  /** The standalone `ticket_sets` row this ticket belongs to — tickets
+   *  generated from a chat with no PRD. */
+  setId?: number
   /** Open a sibling ticket by its title (linked issues are title references). */
   onOpenLinked?: (title: string) => void
   /** Bound-tracker context — switches status/priority to the destination's
@@ -368,7 +390,14 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
   onLifecycleChange?: (lifecycle: TicketLifecycle) => void
 }) {
   const { showToast } = useNavigation()
-  const key = useMemo(() => ticketKeyFor(prdId, story), [prdId, story])
+  // Which owner this ticket has decides its key. `prd-0-…` is the fail-closed
+  // fallback for the impossible case of neither being passed: it parses, so the
+  // backend's ownership check rejects it with a 404 instead of the key landing
+  // on a real artifact's ticket.
+  const key = useMemo(
+    () => (setId != null ? ticketKeyForSet(setId, story) : ticketKeyFor(prdId ?? 0, story)),
+    [prdId, setId, story],
+  )
   const [lifecycle, setLifecycle] = useState<TicketLifecycle>(story.lifecycle || "active")
   const [lcBusy, setLcBusy] = useState(false)
   // The state to confirm, or null for no open dialog. Holding the PENDING

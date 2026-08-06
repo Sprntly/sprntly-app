@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse, GeneratedStory, ReportSummary } from "../lib/api"
+import type { AskResponse, GeneratedStory, ReportSummary, TicketStub } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -783,7 +783,69 @@ export interface AppContentState {
    *  tab renders these instead of calling storiesApi when useGuestSession()
    *  is non-null. `null`/absent for every non-guest render. */
   guestTickets?: GeneratedStory[] | null
+  /** The STANDALONE ticket set on screen — tickets generated from a chat with
+   *  no PRD behind them (`ticket_sets`, backend commit 0edeea35).
+   *
+   *  Owned end to end by `lib/runTicketSetGeneration.ts`: it creates this slice
+   *  at kick-off, republishes it as fan-out batches land, and writes the
+   *  terminal value. The Tickets tab READS it and never polls — that is what
+   *  makes a second, cost-incurring generation of the same set structurally
+   *  impossible (the same guard the guest-tickets branch relies on).
+   *
+   *  Non-null here also means "the Tickets tab is showing a set, not a PRD's
+   *  tickets": `prdInScopeFor` returns null for the tickets tab while it is
+   *  set, so no PRD-acting control (Share, PDF, the prototype CTA) is left
+   *  armed on a document that did not produce what is on screen. */
+  ticketSet?: {
+    /** `ticket_sets.id` — the tracker-sync scope (`set-{id}-{story_id}` keys). */
+    id: number
+    /** The set's LLM-derived name. May be `""` before the naming leg lands or
+     *  when it never ran; the panel renders its own fallback line rather than
+     *  collapsing the header. */
+    title: string
+    stories: GeneratedStory[]
+    /** The chat this set was born in, or null when it was born outside one.
+     *  NOT a "was the thread deleted" signal — see `ticketSetStandalone`. */
+    conversationId: number | null
+    /** `generating` | `ready` | `failed`, straight off the row. */
+    status: string
+    /** The request the set was generated from (`ticket_sets.source_text`) —
+     *  what the in-panel "Try again" re-runs. */
+    sourceText?: string
+    /** Fan-out plan roster, while generating: planned-but-not-yet-written
+     *  tickets, rendered as skeleton rows. Cleared on the terminal write. */
+    stubs?: TicketStub[]
+    /** Fan-out batch counter while generating, for the streaming banner. */
+    progress?: { done: number; total: number } | null
+    /** Why the run ended badly, as a CLASSIFIED KIND — never the raw backend
+     *  message. The panel maps the kind to its own copy, so a stack trace or a
+     *  provider error string can never reach the screen. */
+    error?: TicketSetFailureKind | null
+  } | null
+  /** True from kick-off until the run reaches a terminal state. Distinct from
+   *  `ticketSet.status`: the slice may not exist at all yet (the create call is
+   *  still in flight), and the panel still owes the user a working state. */
+  ticketSetGenerating?: boolean
+  /** True when the ticket set on screen has NO chat behind it — the Artifacts
+   *  row for a set whose thread was deleted.
+   *
+   *  Stated rather than inferred from `ticketSet.conversationId == null`, for
+   *  exactly the reason documented on `reportFocusStandalone` above: a
+   *  brand-new chat tab also has a null conversation id, and reading that null
+   *  as "standalone" is a bug this codebase has already shipped once. */
+  ticketSetStandalone?: boolean
 }
+
+/** How a standalone ticket-set run ended badly. A KIND, not a message: the
+ *  panel owns the words, so nothing a backend or a fetch failure produced is
+ *  ever printed to the user.
+ *
+ *   timeout  — the poll budget ran out with the run still going
+ *   network  — the browser lost the backend mid-poll
+ *   notfound — the set is gone (404); no existence/access language either way
+ *   failed   — the run itself reported failure
+ */
+export type TicketSetFailureKind = "timeout" | "network" | "notfound" | "failed"
 
 export function isBriefEmpty(b: BriefState): boolean {
   return (

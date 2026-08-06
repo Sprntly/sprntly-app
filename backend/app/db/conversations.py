@@ -21,6 +21,29 @@ from app.db.client import require_client
 logger = logging.getLogger(__name__)
 
 
+def conversation_belongs_to_company(conversation_id: int, company_id: str) -> bool:
+    """Whether this conversation exists AND belongs to this company.
+
+    Conversation ids are sequential integers, so any route that accepts one from
+    the client has to prove ownership before storing it — otherwise a caller can
+    stamp their own artifact with a foreign tenant's conversation id and read
+    that chat's title back out of the artifacts listing. Callers turn False into
+    404 (never 403): "exists but not yours" and "doesn't exist" must be
+    indistinguishable.
+    """
+    rows = (
+        require_client().table("conversations")
+        .select("id")
+        .eq("id", conversation_id)
+        .eq("company_id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return bool(rows)
+
+
 def bind_conversation_to_prd(
     conversation_id: int,
     prd_id: int,
