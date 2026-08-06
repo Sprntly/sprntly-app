@@ -1741,10 +1741,11 @@ export type ConnectionSummary = {
     // An entry may be a FOLDER: only Drive metadata says which, so the shape is
     // identical either way.
     files?: GoogleDrivePickedFile[]
-    // Written by the sync: folder id -> the files that folder expanded to on
-    // the last run. Present (possibly empty) for every picked entry that turned
-    // out to be a folder, which is also how the UI knows an entry IS one.
-    folder_contents?: Record<string, GoogleDrivePickedFile[]>
+    // Written by the sync: folder id -> the SUBTREE (sub-folders and files,
+    // each parented by parentId) that folder expanded to on the last run.
+    // Present (possibly empty) for every picked entry that turned out to be a
+    // folder, which is also how the UI knows an entry IS one.
+    folder_contents?: Record<string, GoogleDriveTreeNode[]>
     // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string
@@ -1836,6 +1837,16 @@ export type GoogleDriveSyncResult = {
 export type GoogleDrivePickedFile = {
   id: string
   name?: string
+}
+
+/** One node in a picked folder's stored subtree (see backend
+ *  `google_drive_sync.expand_folder`): a sub-folder or a file, parented to
+ *  the folder it was found in (`parentId` — the picked root's own id for a
+ *  direct child). Superset of GoogleDrivePickedFile, so legacy flat data (no
+ *  `mimeType`/`parentId`) still satisfies this shape. */
+export type GoogleDriveTreeNode = GoogleDrivePickedFile & {
+  mimeType?: string | null
+  parentId?: string | null
 }
 
 /** Short-lived, drive.file-scoped access token for the browser Google Picker. */

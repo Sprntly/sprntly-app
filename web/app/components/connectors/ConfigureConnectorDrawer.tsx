@@ -357,6 +357,27 @@ type ConfigureConnectorDrawerProps = {
   onDisconnected: () => void
 }
 
+/**
+ * Whether the Drive Picker should offer folder selection for this
+ * connection: only once its granted OAuth scope actually includes
+ * drive.readonly. Under the narrower drive.file scope (today's default,
+ * `scopes` holds `.../auth/drive.file`) a picked folder grants the folder
+ * object but nothing beneath it, so offering selection is a silent trap —
+ * this stays false and the Picker behaves exactly as it does on main today.
+ *
+ * The one-line change to enable it later: swap `DRIVE_FILE_SCOPE` for
+ * `DRIVE_READONLY_SCOPE` in `DRIVE_SCOPES`
+ * (backend/app/connectors/google_oauth.py). Every connection made (or
+ * reconnected) after that swap gets a `scopes` string containing
+ * drive.readonly, and this function flips on for it automatically — no
+ * further frontend change needed.
+ */
+export function driveFolderSelectEnabled(
+  connection: ConnectionSummary | null | undefined,
+): boolean {
+  return Boolean(connection?.scopes?.includes("drive.readonly"))
+}
+
 function lookupItem(providerId: string): ConnectorItemRow | null {
   for (const cat of CONNECTOR_CATALOG) {
     const found = cat.items.find((i) => i.id === providerId)
@@ -498,6 +519,7 @@ export function ConfigureConnectorDrawer({
         dataset={activeCompany}
         savedFiles={connection?.config?.files}
         folderContents={connection?.config?.folder_contents}
+        folderSelectEnabled={driveFolderSelectEnabled(connection)}
         onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
