@@ -55,7 +55,15 @@ def test_every_missing_id_blocks_activation(dropped):
     assert missing_impl_spec_ids(broken) == [dropped]
     verdict = validate_impl_spec_skeleton(broken)
     assert verdict.status == "needs_review"
-    assert verdict.notes, "a blocked format must say why"
+    # ONE note, carrying its OWN code. Borrowing the PRD-side codes was
+    # technically honest and actually misleading: a customer who dropped B6 read
+    # a sentence about how Sprntly wants their requirements listed, which
+    # describes neither what they did nor what to fix.
+    assert [n["code"] for n in verdict.notes] == ["missing_spec_sections"]
+    # The specific ids are logged, never rendered — "B6 is missing" is the same
+    # class of jargon as "`ul.ev` is missing".
+    import re as _re
+    assert not _re.search(r"\bB[0-9]\b", verdict.notes[0]["message"])
 
 
 def test_a_bare_mention_in_prose_does_not_satisfy_a_missing_section():
@@ -166,3 +174,71 @@ def test_a_foreign_id_is_none_and_a_prd_row_is_left_alone(
     assert compile_impl_spec.compile_impl_spec_template("other-co", row["id"]) is None
     left = compile_impl_spec.compile_impl_spec_template("co-spec", prd_row["id"])
     assert left["compile_status"] == "pending"
+
+
+def test_the_dispatch_routes_an_impl_spec_row_to_this_compiler(
+    isolated_settings, monkeypatch
+):
+    """`schedule_compile` only reserves the row; `compile_prd_template` is what
+    picks a compiler by type. Without this branch an engineering-spec format
+    stays `pending` forever and the whole milestone is inert — which is exactly
+    what it did before this landed."""
+    from app.artifact_templates import compile_prd
+
+    row = _seed(isolated_settings["supabase"])
+
+    class _R:
+        output = {"skeleton_md": _GOOD}
+
+    seen = {}
+
+    def _call(**kwargs):
+        seen.update(kwargs)
+        return _R()
+
+    # Patched on the IMPL-SPEC module: if the dispatch failed and the PRD
+    # compiler ran instead, this mock would never be reached and the PRD
+    # compiler's own `llm_call` would fire.
+    monkeypatch.setattr(compile_impl_spec, "llm_call", _call)
+    monkeypatch.setattr(
+        compile_prd, "llm_call",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("PRD compiler ran")),
+    )
+
+    updated = compile_prd.compile_prd_template("co-spec", row["id"])
+    assert seen["purpose"] == "compile_impl_spec_template"
+    assert updated["compile_status"] == "ready"
+
+
+def test_a_ticket_row_goes_to_the_parser_and_makes_no_model_call(
+    isolated_settings, monkeypatch
+):
+    """The third dispatch leg, and the odd one out: a ticket format compiles
+    through a DETERMINISTIC markdown parser, so a model call on this path would
+    be a bug rather than a cost. The layout is stored as JSON in `compiled`,
+    which is the contract `stories.layout.resolve_ticket_layout` reads back."""
+    import json
+
+    from app.artifact_templates import compile_prd
+    from app.db.artifact_templates import update_template
+
+    row = _seed(isolated_settings["supabase"], artifact_type="tickets")
+    update_template(
+        company_id="co-spec", template_id=row["id"],
+        source_md="# Acme ticket\n\n## What\n\n## Why now\n\n## User story\n",
+    )
+
+    def _never(**_kwargs):
+        raise AssertionError("a ticket layout needs a parser, not a model call")
+
+    monkeypatch.setattr(compile_prd, "llm_call", _never)
+    monkeypatch.setattr(compile_impl_spec, "llm_call", _never)
+
+    updated = compile_prd.compile_prd_template("co-spec", row["id"])
+    assert updated["compile_status"] == "ready"
+    layout = json.loads(updated["compiled"])
+    sources = [e["source"] for e in layout]
+    # The canonical headings mapped; the document's own H1 became a custom
+    # section, which is the parser's documented behaviour for a heading that
+    # names nothing canonical.
+    assert {"what", "why_now", "user_story"}.issubset(sources)

@@ -31,6 +31,39 @@ from __future__ import annotations
 import uuid
 
 _SOURCE = "# Acme PRD\n\n## Context\n\n## Requirements\n"
+
+# Fixtures for the all-three-dispatch guard at the bottom of this file. A ticket
+# format is read by a deterministic parser, so its headings have to be real
+# ones; the other two are model output and are only ever mocked.
+_TICKET_FORMAT_MD = (
+    "# Acme ticket\n\n## What\n\n## Why now\n\n## User story\n\n## Scope\n"
+)
+_PRD_SKELETON = (
+    "<!DOCTYPE html><html><head><style></style></head><body>"
+    '<div class="frame"><div class="page" contenteditable="true">'
+    '<h1>{{title}}</h1><div class="byline">{{author}}</div>'
+    '<ul class="ev"><li>{{claim}}</li></ul>'
+    '<div class="appendix"><ul class="inputs"><li>{{q}}</li></ul></div>'
+    "</div></div></body></html>"
+)
+_SPEC_SKELETON = (
+    "# Engineering Spec\n## B0. Source\n## B1. Context\n## B2. Stakes\n"
+    "## B3. Rules\n## B4. Contracts\n## B5. Escalations\n## B6. Cross-cutting\n"
+    "## B7. Tasks\n## B8. Done when\n## B9. Verification\n"
+)
+
+
+class _FakeCompileResult:
+    """The `.output` shape `llm_call` returns, for the two model-backed
+    compilers. `key` differs because a PRD skeleton is HTML and a spec skeleton
+    is markdown, and each compiler's JSON schema names its own field."""
+
+    def __init__(self, skeleton: str, key: str = "skeleton_html"):
+        self.output = {key: skeleton}
+        if key == "skeleton_html":
+            self.output["section_map"] = {
+                "sections": [], "unmapped_house": [], "extra_sections": [],
+            }
 _URL = "/v1/artifact-templates"
 
 
@@ -320,18 +353,17 @@ def test_generation_enabled_is_top_level_and_present_on_an_empty_library(
     renders all three group headers — a per-row flag would have nothing to hang
     off, which is why this is top-level.
 
-    `prd` is now TRUE: `prd_runner.resolve_prd_template` genuinely reads this
-    table, and an active PRD format governs every PRD the company generates. The
-    other two are still FALSE because nothing reads them — the
-    implementation-spec skeleton and the ticket description layout are later
-    milestones. The map is served from ONE backend constant precisely so a
-    screen can never tell a user their tickets changed when nothing did."""
+    All three are now TRUE, each flipped by the milestone that gave it a reader:
+    `resolve_prd_template` for the PRD skeleton, `resolve_impl_spec_template`
+    for the Part B spec, and `stories.layout.resolve_ticket_layout` for the
+    ticket description. The map is served from ONE backend constant precisely so
+    a screen can never tell a user their tickets changed when nothing did."""
     t = tenant_client.make(slug="acme")
     body = t.client.get(_URL).json()
 
     assert body["templates"] == []
     assert body["generation_enabled"] == {
-        "prd": True, "tickets": False, "impl_spec": False
+        "prd": True, "tickets": True, "impl_spec": True
     }
 
 
@@ -860,22 +892,63 @@ def test_activating_a_prd_format_really_changes_what_generation_uses(tenant_clie
     assert t.client.get(_URL).json()["generation_enabled"]["prd"] is True
 
 
-def test_tickets_and_impl_spec_are_still_inert(tenant_client):
-    """The other two types have a full library, checks and activation — and no
-    reader. `generation_enabled` is what stops a screen implying otherwise, so
-    it has to stay false until the milestone that makes each true."""
+def test_every_type_is_live_and_every_type_has_a_compiler(tenant_client, monkeypatch):
+    """All three types now have a reader, so `generation_enabled` is all-true
+    and the old inertness guard has nothing left to guard.
+
+    WHAT REPLACES IT is the more valuable half: that every artifact_type is
+    DISPATCHED to a compiler of its own rather than falling through
+    `compile_prd_template`'s early return. Both dispatch gaps this feature
+    shipped with — the engineering spec's and the ticket layout's — were exactly
+    that fall-through, and both were silent: the row sits at `pending` forever,
+    the resolver correctly finds `compiled == ""` and falls back, and every
+    surface tells the truth while the feature does nothing. Nothing else in the
+    suite would have caught either one, and a fourth type added later would
+    reintroduce it."""
+    from app.artifact_templates import compile_impl_spec, compile_prd
+    from app.artifact_templates.store import ARTIFACT_TYPES
+
     t = tenant_client.make(slug="acme")
-    for artifact_type in ("tickets", "impl_spec"):
-        tid = _create(t.client, name=f"{artifact_type} form",
-                      artifact_type=artifact_type).json()["id"]
-        _make_ready(t.company_id, tid)
-        assert t.client.post(f"{_URL}/{tid}/activate").status_code == 200
 
     enabled = t.client.get(_URL).json()["generation_enabled"]
-    assert enabled["tickets"] is False
-    assert enabled["impl_spec"] is False
+    assert enabled == {"prd": True, "tickets": True, "impl_spec": True}
+    # The flag map and the type set cannot drift apart unnoticed.
+    assert set(enabled) == set(ARTIFACT_TYPES)
 
-    # The impl-spec generator still loads the vendored B0-B9 skeleton.
-    import app.prd_runner as prd_runner
+    # One row per type, each dispatched through the REAL entry point. The two
+    # model-backed compilers are mocked at their own module, so reaching the
+    # wrong one is observable rather than merely unlikely.
+    calls = []
+    monkeypatch.setattr(
+        compile_prd, "llm_call",
+        lambda **k: calls.append("prd") or _FakeCompileResult(_PRD_SKELETON),
+    )
+    monkeypatch.setattr(
+        compile_impl_spec, "llm_call",
+        lambda **k: calls.append("impl_spec") or _FakeCompileResult(
+            _SPEC_SKELETON, key="skeleton_md"
+        ),
+    )
 
-    assert "B0" in prd_runner._load_part_b_template()
+    for artifact_type in ARTIFACT_TYPES:
+        tid = _create(
+            t.client, name=f"{artifact_type} form", artifact_type=artifact_type,
+            source_md=_TICKET_FORMAT_MD,
+        ).json()["id"]
+        calls.clear()
+        updated = compile_prd.compile_prd_template(t.company_id, tid)
+        assert updated is not None, artifact_type
+        # The row LEFT `pending`, which is the whole assertion: a type with no
+        # dispatch branch comes back untouched.
+        assert updated["compile_status"] != "pending", (
+            f"{artifact_type} fell through the dispatch and was never compiled"
+        )
+        assert (updated.get("compiled") or "") != "", artifact_type
+        # …and it reached its OWN compiler, not a neighbour's.
+        if artifact_type == "prd":
+            assert calls == ["prd"]
+        elif artifact_type == "impl_spec":
+            assert calls == ["impl_spec"]
+        else:
+            # Tickets are a deterministic parser — no model call at all.
+            assert calls == []

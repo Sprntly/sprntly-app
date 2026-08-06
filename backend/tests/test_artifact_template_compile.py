@@ -613,10 +613,16 @@ def test_claiming_a_row_for_a_recompile_does_not_blank_it_either(
     assert mod._reserve("co-1", row["id"]) is False
 
 
-def test_a_non_prd_format_is_left_alone(isolated_settings, monkeypatch):
-    # The ticket and engineering-spec compilers are later milestones. Running a
-    # ticket format through a compiler written for PRD HTML would produce a
-    # confident, wrong skeleton.
+def test_a_non_prd_format_never_reaches_the_prd_compiler(
+    isolated_settings, monkeypatch
+):
+    """Running a ticket format through a compiler written for PRD HTML would
+    produce a confident, wrong skeleton.
+
+    This used to assert the row was left at `pending`, which was only true while
+    the other two compilers did not exist. They do now, so the row IS compiled —
+    by its own compiler. What still has to hold, and what this pins, is that the
+    PRD compiler's `llm_call` is never the one that runs."""
     _seed_company(isolated_settings["supabase"])
     row = _add("co-1", artifact_type="tickets")
     called: list = []
@@ -628,7 +634,9 @@ def test_a_non_prd_format_is_left_alone(isolated_settings, monkeypatch):
 
     mod.compile_prd_template("co-1", row["id"])
     assert called == []
-    assert get_template_by_id("co-1", row["id"])["compile_status"] == "pending"
+    # Dispatched to the ticket parser instead — deterministic, no model call at
+    # all, and the row does not sit at `pending` forever.
+    assert get_template_by_id("co-1", row["id"])["compile_status"] != "pending"
 
 
 def test_a_foreign_template_id_compiles_nothing(isolated_settings, monkeypatch):

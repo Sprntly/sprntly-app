@@ -45,6 +45,7 @@ later milestone, and the gate it will need is `compiled != ""` — the column is
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 
@@ -53,6 +54,11 @@ from app.artifact_templates.store import (
     normalize_compile_notes,
     normalize_section_map,
 )
+# The TICKET leg of the dispatch below. A deterministic parser rather than a
+# model call, so it is imported at module level like any other helper — only the
+# impl-spec compiler needs a local import, because that module imports from the
+# same two this one does and would close a cycle.
+from app.stories.layout import TicketLayoutError, compile_ticket_layout
 from app.artifact_templates.validate import validate_prd_skeleton
 from app.graph.gateway import llm_call
 from app.skills.loader import get_skill
@@ -237,10 +243,25 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
     row = db.get_template_by_id(company_id, template_id)
     if row is None:
         return None
+    if row.get("artifact_type") == "impl_spec":
+        # An engineering-spec format compiles to MARKDOWN with a different set
+        # of guarantees (the B0-B9 ids, not the HTML class vocabulary), so it
+        # goes to its own compiler. Dispatched here rather than in
+        # `schedule_compile` because that function only reserves the row and is
+        # correct for both. Imported locally: `compile_impl_spec` imports from
+        # the same two modules this one does, and a module-level import would
+        # close the cycle.
+        from app.artifact_templates.compile_impl_spec import (
+            compile_impl_spec_template,
+        )
+
+        return compile_impl_spec_template(company_id, template_id)
+    if row.get("artifact_type") == "tickets":
+        return _compile_ticket_layout_row(company_id, row)
     if row.get("artifact_type") != "prd":
-        # The ticket and engineering-spec compilers are separate milestones;
-        # until they exist, their formats stay `pending` rather than being run
-        # through a compiler written for a different output vocabulary.
+        # An artifact_type with no compiler at all. Unreachable while the column
+        # check holds the set to three, and a row left `pending` is the right
+        # answer if a fourth ever lands before its compiler does.
         return row
 
     source_md = row.get("source_md") or ""
@@ -321,6 +342,57 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
         compiled=store_skeleton,
         section_map=store_map,
         compile_notes=notes,
+    )
+
+
+def _compile_ticket_layout_row(company_id: str, row: dict) -> dict | None:
+    """Compile one TICKET format into its stored description layout.
+
+    The odd one out, and deliberately so: this is a DETERMINISTIC MARKDOWN
+    PARSER, not a model call. A ticket format is a list of section headings, and
+    reading them needs a parser — so there is no gateway call, no prompt, no
+    untrusted-text fencing, and nothing to fail transiently. The `try` below is
+    for a format we cannot make a layout out of, not for a flaky dependency.
+
+    A ticket format's compiled artifact IS the layout: `resolve_ticket_layout`
+    reads `compiled` as JSON, so `json.dumps` is the storage contract between
+    the two. It re-normalises what it reads rather than trusting it, which is
+    what keeps a row written by an older build from putting an unknown `source`
+    in front of `to_description`.
+
+    Kept in this module beside the other two dispatch legs rather than in
+    `stories/layout.py`, so all three compilers are chosen in one place and the
+    status-writing contract ("every exit writes a status") is visibly the same
+    for each."""
+    template_id = row["id"]
+    try:
+        layout = compile_ticket_layout(row.get("source_md") or "")
+    except TicketLayoutError as e:
+        # `needs_review`, not `failed`: the file was read fine, it just has no
+        # headings we can build a description out of. That is previewable and
+        # fixable, and the message on the exception is already user-facing.
+        logger.info(
+            "ticket_layout_compile_unusable company_present=%s", bool(company_id)
+        )
+        return db.set_compile_result(
+            company_id=company_id,
+            template_id=template_id,
+            compile_status="needs_review",
+            compile_notes=normalize_compile_notes([{
+                "code": "missing_requirements",
+                "message": str(e),
+            }]),
+        )
+    logger.info(
+        "ticket_layout_compiled company_present=%s sections=%s",
+        bool(company_id), len(layout),
+    )
+    return db.set_compile_result(
+        company_id=company_id,
+        template_id=template_id,
+        compile_status="ready",
+        compiled=json.dumps(layout),
+        compile_notes=[],
     )
 
 

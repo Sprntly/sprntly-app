@@ -50,15 +50,25 @@ ARTIFACT_TYPE_LABELS: dict[str, str] = {
 # a compiled skeleton now genuinely governs every PRD the company generates,
 # and the PRD row records which format wrote it (prds.artifact_template_id).
 #
-# The other two are still false because nothing reads them: the
-# implementation-spec skeleton (`prd_runner._load_part_b_template`) and the
-# ticket description layout are their own milestones. Flip each one HERE, in the
-# milestone that makes it true, and nowhere else — a client that hardcodes this
-# tells a user their tickets changed when nothing did.
+# `impl_spec` is TRUE from the milestone that made
+# `prd_runner.resolve_impl_spec_template` replace `_load_part_b_template()` at
+# its call site: an active engineering-spec format with a compiled skeleton now
+# governs the Part B spec, and the B0-B9 ids the ticket generator reads are an
+# activation gate rather than a hope.
+#
+# `tickets` is TRUE from the milestone that made `stories.layout` compile an
+# uploaded ticket format into a description layout and `to_description` render
+# through it — with `story_editable_text`, `_IMPORT_LABELS` and the web's
+# section labels moved in the same change, so the tracker round-trip still
+# normalises back to a stable content hash.
+#
+# All three are now live. Flip a flag HERE, in the milestone that makes it true,
+# and nowhere else — a client that hardcodes this tells a user their tickets
+# changed when nothing did.
 GENERATION_ENABLED: dict[str, bool] = {
     "prd": True,
-    "tickets": False,
-    "impl_spec": False,
+    "tickets": True,
+    "impl_spec": True,
 }
 
 # Cap on the uploaded/pasted markdown, in characters. Mirrors
@@ -90,6 +100,13 @@ COMPILE_NOTE_CODES: frozenset[str] = frozenset(
         "missing_requirements",
         "missing_title",
         "missing_style_marker",
+        # ENGINEERING SPEC only. Its skeleton is markdown with no class
+        # vocabulary, so the six hooks above do not apply to it — the one thing
+        # that must survive is the B0-B9 section ids the ticket generator reads.
+        # It gets its own code rather than borrowing `missing_requirements`,
+        # which was technically honest and actually misleading: a customer who
+        # dropped B6 read a sentence about how their requirements are listed.
+        "missing_spec_sections",
         # Safety refusals — the uploaded format carries something we will not
         # put inside a document.
         "unsafe_script",

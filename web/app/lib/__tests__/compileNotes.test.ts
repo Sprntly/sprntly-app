@@ -32,6 +32,7 @@ const KNOWN: [string, RegExp][] = [
   ["missing_requirements", /row or a user story/],
   ["missing_title", /no single document title/],
   ["missing_style_marker", /come out unformatted/],
+  ["missing_spec_sections", /without acceptance criteria/],
   ["unsafe_script", /won't run scripts inside a document/],
   ["unsafe_attribute", /runs when a document is opened/],
   ["unsafe_remote_asset", /only allows Google Fonts/],
@@ -74,6 +75,32 @@ describe("translateCompileNote", () => {
     expect(translateCompileNote("<script> tag found in the upload")).toMatch(
       /won't run scripts/,
     )
+  })
+
+  it("an engineering spec's missing sections never read as 'try again'", () => {
+    // This note's own message contains "couldn't", which the compile-error
+    // catch-all would otherwise claim — turning "your format is missing
+    // sections" into "something went wrong, try again", advice that fixes
+    // nothing. The row's `compile_summary` arrives as a bare message, so the
+    // substring path is the one a user actually hits.
+    const summary =
+      "We couldn't find every section a Sprntly engineering spec needs. Your " +
+      "format is missing the parts the ticket generator reads, so tickets " +
+      "from it would come back without acceptance criteria."
+    expect(translateCompileNote(summary)).toMatch(/without acceptance criteria/)
+    expect(translateCompileNote(summary)).not.toMatch(/Nothing about your file/)
+    // And it does NOT borrow the PRD-side requirements sentence, which is what
+    // it used to say and which describes neither the problem nor the fix.
+    expect(translateCompileNote({ code: "missing_spec_sections", message: "B6 gone" }))
+      .not.toMatch(/row or a user story/)
+  })
+
+  it("never leaks a B-id, which is jargon exactly as `ul.ev` is", () => {
+    const out = translateCompileNote({
+      code: "missing_spec_sections",
+      message: "missing B0, B6 and B7 in the skeleton",
+    })
+    expect(out).not.toMatch(/\bB[0-9]\b/)
   })
 
   it("never echoes the raw message, even when it is the only input", () => {

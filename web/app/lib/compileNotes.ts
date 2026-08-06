@@ -155,6 +155,15 @@ const BY_CODE: Record<string, string> = {
   missing_style_marker:
     "We couldn't fit Sprntly's styling into your format. Documents would come " +
     "out unformatted.",
+  // ENGINEERING SPEC only. That skeleton is markdown with no class vocabulary,
+  // so none of the hooks above apply to it; what has to survive is the B0–B9
+  // section ids the ticket generator reads. Names the CONSEQUENCE rather than
+  // the ids, because "B6 is missing" is the same class of jargon as "`ul.ev` is
+  // missing" — and the preview is where someone fixing it will actually look.
+  missing_spec_sections:
+    "We couldn't find every section a Sprntly engineering spec needs. Your " +
+    "format is missing the parts the ticket generator reads, so tickets from " +
+    "it would come back without acceptance criteria.",
   unsafe_script:
     "Your file contains a script. Sprntly won't run scripts inside a document " +
     "— remove it and upload again.",
@@ -195,6 +204,17 @@ function guessCode(raw: string): string | null {
   }
   if (/remote|external (image|stylesheet|asset)|another site|off-allowlist/.test(s)) {
     return "unsafe_remote_asset"
+  }
+  // ── engineering spec ─────────────────────────────────────────────────────
+  // BEFORE the structural hooks and well before the compile-error catch-all:
+  // this note's own message contains "couldn't", which that catch-all would
+  // otherwise claim, turning "your format is missing sections" into "something
+  // went wrong, try again" — advice that fixes nothing.
+  if (
+    /\bb0\b|b0–b9|b0-b9|engineering spec needs|ticket generator reads|acceptance criteria/
+      .test(s)
+  ) {
+    return "missing_spec_sections"
   }
   // ── structural hooks ─────────────────────────────────────────────────────
   if (/ul\.ev\b|evidence list|\bevidence\b/.test(s)) return "missing_evidence_list"

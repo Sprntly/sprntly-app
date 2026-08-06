@@ -455,16 +455,17 @@ def validate_impl_spec_skeleton(markdown: str) -> ValidationResult:
     Then the B0–B9 ids. Any missing id is `needs_review` — previewable, fixable,
     but not activatable, because the failure it causes downstream is silent.
 
-    NOTE CODES ARE CONSTRAINED, and the choice below is deliberate rather than
-    ideal. `store.COMPILE_NOTE_CODES` is a closed set shared with
-    `web/app/lib/compileNotes.ts`, and it has no id-specific member: `_note`
-    raises on anything outside it, precisely so a drifted code cannot silently
-    render as a generic line. So the missing ids are reported through the two
-    existing codes whose shipped sentences are actually true of them — a lost
-    title/derivation header reads as `missing_title`, a lost requirements or
-    acceptance-test section as `missing_requirements`. A dedicated
-    `missing_spec_sections` code would say it better and is worth adding the
-    next time `store.py` and the web table move together.
+    ONE note, `missing_spec_sections`, whichever ids are gone. This code exists
+    rather than borrowing the PRD-side ones because borrowing them was
+    technically honest and actually misleading: a customer who dropped B6 read a
+    sentence explaining how Sprntly wants their requirements listed, which
+    describes neither what they did nor what to fix. The six hooks above belong
+    to an HTML PRD and have no meaning in a markdown spec.
+
+    The message names the CONSEQUENCE — tickets arriving without acceptance
+    criteria — not the ids, because "B6 is missing" is the same class of jargon
+    as "`ul.ev` is missing". The specific ids are logged, and the preview shows
+    the skeleton, which is where someone fixing it will actually look.
     """
     if _SCRIPT_RE.search(markdown or ""):
         return ValidationResult(
@@ -480,27 +481,17 @@ def validate_impl_spec_skeleton(markdown: str) -> ValidationResult:
     if not missing:
         return ValidationResult(status="ready")
 
-    notes: list[dict] = []
-    # B0 is the derivation header that names the source Part A, so losing it is
-    # the same class of problem as losing the document's title.
-    if "B0" in missing:
-        notes.append(_note(
-            "missing_title",
-            "Your format has no single document title. Sprntly needs one "
-            "heading at the top to name each document.",
-        ))
-    # Everything else lands here: B3 and B8 are what the ticket generator reads,
-    # and the remaining ids are structure the coding agent is told to expect.
-    if any(bid != "B0" for bid in missing):
-        notes.append(_note(
-            "missing_requirements",
-            "We couldn't tell how your format lists requirements. Sprntly "
-            "needs each one as a row or a user story so tickets can cite it.",
-        ))
-
     logger.info(
         "impl_spec_skeleton_missing_ids missing=%s gates_tickets=%s",
         ",".join(missing),
         bool(_IMPL_SPEC_REQUIREMENT_IDS.intersection(missing)),
     )
-    return ValidationResult(status="needs_review", notes=notes)
+    return ValidationResult(
+        status="needs_review",
+        notes=[_note(
+            "missing_spec_sections",
+            "We couldn't find every section a Sprntly engineering spec needs. "
+            "Your format is missing the parts the ticket generator reads, so "
+            "tickets from it would come back without acceptance criteria.",
+        )],
+    )
