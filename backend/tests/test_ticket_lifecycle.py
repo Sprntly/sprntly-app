@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.stories.generate import Story
 from tests._company_helpers import company_client
 from tests.test_ticket_sync import CID, FakeTracker, _seed_prd_tickets, _sync_cfg, fake_tracker  # noqa: F401
+from app.stories.scope import prd_scope
 
 # See test_ticket_sync.py's `pytestmark` for why — same shared CID/FakeTracker
 # fixture family, pinned to one xdist worker as defense in depth.
@@ -39,7 +40,7 @@ def client(isolated_settings, monkeypatch) -> TestClient:
 def test_delete_marks_the_ticket_rather_than_dropping_the_row(client: TestClient):
     """A hard delete would be erased by the next PRD regeneration, which
     rebuilds prd_tickets.stories from scratch and knows nothing about it."""
-    with patch("app.stories.sync.kick_prd_sync_from_key", return_value=False):
+    with patch("app.stories.sync.kick_sync_from_key", return_value=False):
         resp = client.delete(f"/v1/tickets/{KEY}")
     assert resp.status_code == 200, resp.text
     assert resp.json()["lifecycle"] == "deleted"
@@ -59,7 +60,7 @@ def _cid(client: TestClient) -> str:
 def test_delete_kicks_the_tracker_sync(client: TestClient):
     """The tracker side is left to the sync pass — it already knows how to
     delete-or-close, drop the mapping and RETRY a failed removal."""
-    with patch("app.stories.sync.kick_prd_sync_from_key", return_value=True) as kick:
+    with patch("app.stories.sync.kick_sync_from_key", return_value=True) as kick:
         body = client.delete(f"/v1/tickets/{KEY}").json()
     kick.assert_called_once()
     assert kick.call_args[0][1] == KEY
@@ -68,7 +69,7 @@ def test_delete_kicks_the_tracker_sync(client: TestClient):
 
 @pytest.mark.parametrize("state", ["excluded", "deleted", "active"])
 def test_lifecycle_route_sets_each_state(client: TestClient, state):
-    with patch("app.stories.sync.kick_prd_sync_from_key", return_value=False):
+    with patch("app.stories.sync.kick_sync_from_key", return_value=False):
         resp = client.put(f"/v1/tickets/{KEY}/lifecycle", json={"lifecycle": state})
     assert resp.status_code == 200, resp.text
     from app.db.ticket_lifecycle import get_lifecycle
@@ -84,7 +85,7 @@ def test_lifecycle_route_rejects_an_unknown_state(client: TestClient):
 def test_lifecycle_survives_other_field_saves(client: TestClient):
     """The mark shares a row with every other override, so an ordinary edit
     must not quietly resurrect a deleted ticket."""
-    with patch("app.stories.sync.kick_prd_sync_from_key", return_value=False):
+    with patch("app.stories.sync.kick_sync_from_key", return_value=False):
         client.delete(f"/v1/tickets/{KEY}")
         client.put(f"/v1/tickets/{KEY}/fields", json={"priority": "P1 — High"})
     from app.db.ticket_lifecycle import get_lifecycle
@@ -143,7 +144,7 @@ def test_sync_removes_a_marked_ticket_from_the_tracker(
     # Its stale tracker state leaves the sync row too.
     from app.db.ticket_sync import get_sync_config
 
-    assert base["id"] not in (get_sync_config(CID, 7)["statuses"] or {})
+    assert base["id"] not in (get_sync_config(CID, prd_scope(7))["statuses"] or {})
 
 
 def test_sync_keeps_the_mapping_when_removal_fails(
