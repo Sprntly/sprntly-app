@@ -128,16 +128,59 @@ function splitAcTag(text: string): { tag: "failure" | "edge" | null; rest: strin
 // parses that text back into the same styled sections — so an edited ticket
 // keeps its What / Why now / … layout instead of collapsing to a blob.
 
-const DESC_SECTION_LABELS = ["What", "Why now", "User story", "The ticket must cover", "Out of scope"]
+// A ticket generated under the company's own ticket format carries its LAYOUT:
+// an ordered [{label, source}] naming which sections render, in what order,
+// under what labels. Mirrors backend/app/stories/layout.py — the labels here
+// MUST match what `sync.story_editable_text` produces, or the editor parses
+// text it cannot recognise and the tracker sync sees a permanent phantom diff.
+type DescLayoutEntry = { label: string; source: string }
+
+/** The default layout's EDIT labels, in order. `scope` is deliberately labelled
+ *  "The ticket must cover" — a legacy rename the backend mirrors exactly. */
+const DEFAULT_DESC_LAYOUT: DescLayoutEntry[] = [
+  { label: "What", source: "what" },
+  { label: "Why now", source: "why_now" },
+  { label: "User story", source: "user_story" },
+  { label: "The ticket must cover", source: "scope" },
+  { label: "Out of scope", source: "out_of_scope" },
+]
+
+/** A story's layout, or the default. Read defensively — a ticket generated
+ *  before formats existed simply has no `description_layout`. */
+export function descLayoutOf(s: GeneratedStory): DescLayoutEntry[] {
+  const raw = (s as { description_layout?: unknown }).description_layout
+  if (!Array.isArray(raw) || raw.length === 0) return DEFAULT_DESC_LAYOUT
+  const out = raw.filter(
+    (e): e is DescLayoutEntry =>
+      !!e &&
+      typeof (e as DescLayoutEntry).label === "string" &&
+      typeof (e as DescLayoutEntry).source === "string",
+  )
+  return out.length ? out : DEFAULT_DESC_LAYOUT
+}
+
+const DESC_SECTION_LABELS = DEFAULT_DESC_LAYOUT.map((e) => e.label)
+
+/** The content behind one layout entry: a string, a list (scope), or "". */
+function sectionValue(s: GeneratedStory, e: DescLayoutEntry): string | string[] {
+  if (e.source.startsWith("custom:")) {
+    const key = e.source.slice("custom:".length)
+    const custom = (s as { custom_sections?: Record<string, string> }).custom_sections
+    return (custom && custom[key]) || ""
+  }
+  if (e.source === "scope") return s.scope || []
+  return (s as unknown as Record<string, string>)[e.source] || ""
+}
 
 /** Serialize a structured story's sections into the editable text form. */
 export function storyToEditableText(s: GeneratedStory): string {
   const parts: string[] = []
-  if (s.what) parts.push(`What\n${s.what}`)
-  if (s.why_now) parts.push(`Why now\n${s.why_now}`)
-  if (s.user_story) parts.push(`User story\n${s.user_story}`)
-  if (s.scope && s.scope.length) parts.push(`The ticket must cover\n${s.scope.map((x) => `- ${x}`).join("\n")}`)
-  if (s.out_of_scope) parts.push(`Out of scope\n${s.out_of_scope}`)
+  for (const e of descLayoutOf(s)) {
+    const v = sectionValue(s, e)
+    if (!v || (Array.isArray(v) && !v.length)) continue
+    const body = Array.isArray(v) ? v.map((x) => `- ${x}`).join("\n") : v
+    parts.push(`${e.label}\n${body}`)
+  }
   return parts.length ? parts.join("\n\n") : (s.body || "")
 }
 
@@ -147,11 +190,14 @@ type DescBlock = { label: string | null; text: string; items?: string[] }
  *  is exactly a known section label starts a section; a block of "- " bullets
  *  renders as a list; anything else is a plain paragraph. Freeform text (no
  *  labels) comes back as one unlabeled block. */
-export function parseDescBlocks(text: string): DescBlock[] {
+export function parseDescBlocks(
+  text: string,
+  labels: string[] = DESC_SECTION_LABELS,
+): DescBlock[] {
   const blocks: DescBlock[] = []
   let cur: DescBlock | null = null
   for (const line of text.split(/\r?\n/)) {
-    const label = DESC_SECTION_LABELS.find(
+    const label = labels.find(
       (l) => line.trim().toLowerCase() === l.toLowerCase(),
     )
     if (label) {
@@ -193,18 +239,31 @@ function gwtHtml(text: string): string {
   )
 }
 
-/** A generated (structured) story's sections as editable HTML. */
+/** A generated (structured) story's sections as editable HTML, in the layout
+ *  the ticket was written under.
+ *
+ *  A section the company's own format asked for renders its LABEL even when it
+ *  is empty (house keep-empty-fields rule): the format says a ticket has that
+ *  section, so a reader has to see that it is blank rather than wonder whether
+ *  it was dropped. The five canonical sections keep their existing
+ *  skip-when-empty behaviour, so a default-layout ticket looks exactly as it
+ *  did. */
 function structuredDescHtml(s: GeneratedStory): string {
   const parts: string[] = []
-  const label = (l: string) => `<div class="tkv2-dlbl">${l}</div>`
-  if (s.what) parts.push(`${label("What")}<p class="tkv2-dtx">${escapeHtml(s.what)}</p>`)
-  if (s.why_now) parts.push(`${label("Why now")}<p class="tkv2-dtx">${escapeHtml(s.why_now)}</p>`)
-  if (s.user_story) parts.push(`${label("User story")}<p class="tkv2-dtx">${gwtHtml(s.user_story)}</p>`)
-  if (s.scope && s.scope.length) {
-    parts.push(`${label("The ticket must cover")}<ul class="tkv2-dlist">${
-      s.scope.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`)
+  const label = (l: string) => `<div class="tkv2-dlbl">${escapeHtml(l)}</div>`
+  for (const e of descLayoutOf(s)) {
+    const v = sectionValue(s, e)
+    const empty = !v || (Array.isArray(v) && !v.length)
+    if (empty && !e.source.startsWith("custom:")) continue
+    if (Array.isArray(v)) {
+      parts.push(`${label(e.label)}<ul class="tkv2-dlist">${
+        v.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`)
+    } else if (e.source === "user_story") {
+      parts.push(`${label(e.label)}<p class="tkv2-dtx">${gwtHtml(v)}</p>`)
+    } else {
+      parts.push(`${label(e.label)}<p class="tkv2-dtx">${escapeHtml(v)}</p>`)
+    }
   }
-  if (s.out_of_scope) parts.push(`${label("Out of scope")}<p class="tkv2-dtx">${escapeHtml(s.out_of_scope)}</p>`)
   return parts.length ? parts.join("") : (s.body ? `<p class="tkv2-dtx" style="white-space:pre-wrap">${escapeHtml(s.body)}</p>` : "")
 }
 
@@ -603,7 +662,11 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
   // when a blur commits state, never mid-edit).
   const descHtml = useMemo(() => {
     if (structured && !hasDescOverride) return structuredDescHtml(story)
-    return description ? descBlocksHtml(parseDescBlocks(description)) : ""
+    return description
+      ? descBlocksHtml(
+          parseDescBlocks(description, descLayoutOf(story).map((e) => e.label)),
+        )
+      : ""
   }, [structured, hasDescOverride, description, story])
 
   const onDescInput = () => {

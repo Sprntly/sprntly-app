@@ -35,6 +35,11 @@ from typing import Any, Callable, Optional
 
 from app.db.prds import get_prd_rendered
 from app.graph.gateway import llm_call
+from app.stories.layout import (
+    layout_prompt_hint,
+    resolve_layout,
+    resolve_ticket_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,19 @@ _SCHEMA: dict[str, Any] = {
                         "description": (
                             "One line; name the ticket that owns excluded work "
                             "where relevant."
+                        ),
+                    },
+                    # Extra sections this company's own ticket format asks for.
+                    # Empty unless a format is active — the keys and what goes
+                    # in them are carried in the prompt by layout_prompt_hint.
+                    "custom_sections": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Extra description sections this company's ticket "
+                            "format asks for, keyed exactly as the prompt names "
+                            "them. Omit a key entirely rather than inventing "
+                            "content for it. Empty when no format is active."
                         ),
                     },
                     # ── Provenance / trace spine ──
@@ -460,6 +478,17 @@ class Story:
     # Story-map placement (empty for a flat/unsized set)
     activity: str = ""
     release: str = ""
+    # The company's own ticket format, when one is active: an ordered
+    # [{label, source}] governing which description sections render, in what
+    # order, under what labels. None = Sprntly's default layout, which is what
+    # every pre-existing ticket and every company without a format uses.
+    # Carried ON THE STORY rather than resolved at render time on purpose: a
+    # ticket pushed last month must keep round-tripping under the labels it was
+    # actually written with, even after the company changes its format.
+    description_layout: Optional[list[dict[str, Any]]] = None
+    # Extra sections the format asked for, keyed by the layout's
+    # `custom:<key>`. Empty under the default layout.
+    custom_sections: dict[str, str] = field(default_factory=dict)
     # Decision-ticket fields
     decision: Optional[str] = None
     owner: Optional[str] = None
@@ -501,26 +530,44 @@ class Story:
             return None
         return _PRIORITY_TO_JIRA.get(self.priority.lower())
 
+    def section_value(self, entry) -> Any:
+        """The content behind one layout entry: a str, a list (scope), or "".
+
+        The one special case is `user_story`, which falls back to the legacy
+        `body` — a ticket generated before the structured fields existed, or one
+        whose description override replaced them, still has its story there."""
+        if entry.is_custom:
+            return (self.custom_sections or {}).get(entry.custom_key) or ""
+        if entry.source == "user_story":
+            return (self.user_story or self.body or "").strip()
+        if entry.source == "scope":
+            return self.scope or []
+        return getattr(self, entry.source, "") or ""
+
     def to_description(self, *, include_subtasks: bool = True) -> str:
-        """Render the ticket as a tracker task description (markdown). Uses the
-        five-section body when present, falling back to the legacy story body.
-        Used by the push step. `include_subtasks=False` drops the Child issues
-        section — the Jira push uses it when the children are created as REAL
-        sub-tasks (listing them twice would read as duplication)."""
+        """Render the ticket as a tracker task description (markdown). Used by
+        the push step. `include_subtasks=False` drops the Child issues section —
+        the Jira push uses it when the children are created as REAL sub-tasks
+        (listing them twice would read as duplication).
+
+        LAYOUT-DRIVEN, and byte-identical to the previous release under the
+        default layout: `DEFAULT_LAYOUT` encodes exactly the five sections this
+        used to hard-code, in the same order, with the same bold labels, and
+        empty sections are still skipped. That equality is the regression test
+        (`test_user_stories.py`), because this string is what lands in Jira and
+        what `sync.normalize_imported_description` has to recognise on the way
+        back — the two are mirrors of one list, derived, never written twice."""
         parts: list[str] = []
-        if self.what:
-            parts += ["**What**", self.what, ""]
-        if self.why_now:
-            parts += ["**Why now**", self.why_now, ""]
-        story_line = self.user_story or self.body
-        if story_line:
-            parts += ["**User story**", story_line.strip(), ""]
-        if self.scope:
-            parts += ["**Scope**"]
-            parts += [f"- {s}" for s in self.scope]
+        for entry in resolve_layout(self.description_layout):
+            value = self.section_value(entry)
+            if not value:
+                continue
+            parts += [f"**{entry.push_label}**"]
+            if isinstance(value, list):
+                parts += [f"- {s}" for s in value]
+            else:
+                parts += [str(value).strip()]
             parts += [""]
-        if self.out_of_scope:
-            parts += ["**Out of scope**", self.out_of_scope, ""]
         if not parts:  # nothing structured — fall back to the raw body
             parts = [self.body.strip(), ""]
         if self.acceptance_criteria:
@@ -561,6 +608,12 @@ class Story:
             "data_gaps": list(self.data_gaps),
             "activity": self.activity,
             "release": self.release,
+            **(
+                {"description_layout": self.description_layout}
+                if self.description_layout else {}
+            ),
+            **({"custom_sections": dict(self.custom_sections)}
+               if self.custom_sections else {}),
             "priority": self.priority,
             "route": self.route,
             "decision": self.decision,
@@ -598,6 +651,14 @@ class Story:
             data_gaps=_clean_str_list(d.get("data_gaps")),
             activity=str(d.get("activity") or "").strip(),
             release=str(d.get("release") or "").strip(),
+            description_layout=(
+                d.get("description_layout")
+                if isinstance(d.get("description_layout"), list) else None
+            ),
+            custom_sections={
+                str(k): str(v or "")
+                for k, v in (d.get("custom_sections") or {}).items()
+            } if isinstance(d.get("custom_sections"), dict) else {},
             decision=(d.get("decision") or None),
             owner=(d.get("owner") or None),
             decide_by=(d.get("decide_by") or None),
@@ -1017,16 +1078,33 @@ def generate_from_input(
     planned stub roster (both fanout only). Never persists — callers own
     persistence.
     """
+    # The company's own ticket format, resolved ONCE here so both strategies
+    # get it and a run finishes in the layout it started in. (None, None) — the
+    # default layout — for every company without an active ticket format, which
+    # leaves the prompt and every rendered description byte-identical.
+    layout, _template_id = resolve_ticket_layout(enterprise_id)
+    hint = layout_prompt_hint(layout)
+    if hint:
+        prd_input = "\n\n".join([prd_input, hint])
+
     if strategy == "fanout":
-        return _generate_fanout(
+        stories = _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
             batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
             on_batch=on_batch, on_plan=on_plan,
         )
-    return _generate_single(
-        enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
-        stats_out=stats_out,
-    )
+    else:
+        stories = _generate_single(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            stats_out=stats_out,
+        )
+    if layout:
+        # Stamped on the STORY, so this ticket keeps rendering and
+        # round-tripping under the labels it was written with even after the
+        # company changes its format.
+        for s in stories:
+            s.description_layout = layout
+    return stories
 
 
 def generate_user_stories(

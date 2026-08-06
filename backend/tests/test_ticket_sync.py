@@ -900,3 +900,122 @@ def test_scheduler_cycle_syncs_each_auto_row_isolated(isolated_settings, monkeyp
     monkeypatch.setattr("app.stories.sync.run_prd_sync", _run)
     asyncio.run(sched._run_ticket_sync_cycle())
     assert ran == [2]  # prd 1 failed (isolated), prd 3 skipped, prd 2 ran
+
+
+# ── the four-mirror round trip (ticket description layout) ───────────────────
+#
+# `to_description` (push), `story_editable_text` (what the web edits and the
+# sync compares), and `_IMPORT_LABELS` (tracker -> Sprntly) are three renderings
+# of ONE layout. If any two disagree about a label,
+# `normalize_imported_description` stops recognising what the push just wrote,
+# `content_hash(title, description)` differs on every pass, and the tracker sync
+# reports a phantom remote change on every ticket, forever.
+
+_M6_CUSTOM_LAYOUT = [
+    {"label": "Summary", "source": "what"},
+    {"label": "Acceptance owner", "source": "custom:acceptance_owner"},
+    {"label": "The ask", "source": "user_story"},
+    {"label": "Covers", "source": "scope"},
+]
+
+
+def _m6_story(**kw):
+    from app.stories.generate import Story
+
+    base = dict(
+        title="Ship it", body="As a user, I want X, so that Y.",
+        what="Build the thing", why_now="Churn is up 12%",
+        user_story="As a user, I want X, so that Y.",
+        scope=["cover A", "cover B"], out_of_scope="Not the mobile app",
+        acceptance_criteria=["Given A When B Then C"],
+        subtasks=["child one"], prd_section="R3", route="agent-ready",
+    )
+    base.update(kw)
+    return Story(**base)
+
+
+def _assert_round_trip_stable(story):
+    """Push it, read it back, and assert the sync sees NO change.
+
+    This is the exact comparison `sync_prd_tickets` makes: the tracker's
+    description normalised back must equal the local editable text, and the
+    content hash of the two must match. A mismatch here IS the permanent
+    phantom diff."""
+    from app.stories.sync import (
+        content_hash,
+        normalize_imported_description,
+        story_editable_text,
+    )
+
+    pushed = story.to_description()
+    normalised = normalize_imported_description(pushed, story.description_layout)
+    local = story_editable_text(story)
+
+    assert normalised == local, (
+        "the push labels and the editable labels disagree — this is the "
+        "permanent phantom-diff bug"
+    )
+    assert content_hash(story.title, normalised) == content_hash(story.title, local)
+
+
+def test_round_trip_is_stable_under_the_default_layout():
+    _assert_round_trip_stable(_m6_story())
+
+
+def test_round_trip_is_stable_under_a_custom_layout():
+    _assert_round_trip_stable(_m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    ))
+
+
+def test_the_import_labels_are_derived_from_the_layout():
+    # The default map must be exactly the one this used to hard-code, including
+    # the Scope -> "The ticket must cover" rename.
+    from app.stories.sync import _IMPORT_LABELS, import_labels_for
+
+    assert _IMPORT_LABELS == {
+        "**What**": "What",
+        "**Why now**": "Why now",
+        "**User story**": "User story",
+        "**Scope**": "The ticket must cover",
+        "**Out of scope**": "Out of scope",
+    }
+    custom = import_labels_for(_M6_CUSTOM_LAYOUT)
+    # A custom layout uses ONE label for both vocabularies — there is no legacy
+    # rename to preserve for a section the customer just named.
+    assert custom["**Summary**"] == "Summary"
+    assert custom["**Acceptance owner**"] == "Acceptance owner"
+
+
+def test_a_ticket_normalises_under_its_own_layout_not_the_companys_current_one():
+    """A ticket pushed under last month's format keeps round-tripping.
+
+    The layout is carried ON THE STORY, so changing the company's active format
+    cannot retroactively break the sync for tickets already in the tracker."""
+    old = _m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    _assert_round_trip_stable(old)
+    # Normalising the same pushed text under the DEFAULT layout would not
+    # recognise "**Summary**" — which is precisely why the story carries its own.
+    from app.stories.sync import normalize_imported_description, story_editable_text
+
+    wrong = normalize_imported_description(old.to_description(), None)
+    assert wrong != story_editable_text(old)
+
+
+def test_the_generated_tail_is_still_cut_under_a_custom_layout():
+    # Acceptance criteria / child issues / provenance live as their own fields
+    # in Sprntly and must never duplicate into the description on import.
+    from app.stories.sync import normalize_imported_description
+
+    s = _m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    out = normalize_imported_description(s.to_description(), s.description_layout)
+    assert "Acceptance criteria" not in out
+    assert "Child issues" not in out
+    assert "Provenance" not in out
