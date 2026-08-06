@@ -10,6 +10,12 @@
  * No selection stored = the sync's legacy behavior: every channel the bot is
  * a member of. Saving an empty selection clears back to that.
  *
+ * Unticking is destructive on the backend — the bot leaves the channel and
+ * the messages it already pulled are stripped out of the corpus — which is
+ * why the hint says so before the user saves. The picker itself needs no new
+ * code for that: it already POSTs the WHOLE selection, and the route diffs it
+ * against the previous one.
+ *
  * Pure View pattern (props in, JSX out) for unit testing via
  * renderToStaticMarkup, plus a hooks-wired wrapper that handles the
  * fetch + save round-trips — mirrors SlackChannelPicker.
@@ -59,11 +65,20 @@ export function SlackSyncChannelsPickerView({
     <div className="conn-slack-setup">
       <div>
         <span className="conn-slack-label">Channels to pull from</span>
+        {/*
+          Leads with WHAT gets pulled, not HOW. Product-owner feedback from
+          the live panel: "pull from" alone left people unsure what Sprntly
+          was taking — naming customer feedback up front ties ticking a
+          channel to where the knowledge base actually gets its evidence.
+          Same length as before; the two warnings (destructive untick,
+          workspace-wide + admin-only) are load-bearing and stay.
+        */}
         <p className="conn-slack-hint">
-          Sprntly reads messages only from the channels selected here, and
-          syncs them into your knowledge base on a schedule. This selection
-          applies to your whole workspace and only admins can change it.
-          With nothing selected, every channel the bot has been invited to
+          Tick the channels where customer feedback and conversations happen —
+          Sprntly pulls those messages into your knowledge base on a schedule.
+          Unticking a channel also deletes the messages already pulled from
+          it. This applies to your whole workspace and only admins can change
+          it. With nothing ticked, every channel the bot has been invited to
           is read.
         </p>
       </div>

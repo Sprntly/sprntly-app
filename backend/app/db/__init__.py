@@ -149,13 +149,16 @@ from app.db.custom_skills import (
     get_custom_skill_by_id,
     insert_custom_skill,
     list_custom_skills,
+    update_custom_skill,
 )
 
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
     delete_slack_connection,
+    delete_slack_connection_by_id,
     get_connection,
+    get_orphan_slack_connection,
     get_slack_connection,
     list_all_active_connections,
     list_connections,
@@ -309,6 +312,7 @@ __all__ = [
     "get_custom_skill_by_id",
     "insert_custom_skill",
     "list_custom_skills",
+    "update_custom_skill",
     # input sources
     "delete_input_source",
     "list_input_sources",
@@ -316,7 +320,9 @@ __all__ = [
     # connections
     "delete_connection",
     "delete_slack_connection",
+    "delete_slack_connection_by_id",
     "get_connection",
+    "get_orphan_slack_connection",
     "get_slack_connection",
     "list_all_active_connections",
     "list_connections",

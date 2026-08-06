@@ -116,24 +116,34 @@ def test_ask_cache_version_is_unchanged():
 
 
 def test_ask_system_documents_addendum_length_bounds():
-    """The upper bound was raised from 2500 to 3400 when topical selection
-    landed, deliberately and not because CI complained.
+    """Raised 2500 -> 3400 when topical selection landed, and 3400 -> 4300
+    when connected-source documents became selectable. Both deliberate, and
+    both decided by reading the clauses rather than by CI complaining.
 
-    Four clauses were added, and each is load-bearing rather than advisory:
-    documents are now chosen by TOPIC, so the prompt has to carry (a) that a
-    one-line summary is a routing hint and not something to answer from, (b)
-    that an automatically-selected document may be irrelevant and should be
-    ignored rather than summarised, (c) what to do when two loaded documents
-    disagree, and (d) that an Index marked PARTIAL no longer licenses an
-    absence claim. Without (b) generous selection turns into padded answers;
-    without (d) the truncated-index case states a falsehood.
+    The first raise paid for four clauses: documents are chosen by TOPIC, so
+    the prompt has to carry (a) that a one-line summary is a routing hint and
+    not something to answer from, (b) that an automatically-selected document
+    may be irrelevant and should be ignored rather than summarised, (c) what
+    to do when two loaded documents disagree, and (d) that an Index marked
+    PARTIAL no longer licenses an absence claim.
 
-    3400 is ~12% above the current 3021 — room for wording repairs, not room
+    The second pays for two more, and both are the incident itself rather
+    than polish. The Index now also lists documents that live in a connected
+    system, so (e) states that a Confluence page or a Drive file in the Index
+    EXISTS and must not be answered with "go and check that integration" —
+    the verbatim deflection a user got while the page was sitting in the
+    wiki. And because those bodies are fetched at read time, a fetch can
+    fail, so (f) gives that its own marker and its own instruction: say the
+    contents could not be loaded and why, never that the document is absent.
+    Without (f) the failure path collapses back into exactly the false denial
+    this work exists to remove.
+
+    4300 is ~8% above the current 3973 — room for wording repairs, not room
     for another feature's worth of instructions. This string is prepended to
     the system prompt of every ask that renders a document block, so its size
     is a per-request cost and the ceiling is the thing that keeps it honest.
     """
-    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 3400
+    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 4300
 
 
 def test_ask_system_documents_addendum_required_content():

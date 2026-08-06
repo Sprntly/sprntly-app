@@ -51,3 +51,21 @@ export const TICKET_GEN: GenerationCopy = {
   note: "This usually takes under a minute. Tickets appear here as they're written — you can keep working in the chat meanwhile.",
   slowNote: "Still working — a long PRD takes longer to break down. Each ticket appears here the moment it's written.",
 }
+
+/** Standalone tickets — the same fan-out, sourced from the conversation
+ *  instead of a PRD: read the thread → plan the roster → write → link.
+ *
+ *  TICKET_GEN's first two phases name a PRD ("Reading the PRD end to end…"),
+ *  which is a lie on a run that has no PRD behind it — and these lines are the
+ *  only account of the work the user gets while they wait. */
+export const STANDALONE_TICKET_GEN: GenerationCopy = {
+  phases: [
+    "Reading the conversation end to end…",
+    "Pulling in the evidence behind what was discussed…",
+    "Planning the ticket breakdown…",
+    "Writing each ticket — story, criteria, priority…",
+    "Checking how the tickets depend on each other…",
+  ],
+  note: "This usually takes a minute or two. Tickets appear here as they're written — you can keep working in the chat meanwhile.",
+  slowNote: "Still working — a long conversation takes longer to break down. Each ticket appears here the moment it's written.",
+}

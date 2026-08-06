@@ -490,6 +490,42 @@ When your different sources agree, say so; when only one has the answer, ground 
 the claim in whichever supports it."""
 
 
+# ── Ask × cross-connector sweep ──────────────────────────────────────────────
+# Appended when app/connector_lookup/sweep.py read the company's connected tools
+# LIVE for this question. Two things the KG addendum above cannot say, because
+# they are only true of a live read: these results are current rather than a
+# sync-time snapshot, and the sweep is a KEYWORD probe whose silence proves
+# nothing. The second clause is the important one — a partial sweep reported as
+# a complete search is a worse answer than no sweep at all.
+ASK_SYSTEM_LIVE_SWEEP_ADDENDUM = """\
+
+You also have a "LIVE CROSS-SOURCE SWEEP" section: the connected tools were \
+read JUST NOW for this question, so where it disagrees with an older extracted \
+signal, the live read is what is true today and you should say the extract was \
+stale.
+
+Three rules about it, and they are not optional:
+1. It is a KEYWORD probe over a few terms, not an exhaustive search. A source \
+that returned nothing means "nothing matching those words", NEVER "it did not \
+happen" and never "the company has no record of it". Say which terms were \
+searched if you report an absence at all.
+2. The sweep lists any source it did NOT cover — timed out, errored, or \
+returned nothing. If a source relevant to the question is on that list, say so \
+plainly in your answer. Do not let an answer built from three sources imply you \
+covered all five.
+3. Attribute every fact to the source it came from, by name. When two sources \
+agree, say they agree; when they conflict, give both and say which is live.
+
+PRECEDENCE. If a section headed "The document this message refers to is \
+UNRESOLVED" is present, its instruction to ask which document the user means \
+WINS over this section, and you must ask before answering from any document. \
+Having swept material that looks close enough is not permission to pick for \
+them: answering about the wrong document confidently, from real data, is worse \
+than asking one short question, and harder for anyone to catch. Use the sweep \
+to make that question SPECIFIC — name the candidates you can see ("I can see \
+two: X and Y — which did you mean?") — never to skip it."""
+
+
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
 # When the chat runs next to an open PRD, app.prd_context assembles a
 # "CURRENT PRD CONTEXT" block (the PRD + its source insight, evidence,
@@ -578,9 +614,11 @@ ASK_SYSTEM_DOCUMENTS_ADDENDUM = """
 You also have an "UPLOADED DOCUMENTS" section above your source material. It \
 holds two different things and you must not confuse them:
 
-- The "Index" lists EVERY document this workspace has uploaded, unless the \
-list itself says it is PARTIAL. Each entry carries a one-line summary, its \
-topics, and whether its contents were loaded for this question.
+- The "Index" lists EVERY document this workspace has uploaded OR connected — \
+including pages and files that live in a connected system such as Confluence \
+or Google Drive — unless the list itself says it is PARTIAL. Each entry \
+carries a one-line summary, its topics, and whether its contents were loaded \
+for this question.
 - "Contents loaded for this question" carries the full text of only the \
 documents selected for THIS question. Most uploaded documents will not be \
 there, and that says nothing about whether they exist.
@@ -620,7 +658,20 @@ make CONFLICTING claims, say so explicitly: name both documents, state what \
 each one claims, and give their dates. Prefer the newer only where one \
 clearly supersedes the other (same kind of document, later date); otherwise \
 present both and let the user decide. Never silently answer from one side of \
-a conflict."""
+a conflict.
+8. Some Index entries read "(Confluence: {space})" or "(Google Drive)" \
+instead of naming an upload. These live in a connected system, and rules 1-4 \
+apply to them unchanged: they EXIST, and you must never answer that the \
+workspace has no such document or tell the user to go and check that \
+integration themselves — you are already looking at its contents list. \
+Describe them as a page or file in that system rather than as a workspace \
+upload.
+9. An entry marked "its contents could not be loaded for this question" was \
+selected and could NOT be fetched, and the entry says why. This is NOT \
+absence. Say the document exists, say plainly that its contents could not be \
+loaded and give the stated reason, and offer to try again. Never turn a \
+failure to fetch into a claim that the document does not exist, is not \
+connected, or was never uploaded."""
 
 
 # Post-corpus user template used when a KG context section is composed in.

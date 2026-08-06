@@ -694,10 +694,12 @@ export function ConnectorsSettingsView({
 
             {/* Manual upload strip — a dashed full-width row at the foot of the
                 detail column. Hidden for categories that opt out via
-                `allowsManualUpload: false` in the catalog (Communications,
-                Codebase, Project Management) — those must be populated by
-                connecting the real integration. Flip the catalog flag to
-                restore; the backend upload path is unchanged. */}
+                `allowsManualUpload: false` in the catalog (Codebase, Project
+                Management) — those must be populated by connecting the real
+                integration — and for Company documentation, which takes
+                uploads through its own named-source picker above instead.
+                Flip the catalog flag to restore; the backend upload path is
+                unchanged. */}
             {activeCategory.allowsManualUpload !== false ? (
               <label
                 className={`set-conn-upload${uploading ? " is-uploading" : ""}`}

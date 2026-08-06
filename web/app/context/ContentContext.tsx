@@ -70,6 +70,9 @@ const EMPTY: AppContentState = {
   sidebarConvCount: null,
   aiScreenChips: {},
   guestTickets: null,
+  ticketSet: null,
+  ticketSetGenerating: false,
+  ticketSetStandalone: false,
 }
 
 type ContentContextValue = {

@@ -194,6 +194,47 @@ def test_run_sync_handles_expired_token_gracefully(monkeypatch, caplog):
     assert not any(r.levelno >= logging.ERROR for r in recs)  # no ERROR traceback
 
 
+def test_run_sync_does_not_recognize_asana_auth_expired_today(monkeypatch, caplog):
+    """REAL FINDING, proven rather than assumed: unlike the HTTPException(401)
+    used above (which carries a real `status_code` attribute — FastAPI's
+    contract), AsanaAuthExpiredError is a bare RuntimeError subclass with none
+    (see test_asana_auth_expired_error_carries_no_status_code in
+    test_asana_sync.py — same pre-existing gap as JiraAuthExpiredError and
+    ClickUpAuthExpiredError; only MeetAuthExpiredError sets it on purpose).
+    So `_run_sync`'s `getattr(exc, "status_code", None) in (401, 403)` check
+    does NOT recognize it: it falls into the generic branch — a full ERROR
+    traceback and the raw exception string, not the WARNING + friendly
+    reconnect-prompt every other provider's 401 gets. This documents CURRENT
+    behavior; fixing AsanaAuthExpiredError (or the dispatch) is outside the
+    puller-only ticket that added this test."""
+    import logging
+
+    from app.connectors.asana_oauth import AsanaAuthExpiredError
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: '{"access_token": "t"}')
+    monkeypatch.setattr(auto_sync, "token_for", lambda prov, tj: "t")
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+
+    def expired(*a, **k):
+        raise AsanaAuthExpiredError("Asana rejected the stored token")
+
+    monkeypatch.setattr(auto_sync, "sync_provider", expired)
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    with caplog.at_level(logging.WARNING, logger="app.kg_ingest.auto_sync"):
+        auto_sync._run_sync("co-1", "asana")        # must not raise
+
+    # NOT the graceful reconnect-prompt message every other 401 path gets:
+    assert stamps["last_sync_error"] != "asana authorization expired — reconnect required"
+    assert "Asana rejected the stored token" in stamps["last_sync_error"]
+    recs = [r for r in caplog.records if r.name == "app.kg_ingest.auto_sync"]
+    assert any(r.levelno >= logging.ERROR for r in recs)  # falls to the ERROR branch
+
+
 # ---------- github token refresh-on-sync ----------
 
 def _expired_github_tj() -> str:
@@ -343,6 +384,174 @@ def test_maybe_refresh_noop_without_refresh_token_or_non_github(monkeypatch):
     assert auto_sync._maybe_refresh_token("co", "clickup", tj2) is tj2
 
 
+def test_zoom_now_kicks_off_a_sync_via_pullers(monkeypatch):
+    """kickoff_sync is a no-op for a provider with no puller. Zoom's
+    registration in PULLERS is the whole of what puts it on the 6-hourly sweep
+    and on the post-connect kickoff — there is no scheduler edit."""
+    started = {}
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            started["args"] = args
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(auto_sync.threading, "Thread", FakeThread)
+    assert auto_sync.kickoff_sync("co-1", "zoom") is True
+    assert started["started"] is True
+    assert started["args"] == ("co-1", "zoom")
+
+
+def test_zoom_is_in_the_refresh_provider_set(monkeypatch):
+    """Zoom access tokens live 1h. Left out of this set a connection would 401
+    on every sync from the second hour onward and read as "reconnect required"
+    while the stored refresh token was perfectly good."""
+    called = {}
+
+    import app.connectors.tokens as toks
+    import app.connectors.zoom_oauth as zoom_oauth
+
+    def _refresh(rt):
+        called["refreshed"] = rt
+        return {"access_token": "NEW", "refresh_token": "rotated",
+                "expires_in": 3600}
+
+    monkeypatch.setattr(zoom_oauth, "refresh_access_token", _refresh)
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: called.update(cid=cid, prov=prov, enc=enc))
+
+    tj = {"access_token": "OLD", "refresh_token": "r1",
+          "obtained_at": 1, "expires_in": 3600}
+    out = auto_sync._maybe_refresh_token("co-9", "zoom", tj)
+
+    assert out["access_token"] == "NEW"
+    assert called["refreshed"] == "r1"
+    assert called["prov"] == "zoom"
+
+
+def test_zoom_refresh_persists_rotation_and_company_id(monkeypatch):
+    """Two things must survive the rewrite. Zoom ROTATES refresh tokens, so the
+    new one has to be persisted or the connection dies at the next cycle. And
+    company_id is the credential `token_for("zoom", ...)` reads — dropping it
+    breaks the NEXT sync, not this refresh, which is what makes it hard to
+    trace back."""
+    import json as _json
+
+    import app.connectors.tokens as toks
+    import app.connectors.zoom_oauth as zoom_oauth
+
+    persisted: dict = {}
+    monkeypatch.setattr(
+        zoom_oauth, "refresh_access_token",
+        lambda rt: {"access_token": "NEW", "refresh_token": "rotated",
+                    "expires_in": 3600},
+    )
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: persisted.update(enc=enc))
+
+    out = auto_sync._maybe_refresh_token(
+        "co-9", "zoom",
+        {"access_token": "OLD", "refresh_token": "r1",
+         "obtained_at": 1, "expires_in": 3600},
+    )
+
+    stored = _json.loads(persisted["enc"])
+    assert stored["refresh_token"] == "rotated"
+    assert stored["company_id"] == "co-9"
+    assert out["company_id"] == "co-9"
+
+
+def test_zoom_refresh_keeps_the_stored_refresh_token_if_zoom_omits_it(monkeypatch):
+    """A response without a refresh_token must not blank out the stored one —
+    that would turn a transient Zoom quirk into a dead connection."""
+    import json as _json
+
+    import app.connectors.tokens as toks
+    import app.connectors.zoom_oauth as zoom_oauth
+
+    persisted: dict = {}
+    monkeypatch.setattr(
+        zoom_oauth, "refresh_access_token",
+        lambda rt: {"access_token": "NEW", "expires_in": 3600},
+    )
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: persisted.update(enc=enc))
+
+    auto_sync._maybe_refresh_token(
+        "co-9", "zoom",
+        {"access_token": "OLD", "refresh_token": "keep-me",
+         "obtained_at": 1, "expires_in": 3600},
+    )
+    assert _json.loads(persisted["enc"])["refresh_token"] == "keep-me"
+
+
+def test_google_meet_is_in_the_refresh_provider_set(monkeypatch):
+    """Meet access tokens live 1h. Left out of this set a connection would 403
+    on every sync from the second hour onward and read as "reconnect required"
+    while the stored refresh token was perfectly good."""
+    called = {}
+
+    import app.connectors.google_meet as google_meet
+    import app.connectors.tokens as toks
+
+    def _refresh(rt):
+        called["refreshed"] = rt
+        # Exactly what Google returns: no refresh_token in the response.
+        return {"access_token": "NEW", "expires_in": 3599}
+
+    monkeypatch.setattr(google_meet, "refresh_access_token", _refresh)
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: called.update(cid=cid, prov=prov, enc=enc))
+
+    tj = {"access_token": "OLD", "refresh_token": "r1",
+          "obtained_at": 1, "expires_in": 3600}
+    out = auto_sync._maybe_refresh_token("co-9", "google_meet", tj)
+
+    assert out["access_token"] == "NEW"
+    assert called["refreshed"] == "r1"
+    assert called["prov"] == "google_meet"
+
+
+def test_google_meet_refresh_preserves_company_id_and_the_refresh_token(
+    monkeypatch,
+):
+    """Two things must survive the rewrite, and Google makes one of them easy to
+    get wrong. Its refresh response omits `refresh_token` ENTIRELY (the stored
+    one stays valid — Google does not rotate), so persisting the response
+    verbatim BLANKS the credential and the connection dies at the next cycle.
+    And company_id is what `token_for("google_meet", ...)` reads, so dropping it
+    breaks the NEXT sync rather than this refresh."""
+    import json as _json
+
+    import app.connectors.google_meet as google_meet
+    import app.connectors.tokens as toks
+
+    persisted: dict = {}
+    monkeypatch.setattr(
+        google_meet, "refresh_access_token",
+        lambda rt: {"access_token": "NEW", "expires_in": 3599},
+    )
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: s)
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: persisted.update(enc=enc))
+
+    out = auto_sync._maybe_refresh_token(
+        "co-9", "google_meet",
+        {"access_token": "OLD", "refresh_token": "the-only-refresh-token",
+         "obtained_at": 1, "expires_in": 3600},
+    )
+
+    stored = _json.loads(persisted["enc"])
+    assert stored["refresh_token"] == "the-only-refresh-token"
+    assert stored["company_id"] == "co-9"
+    assert out["company_id"] == "co-9"
+
+
 # ---------- kickoff fires from the connect callback ----------
 
 def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
@@ -399,7 +608,10 @@ def test_fireflies_disconnect_clears_the_call_index(isolated_settings, monkeypat
     monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
     monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
     cleared = []
-    monkeypatch.setattr(ci, "clear_company", lambda cid: cleared.append(cid))
+    monkeypatch.setattr(
+        ci, "clear_company",
+        lambda cid, provider=None: cleared.append((cid, provider)),
+    )
 
     require_company = conn_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
@@ -410,7 +622,9 @@ def test_fireflies_disconnect_clears_the_call_index(isolated_settings, monkeypat
     finally:
         main_mod.app.dependency_overrides.pop(require_company, None)
     assert r.status_code == 200
-    assert cleared == ["co-X"]
+    # SCOPED to fireflies. An unscoped wipe would also destroy a working Zoom
+    # index — disconnect one tool, silently lose another tool's call history.
+    assert cleared == [("co-X", "fireflies")]
 
 
 def test_disconnect_survives_a_failed_index_clear(isolated_settings, monkeypatch):
@@ -425,7 +639,7 @@ def test_disconnect_survives_a_failed_index_clear(isolated_settings, monkeypatch
     monkeypatch.setattr(conn_route.db, "get_connection", lambda *a, **k: {"id": "c1"})
     monkeypatch.setattr(conn_route.db, "delete_connection", lambda *a, **k: True)
 
-    def _boom(_cid):
+    def _boom(_cid, _provider=None):
         raise RuntimeError("PostgREST down")
 
     monkeypatch.setattr(ci, "clear_company", _boom)

@@ -90,7 +90,9 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   code: "Repos & PRs — so the agent reads real code and ships fixes",
   monitoring: "Error tracking, APM, paging — powers the On-Call agent",
   design: "Design system & files — so prototypes match your brand",
-  comms: "Where your Top Insights brief lands — with a thread to ask follow-ups",
+  // No `comms` entry: the Communications category was removed from the catalog
+  // (2026-08-04), so the wizard no longer has a step to describe. Where the
+  // brief lands is a Settings → Comms & Brief preference, not a connector.
 }
 
 /* Inline SVG category icons (tabler-style strokes) — the design kit's
@@ -173,12 +175,6 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
       <path d="M8.5 10.5h.01" />
       <path d="M12 7.5h.01" />
       <path d="M15.5 10.5h.01" />
-    </svg>
-  ),
-  comms: (p) => (
-    <svg {...iconProps(p)}>
-      <path d="M21 14l-3-3h-7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1z" />
-      <path d="M14 15v2a1 1 0 0 1-1 1H6l-3 3V11a1 1 0 0 1 1-1h2" />
     </svg>
   ),
   docs: (p) => (
@@ -528,8 +524,10 @@ export function Connectors() {
                     })}
                   </div>
                   {/* Manual fallback for PMs without OAuth access. Hidden for
-                      categories that opt out in the catalog (pm, code, comms) —
-                      a one-off export can't stay current there. */}
+                      categories that opt out in the catalog (pm, code, docs) —
+                      ticket and repo data can't stay current from a one-off
+                      export, and Company documentation takes uploads through
+                      the named-source picker in Settings instead. */}
                   {cat.allowsManualUpload !== false && (
                     <label
                       className="conn-upload"

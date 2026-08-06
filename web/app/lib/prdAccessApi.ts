@@ -12,8 +12,20 @@ export type PrdAccessMetadata = {
   required_email_domain: string | null
 }
 
+/** Same `member` / `guest_view` split artifactShareApi documents — a
+ *  same-company caller who can already act in the prd's owning workspace
+ *  belongs in the real, editable app, not the read-only guest shell. */
+type PrdAccessSameCompany = {
+  artifact_id: number
+  artifact_type: "prd"
+  owning_company_name: string
+  /** The workspace the prd lives in; null for an unbound legacy dataset. */
+  owner_workspace_id: string | null
+}
+
 export type PrdAccessResolveOutcome =
-  | { outcome: "guest_view"; artifact_id: number; artifact_type: "prd"; owning_company_name: string }
+  | ({ outcome: "member" } & PrdAccessSameCompany)
+  | ({ outcome: "guest_view" } & PrdAccessSameCompany)
   | { outcome: "blocked"; reason: "different_company" }
 
 export type PrdAccessJoinResult = {

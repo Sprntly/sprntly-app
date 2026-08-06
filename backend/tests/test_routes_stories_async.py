@@ -314,3 +314,204 @@ def test_generate_requires_exactly_one_source(isolated_settings):
             await stories.generate(stories.GenerateIn(prd_id=1, insight="x"), _ctx())
         assert getattr(ei2.value, "status_code", None) == 400
     asyncio.run(_flow())
+
+
+# ── Standalone ticket sets (the insight path) ────────────────────────────────
+#
+# Tickets asked for in a chat with no PRD used to exist only as markdown in the
+# reply bubble. The insight path now creates a `ticket_sets` row at KICK-OFF and
+# returns its id, so the panel has something durable to open and poll.
+
+
+def test_insight_run_creates_a_generating_set_and_returns_its_id(
+    isolated_settings, monkeypatch
+):
+    from app.db.ticket_sets import get_set
+
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        lambda cid, prd_id=None, insight=None, **kw: [Story(title="T", body="b")],
+    )
+
+    async def _flow():
+        resp = await stories.generate(
+            stories.GenerateIn(insight="break this into tickets"), _ctx()
+        )
+        # The id is available IMMEDIATELY — before the multi-minute run lands.
+        assert resp["ticket_set_id"]
+        row = get_set("ent-A", resp["ticket_set_id"])
+        assert row["status"] == "generating"
+        assert row["source_text"] == "break this into tickets"
+        await _drain(resp["job_id"])
+        return resp["ticket_set_id"]
+
+    sid = asyncio.run(_flow())
+    assert get_set("ent-A", sid)["status"] == "ready"
+
+
+def test_prd_run_creates_no_ticket_set(isolated_settings, monkeypatch):
+    """The PRD path is untouched: no set row, and no `ticket_set_id` key that
+    would make a client think one exists."""
+    from app.db.ticket_sets import list_sets_for_company
+
+    monkeypatch.setattr(stories, "warm_impl_spec", _fake_warm)
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        lambda cid, prd_id=None, insight=None, **kw: [Story(title="T", body="b")],
+    )
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(prd_id=7), _ctx())
+        await _drain(resp["job_id"])
+        return resp
+
+    resp = asyncio.run(_flow())
+    assert "ticket_set_id" not in resp
+    assert list_sets_for_company("ent-A") == []
+
+
+def test_a_failed_insight_run_marks_the_set_failed(isolated_settings, monkeypatch):
+    """A set left 'generating' forever is a panel that spins on a run that
+    already died — the one reopen outcome that must never happen."""
+    from app.db.ticket_sets import get_set
+
+    def _boom(cid, prd_id=None, insight=None, **kw):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(stories, "generate_user_stories", _boom)
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(insight="x"), _ctx())
+        await _drain(resp["job_id"])
+        return resp["ticket_set_id"]
+
+    sid = asyncio.run(_flow())
+    row = get_set("ent-A", sid)
+    assert row["status"] == "failed"
+    assert "provider exploded" in (row["error"] or "")
+
+
+def test_a_zero_ticket_run_settles_ready_with_no_tickets(
+    isolated_settings, monkeypatch
+):
+    """Distinct from a failure: the run completed and produced nothing, which
+    the panel renders as "no tickets came back — try again". Left generating,
+    it would spin forever; marked failed, it would claim an error that did not
+    happen."""
+    from app.db.ticket_sets import get_set
+
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        lambda cid, prd_id=None, insight=None, **kw: [],
+    )
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(insight="x"), _ctx())
+        await _drain(resp["job_id"])
+        return resp["ticket_set_id"]
+
+    sid = asyncio.run(_flow())
+    row = get_set("ent-A", sid)
+    assert row["status"] == "ready"
+    assert list(row["stories"] or []) == []
+
+
+def test_a_swallowed_persist_still_settles_the_set(isolated_settings, monkeypatch):
+    """generate_user_stories owns the normal write and swallows its own
+    exceptions so a persistence hiccup never loses a finished generation. The
+    route's backstop is what stops that hiccup stranding the row."""
+    from app.db.ticket_sets import get_set
+
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        # Returns stories but never persists them (what a swallowed write
+        # looks like from the route's side).
+        lambda cid, prd_id=None, insight=None, **kw: [Story(title="Recovered", body="b")],
+    )
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(insight="x"), _ctx())
+        await _drain(resp["job_id"])
+        return resp["ticket_set_id"]
+
+    sid = asyncio.run(_flow())
+    row = get_set("ent-A", sid)
+    assert row["status"] == "ready"
+    assert [s["title"] for s in row["stories"]] == ["Recovered"]
+    # The fallback names the set after its first ticket rather than a generic
+    # label every set in the library would share.
+    assert row["title"] == "Recovered"
+
+
+def test_a_foreign_conversation_id_404s_and_creates_nothing(
+    isolated_settings, monkeypatch
+):
+    """conversation_id is client-supplied and ids are sequential, so ownership
+    is proven before it is stamped onto an artifact — otherwise a caller could
+    read a foreign chat's title back out of the artifacts listing."""
+    from app.db.client import require_client
+    from app.db.ticket_sets import list_sets_for_company
+
+    conv = require_client().table("conversations").insert(
+        {"company_id": "someone-else", "title": "Their private thread"}
+    ).execute().data[0]["id"]
+
+    async def _flow():
+        with pytest.raises(Exception) as ei:
+            await stories.generate(
+                stories.GenerateIn(insight="x", conversation_id=conv), _ctx()
+            )
+        assert getattr(ei.value, "status_code", None) == 404
+
+    asyncio.run(_flow())
+    assert list_sets_for_company("ent-A") == []
+
+
+def test_an_owned_conversation_id_is_stamped_on_the_set(isolated_settings, monkeypatch):
+    from app.db.client import require_client
+    from app.db.ticket_sets import get_set
+
+    conv = require_client().table("conversations").insert(
+        {"company_id": "ent-A", "title": "Checkout drop-off"}
+    ).execute().data[0]["id"]
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        lambda cid, prd_id=None, insight=None, **kw: [Story(title="T", body="b")],
+    )
+
+    async def _flow():
+        resp = await stories.generate(
+            stories.GenerateIn(insight="x", conversation_id=conv), _ctx()
+        )
+        await _drain(resp["job_id"])
+        return resp["ticket_set_id"]
+
+    sid = asyncio.run(_flow())
+    assert get_set("ent-A", sid)["conversation_id"] == conv
+
+
+def test_reattaching_to_an_inflight_insight_run_reuses_the_same_set(
+    isolated_settings, monkeypatch
+):
+    """A re-attach must hand back the SAME set the running job will fill — not
+    a second row, and not a response with no set id at all."""
+    from app.db.ticket_sets import list_sets_for_company
+
+    release = threading.Event()
+    monkeypatch.setattr(
+        stories, "generate_user_stories",
+        lambda cid, prd_id=None, insight=None, **kw: (
+            release.wait(2), [Story(title="T", body="b")]
+        )[1],
+    )
+
+    async def _flow():
+        first = await stories.generate(stories.GenerateIn(insight="same"), _ctx())
+        second = await stories.generate(stories.GenerateIn(insight="same"), _ctx())
+        assert second["job_id"] == first["job_id"]
+        assert second["ticket_set_id"] == first["ticket_set_id"]
+        release.set()
+        await _drain(first["job_id"])
+
+    asyncio.run(_flow())
+    assert len(list_sets_for_company("ent-A")) == 1

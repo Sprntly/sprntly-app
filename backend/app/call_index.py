@@ -24,8 +24,18 @@ Transcripts are deliberately not stored: they are the customer's raw
 conversation content, they are large, and the source is the system of record. We
 keep a pointer (`external_id`) and re-fetch on demand.
 
-Provider-agnostic by construction — `provider` is a column and Fireflies is
-merely the first populator, so Gong/Otter/Zoom can fill the same index later.
+Provider-agnostic by construction — `provider` is a column and Fireflies was
+merely the first populator. ZOOM IS THE SECOND: its cloud recordings fill the
+same index from the same recordings listing the KG puller already walks, and
+`(company_id, provider)` keys the sync state so neither source can clobber the
+other's watermark.
+
+TWO SOURCES, ONE INDEX, AND WHAT THAT COSTS. `list_calls` reads across
+providers, so an answer built on it is only as fresh as its STALEST connected
+source — `ensure_fresh` therefore reports the oldest successful sync among the
+connected ones, not the newest. Reporting the newest would let a Zoom sync that
+completed a minute ago vouch for Fireflies data that has not refreshed since
+yesterday, and the listing would state a count it has no right to.
 """
 from __future__ import annotations
 
@@ -40,6 +50,9 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 PROVIDER_FIREFLIES = "fireflies"
+PROVIDER_ZOOM = "zoom"
+#: Every source that can populate the index, in the order a sync walks them.
+CALL_PROVIDERS: tuple[str, ...] = (PROVIDER_FIREFLIES, PROVIDER_ZOOM)
 
 # Fireflies rejects limit > 50 outright ("limit must not be greater than 50"),
 # so a sync pages with `skip` rather than asking for everything at once. Mirrors
@@ -89,6 +102,11 @@ class IndexedCall:
     participants: list[str]
     account: Optional[str]
     summary: str
+    #: Which source this row came from. Defaulted (and placed last) so every
+    #: existing construction site is untouched — but load-bearing on the fetch
+    #: path: `external_id` is only meaningful to the provider that issued it,
+    #: and asking Fireflies for a Zoom meeting uuid gets a confident nothing.
+    provider: str = PROVIDER_FIREFLIES
 
     def render(self) -> str:
         """One compact line for a listing answer or a model prompt."""
@@ -192,9 +210,14 @@ def _normalize_date(raw: Any) -> Optional[str]:
 
 
 def sync_company(
-    company_id: str, *, limit: int = _SYNC_LIMIT, since: Optional[datetime] = None
+    company_id: str, *, limit: int = _SYNC_LIMIT, since: Optional[datetime] = None,
+    provider: str = PROVIDER_FIREFLIES,
 ) -> Optional[int]:
-    """Refresh the index for one company from its connected source.
+    """Refresh the index for one company from ONE connected source.
+
+    `provider` defaults to Fireflies so every pre-existing call site — and the
+    behaviour they pin — is unchanged. `sync_all_sources` is what walks a
+    company's whole set.
 
     Returns the number of calls written, or **None** when there is no connected
     source to sync from. That distinction is not decoration: returning 0 for
@@ -222,6 +245,10 @@ def sync_company(
     """
     from app.call_digest import _load_api_key
     from app.db.client import require_client
+
+    if provider == PROVIDER_ZOOM:
+        return _sync_zoom(company_id, limit=limit, since=since)
+
     from app.kg_ingest.pullers.fireflies import _post
 
     api_key = _load_api_key(company_id)
@@ -240,6 +267,43 @@ def sync_company(
     except Exception as exc:  # noqa: BLE001 — stamp, then let the caller decide
         _record_sync_failure(company_id, exc)
         raise
+
+
+def sync_all_sources(
+    company_id: str, *, limit: int = _SYNC_LIMIT, since: Optional[datetime] = None
+) -> Optional[int]:
+    """Refresh the index from EVERY call source this company has connected.
+
+    Returns the total rows written, or **None** when no source is connected at
+    all — preserving `sync_company`'s distinction, which the whole freshness
+    layer rests on: 0 means "we looked and there were none", None means "there
+    was nothing to look at".
+
+    Per-source isolation: a Fireflies outage must not stop Zoom's half from
+    indexing, because a partial index is strictly better than none and the
+    per-provider sync state records exactly which half is stale. The first
+    error is re-raised once both have been attempted, so the caller still sees
+    that something failed.
+    """
+    written: Optional[int] = None
+    first_error: Optional[BaseException] = None
+    for provider in CALL_PROVIDERS:
+        try:
+            count = sync_company(
+                company_id, limit=limit, since=since, provider=provider
+            )
+        except Exception as exc:  # noqa: BLE001 — already stamped per provider
+            logger.warning(
+                "call-index: %s sync failed for %s", provider, company_id,
+                exc_info=True,
+            )
+            first_error = first_error or exc
+            continue
+        if count is not None:
+            written = (written or 0) + count
+    if written is None and first_error is not None:
+        raise first_error
+    return written
 
 
 def _sync_from_source(
@@ -279,10 +343,7 @@ def _sync_from_source(
             "summary": ((call.get("summary") or {}).get("overview") or "")[:4000],
             "synced_at": datetime.now(timezone.utc).isoformat(),
         })
-    for i in range(0, len(rows), 200):
-        client.table("call_index").upsert(
-            rows[i:i + 200], on_conflict="company_id,provider,external_id"
-        ).execute()
+    _upsert_call_rows(client, rows)
     # Stamped even when `rows` is EMPTY, and that is the entire point. An
     # incremental top-up that finds nothing new is a success; a full sync that
     # finds nothing means this company genuinely has no calls. Returning early
@@ -296,6 +357,154 @@ def _sync_from_source(
         len(rows), company_id, "incremental" if since else "full",
     )
     return len(rows)
+
+
+def _upsert_call_rows(client, rows: list[dict]) -> None:
+    """Chunked upsert on the natural key. Shared by every provider so the
+    conflict target can never drift between them — a wrong `on_conflict` here
+    duplicates a company's whole call history instead of refreshing it."""
+    for i in range(0, len(rows), 200):
+        client.table("call_index").upsert(
+            rows[i:i + 200], on_conflict="company_id,provider,external_id"
+        ).execute()
+
+
+# ── Zoom source ──────────────────────────────────────────────────────────────
+#
+# Fed from the SAME recordings listing the KG puller walks
+# (kg_ingest/pullers/zoom.py), and deliberately no more than that: this index
+# holds metadata, so it never downloads a transcript during a sync. The
+# transcript is fetched on demand, for one call, by `fetch_transcript`.
+
+
+def _sync_zoom(
+    company_id: str, *, limit: int, since: Optional[datetime]
+) -> Optional[int]:
+    """Refresh the Zoom half of the index. None when Zoom isn't connected."""
+    from app.connectors import zoom_oauth
+    from app.db.client import require_client
+
+    try:
+        ctx = zoom_oauth.sync_context(company_id)
+    except zoom_oauth.ZoomNotConnectedError:
+        logger.info("call-index: no zoom source for %s", company_id)
+        # Same contract as the Fireflies branch: "not connected" is not a sync
+        # outcome and must not be stamped, or a company that never connected
+        # Zoom looks like one whose sync found nothing.
+        return None
+
+    try:
+        return _sync_zoom_from_source(
+            company_id, ctx, limit=limit, since=since,
+            list_recordings=zoom_oauth.list_user_recordings,
+            client=require_client(),
+        )
+    except Exception as exc:  # noqa: BLE001 — stamp, then let the caller decide
+        _record_sync_failure(company_id, exc, provider=PROVIDER_ZOOM)
+        raise
+
+
+def _sync_zoom_from_source(
+    company_id: str, ctx, *, limit: int, since: Optional[datetime],
+    list_recordings, client,
+) -> int:
+    """The Zoom sync body, split out for the same reason the Fireflies one is:
+    `_sync_zoom` owns the error stamping and this stays a straight-line
+    read-transform-write.
+
+    Honours the host selection (`sync_user_ids`) exactly as the puller does —
+    an empty selection means every licensed host — and walks Zoom's ≤1-month
+    windows through the shared `sync_windows`, so the index can never ask for a
+    range Zoom would silently clamp.
+    """
+    from app.connectors import zoom_oauth
+
+    hosts = _zoom_hosts(ctx)
+    if not hosts:
+        logger.info("call-index: no zoom hosts to index for %s", company_id)
+
+    # An incremental top-up asks only for the window since the last success;
+    # a full sync gets the standard backfill.
+    cursor = since.date().isoformat() if since is not None else None
+    windows = zoom_oauth.sync_windows(cursor)
+
+    raw: list[dict] = []
+    seen: set[str] = set()
+    for host in hosts:
+        for frm, to in windows:
+            if len(raw) >= limit:
+                break
+            for meeting in list_recordings(
+                ctx.access_token, str(host["id"]), frm=frm, to=to,
+                page_size=min(300, limit), max_pages=1,
+            ):
+                uuid = meeting.get("uuid") or meeting.get("id")
+                if not uuid or str(uuid) in seen:
+                    # A recurring meeting can surface in two adjacent windows.
+                    continue
+                seen.add(str(uuid))
+                raw.append({**meeting, "_host": host})
+                if len(raw) >= limit:
+                    break
+
+    own = _own_domains(company_id, [])
+    rows = []
+    now = datetime.now(timezone.utc).isoformat()
+    for meeting in raw:
+        host = meeting.get("_host") or {}
+        # Zoom's recordings listing carries no attendee list — that needs a
+        # per-meeting /past_meetings call, i.e. an N+1 across the window. The
+        # host is the one participant it does give us, and it is enough for
+        # `derive_account` to correctly conclude NOTHING (the host is on every
+        # call, so ubiquity marks their domain as ours). A Zoom row is
+        # therefore resolved by TITLE — which for a customer call is usually
+        # the customer's name — rather than by account, and a null account is
+        # the honest answer rather than a guess.
+        host_email = meeting.get("host_email") or host.get("email") or ""
+        participants = [host_email] if host_email else []
+        duration = meeting.get("duration")
+        rows.append({
+            "company_id": company_id,
+            "provider": PROVIDER_ZOOM,
+            "external_id": str(meeting.get("uuid") or meeting.get("id")),
+            "title": meeting.get("topic") or "",
+            "call_date": _normalize_date(meeting.get("start_time")),
+            "duration_min": float(duration) if isinstance(duration, (int, float))
+            else None,
+            "participants": participants,
+            "account": derive_account(participants, own),
+            # Zoom provides no overview of its own. Left EMPTY rather than
+            # filled with the topic: a listing already renders the title, and a
+            # summary field that merely repeats it would read to a model as a
+            # summary that says nothing happened.
+            "summary": "",
+            "synced_at": now,
+        })
+    _upsert_call_rows(client, rows)
+    _record_sync_success(
+        company_id, len(rows), full=since is None, provider=PROVIDER_ZOOM
+    )
+    logger.info(
+        "call-index: synced %s zoom calls for %s (%s)",
+        len(rows), company_id, "incremental" if since else "full",
+    )
+    return len(rows)
+
+
+def _zoom_hosts(ctx) -> list[dict]:
+    """The hosts to index, honouring the picker. Mirrors the puller's rule: a
+    non-empty selection is used verbatim (a deactivated host still owns their
+    old recordings), an empty one means every licensed host."""
+    from app.connectors import zoom_oauth
+
+    if ctx.user_ids:
+        return [
+            {"id": uid, "email": ctx.user_names.get(uid, "")}
+            for uid in ctx.user_ids
+        ]
+    found, _capped = zoom_oauth.list_users(ctx.access_token)
+    return [{"id": u["id"], "email": u.get("email") or ""}
+            for u in found if u.get("licensed")]
 
 
 # ── sync state + freshness ───────────────────────────────────────────────────
@@ -379,16 +588,16 @@ class Freshness:
         )
 
 
-def _sync_state(company_id: str) -> Optional[dict]:
-    """The company's sync row, or None if it has never synced. Best-effort: a
-    read failure is treated as "unknown", which routes to a refresh attempt
-    rather than to a confident answer."""
+def _sync_state(company_id: str, provider: str = PROVIDER_FIREFLIES) -> Optional[dict]:
+    """The company's sync row for one provider, or None if it has never synced.
+    Best-effort: a read failure is treated as "unknown", which routes to a
+    refresh attempt rather than to a confident answer."""
     from app.db.client import require_client
 
     try:
         rows = (
             require_client().table("call_index_sync").select("*")
-            .eq("company_id", company_id).eq("provider", PROVIDER_FIREFLIES)
+            .eq("company_id", company_id).eq("provider", provider)
             .limit(1).execute().data
         )
         return (rows or [None])[0]
@@ -398,14 +607,16 @@ def _sync_state(company_id: str) -> Optional[dict]:
         return None
 
 
-def _write_sync_state(company_id: str, patch: dict) -> None:
+def _write_sync_state(
+    company_id: str, patch: dict, provider: str = PROVIDER_FIREFLIES
+) -> None:
     """Upsert the sync row. Never raises — a bookkeeping failure must not fail
     the sync that succeeded, nor mask the error of one that didn't."""
     from app.db.client import require_client
 
     row = {
         "company_id": company_id,
-        "provider": PROVIDER_FIREFLIES,
+        "provider": provider,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         **patch,
     }
@@ -418,7 +629,55 @@ def _write_sync_state(company_id: str, patch: dict) -> None:
                        company_id, exc_info=True)
 
 
-def _record_sync_success(company_id: str, written: int, *, full: bool) -> None:
+# THE FIREFLIES CALL SHAPE IS FROZEN, and these two seams are what freeze it.
+#
+# `provider` is defaulted rather than always passed, and Fireflies goes through
+# the one/two-argument form it has always used. That is not decoration: this
+# milestone's contract is that Fireflies behaviour does not change, and its
+# tests pin the shape by patching `_sync_state` / `_write_sync_state` with
+# two-argument stand-ins. Threading `provider=` through unconditionally would
+# have meant editing those mocks — i.e. touching the very tests that are the
+# proof nothing moved. Any NEW provider passes it explicitly.
+
+
+def _state_for(company_id: str, provider: str) -> Optional[dict]:
+    """Sync state for one provider.
+
+    Fireflies goes through `_sync_state` — the function its tests patch — and
+    every other provider goes straight to the table. Routing a Zoom read
+    through `_sync_state` too would mean a Fireflies test's stand-in silently
+    answering for Zoom, which is both wrong and how this first broke.
+    """
+    if provider == PROVIDER_FIREFLIES:
+        return _sync_state(company_id)
+
+    from app.db.client import require_client
+
+    try:
+        rows = (
+            require_client().table("call_index_sync").select("*")
+            .eq("company_id", company_id).eq("provider", provider)
+            .limit(1).execute().data
+        )
+        return (rows or [None])[0]
+    except Exception:  # noqa: BLE001 — unknown routes to a refresh, not a claim
+        logger.warning("call-index: %s sync-state read failed for %s",
+                       provider, company_id, exc_info=True)
+        return None
+
+
+def _stamp_state(company_id: str, patch: dict, provider: str) -> None:
+    """Write sync state for one provider, via the frozen Fireflies call shape."""
+    if provider == PROVIDER_FIREFLIES:
+        _write_sync_state(company_id, patch)
+    else:
+        _write_sync_state(company_id, patch, provider)
+
+
+def _record_sync_success(
+    company_id: str, written: int, *, full: bool,
+    provider: str = PROVIDER_FIREFLIES,
+) -> None:
     """Stamp a completed sync and CLEAR any prior error.
 
     `call_count` is only written on a FULL sync: an incremental top-up that
@@ -430,18 +689,21 @@ def _record_sync_success(company_id: str, written: int, *, full: bool) -> None:
     patch = {"last_sync_at": now, "last_success_at": now, "last_error": None}
     if full:
         patch["call_count"] = written
-    _write_sync_state(company_id, patch)
+    _stamp_state(company_id, patch, provider)
 
 
-def _record_sync_failure(company_id: str, exc: BaseException) -> None:
+def _record_sync_failure(
+    company_id: str, exc: BaseException, *, provider: str = PROVIDER_FIREFLIES
+) -> None:
     """Stamp a failed sync. `last_success_at` is deliberately NOT touched, so a
     source that has been failing for a day reads as a day stale rather than as
     freshly synced — a sync that stamps freshness on failure is worse than one
     that never stamps at all."""
-    _write_sync_state(
+    _stamp_state(
         company_id,
         {"last_sync_at": datetime.now(timezone.utc).isoformat(),
          "last_error": str(exc)[:500]},
+        provider,
     )
 
 
@@ -456,22 +718,47 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _has_source(company_id: str) -> bool:
-    """Does this company have a usable transcript source right now?
+def connected_call_providers(company_id: str) -> list[str]:
+    """Which call sources this company has connected right now, in sync order.
 
     Read live rather than inferred from the presence of index rows: a company
-    that disconnected Fireflies still HAS rows, and answering from them while
-    `connected_sources_line` tells the model Fireflies is not connected puts
-    two contradictory claims in one answer.
+    that disconnected a source still HAS rows, and answering from them while
+    `connected_sources_line` tells the model nothing is connected puts two
+    contradictory claims in one answer.
+
+    Each lookup fails OPEN independently — a Supabase blip on the Zoom read
+    must not make a working Fireflies connection look absent, which would take
+    the whole index offline for a question it could have answered.
     """
+    found: list[str] = []
     try:
         from app.call_digest import _load_api_key
 
-        return bool(_load_api_key(company_id))
+        if _load_api_key(company_id):
+            found.append(PROVIDER_FIREFLIES)
     except Exception:  # noqa: BLE001 — a lookup failure is not a disconnect
-        logger.warning("call-index: source lookup failed for %s", company_id,
+        logger.warning("call-index: fireflies lookup failed for %s", company_id,
                        exc_info=True)
-        return True
+        found.append(PROVIDER_FIREFLIES)
+    try:
+        from app import db
+
+        if db.get_connection(company_id, PROVIDER_ZOOM):
+            found.append(PROVIDER_ZOOM)
+    except Exception:  # noqa: BLE001
+        logger.warning("call-index: zoom lookup failed for %s", company_id,
+                       exc_info=True)
+    return found
+
+
+def _has_source(company_id: str) -> bool:
+    """Does this company have ANY usable transcript source right now?
+
+    Fireflies is no longer the only answer — a company that connected only Zoom
+    has real calls to index, and gating on Fireflies alone would report
+    `connected=False` and refuse to answer from an index that is full.
+    """
+    return bool(connected_call_providers(company_id))
 
 
 # Per-company refresh locks, so several call questions arriving together
@@ -490,6 +777,35 @@ def _refresh_lock(company_id: str) -> threading.Lock:
         return lock
 
 
+def _oldest_success(
+    company_id: str, fireflies_success: Optional[datetime]
+) -> Optional[datetime]:
+    """The freshness the INDEX AS A WHOLE can claim.
+
+    `list_calls` reads across providers, so an answer built on it is only as
+    fresh as its stalest CONTRIBUTING source. Taking the newest would let a
+    Zoom sync that finished a minute ago vouch for Fireflies rows that have not
+    refreshed since yesterday — and `answer_listing` STATES A COUNT, so that
+    would be a wrong number delivered with no hedge.
+
+    THE RULE: a provider contributes iff it has ever synced successfully.
+    That is exactly the set that can have rows in the index, so it needs no
+    connectivity lookup — one keyed read of the Zoom state row settles it.
+    A source connected but never synced has nothing in the index to be stale
+    about; its own failure is reported on the connection row, not here.
+
+    Cost: ONE extra indexed read per freshness check, and only because the
+    alternative is over-claiming. A Fireflies-only tenant short-circuits on the
+    first line.
+    """
+    zoom_state = _state_for(company_id, PROVIDER_ZOOM)
+    if not zoom_state:
+        return fireflies_success
+    zoom_success = _parse_ts(zoom_state.get("last_success_at"))
+    contributing = [s for s in (fireflies_success, zoom_success) if s is not None]
+    return min(contributing) if contributing else None
+
+
 def ensure_fresh(
     company_id: str,
     *,
@@ -505,7 +821,9 @@ def ensure_fresh(
     """
     now = now or datetime.now(timezone.utc)
     state = _sync_state(company_id)
-    last_success = _parse_ts((state or {}).get("last_success_at"))
+    last_success = _oldest_success(company_id, _parse_ts(
+        (state or {}).get("last_success_at")
+    ))
 
     # Fresh enough — the common case, and the only one that costs a single read.
     if last_success is not None and (now - last_success).total_seconds() < ttl_s:
@@ -525,7 +843,10 @@ def ensure_fresh(
             # queued caller re-reads state below and usually finds it already
             # fresh.
             with _refresh_lock(company_id):
-                written = sync_company(company_id, since=since)
+                # Every connected source, not just Fireflies — a Zoom-only
+                # company would otherwise refresh nothing and read as stale
+                # forever.
+                written = sync_all_sources(company_id, since=since)
             if written is None:
                 # No connected source — NOT a successful empty sync. See
                 # sync_company's return contract.
@@ -561,8 +882,8 @@ def ensure_fresh(
     )
 
 
-def clear_company(company_id: str) -> None:
-    """Drop this company's index and its sync state.
+def clear_company(company_id: str, provider: Optional[str] = None) -> None:
+    """Drop this company's indexed calls and sync state.
 
     Called on DISCONNECT. Leaving the rows behind is not harmless: chat would
     keep answering from indexed calls while `prompts.connected_sources_line`
@@ -570,13 +891,23 @@ def clear_company(company_id: str) -> None:
     contradictory claims inside one answer, and the user has no way to tell
     which half is wrong. Best-effort; a failure here is logged, and
     `ensure_fresh` independently refuses to answer once the source is gone.
+
+    `provider` SCOPES the wipe, and passing it is now mandatory in practice.
+    Once two sources can populate this index, an unscoped delete on the
+    Fireflies disconnect would silently destroy a working Zoom index — the
+    customer disconnects one tool and loses the call history of another, with
+    nothing to explain it. None still wipes everything, which is what an
+    account-level teardown wants.
     """
     from app.db.client import require_client
 
     client = require_client()
     for table in ("call_index", "call_index_sync"):
         try:
-            client.table(table).delete().eq("company_id", company_id).execute()
+            query = client.table(table).delete().eq("company_id", company_id)
+            if provider:
+                query = query.eq("provider", provider)
+            query.execute()
         except Exception:  # noqa: BLE001
             logger.warning("call-index: could not clear %s for %s", table,
                            company_id, exc_info=True)
@@ -614,6 +945,7 @@ def list_calls(
             participants=row.get("participants") or [],
             account=row.get("account"),
             summary=row.get("summary") or "",
+            provider=row.get("provider") or PROVIDER_FIREFLIES,
         )
         for row in (query.execute().data or [])
     ]
@@ -1064,8 +1396,20 @@ def is_single_call_request(question: str, history=None) -> bool:
     return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
 
 
-def fetch_transcript(company_id: str, external_id: str) -> Optional[dict]:
-    """Fetch ONE transcript, with sentences, from the source."""
+def fetch_transcript(
+    company_id: str, external_id: str, *, provider: str = PROVIDER_FIREFLIES
+) -> Optional[dict]:
+    """Fetch ONE transcript, with sentences, from the source that issued the id.
+
+    `provider` is not optional in substance: an `external_id` only means
+    something to the source that minted it, so asking Fireflies for a Zoom
+    meeting uuid returns a confident nothing and the answer path falls through
+    for a call we could have summarized. The default keeps every existing
+    caller unchanged.
+    """
+    if provider == PROVIDER_ZOOM:
+        return _fetch_zoom_transcript(company_id, external_id)
+
     from app.call_digest import _load_api_key
     from app.kg_ingest.pullers.fireflies import URL, _TIMEOUT
 
@@ -1087,6 +1431,54 @@ def fetch_transcript(company_id: str, external_id: str) -> Optional[dict]:
         logger.warning("call-index: transcript fetch failed: %s", body["errors"][:1])
         return None
     return (body.get("data") or {}).get("transcript")
+
+
+def _fetch_zoom_transcript(company_id: str, external_id: str) -> Optional[dict]:
+    """One Zoom recording's transcript, shaped like the Fireflies payload so
+    `render_transcript` needs no provider branch of its own.
+
+    Returns None — never a half-built dict — when the meeting has no readable
+    transcript. `_summarize_calls` treats None as "fall through", which is the
+    right outcome: a summary built from a transcript we could not read would be
+    invention about a real customer conversation.
+    """
+    from app.connectors import zoom_oauth
+    from app.kg_ingest.pullers.zoom import parse_vtt
+
+    try:
+        ctx = zoom_oauth.sync_context(company_id)
+    except zoom_oauth.ZoomNotConnectedError:
+        return None
+
+    detail = zoom_oauth.get_meeting_recordings(ctx.access_token, external_id)
+    entry = zoom_oauth.transcript_file_from(detail or {})
+    if not entry:
+        return None
+    raw = zoom_oauth.fetch_transcript_text(
+        ctx.access_token, entry.get("download_url") or ""
+    )
+    if not raw:
+        return None
+    text, speakers = parse_vtt(raw)
+    if not text:
+        return None
+    # Rendered back into per-line "sentences" because that is the shape
+    # render_transcript budgets and elides against. Speaker attribution is
+    # already in the parsed text, so a line without an explicit speaker keeps
+    # its words rather than being dropped.
+    sentences = []
+    for line in text.split("\n"):
+        speaker, _, said = line.partition(": ")
+        if said and speaker in speakers:
+            sentences.append({"speaker_name": speaker, "text": said})
+        else:
+            sentences.append({"speaker_name": "?", "text": line})
+    return {
+        "id": external_id,
+        "title": (detail or {}).get("topic") or "",
+        "summary": {},
+        "sentences": sentences,
+    }
 
 
 # Budget for ONE rendered transcript, in characters (~4 chars/token). The
@@ -1289,7 +1681,16 @@ def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -
     blocks: list[str] = []
     used: list[IndexedCall] = []
     for call in calls[:_MAX_CALLS_PER_ANSWER]:
-        raw = fetch_transcript(company_id, call.external_id)
+        # Frozen Fireflies call shape again (see _state_for): the existing
+        # single-call tests patch `fetch_transcript` with a two-argument
+        # stand-in, and those tests are the proof this path did not move.
+        raw = (
+            fetch_transcript(company_id, call.external_id)
+            if call.provider == PROVIDER_FIREFLIES
+            else fetch_transcript(
+                company_id, call.external_id, provider=call.provider
+            )
+        )
         if raw and (raw.get("sentences") or []):
             blocks.append(render_transcript(raw))
             used.append(call)

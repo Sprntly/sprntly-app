@@ -1056,7 +1056,7 @@ _VOC_KG_SYSTEM = (
 
 
 def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
-    """Voice-of-customer answered from the KG when no live call source exists.
+    """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
     section order, a radar SVG and a schema the model filled in. Reports are
@@ -1064,9 +1064,17 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     same budget-capped KG bundle the direct Ask path uses — the GROUNDING is
     what made this path worth having, not the layout.
 
+    NARROWED 2026-08-05. This was the "no live call source" half of an either/or
+    that hid the knowledge graph from any company with Zoom or Fireflies
+    connected. An unpinned VoC turn now goes to `call_digest.answer`, which
+    retrieves this same bundle (`_retrieve_kg_bundle` + `render_context_section`
+    — deliberately the same pair, so the two cannot drift) and merges it with
+    the live calls. What still reaches here is a turn that PINNED
+    `voice-of-customer-report`, whose behaviour is unchanged: the KG bundle,
+    no live fetch.
+
     Returns None when the KG yields nothing, so the caller falls through to the
-    generic answer (which explains what to connect). The live-calls path
-    (call_digest) takes precedence and is handled upstream in `answer`.
+    generic answer (which explains what to connect).
     """
     from app.graph.retrieval import render_context_section
 
@@ -1176,6 +1184,78 @@ def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
         return False
 
 
+def _cross_connector_sweep_enabled(enterprise_id: Optional[str]) -> bool:
+    """Should this company's source-agnostic questions also read connectors live?
+
+    Two levers, checked in this order:
+      * `settings.chat_cross_connector_sweep` — the GLOBAL operational switch,
+        so the sweep can be turned off everywhere without a per-company DB
+        write. Checked first because it must win.
+      * `chat_cross_connector_sweep` in companies.feature_flags — the per-company
+        product control, DEFAULT ON via the usual grandfather pattern.
+
+    A failed flag read resolves ON, matching `cross_connector_sweep_enabled`'s
+    reasoning: the sweep only re-reads sources the tenant already connected,
+    through the same read-only adapters, so an unknown flag state risks latency
+    rather than exposure — and the global switch is the lever for latency.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.config import settings
+
+        if not settings.chat_cross_connector_sweep:
+            return False
+        from app.entitlements import cross_connector_sweep_enabled, read_feature_flags
+
+        return cross_connector_sweep_enabled(read_feature_flags(enterprise_id))
+    except Exception:  # noqa: BLE001 — flag read must never break the ask
+        logger.exception(
+            "chat_cross_connector_sweep flag read failed for %s", enterprise_id
+        )
+        return True
+
+
+def _sweep_context(enterprise_id: Optional[str], question: str) -> str:
+    """The live cross-source block for the direct path, or "" — never raises.
+
+    Deliberately called on the DIRECT path only, and only after routing has
+    declined every other interception. Everything above it either names its own
+    source (the connector-lookup and document paths, which read it live already)
+    or owns a pipeline with its own retrieval (VoC, DS, CIR, public feedback).
+    What is left is the one shape that had no live reader at all: a question
+    about the company's work that names no tool.
+    """
+    try:
+        from app.connector_lookup import sweep as connector_sweep
+
+        # Cheapest gate FIRST. Most turns in a working thread are follow-ups and
+        # instructions that name no topic, and this check is pure string work —
+        # putting the flag read (a DB round trip) ahead of it would charge every
+        # "make it shorter" for a decision that was always going to be no.
+        if len(connector_sweep.sweep_terms(question)) < connector_sweep.MIN_TERMS:
+            return ""
+        if not _cross_connector_sweep_enabled(enterprise_id):
+            return ""
+        block, result = connector_sweep.context_block(enterprise_id or "", question)
+        # Fire-and-forget: persist whatever this sweep read into the KG, off
+        # this path entirely. Kicked off AFTER `block` is already computed —
+        # nothing below this line participates in producing the return value,
+        # so persistence cannot add latency to the answer it's serving.
+        # `kickoff_sweep_persist` never raises (fully isolated — see
+        # connector_lookup/sweep_persist.py). Unconditional: there is no
+        # separate persistence flag — `_cross_connector_sweep_enabled` above
+        # already gates whether the sweep (and therefore anything it could
+        # persist) ran at all.
+        from app.connector_lookup.sweep_persist import kickoff_sweep_persist
+
+        kickoff_sweep_persist(enterprise_id or "", result)
+        return block
+    except Exception:  # noqa: BLE001 — a sweep degrades, it never breaks the answer
+        logger.exception("cross-connector sweep failed for %s", enterprise_id)
+        return ""
+
+
 # The composer inlines every attachment's extracted text after this literal
 # block, client-side (`ChatScreen.tsx` `submitAsk`:
 # `` `${sendQuery}\n\n[Attached files]\n${ctx}` ``). It is already an
@@ -1239,6 +1319,14 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
     if not names:
         return routing_text
     return routing_text + "\n\n[Attached document names]\n" + "\n".join(names)
+
+
+#: Providers whose content IS the call corpus. Naming one of these does not
+#: displace the call-digest / call-index interceptors — it names the source
+#: they already read, so "summarize last week's calls in fireflies" belongs to
+#: the digest exactly as it always has. Every OTHER named source is a request
+#: to look somewhere the call paths cannot see.
+_CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong", "zoom"})
 
 
 def answer(
@@ -1335,6 +1423,72 @@ def answer(
             )
         return _contest_memo[0]
 
+    # Sources the user NAMED in this very message, and whether any of them is
+    # one we can actually open live for this company. Naming a source is the
+    # most explicit routing signal a person can give us, and until now it lost
+    # to every topical interceptor above the lookup: "summarize the slack
+    # channel syncs from this week" matched the call digest's
+    # verb-plus-`syncs?` rule and was answered from Fireflies transcripts;
+    # "what's the latest customer feedback in slack" matched the VoC rule; and
+    # "what are the latest customer conversations in slack" matched the call
+    # index's listing rule. All three named Slack, all three were answered from
+    # calls, and none of them said so.
+    #
+    # HISTORY-FREE on purpose. `is_connector_lookup(q, history)` also resolves
+    # sticky threads — a bare "what's the full thread?" inherits the source the
+    # thread was reading. That is right for CLAIMING a turn (it is still what
+    # runs at the lookup below) and wrong for DISPLACING an interceptor: the
+    # user has to have named the source in the words being routed, or a Slack
+    # thread would quietly swallow the next call question asked inside it.
+    named_sources: set[str] = set()
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        named_sources = is_connector_lookup(routing_text) or set()
+
+    _live_source_memo: list = []
+
+    def _names_live_source() -> bool:
+        """True when this message names a source the connector lookup can
+        actually read for this company — the only case in which standing an
+        interceptor down is an improvement.
+
+        Two narrowings, both deliberate:
+
+        CONNECTED + READABLE. Same capability-gate shape as the tracker and DS
+        branches below: matching a pattern is not enough to claim (or here, to
+        hand over) a turn. If the named source has no adapter or no connection,
+        the lookup would answer "that isn't connected" — so the interceptor
+        keeps the turn and today's behaviour stands unchanged.
+
+        NOT A CALL SOURCE. Fireflies and Gong ARE the call corpus, so naming
+        one is not a request to route away from the call paths — it names the
+        very source they read. `test_call_digest_still_wins_over_a_named_source`
+        pins that precedence and it stays pinned.
+
+        Lazily memoized: `connected_providers` is a DB read, and a question that
+        trips no interceptor must never pay for it.
+        """
+        if not named_sources:
+            return False
+        if not _live_source_memo:
+            try:
+                from app.connector_lookup import registry
+
+                # Parenthesised because `&` binds tighter than `-`: without
+                # them this reads as `named - (calls & lookup & connected)`,
+                # which is a different (and much wider) set.
+                readable = (
+                    (named_sources - _CALL_SOURCE_PROVIDERS)
+                    & set(registry.LOOKUP_PROVIDERS)
+                    & set(registry.connected_providers(enterprise_id))
+                )
+                _live_source_memo.append(bool(readable))
+            except Exception:  # noqa: BLE001 — routing must never break the answer
+                logger.exception(
+                    "connector-source gate failed for %s", enterprise_id
+                )
+                _live_source_memo.append(False)
+        return _live_source_memo[0]
+
     # Call INDEX first: a listing question ("give me the 5 latest transcripts",
     # "which calls did we have last week") wants the LIST, and the index already
     # holds it. Answering from Postgres costs a query; letting it reach the
@@ -1344,7 +1498,11 @@ def answer(
     # transcripts are unavailable. Placed ahead of the digest, and deliberately
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
-    if not pinned_skill and call_index.is_listing_request(routing_text):
+    if (
+        not pinned_skill
+        and call_index.is_listing_request(routing_text)
+        and not _names_live_source()
+    ):
         try:
             listed = call_index.answer_listing(
                 enterprise_id, question, fresh=_index_fresh()
@@ -1376,13 +1534,42 @@ def answer(
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
     # from the lossy, token-capped KG, so intercept it first — unless the user has
     # pinned a specific skill via a follow-up.
-    if not pinned_skill and is_call_digest(routing_text):
+    #
+    # Three things can now stand this interception down, cheapest first.
+    # `_names_live_source` (2026-08-03) declines when the user named a readable
+    # source the digest cannot see into — "summarize the slack channel syncs
+    # from this week" matched `_DIGEST_VERB` + `syncs?` and was answered from
+    # Fireflies transcripts, a source the question never mentioned.
+    # `_custom_beats_digest` (#1038) lets a company's own upload contest it, and
+    # is checked second because it can cost a model call. And `has_call_source`
+    # is the capability gate its NEIGHBOURS already have (the VoC branch below,
+    # the tracker and DS branches further down): this was the only interceptor
+    # on the ladder claiming its turn unconditionally, so a company with no call
+    # source at all still got the digest's empty-corpus answer instead of
+    # falling through to routing that could serve them.
+    if (
+        not pinned_skill
+        and is_call_digest(routing_text)
+        and not _names_live_source()
+    ):
         if _custom_beats_digest() is None:
             from app import call_digest
 
-            return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
-            )
+            try:
+                has_calls = call_digest.has_call_source(enterprise_id)
+            except Exception:  # noqa: BLE001 — routing must never break the answer
+                # Unknown, so behave exactly as this branch did before the gate
+                # existed: claim the turn. A capability check that cannot be
+                # completed must not be read as "no capability" — that would
+                # turn a transient DB blip into a silently re-routed answer.
+                logger.exception("call-source check failed for %s", enterprise_id)
+                has_calls = True
+            if has_calls:
+                return call_digest.answer(
+                    enterprise_id=enterprise_id, question=question, history=history
+                )
+            # No corpus to digest: a declined precondition falls through to
+            # normal routing — never a canned refusal the user never asked for.
 
     # Bare "voice of customer" / "VoC report" asks carry no call-noun, so
     # is_call_digest misses them — they'd fall to the corpus-less skill answer,
@@ -1390,7 +1577,11 @@ def answer(
     # call source IS connected, run the same live digest so the natural phrasing
     # yields a real report; when it isn't, fall through to the skill route so it
     # can explain what to connect.
-    if not pinned_skill and is_voc_report_request(routing_text):
+    if (
+        not pinned_skill
+        and is_voc_report_request(routing_text)
+        and not _names_live_source()
+    ):
         from app import call_digest
 
         if call_digest.has_call_source(enterprise_id) and _custom_beats_digest() is None:
@@ -1467,7 +1658,14 @@ def answer(
     # engine already vetoes itself on call/meeting/transcript/feedback nouns.
     # The failures this routing exists to fix ("top 3 product requests from
     # last week") match no DS rule, so they are unaffected by sitting here.
-    if not pinned_skill:
+    #
+    # Also stood down by `_names_live_source`, and that is not optional: this is
+    # the SECOND door into the call digest, and the reported failure walks
+    # through it. "summarize the slack channel syncs from this week" names an
+    # explicit window, so gating only the digest above would have handed the
+    # very same question to `call_digest.answer` one branch later — the fix
+    # would have looked right in the diff and changed nothing in production.
+    if not pinned_skill and not _names_live_source():
         try:
             window = call_index.windowed_call_question(enterprise_id, routing_text)
         except Exception:  # noqa: BLE001 — routing must never break the answer
@@ -1660,11 +1858,36 @@ def answer(
         prd_context = build_prd_context(enterprise_id, prd_id)
 
     if not decision.skill_id:
-        # Direct path — corpus + KG, unchanged. Fold history into the question.
-        q = _render_history(history) + question if history else question
+        # Direct path — corpus + KG, plus a bounded live read of every connected
+        # source. Retrieval (the shared question embedding, KG theme kNN, the
+        # document catalog's lexical channel, and Stage N filename matching)
+        # must see the bare question, not the thread — folding history into it
+        # turned each of those into a thread-wide search instead of a
+        # question-scoped one. History still reaches the model: it rides its own
+        # segment inside compose_ask_answer, exactly as the skill-routed path
+        # already does (_answer_single_shot, above).
+        #
+        # This is the path a question about the company's actual work lands on
+        # when it names no tool, and until the sweep it was the only path with
+        # no live reader: a company with Jira, Slack and Confluence connected
+        # got an answer assembled from the corpus and a periodic KG snapshot,
+        # having read none of them.
+        #
+        # The sweep is a FIFTH consumer of that bare question, and it wants the
+        # bare form for the same reason the other four do: it derives keyword
+        # terms, so a folded thread would search every connector for the
+        # previous turn's vocabulary. It was written against the raw question
+        # before the fold was removed here, so the two agree by construction
+        # rather than by retrofit — and a follow-up naming no topic of its own
+        # correctly sweeps nothing.
+        #
+        # Skipped when a PRD is open — that branch skips corpus AND KG
+        # retrieval on purpose (the PRD block is the grounding) and adding I/O
+        # to it would spend exactly what it was built to save.
+        live_context = "" if prd_context else _sweep_context(enterprise_id, question)
         return compose_ask_answer(
-            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context,
-            on_delta=on_delta,
+            dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
+            history=history, live_context=live_context, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic
@@ -1742,18 +1965,33 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
-    # VoC routed by ANY stage — including the haiku intent router. Prefer the
-    # SAME live call digest the phrase fast-paths use when a call source is
-    # connected, so a phrasing only the LLM router understands ("what is the
-    # number 1 user complaint from today's conversations?") gets the identical
-    # answer path as a regex-matched one. Intent decides; phrases are only a
-    # latency shortcut (decision 2026-07-27). Without a call source, render the
-    # pinned HTML report from KG signal when there is any; else fall through to
-    # the generic answer (which explains what to connect).
+    # VoC routed by ANY stage — including the haiku intent router. One path
+    # answers it, and that path reads BOTH halves of the evidence: the live call
+    # sources and the knowledge graph. A phrasing only the LLM router
+    # understands ("what is the number 1 user complaint from today's
+    # conversations?") therefore gets the identical answer path as a
+    # regex-matched one. Intent decides; phrases are only a latency shortcut
+    # (decision 2026-07-27).
+    #
+    # `has_call_source` USED TO GATE THIS BRANCH, AND THAT WAS THE BUG. It made
+    # the two halves an either/or: with a call source the digest ran and the KG
+    # was never read, without one `_answer_voc_report` ran and the calls were
+    # never fetched. So connecting Zoom silently took Slack, tickets and every
+    # other synced source out of every voice-of-customer answer — reported live,
+    # "what are customers feedback" answered from three Zoom calls with Slack
+    # connected and populated. `call_digest.answer` now merges both and degrades
+    # per-source on its own, which leaves nothing for a capability gate here to
+    # decide: a company with no call source but a populated graph belongs on the
+    # merged path (it degrades to KG-only), and a company with neither gets the
+    # digest's own what-to-connect message.
+    #
+    # `_answer_voc_report` is kept for the PINNED case only — `/voice-of-
+    # customer-report` is a pipeline id, so it survives `_invocable` and reaches
+    # here with `pinned_skill` set. Pinning behaviour is unchanged.
     if decision.skill_id == "voice-of-customer-report":
         from app import call_digest
 
-        if not pinned_skill and call_digest.has_call_source(enterprise_id):
+        if not pinned_skill:
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )

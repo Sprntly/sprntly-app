@@ -58,12 +58,19 @@ def _maybe_refresh_token(
     not configured) logs a WARNING and returns the input unchanged, so the
     caller's sync surfaces the usual 401 → "reconnect required".
 
-    Jira and Confluence (Atlassian) are handled alongside github: their access
-    tokens expire ~1h and their refresh tokens ROTATE, so — like github — we
-    persist the whole new payload on every refresh. Confluence additionally
-    requires company_id to survive the rewrite, because that is the credential
-    its puller is handed (see confluence_oauth.token_payload_to_store)."""
-    if provider not in ("github", "jira", "confluence"):
+    Jira, Confluence (Atlassian) and Zoom are handled alongside github: their
+    access tokens expire ~1h and their refresh tokens ROTATE, so — like github —
+    we persist the whole new payload on every refresh. Confluence and Zoom
+    additionally require company_id to survive the rewrite, because that is the
+    credential their pullers are handed (see
+    confluence_oauth.token_payload_to_store).
+
+    Google Meet is here for a DIFFERENT reason. Its refresh tokens do not
+    rotate, so nothing is stranded by a throwaway refresh — but Google's refresh
+    response omits `refresh_token` ENTIRELY, so persisting it verbatim blanks
+    the stored one and the connection dies at the following cycle. It carries
+    the same company_id obligation as Confluence and Zoom."""
+    if provider not in ("github", "jira", "confluence", "zoom", "google_meet"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -81,6 +88,31 @@ def _maybe_refresh_token(
                 # Dropping this here breaks the NEXT sync, not this refresh:
                 # token_for("confluence", ...) reads exactly this field.
                 company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "zoom":
+            from app.connectors import zoom_oauth
+
+            new_json_str = zoom_oauth.token_payload_to_store(
+                zoom_oauth.refresh_access_token(refresh_token),
+                # Same trap as confluence above: dropping this here breaks the
+                # NEXT sync, not this refresh, because token_for("zoom", ...)
+                # reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "google_meet":
+            from app.connectors import google_meet
+
+            new_json_str = google_meet.token_payload_to_store(
+                google_meet.refresh_access_token(refresh_token),
+                # Same trap as confluence/zoom above: dropping this here breaks
+                # the NEXT sync, not this refresh, because
+                # token_for("google_meet", ...) reads exactly this field.
+                company_id=company_id,
+                # And this one is not optional on Google: the refresh response
+                # has no refresh_token at all, so without the carry-forward the
+                # stored credential is replaced by nothing.
                 keep_refresh_token=refresh_token,
             )
         elif provider == "jira":
@@ -465,13 +497,17 @@ def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
 
 def _run_call_index_sync(company_id: str) -> None:
     """Blocking call-index refresh — runs inside the daemon thread. Fully
-    isolated: `call_index.sync_company` already stamps its own failure on
-    `call_index_sync` (which is what makes the failure visible to the read
-    path), so this only has to keep it out of the caller's flow."""
+    isolated: `call_index.sync_all_sources` already stamps each provider's own
+    failure on `call_index_sync` (which is what makes the failure visible to
+    the read path), so this only has to keep it out of the caller's flow.
+
+    Every connected source, in one pass. Kicking per provider instead would
+    race two threads of the same name onto the same company and duplicate the
+    work for a tenant that has both."""
     from app import call_index
 
     try:
-        written = call_index.sync_company(company_id)
+        written = call_index.sync_all_sources(company_id)
         if written is None:
             logger.info("call-index: no transcript source for %s — nothing to do",
                         company_id)

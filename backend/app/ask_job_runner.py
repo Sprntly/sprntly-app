@@ -101,7 +101,37 @@ def _run_sync(
     # inside qa_agent.py, the file this fix stays out of). Both ride a
     # request-scoped ContextVar pair instead, set here immediately before the
     # call and ALWAYS cleared in the finally below — even when answer() raises.
+    #
+    # The question embedding rides the same route, for the same reason. Topical
+    # document selection fuses a lexical and a semantic channel; the semantic
+    # one needs a vector, and the only call site that had one was
+    # `compose_ask_answer`. The skill-routed path reaches document grounding
+    # through `qa_agent._answer_single_shot`, which calls it positionally, so
+    # that path ran with no semantic channel at all and its ranking fell back
+    # to whatever the lexical channel could separate — which, for a catalog
+    # whose documents share the workspace's own name, is nothing. Ranking was
+    # then decided by recency and still reported as a topic match.
+    #
+    # Computed HERE, once, before `answer()` picks a path, so both paths get
+    # the same vector and the ask pays for exactly one embedding:
+    # `compose_ask_answer` reuses this instead of computing its own.
+    #
+    # Computed BEFORE either setter, deliberately: this is the only step here
+    # that does real work (an HTTP call), and nothing between a `set_` and the
+    # `try` is covered by the `finally`. This worker runs on a pooled thread,
+    # and a ContextVar left set outlives the request into whatever ask reuses
+    # that thread next — a stale conversation id would then scope another
+    # user's document lookup. `_question_embedding` swallows its own failures
+    # and returns `(None, True)` rather than raising, so today that window is
+    # already closed; ordering it this way is what keeps it closed if that
+    # ever stops being true.
+    embedding, embedding_degraded = ask_runner._question_embedding(
+        enterprise_id, question
+    )
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
+    embedding_token = ask_runner.set_active_question_embedding(
+        embedding, embedding_degraded
+    )
     try:
         payload = qa_agent.answer(
             enterprise_id=enterprise_id,
@@ -127,6 +157,7 @@ def _run_sync(
         )
     finally:
         ask_runner.reset_active_conversation(context_token)
+        ask_runner.reset_active_question_embedding(embedding_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask

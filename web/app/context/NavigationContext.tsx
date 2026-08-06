@@ -92,6 +92,17 @@ export type ContentPanelTab = "evidence" | "prd" | "tickets" | "reports"
  *  resumed tab is actually active, then opens the panel on that report. */
 export type ReportFocusRequest = { conversationId: number; reportId: number }
 
+/** A request to open a STANDALONE ticket set in the chat it was generated in.
+ *
+ *  Exactly the report hand-off's shape and posture, one artifact over: a set's
+ *  home is its thread, so clicking one in Artifacts lands you in that
+ *  conversation with the panel's Tickets tab on the set — not a bare drawer
+ *  floating over the library. The caller writes the ordinary
+ *  `sprntly_resume_conv` hand-off and fills this; ChatScreen consumes it once
+ *  the resumed tab is actually active, then loads the set and opens the panel.
+ *  No new panel tab: a set reads on the existing `"tickets"` one. */
+export type TicketSetFocusRequest = { conversationId: number; ticketSetId: number }
+
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
 export const AI_PANEL_WIDTH_DEFAULT = 380
@@ -195,6 +206,17 @@ interface NavigationContextType {
    *  routes to the chat surface and says which report to land on. */
   openReportTab: (request: ReportFocusRequest) => void
 
+  /** Filled by `openTicketSetTab`; consumed once by ChatScreen, which loads the
+   *  set and opens the panel's Tickets tab on it as soon as the set's own thread
+   *  is the active tab. */
+  pendingTicketSetFocus: TicketSetFocusRequest | null
+  setPendingTicketSetFocus: (value: TicketSetFocusRequest | null) => void
+  /** Open a standalone ticket set in the chat thread it belongs to. The CALLER
+   *  must already have written the `sprntly_resume_conv` hand-off for that
+   *  conversation (ChatScreen's resume path spawns/refocuses the tab); this
+   *  routes to the chat surface and says which set to land on. */
+  openTicketSetTab: (request: TicketSetFocusRequest) => void
+
   /** Global search / command palette (⌘K). Rendered once by AppShell; the
    *  sidebar trigger and the global hotkey both drive this shared state. */
   paletteOpen: boolean
@@ -234,6 +256,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
   const [pendingReportFocus, setPendingReportFocus] = useState<ReportFocusRequest | null>(null)
+  const [pendingTicketSetFocus, setPendingTicketSetFocus] = useState<TicketSetFocusRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
@@ -447,6 +470,15 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const openTicketSetTab = useCallback((request: TicketSetFocusRequest) => {
+    setPendingTicketSetFocus(request)
+    // Same posture as openReportTab: this navigation to `/` exists to OPEN the
+    // panel, so the route-change effect above must not close it on arrival.
+    skipPanelCloseOnNavRef.current = true
+    router.push("/")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openPalette = useCallback(() => setPaletteOpen(true), [])
   const closePalette = useCallback(() => setPaletteOpen(false), [])
   const togglePalette = useCallback(() => setPaletteOpen((v) => !v), [])
@@ -523,6 +555,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingReportFocus,
         setPendingReportFocus,
         openReportTab,
+        pendingTicketSetFocus,
+        setPendingTicketSetFocus,
+        openTicketSetTab,
         paletteOpen,
         openPalette,
         closePalette,

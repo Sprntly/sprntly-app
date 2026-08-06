@@ -820,6 +820,27 @@ def _seed_prd(db, *, slug: str, prd_id: int, payload_md: str = "# PRD body"):
     ).execute()
 
 
+def _seed_conversation(
+    db, *, conv_id: int, company_id: str, user_id: str, turns: list[dict]
+) -> None:
+    """Insert a `conversations` row plus its ordered `conversation_turns`.
+    `_load_history` requires the conversation to match BOTH company_id and
+    user_id (ask.py's ownership check), so callers must pass the ids the
+    `tenant_client` fixture actually seeded — not hard-coded ones. `turns` is
+    an ordered list of `{"role": ..., "content": ...}` dicts."""
+    db.table("conversations").insert(
+        {"id": conv_id, "company_id": company_id, "user_id": user_id}
+    ).execute()
+    for turn in turns:
+        db.table("conversation_turns").insert(
+            {
+                "conversation_id": conv_id,
+                "role": turn["role"],
+                "content": turn.get("content", ""),
+            }
+        ).execute()
+
+
 def test_ask_foreign_prd_id_returns_404(tenant_client, isolated_settings):
     """prd_id must belong to the caller — otherwise a crafted id would seed a
     foreign tenant's PRD into the answer context."""
@@ -903,3 +924,429 @@ def test_ask_with_prd_id_skips_prewarm_cache(
     assert body["status"] == "ready"
     assert body["answer"] == "fresh grounded answer"
     assert len(fake_llm["calls"]) == 1
+
+
+# ---- mid-thread cache eligibility (thread blindness) ------------------------
+# The prewarm cache is keyed on (dataset, question) only — no conversation, no
+# turn context. A user mid-thread who asks something matching a warmed prompt
+# must not be served an answer that read none of their conversation. A
+# FIRST-TURN ask keeps its cache hit: conversation_id is populated on turn one
+# too (the client awaits conversation creation before asking), so eligibility
+# turns on whether the thread actually holds an assistant turn, not on
+# whether conversation_id is set.
+
+def test_mid_thread_ask_skips_prewarm_cache(
+    tenant_client, isolated_settings, fake_llm
+):
+    """AC1 — a mid-thread ask (thread already holds a user+assistant turn
+    pair) must run a real generation instead of being served from the
+    (dataset, question)-keyed prewarm cache, even though a ready cached row
+    exists for the exact question. FAILS on unfixed code: the cache resolves
+    before history loads, so the conversation's content never factors into
+    eligibility — the cached answer is returned and the LLM is never called."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=601,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[
+            {"role": "user", "content": "What did last week's brief say?"},
+            {"role": "assistant",
+             "content": "Retention dipped sharply in the EMEA segment last week."},
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh generated answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 601},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert body["answer"] == "fresh generated answer"
+    assert len(fake_llm["calls"]) == 1
+
+
+def test_mid_thread_ask_matching_a_warmed_prompt_sees_the_thread(
+    tenant_client, isolated_settings, fake_llm
+):
+    """AC2 — the mid-thread answer must actually SEE the thread, not merely
+    skip the cache: a prior turn's text must reach the captured LLM prompt.
+    "the cache was skipped" and "the thread was used" are different claims and
+    only the second is the bug. FAILS on unfixed code: no LLM call is made at
+    all (the cached answer is served), so there is no prompt to assert on."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=602,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[
+            {"role": "user", "content": "What did last week's brief say?"},
+            {"role": "assistant",
+             "content": "Retention dipped sharply in the EMEA segment last week."},
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh generated answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 602},
+    ).json()
+    _poll_ask(t.client, start["ask_id"])
+    assert len(fake_llm["calls"]) == 1
+    prompt = fake_llm["calls"][0]["user"]
+    assert "Retention dipped sharply in the EMEA segment last week." in prompt
+
+
+def test_first_turn_ask_with_conversation_id_still_serves_the_cache(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """AC3 — the regression pin, NOT a proof of the fix: this test is GREEN
+    on unfixed code too (today the cache is served regardless of
+    conversation_id). It exists to catch a future "simplification" that
+    mirrors the prd_id check (a flat `conversation_id is None`) — conversation_id
+    is populated on the FIRST turn too, because the client awaits conversation
+    creation before asking, so that simplification would silently disable the
+    cache for every starter chip. Covers both sides of the pushUserTurn race:
+    an empty thread and a lone-user-turn thread must both stay cache-eligible."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    # Side 1: an empty thread — the conversation row exists but holds no turns
+    # at all (this is what a freshly-created conversation looks like the
+    # instant before the user's own turn lands).
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=603,
+        company_id=t.company_id, user_id=t.user_id, turns=[],
+    )
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 603},
+    ).json()
+    assert start["status"] == "ready"
+    body = t.client.get(f"/v1/ask/{start['ask_id']}").json()
+    assert body["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+    # Side 2: the lone-user-turn case — pushUserTurn's own POST landed before
+    # this ask ran (the other side of the race).
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=604,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[{"role": "user", "content": question}],
+    )
+    fake_llm["calls"].clear()
+    start2 = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 604},
+    ).json()
+    assert start2["status"] == "ready"
+    body2 = t.client.get(f"/v1/ask/{start2['ask_id']}").json()
+    assert body2["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+
+def test_ask_without_conversation_id_still_serves_the_cache(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """AC3 — the AIBar inline panel (AIBar.tsx:385) never sends
+    conversation_id at all; that ask must stay cache-eligible."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask", json={"question": question, "dataset": "acme"}
+    ).json()
+    assert start["status"] == "ready"
+    body = t.client.get(f"/v1/ask/{start['ask_id']}").json()
+    assert body["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+
+def test_ask_with_conversation_id_zero_is_cache_eligible(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """AC4 — `conversation_id: 0` is a well-formed request value (no `ge`
+    constraint on the field, unlike prd_id's `ge=1`), and `_load_history`
+    short-circuits on it (`if not conversation_id: return []`) — no history
+    loads, so it is treated as first-turn and stays cache-eligible."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 0},
+    ).json()
+    assert start["status"] == "ready"
+    body = t.client.get(f"/v1/ask/{start['ask_id']}").json()
+    assert body["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+
+def test_ask_with_foreign_conversation_id_is_cache_eligible(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """AC4 — a conversation_id owned by a DIFFERENT user loads no history
+    (`_load_history` requires BOTH company_id and user_id to match the
+    caller) and is therefore treated as first-turn — pinned so this reads as
+    intended behaviour rather than a hole. The dataset tenant gate is a
+    separate check and stays unaffected/green."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    # Owned by a DIFFERENT teammate at the SAME company, and mid-thread by
+    # itself — if ownership weren't checked here, this would look mid-thread.
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=605,
+        company_id=t.company_id, user_id="a-different-teammate",
+        turns=[
+            {"role": "user", "content": "teammate's own question"},
+            {"role": "assistant", "content": "teammate's own answer"},
+        ],
+    )
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 605},
+    ).json()
+    assert start["status"] == "ready"
+    body = t.client.get(f"/v1/ask/{start['ask_id']}").json()
+    assert body["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+
+def test_history_is_loaded_once_per_ask(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """AC4b — `_load_history` runs exactly once per request, on BOTH the
+    cache-hit and cache-miss paths. The relocated call replaces the one that
+    used to run after the cache resolution; a leftover second call would cost
+    a silent extra DB read on every ask."""
+    calls = {"n": 0}
+    original = ask_route._load_history
+
+    def _counting_load_history(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ask_route, "_load_history", _counting_load_history)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+
+    # Cache-miss path.
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [],
+        "confidence": 0.5, "unanswered": "",
+    }
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": "A brand new question nobody warmed?", "dataset": "acme"},
+    ).json()
+    _poll_ask(t.client, start["ask_id"])
+    assert calls["n"] == 1
+
+    # Cache-hit path.
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "cached", "key_points": [], "citations": [],
+                    "confidence": 1.0, "unanswered": ""}),
+    )
+    calls["n"] = 0
+    resp = t.client.post(
+        "/v1/ask", json={"question": question, "dataset": "acme"}
+    ).json()
+    assert resp["status"] == "ready"
+    assert calls["n"] == 1
+
+
+def test_ask_with_conversation_id_and_prd_id_skips_cache_once(
+    tenant_client, isolated_settings, fake_llm
+):
+    """AC1 — both prd_id and a mid-thread conversation_id set on the same
+    ask: still exactly one generation (no double-skip pathology), and prd_id
+    is still recorded on the job row."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    _seed_prd(isolated_settings["supabase"], slug="acme", prd_id=404)
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=606,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[
+            {"role": "user", "content": "earlier PRD question"},
+            {"role": "assistant", "content": "earlier PRD answer"},
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh grounded answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "prd_id": 404,
+              "conversation_id": 606},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert body["answer"] == "fresh grounded answer"
+    assert len(fake_llm["calls"]) == 1
+    row = db.get_ask_job(start["ask_id"])
+    assert row["prd_id"] == 404
+
+
+def test_stopped_first_answer_leaves_turn_two_cache_eligible(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """Named residual, ACCEPTED not fixed (do NOT read a future change here
+    as a bug fix). If the user stops the very first answer, no assistant turn
+    is ever persisted, so a turn-two ask sees history == [user turn],
+    mid_thread computes False, and the ask stays cache-eligible — even though
+    the user already has one prior question in the thread that a cached
+    answer would not see. The alternative (treating any non-empty history as
+    mid-thread) reintroduces the pushUserTurn race and makes first-turn
+    eligibility flaky, which is a worse defect than this one."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=607,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[{"role": "user", "content": "the stopped first question"}],
+    )
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 607},
+    ).json()
+    assert start["status"] == "ready"
+    body = t.client.get(f"/v1/ask/{start['ask_id']}").json()
+    assert body["answer"] == "**Cached answer**"
+    assert fake_llm["calls"] == []
+
+
+def test_mid_thread_ask_does_not_write_cached_asks(
+    tenant_client, isolated_settings, fake_llm
+):
+    """AC5 — a mid-thread ask that skips the cache leaves the `cached_asks`
+    row count unchanged. The write path stays warm-only."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    _seed_conversation(
+        isolated_settings["supabase"], conv_id=608,
+        company_id=t.company_id, user_id=t.user_id,
+        turns=[
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+        ],
+    )
+    before = (
+        isolated_settings["supabase"]
+        .table("cached_asks").select("id").execute().data
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh generated answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "conversation_id": 608},
+    ).json()
+    _poll_ask(t.client, start["ask_id"])
+    after = (
+        isolated_settings["supabase"]
+        .table("cached_asks").select("id").execute().data
+    )
+    assert len(after) == len(before)
+
+
+def test_ask_route_holds_no_cached_asks_writer():
+    """AC6 — pins the closed-world claim that justifies not guarding the
+    cache-WRITE path: `app.routes.ask` holds no reference to any of the
+    `cached_asks` writers. The only writers are `_warm_one`'s two callers
+    (dataset-level prompt warming, no conversation in scope), so a
+    conversation-scoped answer can never enter the cache in the first place.
+    If a future request-path writer is added here, this goes red — which is
+    the condition under which the write path would need its own guard."""
+    for name in ("start_cached_ask", "complete_cached_ask", "fail_cached_ask"):
+        assert not hasattr(ask_route, name)

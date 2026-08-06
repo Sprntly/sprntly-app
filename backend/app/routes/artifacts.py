@@ -69,7 +69,7 @@ def list_artifacts(
 
 
 class ChatSummaryIn(BaseModel):
-    kind: Literal["prd", "evidence", "prototype"]
+    kind: Literal["prd", "evidence", "prototype", "ticket_set"]
     id: int = Field(..., ge=1)
 
 
@@ -93,6 +93,26 @@ def chat_summary(
     elif body.kind == "evidence":
         row = require_owned_evidence(body.id, company.company_id)
         title, content, agent = row.get("title") or "", row.get("payload_md") or "", "evidence"
+    elif body.kind == "ticket_set":
+        # A standalone ticket set is company-scoped (get_set filters company_id
+        # in-query), so a foreign id reads as absent and 404s — same posture as
+        # the prototype branch below, no brief chain involved.
+        from app.db.ticket_sets import get_set
+
+        row = get_set(company.company_id, body.id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Ticket set not found")
+        # A set has no document — the substance is the roster of tickets. Render
+        # them as the content so the summary describes the WORK, not the shape
+        # of the JSON.
+        stories = [s for s in (row.get("stories") or []) if isinstance(s, dict)]
+        title = row.get("title") or "Tickets"
+        content = "\n\n".join(
+            f"### {s.get('title') or '(untitled)'}\n"
+            f"{s.get('what') or s.get('user_story') or s.get('body') or ''}"
+            for s in stories
+        )
+        agent = "user_stories"
     else:
         # Prototypes are workspace-scoped directly (no brief chain) — same gate
         # as GET /v1/design-agent/{id}: a foreign row 404s, never 403s.

@@ -2,14 +2,20 @@
 //
 // "Data source" definition (boss's rule, 2026-07): a connector counts as a data
 // source — and can drive the brief — iff its CATEGORY is evidence-bearing, i.e.
-// NOT one of {comms, pm, code, design, docs}. So analytics, customer voice
+// NOT one of {pm, code, design, docs}. So analytics, customer voice
 // (support/calls/feedback), CRM, revenue, and monitoring count;
-// Teams/Email, Jira & other PM tools, GitHub, Figma, and docs tools
+// Jira & other PM tools, GitHub, Figma, and docs tools
 // (Notion / Google Docs) do NOT. Slack DOES count since 2026-07-30: it is
 // dual-typed communication + customer-voice and listed on the Voice shelf
 // (its synced channels are evidence).
+//
+// `comms` left the deny-list on 2026-08-04 when the Communications category
+// was removed from the catalog. Nothing changed about what counts: MS Teams
+// went with the category, and an unknown provider id is not evidence either
+// way (see the msteams case below, which still returns false).
 import { describe, it, expect } from "vitest"
 import {
+  CONNECTOR_CATALOG,
   isEvidenceConnector,
   hasEvidenceConnector,
   hasDataSourceConnection,
@@ -17,14 +23,24 @@ import {
 } from "../connectorsCatalog"
 
 describe("NON_EVIDENCE_CATEGORIES (not data sources)", () => {
-  it("excludes comms, pm, code, design, and docs", () => {
+  it("excludes pm, code, design, and docs", () => {
     expect([...NON_EVIDENCE_CATEGORIES].sort()).toEqual([
       "code",
-      "comms",
       "design",
       "docs",
       "pm",
     ])
+  })
+
+  it("no longer names a category the catalog doesn't have", () => {
+    // The deny-list is keyed on category keys, so a stale entry is silently
+    // dead code — this pins it to reality.
+    for (const key of NON_EVIDENCE_CATEGORIES) {
+      expect(
+        CONNECTOR_CATALOG.some((c) => c.key === key),
+        `${key} is denied but no such category exists`,
+      ).toBe(true)
+    }
   })
 })
 
@@ -52,7 +68,7 @@ describe("isEvidenceConnector — data sources", () => {
 
   it("does NOT count Teams, PM tools, code, design, or docs", () => {
     for (const id of [
-      "msteams", // comms (delivery target — unlike dual-typed Slack)
+      "msteams", // left the catalog with Communications — unknown ⇒ not evidence
       "jira", // pm
       "asana",
       "clickup",

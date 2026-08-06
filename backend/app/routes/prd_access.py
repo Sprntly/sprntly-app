@@ -102,10 +102,17 @@ def resolve(public_id: str, session: dict = Depends(require_session)) -> dict:
         )
         return {"outcome": "blocked", "reason": result["reason"]}
     return {
-        "outcome": "guest_view",
+        # "member" (caller can act in the owning workspace — the gate sends
+        # them into the real, editable app) or "guest_view" (read-only shell
+        # + Join prompt). See db.artifact_shares.resolve_share_access.
+        "outcome": result["outcome"],
         "artifact_id": prd_id,
         "artifact_type": "prd",
         "owning_company_name": result["owning_company_name"],
+        # The workspace the prd lives in — the gate stores it as the
+        # caller's active workspace before handing over to the app, so a
+        # `member` arriving from another workspace doesn't land on a 404.
+        "owner_workspace_id": result["owner_workspace_id"],
     }
 
 
@@ -128,14 +135,19 @@ def auto_join_company(public_id: str, session: dict = Depends(require_session)) 
 
 @router.post("/{public_id}/join")
 def join(public_id: str, session: dict = Depends(require_session)) -> dict:
-    """Grant workspace access. Re-runs the FULL resolve check server-side."""
+    """Grant workspace access. Re-runs the FULL resolve check server-side.
+
+    Accepts BOTH same-company outcomes for the deploy-window reason
+    artifact_share.py's /join documents — a `member` join is substantively
+    a no-op, but a browser on the pre-`member` bundle still offers the
+    button and it must not 403."""
     prd_id = _resolve_or_404(public_id)
     user_id, _ = _session_identity(session)
     result = resolve_prd_access(prd_id=prd_id, user_id=user_id, user_email=None)
     if result["outcome"] == "not_found":
         logger.info("prd_access_deny route=join gate=not_found public_id=%s", public_id)
         raise _not_found()
-    if result["outcome"] != "guest_view":
+    if result["outcome"] not in ("guest_view", "member"):
         logger.info(
             "prd_access_deny route=join gate=blocked reason=%s public_id=%s",
             result.get("reason"),
@@ -158,12 +170,14 @@ def join(public_id: str, session: dict = Depends(require_session)) -> dict:
 @router.get("/{public_id}/content")
 def content(public_id: str, session: dict = Depends(require_session)) -> dict:
     """Guest read of the prd's rendered content + evidence + tickets,
-    company-scoped. Re-runs the FULL resolve check; a non-guest_view
-    outcome 404s."""
+    company-scoped. Re-runs the FULL resolve check; anything but a
+    same-company outcome 404s. `member` is accepted alongside `guest_view`
+    — same deploy-window reason as /join, and it discloses nothing a
+    `member` can't already read through the ordinary endpoints."""
     prd_id = _resolve_or_404(public_id)
     user_id, user_email = _session_identity(session)
     result = resolve_prd_access(prd_id=prd_id, user_id=user_id, user_email=user_email)
-    if result["outcome"] != "guest_view":
+    if result["outcome"] not in ("guest_view", "member"):
         logger.info(
             "prd_access_deny route=content gate=%s public_id=%s",
             result["outcome"] if result["outcome"] == "not_found" else "blocked",

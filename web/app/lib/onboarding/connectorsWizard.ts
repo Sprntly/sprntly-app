@@ -45,13 +45,17 @@ export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
   "monitoring",
   "design",
   "code",
-  "comms",
+  // No "comms" step: the Communications category was removed from the catalog
+  // (2026-08-04) and Slack now lives solely on the Voice shelf, which the
+  // wizard already walks through. Leaving the key here would have asked the PM
+  // to connect Slack a second time — or, once the category was gone, rendered
+  // an onboarding step that Settings → Connectors no longer has.
   // Company documentation joined the wizard 2026-08-03. Confluence and Google
   // Docs are both OAuth-wired, and a team wiki is the densest product context
   // we can read on day one — leaving it Settings-only meant most PMs never
-  // wired it at all. It renders LAST (catalog order, after Communications)
-  // rather than beside the evidence shelves: it is context, not customer
-  // signal, so it should not push the analytics/voice categories down.
+  // wired it at all. It renders LAST (catalog order, after Codebase) rather
+  // than beside the evidence shelves: it is context, not customer signal, so
+  // it should not push the analytics/voice categories down.
   "docs",
 ]
 
@@ -62,8 +66,8 @@ export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
  * Mirrors Settings → Connectors: only connectors we actually support today
  * (OAuth or API-key wired, per `isConnectableConnector`) are shown, and any
  * category that ends up with no supported connector is hidden entirely — so
- * we never ask the PM to "connect" something they can't yet use (e.g. the
- * whole Analytics category today, or MS Teams under Communication).
+ * we never ask the PM to "connect" something they can't yet use (e.g. Linear
+ * under Project Management, or the whole Monitoring category today).
  *
  * `alsoKeepIds` (e.g. providers with a live connection) are never hidden even
  * if not yet wired, and a category kept alive by such a provider is retained.

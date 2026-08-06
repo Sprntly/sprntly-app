@@ -151,7 +151,7 @@ def save_description(
 ):
     """Save/update description and acceptance criteria for a ticket. A
     tracker-bound ticket pushes the change out immediately (instant sync)."""
-    from app.stories.sync import kick_prd_sync_from_key
+    from app.stories.sync import kick_sync_from_key
 
     c = require_client()
     cid = company.company_id
@@ -165,7 +165,7 @@ def save_description(
     c.table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"
     ).execute()
-    kick_prd_sync_from_key(cid, ticket_key)
+    kick_sync_from_key(cid, ticket_key)
     return {"ok": True}
 
 
@@ -217,9 +217,9 @@ def save_fields(
     ).execute()
     # Instant push: a bound ticket's edit lands in the tracker now, not at
     # the next scheduler tick. No-op when unbound / a pass is running.
-    from app.stories.sync import kick_prd_sync_from_key
+    from app.stories.sync import kick_sync_from_key
 
-    kick_prd_sync_from_key(company.company_id, ticket_key)
+    kick_sync_from_key(company.company_id, ticket_key)
     return {"ok": True}
 
 
@@ -240,12 +240,12 @@ def _apply_lifecycle(company_id: str, ticket_key: str, lifecycle: str) -> dict:
     the same thing that gives up after one attempt.
     """
     from app.db.ticket_lifecycle import set_lifecycle
-    from app.stories.sync import kick_prd_sync_from_key
+    from app.stories.sync import kick_sync_from_key
 
     set_lifecycle(company_id, ticket_key, lifecycle)
     # set_lifecycle bumps updated_at, so the pass reads this as a fresh local
     # change. No-op for an unbound PRD (nothing to remove it from).
-    syncing = kick_prd_sync_from_key(company_id, ticket_key)
+    syncing = kick_sync_from_key(company_id, ticket_key)
     return {"ok": True, "lifecycle": lifecycle, "tracker_sync_started": syncing}
 
 
@@ -476,14 +476,24 @@ def tracker_meta_for_destination(
             "meta": meta}
 
 
-def _parse_ticket_key(ticket_key: str) -> tuple[int, str]:
-    """Split a ticket key ("prd-{prd_id}-{ticket_id}") into its parts. The
-    ticket_id half is the story's stable id — the key jira_issue_map and
-    prd_ticket_sync.statuses are keyed by. 400 on a malformed key."""
-    parts = ticket_key.split("-", 2)
-    if len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit() and parts[2]:
-        return int(parts[1]), parts[2]
-    raise HTTPException(400, f"Malformed ticket key {ticket_key!r}")
+def _parse_ticket_key(ticket_key: str):
+    """Split a ticket key ("prd-{prd_id}-{ticket_id}" or "set-{set_id}-…") into
+    (scope, ticket_id). The ticket_id half is the story's stable id — the key
+    jira_issue_map and the sync row's `statuses` map are keyed by. 400 on a
+    malformed key.
+
+    Accepts `set-*` because a standalone ticket set is tracker-bound like any
+    other artifact, so its tickets reach /transitions through exactly the same
+    UI affordance (TicketDetail's status dropdown, gated on the ticket having
+    tracker state). Left PRD-only, that dropdown would 400 for every set
+    ticket the moment the set was pushed.
+    """
+    from app.stories.scope import split_key
+
+    scope, ticket_id = split_key(ticket_key)
+    if scope is None or not ticket_id:
+        raise HTTPException(400, f"Malformed ticket key {ticket_key!r}")
+    return scope, ticket_id
 
 
 @router.get("/{ticket_key}/transitions")
@@ -492,23 +502,23 @@ def ticket_transitions(
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """The status moves LEGAL for this ticket right now — what the status
-    dropdown offers when the PRD is tracker-bound.
+    dropdown offers when the owning artifact is tracker-bound.
 
     Jira: statuses change via workflow transitions and the legal set depends
     on the issue's current state, so this proxies the issue's live
     transitions. ClickUp: any list status is always legal, so the full list
     vocabulary is returned in the SAME shape (one web contract). 404 when the
-    PRD is unbound or the ticket was never pushed — the web falls back to the
-    default status options."""
+    artifact is unbound or the ticket was never pushed — the web falls back to
+    the default status options."""
     from app.connectors.tracker_meta import jira_category_key_to_canonical
     from app.db.jira_sync import get_jira_issue_key
     from app.db.ticket_sync import get_sync_config
     from app.db.tracker_meta import get_or_fetch_meta
 
-    prd_id, ticket_id = _parse_ticket_key(ticket_key)
-    cfg = get_sync_config(company.company_id, prd_id)
+    scope, ticket_id = _parse_ticket_key(ticket_key)
+    cfg = get_sync_config(company.company_id, scope)
     if cfg is None:
-        raise HTTPException(404, "This PRD's tickets are not bound to a tracker")
+        raise HTTPException(404, "These tickets are not bound to a tracker")
 
     provider = cfg.get("provider")
     if provider == "jira":

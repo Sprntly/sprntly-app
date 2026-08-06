@@ -17,6 +17,7 @@ Two layers:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -79,10 +80,19 @@ def _patch_candidates(theme_scores):
 
 
 def _patch_embed():
-    """Patch the embeddings call retrieval imports lazily."""
+    """Patch the embeddings call retrieval imports lazily.
+
+    Full `EMBEDDING_DIM` length (not a short stand-in): `retrieve_context` now
+    has a defence-in-depth check that drops any vector of the wrong length
+    before it reaches `find_candidates` (mirrors `document_catalog.py`), so a
+    fixture vector shorter than that would be silently treated as no
+    embedding and every theme-matching test below would stop exercising the
+    kNN branch it's meant to."""
+    from app.graph.embeddings import EMBEDDING_DIM
+
     return patch(
         "app.graph.embeddings.embed_texts",
-        side_effect=lambda texts, **k: [[0.1] * 4 for _ in texts],
+        side_effect=lambda texts, **k: [[0.1] * EMBEDDING_DIM for _ in texts],
     )
 
 
@@ -405,6 +415,419 @@ def test_kg_refs_collects_signal_theme_and_entity_ids(facade):
     assert dec.id in bundle["kg_refs"]
 
 
+# ─────────────────────────── noise floor ───────────────────────────
+
+
+def test_retrieve_context_drops_themes_below_the_noise_floor(facade):
+    """`find_candidates` is a pure kNN — nearest, not relevant. A theme whose
+    score is indistinguishable from noise must not reach the bundle."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["themes"] == []
+
+
+def test_render_context_section_omits_below_floor_themes(facade):
+    from app.graph.retrieval import render_context_section, retrieve_context
+    from app.graph.types import Signal
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    # An independent recent signal keeps the bundle non-empty so this test
+    # proves the theme block is specifically omitted, not that render()
+    # short-circuits on an empty bundle.
+    facade.write_signal(
+        "ent-A",
+        Signal(
+            enterprise_id="ent-A",
+            source_type="analytics",
+            kind="metric_shift",
+            content="unrelated recent signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+    text = render_context_section(bundle)
+
+    assert bundle["empty"] is False
+    assert "relevance 0.03" not in text
+    assert "## Relevant themes" not in text
+
+
+def test_below_floor_theme_signals_do_not_reach_the_bundle(facade):
+    """Signals reachable ONLY through a below-floor theme edge never enter
+    the bundle.
+
+    DO NOT "simplify" this to age=0 — every signal `_seed_theme_with_signals`
+    writes is a real row in kg_signal, so at age=0 it is picked up
+    independently by the recency path (step 4 in `retrieve_context`)
+    regardless of whether its theme survives the floor. An age-0 version of
+    this test would pass even with the floor completely disabled, because
+    the assertion would be satisfied by dedup against the recency path, not
+    by the floor dropping anything. Aging past the `revenue` source's
+    30-day stale window (see `SOURCE_STALE_WINDOW_DAYS`) removes that
+    escape hatch: `active_signals` excludes them, so the theme edge — now
+    filtered — is the ONLY path in, and a red assertion here is actually
+    caused by the floor working, not a fixture accident. See the sibling
+    `test_recent_signal_survives_when_its_theme_is_filtered` for the age-0
+    case, which is a genuinely different assertion (theme=None via
+    recency), not a relaxed version of this one."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [
+            ("revenue", "deal_blocker", "stale noise 1", {}, 40),
+            ("revenue", "deal_blocker", "stale noise 2", {}, 40),
+            ("revenue", "deal_blocker", "stale noise 3", {}, 40),
+        ],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["signals"] == []
+
+
+def test_retrieve_context_keeps_themes_above_the_noise_floor(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Pipeline health",
+        [("revenue", "deal_blocker", "sig", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["themes"] == [
+        {"entity_id": theme.id, "label": "Pipeline health", "score": 0.9}
+    ]
+
+
+def test_find_candidates_still_called_with_the_full_candidate_window(facade):
+    """The noise floor changes admission, not the candidate window — the kNN
+    primitive is still asked for k=_DEFAULT_THEME_K candidates."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import _DEFAULT_THEME_K, retrieve_context
+
+    seen_k: list[int] = []
+
+    def spy(self, ent, typ, vec, k=10):
+        seen_k.append(k)
+        return []
+
+    with _patch_embed(), patch.object(GraphFacade, "find_candidates", spy):
+        retrieve_context(facade, "ent-A", "q")
+
+    assert seen_k == [_DEFAULT_THEME_K]
+
+
+def test_theme_at_exactly_the_floor_is_kept(facade):
+    """The comparison is `>=`: a score exactly at the floor is kept, not
+    dropped."""
+    from app.graph.retrieval import _MIN_THEME_SCORE, retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Borderline theme",
+        [("revenue", "deal_blocker", "sig", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, _MIN_THEME_SCORE)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [t["label"] for t in bundle["themes"]] == ["Borderline theme"]
+
+
+def test_recent_signal_survives_when_its_theme_is_filtered(facade):
+    """A signal wired to a below-floor theme but also independently recent
+    still reaches the bundle — sourced from the recency path, not the
+    (now-filtered) theme walk, so `theme` is None."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, sigs = _seed_theme_with_signals(
+        facade, "ent-A", "Unrelated theme",
+        [("revenue", "deal_blocker", "dual-path signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [s["content"] for s in bundle["signals"]] == ["dual-path signal"]
+    assert bundle["signals"][0]["signal_id"] == sigs[0].id
+    assert bundle["signals"][0]["theme"] is None
+
+
+def test_all_themes_below_floor_and_nothing_else_yields_empty_bundle(facade):
+    """All candidates filtered, no recent signals, no session context → the
+    pre-#18 corpus-only fallback: `empty` is True and render is blank, not a
+    crash and not an empty header."""
+    from app.graph.retrieval import render_context_section, retrieve_context
+    from app.graph.types import Entity
+
+    theme = Entity(enterprise_id="ent-A", type="theme", canonical_label="Noise theme")
+    facade.create_entity("ent-A", theme)
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["empty"] is True
+    assert render_context_section(bundle) == ""
+
+
+def test_all_themes_below_floor_still_returns_recent_signals(facade):
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Entity, Signal
+
+    theme = Entity(enterprise_id="ent-A", type="theme", canonical_label="Noise theme")
+    facade.create_entity("ent-A", theme)
+    facade.write_signal(
+        "ent-A",
+        Signal(
+            enterprise_id="ent-A",
+            source_type="analytics",
+            kind="metric_shift",
+            content="unrelated recent signal",
+            valid_at=datetime.now(timezone.utc),
+        ),
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["empty"] is False
+    assert [s["content"] for s in bundle["signals"]] == ["unrelated recent signal"]
+
+
+def test_mixed_scores_keep_only_the_above_floor_theme(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme_a, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Relevant theme",
+        [("revenue", "deal_blocker", "relevant signal", {}, 0)],
+    )
+    theme_b, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 40)],
+    )
+    with _patch_embed(), _patch_candidates([(theme_a, 0.9), (theme_b, 0.04)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert [t["label"] for t in bundle["themes"]] == ["Relevant theme"]
+    assert [s["content"] for s in bundle["signals"]] == ["relevant signal"]
+
+
+def test_kg_refs_excludes_below_floor_theme_ids(facade):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert theme.id not in bundle["kg_refs"]
+
+
+def test_noise_floor_drop_logs_counts_only(facade, caplog):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Noise theme",
+        [("revenue", "deal_blocker", "noise signal", {}, 0)],
+    )
+    with caplog.at_level(logging.INFO, logger="app.graph.retrieval"):
+        with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+            retrieve_context(facade, "ent-A", "q")
+
+    drops = [r for r in caplog.records if "noise floor dropped" in r.getMessage()]
+    assert len(drops) == 1
+    msg = drops[0].getMessage()
+    assert "enterprise_id=ent-A" in msg
+    assert "returned=1" in msg
+    assert "kept=0" in msg
+    assert "floor=0.15" in msg
+    assert "top_score=0.03" in msg
+
+
+def test_noise_floor_log_never_contains_theme_labels_or_signal_content(facade, caplog):
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "SENTINEL-THEME-LABEL-DO-NOT-LOG",
+        [("revenue", "deal_blocker", "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG", {}, 0)],
+    )
+    with caplog.at_level(logging.INFO, logger="app.graph.retrieval"):
+        with _patch_embed(), _patch_candidates([(theme, 0.03)]):
+            retrieve_context(facade, "ent-A", "q")
+
+    all_msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "SENTINEL-THEME-LABEL-DO-NOT-LOG" not in all_msgs
+    assert "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG" not in all_msgs
+
+
+def test_existing_theme_scores_in_this_suite_are_all_above_the_floor():
+    """Guard: every `_patch_candidates` call site in this suite uses a score
+    drawn from {0.8, 0.9, 0.92} (verified at ticket time). If a future floor
+    raise pushes `_MIN_THEME_SCORE` above 0.8 it would silently invalidate
+    those 23 call sites — fail loudly here instead of leaving them green for
+    the wrong reason."""
+    from app.graph.retrieval import _MIN_THEME_SCORE
+
+    assert _MIN_THEME_SCORE <= 0.8
+
+
+# ──────────────── the sentinel: "no embedding" vs "compute one" ────────────
+#
+# `question_embedding=None` means "compute it yourself" — it does NOT mean
+# "there is no embedding". A caller that already knows its embedding is
+# unusable (no key, or an all-zero vector) must say so explicitly via
+# `skip_semantic=True`; passing `None` unconditionally re-triggers a self-embed
+# that, with no key, returns the same unusable zero vector. Defence-in-depth:
+# a zero or wrong-dimension vector reaching `qvec` by ANY route (a caller
+# passing one directly, or the self-embed above) is dropped before it can
+# reach `find_candidates` — mirrors `document_catalog.py`'s exact check.
+
+
+def test_zero_vector_never_reaches_find_candidates(facade):
+    """A zero vector passed directly as `question_embedding` must not reach
+    `find_candidates` — the defence-in-depth check mirrors
+    `document_catalog.py`'s `embedding is not None and (len(...) !=
+    EMBEDDING_DIM or not any(...))`. RED before the fix: nothing rejected a
+    zero vector once it arrived at `qvec`."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        retrieve_context(
+            facade, "ent-A", "q", question_embedding=[0.0] * EMBEDDING_DIM,
+        )
+
+    assert calls == [], f"find_candidates was called with a zero vector: {calls}"
+
+
+def test_wrong_dimension_vector_is_treated_as_no_embedding(facade):
+    """A vector of the wrong length is dropped, mirroring
+    `document_catalog.py`'s length check — not just an all-zero vector."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=[0.5, 0.5, 0.5])
+
+    assert calls == []
+
+
+def test_empty_list_embedding_is_treated_as_no_embedding(facade, monkeypatch):
+    """`[]` is not confused with "compute one" — it is a caller-supplied
+    value (not `None`), so no self-embed fires, and it fails the dimension
+    check, so no kNN call is made either."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    embed_calls: list = []
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: embed_calls.append(texts)
+        or [[0.1] * EMBEDDING_DIM for _ in texts],
+    )
+    knn_calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: knn_calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=[])
+
+    assert knn_calls == []
+    assert embed_calls == [], "an empty list must not trigger a self-embed"
+
+
+def test_usable_key_knn_vector_is_byte_identical_to_prefix(facade):
+    """With a real caller-supplied vector, theme kNN runs exactly as it does
+    today — `find_candidates` receives the SAME vector, unmodified."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    vec = [0.01 * i for i in range(1536)]
+    seen: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, v, k=10: seen.append(v) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q", question_embedding=vec)
+
+    assert seen == [vec]
+
+
+def test_retrieve_context_without_embedding_still_self_embeds(facade, monkeypatch):
+    """A non-Ask caller passing no `question_embedding` and no
+    `skip_semantic` keeps the ORIGINAL self-contained behaviour: it embeds
+    for itself and still runs kNN when a key is configured.
+    `retrieve_context`'s five non-Ask callers depend on this default staying
+    exactly as it was — the sentinel is opt-in, never the default."""
+    from app.graph.embeddings import EMBEDDING_DIM
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    embed_calls: list = []
+    monkeypatch.setattr(
+        "app.graph.embeddings.embed_texts",
+        lambda texts, **kw: embed_calls.append(texts)
+        or [[0.05] * EMBEDDING_DIM for _ in texts],
+    )
+    knn_calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: knn_calls.append(vec) or [],
+    ):
+        retrieve_context(facade, "ent-A", "q")
+
+    assert len(embed_calls) == 1
+    assert len(knn_calls) == 1
+
+
+def test_no_question_or_key_in_logs(facade, caplog):
+    """No log line emitted anywhere in `retrieve_context` — across the
+    self-embed branch, the defence-in-depth drop, and the noise-floor drop —
+    contains the question text, a theme label, a signal body, or an API key
+    value."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "SENTINEL-THEME-LABEL-DO-NOT-LOG",
+        [("revenue", "deal_blocker", "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG", {}, 0)],
+    )
+    question = "SENTINEL-QUESTION-TEXT-DO-NOT-LOG"
+    fake_key = "sk-SENTINEL-KEY-VALUE-DO-NOT-LOG"
+    with caplog.at_level(logging.INFO):
+        # No key configured: exercises the self-embed → zero-vector →
+        # defence-in-depth-drop path, which is the one most likely to log
+        # something derived from the question or the (absent) key.
+        retrieve_context(facade, "ent-A", question)
+        # A caller-supplied zero vector: the other route to the same drop.
+        retrieve_context(facade, "ent-A", question, question_embedding=[0.0] * 1536)
+
+    all_msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert question not in all_msgs
+    assert "SENTINEL-THEME-LABEL-DO-NOT-LOG" not in all_msgs
+    assert "SENTINEL-SIGNAL-CONTENT-DO-NOT-LOG" not in all_msgs
+    assert fake_key not in all_msgs
+
+
 # ─────────────────────────── tenant isolation ───────────────────────────
 
 
@@ -539,6 +962,32 @@ def test_render_context_section_empty_bundle_is_blank():
 # ─────────────────────────── compose_ask_answer wiring ───────────────────────────
 
 
+def _only_answer_row(isolated_settings) -> dict:
+    """The ask's own `answer` row, asserting the whole world of rows it wrote.
+
+    An ask now writes TWO rows, not one: this `answer` row, and a
+    `document_selection` row written from inside document grounding — the
+    function BOTH ask paths go through. The skill-routed path wrote none of
+    this before, which is why topical selection returning the wrong document
+    there left nothing in the record to find it by.
+
+    Grouped by `decision_type` rather than counted in total, so this still
+    closes the world: a second `answer` row, a missing one, a stray write of
+    any other type, or a duplicated `document_selection` all still fail. It is
+    deliberately not loosened to "at least one row".
+    """
+    rows = (
+        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
+    )
+    by_type: dict[str, list[dict]] = {}
+    for row in rows:
+        by_type.setdefault(row["decision_type"], []).append(row)
+    assert sorted(by_type) == ["answer", "document_selection"], by_type
+    assert len(by_type["answer"]) == 1
+    assert len(by_type["document_selection"]) == 1
+    return by_type["answer"][0]
+
+
 def test_compose_ask_answer_corpus_only_when_no_enterprise(
     isolated_settings, fake_llm
 ):
@@ -562,6 +1011,49 @@ def test_compose_ask_answer_corpus_only_when_no_enterprise(
         isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
     )
     assert rows == []
+
+
+def test_direct_path_kg_knn_query_derives_from_the_message(
+    isolated_settings, fake_llm, facade
+):
+    """T4 (AC4) — the query text embedded to drive KG theme kNN is the bare
+    current-turn message, not the folded thread. `compose_ask_answer`
+    computes ONE embedding, shared by document grounding and KG retrieval
+    (`test_the_question_is_embedded_once_and_shared_by_both_consumers` in
+    `test_ask_document_retrieval.py`), so proving the embedded text is bare
+    proves the kNN query is too."""
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    theme, _ = _seed_theme_with_signals(
+        facade, "co-1", "Pipeline",
+        [("revenue", "deal_blocker", "Acme blocked on SSO", {}, 0)],
+    )
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    embedded_texts: list = []
+
+    def _embed(texts, **kw):
+        embedded_texts.append(list(texts))
+        from app.graph.embeddings import EMBEDDING_DIM
+
+        return [[0.1] * EMBEDDING_DIM for _ in texts]
+
+    with patch("app.graph.embeddings.embed_texts", side_effect=_embed), \
+         _patch_candidates([(theme, 0.9)]):
+        ask_runner.compose_ask_answer(
+            "asurion", "how is pipeline doing now?", enterprise_id="co-1",
+            history=history,
+        )
+
+    assert embedded_texts == [["how is pipeline doing now?"]]
 
 
 def test_compose_ask_answer_injects_kg_section_and_logs_refs(
@@ -592,11 +1084,7 @@ def test_compose_ask_answer_injects_kg_section_and_logs_refs(
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
 
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    row = rows[0]
+    row = _only_answer_row(isolated_settings)
     assert row["agent"] == "ask"
     assert row["decision_type"] == "answer"
     assert row["enterprise_id"] == "co-1"
@@ -626,15 +1114,12 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
 
     user = fake_llm["calls"][0]["user"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in user
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    row = _only_answer_row(isolated_settings)
+    factors = row["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["kg_used"] is False
-    kg_refs = rows[0]["kg_refs"]
+    kg_refs = row["kg_refs"]
     if isinstance(kg_refs, str):
         kg_refs = json.loads(kg_refs)
     assert kg_refs == []
@@ -678,11 +1163,7 @@ def test_compose_ask_answer_prd_grounded_skips_kg_and_corpus(
     )
     assert "CURRENT PRD CONTEXT" not in call["user"]
     assert "What does this PRD say?" in call["user"]
-    rows = (
-        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
-    )
-    assert len(rows) == 1
-    factors = rows[0]["factors"]
+    factors = _only_answer_row(isolated_settings)["factors"]
     if isinstance(factors, str):
         factors = json.loads(factors)
     assert factors["prd_grounded"] is True
@@ -715,6 +1196,43 @@ def test_compose_ask_answer_prd_prefix_stable_across_turns(
         == block
     )
     assert first["user"] != second["user"]
+
+
+def test_prd_branch_documents_trail_the_prd_block(isolated_settings, fake_llm):
+    """On the PRD branch, `user_cacheable_prefix` orders `facts` ->
+    `prd_context` -> `docs_block`: the ~26K-token PRD block (byte-stable
+    across turns of one conversation) precedes the per-question document
+    index, same treatment as the corpus branch. (AC2)"""
+    from tests.test_ask_document_retrieval import _seed_file, _seed_source
+
+    from app import ask_runner
+    from app.ask_runner import WORKSPACE_CONFIG_HEADER
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-prd-order", "slug": "slug-co-prd-order", "display_name": "Sprntly"}
+    ).execute()
+    db.table("products").insert(
+        {"id": "prod-co-prd-order", "company_id": "co-prd-order", "name": "Sprntly",
+         "website": "https://sprntly.ai", "is_primary": 1}
+    ).execute()
+    src = _seed_source(db, "src-prd-order", company_id="co-prd-order")
+    _seed_file(db, "f-prd-order", src, company_id="co-prd-order",
+               filename="Prd_Order_Report.docx",
+               extracted_text="THE PRD-BRANCH DOCUMENT BODY")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    ask_runner.compose_ask_answer(
+        "asurion", "About Prd_Order_Report", enterprise_id="co-prd-order",
+        prd_context="=== CURRENT PRD CONTEXT ===\nTHE PRD BODY.",
+    )
+
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert prefix.index(WORKSPACE_CONFIG_HEADER) < prefix.index("THE PRD BODY")
+    assert prefix.index("THE PRD BODY") < prefix.index("THE PRD-BRANCH DOCUMENT BODY")
 
 
 # ────────────────────── compose_ask_answer × workspace configuration ────────

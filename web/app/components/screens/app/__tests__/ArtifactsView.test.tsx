@@ -84,13 +84,16 @@ function markup(override: Partial<Props> = {}): string {
 afterEach(cleanup)
 
 describe("ArtifactsView — chrome", () => {
-  it("renders all five filter chips", () => {
+  it("renders all six filter chips", () => {
     const html = markup()
     expect(html).toContain("All")
     expect(html).toContain("Reports")
     expect(html).toContain("PRDs")
     expect(html).toContain("Prototypes")
     expect(html).toContain("Evidence")
+    // "Tickets", not "Non-PRD tickets": a PRD's tickets are not in this library
+    // at all, so the qualifier would name a distinction the user can't see.
+    expect(html).toContain("Tickets")
   })
 
   it("renders a row per artifact with a type badge", () => {

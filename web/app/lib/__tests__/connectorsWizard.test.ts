@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   categoryTitle,
   clampStep,
+  ONBOARDING_CONNECTOR_CATEGORIES,
   firstIncompleteCategory,
   hasLiveAnalyticsConnection,
   isCategoryUnlocked,
@@ -31,11 +32,23 @@ describe("wizard categories", () => {
     // coming-soon) — it survives the empty-category drop on `keepWhenEmpty`
     // because its upload strip is what onboarding is asking for.
     expect(cats.map((c) => c.key)).toEqual([
-      "analytics", "voice", "research", "crm", "pm", "design", "code", "comms",
-      "docs",
+      "analytics", "voice", "research", "crm", "pm", "design", "code", "docs",
     ])
     expect(cats.find((c) => c.key === "research")!.items).toEqual([])
     expect(cats.map((c) => c.key)).not.toContain("revenue")
+  })
+
+  it("has no Communications step — Slack is asked for once, on the Voice shelf", () => {
+    // Removing the catalog category without removing the wizard key would have
+    // left onboarding walking a step Settings → Connectors no longer has.
+    const cats = wizardCategories()
+    expect(cats.map((c) => c.key)).not.toContain("comms")
+    expect(ONBOARDING_CONNECTOR_CATEGORIES).not.toContain("comms")
+    const voice = cats.find((c) => c.key === "voice")!
+    expect(voice.items.map((i) => i.id)).toContain("slack")
+    // …and exactly once across the whole wizard.
+    const slackSteps = cats.filter((c) => c.items.some((i) => i.id === "slack"))
+    expect(slackSteps.map((c) => c.key)).toEqual(["voice"])
   })
 
   it("offers Confluence + Google Docs under Company documentation", () => {
@@ -61,11 +74,14 @@ describe("wizard categories", () => {
     expect(withLive.find((c) => c.key === "docs")!.items.length).toBe(2)
   })
 
-  it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {
+  it("drops connectors we don't support yet (e.g. Linear, Notion)", () => {
     const ids = wizardCategories().flatMap((c) => c.items.map((i) => i.id))
     expect(ids).toContain("slack") // supported
-    expect(ids).not.toContain("msteams") // coming soon
     expect(ids).not.toContain("linear") // coming soon
+    expect(ids).not.toContain("notion") // coming soon
+    // MS Teams left the catalog entirely with the Communications category —
+    // it was a coming-soon delivery target, never a connectable source.
+    expect(ids).not.toContain("msteams")
   })
 
   it("keeps a live-but-unwired provider (and its category) visible", () => {

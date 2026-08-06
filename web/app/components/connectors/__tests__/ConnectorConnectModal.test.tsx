@@ -246,3 +246,57 @@ describe("ConnectorConnectModalView — in-flight prompt", () => {
     expect(html.toLowerCase()).not.toContain("start over")
   })
 })
+
+const GOOGLE_MEET_ITEM: ConnectorItemRow = {
+  id: "google_meet",
+  name: "Google Meet",
+  logo: "M",
+  logoText: "M",
+  logoColor: "#00832D",
+}
+
+describe("ConnectorConnectModalView — Google Meet pre-connect copy", () => {
+  // Meet's coverage is genuinely NARROWER than the Zoom card sitting next to it
+  // on the same shelf, and someone who has connected Zoom will reasonably
+  // assume they match. A customer holding the wrong model reads a correct,
+  // complete sync as a broken one — so these limits are asserted as shipped
+  // copy, not left as documentation nobody reads.
+  const html = () => render({ item: GOOGLE_MEET_ITEM }).toLowerCase()
+
+  it("says coverage is only the connected account's own meetings", () => {
+    expect(html()).toContain("only sees meetings the connected account organized")
+    expect(html()).toContain("connects their own google account")
+  })
+
+  it("names the Workspace edition that can transcribe at all", () => {
+    expect(html()).toContain("business standard or higher")
+  })
+
+  it("says transcripts must be on BEFORE the meeting, and links the help page", () => {
+    const out = render({ item: GOOGLE_MEET_ITEM })
+    expect(out.toLowerCase()).toContain("before a meeting starts")
+    expect(out.toLowerCase()).toContain("won&#x27;t transcribe a call after the fact")
+    expect(out).toContain("https://support.google.com/meet/answer/12849897")
+    // New tab, so a half-finished connect flow is not lost behind it.
+    expect(out).toContain('target="_blank"')
+    expect(out).toContain('rel="noopener noreferrer"')
+  })
+
+  it("promises transcript text only, never the recording", () => {
+    expect(html()).toContain("never the recording video or audio")
+  })
+
+  it("states the 30-day ceiling, so an empty first sync is not read as a bug", () => {
+    expect(html()).toContain("only the last 30 days")
+    expect(html()).toContain("no older history to import")
+  })
+
+  it("keeps Zoom's own prerequisites untouched", () => {
+    const zoom = render({
+      item: { id: "zoom", name: "Zoom", logo: "Z", logoText: "Z", logoColor: "#0B5CFF" },
+    }).toLowerCase()
+    expect(zoom).toContain("zoom account admin")
+    // …and does not leak Meet's very different limits onto the Zoom card.
+    expect(zoom).not.toContain("only the last 30 days")
+  })
+})

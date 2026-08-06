@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import requests
 from fastapi import HTTPException
 
@@ -19,7 +20,17 @@ from app.connector_lookup import answer as ca
 from app.connector_lookup import slack as sl
 
 
-def _handle(user_token=None):
+def _handle(user_token=None, workspace=None):
+    """A warm handle: users and BOTH channel views preloaded.
+
+    `channels` is the bot's MEMBERSHIP (what slack_sync.fetch_channels returns);
+    `workspace_channels` is every channel conversations.list can see, member or
+    not. They are deliberately different sets here — the membership list is what
+    gates search privacy, the workspace list is what turns a name into an id,
+    and conflating them is the bug the resolver tests below pin.
+
+    Both are marked loaded so no test can reach the network by accident.
+    """
     handle = sl.SlackHandle(bot_token="xoxb-1", user_token=user_token)
     handle.users = {"U1": "ada", "U2": "grace"}
     handle._users_loaded = True
@@ -28,6 +39,14 @@ def _handle(user_token=None):
         {"id": "C2", "name": "product-eng", "is_private": True},
     ]
     handle._channels_loaded = True
+    handle.workspace_channels = workspace if workspace is not None else [
+        {"id": "C1", "name": "general", "is_private": False, "is_member": True},
+        {"id": "C2", "name": "product-eng", "is_private": True, "is_member": True},
+        # The bot has NEVER been invited to these two — the whole point.
+        {"id": "C3", "name": "launch-room", "is_private": False, "is_member": False},
+        {"id": "G4", "name": "founders", "is_private": True, "is_member": False},
+    ]
+    handle._workspace_loaded = True
     return handle
 
 
@@ -246,8 +265,9 @@ def test_tokens_are_not_in_the_handle_repr():
 def test_search_with_a_user_token_renders_matches(monkeypatch):
     captured = {}
 
-    def fake_search(token, *, query, count=20, page=1):
-        captured.update({"token": token, "query": query, "count": count})
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+        captured.update({"token": token, "query": query, "count": count,
+                         "sort": sort, "sort_dir": sort_dir})
         return {"matches": [
             {"channel": {"name": "general"}, "ts": "1750000000.1",
              "user": "U1", "text": "we ship pricing v2 <@U2>"},
@@ -261,6 +281,186 @@ def test_search_with_a_user_token_renders_matches(monkeypatch):
     assert "#general" in out and "ada:" in out
     assert "@grace" in out          # user ids resolved to names
     assert "ts=1750000000.1" in out  # so a thread can be followed
+
+
+# ── search ORDERING (relevance vs newest) ────────────────────────────────────
+#
+# Slack's search.messages defaults to sort=score — relevance — so an unsorted
+# search returns the top-scoring matches of ALL TIME. The reported failure was
+# a "what's the latest in Slack" answer built on exactly that list, which read
+# as current and wasn't. These pin both halves of the fix: the param actually
+# reaches Slack, and the rendered result says which order it used.
+# Params verified against https://docs.slack.dev/reference/methods/search.messages
+# (sort: score|timestamp, default score; sort_dir: asc|desc, default desc).
+
+def _capture_search(monkeypatch, matches=None, total=1):
+    captured = {}
+
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+        captured.update({"query": query, "sort": sort, "sort_dir": sort_dir})
+        return {
+            "matches": matches if matches is not None else [
+                {"channel": {"name": "general"}, "ts": "1750000000.1",
+                 "user": "U1", "text": "pricing v2 shipped"},
+            ],
+            "total": total,
+        }
+
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", fake_search)
+    return captured
+
+
+def test_search_defaults_to_relevance_and_says_so(monkeypatch):
+    """The default is unchanged — a keyword question wants the best match, not
+    last Tuesday's passing mention — but the result now DECLARES that, so an
+    answer cannot quietly present relevance hits as the newest news."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "pricing"})
+    assert captured["sort"] == "score"
+    assert captured["sort_dir"] == "desc"
+    assert "ordered by RELEVANCE" in out
+    assert "not the newest" in out
+    assert "sort=\"newest\"" in out
+
+
+def test_search_can_sort_by_time(monkeypatch):
+    """sort='newest' → Slack's `timestamp`, descending. This is what makes a
+    "what's the latest" question answerable at all."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "pricing", "sort": "newest"})
+    assert captured["sort"] == "timestamp"
+    assert captured["sort_dir"] == "desc"
+    assert "ordered NEWEST FIRST" in out
+    assert "RELEVANCE" not in out
+
+
+def test_an_unknown_sort_falls_back_to_relevance(monkeypatch):
+    """`sort` is model input, so it is validated rather than trusted — Slack
+    400s an unrecognised value, and a typo must not break the search."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "pricing", "sort": "chronological"})
+    assert captured["sort"] == "score"
+    assert "ordered by RELEVANCE" in out
+
+
+def test_a_queryless_search_windows_and_sorts_newest(monkeypatch):
+    """No query means "the latest, whatever it is". search.messages requires a
+    query string, but accepts a modifier-only one (verified live 2026-08-03),
+    so the adapter sends `after:<date>` and forces newest — a keyword-free
+    relevance ranking would be ranking nothing."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {})
+    assert captured["query"].startswith("after:")
+    assert captured["sort"] == "timestamp"
+    assert captured["sort_dir"] == "desc"
+    assert "ordered NEWEST FIRST" in out
+    assert "no keyword given" in out
+
+
+def test_a_queryless_search_overrides_a_relevance_sort(monkeypatch):
+    """`sort` is model input; pairing it with no query is a contradiction the
+    adapter resolves in favour of time, never silently in favour of Slack's
+    score default."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"sort": "relevance"})
+    assert captured["sort"] == "timestamp"
+
+
+def test_an_empty_queryless_search_names_its_window(monkeypatch):
+    """Zero rows from a windowed read means "quiet week", not "no such
+    messages" — and the copy must not leak the synthetic after: query the
+    model never wrote."""
+    _capture_search(monkeypatch, matches=[])
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {})
+    assert "last 7 days" in out
+    assert "after:" not in out
+
+
+def test_a_generic_newest_keyword_is_dropped_and_widened(monkeypatch):
+    """The observed failure: "latest feedback in slack" became query='feedback'
+    — and Slack only matches messages CONTAINING that word, so the fresh
+    message (which never says "feedback") was structurally invisible. A generic
+    word + newest means "show me what's new": the keyword is dropped, the read
+    widens to the window, and the result says so."""
+    captured = _capture_search(monkeypatch)
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "feedback", "sort": "newest"})
+    assert captured["query"].startswith("after:")
+    assert captured["sort"] == "timestamp"
+    assert "'feedback' was dropped" in out
+    assert "ordered NEWEST FIRST" in out
+
+
+def test_a_generic_word_on_relevance_stays_a_real_search(monkeypatch):
+    """Without sort=newest there is no recency intent to honour — someone
+    hunting for where the word "feedback" was literally used gets exactly
+    that."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "feedback"})
+    assert captured["query"] == "feedback"
+    assert captured["sort"] == "score"
+
+
+def test_a_specific_newest_keyword_keeps_its_query(monkeypatch):
+    """The widening is for generic words only — "newest about pricing" is a
+    real, answerable question and must stay one."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "pricing", "sort": "newest"})
+    assert captured["query"] == "pricing"
+    assert captured["sort"] == "timestamp"
+
+
+def test_a_multi_word_generic_query_is_not_widened(monkeypatch):
+    """"customer feedback" or "pricing feedback" carries a real subject; only
+    a bare single generic word triggers the widening."""
+    captured = _capture_search(monkeypatch)
+    sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                         {"query": "customer feedback", "sort": "newest"})
+    assert captured["query"] == "customer feedback"
+
+
+def test_the_search_tool_tells_the_model_when_to_sort_by_time():
+    """The disclosure only helps after the fact; the tool schema is what makes
+    the model pick the right order in the first place."""
+    schema = sl.SEARCH_TOOL["input_schema"]["properties"]["sort"]
+    assert schema["enum"] == ["relevance", "newest"]
+    assert "newest" in sl.SEARCH_TOOL["description"]
+    assert "most recent" in sl.SEARCH_TOOL["description"]
+    assert "sort=\"newest\"" in sl.PROVIDER.system_block()
+    # `query` is optional now — a schema that still required it would turn the
+    # queryless mode into a validation error at the API layer.
+    assert "query" not in sl.SEARCH_TOOL["input_schema"].get("required", [])
+    assert "OMIT" in sl.SEARCH_TOOL["input_schema"]["properties"]["query"]["description"]
+
+
+def test_search_messages_clamps_sort_before_it_reaches_slack(monkeypatch):
+    """Same guard one layer down, where the HTTP call is actually built."""
+    from app.connectors import slack_oauth
+
+    seen = {}
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True, "messages": {"matches": [], "total": 0}}
+
+    monkeypatch.setattr(slack_oauth.requests, "get",
+                        lambda url, **k: seen.update(k.get("params") or {}) or _Resp())
+    slack_oauth.search_messages("xoxp-1", query="x", sort="newest", sort_dir="sideways")
+    assert seen["sort"] == "score"        # "newest" is OUR word, not Slack's
+    assert seen["sort_dir"] == "desc"
+    slack_oauth.search_messages("xoxp-1", query="x",
+                                sort=slack_oauth.SEARCH_SORT_NEWEST)
+    assert seen["sort"] == "timestamp"
 
 
 def test_search_reports_when_slack_has_more_matches_than_shown(monkeypatch):
@@ -282,7 +482,8 @@ def test_huge_search_result_is_capped_with_a_marker(monkeypatch):
         "total": 500,
     })
     out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {"query": "x"})
-    assert out.count("\n") <= sl._MAX_SEARCH_HITS + 1
+    # 20 rows + the ordering note + the privacy disclosure + the cap marker.
+    assert out.count("\n") <= sl._MAX_SEARCH_HITS + 2
     assert "showing 20 of 500 matches" in out
 
 
@@ -291,6 +492,102 @@ def test_empty_search_is_honest(monkeypatch):
                         lambda *a, **k: {"matches": [], "total": 0})
     out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages", {"query": "zzz"})
     assert out == "(no Slack messages match 'zzz')"
+
+
+# ── dispatch_records (AC1/AC2/AC3/AC4) ──────────────────────────────────────
+
+
+def test_dispatch_records_returns_none_for_other_tools():
+    for name in ("slack_list_channels", "slack_channel_history", "slack_get_thread"):
+        assert sl.PROVIDER.dispatch_records(_session(), name, {}) is None
+
+
+def test_dispatch_records_no_records_when_search_is_unavailable():
+    """No user token → SEARCH_UNAVAILABLE, same as dispatch — and no records,
+    since there is nothing to build them from."""
+    text, records = sl.PROVIDER.dispatch_records(
+        _session(), "slack_search_messages", {"query": "pricing"}
+    )
+    assert records is None
+    assert text == sl.SEARCH_UNAVAILABLE
+
+
+def test_dispatch_records_text_matches_dispatch_exactly(monkeypatch):
+    """AC5, mutation-proof: dispatch_records's text must be byte-identical to
+    dispatch's own output for the identical search call — both now run
+    `_search_and_hits` (the refactor), so this pins that the split changed
+    nothing observable."""
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+        return {"matches": [
+            {"channel": {"id": "C1", "name": "general"}, "ts": "1750000000.1",
+             "user": "U1", "text": "we ship pricing v2 <@U2>"},
+        ], "total": 1}
+
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", fake_search)
+    expected = sl.PROVIDER.dispatch(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    assert text == expected
+    assert records is not None and len(records) == 1
+
+
+def test_dispatch_records_ac3_external_id_is_channel_and_ts(monkeypatch):
+    """AC3 — Slack's compound identity: channel + ts, the only stable key one
+    Slack message has."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [
+            {"channel": {"id": "C1", "name": "general"}, "ts": "1750000000.1",
+             "user": "U1", "text": "we ship pricing v2"},
+        ], "total": 1,
+    })
+    _text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    assert records[0].external_id == "C1:1750000000.1"
+    assert records[0].provider == "slack"
+    assert records[0].kind == "message"
+
+
+def test_dispatch_records_privacy_gate_matches_dispatch(monkeypatch):
+    """The privacy filter (is_shareable_match) must apply identically to
+    records as it does to the rendered text — a DM must never become a
+    RawRecord any more than it becomes a rendered line."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [
+            {"channel": {"id": "D1", "is_im": True}, "ts": "1.0",
+             "user": "U1", "text": "private message"},
+            {"channel": {"id": "C1", "name": "general"}, "ts": "2.0",
+             "user": "U1", "text": "public message"},
+        ], "total": 2,
+    })
+    _text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "message"}
+    )
+    assert len(records) == 1
+    assert records[0].external_id == "C1:2.0"
+
+
+def test_dispatch_records_ac4_no_puller_to_be_identical_with():
+    """AC4 — Slack's answer, and it is a DIFFERENT one from the other four
+    providers: Slack has NO RawRecord-producing puller at all.
+    `kg_ingest.runner.PULLERS` has no "slack" entry, and Slack's own KG path
+    (`kg_ingest.slack_extract`) hashes whole chunks of synced channel markdown
+    keyed on `(channel_id, chunk)`, never one message and never
+    `RawRecord.render()`. There is structurally nothing for a Slack sweep
+    record to collide with in the ledger."""
+    from app.kg_ingest import runner
+    from app.kg_ingest import slack_extract
+
+    assert "slack" not in runner.PULLERS
+    # The ledger key Slack's OWN ingestion path uses is scoped to
+    # (channel_id, chunk) — not `RawRecord.render()` at all, confirming there
+    # is no unit for a sweep record to collide with.
+    h1 = slack_extract._chunk_hash("C1", "some channel markdown")
+    h2 = slack_extract._chunk_hash("C2", "some channel markdown")
+    assert h1 != h2, "the hash is scoped by channel, not just content"
 
 
 # ── channel reads ────────────────────────────────────────────────────────────
@@ -314,8 +611,10 @@ def test_list_channels_when_the_bot_is_in_none(monkeypatch):
 def test_channel_history_resolves_a_name_to_an_id_and_windows_the_read(monkeypatch):
     captured = {}
 
-    def fake_history(token, *, channel, limit=100, oldest=None, latest=None, cursor=None):
-        captured.update({"channel": channel, "limit": limit, "oldest": oldest})
+    def fake_history(token, *, channel, limit=100, oldest=None, latest=None,
+                     cursor=None, auto_join=False):
+        captured.update({"channel": channel, "limit": limit, "oldest": oldest,
+                         "auto_join": auto_join})
         return {"messages": [
             {"ts": "1750000200.0", "user": "U2", "text": "and shipped"},
             {"ts": "1750000100.0", "user": "U1", "text": "we agreed on v2",
@@ -329,6 +628,7 @@ def test_channel_history_resolves_a_name_to_an_id_and_windows_the_read(monkeypat
     assert captured["channel"] == "C1"
     assert captured["limit"] == sl._MAX_MESSAGES
     assert captured["oldest"] is not None
+    assert captured["auto_join"] is True   # never fail on "the bot wasn't invited"
     # Oldest-first, with authors, thread pointers and the window stated.
     assert out.index("we agreed on v2") < out.index("and shipped")
     assert "thread: 3 replies, thread_ts=1750000100.0" in out
@@ -388,6 +688,183 @@ def test_unknown_channel_reference_is_passed_through():
     assert _handle().resolve_channel("") is None
 
 
+# ── name → id resolution against the WHOLE workspace ─────────────────────────
+#
+# THE bug. conversations.history takes an ID only (the reference is explicit),
+# and the resolver only knew the channels the bot had been INVITED to. So
+# "#launch-room" resolved to the literal string "launch-room", Slack answered
+# `channel_not_found`, the model read that as "no such channel" and fell back
+# to search — which is how a channel-history question became a relevance-ranked
+# keyword search over all time.
+
+def test_a_channel_the_bot_is_not_in_still_resolves_to_its_id():
+    """The membership list has never heard of #launch-room; the workspace list
+    has. A name must become an id either way."""
+    handle = _handle()
+    assert "launch-room" not in {c["name"] for c in handle.channels}
+    assert handle.resolve_channel("#launch-room") == "C3"
+    assert handle.resolve_channel("launch-room") == "C3"
+
+
+def test_a_raw_id_never_touches_the_channel_directory(monkeypatch):
+    """Ids pass through unchanged, and cost nothing to pass through — no
+    conversations.list page is fetched to hand back what we were given."""
+    handle = sl.SlackHandle(bot_token="xoxb-1")   # nothing preloaded
+    monkeypatch.setattr(sl.slack_sync, "fetch_channels",
+                        lambda *a, **k: pytest.fail("membership list fetched for an id"))
+    monkeypatch.setattr(sl.slack_oauth, "list_channels",
+                        lambda *a, **k: pytest.fail("workspace list fetched for an id"))
+    assert handle.resolve_channel("C0123ABCD") == "C0123ABCD"
+    assert handle.resolve_channel("G0123ABCD") == "G0123ABCD"
+
+
+def test_resolution_falls_back_to_the_reference_when_nothing_matches():
+    assert _handle().resolve_channel("#no-such-place") == "no-such-place"
+
+
+def test_the_workspace_list_is_fetched_once_and_survives_failure(monkeypatch):
+    """Best-effort, like every other directory read on this handle: a failed
+    conversations.list degrades resolution, it never breaks the answer."""
+    calls = []
+    monkeypatch.setattr(sl.slack_oauth, "list_channels",
+                        lambda token: calls.append(token) or (_ for _ in ()).throw(
+                            RuntimeError("boom")))
+    handle = sl.SlackHandle(bot_token="xoxb-1")
+    handle._channels_loaded = True     # membership list empty, already "loaded"
+    assert handle.workspace_channel_list() == []
+    assert handle.workspace_channel_list() == []
+    assert calls == ["xoxb-1"]         # fetched once, not once per lookup
+
+
+def test_the_privacy_gate_still_reads_MEMBERSHIP_not_the_workspace():
+    """Load-bearing separation: `bot_channel_ids` decides whether a private
+    search hit may be quoted to a colleague. It must keep meaning "the bot is
+    in this channel" — resolving names against the wider workspace list must
+    not widen the set of private conversations we are willing to report."""
+    handle = _handle()
+    assert handle.bot_channel_ids() == {"C1", "C2"}
+    assert "G4" not in handle.bot_channel_ids()      # visible, but not a member
+    assert not sl.is_shareable_match(
+        {"channel": {"id": "G4", "name": "founders", "is_private": True}},
+        handle.bot_channel_ids(),
+    )
+
+
+# ── self-join, mirroring the delivery path ───────────────────────────────────
+
+def _history_raising(monkeypatch, error, then=None):
+    """Patch fetch_conversation_history to reject with a Slack error string."""
+    def fake(token, *, channel, limit=100, oldest=None, latest=None, cursor=None,
+             auto_join=False):
+        if then is not None and auto_join:
+            return then
+        raise HTTPException(400, f"Slack rejected the history read: {error}")
+
+    monkeypatch.setattr(sl.slack_oauth, "fetch_conversation_history", fake)
+
+
+def test_history_asks_slack_oauth_to_self_join_and_retry(monkeypatch):
+    """The adapter delegates the join to slack_oauth, exactly as brief delivery
+    does (post_message(..., auto_join=True)) — so a public channel the bot was
+    never invited to reads successfully on the retry."""
+    _history_raising(monkeypatch, "not_in_channel", then={
+        "messages": [{"ts": "1750000100.0", "user": "U1", "text": "launch is friday"}],
+        "has_more": False,
+    })
+    out = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                               {"channel": "#launch-room"})
+    assert "launch is friday" in out
+
+
+def test_self_join_retry_happens_inside_the_connector(monkeypatch):
+    """One level down: not_in_channel → conversations.join → read again, once."""
+    from app.connectors import slack_oauth
+
+    attempts = []
+    joined = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.ok = True
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, **kwargs):
+        attempts.append(kwargs["params"]["channel"])
+        if len(attempts) == 1:
+            return _Resp({"ok": False, "error": "not_in_channel"})
+        return _Resp({"ok": True, "messages": [{"ts": "1.0", "text": "hi"}]})
+
+    monkeypatch.setattr(slack_oauth.requests, "get", fake_get)
+    monkeypatch.setattr(slack_oauth, "join_channel",
+                        lambda token, channel: joined.append(channel) or True)
+    out = slack_oauth.fetch_conversation_history("xoxb-1", channel="C3", auto_join=True)
+    assert joined == ["C3"]
+    assert attempts == ["C3", "C3"]        # read, join, read again — once
+    assert out["messages"][0]["text"] == "hi"
+
+
+def test_without_auto_join_the_rejection_is_unchanged(monkeypatch):
+    """Every other caller (the Configure drawer preview, the sync path) keeps
+    today's behaviour — the join is opt-in, not a new default."""
+    from app.connectors import slack_oauth
+
+    joined = []
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": False, "error": "not_in_channel"}
+
+    monkeypatch.setattr(slack_oauth.requests, "get", lambda url, **k: _Resp())
+    monkeypatch.setattr(slack_oauth, "join_channel",
+                        lambda token, channel: joined.append(channel) or True)
+    with pytest.raises(HTTPException):
+        slack_oauth.fetch_conversation_history("xoxb-1", channel="C3")
+    assert joined == []
+
+
+def test_a_private_channel_says_invite_the_bot(monkeypatch):
+    """A bot cannot add itself to a private channel, so the retry cannot help
+    and the honest instruction is the answer — not "the name is wrong"."""
+    _history_raising(monkeypatch, "not_in_channel")
+    out = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                               {"channel": "#founders"})
+    assert "PRIVATE channel" in out
+    assert "/invite @Sprntly in #founders" in out
+    assert "nothing was said there" in out
+    assert "the name is wrong" not in out
+
+
+def test_a_public_channel_that_could_not_be_joined_says_invite_the_bot(monkeypatch):
+    _history_raising(monkeypatch, "not_in_channel")
+    out = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                               {"channel": "#launch-room"})
+    assert "#launch-room exists" in out
+    assert "/invite @Sprntly in #launch-room" in out
+
+
+def test_only_an_unknown_name_gets_the_name_is_wrong_copy(monkeypatch):
+    """The narrowing that matters: telling a model the channel name might be
+    wrong is what made it stop reading channels and start searching. It is now
+    said only when the workspace really has no such channel."""
+    _history_raising(monkeypatch, "channel_not_found")
+    out = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                               {"channel": "#nowhere"})
+    assert "no channel called 'nowhere' is visible" in out
+    assert "slack_list_channels" in out
+    # …and a channel that DOES exist never gets that copy.
+    other = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                                 {"channel": "#launch-room"})
+    assert "no channel called" not in other
+
+
 # ── failure copy (cases 2, 5, 7) ─────────────────────────────────────────────
 
 def test_timeout_becomes_an_honest_tool_result(monkeypatch):
@@ -433,7 +910,20 @@ def test_missing_channel_points_at_the_channel_list(monkeypatch):
 
     monkeypatch.setattr(sl.slack_oauth, "fetch_conversation_history", boom)
     out = sl.PROVIDER.dispatch(_session(), "slack_channel_history", {"channel": "nope"})
-    assert "isn't readable" in out and "slack_list_channels" in out
+    assert "no channel called 'nope' is visible" in out
+    assert "slack_list_channels" in out
+
+
+def test_a_non_channel_rejection_still_uses_the_generic_copy(monkeypatch):
+    """`_channel_access_text` claims only the two channel-access errors; a rate
+    limit or an auth failure on the history read keeps its own copy."""
+    def boom(*a, **k):
+        raise HTTPException(400, "Slack rejected the history read: ratelimited")
+
+    monkeypatch.setattr(sl.slack_oauth, "fetch_conversation_history", boom)
+    out = sl.PROVIDER.dispatch(_session(), "slack_channel_history",
+                               {"channel": "#launch-room"})
+    assert "rate-limited" in out and "may be incomplete" in out
 
 
 def test_connection_error_is_reported_without_a_traceback(monkeypatch):

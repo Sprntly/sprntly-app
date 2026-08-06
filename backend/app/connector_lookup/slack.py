@@ -30,10 +30,13 @@ biggest UX risk on this surface, so it widens later, deliberately.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import requests
 from fastapi import HTTPException
@@ -41,6 +44,9 @@ from fastapi import HTTPException
 from app.connector_lookup.base import HTTP_TIMEOUT, LookupSession, cap_items
 from app.connectors import slack_oauth, slack_sync
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,27 @@ _MAX_THREAD_REPLIES = 30
 _MAX_CHANNELS = 50
 _DEFAULT_DAYS = 7
 _TEXT_CHARS = 1200
+
+#: A raw Slack conversation id — channel (C…), private group (G…) or DM (D…),
+#: followed by uppercase alphanumerics. Slack channel NAMES are lowercase-only,
+#: so this never collides with one, which is what makes an id safe to pass
+#: straight through without touching the channel directory.
+_CHANNEL_ID = re.compile(r"[CGD][A-Z0-9]+")
+
+#: Words the model mirrors from a "what's the latest …" question that are NOT
+#: topics. Slack search matches message TEXT, so query='feedback' only returns
+#: messages containing that literal word — actual feedback rarely says
+#: "feedback", and a just-posted message about anything else can never match.
+#: Observed live 2026-08-03: "latest feedback in slack" became query='feedback'
+#: twice in a row and missed the fresh message both times. When one of these
+#: arrives with sort=newest, the intent is "show me what's new", so the keyword
+#: is dropped and the read widens to the whole window. Single words only —
+#: multi-word queries ("pricing feedback") stay real searches.
+_GENERIC_QUERY_TERMS = frozenset({
+    "activity", "anything", "chatter", "conversations", "discussion",
+    "discussions", "everything", "feedback", "latest", "message", "messages",
+    "new", "news", "recent", "update", "updates",
+})
 
 SEARCH_UNAVAILABLE = (
     "(slack_search_messages is unavailable for this workspace: the Slack "
@@ -73,6 +100,28 @@ SEARCH_DISCLOSURE = (
     "way; do not imply you searched anyone's private messages.)"
 )
 
+#: The OTHER thing a search result must state about itself. Slack's
+#: `search.messages` defaults to `sort=score` — relevance — so an unsorted
+#: search returns the top-scoring matches of ALL TIME, in no date order
+#: whatsoever. A model handed those for "what's the latest in Slack?" will
+#: summarise a 2024 thread as this week's news, which is exactly the reported
+#: failure: the answer was confidently wrong about WHEN, and nothing in the
+#: result said otherwise. So the ordering ships with the rows, every time,
+#: alongside the privacy disclosure.
+SEARCH_ORDER_NOTES = {
+    "relevance": (
+        "(ordered by RELEVANCE, Slack's default — these are the highest-scoring "
+        "matches from ANY date, not the newest. Do NOT describe them as "
+        "\"the latest\" or infer recency from this list; re-run "
+        "slack_search_messages with sort=\"newest\" if the user asked what is "
+        "most recent.)"
+    ),
+    "newest": (
+        "(ordered NEWEST FIRST — these are the most recent messages matching the "
+        "query, not the most relevant ones. A strong older match may be absent.)"
+    ),
+}
+
 SYSTEM = (
     "Tools:\n"
     "- slack_list_channels: the channels this connection can read.\n"
@@ -83,7 +132,12 @@ SYSTEM = (
     "- slack_search_messages: keyword search over PUBLIC / bot-readable "
     "channels. Available ONLY when this install granted a user token; if it "
     "isn't, the tool says so — read channels instead and say that's what you "
-    "did.\n\n"
+    "did. It sorts by RELEVANCE unless you pass sort=\"newest\", so a "
+    "latest/what's-new question MUST pass sort=\"newest\" or you will be "
+    "reading the top-scoring messages of all time and calling them recent. "
+    "For a no-topic \"what's the latest in Slack\" question, omit `query` "
+    "entirely — that returns the newest messages of the last 7 days with no "
+    "keyword filter.\n\n"
     "Honest limits you MUST respect: these reads see the channels the Sprntly "
     "bot was added to, plus public channels in search mode. DMs, group DMs and "
     "private channels the bot isn't in are NEVER readable: search runs as the "
@@ -149,14 +203,42 @@ SEARCH_TOOL = {
         "a user token; the tool tells you when the workspace didn't grant one). "
         "`query` supports Slack's own search syntax, e.g. 'pricing in:#product "
         "after:2026-07-01'. Returns matches with channel, author, date, ts and "
-        "text. DM and private-channel matches are excluded before they reach you."
+        "text. DM and private-channel matches are excluded before they reach you. "
+        "`sort` picks the ORDER, and it matters: \"relevance\" (the default) "
+        "returns the best keyword matches from any date, while \"newest\" "
+        "returns the most recent matches first. Use \"newest\" for anything "
+        "asking what is latest / new / most recent / happening now, and "
+        "\"relevance\" when the user is looking for a topic regardless of when "
+        "it was said. Omitting `query` altogether is the third mode: the newest "
+        "messages across every searchable channel, no keyword filter — use that "
+        "when the user asks what's new WITHOUT naming a topic. The result "
+        "states which order it used — repeat that framing and never call a "
+        "relevance-ordered list \"the latest\"."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search terms (Slack search syntax allowed)."},
+            "query": {
+                "type": "string",
+                "description": (
+                    "Search terms (Slack search syntax allowed). OMIT entirely "
+                    "for 'what's the latest in Slack' — no keyword filter, just "
+                    "the newest messages from the last 7 days. Generic words "
+                    "('feedback', 'updates', 'messages') are NOT topics — omit "
+                    "the query for those too; search only matches messages "
+                    "containing the literal word."
+                ),
+            },
+            "sort": {
+                "type": "string",
+                "enum": ["relevance", "newest"],
+                "description": (
+                    "Result order. \"relevance\" (default) = best keyword "
+                    "matches, any date. \"newest\" = most recent first, for "
+                    "latest/what's-new questions."
+                ),
+            },
         },
-        "required": ["query"],
     },
 }
 
@@ -179,8 +261,10 @@ class SlackHandle:
     user_token: str | None = field(default=None, repr=False)
     users: dict[str, str] = field(default_factory=dict, repr=False)
     channels: list[dict] = field(default_factory=list, repr=False)
+    workspace_channels: list[dict] = field(default_factory=list, repr=False)
     _users_loaded: bool = False
     _channels_loaded: bool = False
+    _workspace_loaded: bool = False
 
     def bot_channel_ids(self) -> set[str]:
         """Channel ids the BOT is a member of (fetch_channels filters on
@@ -212,18 +296,77 @@ class SlackHandle:
                 self.channels = []
         return self.channels
 
+    def workspace_channel_list(self) -> list[dict]:
+        """EVERY channel this connection can see — all public channels in the
+        workspace plus the private ones the bot was added to.
+
+        Distinct from `channel_list()` on purpose, and the distinction is the
+        bug this exists to fix. `channel_list()` is the bot's MEMBERSHIP
+        (slack_sync.fetch_channels filters on `is_member`), which is the right
+        set for the privacy gate and for "what can I read" — and the wrong set
+        for turning a name into an id. conversations.history takes an ID only,
+        so a channel the bot hadn't been invited to resolved to nothing, the
+        raw NAME went to Slack, and the read came back `channel_not_found`.
+        The model read that as "no such channel", fell back to search, and
+        answered from whatever search returned.
+
+        slack_oauth.list_channels (conversations.list, `channels:read` +
+        `groups:read`) returns non-member channels too — that is precisely what
+        its `is_member` flag is for — so a name always has something to resolve
+        against. Best-effort: an unavailable list yields [] and resolution falls
+        back to the membership list exactly as before.
+        """
+        if not self._workspace_loaded:
+            self._workspace_loaded = True
+            try:
+                self.workspace_channels = slack_oauth.list_channels(self.bot_token)
+            except Exception:  # noqa: BLE001 — resolution degrades, never fails
+                logger.warning(
+                    "slack-lookup: workspace channel list fetch failed", exc_info=True
+                )
+                self.workspace_channels = []
+        return self.workspace_channels
+
+    def find_channel(self, ref: str) -> dict | None:
+        """The channel record `ref` names, or None when the workspace has no
+        such channel at all.
+
+        Membership list first — it is usually already warm (the model tends to
+        call slack_list_channels before reading one) and costs nothing when it
+        is — then the full workspace list. None from here is the ONLY thing
+        that justifies telling the user the name is wrong; every other failure
+        is an access problem with different copy.
+        """
+        ref = (ref or "").strip().lstrip("#")
+        if not ref:
+            return None
+        wanted = ref.lower()
+        for source in (self.channel_list(), self.workspace_channel_list()):
+            for channel in source:
+                if (channel.get("name") or "").lower() == wanted:
+                    return channel
+                if channel.get("id") == ref:
+                    return channel
+        return None
+
     def resolve_channel(self, ref: str) -> str | None:
         """'#general' / 'general' / 'C123' → a channel id the API accepts."""
         ref = (ref or "").strip().lstrip("#")
         if not ref:
             return None
-        for channel in self.channel_list():
-            if (channel.get("name") or "").lower() == ref.lower():
-                return channel.get("id")
-            if channel.get("id") == ref:
-                return channel.get("id")
-        # Unknown to the channel list (private channel the bot is in but the
-        # list call failed, or a raw id) — pass it through and let Slack decide.
+        # A raw id needs no directory read at all. Slack conversation ids are
+        # uppercase (C/G/D + uppercase alphanumerics) while channel NAMES are
+        # lowercase-only, so the two can never be confused — and short-circuiting
+        # here keeps a model that already has an id from paying for a
+        # conversations.list page to hand it back unchanged.
+        if _CHANNEL_ID.fullmatch(ref):
+            return ref
+        found = self.find_channel(ref)
+        if found and found.get("id"):
+            return found["id"]
+        # Nothing matched anywhere — pass it through and let Slack decide, which
+        # is what produces the `channel_not_found` the caller turns into honest
+        # "no channel by that name" copy.
         return ref
 
 
@@ -365,6 +508,12 @@ class SlackProvider:
 
     def dispatch(self, session: LookupSession, name: str, inp: dict) -> str:
         handle: SlackHandle = session.handle
+        # INFO, not DEBUG: successful Slack reads used to be invisible — the
+        # 2026-08-03 "stale answer" report could only be traced through a
+        # failure line, with no record of which tools ran or with what input.
+        # One line per call makes "did chat actually go to Slack?" answerable
+        # from the logs alone.
+        logger.info("slack-lookup: call %s %s", name, inp)
         try:
             if name == "slack_list_channels":
                 return self._channels(handle)
@@ -414,10 +563,26 @@ class SlackProvider:
             days = _DEFAULT_DAYS
         days = max(1, min(days, 90))
         oldest = f"{int(time.time()) - days * 86400}.000000"
-        data = slack_oauth.fetch_conversation_history(
-            handle.bot_token, channel=channel_id, limit=_MAX_MESSAGES, oldest=oldest
-        )
+        try:
+            # auto_join mirrors the delivery path (slack_oauth.post_message):
+            # "the bot was never invited" is the single most common reason a
+            # read fails, and a public channel is one idempotent
+            # conversations.join away from working. Private channels can't be
+            # self-joined, so those still fail — with copy that says why.
+            data = slack_oauth.fetch_conversation_history(
+                handle.bot_token, channel=channel_id, limit=_MAX_MESSAGES,
+                oldest=oldest, auto_join=True,
+            )
+        except HTTPException as exc:
+            access = _channel_access_text(handle, ref, str(exc.detail))
+            if access:
+                return access
+            raise
         messages = list(reversed(data.get("messages") or []))  # oldest first
+        logger.info(
+            "slack-lookup: history %s (id=%s, days=%d) -> %d messages",
+            ref, channel_id, days, len(messages),
+        )
         if not messages:
             return (
                 f"(no messages in {ref} in the last {days} days — or the bot "
@@ -449,30 +614,101 @@ class SlackProvider:
         return body + (f"\n{marker}" if marker else "")
 
     def _search(self, handle: SlackHandle, inp: dict) -> str:
+        """`dispatch`'s entry point — unchanged behaviour, now a thin wrapper
+        over `_search_and_hits` so the sweep's `dispatch_records` can reuse the
+        SAME single Slack API call for text and records rather than searching
+        twice. Nothing about this method's return value changed by that split."""
+        text, _kept = self._search_and_hits(handle, inp)
+        return text
+
+    def _search_and_hits(
+        self, handle: SlackHandle, inp: dict
+    ) -> "tuple[str, list[dict]]":
+        """`(rendered text, shareable matches actually rendered)`. Everything
+        below is `_search`'s original body, unmodified, with `kept` (the
+        shareable, capped match list `lines` was built from) now also
+        returned instead of discarded — that discard was the exact gap AC2
+        exists to close (see the module docstring on `RawRecord`-producing
+        adapters generally). `kept` is `[]` for every early return (no user
+        token, no matches, nothing shareable): there is nothing to build
+        records from in those cases either."""
         if not handle.user_token:
-            return SEARCH_UNAVAILABLE
+            return SEARCH_UNAVAILABLE, []
         query = (inp.get("query") or "").strip()
-        if not query:
-            return "(slack_search_messages: 'query' is required)"
+        # Model input, so it is validated, not trusted: anything that isn't the
+        # explicit "newest" falls back to Slack's own relevance default. The
+        # default deliberately stays relevance — a keyword question ("what did
+        # we decide about pricing") wants the best match, not last Tuesday's
+        # passing mention — so only an explicit ask flips it.
+        order = "newest" if str(inp.get("sort") or "").strip().lower() == "newest" else "relevance"
+        window_note = None
+        generic = order == "newest" and query.lower() in _GENERIC_QUERY_TERMS
+        if not query or generic:
+            # No keyword means "the latest, whatever it is" — and so does a
+            # generic one + newest (see _GENERIC_QUERY_TERMS). search.messages
+            # REQUIRES a query string, but accepts a modifier-only one —
+            # verified live 2026-08-03 against this app: query="after:<date>"
+            # returns ok with every indexed message after that date (a "*"
+            # wildcard quietly searches a smaller corpus, so it is not used).
+            # Relevance is meaningless with nothing to rank, so the order is
+            # forced to newest regardless of what the model passed.
+            since = _dt.date.fromtimestamp(time.time() - _DEFAULT_DAYS * 86400).isoformat()
+            if generic:
+                window_note = (
+                    f"(the keyword {query!r} was dropped — it is a generic "
+                    "word that would only match messages containing it "
+                    f"literally. These are ALL the newest indexed messages "
+                    f"since {since}, across every channel search can see. A "
+                    "just-posted message can lag the search index by a minute "
+                    "or two; read the channel directly for up-to-the-second "
+                    "data.)"
+                )
+            else:
+                window_note = (
+                    f"(no keyword given — these are the newest indexed messages "
+                    f"since {since}, across every channel search can see. A "
+                    f"just-posted message can lag the search index by a minute or "
+                    f"two; read the channel directly for up-to-the-second data.)"
+                )
+            order = "newest"
+            query = f"after:{since}"
         result = slack_oauth.search_messages(
-            handle.user_token, query=query, count=_MAX_SEARCH_HITS
+            handle.user_token,
+            query=query,
+            count=_MAX_SEARCH_HITS,
+            sort=(
+                slack_oauth.SEARCH_SORT_NEWEST if order == "newest"
+                else slack_oauth.SEARCH_SORT_RELEVANCE
+            ),
+            sort_dir="desc",
         )
         matches = result.get("matches") or []
         total = result.get("total") or 0
         if not matches:
-            return f"(no Slack messages match {query!r})"
+            if window_note:
+                return (
+                    f"(no Slack messages in the last {_DEFAULT_DAYS} days in "
+                    "channels search can see)"
+                ), []
+            return f"(no Slack messages match {query!r})", []
         # PRIVACY GATE — see is_shareable_match. search.messages reads as the
         # authorizing USER, so raw results can contain their DMs and private
         # channels; this answer goes to whoever asked in Sprntly chat.
         shareable = [m for m in matches if is_shareable_match(m, handle.bot_channel_ids())]
         excluded = len(matches) - len(shareable)
+        logger.info(
+            "slack-lookup: search %r sort=%s -> %d matches (%d shareable, %d total)",
+            query, order, len(matches), len(shareable), total,
+        )
         if not shareable:
             return (
-                f"(no Slack messages match {query!r} in channels I'm allowed to "
-                f"report. {excluded} match(es) were in DMs or private channels "
-                "and were excluded — say the search covered public channels "
-                "only, and never imply you read anyone's DMs.)"
-            ) if excluded else f"(no Slack messages match {query!r})"
+                (
+                    f"(no Slack messages match {query!r} in channels I'm allowed to "
+                    f"report. {excluded} match(es) were in DMs or private channels "
+                    "and were excluded — say the search covered public channels "
+                    "only, and never imply you read anyone's DMs.)"
+                ) if excluded else f"(no Slack messages match {query!r})"
+            ), []
         users = handle.user_map()
         kept, marker = cap_items(shareable, _MAX_SEARCH_HITS)
         lines = []
@@ -484,7 +720,11 @@ class SlackProvider:
             lines.append(
                 f"- #{channel} [{when}] {who}: {text} (ts={m.get('ts')})"
             )
-        notes = [SEARCH_DISCLOSURE]
+        # Ordering first: it is the one property of this list that changes what
+        # the rows MEAN, and an answer that gets it wrong is wrong about time.
+        notes = [SEARCH_ORDER_NOTES[order], SEARCH_DISCLOSURE]
+        if window_note:
+            notes.insert(0, window_note)
         if excluded:
             notes.append(
                 f"({excluded} further match(es) were in DMs or private channels "
@@ -494,7 +734,159 @@ class SlackProvider:
             notes.append(marker)
         elif total > len(kept):
             notes.append(f"(showing {len(kept)} of {total} matches Slack returned)")
-        return "\n".join(lines + notes)
+        return "\n".join(lines + notes), kept
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """`(text, records)` for `slack_search_messages`, `None` for anything
+        else. Calls `_search_and_hits` — the SAME single Slack API call
+        `dispatch` makes for this tool — so `text` is byte-identical to
+        `dispatch`'s own output by construction, including on the SAME
+        exceptions `dispatch`'s outer try/except turns into friendly text:
+        this method wraps the call itself rather than relying on `dispatch`'s
+        wrapper, since `_AdapterLeg.run` calls it INSTEAD of `dispatch`. See
+        `_match_to_record` for why AC4's byte-identity claim does not apply to
+        Slack at all: there is no `RawRecord`-producing puller for Slack to be
+        identical WITH (see that function's docstring)."""
+        if name != "slack_search_messages":
+            return None
+        handle: SlackHandle = session.handle
+        try:
+            text, kept = self._search_and_hits(handle, inp)
+        except requests.Timeout:
+            return f"(Slack timed out on {name} — no results from this call)", None
+        except HTTPException as exc:
+            return _slack_error_text(name, str(exc.detail)), None
+        except requests.RequestException as exc:
+            return f"(Slack {name} failed to reach Slack: {exc})", None
+        if not kept:
+            return text, None
+        # Cache-hit, not a new call: `_search_and_hits` already populated
+        # `handle`'s lazily-loaded user map to render the `who` in `text`
+        # above (SlackHandle.user_map caches on `_users_loaded`).
+        users = handle.user_map()
+        return text, [_match_to_record(m, users) for m in kept]
+
+
+def _ts_to_iso(ts: str) -> str | None:
+    """A Slack `epoch.seq` timestamp as ISO-8601 UTC, or `None` for an empty
+    or unparseable one. Mirrors `kg_ingest.slack_extract._latest_message_iso`
+    — kept local rather than imported, same reasoning `slack_extract` itself
+    gives for not importing `pullers.jira`'s ADF flattener: this module stays
+    testable in isolation."""
+    if not ts:
+        return None
+    try:
+        epoch = float(str(ts).split(".")[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc).isoformat()
+
+
+def _match_to_record(match: dict, users: dict[str, str]) -> "RawRecord":
+    """One shareable `search.messages` hit → a `RawRecord`.
+
+    AC4 (byte-identity with the scheduled pull's record for the same item)
+    does not apply here, for a reason none of the other four providers share:
+    **Slack has no `RawRecord`-producing puller at all.** `kg_ingest.runner
+    .PULLERS` has no "slack" entry, and Slack's OWN KG path
+    (`kg_ingest/slack_extract.py`) hashes whole chunks of a channel's synced
+    markdown (`_chunk_hash(channel_id, chunk)`, keyed on channel + chunk text)
+    — never one message, and never `RawRecord.render()`. There is structurally
+    nothing for this record to collide with in `sweep_persist`'s ledger; a
+    Slack sweep will never register a `skipped` hit against the scheduled
+    ingestion, no matter how this method is implemented.
+
+    Built anyway, for what it still buys: `external_id` is `channel_id:ts`,
+    Slack's own compound key for one message (AC3), which is at least a STABLE
+    identity across repeated sweeps — two different questions that both
+    resurface the same message now hash identically to EACH OTHER, so a
+    second, differently-worded sweep skips re-extracting a message a prior
+    sweep already paid for. That is real, if narrower, value: sweep-to-sweep
+    dedup, not sweep-to-pull dedup.
+
+    NOR IS MAKING THEM COLLIDE ON THE TABLE (recorded here so nobody reopens
+    it — see the amendment to the sweep-persist ticket this closed). Doing so
+    would mean per-message Slack ingestion: `slack_extract._chunk_hash`
+    hashes `_CHUNK_CHARS`-sized (6,000-char) chunks of a channel's
+    CONCATENATED synced markdown, capped at `_MAX_KG_CHARS` (60,000) per
+    channel — a message becoming its own hashable unit is a different
+    ingestion shape entirely, not a fix to this one. At
+    `slack_sync.MAX_CHANNELS` (50) x `MAX_MESSAGES_PER_CHANNEL` (200) that is
+    up to ~10,000 extraction calls where today's per-channel-chunk ingestion
+    pays for at most 50 x (60,000 / 6,000) = 500 — roughly 20x, to enable
+    dedupe on a feature whose own value (the sweep's live hit rate) is still
+    unmeasured. Not worth it.
+
+    What actually bounds Slack's persistence cost instead is the
+    per-(company, provider) cooldown in sweep_persist.py (AC-A2): without a
+    puller to collide with, Slack has NO dedupe at all against a repeated,
+    differently-worded sweep beyond the sweep-to-sweep case above, so the
+    cooldown — not the content-hash ledger — is the only thing standing
+    between Slack and a fresh batch of message-sized extraction calls on
+    every question that happens to sweep it.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    channel = (match.get("channel") or {}) or {}
+    channel_id = str(channel.get("id") or match.get("channel_id") or "")
+    channel_name = channel.get("name") or "?"
+    ts = str(match.get("ts") or "")
+    # Same cleaning + cap as the rendered `text` line above, so the record's
+    # text is the same string the user-facing result already showed.
+    text = slack_sync._clean_message_text(match.get("text") or "", users)[:_TEXT_CHARS]
+    who = match.get("username") or users.get(match.get("user") or "", match.get("user") or "?")
+    return RawRecord(
+        provider="slack",
+        kind="message",
+        external_id=f"{channel_id}:{ts}",
+        title="",
+        text=text,
+        properties={"channel": channel_name, "user": who},
+        timestamp=_ts_to_iso(ts),
+    )
+
+
+def _channel_access_text(handle: SlackHandle, ref: str, detail: str) -> str | None:
+    """Copy for a channel read Slack refused, or None when the rejection wasn't
+    about channel access (leave those to `_slack_error_text`).
+
+    The old copy said one thing for three different situations — "that channel
+    isn't readable — the Sprntly bot isn't in it, or the name is wrong" — and
+    the "or the name is wrong" half is what made the reported failure worse: the
+    channel existed and was spelled correctly, so a model told its name might be
+    wrong stopped reading channels and went to search instead. Now the workspace
+    directory is consulted before anything is claimed, and "the name is wrong" is
+    only ever said when the name genuinely matches NOTHING.
+    """
+    lowered = (detail or "").lower()
+    if "not_in_channel" not in lowered and "channel_not_found" not in lowered:
+        return None
+    known = handle.find_channel(ref)
+    ref = (ref or "").strip().lstrip("#")   # quote the NAME, not the sigil
+    if known is None:
+        return (
+            f"(slack_channel_history: no channel called {ref!r} is visible to "
+            "this connection. Check the exact name with slack_list_channels — "
+            "it may be spelled differently, archived, or a private channel the "
+            "Sprntly bot has never been invited to. Do NOT report this as "
+            "\"nothing was said there\".)"
+        )
+    name = known.get("name") or ref
+    if known.get("is_private"):
+        return (
+            f"(slack_channel_history: #{name} is a PRIVATE channel and the "
+            "Sprntly bot isn't in it. A bot cannot add itself to a private "
+            "channel, so this will keep failing until someone invites it — tell "
+            f"the user to run /invite @Sprntly in #{name}. Do NOT report this "
+            "as \"nothing was said there\", and do not silently answer from "
+            "another channel instead.)"
+        )
+    return (
+        f"(slack_channel_history: #{name} exists but the Sprntly bot could not "
+        "join it automatically, so its messages are unreadable right now. Tell "
+        f"the user to run /invite @Sprntly in #{name}. Do NOT report this as "
+        "\"nothing was said there\".)"
+    )
 
 
 def _slack_error_text(tool: str, detail: str) -> str:

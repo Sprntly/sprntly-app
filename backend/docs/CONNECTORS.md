@@ -51,6 +51,146 @@ first-time empty-KG seed (inline).
 
 ---
 
+## Google Meet
+
+Meeting transcripts, read from the **Meet REST API v2** (`https://meet.googleapis.com/v2`, GA).
+Auth module `app/connectors/google_meet.py`, puller `app/kg_ingest/pullers/google_meet.py`,
+provider key `google_meet`.
+
+**Shares the Drive connector's Cloud project and OAuth client.** Same
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, a **second redirect URI**, and a
+separate `connections` row. Do not create a second OAuth client — Google shows
+the granted scope list per authorization, so a Drive-only customer is never
+asked for Meet permissions and vice versa. (This mirrors the correction
+a1e16c40 made about sharing the Jira app with Confluence.)
+
+The **scope lists are not shared and must never be merged.**
+`google_oauth.DRIVE_SCOPES` must not grow a Meet scope: scopes bake into a token
+at consent and a refresh carries the old set forward, so widening that constant
+would leave every already-stored Drive token claiming a capability it does not
+have — silent 403s on connections whose probe reads healthy.
+
+### Operator setup
+
+1. **Enable the Meet API** on the existing Cloud project:
+   <https://console.cloud.google.com/apis/library/meet.googleapis.com>. Nothing
+   works before this, and the failure looks like an auth problem (403), not a
+   missing-API one.
+2. **Add the redirect URI** to the existing OAuth client's *Authorized redirect
+   URIs*: `https://api.sprntly.ai/v1/connectors/google-meet/callback`
+   (and the staging equivalent).
+3. **Declare the scope and submit for verification.**
+   `https://www.googleapis.com/auth/meetings.space.readonly` is **sensitive**
+   tier. Until Google approves it — roughly 10 business days, longer if they ask
+   for a demo video — every user sees the unverified-app warning screen and the
+   app is capped at 100 users.
+4. Set `GOOGLE_MEET_OAUTH_REDIRECT_URI`.
+
+### Scopes
+
+```
+https://www.googleapis.com/auth/meetings.space.readonly   <- reads everything
+openid
+https://www.googleapis.com/auth/userinfo.email
+https://www.googleapis.com/auth/userinfo.profile
+```
+
+The trio after the Meet scope is **not optional**. Google auto-adds them to the
+granted set for any client that is also a sign-in client (ours is), so
+requesting the Meet scope alone makes the granted set a *superset* of the
+requested one, and `google-auth-oauthlib` raises "Scope has changed" at token
+exchange. `google_oauth.py:26-33` carries the same note for Drive. We also get
+the connecting user's verified email from the ID token, saving a round trip.
+
+`meetings.space.created` is deliberately **not** requested — it covers spaces
+this app created, and Sprntly creates no meetings.
+
+**We will never take a restricted Drive scope.** Recordings (the MP4) and Gemini
+smart notes live in the organizer's Google Drive and are only reachable via
+`drive.readonly` or `drive.meet.readonly`, both **restricted** tier. Taking one
+would put this entire OAuth client — the Drive connector included — through an
+annual, paid **CASA** security assessment, plus the restricted-scope review.
+The transcript *text* comes straight from the Meet API with no Drive access at
+all, and that is the part worth having. Recordings and smart notes are therefore
+permanently out of scope: a deliberate business decision, not a backlog item.
+
+### Coverage — read this before debugging a "broken" sync
+
+**Organizer-only.** `conferenceRecords.list` returns only conferences where the
+authenticating user was the **organizer** — not meetings they merely attended,
+and never a colleague's. There is no admin or account-wide listing equivalent to
+Zoom's `:admin` scopes, and no scope that would add one. Each teammate whose
+meetings should reach Sprntly connects their own Google account. A PM who chairs
+nothing legitimately syncs zero meetings, and that is a healthy connection.
+
+**30-day retention, hard.** Google deletes conference records *and* transcript
+entries 30 days after the conference ends. There is no historical backfill and
+there never can be; a first sync reaches back 30 days and that is the entire
+corpus. Because "everything that exists" and "the last 30 days" are the same
+set, the puller keeps no incremental cursor — it walks the full window every run
+and lets the runner's content-hash ledger make re-seen records free.
+
+**Customer-side requirements**, all three of which produce an empty-but-healthy
+connector when unmet:
+
+- Google Workspace **Business Standard or higher**. Business Starter and
+  personal Gmail accounts cannot record or transcribe at all.
+- **"Record the transcript" switched on before the meeting starts.** Google will
+  not transcribe a call retroactively.
+  <https://support.google.com/meet/answer/12849897>
+- The Meet API not blocked for the Workspace by its admin.
+
+### Tokens
+
+Standard Google OAuth: `access_type=offline` + `prompt=consent` (both required
+to be issued a refresh token; without the forced prompt a *re*-authorization
+silently omits one). Access tokens last ~1 hour.
+
+Google refresh tokens **do not rotate** — no rotation-strand hazard, unlike Zoom
+and Atlassian. They die on user revoke, six months unused, or eviction by the
+100-tokens-per-account-per-client cap. **But the refresh response omits
+`refresh_token` entirely**, so a caller that stores it verbatim blanks the stored
+one and reaches the same dead end by a different road; `token_payload_to_store`'s
+`keep_refresh_token` is what prevents that and is load-bearing on every refresh
+path (`sync_context`, `connector_probe`, `auto_sync._maybe_refresh_token`).
+
+While the consent screen is in **Testing** publishing status, refresh tokens
+expire after **7 days**. Expect this during development and before verification
+lands — it is the likeliest cause of "it worked last week".
+
+### Health probe
+
+`connector_probe` lists **one conference record**, not an identity call. The
+userinfo endpoint answers on `userinfo.email` while every meeting read answers on
+`meetings.space.readonly`, and those genuinely come apart — the Meet API can be
+disabled on the project or blocked for the Workspace without touching sign-in.
+An identity-only probe would report green on a connector whose every sync 403s,
+which is exactly defect #2 of the Confluence granular-scopes incident
+(a1e16c40). An **empty** conference list is healthy.
+
+### Ingestion
+
+`pull(company_id)` yields one `RawRecord` per conference:
+`conferenceRecords.list` (30-day filter) → `participants.list` (the join table
+that turns a transcript entry's participant resource name into a display name)
+→ `transcripts.list` → for each transcript in state `FILE_GENERATED`,
+`transcripts.entries.list` **paged to the 100 maximum**. Entry paging is
+mandatory, not an optimisation: `pageSize` defaults to **10**, so an unpaged
+call returns the first ten seconds of a meeting while looking exactly like a
+complete short one.
+
+A conference with no finished transcript still yields a record whose text says
+so in words — never a silent skip. The commonest cause is a Meet setting the
+customer can change, and dropping those meetings would present a half-empty
+corpus as a complete one with nothing to explain the gap.
+
+Not implemented, deliberately: recordings/video, Gemini smart notes, in-meeting
+chat (not exposed by the API), whole-org coverage (impossible), live chat lookup
+(`connector_lookup` lists Meet as `DEFERRED`), and webhooks / Workspace Events
+subscriptions.
+
+---
+
 ## Figma
 
 OAuth App (not "Plugin"). Register at
@@ -580,3 +720,224 @@ look" are different answers.
 
 Connect, disconnect, health probe, KG ingest, space picker, live chat reads.
 No write path — Sprntly requests no Confluence write scope at all.
+
+---
+
+## Zoom
+
+Sprntly reads **cloud recordings and their transcripts** via a Zoom
+Marketplace **General (admin-managed)** app. Create it at
+<https://marketplace.zoom.us/develop/create>, named e.g. `Sprntly`.
+
+**It must be admin-managed, not user-managed.** A *user-managed* app can only
+be granted user-level scopes — it cannot hold the `:admin` variants this
+connector requires, so the scopes simply will not be offered and the connector
+will only ever see the connecting person's own recordings. If you find yourself
+unable to select `cloud_recording:read:list_user_recordings:admin`, this is
+why; changing it later means re-creating the app and every customer
+reconnecting.
+
+**Not a Server-to-Server app either.** S2S cannot hold the granular
+`cloud_recording:*` scopes at all — they are only offered on General app types.
+
+### App settings
+
+- **App type**: General → **admin-managed** (account-level install)
+- **Redirect URL for OAuth** + **OAuth Allow List**:
+  `https://api.sprntly.ai/v1/connectors/zoom/callback` (production), plus a
+  localhost URL for dev, e.g.
+  `http://localhost:8000/v1/connectors/zoom/callback`. Both fields — a URL in
+  the redirect field but missing from the allow list fails with
+  `Invalid Redirect (4700)`.
+
+### Scopes — granular only
+
+New Marketplace apps are **granular-only**. The classic family
+(`recording:read:admin`, `user:read:admin`) is not selectable, so asking for it
+fails at the *consent screen*, not at the API. Declared in
+`app/connectors/zoom_oauth.py::ZOOM_SCOPES`; the app's enabled scopes must be a
+superset.
+
+| Scope | Why |
+|---|---|
+| `cloud_recording:read:list_user_recordings:admin` | `GET /users/{userId}/recordings` — the per-host listing this connector rests on |
+| `cloud_recording:read:list_recording_files:admin` | `GET /meetings/{meetingId}/recordings` — one meeting's files, including the `.VTT` transcript |
+| `user:read:list_users:admin` | `GET /users` — the host picker |
+| `user:read:user:admin` | `GET /users/me` — the connection's account label |
+
+**Every scope is an `:admin` scope, deliberately.** That is what lets ONE
+connection read every host's recordings rather than only the connecting
+person's — a PM's own Zoom account sees almost no sales calls. The cost is
+that **whoever clicks Connect must be a Zoom account owner or admin**, and it
+is why `zoom` is not in `routes/connectors._PERSONAL_PROVIDERS`.
+
+**Scopes are baked into the token at consent.** Changing this list means every
+existing connection must **reconnect** — a refresh carries the old set forward.
+
+### Admin pre-approval, and the three failure codes
+
+An **unpublished** app must be pre-approved on the customer's Zoom account
+(Marketplace → Manage → *Approved Apps*) before anyone there can authorize it.
+Zoom usually blocks this at its own consent screen without redirecting; when it
+does come back, it comes back through our callback.
+
+A failed consent redirects to `/connectors/return` with one of **three stable
+codes**, because they need three different sentences and one catch-all would
+send people to the wrong place:
+
+| Code | When | What the user must do |
+|---|---|---|
+| `zoom_consent_declined` | Zoom sent `error=access_denied` — the user clicked **Decline** | Try again and accept. Nothing is wrong. |
+| `zoom_app_not_approved` | The error prose carries approval language, or the token exchange failed with it | Ask a Zoom admin to approve Sprntly in the Marketplace |
+| `zoom_oauth_failed` | Anything else | Honest generic failure |
+
+Zoom's raw error string is **never** forwarded — it changes without notice and
+would land straight on a screen. Note `unauthorized_client` on its own is
+deliberately *not* treated as an approval failure: that code means the grant
+type is not enabled on **our** app, a Sprntly-side misconfiguration that no
+amount of customer-admin approving would fix.
+
+### Env vars
+
+| Var | Source |
+|---|---|
+| `ZOOM_CLIENT_ID` | App → *App Credentials* → Client ID |
+| `ZOOM_CLIENT_SECRET` | App → *App Credentials* → Client Secret |
+| `ZOOM_OAUTH_REDIRECT_URI` | matches the app's Redirect URL exactly |
+
+### Token lifecycle
+
+Access tokens last **1 hour**; refresh tokens last **90 days and ROTATE on
+every refresh**. The whole new payload is persisted on every refresh — a
+throwaway refresh *spends* the stored token and the connection dies at the next
+cycle, with nothing failing at the moment the mistake is made. Refresh happens
+in the health probe (`connector_probe.py`), in `auto_sync._maybe_refresh_token`
+before a sync, and in `zoom_oauth.sync_context()`. A rejected refresh raises
+`ZoomAuthExpiredError` (which carries `status_code = 401`, so `auto_sync` picks
+the reconnect branch) → the UI prompts a reconnect.
+
+The client authenticates to the token endpoint with **HTTP Basic**
+(base64 `client_id:client_secret`), not credentials in the body. The body form
+returns `invalid_client`, which reads like a wrong secret rather than a wrong
+auth style.
+
+One Zoom-specific obligation, shared with Confluence: the encrypted token
+payload also carries **`company_id`**, because that is the credential the KG
+puller will be handed (it needs the host selection off the connection config,
+which a lone access token can't reach). Any code path that rewrites the payload
+must preserve it — see `zoom_oauth.token_payload_to_store`.
+
+Disconnect calls `POST https://zoom.us/oauth/revoke` **before** deleting the
+row. A refresh token we merely forget stays live on Zoom's side for the rest of
+its 90 days. The revoke is best-effort: if it fails we still delete, because
+keeping our copy of the credential is the worse outcome.
+
+**Reconnecting must not reset the host selection.** `upsert_connection` replaces
+`config_json` wholesale, and the 90-day refresh expiry means every long-lived
+customer reconnects on a schedule — so the callback reads the existing config
+and merges into it. Without that, a workspace that narrowed sync to three sales
+hosts would silently widen to *every* host once a quarter (an empty selection
+means all hosts), with no event to trace it to.
+
+### What is cached on the connection
+
+Only `{id, email, account_id}` from Zoom's `/users/me` payload
+(`zoom_oauth.identity_to_store`). `config_json` is returned **verbatim to every
+company member** by `GET /v1/connectors`, and Zoom's user object also carries
+the admin's personal meeting id, personal meeting URL, phone number, department
+and job title. Caching it whole would publish one person's contact details to
+the whole workspace as a side effect of connecting a recordings integration.
+
+`id` is the load-bearing field — see the probe below.
+
+### Health probe
+
+`connector_probe` lists **one recording** for one host (`page_size=1`), not the
+identity endpoint. `GET /users/me` answers on `user:read:user:admin` while every
+recording read answers on the `cloud_recording` scopes, so an identity-only
+probe reports a connection green while every sync fails — the exact defect that
+shipped on Confluence (`a1e16c40`).
+
+Two details that keep it from failing green a *different* way:
+
+- It addresses the **real userId** cached at connect, not `me`. An
+  admin-managed app is documented to pass an explicit userId; `me` often works
+  but is not guaranteed to resolve. (`me` remains the fallback for connections
+  made before the id was stored.)
+- It passes `allow_missing=False`, so a **404 raises** instead of collapsing to
+  an empty list. `api_get` normally swallows 404 into `{}`, which is right for a
+  sync racing a deleted recording and catastrophic here: an unresolvable path
+  would read as "this host recorded nothing", which reads as *healthy*.
+
+An **empty** recording list is still healthy: an account with nothing recorded
+this month is a truthful state, not a broken credential.
+
+### API caveats
+
+- **A missing scope arrives as HTTP 400, not 401.** Zoom answers
+  `400 {"code":4711,"message":"Invalid access token, does not contain
+  scopes: …"}`. `api_get` inspects the body of a 400 for code `4711`/`4700` or
+  the phrase `does not contain scopes` and raises `ZoomAuthExpiredError`;
+  every other 400 stays a 502. Without that mapping the picker returns 502
+  instead of the reconnect prompt, `auto_sync`'s `getattr(exc, "status_code")`
+  takes the "genuine error" branch, and — worst — the probe raises an
+  `HTTPException` that `connector_health`'s fail-open catch swallows, leaving a
+  wholly broken connector showing **green**.
+- **The recordings listing is windowed to ONE MONTH.** `from`/`to` spanning
+  more is rejected outright, not truncated, so a longer backfill is several
+  calls. `zoom_oauth.window_bounds()` clamps centrally so no caller can trip it.
+- **Meeting UUIDs need double URL-encoding** when they start with `/` or
+  contain `//` (they are base64, so this is common). Miss it and Zoom's router
+  mis-splits the path and answers 404 for a meeting that plainly exists — the
+  usual cause of "the recording is right there and the API says it isn't". See
+  `zoom_oauth.encode_meeting_uuid`.
+- **Only Licensed hosts** (Zoom user `type == 2`) can record to the cloud. A
+  Basic host with zero recordings is expected, not a bug — the picker surfaces
+  `licensed` so this is visible rather than mysterious.
+- **Transcripts are WebVTT**, downloaded from `download_url` with the same
+  bearer token in an **Authorization header**. The `?access_token=` query form
+  in Zoom's older docs puts a live credential in every proxy and access log on
+  the path, so it is deliberately not used. A `download_url` is itself a
+  credential-bearing link to customer conversation and is never logged.
+- **No webhooks yet.** Sync is poll-only, via the scheduler's
+  `refresh_connectors` job.
+- Typed `meetings` in `connectors/catalog.py` alongside Fireflies and Gong,
+  which makes it **evidence-bearing**: what a customer actually said on a call
+  is measured first-party signal, so Zoom alone can satisfy the Top Insights
+  brief data-source gate.
+
+### Host selection
+
+`GET /v1/connectors/zoom/users` lists the account's active hosts (readable by
+any member); `POST` the same path saves the selection (admin-only, **max 100
+hosts** → 422 past that, because the puller pays one windowed recordings call
+per selected host per pass). Stored on the connection config as
+`sync_user_ids` + `sync_user_names`.
+
+The GET response's size fields mean three different things and are not
+interchangeable:
+
+- `total` — how many hosts we **fetched**, not how many exist.
+- `fetch_capped` — Zoom still had pages when the listing budget (4 × 300) ran
+  out. On a 5,000-host account this is the difference between "showing the
+  first 500 of at least 1,200" and a flat lie about the customer's own org.
+- `truncated` — the response itself was cut to the 500-host picker limit.
+
+`selected_names` is returned alongside `selected_ids` deliberately: the listing
+is active-only, so a host who has since been **deactivated** is absent from
+`users`. Without their stored name the picker could only render a bare opaque
+id — or silently show a shorter selection than the one actually in force. That
+is the entire reason the names are persisted.
+
+**An empty selection means every host on the account.** That is the
+backwards-compatible default, and it is what a connection made before the
+picker existed has.
+
+### Current scope
+
+Connect, disconnect, health probe, host picker. **No KG puller yet** — a
+connected Zoom shows healthy in Settings → Connectors and ingests nothing until
+the puller slice lands. No live chat reads either: `zoom` sits in
+`connector_lookup.DEFERRED`, so a chat question about it gets the honest "it
+syncs but I can't query it live yet" rather than a KG-flavoured guess. No write
+path — Sprntly requests no Zoom write scope at all.
