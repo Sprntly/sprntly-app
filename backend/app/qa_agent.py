@@ -1237,7 +1237,19 @@ def _sweep_context(enterprise_id: Optional[str], question: str) -> str:
             return ""
         if not _cross_connector_sweep_enabled(enterprise_id):
             return ""
-        block, _result = connector_sweep.context_block(enterprise_id or "", question)
+        block, result = connector_sweep.context_block(enterprise_id or "", question)
+        # Fire-and-forget: persist whatever this sweep read into the KG, off
+        # this path entirely. Kicked off AFTER `block` is already computed —
+        # nothing below this line participates in producing the return value,
+        # so persistence cannot add latency to the answer it's serving.
+        # `kickoff_sweep_persist` never raises (fully isolated — see
+        # connector_lookup/sweep_persist.py). Unconditional: there is no
+        # separate persistence flag — `_cross_connector_sweep_enabled` above
+        # already gates whether the sweep (and therefore anything it could
+        # persist) ran at all.
+        from app.connector_lookup.sweep_persist import kickoff_sweep_persist
+
+        kickoff_sweep_persist(enterprise_id or "", result)
         return block
     except Exception:  # noqa: BLE001 — a sweep degrades, it never breaks the answer
         logger.exception("cross-connector sweep failed for %s", enterprise_id)

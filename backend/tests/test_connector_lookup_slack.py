@@ -494,6 +494,102 @@ def test_empty_search_is_honest(monkeypatch):
     assert out == "(no Slack messages match 'zzz')"
 
 
+# ── dispatch_records (AC1/AC2/AC3/AC4) ──────────────────────────────────────
+
+
+def test_dispatch_records_returns_none_for_other_tools():
+    for name in ("slack_list_channels", "slack_channel_history", "slack_get_thread"):
+        assert sl.PROVIDER.dispatch_records(_session(), name, {}) is None
+
+
+def test_dispatch_records_no_records_when_search_is_unavailable():
+    """No user token → SEARCH_UNAVAILABLE, same as dispatch — and no records,
+    since there is nothing to build them from."""
+    text, records = sl.PROVIDER.dispatch_records(
+        _session(), "slack_search_messages", {"query": "pricing"}
+    )
+    assert records is None
+    assert text == sl.SEARCH_UNAVAILABLE
+
+
+def test_dispatch_records_text_matches_dispatch_exactly(monkeypatch):
+    """AC5, mutation-proof: dispatch_records's text must be byte-identical to
+    dispatch's own output for the identical search call — both now run
+    `_search_and_hits` (the refactor), so this pins that the split changed
+    nothing observable."""
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+        return {"matches": [
+            {"channel": {"id": "C1", "name": "general"}, "ts": "1750000000.1",
+             "user": "U1", "text": "we ship pricing v2 <@U2>"},
+        ], "total": 1}
+
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", fake_search)
+    expected = sl.PROVIDER.dispatch(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    assert text == expected
+    assert records is not None and len(records) == 1
+
+
+def test_dispatch_records_ac3_external_id_is_channel_and_ts(monkeypatch):
+    """AC3 — Slack's compound identity: channel + ts, the only stable key one
+    Slack message has."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [
+            {"channel": {"id": "C1", "name": "general"}, "ts": "1750000000.1",
+             "user": "U1", "text": "we ship pricing v2"},
+        ], "total": 1,
+    })
+    _text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "pricing"}
+    )
+    assert records[0].external_id == "C1:1750000000.1"
+    assert records[0].provider == "slack"
+    assert records[0].kind == "message"
+
+
+def test_dispatch_records_privacy_gate_matches_dispatch(monkeypatch):
+    """The privacy filter (is_shareable_match) must apply identically to
+    records as it does to the rendered text — a DM must never become a
+    RawRecord any more than it becomes a rendered line."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [
+            {"channel": {"id": "D1", "is_im": True}, "ts": "1.0",
+             "user": "U1", "text": "private message"},
+            {"channel": {"id": "C1", "name": "general"}, "ts": "2.0",
+             "user": "U1", "text": "public message"},
+        ], "total": 2,
+    })
+    _text, records = sl.PROVIDER.dispatch_records(
+        _session(user_token="xoxp-1"), "slack_search_messages", {"query": "message"}
+    )
+    assert len(records) == 1
+    assert records[0].external_id == "C1:2.0"
+
+
+def test_dispatch_records_ac4_no_puller_to_be_identical_with():
+    """AC4 — Slack's answer, and it is a DIFFERENT one from the other four
+    providers: Slack has NO RawRecord-producing puller at all.
+    `kg_ingest.runner.PULLERS` has no "slack" entry, and Slack's own KG path
+    (`kg_ingest.slack_extract`) hashes whole chunks of synced channel markdown
+    keyed on `(channel_id, chunk)`, never one message and never
+    `RawRecord.render()`. There is structurally nothing for a Slack sweep
+    record to collide with in the ledger."""
+    from app.kg_ingest import runner
+    from app.kg_ingest import slack_extract
+
+    assert "slack" not in runner.PULLERS
+    # The ledger key Slack's OWN ingestion path uses is scoped to
+    # (channel_id, chunk) — not `RawRecord.render()` at all, confirming there
+    # is no unit for a sweep record to collide with.
+    h1 = slack_extract._chunk_hash("C1", "some channel markdown")
+    h2 = slack_extract._chunk_hash("C2", "some channel markdown")
+    assert h1 != h2, "the hash is scoped by channel, not just content"
+
+
 # ── channel reads ────────────────────────────────────────────────────────────
 
 def test_list_channels_renders_ids_and_privacy():

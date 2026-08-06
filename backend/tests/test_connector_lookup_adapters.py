@@ -754,6 +754,169 @@ def test_hubspot_get_missing_record(monkeypatch):
     assert "no HubSpot deal with id 9" in out
 
 
+# ── HubSpot — dispatch_records (AC1/AC2/AC3/AC4) ────────────────────────────
+
+
+def _hs_search_response():
+    return _Resp({"total": 1, "results": [
+        {"id": "501", "properties": {
+            "dealname": "Acme expansion", "amount": "12000",
+            "dealstage": "contract", "pipeline": "default",
+            "closedate": "2026-09-01", "hs_lastmodifieddate": "2026-08-01T00:00:00Z",
+        }},
+    ]})
+
+
+def test_hubspot_dispatch_records_returns_none_for_non_deal_object_types(monkeypatch):
+    """AC1/AC2 scope: the sweep leg only ever calls hubspot_search(deals) — the
+    other three object types (contacts, companies, tickets) are unimplemented
+    on purpose, proving the optional capability degrades cleanly for a tool
+    call this adapter's dispatch_records does not cover."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    for object_type in ("contacts", "companies", "tickets"):
+        assert HUBSPOT.dispatch_records(
+            _hs_session(), "hubspot_search", {"object_type": object_type, "query": "x"}
+        ) is None
+    assert HUBSPOT.dispatch_records(_hs_session(), "hubspot_get", {}) is None
+
+
+def test_hubspot_dispatch_records_text_matches_dispatch_exactly(monkeypatch):
+    """AC5/mutation-proof: dispatch_records's text must be byte-identical to
+    dispatch's own output for the identical call — both are built from the
+    same _render_row/footer logic over one fetch."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    inp = {"object_type": "deals", "query": "acme"}
+    expected = HUBSPOT.dispatch(_hs_session(), "hubspot_search", inp)
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    text, records = HUBSPOT.dispatch_records(_hs_session(), "hubspot_search", inp)
+    assert text == expected
+    assert records is not None and len(records) == 1
+
+
+def test_hubspot_dispatch_records_ac4_not_byte_identical_to_the_puller(monkeypatch):
+    """AC4 — HubSpot's answer for this provider: NOT byte-identical, and the
+    test proves exactly which properties diverge and why, rather than merely
+    asserting inequality.
+
+    `hubspot_search`'s OBJECT_PROPS["deals"] never requests `hubspot_owner_id`
+    or `description`, and the search call carries no `associations` param, so
+    `owner_id`/`company_ids`/`text` cannot be populated without a second HTTP
+    call — out of scope per the ticket. The puller's record for the identical
+    deal DOES carry them (from kg_ingest.pullers.hubspot._pull_deals, which
+    requests the wider _DEAL_PROPS + associations="companies").
+    """
+    from app.kg_ingest.types import RawRecord
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    _text, records = HUBSPOT.dispatch_records(
+        _hs_session(), "hubspot_search", {"object_type": "deals", "query": "acme"}
+    )
+    sweep_record = records[0]
+
+    # The puller's record for the SAME deal id, as kg_ingest.pullers.hubspot
+    # ._pull_deals would build it from its own (wider) fetch — hand-built here
+    # to pin the wire format, mirroring the deal fields _hs_search_response
+    # supplies plus the two the search call never asks HubSpot for.
+    pull_record = RawRecord(
+        provider="hubspot", kind="deal", external_id="501",
+        title="Acme expansion",
+        text="Renewal conversation notes",  # from `description`, search-absent
+        properties={
+            "amount_usd": "12000", "stage": "contract", "pipeline": "default",
+            "close_date": "2026-09-01", "owner_id": "42",  # search-absent
+            "company_ids": ["9001"],                        # search-absent
+        },
+        timestamp="2026-08-01T00:00:00Z",
+    )
+
+    assert sweep_record.render() != pull_record.render(), (
+        "AC4: HubSpot's search-based record must NOT claim byte-identity — "
+        "owner_id/company_ids/text are structurally unavailable from the "
+        "search response"
+    )
+    # The fields the search response DOES carry still agree with the puller.
+    assert sweep_record.external_id == pull_record.external_id
+    assert sweep_record.properties["amount_usd"] == pull_record.properties["amount_usd"]
+    assert sweep_record.properties["stage"] == pull_record.properties["stage"]
+    # The exact gap, named rather than merely observed.
+    assert sweep_record.properties["owner_id"] is None
+    assert sweep_record.properties["company_ids"] is None
+    assert sweep_record.text == ""
+
+
+# ── HubSpot — AC-A1 persist-thread enrichment achieves byte-identity ───────
+
+
+def test_hubspot_enrich_record_achieves_byte_identity_with_the_real_puller(monkeypatch):
+    """AC-A1: after `enrich_record` (persist-thread only), the sweep's record
+    DOES render byte-identical to the real puller's
+    (`kg_ingest.pullers.hubspot._pull_deals`) record for the same deal —
+    proven against the real puller, not a hand-reconstruction."""
+    from app.connector_lookup.hubspot import enrich_record
+    from app.kg_ingest.pullers import hubspot as hubspot_puller
+
+    deal_obj = {
+        "id": "501",
+        "properties": {
+            "dealname": "Acme expansion", "amount": "12000",
+            "dealstage": "contract", "pipeline": "default",
+            "closedate": "2026-09-01", "hs_lastmodifieddate": "2026-08-01T00:00:00Z",
+            "hubspot_owner_id": "42", "description": "Renewal conversation notes",
+        },
+        "associations": {"companies": {"results": [
+            {"id": "9001", "type": "deal_to_company"},
+        ]}},
+    }
+
+    def fake_puller_get(token, path, params=None):
+        assert path == "/crm/v3/objects/deals"
+        assert params["associations"] == "companies"
+        return {"results": [deal_obj], "paging": {}}
+
+    monkeypatch.setattr(hubspot_puller, "_get", fake_puller_get)
+    pull_record = next(hubspot_puller._pull_deals("tok"))
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    _text, records = HUBSPOT.dispatch_records(
+        _hs_session(), "hubspot_search", {"object_type": "deals", "query": "acme"}
+    )
+    lean_record = records[0]
+
+    # Persist-thread enrichment: one deal GET with associations=companies +
+    # the SAME `_DEAL_PROPS` the puller requests.
+    def fake_get(url, headers=None, params=None, timeout=None):
+        assert url.endswith("/crm/v3/objects/deals/501")
+        assert params["associations"] == "companies"
+        assert params["properties"] == hubspot_puller._DEAL_PROPS
+        return _Resp(deal_obj)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    enriched = enrich_record(_hs_session(), lean_record)
+
+    assert enriched.render() == pull_record.render(), (
+        "AC-A1: the ENRICHED record must render byte-identical to the real "
+        "puller's record for the same deal"
+    )
+    assert enriched.external_id == pull_record.external_id == "501"
+
+
+def test_hubspot_enrich_record_falls_back_to_the_lean_record_on_404(monkeypatch):
+    """AC-A4: a deal that vanished between the search and the enrichment
+    fetch (404) is not an error — enrichment falls back to the lean record."""
+    from app.connector_lookup.hubspot import enrich_record
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _hs_search_response())
+    _text, records = HUBSPOT.dispatch_records(
+        _hs_session(), "hubspot_search", {"object_type": "deals", "query": "acme"}
+    )
+    lean_record = records[0]
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp({}, status=404))
+    out = enrich_record(_hs_session(), lean_record)
+    assert out is lean_record
+
+
 # ── Google Drive ─────────────────────────────────────────────────────────────
 
 def _drive_session(picked=None):
