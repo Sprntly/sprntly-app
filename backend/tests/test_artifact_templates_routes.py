@@ -620,14 +620,21 @@ def test_patch_runs_the_same_validation_ladder_as_create(tenant_client):
     assert t.client.patch(f"{_URL}/{tid}", json={"source_md": " "}).status_code == 400
 
 
-# ─── compile (queued only in this milestone) ─────────────────────────────────
+# ─── compile ─────────────────────────────────────────────────────────────────
 
 
-def test_compile_requeues_the_row_and_clears_its_old_notes(tenant_client):
-    """No compiler exists yet, so this parks the row back at `pending` and
-    answers the preview shape — exactly what "queued, nothing has picked it up"
-    should look like. The screen's polling contract is written against this from
-    milestone 1 so it does not change when the compiler lands."""
+def test_compile_asks_for_a_check_and_answers_the_preview_shape(
+    tenant_client, monkeypatch
+):
+    """The "Check again" button: it starts a check and answers the preview
+    shape, so the caller restarts polling from the response rather than
+    guessing.
+
+    The check itself is stubbed out here by conftest's
+    `_no_background_template_compile` — what a REAL run does to the row is
+    test_artifact_template_compile.py's job. What this file owns is that the
+    route asks for one, with this template's id, and that asking never disturbs
+    the skeleton the company may be generating with right now."""
     t = tenant_client.make(slug="acme")
     tid = _create(t.client).json()["id"]
     from app import db
@@ -638,10 +645,23 @@ def test_compile_requeues_the_row_and_clears_its_old_notes(tenant_client):
         compile_notes=[{"code": "missing_evidence_list", "message": "No evidence list."}],
     )
 
-    body = t.client.post(f"{_URL}/{tid}/compile").json()
-    assert body["compile_status"] == "pending"
-    assert body["compile_notes"] == []
-    # The previous skeleton is not blanked by asking for a recheck.
+    import app.routes.artifact_templates as routes_mod
+
+    asked: list = []
+    monkeypatch.setattr(
+        routes_mod, "schedule_compile",
+        lambda company_id, template_id: (asked.append(template_id), False)[1],
+    )
+
+    resp = t.client.post(f"{_URL}/{tid}/compile")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert asked == [tid]
+    # The preview shape, so the client can poll from it.
+    assert body["format"] == "html"
+    assert set(body) >= {"compile_status", "compile_notes", "body", "section_map"}
+    # Asking for a re-check NEVER blanks the last good skeleton — an active
+    # format keeps generating with it until a new one validates.
     assert "<h1>Old</h1>" in body["body"]
 
 
