@@ -400,3 +400,107 @@ def validate_prd_skeleton(html: str, section_map: dict | None = None) -> Validat
     return ValidationResult(
         status="needs_review" if notes else "ready", notes=notes
     )
+
+
+# ─── engineering spec (Part B) ───────────────────────────────────────────────
+#
+# A different output vocabulary and a much shorter check. Part B is MARKDOWN,
+# has no structured viewer, no class vocabulary and no CSS — so none of the
+# HTML machinery above applies. Exactly one thing has to survive a customer's
+# format: the B0–B9 section ids.
+#
+# They are not decoration. `stories/generate.py` builds ticket acceptance
+# criteria by inheriting the EARS requirements under B3 and labels the block
+# `## Part B (machine-readable Implementation Spec)` in `_build_input`; the
+# B0 derivation header is what ties a spec back to the Part A that produced it.
+# A spec whose ids are gone still renders fine and still reads fine — and the
+# ticket generator quietly stops finding anything to inherit. That is the same
+# silent-feature-death failure mode the PRD hooks above exist to prevent, which
+# is why a missing id is an activation gate and not a warning.
+
+#: Every id the skeleton must still carry, in order. Sourced from
+#: `skills/implementation-spec/templates/implementation-spec-template.md`, whose
+#: SKILL.md calls the B0–B9 structure NORMATIVE.
+IMPL_SPEC_SECTION_IDS = ("B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
+
+#: The two ids with live downstream READERS, as opposed to readers-in-principle.
+#: Kept separate because the note they produce differs — see below.
+_IMPL_SPEC_REQUIREMENT_IDS = frozenset({"B3", "B8"})
+
+#: `## B3.` / `**B7**` / `### b0 —` all count. The id has to appear as its own
+#: token so a stray "B3" inside a sentence of prose does not satisfy the check
+#: for a section that is not there.
+_B_ID_RE = re.compile(r"(?<![0-9A-Za-z])B([0-9])(?![0-9A-Za-z])")
+
+#: Markdown permits raw HTML, and Part B is handed to a coding agent and pushed
+#: into tracker descriptions. A `<script>` in a spec skeleton has no legitimate
+#: purpose, so it is refused for the same reason the PRD path refuses one.
+_SCRIPT_RE = re.compile(r"<\s*script\b", re.IGNORECASE)
+
+
+def missing_impl_spec_ids(markdown: str) -> list[str]:
+    """Which of B0–B9 the skeleton no longer carries, in order. Pure."""
+    found = {f"B{d}" for d in _B_ID_RE.findall(markdown or "")}
+    return [bid for bid in IMPL_SPEC_SECTION_IDS if bid not in found]
+
+
+def validate_impl_spec_skeleton(markdown: str) -> ValidationResult:
+    """Decide whether a compiled ENGINEERING-SPEC skeleton may be activated.
+
+    Two checks, in refusal order.
+
+    SAFETY first, and it is a hard `failed`: a skeleton carrying a `<script>`
+    is not stored at all, so it can never be previewed or activated.
+
+    Then the B0–B9 ids. Any missing id is `needs_review` — previewable, fixable,
+    but not activatable, because the failure it causes downstream is silent.
+
+    NOTE CODES ARE CONSTRAINED, and the choice below is deliberate rather than
+    ideal. `store.COMPILE_NOTE_CODES` is a closed set shared with
+    `web/app/lib/compileNotes.ts`, and it has no id-specific member: `_note`
+    raises on anything outside it, precisely so a drifted code cannot silently
+    render as a generic line. So the missing ids are reported through the two
+    existing codes whose shipped sentences are actually true of them — a lost
+    title/derivation header reads as `missing_title`, a lost requirements or
+    acceptance-test section as `missing_requirements`. A dedicated
+    `missing_spec_sections` code would say it better and is worth adding the
+    next time `store.py` and the web table move together.
+    """
+    if _SCRIPT_RE.search(markdown or ""):
+        return ValidationResult(
+            status="failed",
+            notes=[_note(
+                "unsafe_script",
+                "Your file contains a script. Sprntly won't run scripts inside "
+                "a document — remove it and upload again.",
+            )],
+        )
+
+    missing = missing_impl_spec_ids(markdown)
+    if not missing:
+        return ValidationResult(status="ready")
+
+    notes: list[dict] = []
+    # B0 is the derivation header that names the source Part A, so losing it is
+    # the same class of problem as losing the document's title.
+    if "B0" in missing:
+        notes.append(_note(
+            "missing_title",
+            "Your format has no single document title. Sprntly needs one "
+            "heading at the top to name each document.",
+        ))
+    # Everything else lands here: B3 and B8 are what the ticket generator reads,
+    # and the remaining ids are structure the coding agent is told to expect.
+    if any(bid != "B0" for bid in missing):
+        notes.append(_note(
+            "missing_requirements",
+            "We couldn't tell how your format lists requirements. Sprntly "
+            "needs each one as a row or a user story so tickets can cite it.",
+        ))
+
+    logger.info(
+        "impl_spec_skeleton_missing_ids missing=%s gates_tickets=%s",
+        ",".join(missing),
+        bool(_IMPL_SPEC_REQUIREMENT_IDS.intersection(missing)),
+    )
+    return ValidationResult(status="needs_review", notes=notes)
