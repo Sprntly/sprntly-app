@@ -1552,6 +1552,49 @@ def _no_background_connector_sync(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_background_template_compile(request, monkeypatch):
+    """Keep POST/PATCH /v1/artifact-templates from starting a real format check.
+
+    `schedule_compile` (app.artifact_templates.compile_prd) claims the row and
+    runs the compile on a background thread — and that compile goes through
+    `graph.gateway.llm_call`, which holds its OWN `call_json` reference bound at
+    import time. The `fake_llm` fixture patches `app.llm.call_json`, which does
+    NOT reach the gateway's binding, so an unguarded upload in any route test
+    would fire a REAL Anthropic request from a daemon thread, against the
+    mid-reset in-memory DB — the same pair of hazards
+    `_no_background_connector_sync` above exists for.
+
+    Returning False (not True) is what keeps the route's contract intact under
+    the patch: `_with_compile_started` reads False as "a check is already in
+    flight", leaves the row alone, and the response still describes the row the
+    write produced.
+
+    Opt out with `@pytest.mark.real_template_compile` — the compile suite does,
+    and drives the gateway with its own stub."""
+    if request.node.get_closest_marker("real_template_compile"):
+        yield
+        return
+    import importlib
+
+    def _noop_schedule(company_id, template_id):  # noqa: ARG001
+        return False
+
+    # Patched on BOTH modules: routes/artifact_templates.py does
+    # `from ...compile_prd import schedule_compile`, so its binding is fixed at
+    # import and patching only the source module cannot reach it.
+    for mod_name in ("app.artifact_templates.compile_prd",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_compile"):
+            monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
+                                raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_iterate_limiter():
     """Per-test isolation for the Design Agent rate limiters.
 

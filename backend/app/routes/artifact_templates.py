@@ -12,13 +12,20 @@ and engineering-spec FORMS in.
   DELETE /v1/artifact-templates/{id}           -> remove it (admin when it is the active one)
 
 **Nothing reads this table on any generation path yet.** The library stores,
-lists, compiles-to-pending and activates; `prd_runner._load_part_a_template()`
-and its impl-spec sibling are untouched, so every generated document is
+lists, checks (compiles + validates) and activates; a compiled skeleton is
+stored and previewable, but `prd_runner._load_part_a_template()` and its
+impl-spec sibling are untouched, so every generated document is still
 byte-identical to what it was before this shipped. `generation_enabled` on the
 list response says so honestly, per type, so a screen can never imply otherwise
-(app/artifact_templates/store.py::GENERATION_ENABLED). Shipping an inert store
-ahead of its reader is the posture routes/company.py:257 already takes with
-company documents.
+(app/artifact_templates/store.py::GENERATION_ENABLED). Shipping a store ahead of
+its reader is the posture routes/company.py:257 already takes with company
+documents.
+
+A format is CHECKED in the background — on upload, and on every change to its
+markdown — and the client polls the list until nothing is in flight
+(app/artifact_templates/compile_prd.py). Checking automatically rather than on
+an explicit click is deliberate: a user who has to press "check" first will
+instead press "use this format", hit the 409, and file it as a bug.
 
 Templates are COMPANY-SCOPED: all workspaces in a company share one library and
 one active format per artifact type, so every read filters by company_id. The
@@ -66,9 +73,11 @@ from app.artifact_templates.store import (
     TemplateTypeUnknown,
     assert_activatable,
     edit_template,
+    normalize_compile_notes,
     normalize_section_map,
     store_template,
 )
+from app.artifact_templates.compile_prd import schedule_compile
 from app.auth import WorkspaceContext, require_workspace
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 # The same "is this text or binary?" gate the file-ingest path uses. Reused
@@ -100,8 +109,10 @@ def _list_item(row: dict) -> dict:
 
     Every field is emitted even when empty — a blank `uploader_name` or a null
     `created_at` still renders its labelled line on the row (house rule)."""
-    notes = row.get("compile_notes") or []
-    notes = notes if isinstance(notes, list) else []
+    # Normalised on the READ path too, not just where the compiler writes them:
+    # a row written before the closed set existed, or edited by hand, must not
+    # push a code `web/app/lib/compileNotes.ts` can't translate onto a screen.
+    notes = normalize_compile_notes(row.get("compile_notes"))
     first = notes[0] if notes else None
     return {
         "id": row["id"],
@@ -131,7 +142,7 @@ def _detail(row: dict) -> dict:
         **_list_item(row),
         "source_md": row.get("source_md") or "",
         "content_hash": row.get("content_hash") or "",
-        "compile_notes": row.get("compile_notes") or [],
+        "compile_notes": normalize_compile_notes(row.get("compile_notes")),
         "section_map": normalize_section_map(row.get("section_map")),
     }
 
@@ -156,7 +167,7 @@ def _preview(row: dict) -> dict:
         "name": row.get("name") or "",
         "artifact_type": artifact_type,
         "compile_status": row.get("compile_status") or "pending",
-        "compile_notes": row.get("compile_notes") or [],
+        "compile_notes": normalize_compile_notes(row.get("compile_notes")),
         "format": PREVIEW_FORMATS.get(artifact_type, "markdown"),
         "body": row.get("compiled") or "",
         "section_map": normalize_section_map(row.get("section_map")),
@@ -191,6 +202,25 @@ def _owned_or_404(company: WorkspaceContext, template_id: str) -> dict:
     if row is None:
         raise HTTPException(404, "Format not found.")
     return row
+
+
+def _with_compile_started(company_id: str, row: dict) -> dict:
+    """Kick off this template's background check and return the row as the
+    caller should now see it.
+
+    `schedule_compile` claims the row (moving it to `compiling`) BEFORE it
+    returns, so the response can say `compiling` truthfully rather than handing
+    back the `pending` the write returned a microsecond earlier — a client that
+    starts polling off a stale `pending` shows "Queued" for a format that is
+    already being checked.
+
+    Returns the row unchanged when a compile is already in flight, which is what
+    makes a double-click a no-op rather than a second model call."""
+    started = schedule_compile(company_id, row["id"])
+    if not started:
+        return row
+    fresh = db.get_template_by_id(company_id, row["id"])
+    return fresh if fresh is not None else row
 
 
 def _require_company_admin(company: WorkspaceContext, message: str) -> None:
@@ -308,8 +338,11 @@ async def create_template(
     """Add a format to the company's library — a pasted markdown body or an
     uploaded `.md` (≤ 2 MB, ≤ 50,000 characters).
 
-    Lands at `compile_status: "pending"` and governs nothing: a format has to be
-    checked and then activated by an admin before any document is written in it.
+    The check starts immediately and runs in the background: the 201 comes back
+    at `compiling`, and the client polls the LIST until nothing is in flight.
+    Compiling on upload rather than on an explicit click is deliberate — a user
+    who has to press "check" will instead press "use this format", hit the 409,
+    and file it as a bug.
 
     Names are free text and are NOT deconflicted. Two PRD formats called "Acme
     PRD v3" both list, both keep their own id, and neither replaces the other —
@@ -331,7 +364,7 @@ async def create_template(
         )
     except TemplateStoreError as e:
         raise HTTPException(_store_error_status(e), str(e))
-    return _detail(row)
+    return _detail(_with_compile_started(company.company_id, row))
 
 
 # ─── read ────────────────────────────────────────────────────────────────────
@@ -418,14 +451,18 @@ def edit_template_route(
 ):
     """Rename a format and/or replace its markdown, in place on the same row.
 
-    Replacing the source sends the row back to `pending` and drops the notes
-    about the old text — but NOT the compiled skeleton. If this template is the
-    active one, it stays active and keeps serving its last good skeleton while
-    the new source is checked; the alternative silently reformats every document
-    the company generates for the duration of the recompile, and nobody would
-    connect the two events. `is_active = true` with a non-`ready` status is
-    therefore not a defensive edge case — it IS the recompile case, and this is
-    the only path that reaches it.
+    Replacing the source RE-CHECKS it and drops the notes about the old text —
+    but NOT the compiled skeleton. If this template is the active one, it stays
+    active and keeps serving its last good skeleton while the new source is
+    checked; the alternative silently reformats every document the company
+    generates for the duration of the recompile, and nobody would connect the
+    two events. `is_active = true` with a non-`ready` status is therefore not a
+    defensive edge case — it IS the recompile case, and this is the only path
+    that reaches it.
+
+    A RENAME does not re-check anything. The check is over the format's content,
+    and the content did not change; re-running it would take a `ready` format
+    out of use for a minute because somebody fixed a typo in its name.
 
     The artifact type is not editable: a compiled skeleton is written in the
     vocabulary of one generator, and moving a format between them would strand
@@ -450,6 +487,10 @@ def edit_template_route(
     if updated is None:
         # The row vanished between the read and the write (a concurrent delete).
         raise HTTPException(404, "Format not found.")
+    # Compare the STORED text, not `body.source_md is not None`: a client that
+    # re-submits the whole form unchanged must not burn a model call.
+    if (updated.get("source_md") or "") != (row.get("source_md") or ""):
+        updated = _with_compile_started(company.company_id, updated)
     return _detail(updated)
 
 
@@ -463,28 +504,21 @@ def compile_template_route(
 ):
     """Queue a (re)check of this format against what a Sprntly document needs.
 
-    **The compiler itself is not built yet.** This route puts the row back to
-    `pending` with its old notes cleared and answers the same shape the finished
-    version will, so the screen's polling contract, its badges and its "Check
-    again" button are written against a stable contract from the first
-    milestone. A row parked at `pending` is exactly what "queued, nothing has
-    picked it up" should look like, so the answer is honest rather than a stub.
+    This is the "Check again" button behind a `needs_review` or `failed` row,
+    and the escape hatch when a poll budget runs out. It answers the preview
+    shape with the row's new status, so the caller restarts polling from the
+    response rather than guessing.
+
+    Already-in-flight is a NO-OP, not an error: `schedule_compile` refuses a row
+    already at `compiling`, so an impatient double-click costs nothing and the
+    200 still describes the run that is genuinely happening.
 
     Not admin-gated: checking a format changes nothing about what the company
-    writes in. 404 on a foreign or missing id."""
-    _owned_or_404(company, template_id)
-    updated = db.set_compile_result(
-        company_id=company.company_id,
-        template_id=template_id,
-        compile_status="pending",
-        # `compiled` and `section_map` are deliberately NOT passed: the last
-        # good skeleton stays standing while a recheck is pending, so an active
-        # format never blanks out mid-check.
-        compile_notes=[],
-    )
-    if updated is None:
-        raise HTTPException(404, "Format not found.")
-    return _preview(updated)
+    writes in — and the row's `compiled` is untouched until a check succeeds, so
+    even re-checking the ACTIVE format cannot disturb what is generating right
+    now. 404 on a foreign or missing id."""
+    row = _owned_or_404(company, template_id)
+    return _preview(_with_compile_started(company.company_id, row))
 
 
 # ─── activation ──────────────────────────────────────────────────────────────

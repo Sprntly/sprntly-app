@@ -167,23 +167,105 @@ def content_hash_for(source_md: str) -> str:
     return h.hexdigest()[:12]
 
 
+# Model-emitted `form` values that mean one of SECTION_FORMS. A model writing
+# "tabular" one run and "table" the next produces two labels for one thing in
+# the preview's "Written as" column, so drift is folded back here rather than
+# rendered. Anything still unrecognised lands on "prose" — the neutral default —
+# and is logged, because the fix is to add the synonym, not to widen the set.
+_FORM_SYNONYMS: dict[str, str] = {
+    "table": "table", "tabular": "table", "grid": "table", "matrix": "table",
+    "stories": "stories", "story": "stories", "user stories": "stories",
+    "user_stories": "stories", "user-stories": "stories",
+    "bullets": "bullets", "bullet": "bullets", "bulleted": "bullets",
+    "bullet list": "bullets", "list": "bullets", "bulleted list": "bullets",
+    "prose": "prose", "narrative": "prose", "paragraph": "prose",
+    "paragraphs": "prose", "text": "prose",
+}
+
+
+def normalize_form(raw) -> str:
+    """One `form` value coerced into SECTION_FORMS. Never raises — a drifted
+    label is a cosmetic problem in one table column, not a reason to throw away
+    a compile that is otherwise good."""
+    key = str(raw or "").strip().lower()
+    form = _FORM_SYNONYMS.get(key)
+    if form is not None:
+        return form
+    if key:
+        # The raw value is a short enum-ish token from the model, not customer
+        # prose — logging it is what lets somebody add the missing synonym.
+        logger.warning(
+            "artifact_template_form_drift value=%r normalised_to=prose", key[:32]
+        )
+    return "prose"
+
+
 def normalize_section_map(raw) -> dict:
-    """A stored section_map → the three-block shape the preview always renders.
+    """A stored section_map → the three-block shape the preview always renders,
+    with both closed sets enforced.
 
     Every block is present even when empty, because the preview renders all
     three including their empty copy: a silently omitted block reads as
     "nothing to report" when it means "we have no data". A row that has never
     compiled therefore previews as three explicit empties rather than a missing
-    panel."""
+    panel.
+
+    Each section entry is coerced to `{id, house, customer, order, form}`:
+    `id` is stable so the preview's mapping table can key its rows (synthesised
+    positionally when the model omits it), `order` is an int so sorting can't
+    fall over on a string, and `form` is forced into SECTION_FORMS. Applied on
+    both the write and the read path, so a row written before this existed —
+    or by hand — still renders in the closed vocabulary."""
     src = raw if isinstance(raw, dict) else {}
-    sections = src.get("sections")
+    raw_sections = src.get("sections")
+    sections: list[dict] = []
+    for i, entry in enumerate(raw_sections if isinstance(raw_sections, list) else []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            order = int(entry.get("order", i + 1))
+        except (TypeError, ValueError):
+            order = i + 1
+        sections.append({
+            "id": str(entry.get("id") or f"s{i + 1}"),
+            "house": str(entry.get("house") or ""),
+            "customer": str(entry.get("customer") or ""),
+            "order": order,
+            "form": normalize_form(entry.get("form")),
+        })
+    sections.sort(key=lambda s: s["order"])
     return {
-        "sections": list(sections) if isinstance(sections, list) else [],
-        "unmapped_house": list(src.get("unmapped_house") or [])
-        if isinstance(src.get("unmapped_house"), list) else [],
-        "extra_sections": list(src.get("extra_sections") or [])
-        if isinstance(src.get("extra_sections"), list) else [],
+        "sections": sections,
+        "unmapped_house": [
+            str(x) for x in (src.get("unmapped_house") or [])
+        ] if isinstance(src.get("unmapped_house"), list) else [],
+        "extra_sections": [
+            str(x) for x in (src.get("extra_sections") or [])
+        ] if isinstance(src.get("extra_sections"), list) else [],
     }
+
+
+def normalize_compile_notes(raw) -> list[dict]:
+    """A list of compile notes with COMPILE_NOTE_CODES enforced at the storage
+    boundary.
+
+    The validator already refuses to CREATE a note with an unknown code
+    (`validate._note`), so anything filtered here is a bug or a hand-written
+    row. Dropped rather than passed through: `web/app/lib/compileNotes.ts` keys
+    on `code`, an unknown one renders as the generic "one part of your format
+    didn't map" line, and a note that says nothing specific while inflating the
+    "See all N" count is worse than no note at all."""
+    out: list[dict] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        code = str(entry.get("code") or "")
+        message = str(entry.get("message") or "")
+        if code not in COMPILE_NOTE_CODES or not message:
+            logger.warning("artifact_template_note_dropped code=%r", code[:40])
+            continue
+        out.append({"code": code, "message": message})
+    return out
 
 
 def validate_new_template(
