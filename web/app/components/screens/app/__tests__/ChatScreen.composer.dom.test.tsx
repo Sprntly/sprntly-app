@@ -821,17 +821,49 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
   })
 })
 
-// Selecting a tab must leave the cursor in that tab's composer. Before this,
-// focus stayed on the document body, so arriving at a chat cost a second click
-// in the text box before you could type a single character.
-describe("ChatScreen tab selection focuses the composer", () => {
-  it("puts the cursor in the thread composer when a chat tab is clicked", async () => {
+// Wherever the composer is on screen, it holds the cursor — arriving on the page
+// counts, not just clicking a tab. Before this, focus sat on the document body,
+// so every visit cost a second click in the text box before you could type a
+// single character.
+describe("ChatScreen focuses the composer whenever it is on screen", () => {
+  // The rule itself: no click anywhere, the composer still has the cursor.
+  it("puts the cursor in the thread composer on arrival", async () => {
     seedThreadTab()
     renderScreen()
 
-    // Nothing is focused on mount — the focus below is the click's doing.
-    const before = document.querySelector(".cx-input") as HTMLTextAreaElement
-    expect(before).toBeTruthy()
+    await waitFor(() => {
+      const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+      expect(ta).toBeTruthy()
+      expect(document.activeElement).toBe(ta)
+    })
+  })
+
+  // Same on the empty-chat landing, which is a DIFFERENT mount of the composer
+  // (`.home-landing-composer`, not `.bc-dock`).
+  it("puts the cursor in the landing composer on arrival", async () => {
+    searchString = "new=1"
+    renderScreen()
+
+    expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+    await waitFor(() => {
+      const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+      expect(document.activeElement).toBe(ta)
+    })
+  })
+
+  it("puts the cursor back in the thread composer when a chat tab is clicked", async () => {
+    seedThreadTab()
+    renderScreen()
+
+    // Drop focus first, so what this asserts is the CLICK's doing and not the
+    // arrival focus above — a tab click reusing the same mount point does not
+    // remount the composer, so it needs its own handler.
+    const before = await waitFor(() => {
+      const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+      expect(document.activeElement).toBe(ta)
+      return ta
+    })
+    await act(async () => { before.blur() })
     expect(document.activeElement).not.toBe(before)
 
     const strip = screen.getByTestId("chat-tab-bar")
