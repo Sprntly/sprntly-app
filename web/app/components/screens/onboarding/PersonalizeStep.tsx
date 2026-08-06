@@ -41,12 +41,12 @@ import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "personalize-step"
 
-// The insight-type chips come from the shared list of SELECTABLE types
-// (lib/insight-types) so onboarding and Settings → Comms & Brief always offer
-// the same set — currently the three that have a skill behind them. The
-// selection is WORKSPACE-level — persisted on
+// The insight-type chips come from INSIGHT_TYPES (lib/insight-types) — the ONE
+// list, shared with Settings → Comms & Brief and mirrored by
+// backend/app/insight_types.py, so no surface can offer a type another can't
+// produce or render. The selection is WORKSPACE-level — persisted on
 // companies.notification_settings.brief_insight_types — so the whole
-// workspace's brief is filtered to what the admin picks here.
+// workspace's brief is ordered by what the admin picks here. Empty = no filter.
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -81,8 +81,18 @@ export function PersonalizeStep() {
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
+  // Starts EMPTY, like Settings -> Comms & Brief, and like this step's own copy
+  // ("pick any, or leave empty for everything") has always claimed.
+  //
+  // It used to preselect ["top_problems","build_priorities"]. That made the
+  // form arrive already filtered while telling the PM it wasn't, and — because
+  // almost nobody changes a prefilled multi-select — it is why every company
+  // carries `top_problems` and why the preference read as inert: a stored
+  // selection was indistinguishable from a default nobody chose. Empty is a
+  // real, documented choice meaning "no filtering", so it is the honest seed;
+  // a non-empty selection now always means the PM picked it.
   const [surfaces, setSurfaces] = useState<string[]>(
-    (draft?.surfaces as string[]) ?? ["top_problems", "build_priorities"],
+    (draft?.surfaces as string[]) ?? [],
   )
 
   const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
@@ -112,10 +122,10 @@ export function PersonalizeStep() {
 
   // Seed the insight-type selection from the workspace's saved default
   // (notification_settings.brief_insight_types), so returning to the step (or
-  // having set it in Settings) doesn't reset it. A local draft wins; an empty
-  // saved selection keeps the sensible defaults above rather than blanking the
-  // chips. Narrowed to the offered types — a saved slug with no chip would be
-  // invisible state the PM can't see or clear.
+  // having set it in Settings) doesn't reset it. A local draft wins. An empty
+  // or absent saved selection leaves the chips empty, which is now the same
+  // thing the seed says: no filter. Cleaned to the offered types — a saved slug
+  // with no chip would be invisible state the PM can't see or clear.
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}

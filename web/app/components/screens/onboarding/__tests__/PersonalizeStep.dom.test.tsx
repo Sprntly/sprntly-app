@@ -138,6 +138,36 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
+  it("starts with NOTHING preselected, matching its own copy and Settings", async () => {
+    // It used to seed ["top_problems","build_priorities"], so the form arrived
+    // already filtered while telling the PM "leave empty for everything". Since
+    // almost nobody edits a prefilled multi-select, that default is why every
+    // company carries `top_problems` and why the preference read as inert — a
+    // stored selection could not be told apart from a default nobody chose.
+    // A non-empty array must now mean the PM actually picked it.
+    analyticsConnected()
+    const { container } = mount()
+    const pressed = Array.from(
+      container.querySelectorAll('[data-field="surfaces"] button'),
+    ).filter((b) => b.getAttribute("aria-pressed") === "true")
+    expect(pressed).toHaveLength(0)
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
+  it("saves an untouched selection as [] — 'surface everything', not a filter", async () => {
+    analyticsConnected()
+    mount(makeWorkspace({ onboarding_step: 9 }))
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+
+    await act(async () => {
+      continueBtn().click()
+    })
+
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalled())
+    const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
+    expect(ns.brief_insight_types).toEqual([])
+  })
+
   it("states the empty-selection rule in the same words as Settings", async () => {
     // Onboarding and Settings → Comms & Brief write the SAME key
     // (notification_settings.brief_insight_types), so they must present the
@@ -167,7 +197,7 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     mount(workspaceUnderTest)
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
 
-    // Toggle one chip off and another on so the saved array isn't just defaults.
+    // Nothing is preselected, so both clicks turn chips ON.
     fireEvent.click(chip("Top Customer Problem"))
     fireEvent.click(chip("Competitor & market moves"))
 
@@ -181,9 +211,8 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     // The insight-type selection is WORKSPACE-level, persisted on
     // companies.notification_settings.brief_insight_types.
     const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
-    // default ["top_problems","build_priorities"], toggled top_problems off +
-    // competitor_moves on
-    expect(ns.brief_insight_types).toEqual(["build_priorities", "competitor_moves"])
+    // Empty seed + two chips on, in click order.
+    expect(ns.brief_insight_types).toEqual(["top_problems", "competitor_moves"])
     // The closer belongs to define-metrics on this branch.
     expect(finishMock).not.toHaveBeenCalled()
   })
