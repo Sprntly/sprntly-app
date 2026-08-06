@@ -350,6 +350,15 @@ export function ContentPanel() {
     // outlived its thread used to keep a Reports tab on chats that have none.
     !content.reportFocusStandalone
 
+  // A standalone ticket set is on screen — INCLUDING the window before the row
+  // exists. `runTicketSetGeneration` publishes `ticketSetGenerating` on its very
+  // first patch and only learns the set id when POST /v1/stories/generate
+  // answers a second or two later; keying purely on `content.ticketSet` left
+  // that window with no visible Tickets tab at all (every tab hidden → the
+  // panel fell back to a PRD body with no PRD), which is precisely the frame the
+  // runner writes that patch to fill.
+  const standaloneSet = !!content.ticketSet || !!content.ticketSetGenerating
+
   const hidden: Record<(typeof TABS)[number]["id"], boolean> = {
     evidence: evidenceHidden,
     prd: !pipelineInScope,
@@ -358,7 +367,7 @@ export function ContentPanel() {
     // `prd` stays hidden, because there is no PRD to open and a tab that
     // resolves one on click (handleTabClick) would generate a document nobody
     // asked for.
-    tickets: !pipelineInScope && !content.ticketSet,
+    tickets: !pipelineInScope && !standaloneSet,
     reports: reportsHidden,
   }
   // The tab currently being shown is never pulled out from under the reader —
@@ -586,8 +595,8 @@ export function ContentPanel() {
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
                 // written just falls back to what it is.
-                : activeTab === "tickets" && content.ticketSet
-                  ? `Tickets · ${content.ticketSet.title || "from this conversation"}`
+                : activeTab === "tickets" && standaloneSet
+                  ? `Tickets · ${content.ticketSet?.title || "from this conversation"}`
                   : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
             </span>
           <div className="cpanel-head-actions">
@@ -632,7 +641,7 @@ export function ContentPanel() {
             Deliberately keyed on the SET, not on "no PRD in scope": a tickets
             tab whose PRD was cleared by evidenceOpenScopePatch keeps its
             disabled CTA (that pipeline can still get a PRD; this one cannot). */}
-        {activeTab === "tickets" && !guestSession && !content.ticketSet && <TicketsBottomBar />}
+        {activeTab === "tickets" && !guestSession && !standaloneSet && <TicketsBottomBar />}
       </aside>
     </>
   )

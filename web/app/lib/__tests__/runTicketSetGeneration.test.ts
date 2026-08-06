@@ -24,7 +24,7 @@ vi.mock("../api", async () => {
 vi.mock("../poll", () => ({ sleepUntilNextPoll: () => Promise.resolve() }))
 
 import { ApiError } from "../api"
-import { runTicketSetGeneration } from "../runTicketSetGeneration"
+import { loadTicketSet, runTicketSetGeneration } from "../runTicketSetGeneration"
 import type { AppContentState } from "../../types/content"
 
 const STORY = {
@@ -158,5 +158,77 @@ describe("runTicketSetGeneration", () => {
     expect(out).toEqual({ ok: false, kind: "failed" })
     expect(r.last()).toMatchObject({ ticketSet: null, ticketSetGenerating: false })
     expect(storiesApiMock.getJob).not.toHaveBeenCalled()
+  })
+})
+
+// The other half of the same ownership rule: the Artifacts row's open-by-id and
+// the thread resume come through here, so nothing outside this module ever has
+// to know the shape of `content.ticketSet`.
+describe("loadTicketSet", () => {
+  it("publishes a finished set and starts no generation", async () => {
+    const r = recorder()
+
+    const out = await loadTicketSet(7, r.setContent)
+
+    expect(out).toMatchObject({ ok: true })
+    // Opening a set NEVER kicks a run — that is what makes an artifact row safe
+    // to click twice.
+    expect(storiesApiMock.generateFromInsight).not.toHaveBeenCalled()
+    expect(r.patches[0]).toMatchObject({ prd: null, evidence: null, ticketSetGenerating: true })
+    expect(r.last()).toMatchObject({
+      ticketSetGenerating: false,
+      ticketSet: { id: 7, title: "Webhook retries", status: "ready", conversationId: 42 },
+    })
+  })
+
+  it("follows a still-generating row to its terminal state", async () => {
+    // The stale-"Writing tickets…" case: the panel must never park on a
+    // generating flag for a run that has since finished.
+    ticketSetsApiMock.get
+      .mockResolvedValueOnce({
+        id: 7, title: "", status: "generating", stories: [],
+        ticket_count: 0, conversation_id: 42, source_text: "make tickets",
+      })
+      .mockResolvedValueOnce({
+        id: 7, title: "Webhook retries", status: "ready", stories: [STORY],
+        ticket_count: 1, conversation_id: 42, source_text: "make tickets",
+      })
+    const r = recorder()
+
+    const out = await loadTicketSet(7, r.setContent)
+
+    expect(out).toMatchObject({ ok: true })
+    // It showed the live state first…
+    expect(r.patches.some((p) => p.ticketSetGenerating && p.ticketSet?.status === "generating")).toBe(true)
+    // …then settled.
+    expect(r.last()).toMatchObject({
+      ticketSetGenerating: false, ticketSet: { status: "ready" },
+    })
+  })
+
+  it("records a missing set as the notfound KIND, never a message", async () => {
+    ticketSetsApiMock.get.mockRejectedValue(new ApiError(404, { detail: "Ticket set not found" }))
+    const r = recorder()
+
+    const out = await loadTicketSet(7, r.setContent)
+
+    expect(out).toEqual({ ok: false, kind: "notfound" })
+    expect(r.last()).toMatchObject({ ticketSet: null, ticketSetGenerating: false })
+    // 404 covers "another tenant's" as well as "gone" — the copy must never
+    // distinguish them, so nothing off the wire is stored.
+    expect(JSON.stringify(r.last())).not.toMatch(/not found/i)
+  })
+
+  it("a failed row lands the failed kind, not an empty success", async () => {
+    ticketSetsApiMock.get.mockResolvedValue({
+      id: 7, title: "", status: "failed", stories: [],
+      ticket_count: 0, conversation_id: 42, source_text: "make tickets",
+    })
+    const r = recorder()
+
+    const out = await loadTicketSet(7, r.setContent)
+
+    expect(out).toEqual({ ok: false, kind: "failed" })
+    expect(r.last()?.ticketSet).toMatchObject({ id: 7, status: "failed", error: "failed" })
   })
 })

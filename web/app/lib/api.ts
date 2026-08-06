@@ -3593,11 +3593,33 @@ export type TicketSetRecord = {
   created_at?: string | null
 }
 
+/** One row of a thread's ticket-set list (GET /v1/ticket-sets/by-conversation/
+ *  {id}) — the same set as `TicketSetRecord` minus `stories`, which the listing
+ *  deliberately never carries (it is the resume read, not a document fetch). */
+export type TicketSetSummary = {
+  id: number
+  title: string
+  /** "generating" | "ready" | "failed" */
+  status: string
+  created_at: string | null
+}
+
 export const ticketSetsApi = {
   /** One ticket set with its tickets. 404 for an unknown id AND for another
    *  tenant's — deliberately indistinguishable, so never surface the
    *  difference in copy. */
   get: (setId: number) => api.get<TicketSetRecord>(`/v1/ticket-sets/${setId}`),
+  /** The sets born in one chat, newest first — the THREAD-RESUME read.
+   *
+   *  Reopening a chat asks this so it can put the panel back on what that chat
+   *  produced: a `generating` set reopens on the live run, a finished one on its
+   *  tickets. Company-scoped in the backend query, so a conversation id that
+   *  isn't the caller's company's comes back as an empty list rather than a 403
+   *  (routes/ticket_sets.py::sets_for_conversation). */
+  byConversation: (conversationId: number) =>
+    api.get<{ ticket_sets: TicketSetSummary[] }>(
+      `/v1/ticket-sets/by-conversation/${conversationId}`,
+    ),
   /** This set's tracker-sync state. Same shape as `storiesApi.getSyncState`. */
   getSyncState: (setId: number) =>
     api.get<TicketSyncState>(`/v1/ticket-sets/${setId}/sync`),
@@ -4403,6 +4425,34 @@ export type ArtifactItem =
       /** The listing carries no `html` — the body is fetched by id on open. */
       open: { report_id: number }
     }
+  | {
+      /** A STANDALONE ticket set — tickets generated from a chat with no PRD
+       *  behind them (`ticket_sets`). A PRD's tickets are NOT in this library:
+       *  they belong to the PRD row, which is already here. */
+      type: "ticket_set"
+      id: number
+      /** The set's LLM-derived name, or "" before the naming leg ran. The row
+       *  renders its own fallback rather than a fabricated title. */
+      title: string
+      /** Lifecycle. Aggregation filters to generating|ready — a `failed` run
+       *  produced nothing and is not an artifact (db/artifacts.py). */
+      status: "generating" | "ready"
+      created_at: string
+      /** How many tickets the set holds. Counted server-side from `stories`,
+       *  which is never shipped to the client on this listing. */
+      ticket_count: number
+      /** The chat the set was born in. `conversation_id` with a null
+       *  `conversation_title` means that chat was deleted (`on delete set
+       *  null` leaves the id): the row then omits the "from <chat>" clause
+       *  rather than inventing a label. `question` is the original request
+       *  (`ticket_sets.source_text`). */
+      source: {
+        conversation_id: number | null
+        conversation_title: string | null
+        question: string
+      }
+      open: { ticket_set_id: number }
+    }
 
 /** One captured report, body included (GET /v1/reports/{id}). */
 export type ReportDoc = {
@@ -4431,7 +4481,7 @@ export const artifactsApi = {
   /** LLM chat summary of a freshly generated artifact. Best-effort by
    *  contract: the backend returns {summary: null} on any summarizer failure
    *  (never an error), and callers skip posting in that case. */
-  chatSummary: (kind: "prd" | "evidence" | "prototype", id: number) =>
+  chatSummary: (kind: "prd" | "evidence" | "prototype" | "ticket_set", id: number) =>
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 

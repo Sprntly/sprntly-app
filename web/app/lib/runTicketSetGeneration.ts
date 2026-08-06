@@ -242,3 +242,110 @@ export async function runTicketSetGeneration(
 
   return fail("timeout", setId)
 }
+
+/**
+ * Open an EXISTING set by id — the Artifacts library's row, and the thread
+ * resume. The other half of the same ownership rule: this module is still the
+ * only thing that writes `content.ticketSet`, so a screen opening a set never
+ * has to know the slice's shape.
+ *
+ * A set that is still `generating` is picked up mid-run and polled to a
+ * terminal state on the durable ROW (there is no job id on this path — the job
+ * belongs to whoever kicked it off, possibly in another browser tab). That
+ * polling is not optional: writing `ticketSetGenerating: true` and stopping
+ * there is exactly the stale "Writing tickets…" over a run that finished an
+ * hour ago that this feature must never show.
+ *
+ * Never throws. A 404 — an unknown id, or another tenant's, deliberately
+ * indistinguishable — lands the classified `notfound` kind, the same way a run
+ * does, so the panel prints its own words and nothing off the wire.
+ */
+export async function loadTicketSet(
+  setId: number,
+  setContent: SetContent,
+): Promise<TicketSetGenResult> {
+  // Clear the previous artifact's slots on the SAME patch as the working
+  // state, for the reason `ticketSetOpenScopePatch` exists: a PRD left in the
+  // shared slot would put a PRD and an Evidence tab beside a set that has
+  // neither, each opening another thread's document.
+  setContent({
+    ...ticketSetOpenScopePatch(),
+    ticketSet: null,
+    ticketSetGenerating: true,
+  })
+
+  const publish = (rec: {
+    id: number
+    title: string
+    status: string
+    stories: GeneratedStory[]
+    conversation_id: number | null
+    source_text: string
+  }): TicketSetSlice => ({
+    id: rec.id,
+    title: rec.title,
+    stories: rec.stories ?? [],
+    conversationId: rec.conversation_id,
+    status: rec.status || "ready",
+    sourceText: rec.source_text,
+    stubs: [],
+    progress: null,
+    error: null,
+  })
+
+  const fail = (kind: TicketSetFailureKind, known: TicketSetSlice | null): TicketSetGenResult => {
+    setContent({
+      ticketSet: known == null ? null : { ...known, status: "failed", error: kind },
+      ticketSetGenerating: false,
+    })
+    return { ok: false, kind }
+  }
+
+  let rec: Awaited<ReturnType<typeof ticketSetsApi.get>>
+  try {
+    rec = await ticketSetsApi.get(setId)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return fail("notfound", null)
+    return fail(isTransportFailure(e) ? "network" : "failed", null)
+  }
+
+  let slice = publish(rec)
+  if (rec.status !== "generating") {
+    if (rec.status === "failed") return fail("failed", slice)
+    setContent({ ticketSet: slice, ticketSetGenerating: false })
+    return { ok: true, set: slice }
+  }
+
+  // Still being written. Show what already exists (a resumed run may be
+  // half-way through its fan-out) and follow the row to its terminal state.
+  setContent({ ticketSet: slice, ticketSetGenerating: true })
+
+  const startedAt = Date.now()
+  let transportFailures = 0
+  while (Date.now() - startedAt < MAX_MS) {
+    await sleepUntilNextPoll(POLL_MS)
+    try {
+      const next = await ticketSetsApi.get(setId)
+      transportFailures = 0
+      slice = publish(next)
+      if (next.status === "failed") return fail("failed", slice)
+      if (next.status === "ready") {
+        setContent({ ticketSet: slice, ticketSetGenerating: false })
+        return { ok: true, set: slice }
+      }
+      // Partial fan-out: republish so tickets appear as they are written.
+      setContent({
+        ticketSet: { ...slice, status: "generating" },
+        ticketSetGenerating: true,
+      })
+    } catch (e) {
+      // The row is durable — a 404 here means it is genuinely gone, not that an
+      // in-memory job was dropped, so there is nothing left to fall back to.
+      if (e instanceof ApiError && e.status === 404) return fail("notfound", slice)
+      if (!isTransportFailure(e)) return fail("failed", slice)
+      transportFailures += 1
+      if (transportFailures >= MAX_TRANSPORT_FAILURES) return fail("network", slice)
+    }
+  }
+  return fail("timeout", slice)
+}
