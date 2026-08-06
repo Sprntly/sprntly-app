@@ -24,6 +24,10 @@ import pytest
 from app.connector_lookup import sweep as cs
 from app.connector_lookup.base import LookupSession
 
+#: Captured before any fixture neutralises it, so the guard tests can opt
+#: back in to the real implementation.
+_REAL_CREDENTIAL_CHECK = cs._credential_is_refresh_free
+
 
 class FakeAdapter:
     """Minimal LookupProvider whose dispatch is scriptable per test."""
@@ -82,6 +86,11 @@ def wire(monkeypatch):
 
     monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
     monkeypatch.setattr(cs, "_has_github", lambda eid: False)
+    # FakeAdapter.open_session writes nothing, so the refresh guard has nothing
+    # to protect here and would otherwise fail CLOSED on the absent DB and skip
+    # every guarded provider. The tests that are ABOUT the guard drive
+    # `_credential_is_refresh_free` directly instead of relying on this.
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", lambda eid, p: True)
     return _install
 
 
@@ -498,9 +507,21 @@ def test_calls_leg_reads_the_index_not_the_fireflies_api(monkeypatch, wire):
     assert "### Recorded calls" in block
 
 
-def test_calls_leg_reports_index_size_on_a_keyword_miss(monkeypatch, wire):
-    """"13 calls, none matching" is a materially different answer from "no
-    calls", and only the first one is true."""
+def test_a_keyword_miss_alone_renders_no_block_at_all(monkeypatch, wire):
+    """REGRESSION. This test used to assert the opposite, and asserting the
+    opposite is what let the bug ship.
+
+    `_leg_calls` returns real prose on a miss ("13 recorded calls are indexed,
+    none match"), and while that was the leg's TEXT the source counted as
+    `usable` — so `render()` could never return "" for any company with a call
+    index. A user typing "add more detail" got a prompt announcing that five
+    sources had been searched and found nothing, steering the model into
+    asserting an absence drawn from a keyword probe.
+
+    A miss is now UNREAD. On its own it produces no block, so composition is
+    genuinely byte-identical to before the sweep existed — the claim this
+    feature's PR made and did not honour.
+    """
     from app import call_index
 
     wire({}, connected=[])
@@ -508,8 +529,31 @@ def test_calls_leg_reports_index_size_on_a_keyword_miss(monkeypatch, wire):
     monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [])
     monkeypatch.setattr(call_index, "count_calls", lambda eid, **k: 13)
 
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert result.read == []
+    assert result.render() == ""
+    # The honest detail is retained — it just is not content.
+    assert "13 recorded calls are indexed" in result.unread[0].unread_reason()
+
+
+def test_a_keyword_miss_is_disclosed_when_another_source_did_answer(
+    monkeypatch, wire
+):
+    """The miss detail still earns its place ALONGSIDE a real hit: "13 calls
+    indexed, none match" is materially different from "no calls", and once
+    something else has been read there is an answer for it to qualify."""
+    from app import call_index
+
+    wire({"jira": FakeAdapter("jira", result="PROJ-9 Checkout redesign")})
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [])
+    monkeypatch.setattr(call_index, "count_calls", lambda eid, **k: 13)
+
     block = cs.sweep("ent-1", "checkout redesign status").render()
 
+    assert "PROJ-9 Checkout redesign" in block
+    assert "Sources NOT covered by this sweep" in block
     assert "13 recorded calls are indexed" in block
     assert "not transcripts" in block
 
@@ -803,3 +847,101 @@ def test_no_live_block_leaves_the_prompt_untouched(isolated_settings, fake_llm):
     call = fake_llm["calls"][0]
     assert "LIVE CROSS-SOURCE SWEEP" not in call["system"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in call["user"]
+
+
+# ──────────────── the sweep never mutates auth state ─────────────────
+
+
+def test_sweep_skips_a_source_whose_token_is_due_for_refresh(monkeypatch, wire):
+    """THE fix for the bricked-connector race. `open_session` is a WRITE path for
+    Jira, Confluence and HubSpot — it rotates and persists the refresh token —
+    and the sweep is the worst caller to hand a rotating credential to: several
+    sources in parallel, on an ordinary chat turn, with no coordination.
+
+    So the sweep reads the row itself and DECLINES when a refresh is due, rather
+    than letting open_session decide. Cost: one unread source on one turn.
+    Alternative cost: a credential the provider has already retired, and a dead
+    connector until someone reconnects.
+    """
+    import time as _t
+
+    from app import db
+    from app.connectors import tokens
+
+    jira = FakeAdapter("jira", result="PROJ-1")
+    slack = FakeAdapter("slack", result="#eng: shipped")
+    wire({"jira": jira, "slack": slack})
+    # Opt back IN to the real guard — the fixture neutralises it for tests that
+    # are not about it.
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", _REAL_CREDENTIAL_CHECK)
+
+    # Jira's token expires inside the skew window.
+    stale = {"obtained_at": int(_t.time()) - 3500, "expires_in": 3600}
+    monkeypatch.setattr(
+        db, "get_connection", lambda cid, p: {"token_json_encrypted": "enc"}
+    )
+    monkeypatch.setattr(tokens, "decrypt_token_json", lambda c: __import__("json").dumps(stale))
+    monkeypatch.setattr(
+        "app.connector_lookup.sweep.decrypt_token_json", lambda c: "", raising=False
+    )
+
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert jira.opened_with == [], "must not open a session that would rotate a token"
+    # Slack has no refresh-on-open, so it is untouched by the guard.
+    assert slack.opened_with == ["ent-1"]
+    unread = {s.key: s for s in result.unread}
+    assert unread["jira"].status == cs.STATUS_REFRESH_DUE
+    assert "was NOT searched" in unread["jira"].unread_reason()
+    assert "never renews one" in unread["jira"].unread_reason()
+
+
+def test_sweep_opens_a_source_whose_token_is_comfortably_fresh(monkeypatch, wire):
+    import time as _t
+
+    from app import db
+    from app.connectors import tokens
+
+    jira = FakeAdapter("jira", result="PROJ-1 Checkout")
+    wire({"jira": jira})
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", _REAL_CREDENTIAL_CHECK)
+
+    fresh = {"obtained_at": int(_t.time()), "expires_in": 3600}
+    monkeypatch.setattr(
+        db, "get_connection", lambda cid, p: {"token_json_encrypted": "enc"}
+    )
+    monkeypatch.setattr(
+        tokens, "decrypt_token_json", lambda c: __import__("json").dumps(fresh)
+    )
+
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert jira.opened_with == ["ent-1"]
+    assert [s.key for s in result.read] == ["jira"]
+
+
+def test_credential_check_fails_closed(monkeypatch):
+    """Anything unreadable means we cannot prove opening is write-free, and the
+    safe answer to that is not to open it."""
+    from app import db
+
+    monkeypatch.setattr(db, "get_connection", lambda cid, p: None)
+    assert cs._credential_is_refresh_free("ent-1", "jira") is False
+
+    def _boom(cid, p):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(db, "get_connection", _boom)
+    assert cs._credential_is_refresh_free("ent-1", "jira") is False
+
+
+def test_skew_covers_every_guarded_provider():
+    """The skew must be >= the largest any guarded provider uses, or the sweep
+    would open a session inside their refresh window and trigger the write."""
+    from app.connectors import jira_fetch
+
+    assert cs.CREDENTIAL_SKEW_S >= jira_fetch._TOKEN_REFRESH_SKEW_S
+    assert cs._REFRESHES_ON_OPEN == {"jira", "confluence", "hubspot"}
+    # Slack and ClickUp do not refresh on open, so they are not guarded.
+    assert "slack" not in cs._REFRESHES_ON_OPEN
+    assert "clickup" not in cs._REFRESHES_ON_OPEN
