@@ -140,12 +140,45 @@ def test_trailing_commentary_is_dropped(golden):
     assert html.rstrip().endswith(">")
 
 
-def test_a_document_opening_on_an_unrecognised_tag_is_made_to_sniff(golden):
-    """A brief that starts at `<section>` is valid HTML and completely broken
-    for the panel. Injection prepends the stylesheet, which fixes it; the meta
-    prefix is the belt-and-braces for the case where it cannot."""
+def test_a_styleless_document_is_fixed_by_the_css_injection_alone(golden):
+    """A brief that starts at `<section>` and carries NO `<style>` is valid HTML
+    and completely broken for the panel. `inject_canonical_css` prepends the
+    stylesheet in that case, which fixes the sniff on its own — no new code
+    needed. Pinned because it is load-bearing, NOT because it guards this
+    change: it passes against pre-fix code too."""
     html = _stored("<section><h2>No wrapper</h2></section>")
     assert _SNIFF.match(html)
+    assert html.lstrip().lower().startswith("<style")
+
+
+def test_the_meta_prefix_fallback_catches_what_injection_cannot(golden):
+    """The branch injection CANNOT fix, and the only test that reaches it.
+
+    When the document already HAS a `<style>`, injection REPLACES it in place
+    rather than prepending — so a document opening on `<section>` keeps opening
+    on `<section>` and still fails the anchored sniff. `<h2>` before the
+    `<style>` also pins the preamble tie-break to the earlier tag (a closing tag
+    sits between them), so nothing is cut. That combination is what the meta
+    prefix exists for; without it this payload renders its own markup as body
+    text in every panel consumer.
+    """
+    raw = (
+        '<section><h2>Opens on a section</h2><style></style>'
+        '<div class="wrap"><p>body</p></div></section>'
+    )
+    html = _stored(raw)
+
+    assert _SNIFF.match(html), "the meta prefix must make this sniff"
+    assert html.startswith('<meta charset="utf-8">')
+    # Proof the fallback did the work, not the injection: the section survives
+    # (so nothing was cut) and the stylesheet was swapped in place, not prepended.
+    assert "<section>" in html
+    assert "<h2>Opens on a section</h2>" in html
+    assert html.count("<style>") == 1
+    assert "--problem:#dd4b32" in html
+    # And the counterfactual: without the prefix this is exactly what a panel
+    # consumer would reject.
+    assert not _SNIFF.match(html[len('<meta charset="utf-8">\n'):])
 
 
 def test_scripts_are_stripped_from_the_stored_payload(golden):
@@ -262,3 +295,123 @@ def test_markup_before_the_wrapper_is_kept_not_cut(golden):
     html = _stored('<h1>Real title</h1>\n' + golden.split("\n", 2)[2])
     assert "<h1>Real title</h1>" in html
     assert _SNIFF.match(html)      # injection/meta prefix still makes it sniff
+
+
+# ── 4. the chart menu ↔ the markup reference ────────────────────────────────
+#
+# The prompt offers the model a menu of chart forms; the skill's reference is
+# the only place it can see how one is MARKED UP. When the deleted five worked
+# briefs went, so did the only funnel and the only scatter — leaving three of
+# the seven forms named with nothing to match. This pins both ends: each form
+# is still offered by the prompt AND still has an exemplar.
+#
+# key = what the PROMPT calls it · value = what the REFERENCE's aria-label /
+# comment calls it.
+CHART_FORMS = {
+    "line": "line chart",
+    "area": "area chart",
+    "bar": "horizontal bars",
+    "funnel": "funnel",
+    "waterfall": "waterfall",      # same markup as the funnel; noted there
+    "paired bars": "paired bars",
+    "scatter": "scatter",
+    "convergence diagram": "converging on one outcome",
+}
+
+REFERENCE = (
+    REPO_BACKEND / "skills" / "evidence-brief" / "references"
+    / "component-reference.html"
+)
+
+
+@pytest.mark.parametrize("in_prompt,in_reference", sorted(CHART_FORMS.items()))
+def test_every_chart_form_the_prompt_offers_has_an_exemplar(in_prompt, in_reference):
+    """"Match its markup" is only an instruction the model can follow for forms
+    the reference actually shows."""
+    from app.prompts import EVIDENCE_KG_SYSTEM as sys_prompt
+
+    assert in_prompt.lower() in sys_prompt.lower(), (
+        f"the prompt no longer offers {in_prompt!r} — drop it from CHART_FORMS "
+        "or put it back"
+    )
+    assert in_reference.lower() in REFERENCE.read_text(encoding="utf-8").lower(), (
+        f"the prompt offers {in_prompt!r} but component-reference.html shows no "
+        "markup for it"
+    )
+
+
+def test_the_markup_reference_obeys_the_contract_it_teaches():
+    """It is the one document the model is told to copy, so a violation here
+    propagates into every brief. It must be exactly what we ask for: an EMPTY
+    `<style>`, the canonical vocabulary, no scripts, charts in figures."""
+    ref = REFERENCE.read_text(encoding="utf-8")
+
+    assert "<style></style>" in ref, "the reference must model an EMPTY <style>"
+    assert _SNIFF.match(ref)
+    assert '<div class="wrap">' in ref
+    assert "<script" not in ref.lower()
+    assert 'class="hyp"' not in ref
+    assert not re.search(r"""(?:src|href)\s*=\s*["']https?://""", ref, re.I)
+    # Every <svg> chart sits in a <figure> with a caption, and carries a11y text.
+    assert ref.count("<figure>") == ref.count("<figcaption>")
+    assert ref.count("<svg") == ref.count('role="img"') == ref.count("aria-label=")
+
+    defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", CANONICAL_CSS))
+    names = {
+        n for value in re.findall(r'class="([^"]+)"', ref) for n in value.split()
+    }
+    assert names <= defined, f"undefined classes: {sorted(names - defined)}"
+    tokens = set(re.findall(r"--([a-z-]+):", CANONICAL_CSS))
+    referenced = set(re.findall(r"var\(--([a-z-]+)\)", ref))
+    assert referenced <= tokens, f"undefined tokens: {sorted(referenced - tokens)}"
+
+
+# ── 5. accepted residual holes ──────────────────────────────────────────────
+#
+# The normaliser is a heuristic over model output, not a parser, and three
+# inputs get through it. All three are ACCEPTED, and pinned here so they are
+# visible in the codebase rather than rediscovered later. What makes them
+# acceptable is that none of them reaches the failure this change exists to
+# prevent — the sniff always passes, so no consumer falls back to the markdown
+# parser. What they cost is junk in `payload_md`, and that junk does not only
+# render: it goes VERBATIM to MCP `get_prd_evidence`, to
+# `prd_context._evidence_section`, and to the QA / technical-design / risk
+# agents, which read the payload as text.
+#
+# Fixing any of them properly means parsing the HTML rather than scanning it.
+# That is a bigger change than this one, and the last two attempts to be
+# cleverer here each introduced a worse bug than the one being fixed (see
+# 5d5bc55a → 6568382e).
+
+def test_ACCEPTED_prose_preamble_with_a_closing_tag_survives():
+    """(a) The `</`-tie-break reads a closing tag as "this is the document",
+    so prose that contains one is kept. Visible junk above the brief."""
+    html = _stored(
+        "See <b>this</b> brief:\n\n"
+        '<meta charset="utf-8"><style></style><div class="wrap">body</div>'
+    )
+    assert _SNIFF.match(html)          # the failure that matters is still prevented
+    assert "<b>this</b> brief:" in html  # …but the junk is in the payload
+
+
+def test_ACCEPTED_a_cut_section_leaves_an_unmatched_close():
+    """(b) `<section><style>…` has no closing tag before the doc-start tag, so
+    the tie-break cuts the opening `<section>` and its `</section>` is orphaned.
+    Browsers ignore a stray close tag, so it renders; the markup is wrong."""
+    html = _stored('<section><style></style><div class="wrap">body</div></section>')
+    assert _SNIFF.match(html)
+    assert "<section>" not in html
+    assert "</section>" in html        # orphaned
+
+
+def test_ACCEPTED_trailing_commentary_containing_markup_survives():
+    """(c) The trailer strip cuts at the LAST `>`, so commentary containing a
+    tag is only partly removed — the worst of the three, because it truncates
+    mid-sentence rather than leaving the text intact or removing it."""
+    html = _stored(
+        '<meta charset="utf-8"><style></style><div class="wrap">body</div>'
+        "\n\nLet me know if you want a <b>different</b> chart."
+    )
+    assert _SNIFF.match(html)
+    assert "Let me know if you want a <b>different</b>" in html  # kept
+    assert "chart." not in html                                   # truncated
