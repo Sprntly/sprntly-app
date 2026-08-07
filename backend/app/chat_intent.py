@@ -125,6 +125,27 @@ _AUTHORING_VERB_RE = re.compile(
 )
 
 
+def _subject_of(task: Optional[str]) -> Optional[str]:
+    """A generation BRIEF reduced to something you can search titles with.
+
+    Only used by the veto below, and only as a fallback: a `generate_prd`
+    verdict fills `task` with a multi-sentence brief composed from the whole
+    thread, which as a title query matches nothing and would put a paragraph
+    inside the user's "I couldn't find a PRD for …" reply. First sentence,
+    length-capped — enough to find the document, short enough to quote back.
+    """
+    if not task:
+        return None
+    first = re.split(r"(?<=[.!?])\s", task.strip(), maxsplit=1)[0].strip()
+    # The sentence terminator rides along with the lookbehind split and is not
+    # part of the subject — a trailing "." would be tokenized away by the
+    # matcher anyway, but it reads wrong when quoted back to the user.
+    first = first.rstrip(".!?").strip()
+    if len(first) > 80:
+        first = first[:80].rsplit(" ", 1)[0]
+    return first or None
+
+
 def looks_like_open_request(message: str) -> bool:
     """True when `message` is UNAMBIGUOUSLY a request to see an existing thing.
 
@@ -436,7 +457,9 @@ def resolve_chat_intent(
                 # subject it identified; keep whatever it already gave for the
                 # open, then fall back to it. `task` is dropped either way —
                 # nothing downstream may read it as a generation brief.
-                artifact_query=envelope["artifact_query"] or envelope["task"],
+                artifact_query=(
+                    envelope["artifact_query"] or _subject_of(envelope["task"])
+                ),
                 artifact_type=envelope["artifact_type"] or "prd",
                 task=None,
             )

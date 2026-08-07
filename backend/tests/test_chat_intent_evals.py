@@ -612,6 +612,24 @@ def test_a_generate_verdict_on_an_open_shaped_message_is_vetoed(monkeypatch):
     assert env["task"] is None
 
 
+def test_the_veto_reduces_a_generation_brief_to_a_searchable_subject(monkeypatch):
+    """A vetoed `generate_prd` carries a multi-sentence brief, which matches no
+    title and would land a paragraph inside "I couldn't find a PRD for …"."""
+    _patch_llm(monkeypatch, {
+        "intent": "generate_prd", "confidence": 0.95,
+        "task": (
+            "Compliance reporting for enterprise admins. It must respect the "
+            "report filters, cap at 50k rows, and support scheduled exports "
+            "on a weekly cadence for the finance team."
+        ),
+        "reason": "misread as authoring",
+    })
+    env = ci.resolve_chat_intent(
+        "ent-1", "open the PRD for compliance reporting", []
+    )
+    assert env["artifact_query"] == "Compliance reporting for enterprise admins"
+
+
 def test_the_veto_never_fires_on_a_real_authoring_request(monkeypatch):
     """The other direction: widening the veto until it eats genuine commands
     would be a worse bug than the one it prevents."""
