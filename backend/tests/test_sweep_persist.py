@@ -28,8 +28,27 @@ from app.connector_lookup import sweep as cs
 from app.connector_lookup import sweep_persist as sp
 
 
-def _source(key="jira", text="PROJ-9 needs a fix", status=cs.STATUS_OK):
-    s = cs.SourceResult(key=key, display_name=key.title(), status=status, text=text)
+def _one_record(provider="jira", ext="PROJ-9"):
+    """The minimum a source needs to be persistable at all.
+
+    `sweep_persist.is_persistable` now requires structured records, not just
+    STATUS_OK plus non-empty text — see its docstring for the graph-poisoning
+    incident that made prose-without-records refusable in code. Every test
+    below is about what happens to a source that IS a genuine read, so the
+    helper supplies one.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(provider=provider, kind="issue", external_id=ext,
+                     title="Needs a fix", text="body", properties={})
+
+
+def _source(key="jira", text="PROJ-9 needs a fix", status=cs.STATUS_OK,
+            records=None):
+    s = cs.SourceResult(
+        key=key, display_name=key.title(), status=status, text=text,
+        records=records if records is not None else [_one_record(key)],
+    )
     return s
 
 
@@ -183,8 +202,13 @@ def test_run_only_extracts_read_sources(monkeypatch):
     # `sp._run` receives exactly the list `kickoff_sweep_persist` selected,
     # so this pins that a source with no usable text never gets extracted
     # even if it slipped through.
-    sp._run("ent-A", [_source("jira", "PROJ-9 text")])
-    assert calls == [("ent-A", "PROJ-9 text")]
+    source = _source("jira", "PROJ-9 text")
+    sp._run("ent-A", [source])
+
+    # The extracted unit is the RECORD's render, not the source's prose — the
+    # prose path was removed with `is_persistable` (see the regression test
+    # below). What this still pins is WHICH sources reach extraction at all.
+    assert calls == [("ent-A", source.records[0].render())]
 
 
 # ─────────────────────────── AC4 — dedupe against the ledger ───────────────
@@ -198,7 +222,7 @@ def test_already_hashed_content_is_skipped(monkeypatch):
     from app.db import kg_ingest_ledger as ledger
     from app.graph import extractor
 
-    h = sp._content_hash("same content")
+    h = sp._content_hash(_one_record("jira").render())
     monkeypatch.setattr(ledger, "seen_hashes", lambda eid, hashes: {h})
     recorded = []
     monkeypatch.setattr(
@@ -233,8 +257,11 @@ def test_new_content_is_extracted_and_recorded(monkeypatch):
         lambda *a, **k: {"signals": 2, "themes": 1, "skipped": 0},
     )
 
-    sp._run("ent-A", [_source("jira", "fresh content")])
-    assert recorded == [("ent-A", "jira", [sp._content_hash("fresh content")])]
+    source = _source("jira", "fresh content")
+    sp._run("ent-A", [source])
+    assert recorded == [
+        ("ent-A", "jira", [sp._content_hash(source.records[0].render())])
+    ]
 
 
 # ─────────────────────────── AC8 — error isolation ───────────────────────────
@@ -341,6 +368,7 @@ def test_company_a_write_never_carries_company_b_tenant(monkeypatch):
     monkeypatch.setattr(extractor, "extract_document", fake_extract)
 
     # Same content, two different tenants.
+    shared = _source("jira", "identical text").records[0].render()
     sp._run("ent-A", [_source("jira", "identical text")])
     sp._run("ent-B", [_source("jira", "identical text")])
 
@@ -349,8 +377,8 @@ def test_company_a_write_never_carries_company_b_tenant(monkeypatch):
     # every extract_document call must carry its OWN tenant, never the other
     # company's.
     assert extract_calls == ["ent-A", "ent-B"]
-    assert ("ent-A", sp._content_hash("identical text")) in seen_store
-    assert ("ent-B", sp._content_hash("identical text")) in seen_store
+    assert ("ent-A", sp._content_hash(shared)) in seen_store
+    assert ("ent-B", sp._content_hash(shared)) in seen_store
 
 
 # ─────────────────────────── AC5/AC7 — provenance + triage ───────────────────
@@ -449,10 +477,23 @@ def test_a_source_with_records_hashes_each_record_not_the_whole_text(monkeypatch
     assert recorded == [[sp._content_hash(r2.render())]]
 
 
-def test_a_source_without_records_falls_back_to_hashing_text(monkeypatch):
-    """AC6, the other half: an adapter that returned no records (AC1: absence
-    must keep working) degrades to hashing/extracting `source.text` exactly as
-    before this ticket."""
+def test_a_source_without_records_is_refused_rather_than_hashing_its_text(
+    monkeypatch,
+):
+    """REGRESSION. This test asserted the OPPOSITE — that a records-free source
+    degrades to hashing and extracting `source.text` — and that fallback is
+    exactly the hole a HIGH review finding came through: an adapter returning a
+    failure SENTENCE instead of raising produced a records-free, STATUS_OK
+    source whose error string was extracted into a tenant's graph on the shared
+    prod Supabase, where a connected source_type makes it count toward
+    `has_sufficient_evidence` and lets it surface in a weekly brief.
+
+    The text fallback was never worth much on its own: `_hashable_units`' own
+    docstring calls it "the narrower, degraded case" because a whole-source
+    prose blob can never hash-collide with the scheduled pull's per-record
+    hash, so it only ever deduped a sweep against a previous IDENTICAL sweep.
+    Trading that for a structural guarantee is not a close call.
+    """
     from app.graph import facade as facade_mod
     monkeypatch.setattr(facade_mod, "GraphFacade", lambda: "FACADE")
 
@@ -468,11 +509,12 @@ def test_a_source_without_records_falls_back_to_hashing_text(monkeypatch):
             extracted_texts.append(text) or {"signals": 1, "themes": 0, "skipped": 0},
     )
 
-    source = _source("slack", text="whole-source prose, no records")
-    assert source.records is None
+    source = _source("slack", text="whole-source prose, no records", records=[])
+    assert not source.records
+    assert source.usable is True, "precondition: `.read` would still accept it"
     sp._run("ent-A", [source])
 
-    assert extracted_texts == ["whole-source prose, no records"]
+    assert extracted_texts == [], "prose without records reached the graph"
 
 
 # ─────────────────────────── AC7 — dedupes against the SCHEDULED PULL ─────

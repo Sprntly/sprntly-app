@@ -94,6 +94,21 @@ def wire(monkeypatch):
     return _install
 
 
+@pytest.fixture
+def rollout_on(monkeypatch):
+    """Turn the two new legs ON for tests that are about what the legs DO.
+
+    They ship OFF (`config.chat_sweep_asana` / `chat_sweep_google_meet`) so a
+    merge cannot start writing prod tenants' graphs from unproven adapters —
+    see the rollout tests at the bottom of this file, which deliberately do NOT
+    use this fixture and assert the shipped default instead.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    monkeypatch.setattr(settings, "chat_sweep_google_meet", True)
+
+
 # ─────────────────────────── the term gate ───────────────────────────
 
 
@@ -561,7 +576,7 @@ T1_PROVIDERS = (
 @pytest.mark.parametrize(
     "provider", [p for p in T1_PROVIDERS if p != "google_drive"]
 )
-def test_every_named_provider_is_reachable_without_being_named(provider):
+def test_every_named_provider_is_reachable_without_being_named(provider, rollout_on):
     """T1's coverage requirement, one provider per case.
 
     `can_sweep` is the single predicate that decides whether a source-agnostic
@@ -930,7 +945,7 @@ class WritingAdapter(FakeAdapter):
 
 @pytest.mark.parametrize("provider", ["asana", "google_meet"])
 def test_new_leg_declines_a_refresh_due_source_and_writes_no_token(
-    provider, monkeypatch, wire
+    provider, monkeypatch, wire, rollout_on
 ):
     """A refresh-due token means DECLINE, and the decline is reported honestly.
 
@@ -960,7 +975,7 @@ def test_new_leg_declines_a_refresh_due_source_and_writes_no_token(
 
 @pytest.mark.parametrize("provider", ["asana", "google_meet"])
 def test_new_leg_opens_a_source_whose_token_is_comfortably_fresh(
-    provider, monkeypatch, wire
+    provider, monkeypatch, wire, rollout_on
 ):
     """The guard must not be a blanket refusal — a fresh credential opens
     normally, or the feature would be off for everyone."""
@@ -1031,7 +1046,7 @@ def test_every_write_on_open_provider_is_guarded():
 
 
 @pytest.mark.parametrize("provider", ["asana", "google_meet"])
-def test_new_leg_that_hangs_is_abandoned_and_named_not_waited_on(provider, wire):
+def test_new_leg_that_hangs_is_abandoned_and_named_not_waited_on(provider, wire, rollout_on):
     """A slow new source costs the budget ONCE and is reported as unread. The
     rest of the sweep still lands — the guarantee that lets a leg be added at
     all."""
@@ -1084,7 +1099,7 @@ def test_max_sources_admits_every_leg_that_exists():
     assert set(cs.LIVE_PROVIDERS) == set(cs._LIVE_LEGS)
 
 
-def test_every_connected_source_is_swept_in_one_pass(monkeypatch, wire):
+def test_every_connected_source_is_swept_in_one_pass(monkeypatch, wire, rollout_on):
     """The whole ticket, end to end: a question naming NO source reads every
     connected one — all seven live legs AND both local ones — and none is
     dropped for want of a slot.
@@ -1157,7 +1172,7 @@ class RaisingAdapter(FakeAdapter):
 
 
 @pytest.mark.parametrize("provider", ["asana", "google_meet"])
-def test_a_failed_leg_is_unread_never_ok_and_never_persisted(provider, wire):
+def test_a_failed_leg_is_unread_never_ok_and_never_persisted(provider, wire, rollout_on):
     """The regression this locks. Four properties, each of which broke
     separately in the shipped version, and the last is the expensive one."""
     adapter = RaisingAdapter(provider, RuntimeError("listing failed"))
@@ -1183,7 +1198,7 @@ def test_a_failed_leg_is_unread_never_ok_and_never_persisted(provider, wire):
     assert all(s.text for s in result.read), "a read source with no text"
 
 
-def test_sweep_persist_only_ever_sees_sources_that_were_really_read(wire):
+def test_sweep_persist_only_ever_sees_sources_that_were_really_read(wire, rollout_on):
     """The property `sweep_persist`'s docstring claims ("never an
     unread_reason") asserted from the sweep's side, against a failing leg —
     because that claim held only while no adapter smuggled a failure through
@@ -1262,7 +1277,7 @@ def test_a_connected_provider_with_an_index_is_read_not_flagged(monkeypatch, wir
 
 
 def test_the_real_meet_adapter_in_the_real_sweep_reports_a_failure_as_unread(
-    monkeypatch,
+    monkeypatch, rollout_on,
 ):
     """END TO END, through the REAL adapter — the test that would actually have
     caught the shipped bug.
@@ -1304,3 +1319,190 @@ def test_the_real_meet_adapter_in_the_real_sweep_reports_a_failure_as_unread(
     assert "google_meet" not in result.covered_providers()
     # And with nothing read, the KG writer is never even started.
     assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+
+
+# ─────── the persist path fails CLOSED, structurally (requirement A) ───────
+#
+# A bad DATA write is worse than a bad migration, and the safety apparatus is
+# pointed at the migration: that one gets a gate, a file, a version row and a
+# repair path, and it fails LOUDLY. A tenant-graph write happens at runtime,
+# straight into prod tenants' KG, with no artifact recording what was written —
+# and a poisoned signal with a connected source_type counts toward
+# `has_sufficient_evidence` and can surface in a customer's weekly BRIEF as
+# though it were something a real person said on a call.
+#
+# So the rule is a property of the DATA, not of the adapter's honesty: only a
+# source carrying structured RawRecords may be written. No adapter builds a
+# RawRecord out of a timeout.
+
+
+def _record(provider="google_meet", ext="c1"):
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(provider=provider, kind="meeting", external_id=ext,
+                     title="t", text="body", properties={})
+
+
+def _source(key, *, status=None, text="rows", records=None):
+    return cs.SourceResult(
+        key=key, display_name=key.title(),
+        status=status or cs.STATUS_OK, text=text, records=records,
+    )
+
+
+def test_prose_without_records_is_never_persisted():
+    """THE structural fix. Even a source the sweep believes it READ is refused
+    unless it carries records — so an adapter that returns a failure sentence
+    instead of raising can no longer reach the graph, whatever it says."""
+    from app.connector_lookup import sweep_persist
+
+    timeout_prose = _source(
+        "google_meet",
+        text="(Google Meet could not be listed just now — NOT an absence.)",
+    )
+    assert timeout_prose.usable is True, "precondition: .read would accept it"
+    assert sweep_persist.is_persistable(timeout_prose) is False
+
+    real = _source("google_meet", records=[_record()])
+    assert sweep_persist.is_persistable(real) is True
+
+
+def test_an_honest_empty_result_is_not_written_to_the_graph():
+    """The second hole the same rule closes. "(no Asana task TITLE matches
+    these terms)" is a real answer and belongs in the PROMPT — and it was also
+    `usable`, records-free, and being extracted into the graph. An absence
+    statement is the last thing that should become evidence."""
+    from app.connector_lookup import sweep_persist
+
+    empty = _source("asana", text="(no Asana task TITLE matches these terms)")
+    assert empty.usable is True
+    assert sweep_persist.is_persistable(empty) is False
+
+
+def test_local_legs_are_no_longer_persisted_and_that_is_intended():
+    """Stated as a test so the tradeoff cannot be discovered by surprise: the
+    two local legs carry no records and stop being written. Both read from
+    tables our own pullers already ingested, so nothing real is lost."""
+    from app.connector_lookup import sweep_persist
+
+    for key in ("calls", "github"):
+        assert sweep_persist.is_persistable(_source(key)) is False
+
+
+def test_kickoff_refuses_a_sweep_with_nothing_persistable(monkeypatch):
+    """No thread is even started, so the refusal costs nothing."""
+    from app.connector_lookup import sweep_persist
+
+    started: list = []
+    monkeypatch.setattr(
+        sweep_persist.threading, "Thread",
+        lambda **kw: started.append(kw) or (_ for _ in ()).throw(
+            AssertionError("a thread was started for an unpersistable sweep")
+        ),
+    )
+    result = cs.SweepResult(sources=[
+        _source("google_meet", text="(could not be listed)"),
+        _source("calls"),
+    ])
+    assert result.read, "precondition: these ARE in .read"
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+    assert started == []
+
+
+def test_run_re_checks_the_invariant_at_the_choke_point(monkeypatch):
+    """`_run` is the only thing that writes, so the guarantee lives there too —
+    a guarantee held only by the caller is one a future direct caller walks
+    around."""
+    from app.connector_lookup import sweep_persist
+
+    extracted: list = []
+    monkeypatch.setattr(
+        "app.graph.extractor.extract_document",
+        lambda *a, **k: extracted.append(k.get("doc_name")) or {},
+    )
+    monkeypatch.setattr("app.graph.facade.GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(
+        "app.db.sweep_persist_cooldown.in_cooldown", lambda *a, **k: False
+    )
+    monkeypatch.setattr("app.db.sweep_persist_cooldown.mark_run", lambda *a, **k: None)
+    monkeypatch.setattr("app.db.kg_ingest_ledger.seen_hashes", lambda *a, **k: set())
+    monkeypatch.setattr("app.db.kg_ingest_ledger.record_hashes", lambda *a, **k: None)
+
+    # Called DIRECTLY, bypassing kickoff's filter entirely.
+    sweep_persist._run("ent-1", [_source("google_meet", text="(a failure)")])
+
+    assert extracted == [], "prose reached extract_document through _run"
+
+
+# ─────── the new legs are flag-gated OFF by default (requirement B) ───────
+
+
+def test_the_new_providers_are_off_by_default():
+    """Merging deploys to staging, and staging's writes land on the PROD
+    Supabase KG — so an unflagged merge starts writing prod tenants' graphs
+    from two adapters that have never run against real data. The flag converts
+    an irreversible data action into a deliberate one."""
+    from app.config import settings
+
+    assert settings.chat_sweep_asana is False
+    assert settings.chat_sweep_google_meet is False
+    assert cs.provider_enabled("asana") is False
+    assert cs.provider_enabled("google_meet") is False
+    # Everything that already shipped is unaffected.
+    for provider in ("jira", "clickup", "slack", "confluence", "hubspot"):
+        assert cs.provider_enabled(provider) is True
+
+
+def test_a_flagged_off_provider_is_never_probed(monkeypatch, wire):
+    """The gate sits at the choke point every entry point goes through, so no
+    call site can bypass it — the lesson from the kill switch that covered one
+    of two callers."""
+    asana = FakeAdapter("asana", result="AS-1 Checkout redesign")
+    clickup = FakeAdapter("clickup", result="CU-1 Checkout redesign")
+    wire({"asana": asana, "clickup": clickup})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert asana.opened_with == [], "a flagged-off leg opened a session"
+    assert [s.key for s in result.sources] == ["clickup"]
+    assert "asana" not in result.covered_providers()
+
+
+def test_flipping_the_flag_on_enables_the_leg(monkeypatch, wire):
+    """And the switch really is the only thing holding it back."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    asana = FakeAdapter("asana", result="AS-1 Checkout redesign")
+    wire({"asana": asana})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert asana.opened_with == ["ent-1"]
+    assert [s.key for s in result.read] == ["asana"]
+
+
+def test_the_rollout_flag_fails_closed(monkeypatch):
+    """Cannot prove it is on ⇒ it is off. One unswept source against writing a
+    prod tenant's graph from unwatched code is not a close trade."""
+    import app.config
+
+    class _Boom:
+        def __getattr__(self, name):
+            raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(app.config, "settings", _Boom())
+    assert cs.provider_enabled("asana") is False
+
+
+def test_can_sweep_agrees_with_the_flag(monkeypatch):
+    """`registry._sweepable` ranks a source DOWN the tool-slot order when the
+    sweep can cover it. A flagged-off provider that answered True would lose
+    its slot on a promise the sweep will not keep, and be reachable by neither
+    path."""
+    from app.config import settings
+
+    assert cs.can_sweep("asana") is False
+    assert cs.can_sweep("google_meet") is False
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    assert cs.can_sweep("asana") is True

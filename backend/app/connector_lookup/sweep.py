@@ -600,6 +600,50 @@ _LOCAL_LEG_FOR_PROVIDER: dict[str, str] = {
 # ── the sweep ────────────────────────────────────────────────────────────────
 
 
+#: provider -> the `settings` attribute that must be true for its sweep leg to
+#: run. A provider absent from this map is unconditionally enabled.
+#:
+#: Rollout gates for the legs added in #1113, DEFAULT OFF. See the flags'
+#: own comment in config.py for why a read-only-looking leg needs one: a sweep
+#: leg's content is written into the tenant's knowledge graph by
+#: `sweep_persist`, and staging's writes land on the PROD Supabase — so an
+#: unflagged merge is an irreversible prod-data action taken as a side effect
+#: of deploying a branch.
+_ROLLOUT_FLAGS: dict[str, str] = {
+    "asana": "chat_sweep_asana",
+    "google_meet": "chat_sweep_google_meet",
+}
+
+
+def provider_enabled(provider: str) -> bool:
+    """Is this provider's sweep leg turned on?
+
+    Consulted at the CHOKE POINT (`_live_candidates`, which every sweep entry
+    point goes through) rather than at each call site, for the reason the last
+    kill-switch review recorded: the sweep had two entry points and the flag
+    was checked at one, so half the feature kept running with the switch off.
+    A gate a caller can forget is not a gate.
+
+    Fails CLOSED — an unreadable settings object means the leg does not run.
+    The cost of being wrong that way is one unswept source; the cost of being
+    wrong the other way is writing a prod tenant's graph from code nobody has
+    watched yet.
+    """
+    flag = _ROLLOUT_FLAGS.get(provider)
+    if flag is None:
+        return True
+    try:
+        from app.config import settings
+
+        return bool(getattr(settings, flag, False))
+    except Exception:  # noqa: BLE001 — cannot prove it is on ⇒ it is off
+        logger.warning(
+            "cross-connector sweep: could not read the %s rollout flag — "
+            "leaving the leg off", flag, exc_info=True,
+        )
+        return False
+
+
 def _live_candidates(enterprise_id: str) -> list[str]:
     """Connected providers this sweep has a leg for, in render priority order.
 
@@ -610,7 +654,10 @@ def _live_candidates(enterprise_id: str) -> list[str]:
     from app.connector_lookup import registry
 
     connected = set(registry.connected_providers(enterprise_id))
-    return [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
+    return [
+        p for p in LIVE_PROVIDERS
+        if p in connected and p in _LIVE_LEGS and provider_enabled(p)
+    ]
 
 
 #: Providers whose `open_session` is a WRITE path: it notices a near-expiry
@@ -713,7 +760,15 @@ def can_sweep(provider: str) -> bool:
     """
     if provider in _LOCAL_LEG_FOR_PROVIDER:
         return True
-    return provider in _LIVE_LEGS and provider in LIVE_PROVIDERS
+    # `provider_enabled` belongs here too. A rolled-out-OFF provider that
+    # answered True would be ranked DOWN the tool-slot order on the assumption
+    # the sweep covers it — and then not swept, so the user's named source
+    # would be reachable by neither path.
+    return (
+        provider in _LIVE_LEGS
+        and provider in LIVE_PROVIDERS
+        and provider_enabled(provider)
+    )
 
 
 def _display(provider: str) -> str:
@@ -918,7 +973,10 @@ def sweep(
         from app.connector_lookup import registry as _registry
 
         connected = set(_registry.connected_providers(enterprise_id))
-        providers = [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
+        providers = [
+            p for p in LIVE_PROVIDERS
+            if p in connected and p in _LIVE_LEGS and provider_enabled(p)
+        ]
         if only is not None:
             providers = [p for p in providers if p in only]
     except Exception:  # noqa: BLE001
