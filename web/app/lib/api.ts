@@ -4021,6 +4021,11 @@ export type UsageSummary = {
    *  are counted. Usage on Sprntly's platform key is spend we absorb and is
    *  deliberately excluded — it is not the customer's to see or pay. */
   scope: string
+  /** Which provider this payload covers, echoed back by the server; null when
+   *  the request was un-scoped and the figures span every provider. Read this
+   *  rather than the requested value — a chart must be captioned with the scope
+   *  it was actually served. */
+  provider: LlmProvider | null
   totals: UsageBucket
   /** One entry per calendar day in the range — empty days included. */
   daily: (UsageBucket & { day: string })[]
@@ -4039,15 +4044,38 @@ function localTimeZone(): string {
   }
 }
 
+/** `&provider=…` when scoping to one provider, empty when spanning all of them.
+ *  Omitting the param is what asks the server for every provider, so an absent
+ *  value must not be sent as the empty string. */
+function usageProviderQuery(provider?: LlmProvider | null): string {
+  return provider ? `&provider=${encodeURIComponent(provider)}` : ""
+}
+
 export const usageApi = {
-  summary: (days: number, tz: string = localTimeZone()) =>
+  /** `provider` scopes every figure in the response — totals, daily series and
+   *  all breakdowns — to that provider alone. The Admin pane always passes the
+   *  one it is running on: Claude and OpenAI bill separately, so a blended
+   *  number reconciles against neither invoice. */
+  summary: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<UsageSummary>(
-      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
   /** The same rollup as CSV text (the request helper returns non-JSON as-is). */
-  exportCsv: (days: number, tz: string = localTimeZone()) =>
+  exportCsv: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<string>(
-      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
 }
 
