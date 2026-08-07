@@ -17,7 +17,17 @@ guarded as preference DATA, not instructions. The full compiled selection
 profile (deterministic multipliers + audit, per-reader) is tracked as its own
 phase-2 slice.
 
-Best-effort: any failure returns "" — preferences must never break a run.
+The prompt block is a STEERING input, not a guarantee — the model may still
+lead with an unpreferred finding. `selected_insight_types` exposes the same
+stored selection to synthesis/agent.py, which applies it DETERMINISTICALLY to
+the composed pool (see insight_types.order_pool_for_types) so the canonical
+`insights[0]` every downstream reads — the weekly email, the Slack post, PRD
+warming, the KG ledger — leads with a preferred finding whenever one exists.
+Before 2026-08-04 only the browser reordered, so every non-web surface ignored
+the selection entirely.
+
+Best-effort: any failure returns the neutral value ("" / []) — preferences
+must never break a run.
 """
 from __future__ import annotations
 
@@ -26,20 +36,46 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _notification_settings(enterprise_id: str) -> dict:
+    """companies.notification_settings for this company, or {}."""
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("companies")
+        .select("notification_settings").eq("id", enterprise_id)
+        .limit(1).execute().data or []
+    )
+    n = (rows[0].get("notification_settings") or {}) if rows else {}
+    return n if isinstance(n, dict) else {}
+
+
+def selected_insight_types(enterprise_id: str) -> "list[str]":
+    """The workspace's stored insight-type selection, cleaned to known slugs.
+
+    [] means "no preference" — the readers' documented default of surfacing
+    everything in the model's own rank order. Since 2026-08-06 the pickers
+    resolve a cleared selection to the FULL set rather than to [], which
+    `order_pool_for_types` treats identically; both shapes therefore arrive and
+    both mean the same thing. Legacy rows holding [] need no backfill.
+    """
+    try:
+        from app.insight_types import clean_insight_types
+
+        return clean_insight_types(
+            _notification_settings(enterprise_id).get("brief_insight_types"))
+    except Exception:  # noqa: BLE001 — preferences must never break a run
+        logger.warning(
+            "reader insight-type selection failed for %s", enterprise_id,
+            exc_info=True)
+        return []
+
+
 def reader_preferences_block(enterprise_id: str) -> str:
     """The workspace's stated preferences rendered as a prompt block, or ""."""
     try:
-        from app.db.client import require_client
         from app.insight_types import INSIGHT_TYPES, clean_insight_types
 
-        rows = (
-            require_client().table("companies")
-            .select("notification_settings").eq("id", enterprise_id)
-            .limit(1).execute().data or []
-        )
-        n = (rows[0].get("notification_settings") or {}) if rows else {}
-        if not isinstance(n, dict):
-            return ""
+        n = _notification_settings(enterprise_id)
         selected = clean_insight_types(n.get("brief_insight_types"))
         note = str(n.get("brief_insight_note") or "").strip()
         if not selected and not note:
