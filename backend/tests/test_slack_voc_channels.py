@@ -814,7 +814,6 @@ def test_feedback_questions_route_to_the_voc_path_without_naming_slack():
         "what have users been complaining about lately",
         "what's been happening in our feedback channels this week",
         "anything new in the support channels?",
-        "what are customers asking for",
         "what came through the channels we connected for voice of customer",
     ]:
         assert is_voc_report_request(q), q
@@ -900,8 +899,6 @@ def test_a_real_voc_question_containing_an_action_verb_still_routes():
 
     for q in [
         "users complain they can't log into the app",
-        "what features are customers asking us to add to the roadmap?",
-        "what do customers want us to prioritize next quarter?",
         "what did users say about the ticket triage flow?",
         "what complaints do we have about order management?",
         "customers say our delivery estimate is always wrong",
@@ -912,8 +909,106 @@ def test_a_real_voc_question_containing_an_action_verb_still_routes():
         "what feedback did we get about the assign-to-me button",
         "customers complain the rank ordering is wrong",
         "what are users saying about triage times",
-        "clients keep asking us to add dark mode",
         "what do customers say about how we estimate delivery",
+    ]:
+        assert is_voc_report_request(q), q
+
+
+def test_recall_given_up_to_keep_precision():
+    """THE LIMITS, WRITTEN DOWN — these are misses ON PURPOSE, not bugs.
+
+    The bar for these rules is honestly narrower recall with no precision leaks.
+    The asymmetry: a miss falls through to pre-feature routing (yesterday's
+    answer); a false positive REPLACES the answer the user asked for.
+
+    1. Wanting verbs. `want`/`need`/`ask` were admitted to catch "customers
+       asking us to add X" and immediately turned four ordinary product
+       questions into VoC reports — they are how people ask about MECHANICS as
+       much as sentiment. No veto can separate the two, because neither is an
+       action request; the only fix is not admitting the verbs.
+    2. Ambiguous nouns with no customer noun (see the ambiguous-noun test).
+    3. A voice noun with no topic marker, ranking word or speech verb.
+
+    If a future change makes any of these route again, check it has not
+    reopened `test_ordinary_questions_with_wanting_verbs_are_not_voc`."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "what are customers asking for",
+        "what features are customers asking us to add to the roadmap?",
+        "what do customers want us to prioritize next quarter?",
+        "clients keep asking us to add dark mode",
+        "what are the top issues right now",
+        "estimate accuracy is a common complaint",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
+def test_ordinary_questions_with_wanting_verbs_are_not_voc():
+    """THE LEAK THE ABOVE BUYS BACK. Each of these carries a customer noun and a
+    wanting verb while asking about mechanics, and each became a
+    voice-of-customer report when `want`/`need`/`ask` were in the speech-verb
+    list. They are not action requests, so no veto guards them."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "what do users need to do to reset a password?",
+        "what permissions does a user need to publish?",
+        "what plan do customers need for SSO?",
+        "the client asked for a demo on Friday, add it to the calendar",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
+def test_a_subject_first_command_is_still_vetoed():
+    """POSITION CANNOT CATCH THESE, structurally — the subject noun comes first,
+    so `veto.start() < subject.start()` is false and the veto stands down.
+
+    The fix is anchoring on the action's OBJECT: a work artifact
+    (ticket/bug/backlog/roadmap) can only be the target of a command, never part
+    of a customer question. That tier ignores position entirely.
+
+    This is the same insight `_vetoed_as_creation` already embodies — it
+    compares against `_JIRA_PM_NOUN`, the ARTIFACT, which lands after the verb,
+    whereas `_vetoed_as_action` compared against the SUBJECT, which lands before
+    it. Checked directly: `_vetoed_as_creation` does NOT have this hole."""
+    from app.skill_router import _vetoed_as_creation, is_voc_report_request
+
+    for q in [
+        "take the customer complaints and turn them into tickets",
+        "the top complaints - add them to the backlog",
+        "customer requests: prioritize the top ones",
+        "these user complaints should go onto the roadmap",
+        "grab what customers are saying and file it as a bug",
+        "prioritize what customers are asking for",
+        "move the top complaints into the sprint",
+    ]:
+        assert not is_voc_report_request(q), q
+
+    # The creation veto's equivalent shape, confirmed sound rather than assumed.
+    for q in [
+        "take the customer complaints and write a PRD for them",
+        "the top complaints - draft tickets for them",
+        "customer feedback: generate a spec from it",
+    ]:
+        assert _vetoed_as_creation(q), q
+
+
+def test_the_object_constraint_is_load_bearing():
+    """The reprioritise family requires a determiner-led object, and that is NOT
+    redundant with the position check — a review pass removed it, kept position,
+    saw zero false vetoes, and concluded it was dead weight.
+
+    It is not. When a sentence STARTS with the noun sense, the bare verb sits
+    before the customer noun, so position votes to veto and only the object
+    constraint saves it. Each of these is a real customer-voice question that a
+    bare-verb alternation would stand down."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "order management is what customers complain about",
+        "estimate accuracy is what users complain about",
+        "schedule changes are a common customer complaint",
     ]:
         assert is_voc_report_request(q), q
 
@@ -1280,13 +1375,22 @@ def test_the_report_path_run_line_counts_slack_channels(slack_env, monkeypatch):
     it at all.
 
     Also pins the pluralisation — the label read "1 Slack feedback channels"
-    because the 's' was hardcoded."""
+    because the 's' was hardcoded.
+
+    THE FIXTURE HAS TO MAKE `live != covered`, or the test is vacuous. An
+    earlier version read one channel live with an empty catalog, so
+    `live == covered == 1` and the `covered → read_channels` mutation survived
+    — it pinned the plural and nothing else. Here the only channel is
+    STORED-ONLY (live=0, covered=1), which is exactly the case the fix was
+    about: a run line counting live reads printed "0 Slack feedback channels"
+    on an answer partly built from Slack."""
     import app.call_digest as cd
     import app.graph.gateway as gateway_mod
 
-    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
-                               "sync_channel_names": {"C1": "product-feedback"}})]
-    slack_env["catalog"] = []
+    slack_env["rows"] = [_row()]
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
+    slack_env["catalog"] = [_Doc("C3", "#demos", summary="stored gist",
+                                 topics=["t"], doc_date="2026-08-05T00:00:00Z")]
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
     monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
     monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
@@ -1306,7 +1410,7 @@ def test_the_report_path_run_line_counts_slack_channels(slack_env, monkeypatch):
     action = payload["_skill_action"]
     assert "1 Slack feedback channel" in action
     assert "1 Slack feedback channels" not in action     # pluralisation
-    assert "0 Slack feedback" not in action
+    assert "0 Slack feedback" not in action              # covered, not live
 
 
 def test_config_keys_match_the_sync_paths_keys():

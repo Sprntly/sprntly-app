@@ -358,11 +358,24 @@ _VOC_CHANNEL_RULE = re.compile(
 # tight: it needs a customer-noun IMMEDIATELY followed (within a few words) by a
 # SPEECH verb, so "what are our customers doing in the product" doesn't divert
 # to a feedback report.
+#: NOTE THE ABSENCE OF `want`, `need` AND `ask`. They were added to catch
+#: "customers asking us to add X" and immediately turned ordinary product
+#: questions into voice-of-customer reports, because those verbs are how people
+#: ask about MECHANICS as well as sentiment:
+#:
+#:   "what do users NEED to do to reset a password?"
+#:   "what permissions does a user NEED to publish?"
+#:   "what plan do customers NEED for SSO?"
+#:   "the client ASKED FOR a demo on Friday, add it to the calendar"
+#:
+#: No veto can guard these — they are not action requests, they are ordinary
+#: questions that happen to contain a customer noun and a wanting verb. The only
+#: fix is not admitting them, so the verbs stay out and the recall is given up
+#: knowingly (see MODULE LIMITS in `is_voc_report_request`).
 _VOC_SAYING_RULE = re.compile(
     r"\b(?:customer|user|client)s?\b(?:\s+\w+){0,3}\s+"
     r"\b(?:say(?:ing|s)?|said|telling|told|complain\w*|report(?:ing|ed)?|"
-    r"flag(?:ging|ged)|ask(?:ing|ed|s)?|request(?:ing|ed|s)?|"
-    r"want(?:ing|s)?|need(?:ing|s)?|push(?:ing)?\s+for|struggl\w*|"
+    r"flag(?:ging|ged)|push(?:ing)?\s+for|struggl\w*|"
     r"unhappy|frustrated|confused)\b",
     re.I,
 )
@@ -524,18 +537,70 @@ _VOC_RECALL_RULES: list[re.Pattern] = [
 #:     determiner-led object ("prioritise THE …", "rank OUR …") is what
 #:     separates the verb sense from the noun sense; a bare verb alternation has
 #:     no way to tell them apart.
-_VOC_ACTION_VETO = re.compile(
-    # transform: "turn X into tickets", "file the complaints as bugs"
+#: A work artifact — the OBJECT that makes an action a command about our
+#: backlog rather than a sentence about a customer.
+_WORK_ITEM = (
+    r"(?:tickets?|bugs?|issues?|stor(?:y|ies)|epics?|tasks?|cards?|"
+    r"work\s+items?|backlog\s+items?)"
+)
+_WORK_SURFACE = (
+    r"(?:backlog|roadmap|sprint|board|prd|ideation|epic|list|queue)"
+)
+
+#: TIER A — position-INDEPENDENT. Every pattern here is anchored on a work
+#: ARTIFACT as the action's object, which is what makes it impossible for these
+#: to appear inside a customer question. That anchoring is the fix for
+#: subject-first commands, which a position check structurally cannot catch:
+#:
+#:   "take the customer complaints and turn them into tickets"
+#:   "the top complaints — add them to the backlog"
+#:   "grab what customers are saying and file it as a bug"
+#:
+#: In each the subject noun comes FIRST, so `veto.start() < subject.start()` is
+#: false and position stands the veto down. `_vetoed_as_creation` does NOT have
+#: this hole, and the reason is instructive: it compares against
+#: `_JIRA_PM_NOUN` — the ARTIFACT, which lands after the verb — while
+#: `_vetoed_as_action` compared against the SUBJECT, which lands before it.
+#: Anchoring on the object is the same insight applied here.
+#:
+#: It is also what keeps the CUSTOMER's own actions out: "can't log into the
+#: APP" and "can't file a claim as a GUEST" use the same verbs and prepositions
+#: but their objects are not work items, so they never match.
+_VOC_ACTION_ANY_POSITION = re.compile(
+    # transform INTO a work item: "turn them into tickets", "file it as a bug"
     r"\b(?:turn|convert|translate|transform|make|move|pull|push|drop|put|file|"
-    r"promote|copy|log|raise|open)\b[^.?!]{0,60}\b(?:into|onto|as)\b"
-    # open a work item: "file a ticket for …", "raise a bug about …"
+    r"promote|copy|log|raise|open|cut)\b[^.?!]{0,40}?\b(?:into|onto|as)\s+"
+    r"(?:a|an|the|some|new)?\s*" + _WORK_ITEM + r"\b"
+    # open a work item outright: "file a ticket for …", "raise a bug about …"
     r"|\b(?:file|open|raise|log|create|cut)\s+(?:a|an|the|some)?\s*"
-    r"(?:ticket|bug|issue|story|epic|task)s?\b"
-    # append to a named surface: "add X to the backlog"
-    r"|\badd\b[^.?!]{0,60}\bto\s+(?:the\s+)?"
-    r"(?:backlog|roadmap|sprint|board|prd|ideation|epic|list|queue)\b"
-    # reprioritise, WITH a determiner-led object so the noun senses are excluded
-    r"|\b(?:prioriti[sz]e|re-?prioriti[sz]e|rank|order|triage|groom|estimate|"
+    + _WORK_ITEM + r"\b"
+    # append to a named surface: "add them to the backlog", "move them INTO
+    # the sprint". `into`/`onto` matter here as well as `to` — a surface takes
+    # all three, and only the SURFACE noun is doing the disambiguating work.
+    r"|\b(?:add|append|move|pull|push|put|promote|copy)\b[^.?!]{0,40}?"
+    r"\b(?:to|into|onto)\s+(?:the\s+)?" + _WORK_SURFACE + r"\b"
+    # "these complaints should go onto the roadmap"
+    r"|\b(?:should|shall|must|need\s+to|let'?s)\b[^.?!]{0,30}?\bgo(?:es)?\s+"
+    r"(?:onto|into|on)\s+(?:the\s+)?" + _WORK_SURFACE + r"\b"
+    # reprioritise an ANAPHORIC object — "prioritize them", "rank the top ones",
+    # "prioritize what customers are asking for". A pronoun or `what` after one
+    # of these verbs is always a command; it is never part of a topic.
+    r"|\b(?:prioriti[sz]e|re-?prioriti[sz]e|rank|triage|groom)\s+"
+    r"(?:them|these|those|it|what|the\s+top\s+ones)\b",
+    re.I,
+)
+
+#: TIER B — position-CHECKED. These can legitimately appear inside a question
+#: about a customer ("what do customers say about the UPDATE TO THE TICKET
+#: flow?", "what did users say about the TRIAGE flow?"), so they only veto when
+#: the verb GOVERNS — i.e. appears before the customer/voice noun.
+_VOC_ACTION_VETO = re.compile(
+    # reprioritise, WITH a determiner-led object so the noun senses are
+    # excluded. See `test_the_object_constraint_is_load_bearing` for why this
+    # is not redundant with position: a sentence STARTING with the noun sense
+    # ("order management is what customers complain about") puts the bare verb
+    # before the subject, and position alone then vetoes it.
+    r"\b(?:prioriti[sz]e|re-?prioriti[sz]e|rank|order|triage|groom|estimate|"
     r"assign|schedule)\s+(?:the|these|those|our|all|top|every|"
     r"customers?|users?|clients?)\b"
     # amend a named artifact: "update the PRD with …"
@@ -564,7 +629,14 @@ def _vetoed_as_action(question: str) -> bool:
 
     A veto with no subject noun at all is still a veto — "turn it into tickets"
     names nothing customer-ish and is plainly an action.
+
+    Tier A is checked first and IGNORES position: those patterns are anchored on
+    a work artifact as the action's object, so they cannot occur inside a
+    customer question no matter where they sit in the sentence. That is what
+    catches subject-first commands, which position structurally cannot.
     """
+    if _VOC_ACTION_ANY_POSITION.search(question):
+        return True
     m_veto = _VOC_ACTION_VETO.search(question)
     if m_veto is None:
         return False
@@ -620,6 +692,39 @@ def is_voc_report_request(question: str) -> bool:
 
     FEEDBACK ON OUR OWN WORK. "give me feedback on my PRD draft" is not customer
     voice. See `_VOC_SELF_REVIEW_VETO`.
+
+    ── MODULE LIMITS — recall deliberately given up, and why ──────────────────
+
+    The bar for these rules is "honestly narrower recall with no precision
+    leaks", NOT "match every phrasing". The asymmetry decides every trade below:
+    a MISS falls through to the routing that existed before this feature, so the
+    user gets yesterday's answer; a FALSE POSITIVE replaces the answer they
+    asked for with a report they did not want. Misses are recoverable, leaks are
+    not.
+
+    Known misses, each one knowingly accepted:
+
+    1. WANTING VERBS. "what are customers asking for", "what do customers want
+       us to prioritize next quarter", "clients keep asking us to add dark
+       mode". `want`/`need`/`ask` are how people ask about MECHANICS as often as
+       sentiment ("what do users need to do to reset a password?"), and no veto
+       can separate the two because neither is an action request. Admitting the
+       verbs cost four ordinary product questions; they stay out.
+    2. AMBIGUOUS NOUNS ALONE. "what are the top issues right now", "what are the
+       main problems" — see `_AMBIGUOUS_NOUN`. Equally at home in a tracker or
+       release-status question.
+    3. BARE VOICE NOUNS WITH NO TOPIC MARKER. "estimate accuracy is a common
+       complaint" — a complaint noun with no `about`/ranking/speech verb near a
+       customer noun matches nothing here.
+
+    None of these is a regex that could not be written. Each is one that could
+    not be written WITHOUT reopening a leak, which is the whole finding: four
+    rounds of locally-correct rules each moved the failure to an unenumerated
+    phrasing. Recognising a customer QUESTION versus a command ABOUT customer
+    content is a judgement, and the durable home for it is the chat intent
+    envelope (the repo's convention for intent, already used for
+    open-vs-generate) rather than another rule here. That migration is tracked
+    as a follow-up; do not fix the misses above by widening these patterns.
     """
     if (
         _vetoed_as_creation(question)
