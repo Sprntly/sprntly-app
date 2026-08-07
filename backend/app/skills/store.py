@@ -78,6 +78,7 @@ async def store_skill(
     ext: str,
     builtin_slugs: Iterable[str],
     max_content_chars: int,
+    source_id: str | None = None,
 ) -> StoredSkill:
     """Stage `data` and create-or-replace the skill row it belongs to.
 
@@ -90,6 +91,14 @@ async def store_skill(
     file itself for a single upload, or the standalone archive synthesized for
     one skill out of a multi-skill zip. Either way one row owns one object, so
     the per-skill download and the delete cleanup keep working.
+
+    `source_id` names the synced GitHub folder this skill came from, and it
+    rides the SAME collision rules as everything else here — which is the point.
+    A synced folder holding `estimation-helper.md` replaces the company's own
+    "Estimation Helper" in place and ADOPTS it, so the team ends up with one
+    skill on its original trigger rather than a duplicate on `-2`. That adoption
+    also makes the skill read-only, which is a real consequence of importing a
+    same-named skill from a synced folder and is called out in the import UI.
     """
     # Character cap on the PARSED text, after the byte cap on the raw file: a
     # zip can pass 20 MB compressed yet expand into far more prompt text than
@@ -140,6 +149,7 @@ async def store_skill(
                 storage_key=key,
                 uploader_id=uploader_id,
                 uploader_name=uploader_name,
+                source_id=source_id,
             )
         except Exception:
             await skills_storage.delete_skill_file(company_id=company_id, key=key)
@@ -183,6 +193,7 @@ async def store_skill(
             storage_key=key,
             uploader_id=uploader_id,
             uploader_name=uploader_name,
+            source_id=source_id,
         )
     except db.DuplicateSkillSlug as exc:
         # Backstop for the race the library read above can't close: two

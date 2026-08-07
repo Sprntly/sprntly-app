@@ -140,15 +140,21 @@ def test_the_runner_injected_templates_are_loadable(skill_id, filename):
     assert filename in get_skill(skill_id).templates
 
 
-def test_evidence_examples_are_injected_not_merely_shipped():
+def test_evidence_markup_reference_is_injected_not_merely_shipped():
     """`evidence-brief` is the one PM skill whose model output IS raw HTML, so
-    "match their markup" is a real instruction — which means the briefs have to
-    live under `references/` where the gateway folds them in. Shipping them in
-    `examples/` looked identical on disk and sent nothing."""
+    "match its markup" is a real instruction — which means the reference has to
+    live under `references/` where the gateway folds it in. Shipping it in
+    `examples/` looked identical on disk and sent nothing.
+
+    ONE reference, not the five worked briefs it replaced: the skill is now the
+    rendering contract only, so what the model needs to see is the component
+    markup, not five arguments to imitate."""
     refs = get_skill("evidence-brief").references
     briefs = [n for n in refs if n.endswith(".html")]
-    assert len(briefs) == 5, f"expected the 5 calibration briefs, got {briefs}"
+    assert briefs == ["component-reference.html"], (
+        f"expected the single markup reference, got {briefs}"
+    )
     assert not (SKILLS_ROOT / "evidence-brief" / "examples").exists(), (
-        "the briefs moved to references/; an examples/ dir here means a split "
-        "set, half of which the model never sees"
+        "the reference lives in references/; an examples/ dir here means a "
+        "split set, half of which the model never sees"
     )

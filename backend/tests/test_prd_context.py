@@ -168,3 +168,53 @@ def test_themed_prd_skips_foreign_insight_and_evidence(tenant_client, isolated_s
     assert "Dark mode PRD" in block
     assert "Real insight zero" not in block
     assert "Insight-0 evidence" not in block
+
+
+def test_golden_evidence_brief_reaches_the_chat_context_as_prose(
+    tenant_client, isolated_settings
+):
+    """CONSUMER: the PRD-tab chat grounding block.
+
+    `_evidence_section` is a non-rendering consumer — it reads `payload_md`,
+    drops <style>/<script>/comments and caps the rest. It never parsed the brief
+    structurally, so the LLM/skill split cannot break it — but the injected
+    stylesheet is ~48 lines of pure noise ahead of the first sentence, so the
+    guarantee worth pinning is that the STRIPPED body still carries the brief's
+    prose. Uses the same golden brief as the render-contract test.
+    """
+    from pathlib import Path
+
+    from app.evidence_html import normalize_evidence_html
+    from app.skills.loader import get_skill
+
+    golden = (
+        Path(__file__).resolve().parent / "fixtures" / "evidence" / "golden_brief.html"
+    ).read_text(encoding="utf-8")
+    stored = normalize_evidence_html(
+        golden, get_skill("evidence-brief").assets["evidence.css"]
+    )
+
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["supabase"]
+    brief = _seed_chain(db, slug="acme", prd_id=302)
+    db.table("evidences").insert(
+        {
+            "brief_id": brief["id"],
+            "insight_index": 0,
+            "title": "SSO Is the Gate on Enterprise Expansion",
+            "payload_md": stored,
+            "status": "ready",
+            "variant": "v3",
+        }
+    ).execute()
+
+    block = build_prd_context(t.company_id, 302)
+
+    assert "Evidence (the research behind this PRD)" in block
+    assert "SSO Is the Gate on Enterprise Expansion" in block
+    # The prose the downstream chat turn actually needs.
+    assert "Four HubSpot opportunities worth $1.4M" in block
+    assert "table stakes at this deal size" in block
+    # …and none of the stylesheet the server injected.
+    assert "--problem:#dd4b32" not in block
+    assert "box-sizing" not in block
