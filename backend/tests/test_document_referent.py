@@ -475,6 +475,55 @@ def test_human_subject_questions_never_reach_the_adjudicator(
     assert DOCUMENT_REFERENT_HEADING not in block
 
 
+@pytest.mark.parametrize("question", [
+    "what does the deployment runbook say about rollbacks?",
+    "check the onboarding playbook",
+    "what does the engineering handbook say?",
+    "summarise the interview guide",
+    "what is in the security policy",
+])
+def test_ordinary_pm_document_nouns_are_cues(question):
+    """Recall restored after the verb alternative was deleted.
+
+    `runbook`, `playbook`, `handbook`, `guide` and `policy` are ordinary PM
+    document words that used to reach resolution only via
+    `what does <anything> say`. A NOUN carries none of that pattern's risk —
+    it cannot be satisfied by a sentence about people — so the recall comes
+    back without the false positives."""
+    from app.document_referent import has_document_cue
+
+    assert has_document_cue(question) is True
+
+
+@pytest.mark.parametrize("question", [
+    # `prd` — 151 of 986 real turns contain it; 133 would newly cue, and they
+    # are overwhelmingly requests to CREATE one.
+    "generate prd",
+    "generate a prd using this above report",
+    "getting a prd for this wont be bad",
+    # `transcript` — Fireflies/Zoom material on the VoC path, not a
+    # `document_catalog` row.
+    "Check Zoom for the transcript of our last meeting",
+    # `roadmap` — a Sprntly concept and an ordinary business word.
+    "is this already on their roadmap or strategy?",
+])
+def test_first_class_sprntly_artifacts_are_not_document_cues(question):
+    """The exclusions, pinned with the traffic that justifies them.
+
+    These three nouns were proposed alongside the five above and are
+    deliberately absent, for the same reason `report`/`brief`/`summary` are:
+    they name things Sprntly BUILDS or serves through another subsystem, not
+    catalogued documents. Admitting `prd` alone would put an extra ~1.5s model
+    call on roughly an eighth of all traffic, to answer questions that were
+    never about a stored document.
+
+    Verbatim messages rather than invented ones, so a future reader adding
+    `prd` "for completeness" sees what it would actually match."""
+    from app.document_referent import has_document_cue
+
+    assert has_document_cue(question) is False
+
+
 def test_naming_a_document_kind_still_works_after_the_human_subject_fix():
     """The other side of that removal: refusing "what does the team say" must
     not cost "what does the spec say". Both are `what does X say`; only the
@@ -665,8 +714,30 @@ def test_content_term_floor_skips_a_shortlist_with_nothing_in_common(
     """Guard #2. A cue is present, but the only candidate shares no vocabulary
     with the question at all — so the model is never asked. Cheap, and it
     keeps a shortlist of one irrelevant row from being the thing a model is
-    invited to pick from."""
+    invited to pick from.
+
+    THE CUE ASSERTION BELOW IS THE POINT OF THIS DOCSTRING. This test once
+    asked about a "deployment runbook", and when `runbook` was not a cue noun
+    the question stopped at GUARD 1 and never reached the floor this test is
+    named for. Deleting the floor entirely then killed no test at all —
+    `eligible_candidates` could have been reduced to `candidates[:5]`, putting
+    an unrelated shortlist in front of the adjudicator on every cue-bearing
+    question, with CI still green.
+
+    That is the general hazard, and it is worth stating rather than just
+    fixing: deleting an upstream gate silently disarms every downstream test
+    that relied on that gate to reach its own subject. Asserting the
+    precondition is what keeps a test in contact with the thing it tests when
+    something upstream moves.
+    """
     from app.ask_runner import document_grounding
+    from app.document_referent import has_document_cue
+
+    question = "what does the deployment doc say about rollbacks?"
+    assert has_document_cue(question) is True, (
+        "this test cannot exercise the content-term floor unless the question "
+        "clears guard 1 first"
+    )
 
     db = isolated_settings["supabase"]
     _seed_catalog_row(
@@ -684,11 +755,11 @@ def test_content_term_floor_skips_a_shortlist_with_nothing_in_common(
     confluence_pages(page={"id": "page-holiday", "text": "Offices close Dec 25."})
     adjudicator.picks(1)
 
-    _, manifest = document_grounding(
-        _CID, "what does the deployment runbook say about rollbacks?"
-    )
+    _, manifest = document_grounding(_CID, question)
 
-    assert adjudicator.calls == []
+    assert adjudicator.calls == [], (
+        "the floor let an unrelated shortlist reach the adjudicator"
+    )
     assert _referent_matches(manifest) == []
 
 

@@ -32,10 +32,16 @@ contained a word of six characters or more. So there are three independent
 guards here, and a question must clear all three:
 
   1. **A cue in the message.** The message must actually point at a document —
-     a document noun ("the spec", "that deck", "our write-up"), a reading verb
-     aimed at a source ("what does it say", "according to"), or an anaphor.
-     `has_document_cue` is deterministic, runs first, and costs nothing. An
-     ordinary business question fails here and never reaches an LLM.
+     a document NOUN ("the spec", "that deck", "our write-up"), an attribution
+     ("according to"), or an anaphor ("what does it say"). `has_document_cue`
+     is deterministic, runs first, and costs nothing. An ordinary business
+     question fails here and never reaches an LLM.
+
+     A READING VERB ALONE IS NOT A CUE, and that is a correction rather than
+     an omission. The pattern once admitted `what (does|did) <anything>
+     <reading verb>`, which made "what does the TEAM say about the roadmap?"
+     and "what did CUSTOMERS say about onboarding?" document questions on the
+     strength of a verb. People are sources too.
   2. **A floor.** For the descriptive path, a candidate must share at least one
      content term with the question across its title, topics and summary.
      Cheap, visible, and — critically — a candidate that fails it is NOT
@@ -63,6 +69,43 @@ does not want one: the referent is RE-DERIVED from the history that already
 rides every prompt, by running the same binary name match Stage N uses over
 the recent turns. Re-deriving cannot go stale, cannot leak across
 conversations, and cannot disagree with what the model can see.
+
+KNOWN LIMITS
+------------
+Written down because a limit nobody recorded is just a bug someone will
+rediscover, and because every one of these was found in review rather than by
+a test — which is exactly why they need to be readable here.
+
+1. **Carry has no recency bound beyond the turn window.** `carried_referent`
+   walks back up to `HISTORY_TURNS_SCANNED` turns and takes the first turn
+   that names a document, however long ago that was in wall-clock terms. A
+   thread that discussed a document eight turns and two days ago, then said
+   "what does it say about X", carries that document. Bounded by the window
+   and by requiring an anaphor, but it is a bound on TURNS, not on staleness
+   or on topic drift.
+
+2. **Stage R's contribution is invisible in the ask-level record.** The
+   `document_selection` decision row carries `referent_outcome`, but the
+   ask's own log does not, so a run reconstructed from the ask row alone
+   cannot tell that a document was asserted as the question's subject. If a
+   bad answer is ever traced from the ask side, this is the missing link.
+
+3. **`_content_terms` matches exact tokens, not stems.** "customers" does not
+   match "customer" and "churning" does not match "churn". This fails SAFE —
+   a missed overlap withholds an assertion, it never invents one — but it is
+   not free: it has twice caused a test to pass while exercising a different
+   guard than its name claimed, because the floor silently caught a question
+   the test meant to send further.
+
+4. **`test_a_topical_load_is_not_a_referent` passes via the conftest guard.**
+   It does not request the `adjudicator` fixture, so `adjudicate` is the
+   autouse no-op. It still proves Stage T labels a load `topic` rather than a
+   referent, which is what it is for, but it is not evidence about guard 3.
+
+5. **No test anywhere exercises the real adjudicator.** It is a fake at the
+   LLM boundary in every case, so the PROMPT's real-world decline rate is
+   unverified. What is verified is that it is consulted under exactly the
+   right conditions and that its refusal is honoured.
 """
 from __future__ import annotations
 
@@ -118,36 +161,42 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 _SEPARATOR_RE = re.compile(r"[_\-.]+")
 
-# Nouns that make a message point at a document. The exclusions are the
-# interesting part of this list, and each one is a false positive that would
-# otherwise be routine:
-#   "report", "brief", "summary" — Sprntly has first-class Reports and a
-#     first-class weekly Brief. "show me the report" asks for one of those.
-#   "notes" — "what were the most recent release notes?" and "what came out of
-#     the meeting notes" are topic questions far more often than they are
-#     references to one catalogued document, and admitting the word bought a
-#     model call on questions that were never going to resolve.
-#   bare "drive" — "what drives churn" is not a Google Drive question.
-_DOCUMENT_NOUNS = (
-    r"(?:docs?|documents?|pages?|files?|specs?|write-?ups?|memos?|decks?"
-    r"|pdfs?|one-?pagers?|agreements?|contracts?|proposals?|wikis?"
-    r"|confluence|google\s+drive|gdrive)"
-)
-
-#: The same list MINUS bare "page", for the broad cue. Measured against 986
-#: real user turns from the shared database: `page` matched 12 of them and
-#: ELEVEN meant a UI screen — "branded error page", "the Settings page", "page
-#: is sign in page", "web-rendered page". In a product-management tool, "page"
-#: is overwhelmingly a thing you are building, not a thing you have written.
+#: The nouns whose bare presence anywhere in a message makes it a document
+#: question. WHAT IS ABSENT FROM THIS LIST IS THE INTERESTING PART — each
+#: exclusion is a false positive that would otherwise be routine:
+#:   `report`, `brief`, `summary` — Sprntly has first-class Reports and a
+#:     first-class weekly Brief. "show me the report" asks for one of those.
+#:   `notes` — "what were the most recent release notes?" is a topic question
+#:     far more often than a reference to one catalogued document.
+#:   bare `drive` — "what drives churn" is not a Google Drive question.
+#:   bare `page` — measured against 986 real user turns, `page` matched 12 and
+#:     ELEVEN meant a UI SCREEN ("branded error page", "the Settings page",
+#:     "page is sign in page", "web-rendered page"). In a product-management
+#:     tool a page is overwhelmingly a thing you are building. It survives in
+#:     `_WEAK_ANAPHOR_NOUNS` below, where a reading verb must follow it.
 #:
-#: It stays in `_DOCUMENT_NOUNS` above, so the ANAPHOR pattern still accepts
-#: "what does that page say?" — a natural way to refer back to a wiki page.
-#: That form appeared twice in the same 986 turns, and the anaphor path
-#: additionally requires a prior turn to have named exactly one document, so
-#: the residual risk is bounded in a way the bare cue's was not.
+#: `runbook`, `playbook`, `handbook`, `guide` and `policy` are here because
+#: deleting the verb alternative cost their recall and a NOUN carries none of
+#: that alternative's risk. All five measured zero or near-zero collisions
+#: across 986 real turns.
+#:
+#: THREE MORE WERE PROPOSED AND ARE DELIBERATELY ABSENT, each for the same
+#: reason `report`/`brief`/`summary` are:
+#:   `prd` — 151 of those 986 turns contain it and 133 would newly cue, and
+#:     they read "generate prd", "generate a prd using this above report",
+#:     "getting a prd for this wont be bad". A PRD is a first-class Sprntly
+#:     artifact people ask us to CREATE; admitting it would buy an extra
+#:     ~1.5s model call on roughly an eighth of all traffic to answer
+#:     questions that are not about a catalogued document at all.
+#:   `transcript` — call transcripts are Fireflies/Zoom material served by the
+#:     VoC path, not `document_catalog` rows. "Check Zoom for the transcript
+#:     of our last meeting" must not resolve to a wiki page.
+#:   `roadmap` — both a Sprntly concept and an ordinary business word ("is
+#:     this already on their roadmap or strategy?").
 _CUE_NOUNS = (
     r"(?:docs?|documents?|files?|specs?|write-?ups?|memos?|decks?"
     r"|pdfs?|one-?pagers?|agreements?|contracts?|proposals?|wikis?"
+    r"|runbooks?|playbooks?|handbooks?|guides?|policy|policies"
     r"|confluence|google\s+drive|gdrive)"
 )
 _READING_VERBS = (
@@ -180,9 +229,6 @@ _ANAPHOR_RE = re.compile(
     rf"|\b(?:that|this|the|those|these)\s+{_WEAK_ANAPHOR_NOUNS}\s+{_READING_VERBS}\b",
     re.I,
 )
-#: Pointing at a document at all — by description, by anaphor, or by asking
-#: what a source says. A message with none of this is not a document question,
-#: and no amount of ranking may turn it into one.
 #: Pointing at a document at all — by naming the kind of thing it is, or by
 #: attribution ("according to ..."). A message matching neither of these, and
 #: carrying no anaphor, is not a document question and no amount of ranking
