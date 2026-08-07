@@ -1,0 +1,74 @@
+{
+  "data": [
+    {
+      "t": "2026-01-01",
+      "y": 120.0
+    },
+    {
+      "t": "2026-01-08",
+      "y": 138.0
+    },
+    {
+      "t": "2026-01-15",
+      "y": 131.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.timeseries",
+    "rows": 3
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "t": "2026-01-01",
+          "y": 120.0
+        },
+        {
+          "t": "2026-01-08",
+          "y": 138.0
+        },
+        {
+          "t": "2026-01-15",
+          "y": 131.0
+        }
+      ]
+    },
+    "encoding": {
+      "x": {
+        "axis": {
+          "format": "%b %d",
+          "labelAngle": 0
+        },
+        "field": "t",
+        "scale": {
+          "type": "utc"
+        },
+        "title": "Date",
+        "type": "temporal"
+      },
+      "y": {
+        "field": "y",
+        "title": "Teams",
+        "type": "quantitative"
+      }
+    },
+    "height": 300,
+    "mark": {
+      "color": "#5B7FFF",
+      "point": {
+        "color": "#5B7FFF",
+        "filled": true
+      },
+      "tooltip": true,
+      "type": "line"
+    },
+    "title": {
+      "text": "Weekly active teams"
+    },
+    "width": 560
+  },
+  "title": "Weekly active teams"
+}

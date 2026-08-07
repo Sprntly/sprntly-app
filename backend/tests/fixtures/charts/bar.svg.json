@@ -1,0 +1,29 @@
+{
+  "colors": [
+    "#15201b",
+    "#5b7fff",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "clipPath": 3,
+    "defs": 1,
+    "g": 44,
+    "line": 15,
+    "path": 28,
+    "svg": 1,
+    "text": 10
+  },
+  "texts": [
+    "0",
+    "10",
+    "20",
+    "30",
+    "40",
+    "Export",
+    "Filters",
+    "Mentions",
+    "Mentions by theme",
+    "Search"
+  ]
+}

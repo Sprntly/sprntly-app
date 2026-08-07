@@ -1,0 +1,59 @@
+{
+  "data": [
+    {
+      "label": "Search",
+      "value": 42.0
+    },
+    {
+      "label": "Filters",
+      "value": 31.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.bar",
+    "rows": 2
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "label": "Search",
+          "value": 42.0
+        },
+        {
+          "label": "Filters",
+          "value": 31.0
+        }
+      ]
+    },
+    "encoding": {
+      "x": {
+        "field": "value",
+        "title": "Value",
+        "type": "quantitative"
+      },
+      "y": {
+        "field": "label",
+        "sort": [
+          "Search",
+          "Filters"
+        ],
+        "title": null,
+        "type": "nominal"
+      }
+    },
+    "height": 300,
+    "mark": {
+      "color": "#5B7FFF",
+      "tooltip": true,
+      "type": "bar"
+    },
+    "title": {
+      "text": "Mentions by theme"
+    },
+    "width": 560
+  },
+  "title": "Mentions by theme"
+}

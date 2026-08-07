@@ -1,0 +1,120 @@
+{
+  "data": [
+    {
+      "annotation": "1,200  (100%)",
+      "count": 1200,
+      "label": "Signed up",
+      "pct_of_first": 1.0,
+      "pct_of_prev": 1.0
+    },
+    {
+      "annotation": "780  (65%)",
+      "count": 780,
+      "label": "Created a company",
+      "pct_of_first": 0.65,
+      "pct_of_prev": 0.65
+    },
+    {
+      "annotation": "305  (25%)",
+      "count": 305,
+      "label": "Generated a PRD",
+      "pct_of_first": 0.2542,
+      "pct_of_prev": 0.391
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.funnel",
+    "rows": 3
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "annotation": "1,200  (100%)",
+          "count": 1200,
+          "label": "Signed up",
+          "pct_of_first": 1.0,
+          "pct_of_prev": 1.0
+        },
+        {
+          "annotation": "780  (65%)",
+          "count": 780,
+          "label": "Created a company",
+          "pct_of_first": 0.65,
+          "pct_of_prev": 0.65
+        },
+        {
+          "annotation": "305  (25%)",
+          "count": 305,
+          "label": "Generated a PRD",
+          "pct_of_first": 0.2542,
+          "pct_of_prev": 0.391
+        }
+      ]
+    },
+    "height": 300,
+    "layer": [
+      {
+        "encoding": {
+          "x": {
+            "field": "count",
+            "title": "Users",
+            "type": "quantitative"
+          },
+          "y": {
+            "field": "label",
+            "sort": [
+              "Signed up",
+              "Created a company",
+              "Generated a PRD"
+            ],
+            "title": null,
+            "type": "nominal"
+          }
+        },
+        "mark": {
+          "color": "#5B7FFF",
+          "tooltip": true,
+          "type": "bar"
+        }
+      },
+      {
+        "encoding": {
+          "text": {
+            "field": "annotation",
+            "type": "nominal"
+          },
+          "x": {
+            "field": "count",
+            "title": "Users",
+            "type": "quantitative"
+          },
+          "y": {
+            "field": "label",
+            "sort": [
+              "Signed up",
+              "Created a company",
+              "Generated a PRD"
+            ],
+            "title": null,
+            "type": "nominal"
+          }
+        },
+        "mark": {
+          "align": "left",
+          "baseline": "middle",
+          "color": "#4A554F",
+          "dx": 6,
+          "type": "text"
+        }
+      }
+    ],
+    "title": {
+      "text": "Onboarding funnel"
+    },
+    "width": 560
+  },
+  "title": "Onboarding funnel"
+}

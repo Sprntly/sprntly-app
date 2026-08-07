@@ -57,3 +57,28 @@ scikit-learn>=1.3
 # model's sandbox, so it must not run on a Pillow with known decoder CVEs;
 # >=10.3 clears CVE-2024-28219 (_imagingcms buffer overflow, fixed in 10.3.0).
 Pillow>=10.3
+# Charts (app/charts — the Vega-Lite chart contract + server-side renderer).
+#
+# vl-convert-python renders a Vega-Lite spec to SVG/PNG in-process: Rust + an
+# embedded V8, so NO browser, NO Node, NO system libs and no extra build step.
+# The wheel is cp37-abi3 manylinux_2_17 x86_64 (33.5 MB) — large, but the backend
+# already ships playwright, so it is not a step change in image size, and it is
+# the only server-side Vega renderer that does not need headless Chrome.
+# EXACT pin, not a floor: the SVG it produces is compared against golden files,
+# and a renderer bump can legitimately change glyph metrics or element ordering.
+# Bumping it means re-reviewing those goldens, which is a deliberate act.
+vl-convert-python==1.9.0.post1
+# altair is the typed Python authoring surface for the same spec
+# (chart.to_dict() == what our emitters build). Phase 1 has the model author
+# charts through it inside the code-execution sandbox. Pinned exactly for the
+# same golden-file reason, and for a second one: the wheel also SHIPS THE
+# VEGA-LITE v6.4 JSON SCHEMA, which app/charts/spec.py reads through
+# importlib.resources and validates every chart against. Nothing is vendored and
+# nothing is fetched, so the schema cannot drift from this pin — bumping altair
+# moves the authoring library and the validation schema together, on purpose.
+altair==6.2.2
+# Used directly by app/charts/spec.py to run that validation BEFORE a spec
+# reaches the renderer (it is a security boundary, not a nicety). It arrives
+# transitively via altair, but the code imports it by name, so it is declared
+# explicitly — the same lesson the Pillow entry above records.
+jsonschema>=4.21

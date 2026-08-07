@@ -1,0 +1,171 @@
+{
+  "data": [
+    {
+      "estimate": 0.18,
+      "hi": 0.27,
+      "label": "Enterprise",
+      "lo": 0.09,
+      "significant": "Significant"
+    },
+    {
+      "estimate": 0.04,
+      "hi": 0.11,
+      "label": "Mid-market",
+      "lo": -0.03,
+      "significant": "Not significant"
+    },
+    {
+      "estimate": -0.12,
+      "hi": -0.03,
+      "label": "Self-serve",
+      "lo": -0.21,
+      "significant": "Significant"
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.segment_forest",
+    "rows": 3
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "estimate": 0.18,
+          "hi": 0.27,
+          "label": "Enterprise",
+          "lo": 0.09,
+          "significant": "Significant"
+        },
+        {
+          "estimate": 0.04,
+          "hi": 0.11,
+          "label": "Mid-market",
+          "lo": -0.03,
+          "significant": "Not significant"
+        },
+        {
+          "estimate": -0.12,
+          "hi": -0.03,
+          "label": "Self-serve",
+          "lo": -0.21,
+          "significant": "Significant"
+        }
+      ]
+    },
+    "height": 120,
+    "layer": [
+      {
+        "data": {
+          "values": [
+            {
+              "null_value": 0.0
+            }
+          ]
+        },
+        "encoding": {
+          "x": {
+            "field": "null_value",
+            "type": "quantitative"
+          }
+        },
+        "mark": {
+          "color": "#4A554F",
+          "strokeDash": [
+            4,
+            3
+          ],
+          "strokeWidth": 1,
+          "type": "rule"
+        }
+      },
+      {
+        "encoding": {
+          "color": {
+            "field": "significant",
+            "scale": {
+              "domain": [
+                "Significant",
+                "Not significant"
+              ],
+              "range": [
+                "#C13838",
+                "#828D87"
+              ]
+            },
+            "title": null,
+            "type": "nominal"
+          },
+          "x": {
+            "field": "lo",
+            "title": "Effect",
+            "type": "quantitative"
+          },
+          "x2": {
+            "field": "hi"
+          },
+          "y": {
+            "field": "label",
+            "sort": [
+              "Enterprise",
+              "Mid-market",
+              "Self-serve"
+            ],
+            "title": null,
+            "type": "nominal"
+          }
+        },
+        "mark": {
+          "strokeWidth": 1.5,
+          "type": "rule"
+        }
+      },
+      {
+        "encoding": {
+          "color": {
+            "field": "significant",
+            "scale": {
+              "domain": [
+                "Significant",
+                "Not significant"
+              ],
+              "range": [
+                "#C13838",
+                "#828D87"
+              ]
+            },
+            "title": null,
+            "type": "nominal"
+          },
+          "x": {
+            "field": "estimate",
+            "title": "Effect",
+            "type": "quantitative"
+          },
+          "y": {
+            "field": "label",
+            "sort": [
+              "Enterprise",
+              "Mid-market",
+              "Self-serve"
+            ],
+            "title": null,
+            "type": "nominal"
+          }
+        },
+        "mark": {
+          "filled": true,
+          "size": 70,
+          "tooltip": true,
+          "type": "point"
+        }
+      }
+    ],
+    "title": {
+      "text": "Effect by segment"
+    },
+    "width": 560
+  },
+  "title": "Effect by segment"
+}
