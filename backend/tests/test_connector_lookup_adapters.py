@@ -1057,6 +1057,9 @@ def test_every_shipped_adapter_resolves():
     assert set(registry.LOOKUP_PROVIDERS) == {
         "jira", "clickup", "slack", "fireflies", "github", "hubspot",
         "google_drive", "confluence", "zoom",
+        # Promoted out of DEFERRED when they gained live-read adapters — see
+        # connector_lookup/asana.py and connector_lookup/google_meet.py.
+        "asana", "google_meet",
     }
     for name in registry.LOOKUP_PROVIDERS:
         provider = registry.provider_for(name)

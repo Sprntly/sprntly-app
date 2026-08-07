@@ -91,6 +91,56 @@ _GENERIC_QUERY_TERMS = frozenset({
     "new", "news", "recent", "update", "updates",
 })
 
+#: Input key on `slack_search_messages` that turns on the recency fallback in
+#: `_search_and_hits`. Deliberately ABSENT from SEARCH_TOOL's input_schema: the
+#: model must not reach it, because on the named path a literal miss is a true
+#: and useful answer ("no message says 'pricing'") and widening it to a week of
+#: unrelated chatter would be a worse answer, not a better one. Only the
+#: cross-connector sweep sets it, because only the sweep asks Slack about words
+#: the user never aimed at Slack.
+RECENT_FALLBACK_INPUT_KEY = "fallback_to_recent"
+
+#: Wall-clock one `slack_search_messages` call may spend, checked before each
+#: probe and used to clamp its socket timeout.
+#:
+#: This leg is the one that is NOT flag-gated — Jira/Slack/Confluence/HubSpot/
+#: ClickUp shipped before the per-provider rollout switches, so Slack is
+#: default-ON and reaches every tenant from the first deploy. The recency
+#: fallback also made it the only leg that issues TWO sequential requests, so
+#: its worst case doubled to ~30s of leaked worker thread past `sweep.BUDGET_S`
+#: (8s) — `_run_live` abandons with `shutdown(wait=False)`, which does not
+#: cancel a running thread. Same bound the Asana and Meet legs carry, for the
+#: same reason, on the leg where it matters most.
+SCAN_BUDGET_S = 6.0
+
+#: Floor on a clamped socket timeout — below this the clamp starts CAUSING the
+#: timeouts it exists to bound, so a probe this close to the deadline is
+#: skipped instead.
+_MIN_CALL_TIMEOUT_S = 0.5
+
+
+def recent_fallback_note(query: str) -> str:
+    """What the model is told when the literal search missed and the recency
+    window answered instead.
+
+    Deliberately blunt about BOTH failures it has to prevent. Without the first
+    sentence the model reads a week of unrelated Slack as topic evidence — the
+    same false-positive that produced "one stray hit from #mvp-product" in a
+    new costume. Without the second it reports the literal miss as an absence,
+    which is the false-negative the module docstring's honesty contract exists
+    to forbid.
+    """
+    return (
+        f"(NO Slack message contains the words {query!r}. Slack search matches "
+        "literal message text, so that is NOT evidence the topic was never "
+        "discussed — only that nobody phrased it this way. What follows is "
+        f"instead the most RECENT Slack activity, and it may have nothing to "
+        "do with the question: treat it as background, cite a message only if "
+        "it is genuinely on topic, and never present this list as 'what Slack "
+        "says about' the subject.)"
+    )
+
+
 SEARCH_UNAVAILABLE = (
     "(slack_search_messages is unavailable for this workspace: the Slack "
     "connection granted bot access only, with no user token carrying "
@@ -872,6 +922,113 @@ class SlackProvider:
     def _search_and_hits(
         self, handle: SlackHandle, inp: dict
     ) -> "tuple[str, list[dict]]":
+        """One search, plus the OPTIONAL recency fallback the cross-connector
+        sweep needs (`RECENT_FALLBACK_INPUT_KEY`). Every caller that does not
+        set that key gets `_search_once` and nothing else — byte-identical to
+        before this method existed.
+
+        WHY THE SWEEP NEEDS A SECOND PROBE AT ALL. Slack's `search.messages`
+        matches literal message TEXT, AND-ish across the words in the query.
+        The named path is fine with that: the user typed the words, so "no
+        messages match 'pricing'" is a true and useful sentence. The sweep did
+        not — it joins up to `sweep.MAX_TERMS` (8) topic words lifted out of a
+        question the user never aimed at Slack, and asks Slack to find a single
+        message containing all of them. Observed on staging 2026-08-07: a topic
+        question returned exactly ONE stray hit from a channel nobody had
+        selected, while the channels that actually held the discussion returned
+        nothing.
+
+        Three separate mechanisms make that unfixable by tuning the query, and
+        all three had to be checked before choosing this shape:
+
+        - `_GENERIC_QUERY_TERMS` (the existing mitigation for exactly this
+          class of failure) is gated on `order == "newest"` at the `generic =`
+          line below, and the sweep asks for relevance. Flipping the sweep's
+          sort looks like the fix and is not:
+        - that set is SINGLE-WORD ONLY by design (see its own comment), and the
+          sweep's query is always multi-word. So the mitigation cannot fire for
+          the sweep under any sort.
+        - Picking which words to send instead does not work either. The obvious
+          rule — keep the first N topic words — chooses "customers saying" out
+          of "what are customers saying about the onboarding flow", which is
+          precisely the query that failed. Whether a word appears literally in
+          this company's Slack is not knowable from the question.
+
+        So the trigger is EVIDENCE, not prediction: run the literal search, and
+        only when it returns nothing usable fall back to the recency window
+        (`query=""`, which the `not query` branch below turns into
+        `after:<date>` + newest — the path verified live 2026-08-03). That
+        costs one extra call ONLY in the case that is currently broken, and it
+        keeps the literal search — which is the RIGHT probe whenever the topic
+        word really is in the messages, the common case for a product or
+        customer name.
+
+        HONESTY IS THE OTHER HALF, and the fallback creates a new way to lie if
+        it is not stated: recent Slack activity is not evidence about the
+        topic. Both branches are labelled — a literal hit says it matched text,
+        a fallback says plainly that NOTHING matched and that what follows may
+        be unrelated — because "recent chatter presented as topic context" is
+        the same false-absence bug wearing a different hat.
+        """
+        deadline = time.monotonic() + SCAN_BUDGET_S
+
+        def _remaining() -> float | None:
+            left = deadline - time.monotonic()
+            return left if left >= _MIN_CALL_TIMEOUT_S else None
+
+        text, kept = self._search_once(handle, inp, timeout=_remaining())
+        if kept or not inp.get(RECENT_FALLBACK_INPUT_KEY):
+            return text, kept
+        query = (inp.get("query") or "").strip()
+        if not query or text == SEARCH_UNAVAILABLE:
+            # Nothing to fall back FROM (the first probe was already the
+            # window), or no search grant at all — retrying buys the identical
+            # answer for a second round trip.
+            return text, kept
+        budget = _remaining()
+        if budget is None:
+            # The literal probe used the whole budget. The fallback is a
+            # NICETY; spending someone else's time on it is not.
+            return text, kept
+        text, kept = self._search_once(
+            handle, {"query": "", "sort": "newest"}, timeout=budget,
+        )
+        if not kept:
+            return (
+                f"(no Slack message contains {query!r}, and there is no Slack "
+                f"activity at all in the last {_DEFAULT_DAYS} days in channels "
+                "search can see. Slack matches literal message text, so the "
+                "first half of that is NOT evidence the topic was never "
+                "discussed — only that nobody used those words.)"
+            ), []
+        # EMPTY, not `kept`, and this is the load-bearing line of the whole
+        # fallback.
+        #
+        # `dispatch_records` turns the second element into `RawRecord`s, and
+        # `sweep_persist` writes those into the tenant's knowledge graph. These
+        # particular hits were selected by RECENCY, not by relevance to
+        # anything the user asked — that is the entire premise of the fallback,
+        # and `recent_fallback_note` says so in as many words. But that note
+        # protects the MODEL and is stripped from the records, so it does not
+        # protect the GRAPH: without this line, a question whose literal search
+        # missed (the common case — it is why the fallback exists) would
+        # extract up to `_MAX_SEARCH_HITS` unrelated messages into that
+        # company's KG as sweep-origin signals, on the shared prod Supabase.
+        #
+        # It also contradicts the rule `sweep_persist.is_persistable` exists to
+        # enforce — "an absence statement is the last thing that should become
+        # evidence" — because a recency fallback IS an absence statement with
+        # unrelated content wrapped around it.
+        #
+        # The prose still reaches the model, carrying its own warning, which is
+        # exactly where content of unknown relevance belongs. Nothing here is
+        # lost for the answer; only the write is refused. `kept` has no other
+        # consumer — `_search` discards it (see the wrapper above).
+        return f"{recent_fallback_note(query)}\n{text}", []
+
+    def _search_once(
+        self, handle: SlackHandle, inp: dict, *, timeout: float | None = None,
+    ) -> "tuple[str, list[dict]]":
         """`(rendered text, shareable matches actually rendered)`. Everything
         below is `_search`'s original body, unmodified, with `kept` (the
         shareable, capped match list `lines` was built from) now also
@@ -929,6 +1086,7 @@ class SlackProvider:
                 else slack_oauth.SEARCH_SORT_RELEVANCE
             ),
             sort_dir="desc",
+            timeout=timeout,
         )
         matches = result.get("matches") or []
         total = result.get("total") or 0

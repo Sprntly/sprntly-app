@@ -117,6 +117,52 @@ _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
 
+def is_persistable(source: "SourceResult") -> bool:
+    """May this source's content be written into the tenant's graph?
+
+    THE STRUCTURAL FAIL-CLOSED RULE. `SweepResult.read` filters on `usable` —
+    STATUS_OK plus non-empty text — and that turned out to be a property of the
+    ADAPTER'S HONESTY rather than of the data. An adapter that returned a
+    carefully-worded failure sentence instead of raising was, to
+    `sweep._run_live`, a source that had been read; its error string flowed
+    straight through here into `extract_document` and became a signal in a
+    customer's graph on the shared prod Supabase. That happened (the Meet
+    listing paths, fixed in the adapters), and fixing the adapters alone leaves
+    the next adapter free to reintroduce it.
+
+    So the gate is now a property of the DATA: **only a source carrying
+    structured `RawRecord`s is persistable.** No adapter builds a RawRecord out
+    of a timeout; records exist only where a real fetch returned real rows. A
+    future adapter that returns prose on failure now produces a leg that is
+    rendered to the model (where an honest failure sentence belongs) and
+    written nowhere.
+
+    THE PROMPT TAKES PROSE, THE GRAPH TAKES ONLY RECORDS. That split is the
+    whole idea, and it closes a second hole nobody had noticed: an honest EMPTY
+    result — "(no Asana task TITLE matches these terms)", "(no Slack message
+    contains 'x')" — was also `usable`, also records-free, and was therefore
+    also being extracted into the graph. An absence statement is the last thing
+    that should become evidence.
+
+    WHAT THIS GIVES UP, stated rather than glossed: the two local legs (`calls`,
+    `github`) carry no records, so they stop being persisted. That costs
+    nothing real — both read from tables our own pullers already ingested
+    (`call_index` rows come from the Fireflies/Zoom pullers, `github` from the
+    synced `github_pull_requests`), so persisting them re-extracted content the
+    KG already had by another route. `_hashable_units`' own docstring already
+    called the text-hashing path "the narrower, degraded case": it could never
+    collide with the scheduled pull's hash, so it only ever deduped a sweep
+    against a previous identical sweep.
+    """
+    from app.connector_lookup.sweep import STATUS_OK
+
+    return (
+        source.status == STATUS_OK
+        and bool((source.text or "").strip())
+        and bool(source.records)
+    )
+
+
 def _lock_for(enterprise_id: str) -> threading.Lock:
     with _locks_guard:
         lock = _locks.get(enterprise_id)
@@ -279,6 +325,22 @@ def _run(enterprise_id: str, sources: "list[SourceResult]") -> None:
             # run, so one company sweeping jira+clickup in the same minute
             # doesn't have clickup's cooldown gate jira's turn too.
             interval_hours = getattr(settings, "pipeline_interval_hours", 6)
+            # THE INVARIANT, re-checked HERE and not only at the caller. `_run`
+            # is the only thing in this codebase that writes a sweep's content
+            # to a graph, so it is the choke point, and a guarantee that lives
+            # only in `kickoff_sweep_persist` is one a future direct caller can
+            # walk around. See `is_persistable`.
+            refused = [s.key for s in sources if not is_persistable(s)]
+            sources = [s for s in sources if is_persistable(s)]
+            if refused:
+                logger.info(
+                    "sweep-persist: %s refused %s — no structured records, so "
+                    "nothing about them is written to the graph",
+                    enterprise_id, ",".join(refused),
+                )
+            if not sources:
+                return
+
             active_sources: list = []
             cooled_providers: list[str] = []
             for source in sources:
@@ -391,10 +453,13 @@ def kickoff_sweep_persist(enterprise_id: str, result: "SweepResult | None") -> b
     if not enterprise_id or result is None:
         return False
     try:
-        # `.read` is already filtered to sources actually read from a
-        # connector (status ok, non-empty text) — never an unread/timed-out/
-        # dropped source, and never an `unread_reason` (AC6).
-        sources = list(result.read)
+        # `.read` filters to sources with status ok and non-empty text. That is
+        # necessary and NOT sufficient — it is a claim the adapter makes about
+        # itself, and one adapter's honest-sounding failure sentence satisfied
+        # it all the way into a tenant's graph. `is_persistable` adds the
+        # structural half (real records, not prose) and `_run` re-checks it, so
+        # this filter is the cheap early-out rather than the guarantee.
+        sources = [s for s in result.read if is_persistable(s)]
         if not sources:
             return False
         t = threading.Thread(

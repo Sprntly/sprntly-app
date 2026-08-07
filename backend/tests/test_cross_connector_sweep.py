@@ -24,6 +24,10 @@ import pytest
 from app.connector_lookup import sweep as cs
 from app.connector_lookup.base import LookupSession
 
+#: Captured before any fixture neutralises it, so the guard tests can opt back
+#: in to the real implementation.
+_REAL_CREDENTIAL_CHECK = cs._credential_is_refresh_free
+
 
 class FakeAdapter:
     """Minimal LookupProvider whose dispatch is scriptable per test."""
@@ -82,7 +86,27 @@ def wire(monkeypatch):
 
     monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
     monkeypatch.setattr(cs, "_has_github", lambda eid: False)
+    # FakeAdapter.open_session writes nothing, so the refresh guard has nothing
+    # to protect here and would otherwise fail CLOSED on the absent DB and skip
+    # every guarded provider. The tests that are ABOUT the guard opt back in to
+    # `_REAL_CREDENTIAL_CHECK` explicitly.
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", lambda eid, p: True)
     return _install
+
+
+@pytest.fixture
+def rollout_on(monkeypatch):
+    """Turn the two new legs ON for tests that are about what the legs DO.
+
+    They ship OFF (`config.chat_sweep_asana` / `chat_sweep_google_meet`) so a
+    merge cannot start writing prod tenants' graphs from unproven adapters —
+    see the rollout tests at the bottom of this file, which deliberately do NOT
+    use this fixture and assert the shipped default instead.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    monkeypatch.setattr(settings, "chat_sweep_google_meet", True)
 
 
 # ─────────────────────────── the term gate ───────────────────────────
@@ -540,16 +564,72 @@ def test_zoom_sweeps_through_the_call_index_not_its_live_adapter(monkeypatch, wi
     assert "Acme sync" in result.render()
 
 
-def test_google_meet_is_not_sweepable_and_stays_honest():
-    """Google Meet arrived on main (#1078) as a DEFERRED connector — it syncs to
-    the KG but has no live adapter. The sweep must not claim it: `can_sweep` is
-    False, so `answer_for_hints` keeps it in the honest not-supported copy
-    instead of quietly reporting it as covered."""
+#: Apurva's T1, stated as a list: chat must gather context from ALL of these
+#: without the question naming any of them. Held as data so the coverage test
+#: below reads as the requirement rather than as seven separate assertions.
+T1_PROVIDERS = (
+    "google_drive", "jira", "confluence", "clickup", "hubspot", "asana",
+    "zoom", "google_meet",
+)
+
+
+@pytest.mark.parametrize(
+    "provider", [p for p in T1_PROVIDERS if p != "google_drive"]
+)
+def test_every_named_provider_is_reachable_without_being_named(provider, rollout_on):
+    """T1's coverage requirement, one provider per case.
+
+    `can_sweep` is the single predicate that decides whether a source-agnostic
+    question can reach a provider at all — the sweep probes it directly (a live
+    leg) or a local leg answers for it (`_LOCAL_LEG_FOR_PROVIDER`). A provider
+    that fails this is invisible to every question that does not name it, which
+    is precisely the gap this ticket closes.
+
+    `google_drive` is excluded and covered by its own test below: it is
+    deliberately answered by `ask_runner.document_grounding` rather than by a
+    leg here, and asserting `can_sweep("google_drive")` would be asserting the
+    wrong mechanism.
+    """
     from app.connector_lookup import registry
 
-    assert cs.can_sweep("google_meet") is False
-    assert "google_meet" in registry.DEFERRED
-    assert "google_meet" not in registry.LOOKUP_PROVIDERS
+    assert cs.can_sweep(provider) is True, f"{provider} is unreachable by a sweep"
+    assert provider not in registry.DEFERRED
+    # `fireflies`/`zoom`/`github` answer through a LOCAL leg and need no
+    # adapter of their own for coverage; the rest must resolve one.
+    if provider in cs._LIVE_LEGS:
+        assert registry.provider_for(provider) is not None
+        assert provider in registry.LOOKUP_PROVIDERS
+
+
+def test_google_drive_is_covered_by_document_grounding_not_by_a_leg():
+    """Drive's coverage is real but lives elsewhere, and this test exists so
+    "Drive has no leg" can never be mistaken for "Drive is not covered".
+
+    The sweep deliberately has no Drive leg: its adapter builds the
+    googleapiclient service with NO deadline, so an abandoned read would hold a
+    worker thread open indefinitely instead of merely missing the budget.
+    Coverage comes from `ask_runner.document_grounding`, whose Stage T ranks
+    every connected-source document — Drive included — without the question
+    naming it, and whose bodies resolve from the markdown the Drive sync wrote.
+
+    Asserted here rather than trusted: if someone gives Drive a leg, they must
+    fix the missing timeout first and update this test deliberately.
+    """
+    from app import ask_runner
+    from app.connector_lookup import registry
+
+    assert cs.can_sweep("google_drive") is False
+    assert "google_drive" not in cs._LIVE_LEGS
+    assert "google_drive" not in cs._LOCAL_LEG_FOR_PROVIDER
+    # It IS a live-readable adapter, so NAMING Drive still reads it live —
+    # `answer_for_hints` ranks unsweepable sources into a tool slot first
+    # precisely so this stays true.
+    assert registry.provider_for("google_drive") is not None
+    assert "google_drive" in registry.LOOKUP_PROVIDERS
+    # And the source-agnostic path that DOES cover it exists with the signature
+    # the sweep's docstring claims: (enterprise_id, question) -> (block, docs).
+    assert callable(ask_runner.document_grounding)
+    assert "google_drive" not in ask_runner._LOCALLY_INDEXED_PROVIDERS
 
 
 def test_github_leg_matches_open_prs_by_title(monkeypatch, wire):
@@ -803,3 +883,626 @@ def test_no_live_block_leaves_the_prompt_untouched(isolated_settings, fake_llm):
     call = fake_llm["calls"][0]
     assert "LIVE CROSS-SOURCE SWEEP" not in call["system"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in call["user"]
+
+
+# ─────────── the sweep never mutates auth state (asana, google_meet) ──────────
+#
+# `open_session` is a WRITE path for five providers: it notices a near-expiry
+# access token, POSTs the refresh token and PERSISTS the result. Jira,
+# Confluence and HubSpot rotate their refresh token, so a lost race stores a
+# credential the provider has already retired and the tenant's connector is
+# dead until a human reconnects. Asana and Google Meet do NOT rotate, so their
+# blast radius is smaller — but they still write, and the rule the sweep
+# encodes is "a background fan-out never mutates auth state", not "never bricks
+# a connector". These tests hold that line for the two legs this ticket added.
+
+
+def _stub_credential(monkeypatch, *, age_s: int, lifetime_s: int = 3600):
+    """Point `_credential_is_refresh_free` at a token of a chosen age, and
+    return the list every `db.update_connection_tokens` call lands in — so a
+    test can assert that NO token write happened, not merely that no session
+    opened."""
+    import json as _json
+    import time as _t
+
+    from app import db
+    from app.connectors import tokens
+
+    writes: list = []
+    monkeypatch.setattr(
+        db, "get_connection", lambda cid, p: {"token_json_encrypted": "enc"}
+    )
+    monkeypatch.setattr(
+        tokens, "decrypt_token_json",
+        lambda c: _json.dumps(
+            {"obtained_at": int(_t.time()) - age_s, "expires_in": lifetime_s}
+        ),
+    )
+    monkeypatch.setattr(
+        db, "update_connection_tokens",
+        lambda *a, **k: writes.append(a) or None,
+    )
+    return writes
+
+
+class WritingAdapter(FakeAdapter):
+    """A FakeAdapter whose `open_session` PERSISTS a token, like the five real
+    guarded adapters do.
+
+    Without this the "no token write" assertion is vacuous — a stub that never
+    writes cannot demonstrate that the guard stopped a write. This one models
+    the real shape (`stories.push._asana_creds` and
+    `connectors.google_meet.sync_context` both call `db.update_connection_tokens`
+    on open), so the assertion is about behaviour rather than about the stub.
+    """
+
+    def open_session(self, enterprise_id):
+        from app import db
+
+        db.update_connection_tokens(enterprise_id, self.provider, "rotated")
+        return super().open_session(enterprise_id)
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_new_leg_declines_a_refresh_due_source_and_writes_no_token(
+    provider, monkeypatch, wire, rollout_on
+):
+    """A refresh-due token means DECLINE, and the decline is reported honestly.
+
+    Two assertions, not one. "No session opened" is the mechanism; "no token
+    write" is the property that actually matters, and it is asserted against an
+    adapter that really does write on open (see WritingAdapter) — otherwise the
+    test would pass for a guard that does nothing.
+    """
+    adapter = WritingAdapter(provider, result="rows")
+    slack = FakeAdapter("slack", result="#eng: shipped")
+    wire({provider: adapter, "slack": slack})
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", _REAL_CREDENTIAL_CHECK)
+    # 3,500s into a 3,600s life — inside CREDENTIAL_SKEW_S (300).
+    writes = _stub_credential(monkeypatch, age_s=3500)
+
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert adapter.opened_with == [], "opened a session that would rotate a token"
+    assert writes == [], "a sweep leg wrote a tenant's OAuth token"
+    # Slack has no refresh-on-open, so the guard leaves it alone.
+    assert slack.opened_with == ["ent-1"]
+    unread = {s.key: s for s in result.unread}
+    assert unread[provider].status == cs.STATUS_REFRESH_DUE
+    assert "was NOT searched" in unread[provider].unread_reason()
+    assert "never renews one" in unread[provider].unread_reason()
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_new_leg_opens_a_source_whose_token_is_comfortably_fresh(
+    provider, monkeypatch, wire, rollout_on
+):
+    """The guard must not be a blanket refusal — a fresh credential opens
+    normally, or the feature would be off for everyone."""
+    adapter = FakeAdapter(provider, result="a matching row")
+    wire({provider: adapter})
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", _REAL_CREDENTIAL_CHECK)
+    writes = _stub_credential(monkeypatch, age_s=10)
+
+    result = cs.sweep("ent-1", "checkout redesign status")
+
+    assert adapter.opened_with == ["ent-1"]
+    assert [s.key for s in result.read] == [provider]
+    assert writes == []
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_new_leg_credential_check_fails_closed(provider, monkeypatch):
+    """"I cannot tell whether opening this will write" must resolve to "do not
+    open it". One unread source is recoverable; a rotated token is not."""
+    from app import db
+
+    monkeypatch.setattr(db, "get_connection", lambda cid, p: None)
+    assert cs._credential_is_refresh_free("ent-1", provider) is False
+
+    monkeypatch.setattr(
+        db, "get_connection", lambda cid, p: {"token_json_encrypted": "enc"}
+    )
+    from app.connectors import tokens
+
+    # Unparseable payload.
+    monkeypatch.setattr(tokens, "decrypt_token_json", lambda c: "not json")
+    assert cs._credential_is_refresh_free("ent-1", provider) is False
+
+    # Parseable, but with no freshness to prove.
+    monkeypatch.setattr(tokens, "decrypt_token_json", lambda c: '{"access_token": "x"}')
+    assert cs._credential_is_refresh_free("ent-1", provider) is False
+
+    def _boom(cid, p):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(db, "get_connection", _boom)
+    assert cs._credential_is_refresh_free("ent-1", provider) is False
+
+
+def test_every_write_on_open_provider_is_guarded():
+    """The guarded set must name every provider whose `open_session` persists a
+    token, and the skew must dominate every one of their refresh windows.
+
+    Written as an equality rather than a membership check on purpose: a new
+    adapter whose open path writes must fail HERE, at a test that names the
+    rule, rather than silently join the fan-out as an unguarded writer.
+    """
+    from app.connectors import jira_fetch
+
+    assert cs._REFRESHES_ON_OPEN == {
+        "jira", "confluence", "hubspot", "asana", "google_meet"
+    }
+    # jira 300, confluence 120, hubspot 120, asana 120, google_meet 120 — the
+    # skew is a floor derived from the widest of them, not a preference.
+    assert cs.CREDENTIAL_SKEW_S >= jira_fetch._TOKEN_REFRESH_SKEW_S
+    # Providers that do NOT refresh on open stay unguarded, or the sweep would
+    # skip healthy sources for nothing.
+    assert "slack" not in cs._REFRESHES_ON_OPEN
+    assert "clickup" not in cs._REFRESHES_ON_OPEN
+
+
+# ────────────── the new legs are abandonable at the budget ───────────────
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_new_leg_that_hangs_is_abandoned_and_named_not_waited_on(provider, wire, rollout_on):
+    """A slow new source costs the budget ONCE and is reported as unread. The
+    rest of the sweep still lands — the guarantee that lets a leg be added at
+    all."""
+    slow = FakeAdapter(provider, result="late", delay=5.0)
+    fast = FakeAdapter("clickup", result="CU-1 Checkout redesign")
+    wire({provider: slow, "clickup": fast})
+
+    started = time.monotonic()
+    result = cs.sweep("ent-1", "checkout redesign status", budget_s=0.3)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0, "the sweep waited on an abandoned leg"
+    assert result.budget_exceeded is True
+    assert [s.key for s in result.read] == ["clickup"]
+    unread = {s.key: s for s in result.unread}
+    assert unread[provider].status == cs.STATUS_TIMEOUT
+    assert "time budget" in unread[provider].unread_reason()
+    # And it is NAMED in the rendered block — a source that timed out must
+    # never read as a source that was searched and found nothing.
+    assert provider.replace("_", " ").title() in result.render() or \
+        slow.display_name in result.render()
+
+
+def test_google_meet_scan_budget_stays_under_the_sweep_budget():
+    """Meet is the only leg that must stop ITSELF.
+
+    Every other live leg is one search call, so abandoning it costs at most one
+    in-flight HTTP request. Meet's probe walks conferences and reads a
+    transcript per conference (three round trips each) because a Meet
+    conference record has no title to match on — so an abandoned Meet leg with
+    no internal deadline would keep walking a customer's calendar for minutes
+    with nobody listening. That is the exact failure mode `google_drive` has no
+    leg for.
+
+    The relationship, not the number, is what this asserts: raise BUDGET_S and
+    nothing breaks; raise SCAN_BUDGET_S past it and this fails loudly.
+    """
+    from app.connector_lookup import google_meet as gm
+
+    assert gm.SCAN_BUDGET_S < cs.BUDGET_S
+    assert gm._MAX_SCAN_CONFERENCES > 0
+
+
+def test_max_sources_admits_every_leg_that_exists():
+    """MAX_SOURCES counts local AND live legs, so a cap left behind by a new
+    adapter truncates the fan-out SILENTLY — a provider dropped before the
+    fan-out never becomes a SourceResult and so is never named in the unread
+    list. Asserted against the real leg counts so it cannot rot."""
+    assert cs.MAX_SOURCES >= len(cs._local_legs()) + len(cs.LIVE_PROVIDERS)
+    assert set(cs.LIVE_PROVIDERS) == set(cs._LIVE_LEGS)
+
+
+def test_every_connected_source_is_swept_in_one_pass(monkeypatch, wire, rollout_on):
+    """The whole ticket, end to end: a question naming NO source reads every
+    connected one — all seven live legs AND both local ones — and none is
+    dropped for want of a slot.
+
+    The local legs are deliberately turned back ON here, unlike everywhere else
+    in this file. They count against MAX_SOURCES, so a company with everything
+    connected is the case where a cap left behind by a new adapter actually
+    bites, and it bites SILENTLY: a provider truncated before the fan-out never
+    becomes a SourceResult, so it is not even in the unread list.
+    """
+    from app import call_index, db
+
+    adapters = {
+        p: FakeAdapter(p, result=f"{p} says checkout redesign")
+        for p in cs.LIVE_PROVIDERS
+    }
+    wire(adapters)
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(cs, "_has_github", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [])
+    monkeypatch.setattr(call_index, "count_calls", lambda eid, **k: 3)
+    monkeypatch.setattr(db, "list_open_pull_requests", lambda eid: [
+        {"repo_full_name": "acme/app", "pr_number": 7,
+         "title": "Checkout redesign step 1", "is_draft": 0},
+    ])
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert {s.key for s in result.sources} == set(cs.LIVE_PROVIDERS) | {
+        "calls", "github"
+    }
+    # Every provider T1 names is reported as covered — including the three that
+    # answer through a local leg under a different key.
+    assert result.covered_providers() >= set(cs.LIVE_PROVIDERS) | {
+        "github", "fireflies", "zoom"
+    }
+    for provider in adapters:
+        assert adapters[provider].opened_with == ["ent-1"], provider
+
+
+# ─── a leg that FAILED must never be reported as read (review HIGH) ───
+#
+# `_run_live` promotes ANY non-empty text to STATUS_OK. So an adapter that
+# returns a carefully-worded failure SENTENCE instead of raising is, to the
+# sweep, a source that was read: it renders under the "read from the connected
+# sources just now" heading rather than the not-covered list,
+# `covered_providers()` reports it as covered (which deletes it from
+# `registry.answer_for_hints`'s unavailable_names), and — the part that makes
+# this HIGH — `sweep_persist` takes `list(result.read)` and hands the error
+# string to `extract_document`, writing it into the tenant's knowledge graph on
+# the shared prod Supabase, where it later resurfaces as evidence.
+#
+# The suite had a test for the legitimate EMPTY case and none for the FAILURE
+# case, which is exactly why fully green CI shipped it.
+
+
+class RaisingAdapter(FakeAdapter):
+    """An adapter whose tool call raises, as every adapter must when it could
+    not read rather than read-and-found-nothing."""
+
+    def __init__(self, name, exc):
+        super().__init__(name)
+        self._exc = exc
+
+    def dispatch(self, session, name, inp):
+        raise self._exc
+
+    def dispatch_records(self, session, name, inp):
+        raise self._exc
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_a_failed_leg_is_unread_never_ok_and_never_persisted(provider, wire, rollout_on):
+    """The regression this locks. Four properties, each of which broke
+    separately in the shipped version, and the last is the expensive one."""
+    adapter = RaisingAdapter(provider, RuntimeError("listing failed"))
+    other = FakeAdapter("clickup", result="CU-1 Checkout redesign")
+    wire({provider: adapter, "clickup": other})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    by_key = {s.key: s for s in result.sources}
+    assert by_key[provider].status == cs.STATUS_ERROR
+    assert by_key[provider].usable is False
+    # (a) not in the read set, so not under the "read just now" heading;
+    assert [s.key for s in result.read] == ["clickup"]
+    # (b) not reported as covered, so the honesty machinery still names it;
+    assert provider not in result.covered_providers()
+    # (c) named in the not-covered list with a reason;
+    block = result.render()
+    assert "Sources NOT covered by this sweep" in block
+    assert by_key[provider].display_name in block
+    # (d) THE expensive one — nothing about it can reach the KG writer, which
+    # consumes exactly `result.read`.
+    assert by_key[provider] not in result.read
+    assert all(s.text for s in result.read), "a read source with no text"
+
+
+def test_sweep_persist_only_ever_sees_sources_that_were_really_read(wire, rollout_on):
+    """The property `sweep_persist`'s docstring claims ("never an
+    unread_reason") asserted from the sweep's side, against a failing leg —
+    because that claim held only while no adapter smuggled a failure through
+    `read`."""
+    from app.connector_lookup import sweep_persist
+
+    wire({
+        "google_meet": RaisingAdapter("google_meet", RuntimeError("boom")),
+        "asana": RaisingAdapter("asana", TimeoutError("no budget")),
+    })
+    started: list = []
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+    # Nothing was read at all, so persistence must not even start a thread.
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+    assert started == []
+
+
+# ─── a connected source with no index yet is NAMED, not silent (finding 4) ───
+
+
+def test_a_connected_local_leg_provider_with_no_index_is_named_as_unread(
+    monkeypatch, wire
+):
+    """Zoom's ONLY sweep coverage is the `calls` index, gated on
+    `call_index.has_index`. Before a company's first sync that probe says no
+    and `_run_local` drops the leg silently — right for a company with no Zoom,
+    wrong for one that has connected it and is waiting on the first sync, which
+    got no coverage AND no mention anywhere. Silence about a source the user
+    connected is the same false-completeness the unread list exists to stop.
+    """
+    wire({"clickup": FakeAdapter("clickup", result="CU-1 Checkout")},
+         connected=["clickup", "zoom"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    unread = {s.key: s for s in result.unread}
+    assert "zoom" in unread, "a connected Zoom was not mentioned at all"
+    assert "nothing of it has been indexed yet" in unread["zoom"].unread_reason()
+    assert "NOT evidence there is nothing there" in unread["zoom"].unread_reason()
+    assert "Zoom" in result.render()
+
+
+def test_a_provider_that_is_not_connected_stays_silent(monkeypatch, wire):
+    """The other half, and the reason `_run_local` drops a leg quietly in the
+    first place: "Zoom could not be read", told to a company that has no Zoom,
+    is a worse answer than saying nothing."""
+    wire({"clickup": FakeAdapter("clickup", result="CU-1 Checkout")},
+         connected=["clickup"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert "zoom" not in {s.key for s in result.sources}
+    assert "Zoom" not in result.render()
+
+
+def test_a_connected_provider_with_an_index_is_read_not_flagged(monkeypatch, wire):
+    """And the leg still wins when there IS an index — the unread entry must
+    not shadow a working local leg."""
+    from app import call_index
+
+    wire({}, connected=["zoom"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [
+        type("C", (), {"call_date": "2026-08-01", "title": "Acme QBR",
+                       "account": "Acme", "summary": "checkout redesign"})(),
+    ])
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert "calls" in {s.key for s in result.read}
+    assert "zoom" not in {s.key for s in result.sources}
+    assert "zoom" in result.covered_providers()
+
+
+def test_the_real_meet_adapter_in_the_real_sweep_reports_a_failure_as_unread(
+    monkeypatch, rollout_on,
+):
+    """END TO END, through the REAL adapter — the test that would actually have
+    caught the shipped bug.
+
+    The two tests above use a fake that raises, so they pin the SWEEP's
+    contract and would have stayed green against the defect: the real
+    `google_meet` adapter returned prose, the sweep dutifully called it
+    STATUS_OK, and no fake-based test could see it. Wiring the real adapter in
+    is what closes that gap, and it is worth the extra stubbing.
+    """
+    from app.connector_lookup import google_meet as gm
+    from app.connector_lookup import registry, sweep_persist
+    from app.connectors.google_meet import MeetContext
+
+    monkeypatch.setattr(
+        registry, "connected_providers", lambda eid: ["google_meet"]
+    )
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+    monkeypatch.setattr(cs, "_has_github", lambda eid: False)
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", lambda eid, p: True)
+    monkeypatch.setattr(
+        gm, "sync_context",
+        lambda cid: MeetContext(company_id=cid, access_token="tok",
+                                account_email="pm@acme.com"),
+    )
+
+    def _boom(tok, **kw):
+        raise RuntimeError("502 from Google")
+
+    monkeypatch.setattr(gm, "list_conference_records", _boom)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    meet = {s.key: s for s in result.sources}["google_meet"]
+    assert meet.status == cs.STATUS_ERROR
+    assert meet.usable is False
+    assert meet.text == "", "a failed leg carried text into the prompt"
+    assert result.read == []
+    assert "google_meet" not in result.covered_providers()
+    # And with nothing read, the KG writer is never even started.
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+
+
+# ─────── the persist path fails CLOSED, structurally (requirement A) ───────
+#
+# A bad DATA write is worse than a bad migration, and the safety apparatus is
+# pointed at the migration: that one gets a gate, a file, a version row and a
+# repair path, and it fails LOUDLY. A tenant-graph write happens at runtime,
+# straight into prod tenants' KG, with no artifact recording what was written —
+# and a poisoned signal with a connected source_type counts toward
+# `has_sufficient_evidence` and can surface in a customer's weekly BRIEF as
+# though it were something a real person said on a call.
+#
+# So the rule is a property of the DATA, not of the adapter's honesty: only a
+# source carrying structured RawRecords may be written. No adapter builds a
+# RawRecord out of a timeout.
+
+
+def _record(provider="google_meet", ext="c1"):
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(provider=provider, kind="meeting", external_id=ext,
+                     title="t", text="body", properties={})
+
+
+def _source(key, *, status=None, text="rows", records=None):
+    return cs.SourceResult(
+        key=key, display_name=key.title(),
+        status=status or cs.STATUS_OK, text=text, records=records,
+    )
+
+
+def test_prose_without_records_is_never_persisted():
+    """THE structural fix. Even a source the sweep believes it READ is refused
+    unless it carries records — so an adapter that returns a failure sentence
+    instead of raising can no longer reach the graph, whatever it says."""
+    from app.connector_lookup import sweep_persist
+
+    timeout_prose = _source(
+        "google_meet",
+        text="(Google Meet could not be listed just now — NOT an absence.)",
+    )
+    assert timeout_prose.usable is True, "precondition: .read would accept it"
+    assert sweep_persist.is_persistable(timeout_prose) is False
+
+    real = _source("google_meet", records=[_record()])
+    assert sweep_persist.is_persistable(real) is True
+
+
+def test_an_honest_empty_result_is_not_written_to_the_graph():
+    """The second hole the same rule closes. "(no Asana task TITLE matches
+    these terms)" is a real answer and belongs in the PROMPT — and it was also
+    `usable`, records-free, and being extracted into the graph. An absence
+    statement is the last thing that should become evidence."""
+    from app.connector_lookup import sweep_persist
+
+    empty = _source("asana", text="(no Asana task TITLE matches these terms)")
+    assert empty.usable is True
+    assert sweep_persist.is_persistable(empty) is False
+
+
+def test_local_legs_are_no_longer_persisted_and_that_is_intended():
+    """Stated as a test so the tradeoff cannot be discovered by surprise: the
+    two local legs carry no records and stop being written. Both read from
+    tables our own pullers already ingested, so nothing real is lost."""
+    from app.connector_lookup import sweep_persist
+
+    for key in ("calls", "github"):
+        assert sweep_persist.is_persistable(_source(key)) is False
+
+
+def test_kickoff_refuses_a_sweep_with_nothing_persistable(monkeypatch):
+    """No thread is even started, so the refusal costs nothing."""
+    from app.connector_lookup import sweep_persist
+
+    started: list = []
+    monkeypatch.setattr(
+        sweep_persist.threading, "Thread",
+        lambda **kw: started.append(kw) or (_ for _ in ()).throw(
+            AssertionError("a thread was started for an unpersistable sweep")
+        ),
+    )
+    result = cs.SweepResult(sources=[
+        _source("google_meet", text="(could not be listed)"),
+        _source("calls"),
+    ])
+    assert result.read, "precondition: these ARE in .read"
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+    assert started == []
+
+
+def test_run_re_checks_the_invariant_at_the_choke_point(monkeypatch):
+    """`_run` is the only thing that writes, so the guarantee lives there too —
+    a guarantee held only by the caller is one a future direct caller walks
+    around."""
+    from app.connector_lookup import sweep_persist
+
+    extracted: list = []
+    monkeypatch.setattr(
+        "app.graph.extractor.extract_document",
+        lambda *a, **k: extracted.append(k.get("doc_name")) or {},
+    )
+    monkeypatch.setattr("app.graph.facade.GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(
+        "app.db.sweep_persist_cooldown.in_cooldown", lambda *a, **k: False
+    )
+    monkeypatch.setattr("app.db.sweep_persist_cooldown.mark_run", lambda *a, **k: None)
+    monkeypatch.setattr("app.db.kg_ingest_ledger.seen_hashes", lambda *a, **k: set())
+    monkeypatch.setattr("app.db.kg_ingest_ledger.record_hashes", lambda *a, **k: None)
+
+    # Called DIRECTLY, bypassing kickoff's filter entirely.
+    sweep_persist._run("ent-1", [_source("google_meet", text="(a failure)")])
+
+    assert extracted == [], "prose reached extract_document through _run"
+
+
+# ─────── the new legs are flag-gated OFF by default (requirement B) ───────
+
+
+def test_the_new_providers_are_off_by_default():
+    """Merging deploys to staging, and staging's writes land on the PROD
+    Supabase KG — so an unflagged merge starts writing prod tenants' graphs
+    from two adapters that have never run against real data. The flag converts
+    an irreversible data action into a deliberate one."""
+    from app.config import settings
+
+    assert settings.chat_sweep_asana is False
+    assert settings.chat_sweep_google_meet is False
+    assert cs.provider_enabled("asana") is False
+    assert cs.provider_enabled("google_meet") is False
+    # Everything that already shipped is unaffected.
+    for provider in ("jira", "clickup", "slack", "confluence", "hubspot"):
+        assert cs.provider_enabled(provider) is True
+
+
+def test_a_flagged_off_provider_is_never_probed(monkeypatch, wire):
+    """The gate sits at the choke point every entry point goes through, so no
+    call site can bypass it — the lesson from the kill switch that covered one
+    of two callers."""
+    asana = FakeAdapter("asana", result="AS-1 Checkout redesign")
+    clickup = FakeAdapter("clickup", result="CU-1 Checkout redesign")
+    wire({"asana": asana, "clickup": clickup})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert asana.opened_with == [], "a flagged-off leg opened a session"
+    assert [s.key for s in result.sources] == ["clickup"]
+    assert "asana" not in result.covered_providers()
+
+
+def test_flipping_the_flag_on_enables_the_leg(monkeypatch, wire):
+    """And the switch really is the only thing holding it back."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    asana = FakeAdapter("asana", result="AS-1 Checkout redesign")
+    wire({"asana": asana})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert asana.opened_with == ["ent-1"]
+    assert [s.key for s in result.read] == ["asana"]
+
+
+def test_the_rollout_flag_fails_closed(monkeypatch):
+    """Cannot prove it is on ⇒ it is off. One unswept source against writing a
+    prod tenant's graph from unwatched code is not a close trade."""
+    import app.config
+
+    class _Boom:
+        def __getattr__(self, name):
+            raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(app.config, "settings", _Boom())
+    assert cs.provider_enabled("asana") is False
+
+
+def test_can_sweep_agrees_with_the_flag(monkeypatch):
+    """`registry._sweepable` ranks a source DOWN the tool-slot order when the
+    sweep can cover it. A flagged-off provider that answered True would lose
+    its slot on a promise the sweep will not keep, and be reachable by neither
+    path."""
+    from app.config import settings
+
+    assert cs.can_sweep("asana") is False
+    assert cs.can_sweep("google_meet") is False
+    monkeypatch.setattr(settings, "chat_sweep_asana", True)
+    assert cs.can_sweep("asana") is True

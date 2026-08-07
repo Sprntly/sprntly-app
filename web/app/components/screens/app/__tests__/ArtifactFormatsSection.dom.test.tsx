@@ -249,6 +249,10 @@ describe("upload → compile → ready", () => {
       fireEvent.click(screen.getByRole("button", { name: "Add a PRD format" }))
     })
     await act(async () => {
+      // The modal opens on the file tile, so this path starts by switching.
+      fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
+    })
+    await act(async () => {
       fireEvent.change(
         screen.getByLabelText("Paste your format as Markdown"),
         { target: { value: "# Product requirements" } },

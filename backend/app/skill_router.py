@@ -1377,8 +1377,10 @@ _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
     # `_CONNECTOR_READ_CONTEXT` matches `meetings?`, `calls?`, `find` and
     # `check`, so "can we meet to go over the tickets" would satisfy BOTH halves
     # of the ambiguous gate and get hijacked into a connector lookup — turning a
-    # scheduling question into "Google Meet syncs into your knowledge graph, but
-    # I can't query it live". Requiring the qualifier makes the false positive
+    # scheduling question into a transcript search. (Meet now HAS a live-read
+    # adapter, so the false positive costs a real round of transcript reads
+    # rather than an apology — the argument for requiring the qualifier only got
+    # stronger.) Requiring it makes the false positive
     # impossible rather than merely unlikely. The cost is that a bare "meet"
     # never routes here, which is correct: nobody names this product that way.
     "google_meet": re.compile(r"\b(google\s+meet|g[\s-]?meet)\b", re.I),
