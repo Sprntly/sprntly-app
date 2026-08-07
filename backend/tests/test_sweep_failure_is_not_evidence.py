@@ -168,17 +168,35 @@ def _session_for(provider: str) -> ca.LookupSession:
     )
 
 
-def _dispatch_under_failure(provider: str):
-    """`("raised", exc)` or `("returned", text)` for one leg's dead-upstream call."""
+def _dispatch_under_failure(provider: str, entry: str = "dispatch"):
+    """`("raised", exc)` or `("returned", text)` for one leg's dead-upstream call.
+
+    `entry` selects which of the adapter's TWO entry points to drive.
+    `_AdapterLeg.run` prefers the optional `dispatch_records` and only falls
+    back to `dispatch`, so checking `dispatch` alone leaves the path the sweep
+    actually takes for most adapters unexamined — and it is that path whose
+    return value becomes `SourceResult.text`.
+    """
     adapter = registry.provider_for(provider)
     assert adapter is not None, f"{provider} is in _LIVE_LEGS but has no adapter"
+    fn = getattr(adapter, entry, None)
+    if fn is None:
+        return "absent", None
     leg = sweep._LIVE_LEGS[provider]
     inp = leg.build_input(sweep.sweep_terms(_QUESTION))
     with _DeadTransport():
         try:
-            return "returned", adapter.dispatch(_session_for(provider), leg.tool, inp)
+            out = fn(_session_for(provider), leg.tool, inp)
         except Exception as exc:  # noqa: BLE001 — the outcome under test
             return "raised", exc
+    # `dispatch_records` returns `(text, records) | None`; `None` means "this
+    # leg cannot produce records for this call", which is a fallback to
+    # `dispatch`, not a failure report.
+    if entry == "dispatch_records":
+        if out is None:
+            return "absent", None
+        out = out[0]
+    return "returned", out
 
 
 # ---------------------------------------------------------------------------
@@ -224,22 +242,29 @@ def test_sweep_terms_survive_the_probe_question():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("entry", ["dispatch", "dispatch_records"])
 @pytest.mark.parametrize("provider", _leg_params())
-def test_a_dead_upstream_raises_rather_than_returning_prose(provider):
+def test_a_dead_upstream_raises_rather_than_returning_prose(provider, entry):
     """A leg's failure must be an EXCEPTION, not a sentence.
 
     `sweep._run_live` classifies by emptiness: `if text and text.strip():
     result.status = STATUS_OK`. There is no other signal. So an adapter that
     returns "(X timed out ...)" has told the sweep it succeeded, and the sweep
     has no way to know better. Raising is the only way to say "this failed".
+
+    Run for BOTH entry points, because `_AdapterLeg.run` prefers
+    `dispatch_records` and either one's return value can become the source
+    text. An adapter that raises from `dispatch` but returns prose from
+    `dispatch_records` is still broken on the path the sweep takes.
     """
-    outcome, payload = _dispatch_under_failure(provider)
+    outcome, payload = _dispatch_under_failure(provider, entry)
+    if outcome == "absent":
+        pytest.skip(f"{provider} implements no {entry} for this tool")
     assert outcome == "raised", (
-        f"{provider}'s dispatch RETURNED {payload!r} when its upstream was "
+        f"{provider}'s {entry} RETURNED {payload!r} when its upstream was "
         "dead. sweep._run_live will read that as STATUS_OK, render it into the "
-        "prompt as source data, and sweep_persist will extract it into the "
-        "tenant's knowledge graph as evidence. Raise instead of returning a "
-        "failure notice."
+        "prompt as source data, and sweep_persist will consider it for the "
+        "tenant's knowledge graph. Raise instead of returning a failure notice."
     )
 
 
@@ -254,6 +279,27 @@ def test_a_dead_upstream_is_reported_unread_and_never_persisted(provider):
     """
     adapter = registry.provider_for(provider)
     persisted: list = []
+    dispatched: list = []
+
+    # Spy BOTH entry points. `_AdapterLeg.run` prefers the OPTIONAL
+    # `dispatch_records` and only falls back to `dispatch`, so a spy on
+    # `dispatch` alone sees nothing for every records-capable adapter — which is
+    # most of them. Watching one of two entry points and calling that "the leg
+    # ran" is the same mistake in miniature as the gates above.
+    _spies = []
+    for _name in ("dispatch", "dispatch_records"):
+        _real = getattr(adapter, _name, None)
+        if _real is None:
+            continue
+
+        def _watched(*args, _r=_real, **kwargs):
+            dispatched.append((args, kwargs))
+            return _r(*args, **kwargs)
+
+        _spies.append(mock.patch.object(adapter, _name, _watched))
+
+    for _spy in _spies:
+        _spy.start()
 
     with mock.patch.object(
         registry, "connected_providers", lambda _eid: [provider]
@@ -262,11 +308,45 @@ def test_a_dead_upstream_is_reported_unread_and_never_persisted(provider):
     ), mock.patch.object(
         adapter, "open_session", lambda _eid: _session_for(provider)
     ), mock.patch.object(
+        # Two gates stand between `sweep()` and the leg, and BOTH are orthogonal
+        # to what this test asserts. Neutralising them is not weakening the
+        # test — leaving them in place is what made it vacuous:
+        #
+        #  - `provider_enabled` is #1113's rollout flag, DEFAULT OFF for asana
+        #    and google_meet, so those legs never ran here at all;
+        #  - `_credential_is_refresh_free` is #1113's open_session write guard,
+        #    which declines any provider in `_REFRESHES_ON_OPEN` whose token
+        #    this harness cannot prove fresh — i.e. jira, confluence, hubspot,
+        #    asana and google_meet.
+        #
+        # Together those meant this test only ever reached TWO of seven legs,
+        # and passed green for the other five without executing them. It was
+        # caught by the strict xfail on hubspot flipping to XPASS — hubspot
+        # "passed" because it was declined before it could return prose, not
+        # because it stopped returning prose. That is exactly the
+        # fixture-does-not-contain-what-the-name-claims class this batch is
+        # about, reproduced inside a guard written against it, which is why the
+        # `assert dispatched` below is now mandatory rather than tidy.
+        sweep, "provider_enabled", lambda _p: True
+    ), mock.patch.object(
+        sweep, "_credential_is_refresh_free", lambda _eid, _p: True
+    ), mock.patch.object(
         sweep, "_has_calls", lambda _eid: False
     ), mock.patch.object(
         sweep, "_has_github", lambda _eid: False
     ), _DeadTransport():
-        result = sweep.sweep(_EID, _QUESTION)
+        try:
+            result = sweep.sweep(_EID, _QUESTION)
+        finally:
+            for _spy in _spies:
+                _spy.stop()
+
+    assert dispatched, (
+        f"the sweep never dispatched to {provider} — a rollout flag, a "
+        "credential gate or provider discovery dropped the leg before it ran. "
+        "Every assertion below would pass without exercising anything. Fix the "
+        "harness; do not weaken the assertions."
+    )
 
     read_keys = [s.key for s in result.read]
     assert provider not in read_keys, (
