@@ -217,13 +217,21 @@ export function reasonLine(row: ArtifactTemplate, stalled: boolean): string {
       return stalled
         ? "Still checking — this is taking longer than usual."
         : "Checking your format against what a Sprntly document needs…"
+    // READY SAYS NOTHING (owner, 2026-08-07). "Checked — every part of a Sprntly
+    // document has a home in this format" repeated on every healthy card, which
+    // is most of them, so the line trained people to stop reading it — and it is
+    // the line that carries the actual reason on a card that needs attention.
+    // The Ready badge already says the state; a sentence restating it is noise
+    // that costs the badge its meaning. The four states with something real to
+    // say still say it, and the caller drops the element entirely when this is
+    // empty rather than rendering a blank line.
     case "ready":
-      return "Checked — every part of a Sprntly document has a home in this format."
+      return ""
     case "needs_review":
     case "failed":
       return translateCompileNote(row.compile_summary)
     default:
-      return "Checked — every part of a Sprntly document has a home in this format."
+      return ""
   }
 }
 
@@ -495,21 +503,28 @@ export function ArtifactFormatsView({
 
           <p className="afmt-meta">{metaParts(row).join(" · ")}</p>
 
-          <p className="afmt-reason">
-            {reasonLine(row, stalled)}
-            {showAll ? (
-              <>
-                {" "}
-                <button
-                  type="button"
-                  className="afmt-link"
-                  onClick={() => onPreview(row.id)}
-                >
-                  See all {notes}
-                </button>
-              </>
-            ) : null}
-          </p>
+          {/* Dropped entirely when there is nothing to say — a healthy card is
+              silent rather than carrying an empty <p> that still takes its
+              margin. `showAll` can only be true on needs_review/failed, which
+              always have a reason, so the "See all" affordance can never be
+              orphaned by this. */}
+          {reasonLine(row, stalled) ? (
+            <p className="afmt-reason">
+              {reasonLine(row, stalled)}
+              {showAll ? (
+                <>
+                  {" "}
+                  <button
+                    type="button"
+                    className="afmt-link"
+                    onClick={() => onPreview(row.id)}
+                  >
+                    See all {notes}
+                  </button>
+                </>
+              ) : null}
+            </p>
+          ) : null}
 
           {renamingId === row.id ? (
             <div className="afmt-rename">
@@ -571,7 +586,12 @@ export function ArtifactFormatsView({
             </button>
           ) : null}
 
-          {activationSlot(row, type)}
+          {/* Wrapped so the card can give the activation control a full row of
+              its own. It is the action that changes what the whole company
+              writes in, and its honest label ("Use Sprntly's built-in format
+              instead") is too long to share a line inside a 300px card without
+              wrapping mid-phrase. */}
+          <span className="afmt-act-toggle">{activationSlot(row, type)}</span>
 
           {row.compile_status === "needs_review" ||
           row.compile_status === "failed" ||
@@ -636,13 +656,18 @@ export function ArtifactFormatsView({
       aria-busy={refreshing ? "true" : undefined}
     >
       <div className="afmt-top">
+        {/* Same chrome as the Skills header (.skl-top / .skl-title): icon,
+            title, one-line sub, primary action on the right. The sub now
+            carries the explanation the intro banner used to — with the banner
+            gone it is the only place that says formats govern layout rather
+            than content, and it has to be short enough to sit on the header
+            line. */}
         <h2 className="afmt-title" id="afmt-title">
           <IconLayoutList size={16} className="afmt-title-icon" aria-hidden />
           Formats we write in
           <span className="afmt-sub">
-            Your team&apos;s own PRD, ticket and engineering-spec structure. One
-            format is active per document type — every new document Sprntly
-            writes follows it.
+            Your team&apos;s own structure — headings, order, wording. One format
+            is active per document type, and every new document follows it.
           </span>
         </h2>
         <button
@@ -656,18 +681,13 @@ export function ArtifactFormatsView({
       </div>
 
       <div className="afmt-body">
-        {/* Tinted --info, deliberately NOT the accent green of .tpl-intro below
-            — two identically-tinted stacked banners would undo the very
-            distinction this section exists to make. */}
-        <div className="afmt-intro">
-          <IconLayoutList size={16} className="afmt-intro-icon" aria-hidden />
-          <span>
-            <strong>Skills decide what a document says. Formats decide how
-            it&apos;s laid out</strong> — your headings, your order, your
-            wording. Upload a Markdown copy of the format your team already
-            uses, and Sprntly writes into it.
-          </span>
-        </div>
+        {/* The intro banner is gone (owner, 2026-08-07). It existed to separate
+            this library from the exemplar library stacked below it — "skills
+            decide what a document says, formats decide how it's laid out" — and
+            with §2 hidden there is nothing left to distinguish it from. What it
+            said that still matters (formats govern layout) now rides the header
+            sub, where it costs a line instead of a banner. The empty state still
+            carries the full pitch for anyone arriving with nothing uploaded. */}
 
         {/* Type tabs. Same chip vocabulary as the exemplar filters below, on
             purpose: two different-looking filter rows on one screen would read

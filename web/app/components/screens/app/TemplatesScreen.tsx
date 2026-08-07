@@ -314,7 +314,12 @@ export function TemplatesScreen() {
     // pane and leaves §1 unreachable below the fold. The scroll moves up a
     // level and both headers scroll with their content. Deliberately NOT
     // sticky: two stacked sticky bars eat half a narrow viewport.
-    <AppLayout mainClassName="main--templates">
+    // hideChromeStrip, matching SkillsScreen: the formats section carries its
+    // own .afmt-top title bar, so the main-column strip only put a second,
+    // emptier "Templates" above it. It was tolerable while two sections shared
+    // the page and neither owned the page name; with §2 hidden, the section
+    // header IS the page header.
+    <AppLayout mainClassName="main--templates" hideChromeStrip>
       <div className="tplpage">
         <ArtifactFormatsSection />
         {/* §2 "Examples we learn from" — HIDDEN, not deleted (owner, 2026-08-06).

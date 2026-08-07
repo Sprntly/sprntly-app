@@ -21193,9 +21193,11 @@
 
 .afmt { display: flex; flex-direction: column; }
 
+/* Matches .skl-top exactly — same padding, rule and vertical centring — so the
+   two library screens share one chrome instead of two near-misses. */
 .afmt-top {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 18px 24px;
@@ -21206,7 +21208,6 @@
 .afmt-title {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 8px;
   margin: 0;
   font-size: 16px;
@@ -21216,13 +21217,20 @@
 
 .afmt-title-icon { color: var(--accent); flex-shrink: 0; }
 
+/* Inline beside the title, as .skl-sub is — it used to break to its own line
+   (flex-basis: 100%) and wrap to two, which turned a header into a paragraph.
+   Ellipsised rather than wrapped so the header stays exactly one line tall at
+   any width; the copy is short enough that it only truncates when the window
+   is genuinely narrow. */
 .afmt-sub {
-  flex-basis: 100%;
   font-size: 13px;
   font-weight: 400;
-  line-height: 1.45;
   color: var(--ink-3);
-  max-width: 62ch;
+  margin-left: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .afmt-upload { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -21236,6 +21244,10 @@
 
 /* --info, deliberately not the --accent-muted green of .tpl-intro: two
    identically-tinted stacked banners would undo the distinction. */
+/* NOT CURRENTLY RENDERED — the intro banner was removed from the section
+   (owner, 2026-08-07) once the exemplar library below it was hidden and there
+   was nothing left to distinguish this one from. Kept so restoring the banner is
+   uncommenting its markup and nothing else. */
 .afmt-intro {
   display: flex;
   align-items: flex-start;
@@ -21365,32 +21377,75 @@
   color: var(--ink-3);
 }
 
-.afmt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* A CARD GRID, not a list. It was a list originally to differ in silhouette
+   from the exemplar card grid stacked below it — a PM had to tell the two
+   libraries apart in seconds, and copy alone wouldn't carry that. §2 is hidden
+   now, so that constraint is gone and the grid is simply the better shape: a
+   format is one object with its own actions, and four to a row shows a whole
+   library at a glance instead of one item per screen-width. Same
+   `auto-fill minmax()` as .tpl-grid, so if §2 ever returns the two read as one
+   system rather than two guesses at a card. */
+.afmt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
 
 .afmt-row {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  /* Content grows, actions sit on the floor of the card, so a short and a long
+     card still line their buttons up across a row. */
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
-  border-left: 3px solid transparent;
+  border-top: 3px solid transparent;
   border-radius: var(--radius);
   background: var(--surface-2);
   box-shadow: var(--shadow-sm);
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
 }
 
-/* Five signals mark the active row and this is two of them — the left border
-   and the tint. The other three are the solid pill, the sort to the top of the
-   group, and aria-current on the <li>. */
+/* Same hover as .skl-card — accent border, soft green lift, 1px rise. Copied
+   rather than approximated so the two card surfaces feel like one product. */
+.afmt-row:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(23, 148, 99, 0.08);
+  transform: translateY(-1px);
+}
+
+/* The active card keeps its accent top rule on hover — the border-color above
+   would otherwise ring the whole card and swallow the one signal that says
+   which format is in use. */
+.afmt-row.is-active:hover { border-top-color: var(--accent); }
+
+.afmt-row:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .afmt-row { transition: none; }
+  .afmt-row:hover { transform: none; }
+}
+
+/* Five signals mark the active card and this is two of them — the accent rule
+   and the tint. The other three are the solid pill, the sort to the front of
+   the group, and aria-current on the <li>. The rule moved from the left edge to
+   the top when this became a grid: a left border on a card reads as decoration,
+   but a full-width bar across the head of one card in a row of four is the
+   thing your eye lands on first. */
 .afmt-row.is-active {
-  border-left-color: var(--accent);
+  border-top-color: var(--accent);
   background: var(--accent-muted);
 }
 
+/* Sized to a card rather than a row, so the skeleton occupies the space the
+   real thing will and the grid doesn't jump when the list lands. */
 .afmt-row--skel {
-  min-height: 62px;
+  min-height: 148px;
   border-style: dashed;
   background: var(--surface-3);
   box-shadow: none;
@@ -21442,20 +21497,48 @@
 
 .afmt-meta { margin: 0; font-size: 12px; color: var(--ink-3); }
 
-/* The badge says WHAT; this says WHY. Rendered in all five states. */
-.afmt-reason { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-2); max-width: 78ch; }
+/* The badge says WHAT; this says WHY. Rendered in all five states. The 78ch cap
+   is gone — inside a card the card IS the measure, and the cap only ever
+   existed to stop a line running the width of the screen. */
+.afmt-reason { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-2); }
 
 .afmt-rename { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .afmt-rename .input { flex: 1; min-width: 180px; }
 
+/* The card's floor. Left-aligned rather than right: on a card the actions read
+   as belonging to the content above them, and the old right-alignment existed
+   only to push them away from a full-width row's text. Separated by a hairline
+   so the card has a clear "what it is" half and "what you can do" half.
+   `max-width` is gone — inside a 300px card it clipped the buttons. */
 .afmt-row-actions {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  max-width: 52%;
+  justify-content: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
+
+/* The activation control gets the card's full width on its own line: it is the
+   one action that changes what the whole company writes in, and its label is a
+   sentence rather than a word. Everything else — Preview, Check again, Rename,
+   Delete — shares the line above it. */
+.afmt-act-toggle {
+  order: 2;
+  flex: 1 0 100%;
+  display: block;
+}
+
+.afmt-act-toggle > .btn { width: 100%; justify-content: center; }
+
+/* A denial reads as a sentence, not a control, so it keeps its own line but
+   drops the button metrics. */
+.afmt-act-toggle > .afmt-denied { display: block; }
+
+/* Icon buttons to the right edge of the first line, so the destructive one is
+   never adjacent to the primary action below it. */
+.afmt-row-actions .btn-icon:first-of-type { margin-left: auto; }
 
 .afmt-act { white-space: nowrap; }
 .afmt-act-del:hover:not(:disabled) { color: var(--danger-ink); border-color: var(--danger-border); background: var(--danger-soft); }
@@ -21528,12 +21611,14 @@
 
 /* A denied action is REPLACED by its reason, never left as a disabled button —
    a dimmed trash icon reads as a bug rather than as a rule. */
+/* Left-aligned and unbounded inside a card — the right-alignment and 34ch cap
+   were for a full-width row where the denial sat at the far edge. In a 300px
+   card both just produced a ragged block against the wrong margin. */
 .afmt-denied {
   font-size: 12px;
   line-height: 1.45;
   color: var(--ink-3);
-  max-width: 34ch;
-  text-align: right;
+  text-align: left;
 }
 
 .afmt-replace { position: relative; overflow: hidden; cursor: pointer; }
@@ -21625,9 +21710,12 @@
 }
 
 @media (max-width: 720px) {
-  .afmt-row { flex-direction: column; align-items: flex-start; }
-  .afmt-row-actions { width: 100%; max-width: none; flex-wrap: wrap; justify-content: flex-start; }
-  .afmt-denied { text-align: left; }
+  /* The card grid already collapses to one column via auto-fill, so the row
+     rules that used to un-stack a full-width layout are no longer needed —
+     .afmt-row is a column card at every width now. What IS still needed is
+     forcing a single column below the 300px track, so a card never gets
+     narrower than its own buttons. */
+  .afmt-list { grid-template-columns: 1fr; }
   .afmt-group-head { flex-direction: column; align-items: flex-start; gap: 6px; }
   .afmt-preview-panes { grid-template-columns: 1fr; }
 }
