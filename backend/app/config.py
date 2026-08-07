@@ -9,7 +9,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
-    openai_api_key: str = ""  # embeddings (text-embedding-3-small)
+    # Two jobs, one key. Embeddings (text-embedding-3-small) have always run on
+    # it, and it is now ALSO the platform fallback for companies whose
+    # llm_provider is 'openai' but which have not supplied a key of their own —
+    # the mirror of what anthropic_api_key does for Claude workspaces.
+    openai_api_key: str = ""
+    # Override for an OpenAI-compatible gateway (Azure OpenAI, a proxy, a
+    # self-hosted relay). Unset means api.openai.com. Applies only to the chat
+    # client in app/openai_client.py; embeddings keep their own hardcoded URL.
+    openai_base_url: str = ""
     # Design Agent uses a dedicated key for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).

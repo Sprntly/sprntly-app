@@ -9373,7 +9373,7 @@
   }
 
   .ai-bar-reply-answer a {
-    color: var(--accent, var(--ink));
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
@@ -23303,7 +23303,101 @@
 }
 
 /* ============================================================
-   Settings → Admin: Claude API key card
+   Settings → Admin: AI provider choice
+   Two cards, one per provider, above the key panel they own.
+   The card IS the setting (a real radiogroup), so the active
+   one carries a border + a labelled "In use" badge rather than
+   relying on a colour shift alone.
+   ============================================================ */
+
+.prov-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.prov-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 13px 14px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.prov-card:hover:not(:disabled):not(.is-active) {
+  border-color: var(--ink-3);
+  background: var(--surface-2);
+}
+
+.prov-card:disabled { cursor: default; opacity: 0.6; }
+
+/* Two-signal active state: the accent border AND the badge below. Colour alone
+   would leave the choice unreadable to anyone who can't distinguish it. */
+.prov-card.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  cursor: default;
+}
+
+.prov-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.prov-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.prov-card-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.prov-card-blurb {
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+
+.prov-card-key {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Sits under the key input; explains what happens if it's left blank. */
+.prov-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 560px) {
+  .prov-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ============================================================
+   Settings → Admin: provider API key card
    Two rows. The stored key sits on its own line with the
    actions that operate on it (test / remove) pinned right; the
    input for a NEW key sits below with its submit inline.
