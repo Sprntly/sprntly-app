@@ -42,6 +42,32 @@ export const ARTIFACT_TYPE_IDS: readonly ArtifactTemplateType[] = [
   "impl_spec",
 ] as const
 
+/** Document types withheld from the UI (owner, 2026-08-06) — HIDDEN, not
+ *  removed. Engineering-spec formats are built end to end: the routes accept
+ *  them, the compiler compiles them, `resolve_impl_spec_template` reads them and
+ *  `GENERATION_ENABLED.impl_spec` is true. Only the surfaces are withheld, so a
+ *  user is asked to understand two document types instead of three while this
+ *  settles.
+ *
+ *  Restoring it is emptying this set. Nothing else — no route, no test of the
+ *  backend behaviour, and no data — is conditioned on it, and a company that
+ *  already activated an engineering-spec format keeps generating into it. That
+ *  is deliberate: hiding a surface must never silently change what the product
+ *  produces.
+ *
+ *  Lives HERE rather than beside the section that first needed it because the
+ *  add-a-format modal shipped its own chip row off `ARTIFACT_TYPE_IDS` and so
+ *  kept offering the type the screen behind it had already withheld. One set,
+ *  one place to empty. */
+export const HIDDEN_ARTIFACT_TYPE_IDS = new Set<ArtifactTemplateType>([
+  "impl_spec",
+])
+
+/** The types any surface may offer. Derived, so a tab row, a group list and the
+ *  upload modal's chips can never disagree about what is on screen. */
+export const VISIBLE_ARTIFACT_TYPE_IDS: readonly ArtifactTemplateType[] =
+  ARTIFACT_TYPE_IDS.filter((t) => !HIDDEN_ARTIFACT_TYPE_IDS.has(t))
+
 /** Group heading. Mirrors store.ARTIFACT_TYPE_LABELS' intent — a user who
  *  uploaded an engineering-spec format must never be shown "impl_spec". */
 export const ARTIFACT_TYPE_LABELS: Record<ArtifactTemplateType, string> = {
