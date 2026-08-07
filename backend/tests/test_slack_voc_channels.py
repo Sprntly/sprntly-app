@@ -990,37 +990,79 @@ def test_an_artifact_request_is_never_hijacked_by_a_voc_report():
         assert not is_voc_report_request(q), q
 
 
-def test_people_is_a_customer_noun_but_not_on_public_surfaces():
-    """`_CUSTOMER_NOUN` had `people`; the speech rule did not, and nobody chose
-    that. Adding it walked straight into a DIFFERENT pinned boundary, though:
-    public/anonymous channels route to the public-feedback report, never to
-    voice of customer (`test_voc_routing_phrases.py` NEGATIVES).
+def test_people_is_not_admitted_as_a_customer_noun():
+    """`people` was added to the speech rule because `_CUSTOMER_NOUN` has it and
+    this list did not — it looked like an unchosen omission. It is not.
 
-    So the widening ships with a veto, and the marker that separates the two is
-    WHERE the talking happens, not WHO is doing it."""
+    `people` is the one customer-ish noun that does not say WHOSE, so admitting
+    it also admits internal talk and answers it from the customer feedback
+    channels. That is the same defect as "top gripes from the design team",
+    arriving one rule along: the ranked-complaint rule was fixed by requiring a
+    customer noun, and this put a non-customer noun back in.
+
+    Guarding it would mean enumerating internal loci — standup, retro, on-call,
+    sprint review — which is exactly the treadmill MODULE LIMITS refuses. The
+    cost is recorded as limit 6."""
     from app.skill_router import is_voc_report_request
 
-    assert is_voc_report_request("what are people saying about the new billing page")
     for q in [
-        "what are people saying about us online",
-        "what's trending about us on Reddit",
-        "what are customers saying about us on social media",
-        "what do people say about us in the press",
+        "what are people saying in the standup",
+        "what are people saying about the on-call rotation",
+        "what are people saying in the retro",
+        # …and the legitimate one it costs us, recorded honestly.
+        "what are people saying about the new billing page",
     ]:
         assert not is_voc_report_request(q), q
 
 
-def test_known_leaks_are_recorded_not_silently_tolerated():
+def test_public_surfaces_go_to_public_feedback_not_voc():
+    """A SEPARATE, PINNED SURFACE — not a recall loss. Naming a public locus
+    redirects the question to the public-feedback report
+    (`test_voc_routing_phrases.py` NEGATIVES pins the boundary); the user still
+    gets an answer, from the right place.
+
+    Kept after `people` was dropped, because it guards the customer nouns too:
+    without it, "what are customers saying about us on social media" is claimed
+    by the internal-Slack path."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "what are people saying about us online",
+        "what's trending about us on Reddit",
+        "what are customers saying about us on social media",
+        "customers complain our app store listing is confusing",
+        "what are customers saying about our G2 reviews",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN LEAKS, shipped knowingly — these action commands still route to "
+        "a VoC report. XPASS means one now routes CORRECTLY: invert that entry, "
+        "do NOT delete it. See MODULE LIMITS in skill_router."
+    ),
+)
+def test_known_action_command_leaks_are_fixed():
     """THE LEAKS WE ARE KNOWINGLY SHIPPING, pinned so their status is a decision
     rather than an oversight, and so the envelope migration inherits them as its
     test set.
 
-    This test asserts the CURRENT (wrong) behaviour on purpose. When the intent
-    envelope takes over VoC classification it should start failing — that is the
-    signal the migration worked, and the test should then be inverted, not
-    deleted. `spin up`, `stick` and `sort` are ordinary words; five independent
-    phrasing sets produced five different leak sets, so enumerating these three
-    would produce a sixth rather than converge."""
+    `xfail(strict=True)` rather than an inverted assert: it is the native idiom
+    for "known broken, tell me when it's fixed", an XPASS reports distinctly
+    from a failure, and it removes the odd property of a bare assert whose
+    SUCCESS depends on the bug still existing.
+
+    The likelier trigger is NOT the envelope migration but an incidental fix —
+    someone adds `sort` to a veto for an unrelated reason and CI goes red with
+    the migration nowhere in sight. The reason string above is written for that
+    person, not for the planned case.
+
+    `spin up`, `stick` and `sort` are ordinary words. Five independent phrasing
+    sets produced five different leak sets, so enumerating these three would
+    produce a sixth rather than converge — which is the argument for moving this
+    judgement into the intent envelope."""
     from app.skill_router import is_voc_report_request
 
     for q in [
@@ -1028,10 +1070,7 @@ def test_known_leaks_are_recorded_not_silently_tolerated():
         "stick the top complaints on the roadmap",
         "sort the customer complaints by severity and assign them",
     ]:
-        assert is_voc_report_request(q), (
-            f"{q!r} now routes correctly — if the intent envelope landed, "
-            "invert this test rather than deleting it"
-        )
+        assert not is_voc_report_request(q), q
 
 
 def test_ordinary_questions_with_wanting_verbs_are_not_voc():

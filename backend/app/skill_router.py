@@ -373,10 +373,21 @@ _VOC_CHANNEL_RULE = re.compile(
 #: fix is not admitting them, so the verbs stay out and the recall is given up
 #: knowingly (see MODULE LIMITS in `is_voc_report_request`).
 _VOC_SAYING_RULE = re.compile(
-    # `people` is here because `_CUSTOMER_NOUN` has it and this list did not —
-    # "what are people saying about the new billing page" missed for no reason
-    # anyone chose.
-    r"\b(?:customer|user|client|people)s?\b(?:\s+\w+){0,3}\s+"
+    # NO `people`. It was added here because `_CUSTOMER_NOUN` has it and this
+    # list did not, which looked like an unchosen omission. It is not: `people`
+    # is the one noun in that set that does not say WHOSE, so it admits internal
+    # talk — "what are people saying in the standup", "what are people saying
+    # about the on-call rotation" — and answers it from the customer feedback
+    # channels. That is the SAME defect as "top gripes from the design team",
+    # arriving through a different rule: the ranked-complaint rule was fixed by
+    # requiring a customer noun, and putting a non-customer noun in here
+    # reopened it one rule along.
+    #
+    # The public-surface veto does not help — it guards PUBLIC loci (online,
+    # Reddit, app store); nothing guards INTERNAL ones, and enumerating them
+    # (standup, retro, on-call, sprint review, …) is the treadmill MODULE LIMITS
+    # exists to refuse. The miss it costs is recorded as limit 6.
+    r"\b(?:customer|user|client)s?\b(?:\s+\w+){0,3}\s+"
     r"\b(?:say(?:ing|s)?|said|telling|told|complain\w*|report(?:ing|ed)?|"
     r"flag(?:ging|ged)|push(?:ing)?\s+for|struggl\w*|"
     r"unhappy|frustrated|confused)\b",
@@ -770,6 +781,15 @@ def is_voc_report_request(question: str) -> bool:
        veto on a work artifact and making that tier position-independent: the
        anchor cannot tell WHOSE action the ticket-filing is. Making it try would
        reopen every subject-first command in the KNOWN LEAKS below.
+    6. `people` AS A CUSTOMER NOUN. "what are people saying about the new
+       billing page" misses. `people` is the one customer-ish noun that does not
+       say WHOSE, so admitting it also admits "what are people saying in the
+       standup" — the same defect as limit 4's on-call complaints, one rule
+       along. Guarding it would mean enumerating internal loci (standup, retro,
+       on-call, sprint review …), which is the treadmill this section refuses.
+       Note this is NOT symmetric with the PUBLIC surfaces: those are guarded,
+       because naming a public locus redirects the question to the
+       public-feedback report — a different surface, not a lost answer.
 
     ── KNOWN LEAKS — reproduced, recorded, deliberately not chased ────────────
 
