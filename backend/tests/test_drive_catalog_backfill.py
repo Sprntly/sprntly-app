@@ -291,3 +291,96 @@ def test_backfill_never_calls_google(isolated_settings, stub_enrichment, monkeyp
     backfill_drive_catalog(_CID)
 
     assert reads == ["drive-a"]
+
+
+# ═════════════ Degrading honestly on a tenant with no Drive rows ════════════
+
+
+def test_zero_drive_rows_yields_no_referent_and_no_failure_language(
+    isolated_settings, monkeypatch
+):
+    """The state EVERY tenant but one is in today, asserted as a behaviour.
+
+    A tenant with Confluence catalogued and Drive not must answer Drive
+    questions with silence about Drive, not with anything that reads like a
+    lookup that failed. "We could not find that in your Drive" would be a
+    false statement dressed as a diagnosis — nothing was ever searched,
+    because nothing was ever registered.
+
+    Adjudication is forced ON here (the autouse guard would mask the path) and
+    set to accept whatever it is given, so the only reason no referent appears
+    is that there is no Drive row to resolve to."""
+    from app import ask_runner, document_referent
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    db.table("document_catalog").insert({
+        "company_id": _CID, "provider": "confluence",
+        "external_id": "page-1", "title": "Release notes",
+        "source_name": "SD", "content_hash": "h1",
+        "summary": "Ship dates for the August release.",
+        "topics": ["release notes"], "doc_date": "2026-08-02T10:00:00+00:00",
+    }).execute()
+    monkeypatch.setattr(
+        document_referent, "adjudicate",
+        lambda **kw: kw["candidates"][0].get("external_id") if kw["candidates"] else None,
+    )
+
+    block, manifest = ask_runner.document_grounding(
+        _CID, "what does the billing doc in google drive say about usage?"
+    )
+
+    assert not [
+        m for m in manifest
+        if m.get("match") in (document_referent.MATCH_CARRIED,
+                              document_referent.MATCH_RESOLVED)
+    ]
+    lowered = block.lower()
+    for forbidden in (
+        "could not be loaded", "does not exist", "no such document",
+        "not in any connected source", "google drive",
+    ):
+        assert forbidden not in lowered, (
+            f"a tenant with no Drive rows emitted {forbidden!r} — nothing was "
+            f"searched, so nothing may be reported about Drive"
+        )
+
+
+def test_decision_log_separates_no_drive_rows_from_no_drive_match(
+    isolated_settings, monkeypatch
+):
+    """`catalog_size` and `topical_outcome` are whole-catalog, so a tenant with
+    27 Confluence rows and zero Drive rows reports `ranked` and looks healthy
+    while Drive is structurally unreachable. Those two states need opposite
+    fixes — run the backfill, versus look at ranking — so the record has to
+    tell them apart. Counts per provider, no titles."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    for i in range(3):
+        db.table("document_catalog").insert({
+            "company_id": _CID, "provider": "confluence",
+            "external_id": f"page-{i}", "title": f"Page {i}",
+            "source_name": "SD", "content_hash": f"h{i}",
+            "summary": "s", "topics": [],
+            "doc_date": "2026-08-02T10:00:00+00:00",
+        }).execute()
+
+    logged = []
+    from app.graph import decision_log
+
+    monkeypatch.setattr(
+        decision_log, "log_agent_decision",
+        lambda **kw: logged.append(kw),
+    )
+
+    ask_runner.document_grounding(_CID, "what shipped recently")
+
+    row = next(r for r in logged if r["decision_type"] == "document_selection")
+    by_provider = row["factors"]["catalog_by_provider"]
+    assert by_provider == {"confluence": 3}
+    assert "google_drive" not in by_provider, (
+        "absence of the key is what says 'this tenant has no Drive documents "
+        "catalogued' — distinct from a zero-match against rows that exist"
+    )

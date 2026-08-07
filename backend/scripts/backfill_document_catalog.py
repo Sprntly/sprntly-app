@@ -24,10 +24,24 @@ the markdown the sync already wrote rather than calling Google:
     python scripts/backfill_document_catalog.py --drive --company <id>
     python scripts/backfill_document_catalog.py --drive --apply --company <id>
 
-Run `document_bodies.backfill_drive_markdown_paths` first for any tenant whose
-Drive files predate markdown-location tracking — a file whose body cannot be
-located is skipped here (counted `no_body`), because an Index entry with
-nothing behind it is worse than an absent one.
+A Drive file is registered only when its converted markdown can actually be
+located; one that cannot is counted `no_body` and skipped, because an Index
+entry with nothing behind it is worse than an absent one.
+
+THAT SKIP IS WHY `--derive-locations` EXISTS, and why you almost certainly
+need it. Measured on the shared database 2026-08-07 there were SIX
+`kg_source` google_drive rows fleet-wide, and FIVE carried no `md_file` — so a
+plain `--drive` run registers exactly ZERO documents. Deriving the locations
+first (`document_bodies.backfill_drive_markdown_paths`, which reconstructs the
+path from the row's label) is what turns this script from a no-op into the
+fix. It must run where the corpus markdown actually lives, and it declines any
+name that collided on disk rather than guessing, so expect some files to stay
+unresolved.
+
+    # See how much is reachable, writing nothing:
+    python scripts/backfill_document_catalog.py --drive --derive-locations
+    # Then commit both steps:
+    python scripts/backfill_document_catalog.py --drive --derive-locations --apply
 
 Cost + safety, stated plainly because this script spends money:
 
@@ -62,6 +76,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import document_bodies  # noqa: E402
 from app.db.client import require_client  # noqa: E402
 from app.document_sources import (  # noqa: E402
     backfill_catalog,
@@ -96,6 +111,15 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0,
                         help="max documents to register per company")
     parser.add_argument(
+        "--derive-locations", action="store_true",
+        help=(
+            "with --drive: first reconstruct missing markdown locations on "
+            "kg_source rows (document_bodies.backfill_drive_markdown_paths). "
+            "Without this, files synced before location tracking are skipped "
+            "as no_body and the run registers nothing"
+        ),
+    )
+    parser.add_argument(
         "--drive", action="store_true",
         help=(
             "backfill already-synced Google Drive files instead of uploads "
@@ -114,6 +138,20 @@ def main() -> int:
     )
     for company_id in _companies(args.company):
         try:
+            if args.drive and args.derive_locations:
+                # Reported separately from the catalog counts: "we could not
+                # find where this file's text was stored" and "we found it and
+                # chose not to register it" are different problems with
+                # different owners, and collapsing them into one number is how
+                # a backfill gets called done while Drive stays unreachable.
+                located = document_bodies.backfill_drive_markdown_paths(
+                    company_id, apply=args.apply
+                )
+                if any(located.values()):
+                    logger.info(
+                        "%s %s — locations %s",
+                        "OK   " if args.apply else "WOULD", company_id, located,
+                    )
             if args.drive:
                 # Drive's dry run goes through the SAME function with
                 # apply=False rather than a separate count, so what a dry run

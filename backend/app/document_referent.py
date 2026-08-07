@@ -133,24 +133,58 @@ _DOCUMENT_NOUNS = (
     r"|pdfs?|one-?pagers?|agreements?|contracts?|proposals?|wikis?"
     r"|confluence|google\s+drive|gdrive)"
 )
+
+#: The same list MINUS bare "page", for the broad cue. Measured against 986
+#: real user turns from the shared database: `page` matched 12 of them and
+#: ELEVEN meant a UI screen — "branded error page", "the Settings page", "page
+#: is sign in page", "web-rendered page". In a product-management tool, "page"
+#: is overwhelmingly a thing you are building, not a thing you have written.
+#:
+#: It stays in `_DOCUMENT_NOUNS` above, so the ANAPHOR pattern still accepts
+#: "what does that page say?" — a natural way to refer back to a wiki page.
+#: That form appeared twice in the same 986 turns, and the anaphor path
+#: additionally requires a prior turn to have named exactly one document, so
+#: the residual risk is bounded in a way the bare cue's was not.
+_CUE_NOUNS = (
+    r"(?:docs?|documents?|files?|specs?|write-?ups?|memos?|decks?"
+    r"|pdfs?|one-?pagers?|agreements?|contracts?|proposals?|wikis?"
+    r"|confluence|google\s+drive|gdrive)"
+)
 _READING_VERBS = (
     r"(?:says?|said|saying|mentions?|mentioned|states?|stated|covers?|covered"
     r"|describes?|described|documented|wrote\s+up|written)"
 )
 
-#: Referring back at a document without naming it. The second alternative
-#: covers the bare-verb forms too — "does it say about X" contains "it say",
-#: and `_READING_VERBS` already admits both `say` and `says`.
+#: Nouns strong enough that a determiner alone makes the phrase a reference:
+#: "that doc", "the spec", "this deck". Nobody says "the spec" about a screen.
+_STRONG_ANAPHOR_NOUNS = (
+    r"(?:docs?|documents?|files?|specs?|write-?ups?|memos?|decks?"
+    r"|pdfs?|one-?pagers?|agreements?|contracts?|proposals?|wikis?)"
+)
+
+#: Nouns that need a READING VERB before they count. Only "page" so far, and
+#: the evidence is the same 986 real turns: "this page" appeared twice, once
+#: meaning a wiki page and once meaning a login screen. A determiner cannot
+#: separate those; a reading verb can. "what does that page SAY" is a
+#: document reference; "users cannot see this page if they aren't logged in"
+#: is not, and under the determiner-only rule it was one.
+_WEAK_ANAPHOR_NOUNS = r"(?:pages?)"
+
+#: Referring back at a document without naming it. Alternative 2 covers the
+#: bare-verb forms — "does it say about X" contains "it say", and
+#: `_READING_VERBS` admits both `say` and `says`. Alternative 3 is the weak
+#: nouns, admitted only in front of a reading verb.
 _ANAPHOR_RE = re.compile(
-    rf"\b(?:that|this|the|those|these|it)\s+{_DOCUMENT_NOUNS}\b"
-    rf"|\b(?:it|that|this)\s+{_READING_VERBS}\b",
+    rf"\b(?:that|this|the|those|these|it)\s+{_STRONG_ANAPHOR_NOUNS}\b"
+    rf"|\b(?:it|that|this)\s+{_READING_VERBS}\b"
+    rf"|\b(?:that|this|the|those|these)\s+{_WEAK_ANAPHOR_NOUNS}\s+{_READING_VERBS}\b",
     re.I,
 )
 #: Pointing at a document at all — by description, by anaphor, or by asking
 #: what a source says. A message with none of this is not a document question,
 #: and no amount of ranking may turn it into one.
 _CUE_RE = re.compile(
-    rf"\b{_DOCUMENT_NOUNS}\b"
+    rf"\b{_CUE_NOUNS}\b"
     rf"|\b(?:according\s+to|as\s+per)\b"
     rf"|\bwhat\s+(?:does|did)\s+.{{0,40}}?\b{_READING_VERBS}\b",
     re.I,

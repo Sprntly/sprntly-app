@@ -824,6 +824,7 @@ def document_grounding(
             enterprise_id,
             manifest=[],
             catalog_size=len(catalog_docs),
+            catalog_by_provider=_catalog_by_provider(catalog_docs),
             topical_ran=False,
             topical_candidates=0,
             question_embedding=question_embedding,
@@ -1194,6 +1195,7 @@ def document_grounding(
         enterprise_id,
         manifest=manifest,
         catalog_size=len(catalog_docs),
+        catalog_by_provider=_catalog_by_provider(catalog_docs),
         topical_ran=topical_ran,
         topical_candidates=len(topical_candidates),
         question_embedding=question_embedding,
@@ -1239,6 +1241,15 @@ def _topical_outcome(
     return TOPICAL_RANKED if topical_candidates else TOPICAL_SEARCHED_NO_MATCH
 
 
+def _catalog_by_provider(catalog_docs) -> dict[str, int]:
+    """{provider: row count} for what this caller can see. Counts only."""
+    counts: dict[str, int] = {}
+    for doc in catalog_docs or []:
+        provider = getattr(doc, "provider", None) or "unknown"
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
 #: How Stage R ended. `none` is the majority outcome and the RIGHT one for a
 #: question that is not about a document — it is recorded rather than being
 #: the absence of a record, because "resolution declined" and "resolution
@@ -1268,6 +1279,7 @@ def _log_document_selection(
     index_empty: bool = False,
     resolution: "document_referent.Resolution | None" = None,
     history_turns: int = 0,
+    catalog_by_provider: dict[str, int] | None = None,
 ) -> None:
     """Record how document selection went, from the ONE function both grounding
     call sites share.
@@ -1307,6 +1319,18 @@ def _log_document_selection(
                 # How many rows the catalog held for this caller, which is what
                 # separates "nothing to find" from "found nothing".
                 "catalog_size": catalog_size,
+                # The same separation, PER PROVIDER, and it is not a nicety.
+                # `catalog_size` and `topical_outcome` are whole-catalog: a
+                # tenant with 27 Confluence rows and ZERO Drive rows — which
+                # is the real fleet-wide shape as of 2026-08-07, because
+                # `drive_extract` only registers a file whose modifiedTime
+                # moved — reports `ranked` and looks perfectly healthy while
+                # Drive is structurally unreachable. Without this field, "this
+                # tenant has no Drive documents catalogued" and "Drive had
+                # documents and none matched" are the same record, and they
+                # call for opposite fixes: run the backfill, versus look at
+                # ranking. Counts only, keyed by provider — no titles.
+                "catalog_by_provider": dict(sorted((catalog_by_provider or {}).items())),
                 "topical_candidates": topical_candidates,
                 "topical_outcome": _topical_outcome(
                     catalog_size, topical_ran, topical_candidates,

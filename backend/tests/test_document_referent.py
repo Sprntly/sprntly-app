@@ -226,6 +226,47 @@ def _seed_two_wiki_pages(db):
     )
 
 
+#: A summary written to share vocabulary with EVERY question in
+#: ORDINARY_BUSINESS_QUESTIONS below. Its whole purpose is to defeat the
+#: content-term floor.
+#:
+#: Mutation testing is why it exists. With only the two wiki pages seeded,
+#: disabling the cue gate killed just 4 of the 10 false-positive integration
+#: cases — the other 6 were being saved by the FLOOR, not by the guard the
+#: test claims to exercise. Six tests were passing for a reason their names
+#: did not describe, which is the exact defect class this suite exists to
+#: catch. With this row present every question clears the floor, so the cue
+#: gate is the only thing left that can hold the line, and all 10 die when it
+#: is removed.
+#: Inflections are spelled out (customers AND customer, churning AND churn)
+#: because `_content_terms` matches exact tokens, not stems. The first version
+#: of this fixture omitted them and "why are customers churning?" kept passing
+#: the cue-gate mutation for the wrong reason — the floor was catching it. One
+#: survivor out of ten is precisely how a suite quietly stops testing what its
+#: name says.
+_KITCHEN_SINK_SUMMARY = (
+    "Pricing strategy for enterprise accounts, revenue booked last quarter, "
+    "engineering team headcount and billing squads, customer and customers "
+    "complaints, churn and churning drivers, activation for new signups, and "
+    "what we should build next."
+)
+_KITCHEN_SINK_TOPICS = [
+    "pricing strategy", "revenue", "team headcount", "billing", "engineers",
+    "customer complaints", "customers", "churn", "churning", "activation",
+    "signups", "roadmap", "enterprise accounts", "prices",
+]
+
+
+def _seed_floor_defeating_page(db):
+    """A catalog row that clears the content-term floor for every ordinary
+    business question, so those tests exercise the CUE GATE and nothing else."""
+    _seed_catalog_row(
+        db, provider="confluence", external_id="page-everything",
+        title="Company Overview 2026", source_name="Strategy",
+        summary=_KITCHEN_SINK_SUMMARY, topics=_KITCHEN_SINK_TOPICS,
+    )
+
+
 # ══════════════════ 1. FALSE POSITIVES — the acceptance bar ════════════════
 
 
@@ -250,17 +291,30 @@ def test_ordinary_business_question_resolves_to_no_document(
     """THE BAR. A question about the business is not a reference to a document,
     even when a document on the shortlist is about the same subject.
 
-    The catalog here is stacked against the test on purpose: the pricing page
-    is a strong topical match for half these questions, and the fake
-    adjudicator is set to pick the FIRST candidate if it is ever consulted. So
-    the only thing that can keep the referent empty is the deterministic cue
-    gate refusing to treat these as document questions at all.
+    The catalog is stacked against the test on three counts, so that a pass
+    can only mean the cue gate held:
+
+      * `_seed_floor_defeating_page` shares vocabulary with EVERY question
+        here, so guard #2 (the content-term floor) cannot be what saves the
+        test. Without this the suite was weaker than it looked — see that
+        helper's comment for the mutation run that exposed it.
+      * The fake adjudicator is set to pick the FIRST candidate if it is ever
+        consulted, so guard #3 cannot be what saves the test either.
+      * The assertion is not merely that no referent came back, but that the
+        adjudicator was NEVER CALLED — a guard that works only because a model
+        chose to decline is one prompt revision away from failing.
     """
     from app.ask_runner import document_grounding
 
     db = isolated_settings["supabase"]
     _seed_two_wiki_pages(db)
+    _seed_floor_defeating_page(db)
     catalog_candidates([
+        _candidate(
+            provider="confluence", external_id="page-everything",
+            title="Company Overview 2026", source_name="Strategy",
+            summary=_KITCHEN_SINK_SUMMARY, topics=_KITCHEN_SINK_TOPICS,
+        ),
         _candidate(
             provider="confluence", external_id="page-pricing",
             title="Enterprise Pricing Model 2026", source_name="Strategy",
@@ -290,6 +344,82 @@ def test_ordinary_business_question_resolves_to_no_document(
         "an ordinary business question reached the adjudicator; the cue gate "
         "must stop it deterministically, before any model gets a vote"
     )
+
+
+def test_the_suite_fake_adjudicator_beats_the_autouse_guard(
+    isolated_settings, adjudicator
+):
+    """PROOF THAT THE FALSE-POSITIVE SUITE ABOVE CAN FAIL AT ALL.
+
+    `tests/conftest.py` installs an autouse `_no_referent_adjudication` guard
+    that makes `adjudicate` return None everywhere, so no test accidentally
+    fires a real gateway call. If that guard also won inside THIS module, every
+    "resolves to no document" assertion would pass because adjudication was
+    stubbed to never resolve — testing nothing, and passing just as happily
+    against a resolver that pinned a wiki page onto every business question.
+    That is the precise shape of defect that made the previous attempt
+    unmergeable, so it is asserted rather than reasoned about.
+
+    Two things are checked: the installed function is the suite's recording
+    fake (not the guard's `lambda **kw: None`), and it really does return a
+    document when told to."""
+    from app import document_referent
+
+    assert document_referent.adjudicate.__qualname__ == "adjudicator.<locals>._fake", (
+        "the autouse conftest guard is shadowing the suite's controllable "
+        "fake — every false-positive assertion in this file is vacuous"
+    )
+    adjudicator.picks(1)
+    assert document_referent.adjudicate(
+        enterprise_id=_CID, question="q", candidates=[{"external_id": "A"}]
+    ) == "A"
+    assert adjudicator.calls, "the fake must record what it was asked"
+
+
+#: VERBATIM user messages pulled from `conversation_turns` on the shared
+#: database (986 real turns sampled 2026-08-07). Synthetic questions test the
+#: failure mode you imagined; these test the one users actually produce.
+#:
+#: Every one of these is a product/UI discussion, and every one of them would
+#: have fired the cue gate under the first version of this module, because
+#: `page` was in the broad noun list. Eleven of the twelve real `page` matches
+#: meant a SCREEN — in a PM tool "page" is something you are building. That is
+#: not a correctness bug (the adjudicator would decline) but it is a wasted
+#: ~1.5s model call on a common shape of message, and it is exactly the kind
+#: of thing a synthetic suite never surfaces.
+REAL_PRODUCT_MESSAGES_WITHOUT_DOCUMENT_CUE = [
+    "users cannot see this page if they arenot loggedin",
+    "A branded error page — distinguishing access ended from a real failure",
+    "invite users from the Settings page. This should mirror the bulk-invite flow",
+    "is it a web-rendered page, a data-driven report component, or something else?",
+    "page is sign in page What should the toast say",
+]
+
+
+@pytest.mark.parametrize("message", REAL_PRODUCT_MESSAGES_WITHOUT_DOCUMENT_CUE)
+def test_real_product_ui_messages_carry_no_document_cue(message):
+    """Guards the `page` finding above against a well-meaning revert.
+
+    Someone reading `_CUE_NOUNS` will eventually notice `page` is missing and
+    add it back — it looks like an oversight. These are the messages that make
+    the case for its absence, in the users' own words."""
+    from app.document_referent import has_document_cue
+
+    assert has_document_cue(message) is False
+
+
+def test_a_wiki_page_can_still_be_referred_back_to_as_that_page():
+    """The other side of the `page` decision, so the fix is not read as
+    "page is never a document". Dropping it from the broad cue must NOT cost
+    the anaphor — "what does that page say?" is a natural follow-up to a
+    Confluence result, and it still resolves (guarded further by requiring a
+    prior turn to have named exactly one document)."""
+    from app.document_referent import has_anaphor, has_document_cue
+
+    assert has_anaphor("what does that page say about seat bands?") is True
+    assert has_document_cue("what does that page say about seat bands?") is True
+    # And naming the system directly is still a cue on its own.
+    assert has_document_cue("what pages are on confluence?") is True
 
 
 @pytest.mark.parametrize("question", ORDINARY_BUSINESS_QUESTIONS)
@@ -580,7 +710,11 @@ class TestCarryForward:
     ):
         """Same history, a question that does not refer back. Carry needs a
         referring expression; standing next to a document discussion is not
-        one."""
+        one.
+
+        NOTE this test alone does not isolate the anaphor rule — its question
+        has no document cue either, so guard #1 would stop it regardless. The
+        isolating case is the next test."""
         from app.ask_runner import document_grounding
 
         db = isolated_settings["supabase"]
@@ -595,6 +729,50 @@ class TestCarryForward:
         _, manifest = document_grounding(
             _CID, "what were revenues last quarter?", history=history
         )
+
+        assert _referent_matches(manifest) == []
+
+    def test_a_cue_without_an_anaphor_does_not_carry_the_prior_document(
+        self, isolated_settings, catalog_candidates, adjudicator, confluence_pages
+    ):
+        """THE CASE THAT ISOLATES THE ANAPHOR RULE, and it was missing.
+
+        Mutation testing found the hole: deleting the `has_anaphor` guard from
+        `carried_referent` killed NO test, because every existing negative
+        case also lacked a document cue, so guard #1 returned first and the
+        anaphor rule was never reached. The whole carry-forward precondition
+        was untested.
+
+        Here the question DOES point at a document ("the deployment spec"), so
+        the cue gate passes — but it is asking about a DIFFERENT document than
+        the one the conversation established, and it refers back to nothing.
+        Carrying the pricing page here would mean any document question asked
+        after any document discussion silently inherits the earlier document,
+        which is the pin-forever failure wearing a cue.
+
+        The adjudicator declines, so the descriptive path contributes nothing
+        and carry is the only thing that could produce a referent."""
+        from app.ask_runner import document_grounding
+        from app.document_referent import has_anaphor, has_document_cue
+
+        question = "what does the deployment spec say about rollbacks?"
+        # The precondition this test rests on, asserted rather than assumed:
+        # if the regexes drift so this question gains an anaphor, the test
+        # would start passing for the wrong reason and say nothing.
+        assert has_document_cue(question) is True
+        assert has_anaphor(question) is False
+
+        db = isolated_settings["supabase"]
+        _seed_two_wiki_pages(db)
+        catalog_candidates([])
+        confluence_pages(page={"id": "page-pricing", "text": "Seat bands."})
+        adjudicator.declines()
+        history = [
+            {"role": "user", "content": "summarise Enterprise Pricing Model 2026"},
+            {"role": "assistant", "content": "Seat bands."},
+        ]
+
+        _, manifest = document_grounding(_CID, question, history=history)
 
         assert _referent_matches(manifest) == []
 
