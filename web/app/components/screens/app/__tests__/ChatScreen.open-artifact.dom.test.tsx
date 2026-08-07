@@ -64,10 +64,22 @@ vi.mock("../../../../lib/api", () => {
       get: vi.fn(),
     },
     artifactsApi: { chatSummary: vi.fn().mockResolvedValue({ summary: null }) },
+    attachmentsApi: { upload: vi.fn().mockResolvedValue(null) },
+    storiesApi: { generate: vi.fn().mockResolvedValue({}) },
+    evidenceApi: { get: vi.fn().mockResolvedValue(null) },
+    reportsApi: { list: vi.fn().mockResolvedValue({ reports: [] }) },
+    // The persistence layer reaches this module through a DYNAMIC import
+    // (`chatPersistence`'s getApi). A partial mock here does not merely leave a
+    // method undefined — the real module gets pulled in alongside it and the
+    // conversation `create` goes out over the network, so the tab never gets a
+    // conversation id and every turn after it is silently dropped. Mirror the
+    // sibling command suites' full shape.
     conversationsApi: {
+      list: vi.fn().mockResolvedValue({ conversations: [] }),
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: (...a: unknown[]) => addTurn(...a),
-      byPrd: vi.fn().mockResolvedValue({ conversation: null }),
+      update: vi.fn().mockResolvedValue({}),
+      byPrd: vi.fn().mockResolvedValue({ conversation: null, turns: [] }),
     },
   }
 })
@@ -410,27 +422,55 @@ describe("ChatScreen — the open acknowledgment is not a promise", () => {
     )
   })
 
-  it("still acknowledges when the document was ALREADY on screen", async () => {
-    // The instant path: the second open finds the PRD cached on the tab and
-    // returns before any load. Deferring the ack without settling it here left
-    // the turn under a thinking indicator forever — dead air in the one case
-    // where the panel opened immediately.
+  it("PERSISTS the ack when the document was already cached, not just renders it", async () => {
+    // The instant path: a repeat open finds the PRD cached on the tab and
+    // returns before any load. Two bugs have lived here, in order:
+    //
+    //   1. no ack at all — the turn sat under a thinking indicator forever;
+    //   2. an ack rendered but never SAVED — `settleCommandAck` writes the
+    //      visible thread unconditionally and only persists when it finds a
+    //      registered deferred entry, and the settle ran before the
+    //      registration. On screen it looked perfect; reopening the chat from
+    //      the rail showed "No response was generated for this message."
+    //
+    // So the visible-thread assertion cannot stand alone: it passed straight
+    // through (2). Every ack must reach `conversationsApi.addTurn` as an
+    // assistant turn, and the user→assistant pairing must stay in order —
+    // `hydratePrdThread`'s rebuild depends on it.
     resolveIntent.mockResolvedValue(resolved2216())
     renderChat()
+    // #1 does the real load and establishes the tab's conversation; #2 is the
+    // first CACHED open. Assertions begin after both, from a cleared spy — the
+    // opening turn races its own conversation `create` in this harness, and
+    // that race is not what is under test. Running a cached open BEFORE the
+    // measured one also sets the scenario-B trap: with the bug, #2 stranded a
+    // registration that #3 would then consume and write against #2's turn id.
     await typeAndSend("open the PRD for compliance reporting")
-    await waitFor(() =>
-      expect(screen.getByText(/Opening that PRD in the panel on the right/i)).toBeTruthy(),
-    )
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledTimes(1))
+    await typeAndSend("open the PRD for compliance reporting")
+    await waitFor(() => expect(addTurn).toHaveBeenCalled())
+    addTurn.mockClear()
 
+    // #3 — cached. openPrdInTab returns before ever reaching its async block.
     await typeAndSend("open the PRD for compliance reporting")
 
-    // Two asks, two acknowledgments — and no second fetch for a cached doc.
     await waitFor(() =>
       expect(
         screen.getAllByText(/Opening that PRD in the panel on the right/i),
-      ).toHaveLength(2),
+      ).toHaveLength(3),
     )
+    // No re-fetch for a document already in hand.
     expect(loadPrdById).toHaveBeenCalledTimes(1)
+
+    // …and THIS exchange reached the conversation, user before assistant. That
+    // is the half the visible-thread assertion cannot see, and the half that
+    // was broken: the reply rendered perfectly and was never saved.
+    await waitFor(() => {
+      expect(addTurn.mock.calls.map((c) => c[1])).toEqual(["user", "assistant"])
+    })
+    expect(String(addTurn.mock.calls[1][2])).toMatch(
+      /Opening that PRD in the panel on the right/i,
+    )
   })
 
   it("says what really happened when the document refuses to load", async () => {

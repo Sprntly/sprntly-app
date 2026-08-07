@@ -458,6 +458,26 @@ type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
    *  live thread) instead of spawning a new tab. Set by the in-chat command
    *  flows when the active tab is a plain, PRD-less chat. */
   inTabId?: string
+  /** This open resolves ENTIRELY from the target tab's cache: `openPrdInTab`
+   *  returns before reaching its async block, so nothing will ever run later to
+   *  settle a deferred acknowledgment — the ack must ride the seed turn instead.
+   *
+   *  It is a field rather than a local because TWO functions have to agree on
+   *  it: `openPrdInTab` decides whether the seed turn carries its reply inline,
+   *  and `seedCommandTurn` — which runs AFTER it — decides whether to register
+   *  the turn in `deferredAckRef`. The second cannot safely re-derive the answer
+   *  from tab state the first has already started mutating.
+   *
+   *  Disagreement is not cosmetic. `settleCommandAck` writes the visible thread
+   *  unconditionally but only PERSISTS when it finds a registered entry, so a
+   *  settle arriving before the registration looks perfect on screen while
+   *  silently dropping the assistant turn from the conversation — and the NEXT
+   *  one then pairs its reply with the previous turn's id, inverting the
+   *  user→assistant order `hydratePrdThread`'s rebuild depends on.
+   *
+   *  Computed once by the caller that knows whether the document is cached
+   *  (`openArtifactInPanel`), read by both. */
+  ackInline?: boolean
 }
 
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
@@ -1988,8 +2008,13 @@ export function ChatScreen() {
     // panel that never opened. Now the ack is written only once the document is
     // actually on screen (settleCommandAck below), and a refusal writes what
     // really happened (failDeferredAck).
+    // …but NOT when the document is already cached on the target tab: that open
+    // returns below without ever entering the async block, so a deferred ack
+    // would have nothing to settle it. `ackInline` is the caller's verdict on
+    // exactly that, shared with seedCommandTurn so the two cannot disagree.
     const deferAck =
-      source.kind === "generateTask" || (source.kind === "load" && !!req.seedQuery)
+      source.kind === "generateTask" ||
+      (source.kind === "load" && !!req.seedQuery && !req.ackInline)
     const seedTurn: ThreadTurn | null = req.seedQuery
       ? {
           id: `seed-${Date.now()}`,
@@ -2097,13 +2122,11 @@ export function ChatScreen() {
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
-      // The document is on screen ALREADY, so the open command's deferred ack is
-      // true right now — and this return never reaches the async block that
-      // normally settles it. Without this the turn keeps a thinking indicator
-      // forever, which is the exact dead air the deferral was meant to avoid:
-      // the one case where the panel opens instantly is the one where the chat
-      // would have said nothing at all.
-      if (deferAck && seedTurn) settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
+      // No ack settling here, deliberately. This return is upstream of the turn
+      // ever being registered (seedCommandTurn runs after openPrdInTab), so a
+      // settle would write the thread and skip persistence entirely. `ackInline`
+      // has already told the seed turn to carry its reply, so the acknowledgment
+      // is on screen AND in the conversation before we get here.
       return tabId
     }
     // Caller already holds the PRD — show it immediately, no async work.
@@ -3151,7 +3174,16 @@ export function ChatScreen() {
     // "open the PRD for X" (a `load` with a seed query) defers on the same
     // rule: "Opening that PRD in the panel on the right" is only true once the
     // load succeeds, and a PRD being regenerated refuses to load.
-    if (req.source.kind === "generateTask" || req.source.kind === "load") {
+    //
+    // `ackInline` is the exception, and MUST be read here rather than
+    // re-derived: that open already returned from cache, so registering a turn
+    // for it would strand an entry no settle ever consumes — and the next
+    // command on this tab would then find that stale entry and persist its own
+    // reply against the wrong turn id. See the field's doc comment.
+    if (
+      req.source.kind === "generateTask" ||
+      (req.source.kind === "load" && !req.ackInline)
+    ) {
       deferredAckRef.current.set(tabId, { turnId, req })
       return
     }
@@ -3754,10 +3786,18 @@ export function ChatScreen() {
       // a tab of its own. `reusableActiveTab` declines a tab already bound to a
       // different PRD/insight, which must not be repointed.
       const inTab = holder ?? reusableActiveTab()
+      // Is the document ALREADY cached on the tab we're about to open into? Then
+      // openPrdInTab returns straight from that cache and never reaches the
+      // async block, so the acknowledgment has to ride the seed turn instead of
+      // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
+      // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
+      // returns tabs with no PRD by definition.
+      const ackInline = holder?.prd?.prd_id === prdId
       const req: LocalPrdTabRequest = {
         title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
         ...(seedQuery ? { seedQuery } : {}),
         ...(inTab ? { inTabId: inTab.id } : {}),
+        ...(ackInline ? { ackInline: true } : {}),
         source: {
           kind: "load",
           prdId,
