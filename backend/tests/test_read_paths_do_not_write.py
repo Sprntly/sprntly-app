@@ -78,8 +78,16 @@ _WRITE_ENABLING_FLAGS: dict[tuple[str, str, str], str] = {
         "at all — see _WRITE_OPS."
     ),
     ("app.connectors.slack_oauth", "fetch_conversation_history", "auto_join"): (
-        "Legitimate for delivery-adjacent callers; NEVER for a chat read. The "
-        "read path is checked below."
+        "Legitimate for delivery-adjacent callers; NEVER for an IMPLICIT read. "
+        "The implicit path is checked below."
+    ),
+    ("app.connector_lookup.slack", "read_channel_history", "auto_join"): (
+        "#1111's resolution: caller-controlled, DEFAULT TRUE. True is allowed "
+        "for the EXPLICIT `slack_channel_history` tool, where the user named "
+        "the channel and asked for it, so joining is the obvious repair. It "
+        "MUST be False on every IMPLICIT path — a question that named no "
+        "channel and no source. That is the property "
+        "`test_the_implicit_voc_read_does_not_enable_auto_join` pins."
     ),
 }
 
@@ -220,63 +228,69 @@ def test_the_spy_harness_actually_catches_a_write():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN DEFECT, live on main: connector_lookup/slack.py `_history` passes "
-        "auto_join=True, so a chat READ makes the bot join channels in a "
-        "customer's workspace. Fixed by PR #1111 — delete this xfail with it."
-    ),
-)
-def test_slack_chat_read_does_not_enable_auto_join():
-    """The read path must call `fetch_conversation_history` with auto_join FALSE.
+def _spy_history_calls():
+    """A `fetch_conversation_history` spy plus a handle that RESOLVES.
 
-    Asserting the ARGUMENT, deliberately. A test that asserted "no join
-    happened" would pass against a fixture where the bot is already a member —
-    which is every fixture anyone writes — while the flag sat in the code
-    waiting for the first customer channel the bot was not in.
+    `_DeadHandle` is wrong for this check: the reader calls
+    `handle.resolve_channel(ref)` BEFORE the call under test, so a dead handle
+    raises first and the test reports a green "no auto_join" having exercised
+    nothing. That happened in this file's first draft and was caught only by the
+    `assert seen` pin below — which is why that pin is not optional.
     """
-    from app.connector_lookup import slack as slack_adapter
-
     seen: list[dict] = []
 
     def _spy(*_a, **kwargs):
         seen.append(kwargs)
         return {"messages": []}
 
-    # A handle that RESOLVES but does not reach Slack. `_DeadHandle` is wrong
-    # here: `_history` calls `handle.resolve_channel(ref)` first, which would
-    # raise before the call under test is ever made — and this test would then
-    # report a green "no auto_join" while having exercised nothing. The
-    # `assert seen` below is what caught exactly that during development.
     handle = mock.MagicMock()
     handle.resolve_channel.side_effect = lambda ref: "C0DEMOS"
     handle.bot_token = "xoxb-fake"
+    return seen, handle, _spy
 
-    with mock.patch.object(slack_oauth, "fetch_conversation_history", _spy):
-        session = ca.LookupSession(
-            provider="slack", handle=handle, extras=collections.defaultdict(dict)
-        )
+
+def test_the_implicit_voc_read_does_not_enable_auto_join():
+    """The IMPLICIT path must pass auto_join=False.
+
+    #1111 resolved this flag as caller-controlled: True is legitimate for the
+    EXPLICIT `slack_channel_history` tool, where the user named the channel, and
+    forbidden on any implicit path. So the property worth pinning is not "the
+    flag is never True" but "the path that never asked for a channel never sets
+    it" — and `slack_voc._read_one` is that path: it runs on "what are our
+    customers saying?", which named no channel and no source.
+
+    Asserting the ARGUMENT, deliberately. A test that asserted "no join
+    happened" would pass against any fixture where the bot is already a member —
+    which is every fixture anyone writes — while the flag sat in the code
+    waiting for the first customer channel the bot was not in.
+    """
+    from app.connector_lookup import slack as slack_lookup
+    from app.connector_lookup import slack_voc
+
+    seen, handle, spy = _spy_history_calls()
+
+    channel = slack_voc.VocChannel(id="C0DEMOS", name="demos")
+    with mock.patch.object(slack_oauth, "fetch_conversation_history", spy):
         try:
-            slack_adapter.PROVIDER.dispatch(
-                session, "slack_channel_history", {"channel": "C0DEMOS", "days": 7}
-            )
-        except Exception:  # noqa: BLE001 — the handle is dead; the call is what matters
+            slack_voc._read_one(handle, channel, 7)
+        except Exception:  # noqa: BLE001 — the shape of the reply is not the point
             pass
 
     assert seen, (
-        "the read path never reached fetch_conversation_history — this test "
-        "proves nothing about auto_join until it does. Fix the harness, do not "
-        "delete the test."
+        "the implicit VoC read never reached fetch_conversation_history — this "
+        "test proves nothing about auto_join until it does. Fix the harness, do "
+        "not delete the test."
     )
     offenders = [kw for kw in seen if kw.get("auto_join")]
     assert not offenders, (
-        "a chat READ called fetch_conversation_history with auto_join=True. "
-        "That makes the Sprntly bot conversations.join a channel in the "
-        "CUSTOMER'S workspace and post a visible join notice, as a side effect "
-        "of someone asking a question. Reads pass auto_join=False; only the "
-        "brief DELIVERY path may join."
+        "the IMPLICIT voice-of-customer read called fetch_conversation_history "
+        "with auto_join=True. That makes the Sprntly bot conversations.join a "
+        "channel in the CUSTOMER'S workspace and post a visible join notice, as "
+        "a side effect of someone asking 'what are customers saying' — a "
+        "question that named no channel at all. Only a path where the user "
+        "NAMED the channel may pass it True."
     )
+    assert slack_lookup.read_channel_history is not None  # the reader still exists
 
 
 def test_every_write_enabling_flag_is_registered():
