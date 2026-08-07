@@ -12,14 +12,13 @@ description: >
 
 # Evidence Brief — the rendering contract
 
-You are given the content decisions by the prompt around this method. **This
-document decides only how that content is rendered.** Where the prompt and this
-file appear to conflict about *what to say*, the prompt wins; this file is
-authoritative for *markup*.
+The prompt around this method decides WHAT the brief says. **This document
+decides only how that content is rendered.** Where the two appear to conflict
+about content, the prompt wins; this file is authoritative for *markup*.
 
 ## The artifact
 
-ONE self-contained HTML document, `1–3` pages, rendered in a **sandboxed iframe
+ONE self-contained HTML document, 1–3 pages, rendered in a **sandboxed iframe
 with scripts disabled**. Nothing that needs JavaScript can ever run: no chart
 library, no runtime, no inline handler, no `<script>` — such an element is not
 merely discouraged, it renders as nothing at all.
