@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 # frontend anchors them. Kept in sync with web/app/lib/htmlBrief.ts — that sniff
 # is the whole reason this module exists.
 _SNIFF_RE = re.compile(r"^\s*<(?:!doctype|meta|html|div|style)\b", re.IGNORECASE)
-# Any markup at all — where the document actually starts, whatever tag it is.
+# The same opening tags, found ANYWHERE — this is where the document really
+# starts when the model wrote something in front of it.
+_DOC_START_RE = re.compile(r"<(?:!doctype|meta|html|div|style)\b", re.IGNORECASE)
+# Any markup at all — the fallback for a document that opens on some other tag.
+# Deliberately second: preferring a known doc-start tag means a preamble that
+# happens to contain angle brackets ("see <below>") cannot be mistaken for it.
 _ANY_TAG_RE = re.compile(r"<[A-Za-z!/]")
 _SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.DOTALL | re.IGNORECASE)
 _BARE_SCRIPT_RE = re.compile(r"<script\b[^>]*/?>", re.IGNORECASE)
@@ -61,7 +66,7 @@ def _strip_preamble_and_trailer(html: str) -> str:
     cosmetic — it renders as stray text under the brief — and is only removed
     when it is unambiguous: plain text after the final `>` with no markup in it.
     """
-    m = _ANY_TAG_RE.search(html)
+    m = _DOC_START_RE.search(html) or _ANY_TAG_RE.search(html)
     if not m:
         raise EvidenceHtmlError(
             "model output contains no HTML at all — the evidence brief must be "
@@ -114,7 +119,7 @@ def normalize_evidence_html(raw: object, css: str) -> str:
         )
         html = '<meta charset="utf-8">\n' + html
 
-    if 'class="wrap"' not in html and "class='wrap'" not in html:
+    if not re.search(r"""class\s*=\s*["'][^"']*\bwrap\b""", html):
         # Not fatal: the document still renders, just full-bleed and unpadded
         # (`.wrap` is what the stylesheet and the viewer's width override both
         # key on). Worth a log line because it means the model left the contract.

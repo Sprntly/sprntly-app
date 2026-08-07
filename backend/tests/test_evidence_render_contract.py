@@ -241,3 +241,14 @@ def test_the_skill_is_still_bound_and_loadable():
     assert "component-reference.html" in spec.references
     assert "evidence.css" in spec.assets
     assert spec.content_hash
+
+
+def test_a_preamble_containing_angle_brackets_is_not_mistaken_for_the_document(golden):
+    """`<below>` in the prose is not where the brief starts. Preferring a known
+    doc-start tag over "any tag at all" is what keeps the cut in the right
+    place — the any-tag fallback exists only for a document that opens on
+    something else entirely."""
+    html = _stored("Here's the brief (details <below>):\n\n" + golden)
+    assert _SNIFF.match(html)
+    assert "below" not in html.split("<div", 1)[0]
+    assert '<div class="wrap"' in html
