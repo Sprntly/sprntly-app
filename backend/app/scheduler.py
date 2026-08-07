@@ -694,6 +694,26 @@ def _run_extraction_eval_cycle() -> None:
         logger.exception("extraction-eval cycle failed")
 
 
+async def _run_skill_source_sync_cycle() -> None:
+    """Re-read every company's synced GitHub skill folders.
+
+    The half of the skills feature that runs without a user: a folder someone
+    registered at import time is re-discovered here, so a skill added to that
+    folder in the repo lands in the library within the interval instead of
+    waiting for someone to reopen the import picker.
+
+    Cheap when idle — `sync_source` short-circuits on an unchanged head SHA, so
+    a quiet folder costs one GitHub request. Fully isolated: per-source failures
+    are swallowed and recorded on the source row inside `sync_all_sources`, and
+    this wrapper is the backstop for anything that escapes it."""
+    try:
+        from app.skills.github_sync import sync_all_sources
+
+        await sync_all_sources()
+    except Exception:  # noqa: BLE001 — sync job must never crash the scheduler
+        logger.exception("skill-source sync cycle failed")
+
+
 def start_scheduler() -> None:
     """Initialize and start the APScheduler. Call from FastAPI lifespan."""
     global _scheduler
@@ -730,6 +750,19 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(hours=interval_hours),
         id="refresh_connectors",
         name=f"Refresh connector data (every {interval_hours}h)",
+        replace_existing=True,
+    )
+    # Synced skill folders: re-read every registered GitHub folder so a skill
+    # added to one shows up in the library on its own. Half-hourly by default —
+    # much finer than the connector refresh because a method someone just
+    # committed is something they expect to use in the same sitting, and the
+    # unchanged-SHA short-circuit makes an idle tick nearly free.
+    skill_sync_minutes = getattr(settings, "skill_sync_interval_minutes", 30) or 30
+    _scheduler.add_job(
+        _run_skill_source_sync_cycle,
+        trigger=IntervalTrigger(minutes=skill_sync_minutes),
+        id="skill_source_sync",
+        name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
         replace_existing=True,
     )
     # Third job: onboarding drip / nudge emails (v0 checklist 2.1). Opt-in via

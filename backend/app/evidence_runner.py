@@ -20,9 +20,8 @@ import logging
 
 from app.corpus import load_corpus
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
+from app.evidence_html import normalize_evidence_html
 from app.graph.gateway import llm_call
-from app.html_style import inject_canonical_css
-from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
@@ -75,19 +74,19 @@ def _run_sync(
         prompt_version=EVIDENCE_KG_PROMPT_VERSION,
         system=EVIDENCE_KG_SYSTEM,
         input=user,
-        # Same binding as the KG path: SKILL.md is METHOD + HTML output contract.
-        # evidence-brief is a registered long-output skill, so the gateway
-        # streams on the long read timeout (the HTML brief is a big generation).
+        # Same binding as the KG path: the skill supplies the RENDERING CONTRACT,
+        # EVIDENCE_KG_SYSTEM supplies the analysis. evidence-brief is a
+        # registered long-output skill, so the gateway streams on the long read
+        # timeout (the HTML brief is a big generation).
         skill="evidence-brief",
         on_delta=on_delta,
         background=background,
     )
-    raw = result.output if isinstance(result.output, str) else str(result.output)
-    # Strip any ```html code fence the model added so the stored payload is raw HTML.
-    html = strip_code_fence(raw)
-    # The model emits an EMPTY `<style>`; inject the canonical stylesheet so the
-    # stored brief is self-contained and matches the KG path (see app.html_style).
-    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
+    # Same normalisation as the KG path, so a corpus-grounded brief is stored
+    # under exactly the same contract (see app.evidence_html).
+    html = normalize_evidence_html(
+        result.output, get_skill("evidence-brief").assets["evidence.css"]
+    )
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     complete_evidence(evidence_id=evidence_id, title=title, md=html)
 

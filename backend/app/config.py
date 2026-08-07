@@ -412,6 +412,14 @@ class Settings(BaseSettings):
     # tracker API rate limits ever bite.
     ticket_sync_enabled: bool = True
     ticket_sync_interval_minutes: int = 15
+    # Synced GitHub skill folders: how often the sweep re-reads each registered
+    # folder and imports the markdown it now holds (app/skills/github_sync.py).
+    # 30 min by default — a method someone just committed should be usable in
+    # the same sitting. An unchanged folder costs one GitHub request per tick,
+    # so this is safe to leave fine-grained; raise it via
+    # SKILL_SYNC_INTERVAL_MINUTES if an installation's REST budget ever bites
+    # (the Design Agent's codebase map spends from the same 5,000/hour pocket).
+    skill_sync_interval_minutes: int = 30
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
 
     # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────
