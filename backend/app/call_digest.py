@@ -1217,7 +1217,27 @@ def _voc_coverage_clause(voc) -> str:
             f"{len(named)} customer-feedback channel"
             f"{'s' if len(named) != 1 else ''} ({', '.join(named)})"
         )
-    quiet = [r for r in voc.unread_channels if r.status == slack_voc.STATUS_EMPTY]
+    stored = voc.stored_channels
+    if stored:
+        # Named and DATED, and never folded into the live count. A stored
+        # summary answers "does #demos exist and what is it about" — which is
+        # the question the reported answer got wrong — but it cannot answer
+        # "what was said there this week", and a banner that blurred the two
+        # would license exactly that overreach.
+        parts.append(
+            f"{len(stored)} further channel"
+            f"{'s' if len(stored) != 1 else ''} covered ONLY by a stored, "
+            "dated summary, not read live ("
+            + ", ".join(
+                f"{r.channel.label}{r.stored.as_of().strip()}" for r in stored
+            )
+            + ") — say what those channels are ABOUT, never what was said in "
+            "them during this window"
+        )
+    quiet = [
+        r for r in voc.unread_channels
+        if r.status == slack_voc.STATUS_EMPTY and not r.stored.present
+    ]
     if quiet:
         clause = (
             ", ".join(r.channel.label for r in quiet)
@@ -1226,11 +1246,12 @@ def _voc_coverage_clause(voc) -> str:
         )
         parts.append(clause if parts else f"Slack: {clause}")
     missed = [
-        r for r in voc.unread_channels if r.status != slack_voc.STATUS_EMPTY
+        r for r in voc.unread_channels
+        if r.status != slack_voc.STATUS_EMPTY and not r.stored.present
     ]
     if missed:
         parts.append(
-            "NOT read: "
+            "NOT read and NOTHING stored: "
             + "; ".join(f"{r.channel.label} ({r.reason()})" for r in missed)
             + " — state this as a coverage caveat"
         )
@@ -1433,6 +1454,22 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # this week" is a true, checkable answer that only this leg can support, and
     # it is strictly better than "no call source is connected" told to a company
     # whose Slack is connected and working.
+    # Slack IS the voice source here, and every one of its channels was
+    # unreadable. Telling this company to connect Fireflies is both wrong and
+    # unactionable: what it needs is the channel name and `/invite @Sprntly`.
+    # Placed ahead of the generic dead ends because it is strictly more
+    # specific than any of them, and it never fires when anything was read
+    # (`voc_block` is empty exactly when nothing reached the prompt).
+    if not voc_block and voc.reads and not corpus.calls and not corpus.docs \
+            and not kg.present:
+        blocked = "; ".join(
+            f"{r.channel.label} — {r.reason()}" for r in voc.unread_channels
+        )
+        return _plain_payload(
+            "I couldn't read any of your Slack customer-feedback channels, so "
+            "I have nothing to summarize — that is a read failure, not an "
+            f"absence of feedback. {blocked}"
+        )
     if corpus.status == "not_connected" and not kg.present and not voc_block:
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "

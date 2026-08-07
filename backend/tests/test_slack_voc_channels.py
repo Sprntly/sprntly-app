@@ -96,7 +96,35 @@ def slack_env(monkeypatch):
         return {"messages": list(reversed(found)), "has_more": False}
 
     monkeypatch.setattr(slack_oauth, "fetch_conversation_history", _history)
+
+    # The catalog is empty unless a test fills `env["catalog"]`. Patched at the
+    # accessor `slack_voc` actually calls, not at the table: `document_catalog`
+    # is the single module that names `document_catalog`, and going around it
+    # in a test would prove nothing about the code path that ships.
+    env["catalog"] = []
+    import app.document_catalog as dc
+
+    monkeypatch.setattr(
+        dc, "list_documents", lambda cid, **kw: list(env["catalog"])
+    )
     return env
+
+
+class _Doc:
+    """A `CatalogDocument`-shaped row. `**kw`-tolerant by construction so a new
+    field on the real model cannot silently narrow this double."""
+
+    def __init__(self, external_id, title, summary="", topics=None, doc_date="",
+                 updated_at="", url="", **kw):
+        self.external_id = external_id
+        self.title = title
+        self.summary = summary
+        self.topics = topics or []
+        self.doc_date = doc_date
+        self.updated_at = updated_at
+        self.url = url
+        for k, v in kw.items():
+            setattr(self, k, v)
 
 
 # ── channel resolution: both config shapes, and the one that is NOT a VoC shape ──
@@ -339,6 +367,172 @@ def test_the_voc_tool_refuses_rather_than_guessing_a_tenant(slack_env):
     assert slack_env["calls"] == []
 
 
+# ── the stored catalog layer ─────────────────────────────────────────────────
+
+
+def test_an_unreadable_channel_with_a_stored_summary_is_not_absent(slack_env):
+    """THE REPORTED DEFECT, at its narrowest. The live answer said "I am not
+    able to confirm whether a #demos channel exists" while a #demos
+    document_catalog row with a summary and topics sat in the table, refreshed
+    the day before. The channel must now appear, with its summary, its date,
+    and an explicit "not read live"."""
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "C3"],
+        "sync_channel_names": {"C1": "product-feedback", "C3": "demos"},
+    })]
+    slack_env["history"]["C3"] = HTTPException(400, "not_in_channel")
+    slack_env["catalog"] = [_Doc(
+        "C3", "#demos",
+        summary="Two demos booked this week; one pilot at risk.",
+        topics=["demo scheduling", "customer pilot risk", "renewal churn"],
+        doc_date="2026-08-05T20:51:11+00:00",
+    )]
+
+    result = voc.read(COMPANY)
+    block = result.render()
+
+    assert "### #demos" in block
+    assert "NOT read live" in block
+    assert "one pilot at risk" in block
+    assert "renewal churn" in block
+    assert "2026-08-05" in block                     # the summary is DATED
+    # And it must not be passed off as a live read.
+    assert "do NOT quote it as if you read it just now" in block
+    assert result.read_channels and result.read_channels[0].channel.name == "product-feedback"
+    assert [r.channel.name for r in result.stored_channels] == ["demos"]
+
+
+def test_a_live_read_also_carries_its_stored_gist_labelled(slack_env):
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    slack_env["catalog"] = [_Doc(
+        "C1", "#product-feedback", summary="VOC skill needs user input shaping.",
+        topics=["VOC skill customization"], doc_date="2026-08-04T15:00:03+00:00",
+    )]
+    block = voc.read(COMPANY).render()
+    assert "message(s) read live" in block
+    assert "first in C1" in block                      # live messages
+    assert "What this channel is about" in block       # and the gist, labelled
+    assert "VOC skill needs user input shaping" in block
+
+
+def test_catalog_channels_outside_the_live_scope_are_added_not_dropped(slack_env):
+    """The configured set and the ingested set diverge in BOTH directions in the
+    live data — staging-test's catalog holds four channels while its connection
+    row selects none. Covering only the intersection would make the answer
+    narrower than either set the user can see in the product."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    slack_env["catalog"] = [
+        _Doc("C1", "#product-feedback", summary="a", topics=["x"]),
+        _Doc("C9", "#working-group-for-june-9", summary="wg summary",
+             topics=["github org"], doc_date="2026-08-04T20:39:41+00:00"),
+    ]
+    result = voc.read(COMPANY)
+    labels = {r.channel.label for r in result.reads}
+    assert "#working-group-for-june-9" in labels
+    assert "C9" not in slack_env["calls"]     # added from storage, never read
+    block = result.render()
+    assert "wg summary" in block and "NOT read live" in block
+
+
+def test_configured_but_never_ingested_says_so(slack_env):
+    """Three live tenants have configured channels and ZERO catalog rows. Their
+    answer must say "configured but nothing ingested and unreadable", never
+    "no feedback found"."""
+    slack_env["members"] = [{"id": "C1", "name": "product-feedback", "is_private": False}]
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "C8"],
+        "sync_channel_names": {"C1": "product-feedback", "C8": "all-sprntlyai"},
+    })]
+    slack_env["history"]["C8"] = HTTPException(400, "channel_not_found")
+    slack_env["catalog"] = []
+
+    block = voc.read(COMPANY).render()
+    assert "NOT read, with NOTHING stored either" in block
+    assert "#all-sprntlyai" in block or "C8" in block
+    assert "never ingested this channel" in block
+    assert "do not say they hold no feedback" in block
+
+
+def test_a_dead_connection_still_answers_from_stored_summaries(slack_env):
+    """Opening Slack failing is not the same as knowing nothing about the
+    channels. The catalog is fetched BEFORE the session for exactly this."""
+    slack_env["rows"] = []          # no usable Slack connection at all
+    slack_env["catalog"] = [_Doc(
+        "C3", "#demos", summary="demo scheduling and pilot risk",
+        topics=["demo scheduling"], doc_date="2026-08-05T20:51:11+00:00",
+    )]
+    result = voc.read(COMPANY)
+    assert result.connected is False
+    assert result.present is True                   # stored content IS content
+    block = result.render()
+    assert "#demos" in block and "demo scheduling and pilot risk" in block
+    assert "NOT read live" in block
+
+
+def test_a_stored_summary_is_never_counted_as_a_live_read(slack_env):
+    """`read_channels` means "read just now". If a stored summary ever leaked
+    into it, the coverage banner would claim a live read that did not happen —
+    the single worst failure available on this path."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C3"],
+                               "sync_channel_names": {"C3": "demos"}})]
+    slack_env["history"]["C3"] = HTTPException(400, "not_in_channel")
+    slack_env["catalog"] = [_Doc("C3", "#demos", summary="s", topics=["t"])]
+    result = voc.read(COMPANY)
+    assert result.read_channels == []
+    assert len(result.covered_channels) == 1
+    assert result.present is True
+
+
+def test_a_summaryless_catalog_row_contributes_nothing(slack_env):
+    """One live row (#spryntly) has an empty summary. An empty stored summary
+    must not mark a channel as covered.
+
+    And with NOTHING readable at all the block stays empty — the sweep's rule,
+    kept: a block saying only "I checked and found nothing" invites the model to
+    assert the absence. The failure is not lost, it moves to the caller
+    (`unread_channels` / the adapter tool / the digest's Slack-specific dead
+    end), where it is stated as a read failure rather than as evidence."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C3"],
+                               "sync_channel_names": {"C3": "demos"}})]
+    slack_env["history"]["C3"] = HTTPException(400, "not_in_channel")
+    slack_env["catalog"] = [_Doc("C3", "#demos", summary="", topics=[])]
+    result = voc.read(COMPANY)
+    assert result.present is False
+    assert result.render() == ""
+    assert [r.channel.label for r in result.unread_channels] == ["#demos"]
+    assert "/invite @Sprntly" in result.unread_channels[0].reason()
+
+
+def test_all_channels_unreadable_gives_slack_specific_guidance(slack_env, monkeypatch):
+    """A Slack-only company whose channels are all unreadable must be told
+    WHICH channel and what to do — not "connect Fireflies or Zoom", which is
+    both wrong and unactionable when Slack is the voice source."""
+    import app.call_digest as cd
+    import app.graph.gateway as gateway_mod
+
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C3"],
+                               "sync_channel_names": {"C3": "demos"}})]
+    slack_env["history"]["C3"] = HTTPException(400, "not_in_channel")
+    slack_env["catalog"] = []
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "build_kg_context", lambda *a, **k: cd.KgContext())
+
+    spent: list = []
+    monkeypatch.setattr(
+        gateway_mod, "llm_call", lambda **kw: spent.append(kw) or None
+    )
+    payload = cd.answer(enterprise_id=COMPANY, question="what are customers saying?")
+
+    assert spent == []                      # no spend with nothing to summarize
+    assert "#demos" in payload["answer"]
+    assert "not an absence of feedback" in payload["answer"]
+    assert "Fireflies" not in payload["answer"]
+
+
 # ── routing: reaching the channels WITHOUT the word "slack" ──────────────────
 
 
@@ -464,7 +658,7 @@ def test_the_digest_banner_names_a_channel_it_could_not_read(slack_env, monkeypa
     cd.answer(enterprise_id=COMPANY, question="summarize customer feedback")
 
     banner = captured["input"].split("===")[1]
-    assert "NOT read: #founders" in banner
+    assert "NOT read and NOTHING stored: #founders" in banner
     assert "coverage caveat" in banner
 
 
@@ -486,6 +680,51 @@ def test_the_kill_switch_gates_the_choke_point_not_the_call_sites(slack_env, mon
     out = sl.PROVIDER.dispatch(session, "slack_voc_channels", {})
     assert "switched off" in out
     assert slack_env["calls"] == []          # no channel was read by any route
+
+
+def test_the_digest_banner_separates_live_reads_from_stored_summaries(
+    slack_env, monkeypatch
+):
+    """The banner is what a user reads to check coverage. A stored summary must
+    appear there NAMED and DATED, and must never be folded into the live-read
+    count — that blur is what would license "customers said X this week" from a
+    summary written a week ago."""
+    import app.call_digest as cd
+    import app.graph.gateway as gateway_mod
+
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "C3"],
+        "sync_channel_names": {"C1": "product-feedback", "C3": "demos"},
+    })]
+    slack_env["history"]["C3"] = HTTPException(400, "not_in_channel")
+    slack_env["catalog"] = [_Doc(
+        "C3", "#demos", summary="demo scheduling and renewal churn",
+        topics=["renewal churn"], doc_date="2026-08-05T20:51:11+00:00",
+    )]
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "build_kg_context", lambda *a, **k: cd.KgContext())
+
+    captured: dict = {}
+
+    class _R:
+        output = {"answer": "themes", "key_points": [], "citations": [],
+                  "confidence": 0.6, "unanswered": ""}
+
+    monkeypatch.setattr(
+        gateway_mod, "llm_call", lambda **kw: (captured.update(kw), _R())[1]
+    )
+    cd.answer(enterprise_id=COMPANY, question="what are our customers saying?")
+
+    banner = captured["input"].split("===")[1]
+    assert "1 customer-feedback channel" in banner          # live count is ONE
+    assert "#product-feedback" in banner
+    assert "covered ONLY by a stored, dated summary" in banner
+    assert "#demos" in banner and "2026-08-05" in banner
+    assert "never what was said in them during this window" in banner
+    # And the summary itself reached the corpus, so the answer can use it.
+    assert "demo scheduling and renewal churn" in captured["input"]
 
 
 def test_config_keys_match_the_sync_paths_keys():

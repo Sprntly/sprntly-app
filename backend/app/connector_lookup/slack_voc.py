@@ -28,6 +28,32 @@ section per channel. It is a bounded gather, not a tool loop: the model is never
 asked to pick a channel, because picking one is how an aggregate answer becomes
 a single-channel answer that reads like an aggregate.
 
+TWO LAYERS, AND THE SECOND ONE IS WHY THE REPORTED ANSWER WAS FACTUALLY WRONG.
+Alongside the live read, every channel carries its `document_catalog` row — a
+dated, per-channel extractive summary plus topics that
+`kg_ingest.slack_extract.register_slack_catalog` has been writing all along,
+keyed on the channel id. The live chat answer said "I am not able to confirm
+whether a #demos channel exists" while a `#demos` catalog row with a summary and
+eight topics sat in the table, refreshed the day before. Nothing consulted it.
+Now:
+
+  - a channel read live shows its messages AND its stored gist, labelled;
+  - a channel that could NOT be read live still appears, with its stored summary
+    and its date, explicitly marked as not-read-live;
+  - a channel in the catalog but outside the live scope is added rather than
+    dropped — the configured set and the ingested set diverge in BOTH directions
+    in the live data;
+  - a channel with neither is named with its reason AND the fact that nothing
+    has ever been ingested from it.
+
+`document_catalog.body_text` is NOT populated, by design — that module's
+docstring calls the table "a POINTER, NOT A COPY" so connecting a source never
+leaves Sprntly holding a second copy of a customer's content at rest. This
+module does not change that, and does not need to: for Slack the body IS
+reachable, live, from `conversations.history`. Populating `body_text` would
+reverse a deliberate storage decision in order to duplicate data we can already
+fetch.
+
 THE THREE PROPERTIES THAT MUST NOT DRIFT:
 
   AGGREGATION. Every configured channel is read and rendered, or NAMED as unread
@@ -104,6 +130,18 @@ STATUS_TIMEOUT = "timeout"
 STATUS_ERROR = "error"
 STATUS_DROPPED = "dropped"
 STATUS_EXCLUDED = "excluded"
+#: Not read live, but `document_catalog` holds a per-channel summary for it.
+#: Its own status because the distinction is the whole point: a stored summary
+#: is dated, distilled and second-hand, and an answer that presents one as a
+#: live read is wrong about WHEN — the same failure the search adapter's
+#: ordering notes exist to prevent.
+STATUS_STORED = "stored"
+
+#: Cap on a stored summary. They are already extractive and short (a few
+#: hundred chars in the live data); this is a backstop, not a trim.
+STORED_SUMMARY_CHARS = 1_200
+#: Topics quoted per channel.
+STORED_TOPICS = 10
 
 
 @dataclass(frozen=True)
@@ -119,6 +157,51 @@ class VocChannel:
 
 
 @dataclass
+class StoredSummary:
+    """A `document_catalog` row for one channel — what Sprntly already knows
+    that channel is ABOUT, without reading it again.
+
+    The catalog is a POINTER, NOT A COPY (see `document_catalog`'s docstring):
+    `body_text` is unpopulated by every writer, deliberately, so this is a
+    distilled summary plus topics — never the messages. That is exactly why it
+    is kept apart from a live read here rather than merged into one blob.
+    """
+
+    summary: str = ""
+    topics: list[str] = field(default_factory=list)
+    #: The channel this row is for, from the catalog title (`#<name>`). Carried
+    #: on the summary itself so a catalog-only channel can be NAMED without
+    #: reverse-searching the id→summary map for its alias.
+    channel_name: str = ""
+    #: Date of the newest message the summary was taken over, when known.
+    doc_date: str = ""
+    #: When the catalog row was last refreshed.
+    updated_at: str = ""
+    url: str = ""
+
+    @property
+    def present(self) -> bool:
+        return bool(self.summary.strip() or self.topics)
+
+    def render(self) -> str:
+        parts = []
+        if self.summary.strip():
+            parts.append(self.summary.strip()[:STORED_SUMMARY_CHARS])
+        if self.topics:
+            parts.append(
+                "Topics: " + ", ".join(str(t) for t in self.topics[:STORED_TOPICS])
+            )
+        return "\n".join(parts)
+
+    def as_of(self) -> str:
+        when = (self.doc_date or self.updated_at or "")[:10]
+        return (
+            f" (stored summary, newest message {when})" if when
+            else " (stored summary)"
+        )
+
+
+@dataclass
 class ChannelRead:
     """What one channel contributed, or why it contributed nothing."""
 
@@ -127,14 +210,34 @@ class ChannelRead:
     text: str = ""
     detail: str = ""
     message_count: int = 0
+    #: The catalog's distilled view of this channel, when one exists. Attached
+    #: to EVERY read, not only the failed ones: it is the cheapest way for an
+    #: answer to say what a channel is generally about alongside this week's
+    #: messages, and it is the ONLY thing available when the live read fails.
+    stored: "StoredSummary" = field(default_factory=lambda: StoredSummary())
 
     @property
     def usable(self) -> bool:
+        """Live messages are present. Deliberately NOT true for a stored-only
+        channel — callers that mean "we read this channel just now" must not
+        silently start counting summaries."""
         return self.status == STATUS_OK and bool(self.text.strip())
+
+    @property
+    def has_content(self) -> bool:
+        """Anything at all reached the prompt for this channel — live or
+        stored. This is what "the answer covered this channel" means."""
+        return self.usable or self.stored.present
 
     def reason(self) -> str:
         """Why this channel is absent from the answer. Never "" — a channel with
         no reason is a channel the model will read as "nothing was said there"."""
+        if self.status == STATUS_STORED:
+            return (
+                "not read live — only Sprntly's stored summary of it is "
+                "available, which is dated and distilled, not this window's "
+                "messages"
+            )
         if self.detail:
             return self.detail
         if self.status == STATUS_EMPTY:
@@ -170,7 +273,8 @@ class VocRead:
 
     @property
     def present(self) -> bool:
-        return any(r.usable for r in self.reads)
+        """Anything reached the prompt — live messages OR a stored summary."""
+        return any(r.has_content for r in self.reads)
 
     @property
     def connected(self) -> bool:
@@ -178,7 +282,19 @@ class VocRead:
 
     @property
     def read_channels(self) -> list[ChannelRead]:
+        """Channels read LIVE. Not the same as `covered_channels` — keeping the
+        two apart is what stops a stored summary being counted as a live read
+        in the coverage banner."""
         return [r for r in self.reads if r.usable]
+
+    @property
+    def stored_channels(self) -> list[ChannelRead]:
+        """Channels present ONLY as a stored catalog summary."""
+        return [r for r in self.reads if not r.usable and r.stored.present]
+
+    @property
+    def covered_channels(self) -> list[ChannelRead]:
+        return [r for r in self.reads if r.has_content]
 
     @property
     def unread_channels(self) -> list[ChannelRead]:
@@ -218,7 +334,7 @@ class VocRead:
             return ""
         readable = [
             r for r in self.reads
-            if r.status in (STATUS_OK, STATUS_EMPTY) or r.usable
+            if r.status in (STATUS_OK, STATUS_EMPTY) or r.has_content
         ]
         if not readable:
             return ""
@@ -241,9 +357,34 @@ class VocRead:
         ]
         for read in self.reads:
             if read.usable:
-                parts.append(
+                section = (
                     f"\n### {read.channel.label} — {read.message_count} "
-                    f"message(s)\n{read.text.strip()}"
+                    f"message(s) read live\n{read.text.strip()}"
+                )
+                if read.stored.present:
+                    # The gist ALONGSIDE the messages, labelled — what the
+                    # channel is generally about is useful next to one week of
+                    # it, and mislabelling it as this week's traffic is not.
+                    section += (
+                        f"\nWhat this channel is about, from Sprntly's stored "
+                        f"summary{read.stored.as_of()}:\n{read.stored.render()}"
+                    )
+                parts.append(section)
+            elif read.stored.present:
+                # The channel could not be read live — but we are NOT silent
+                # about it, because a dated summary of it exists. This is the
+                # case that produced the reported answer "I am not able to
+                # confirm whether a #demos channel exists": the catalog row was
+                # there the whole time and nothing consulted it.
+                parts.append(
+                    f"\n### {read.channel.label} — NOT read live"
+                    f"{read.stored.as_of()}\n{read.stored.render()}\n"
+                    f"(This is a stored, distilled summary, not this window's "
+                    f"messages. Reason the live read did not happen: "
+                    f"{read.reason()} Say the channel EXISTS and what it is "
+                    f"about; do NOT quote it as if you read it just now, and "
+                    f"do NOT claim to know its message volume in the last "
+                    f"{self.days} days.)"
                 )
             elif read.status == STATUS_EMPTY:
                 parts.append(
@@ -251,15 +392,23 @@ class VocRead:
                     f"messages posted in the last {self.days} days)"
                 )
         missed = [
-            r for r in self.unread_channels if r.status != STATUS_EMPTY
+            r for r in self.unread_channels
+            if r.status != STATUS_EMPTY and not r.stored.present
         ]
         if missed:
             parts.append(
-                "\n### Feedback channels NOT read\n"
-                + "\n".join(f"- {r.channel.label}: {r.reason()}" for r in missed)
-                + "\nThese channels were NOT searched. Do not describe them as "
-                "quiet, and do not let their absence make a company-wide claim "
-                "look complete — name them if the answer implies full coverage."
+                "\n### Feedback channels NOT read, with NOTHING stored either\n"
+                + "\n".join(
+                    f"- {r.channel.label}: {r.reason()} Sprntly has also never "
+                    "ingested this channel, so there is no stored summary of it "
+                    "to fall back on."
+                    for r in missed
+                )
+                + "\nThese channels were NOT searched and nothing about them was "
+                "loaded. Do not describe them as quiet, do not say they hold no "
+                "feedback, and do not let their absence make a company-wide "
+                "claim look complete — name them if the answer implies full "
+                "coverage."
             )
         return "\n".join(parts)
 
@@ -335,6 +484,130 @@ def configured_channels(company_id: str) -> tuple[list[VocChannel], bool]:
             seen.add(cid)
             out.append(VocChannel(id=cid, name=str(names.get(cid) or "").strip()))
     return out, explicit
+
+
+def catalog_summaries(company_id: str) -> dict[str, StoredSummary]:
+    """`{channel_id: StoredSummary}` from `document_catalog`, or `{}`.
+
+    Keyed on `external_id`, which
+    `kg_ingest.slack_extract.register_slack_catalog` writes as the raw CHANNEL
+    ID — so the join to a configured `sync_channel_ids` entry is exact, not a
+    title match. The row's `title` is `#<name>`, added as a secondary key for a
+    selection that carries a name where an id belongs.
+
+    Reads through `document_catalog.list_documents`, the single accessor for
+    that table (its module docstring explains why the table name appears
+    nowhere else): the tenant filter is that function's job, not a filter this
+    module hand-writes. Fails open to `{}` — a missing catalog degrades the
+    answer to live-only, exactly what it was before.
+    """
+    if not company_id:
+        return {}
+    try:
+        from app import document_catalog
+
+        rows = document_catalog.list_documents(
+            company_id, provider=document_catalog.PROVIDER_SLACK
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "slack-voc: catalog read failed for %s", company_id, exc_info=True
+        )
+        return {}
+    out: dict[str, StoredSummary] = {}
+    for row in rows or []:
+        title = str(getattr(row, "title", "") or "").strip().lstrip("#")
+        summary = StoredSummary(
+            summary=str(getattr(row, "summary", "") or ""),
+            topics=list(getattr(row, "topics", None) or []),
+            channel_name=title,
+            doc_date=str(getattr(row, "doc_date", "") or ""),
+            updated_at=str(getattr(row, "updated_at", "") or ""),
+            url=str(getattr(row, "url", "") or ""),
+        )
+        # An empty summary contributes nothing and must not mark a channel
+        # covered — one live row (#spryntly) has exactly that shape.
+        if not summary.present:
+            continue
+        external_id = str(getattr(row, "external_id", "") or "").strip()
+        if external_id:
+            out[external_id] = summary
+        if title:
+            out.setdefault(title.lower(), summary)
+    return out
+
+
+def _catalog_channel(key: str, catalog: dict[str, StoredSummary]) -> StoredSummary:
+    """The stored summary for a channel id or name, or an empty one."""
+    return (
+        catalog.get(key)
+        or catalog.get((key or "").lstrip("#").lower())
+        or StoredSummary()
+    )
+
+
+def _attach_stored(
+    reads: list[ChannelRead], catalog: dict[str, StoredSummary]
+) -> None:
+    """Give every channel its catalog summary, whatever the live read did.
+
+    Attached to SUCCESSFUL reads too, not only failed ones. A week of messages
+    plus "what this channel is generally about" is a better answer than either
+    alone, and attaching it only on failure would make the summary look like an
+    error artifact rather than what it is.
+    """
+    if not catalog:
+        return
+    for read in reads:
+        if read.stored.present:
+            continue
+        stored = _catalog_channel(read.channel.id, catalog)
+        if not stored.present and read.channel.name:
+            stored = _catalog_channel(read.channel.name, catalog)
+        read.stored = stored
+
+
+def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> None:
+    """Add channels the catalog knows about that the live scope did not cover.
+
+    THE CONFIGURED SET AND THE INGESTED SET DIVERGE IN THE LIVE DATA, in both
+    directions, and this closes one direction. One company's catalog holds four
+    channels while its connection row carries no selection at all and the bot's
+    membership list shows a different five; three other companies have
+    configured channels and zero catalog rows. An answer that silently covered
+    only the intersection would be narrower than either set the user can see in
+    the product.
+
+    The other direction — configured but never ingested — is handled by the
+    render's NOTHING-stored-either section, which names those channels rather
+    than dropping them.
+
+    These are added as STATUS_STORED: represented, clearly second-hand, and
+    never counted as a live read.
+    """
+    if not catalog:
+        return
+    # Computed here rather than passed in: every call site would otherwise have
+    # to remember to include NAMES as well as ids, and the one that forgot
+    # would silently render a channel twice.
+    seen = {r.channel.id for r in result.reads if r.channel.id}
+    seen_lower = {s.lower() for s in seen}
+    seen_lower |= {r.channel.name.lower() for r in result.reads if r.channel.name}
+    for key, stored in catalog.items():
+        # Skip the name-keyed aliases added alongside ids. A Slack conversation
+        # id is uppercase C/G/D + uppercase alphanumerics and a channel NAME is
+        # lowercase-only, so the two can never collide.
+        if not key or not key[0].isupper():
+            continue
+        if key in seen or key.lower() in seen_lower:
+            continue
+        if stored.channel_name and stored.channel_name.lower() in seen_lower:
+            continue
+        result.reads.append(ChannelRead(
+            channel=VocChannel(id=key, name=stored.channel_name),
+            status=STATUS_STORED,
+            stored=stored,
+        ))
 
 
 def has_voc_channels(company_id: str) -> bool:
@@ -503,6 +776,13 @@ def read(
     if not _enabled():
         result.unavailable = "the live Slack feedback-channel read is switched off"
         return result
+    # Fetched BEFORE the session, deliberately. It is the fallback for the very
+    # case where opening Slack fails, and fetching it after would make the
+    # failure path the one with no data — which is how "no stored copy of those
+    # messages" came to be reported about a channel the catalog had a summary
+    # for.
+    catalog = catalog_summaries(company_id)
+
     if handle is None:
         try:
             from app.connector_lookup import slack as slack_lookup
@@ -518,6 +798,7 @@ def read(
                 "Slack is not connected for this company, or its stored "
                 "credential could not be used"
             )
+            _append_stored_only(result, catalog)
             return result
         handle = session.handle
 
@@ -547,12 +828,16 @@ def read(
                 ))
             readable = readable[:max_channels]
         if not readable:
+            _attach_stored(result.reads, catalog)
+            _append_stored_only(result, catalog)
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
             return result
         handle.user_map()
     except Exception:  # noqa: BLE001 — resolution degrades, never breaks chat
         logger.exception("slack-voc: channel resolution failed for %s", company_id)
         result.unavailable = "the Slack channel list could not be read"
+        _attach_stored(result.reads, catalog)
+        _append_stored_only(result, catalog)
         return result
 
     deadline = started + max(budget_s, 0.0)
@@ -562,6 +847,8 @@ def read(
         result.reads.extend(
             ChannelRead(channel=c, status=STATUS_TIMEOUT) for c in readable
         )
+        _attach_stored(result.reads, catalog)
+        _append_stored_only(result, catalog)
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
@@ -599,6 +886,8 @@ def read(
     order = {c.id: i for i, c in enumerate(readable)}
     fanned.sort(key=lambda r: order.get(r.channel.id, len(order)))
     result.reads.extend(fanned)
+    _attach_stored(result.reads, catalog)
+    _append_stored_only(result, catalog)
     _apply_caps(result.reads)
     result.elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.info(
