@@ -10,10 +10,44 @@
     python scripts/backfill_document_catalog.py --apply
 
 New uploads catalog themselves on the way in, so this exists only to cover
-files uploaded BEFORE the catalog existed. Drive and Confluence documents are
-covered by their next sync (their registration rides the same pull that
-already re-reads them) and are deliberately not backfilled here — this script
-reads `document_source_file` and nothing else.
+files uploaded BEFORE the catalog existed.
+
+CONFLUENCE is covered by its next sync — its puller re-reads every page, so
+registration rides that pull. DRIVE IS NOT, and the original version of this
+docstring said it was. `drive_extract` only sees files whose `modifiedTime`
+moved, and catalog registration lives inside that per-file loop, so a Drive
+file synced before the catalog shipped stays unregistered until a human edits
+it in Drive. Measured on the shared database 2026-08-07, that left ONE
+`google_drive` row against 27 `confluence` ones. `--drive` covers it, reading
+the markdown the sync already wrote rather than calling Google:
+
+    python scripts/backfill_document_catalog.py --drive --company <id>
+    python scripts/backfill_document_catalog.py --drive --apply --company <id>
+
+A Drive file is registered only when its converted markdown can actually be
+located; one that cannot is counted `no_body` and skipped, because an Index
+entry with nothing behind it is worse than an absent one.
+
+THAT SKIP IS WHY `--derive-locations` EXISTS, and why you almost certainly
+need it. Measured on the shared database 2026-08-07 there were SIX
+`kg_source` google_drive rows fleet-wide, and FIVE carried no `md_file` — so a
+plain `--drive` run registers exactly ZERO documents. Deriving the locations
+first (`document_bodies.backfill_drive_markdown_paths`, which reconstructs the
+path from the row's label) is what turns this script from a no-op into the
+fix. It must run where the corpus markdown actually lives, and it declines any
+name that collided on disk rather than guessing, so expect some files to stay
+unresolved.
+
+    # See how much is reachable, writing nothing:
+    python scripts/backfill_document_catalog.py --drive --derive-locations
+    # Then commit both steps:
+    python scripts/backfill_document_catalog.py --drive --derive-locations --apply
+
+READ THE DRY RUN CAREFULLY: because it persists nothing, the derived locations
+are not visible to the catalog pass that follows, so files that WOULD be
+registered are still counted `no_body` and the run reports `registered: 0`.
+The log says so explicitly at the point it happens. The number to read in a
+dry run is `locations {updated: N}` — that N is what `--apply` will register.
 
 Cost + safety, stated plainly because this script spends money:
 
@@ -26,8 +60,15 @@ Cost + safety, stated plainly because this script spends money:
   * Per-file and per-company error isolation — one bad document or one bad
     tenant logs and the run continues.
   * `--dry-run` is the DEFAULT. Nothing is written without `--apply`.
-  * Nothing READS the catalog yet, so this changes no user-visible behaviour
-    in either direction. It only pre-pays work a later change will consume.
+  * THE CATALOG IS NOW READ ON THE ANSWER PATH — this line used to say
+    nothing read it, and that stopped being true when `document_grounding`
+    began indexing and ranking from it. Registering a document therefore DOES
+    change answers: it becomes visible in the document Index (so the model
+    stops saying the workspace has no such file), rankable by topic, and
+    resolvable as the subject of a question. That is the intended effect and
+    the reason to run this, but it is no longer a no-op, and a run against a
+    live tenant should be treated as a behaviour change rather than as
+    pre-paid work.
 
 Running this against staging or production is an owner decision, per
 environment — it is not implied by shipping the script.
@@ -41,9 +82,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import document_bodies  # noqa: E402
 from app.db.client import require_client  # noqa: E402
 from app.document_sources import (  # noqa: E402
     backfill_catalog,
+    backfill_drive_catalog,
     list_document_sources,
     list_source_files,
 )
@@ -73,11 +116,82 @@ def main() -> int:
     parser.add_argument("--company", help="one company id (default: all)")
     parser.add_argument("--limit", type=int, default=0,
                         help="max documents to register per company")
+    parser.add_argument(
+        "--derive-locations", action="store_true",
+        help=(
+            "with --drive: first reconstruct missing markdown locations on "
+            "kg_source rows (document_bodies.backfill_drive_markdown_paths). "
+            "Without this, files synced before location tracking are skipped "
+            "as no_body and the run registers nothing"
+        ),
+    )
+    parser.add_argument(
+        "--drive", action="store_true",
+        help=(
+            "backfill already-synced Google Drive files instead of uploads "
+            "(reads the corpus markdown the sync wrote; never calls Google)"
+        ),
+    )
     args = parser.parse_args()
 
-    totals = {"registered": 0, "skipped": 0, "errors": 0}
+    # Drive counts `no_body` — files whose markdown location was never
+    # recorded — apart from errors, because it is the expected outcome for an
+    # older tenant and not a fault. Kept out of the uploads totals so a run of
+    # either mode reports only the keys that mode can produce.
+    totals = (
+        {"registered": 0, "skipped": 0, "no_body": 0, "errors": 0} if args.drive
+        else {"registered": 0, "skipped": 0, "errors": 0}
+    )
     for company_id in _companies(args.company):
         try:
+            if args.drive and args.derive_locations:
+                # Reported separately from the catalog counts: "we could not
+                # find where this file's text was stored" and "we found it and
+                # chose not to register it" are different problems with
+                # different owners, and collapsing them into one number is how
+                # a backfill gets called done while Drive stays unreachable.
+                located = document_bodies.backfill_drive_markdown_paths(
+                    company_id, apply=args.apply
+                )
+                if any(located.values()):
+                    logger.info(
+                        "%s %s — locations %s",
+                        "OK   " if args.apply else "WOULD", company_id, located,
+                    )
+                    # A dry run derives locations WITHOUT writing them, so the
+                    # catalog pass below still reads md_file as unset and
+                    # counts every one of these files `no_body` — reporting
+                    # `registered: 0` for a tenant that is in fact fully
+                    # reachable. Left unsaid, the operator reads those two
+                    # lines together and concludes there is nothing to
+                    # register, which is the precise wrong conclusion this
+                    # script exists to prevent. So say it, on the line right
+                    # before the misleading one.
+                    if not args.apply and located.get("updated"):
+                        logger.info(
+                            "      %s — NOTE: %s file(s) would gain a location, "
+                            "but a dry run does not persist it, so they are "
+                            "counted `no_body` below. Re-run with --apply to "
+                            "register them.",
+                            company_id, located["updated"],
+                        )
+            if args.drive:
+                # Drive's dry run goes through the SAME function with
+                # apply=False rather than a separate count, so what a dry run
+                # reports and what an apply does cannot drift: the skip
+                # decisions (hash unchanged, body unlocatable) are made once,
+                # in one place.
+                counts = backfill_drive_catalog(
+                    company_id, apply=args.apply, limit=args.limit or None
+                )
+                if any(counts.values()):
+                    logger.info(
+                        "%s %s — %s",
+                        "OK   " if args.apply else "WOULD", company_id, counts,
+                    )
+                for k in totals:
+                    totals[k] += counts[k]
+                continue
             if not args.apply:
                 planned = _planned(company_id)
                 if planned:

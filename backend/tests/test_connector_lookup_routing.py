@@ -200,12 +200,17 @@ def test_building_the_google_meet_integration_is_not_a_lookup():
         "how does google meet compare to zoom for our customers") is None
 
 
-def test_google_meet_syncs_but_has_no_live_adapter_yet():
-    """Meet connects and syncs into the KG (kg_ingest/pullers/google_meet.py)
-    but has no live-read adapter in this PR — so it belongs in DEFERRED, whose
-    copy says exactly that. Absent from every tier it would fall to the generic
-    path and be answered with a KG-flavoured guess; in NO_CONNECTOR it would be
-    told, falsely, that Sprntly has no Meet connector at all."""
+def test_google_meet_is_now_readable_live_not_deferred():
+    """REGRESSION. This test asserted the opposite until Meet gained a live-read
+    adapter (connector_lookup/google_meet.py).
+
+    Meet used to sit in DEFERRED, whose copy says "it syncs into your knowledge
+    graph, but I can't query it live in chat yet". Leaving it there would now be
+    a false apology about a source chat CAN read. It still must not be in
+    NO_CONNECTOR — that would claim Sprntly has no Meet connector at all — and
+    it must resolve to a real adapter, or naming Meet would fall through to the
+    generic path and be answered with a KG-flavoured guess.
+    """
     from app.connector_lookup.registry import (
         DEFERRED,
         LOOKUP_PROVIDERS,
@@ -214,11 +219,11 @@ def test_google_meet_syncs_but_has_no_live_adapter_yet():
         provider_for,
     )
 
-    assert "google_meet" in DEFERRED
-    assert "google_meet" not in LOOKUP_PROVIDERS
+    assert "google_meet" not in DEFERRED
+    assert "google_meet" in LOOKUP_PROVIDERS
     assert "google_meet" not in NO_CONNECTOR
     assert display_name("google_meet") == "Google Meet"
-    assert provider_for("google_meet") is None
+    assert provider_for("google_meet") is not None
 
 
 def test_zoom_recordings_still_belong_to_the_voice_of_customer_skill():

@@ -31,6 +31,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.artifact_open import resolve_open_artifact
 from app.auth import CompanyContext
 from app.chat_intent import resolve_chat_intent
 from app.chat_suggestions import suggest_next_prompts
@@ -42,6 +43,33 @@ from app.routes.ask import _load_history
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
+
+
+def _dataset_for(company) -> str:
+    """The dataset slug backing the caller's active workspace ("" if none).
+
+    Datasets are per-workspace ('{company}--{workspace}') except the DEFAULT
+    workspace, which keeps the bare company slug and — for companies predating
+    the workspace binding — often has no `datasets.workspace_id` at all. The
+    company-slug fallback covers exactly that legacy case and is scoped to the
+    default workspace on purpose: applying it to a non-default workspace with
+    no dataset of its own would search the default workspace's artifacts from
+    inside a workspace that must not see them.
+
+    Returning "" (never a guess) is what makes an unresolvable workspace a
+    clean `not_found` instead of a lookup against the wrong slug.
+    """
+    from app.db.companies import slug_for_company_id
+    from app.db.workspaces import dataset_slug_for_workspace
+
+    workspace_id = getattr(company, "workspace_id", None)
+    if workspace_id:
+        bound = dataset_slug_for_workspace(workspace_id)
+        if bound:
+            return bound
+        if not getattr(company, "workspace_is_default", False):
+            return ""
+    return slug_for_company_id(company.company_id) or ""
 
 
 class ChatIntentIn(BaseModel):
@@ -64,10 +92,15 @@ def chat_intent(
 ):
     """Decide the action envelope for one chat message.
 
-    Returns {intent, confidence, task, instruction, reason, source, prd_id,
-    prd_title} — prd_id/prd_title are the resolved TARGET (tab-sent or
-    conversation-bound), echoed so the reducer acts on the same document the
-    decision was grounded on.
+    Returns {intent, confidence, task, instruction, artifact_type,
+    artifact_query, reason, source, prd_id, prd_title} — prd_id/prd_title are
+    the resolved TARGET (tab-sent or conversation-bound), echoed so the reducer
+    acts on the same document the decision was grounded on.
+
+    An `open_artifact` envelope carries one extra key, `open`:
+    {status: "resolved"|"ambiguous"|"not_found", artifact_type, query,
+    artifact, candidates} — the LOOKUP result. Still read-only: naming a
+    document is not opening it, and nothing here generates anything.
     """
     prd_id = body.prd_id
     prd_row: dict | None = None
@@ -104,6 +137,16 @@ def chat_intent(
     )
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = prd_title
+    if envelope.get("intent") == "open_artifact":
+        # The resolver named a SUBJECT; the lookup happens here, where the
+        # tenant scope lives. Same posture as the rest of this route: read-only
+        # and scoped to the caller's workspace, so a phrase can only ever
+        # resolve to a document this caller already owns.
+        envelope["open"] = resolve_open_artifact(
+            artifact_type=envelope.get("artifact_type") or "prd",
+            query=envelope.get("artifact_query") or "",
+            dataset=_dataset_for(company),
+        )
     return envelope
 
 

@@ -912,17 +912,74 @@ export const skillsApi = {
  *  tab-sent PRD, or the one the conversation is bound to) so the reducer acts
  *  on the same document the decision was grounded on. */
 export type ChatIntentEnvelope = {
-  intent: "answer" | "generate_prd" | "edit_prd" | "generate_tickets" | "generate_prototype"
+  intent:
+    | "answer"
+    | "generate_prd"
+    | "edit_prd"
+    | "generate_tickets"
+    | "generate_prototype"
+    | "open_artifact"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
   /** edit_prd: the change to apply, self-contained. */
   instruction: string | null
+  /** open_artifact: which existing artifact kind to bring up. */
+  artifact_type: OpenArtifactKind | null
+  /** open_artifact: the subject the user named the document by. */
+  artifact_query: string | null
   reason: string
-  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction" */
+  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
+   *  | "no_artifact_query" */
   source: string
   prd_id: number | null
   prd_title: string | null
+  /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
+   *  company's artifact library. Absent for every other intent. */
+  open?: OpenArtifactResult
+}
+
+/** Artifact kinds an OPEN request can name. Both have an existing right-panel
+ *  view in the chat; prototypes/reports deliberately do not appear here. */
+export type OpenArtifactKind = "prd" | "evidence"
+
+/** One artifact the user's phrase could have meant — carrying the IDS needed to
+ *  open it, so a disambiguation chip is a real action and never a re-sent
+ *  message. `prd_id` for the PRD panel; `brief_id` + `insight_index` for the
+ *  Evidence panel, which is scoped by the insight rather than by an evidence
+ *  row id (matching ChatScreen's `kind: "evidence"` open). */
+export type OpenArtifactCandidate = {
+  type: OpenArtifactKind
+  id: number
+  title: string
+  status: string
+  prd_id: number | null
+  brief_id: number | null
+  insight_index: number | null
+  /** Whether `insight_index` names a REAL brief finding rather than the storage
+   *  sentinel a chat/ideation/uploaded PRD carries (always `0`). Only pass the
+   *  pair to the panel as `meta` when this is true — the panel's Evidence tab
+   *  loads by (briefId, insightIndex), so a sentinel would render the brief's
+   *  first finding underneath an unrelated document. */
+  brief_anchored: boolean
+  week_label: string | null
+}
+
+/** The 0/1/many verdict for an open request. All three outcomes are part of the
+ *  contract: `not_found` must open NOTHING and say so (it never degrades into
+ *  generating a new document — see backend/app/artifact_open.py), `ambiguous`
+ *  must ask, `resolved` opens directly. */
+export type OpenArtifactResult = {
+  /** `unsupported_type` = the user named a real artifact kind this panel cannot
+   *  show (a prototype, a report). It is NOT coerced into a PRD — say where the
+   *  thing actually lives instead. */
+  status: "resolved" | "ambiguous" | "not_found" | "unsupported_type"
+  /** What the user NAMED — may be a kind outside OpenArtifactKind when the
+   *  status is `unsupported_type`. */
+  artifact_type: OpenArtifactKind | string
+  query: string
+  artifact: OpenArtifactCandidate | null
+  candidates: OpenArtifactCandidate[]
 }
 
 export const chatIntentApi = {

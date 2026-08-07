@@ -2238,10 +2238,15 @@ def test_the_question_is_embedded_once_and_shared_by_both_consumers(
     seen = {}
     real_grounding = ask_runner.document_grounding
 
-    def _spy_grounding(eid, q, conversation_id=None, *, question_embedding=None):
+    # `**kw` rather than a spelled-out signature: this spy exists to observe
+    # the EMBEDDING argument, and every other parameter grounding grows (a
+    # conversation id, now a history) is passed straight through. Naming them
+    # here made the spy a second copy of the signature that had to be kept in
+    # step with the real one, and it fell behind.
+    def _spy_grounding(eid, q, conversation_id=None, *, question_embedding=None, **kw):
         seen["documents"] = question_embedding
         return real_grounding(
-            eid, q, conversation_id, question_embedding=question_embedding
+            eid, q, conversation_id, question_embedding=question_embedding, **kw
         )
 
     monkeypatch.setattr(ask_runner, "document_grounding", _spy_grounding)
