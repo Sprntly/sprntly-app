@@ -713,7 +713,7 @@ def google_drive_callback(code: str, state: str):
         company_id=company_id,
         provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
         token_encrypted=token_encrypted,
-        scopes=" ".join(google_oauth.DRIVE_SCOPES),
+        scopes=" ".join(google_oauth.drive_scopes()),
         google_email=email,
         config_json=json.dumps(config),
     )

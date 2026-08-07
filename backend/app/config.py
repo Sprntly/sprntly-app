@@ -170,10 +170,14 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
     # Drive access mode TOGGLE. "oauth" (DEFAULT) = the existing per-user OAuth
-    # Picker route (drive.file/readonly), unchanged. "service_account" = mint a
+    # Picker route (drive.file), unchanged. "service_account" = mint a
     # per-company service account, the customer shares a folder with its email
-    # out-of-band, and Sprntly enumerates + ingests what the SA can see. The
-    # Drive connector branches on this one value.
+    # out-of-band, and Sprntly enumerates + ingests what the SA can see.
+    # "oauth_folder" = the per-user OAuth Picker with folder selection enabled,
+    # which requires requesting the RESTRICTED drive.readonly scope instead of
+    # drive.file — Google gates that scope behind CASA Tier 2 app verification,
+    # so this value stays dormant (not set anywhere) until that approval lands.
+    # The Drive connector branches on this one value.
     google_drive_access_mode: str = "oauth"
     # Bootstrap credential for service_account mode: a GCP project with the IAM
     # API enabled and a bootstrap SA holding iam.serviceAccountAdmin +
