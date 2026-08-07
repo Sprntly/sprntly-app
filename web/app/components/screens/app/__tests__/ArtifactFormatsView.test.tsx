@@ -88,11 +88,16 @@ function render(
 }
 
 describe("ArtifactFormatsView — the section", () => {
-  it("names itself with the verb that separates it from the exemplars below", () => {
+  it("names itself, and says in the header what formats govern", () => {
     const html = render()
     expect(html).toMatch(/Formats we write in/)
     expect(html).toMatch(/One format is active per document type/)
-    expect(html).toMatch(/Skills decide what a document says/)
+    // The intro banner is gone — it existed to separate this library from the
+    // exemplar library below, which is itself hidden now. What it said that
+    // still matters (formats govern layout, not content) moved to the header
+    // sub, so THAT is what must survive.
+    expect(html).not.toMatch(/Skills decide what a document says/)
+    expect(html).toMatch(/headings, order, wording/)
   })
 
   it("carries exactly ONE section-level live region", () => {
@@ -230,37 +235,57 @@ describe("ArtifactFormatsView — the row", () => {
 })
 
 describe("ArtifactFormatsView — the five compile states", () => {
-  const CASES: [CompileStatus, RegExp, RegExp][] = [
+  // `null` reason = the card deliberately says nothing. Only `ready` qualifies:
+  // its badge already states the state, and repeating it in a sentence on every
+  // healthy card — which is most of them — taught people to skip the line that
+  // carries the real reason on a card that needs attention.
+  const CASES: [CompileStatus, RegExp, RegExp | null][] = [
     ["pending", /Queued/, /Queued — we&#x27;ll check this format in a moment\./],
     ["compiling", /Checking…/, /Checking your format against what a Sprntly document needs…/],
-    ["ready", /Ready/, /Checked — every part of a Sprntly document has a home/],
+    ["ready", /Ready/, null],
     ["needs_review", /Needs a look/, /didn&#x27;t map onto a Sprntly document|bulleted evidence list/],
     ["failed", /Couldn&#x27;t be read/, /didn&#x27;t map onto a Sprntly document|Nothing about your file/],
   ]
 
-  it("every status renders a WORD badge and a reason line — colour is never the only signal", () => {
-    for (const [status, badge, reason] of CASES) {
+  it("every status renders a WORD badge — colour is never the only signal", () => {
+    for (const [status, badge] of CASES) {
       const html = render({
         groups: { ...EMPTY, prd: [row({ compile_status: status })] },
       })
       expect(html, status).toMatch(badge)
-      expect(html, status).toMatch(reason)
     }
   })
 
-  it("reasonLine answers something for all five, and for an unknown status", () => {
+  it("every status that has something to say says it; ready stays silent", () => {
+    for (const [status, , reason] of CASES) {
+      const html = render({
+        groups: { ...EMPTY, prd: [row({ compile_status: status })] },
+      })
+      if (reason) {
+        expect(html, status).toMatch(reason)
+      } else {
+        // Not merely empty text — the element is dropped, so a healthy card
+        // carries no blank paragraph taking its own margin.
+        expect(html, status).not.toMatch(/class="afmt-reason"/)
+        expect(html, status).not.toMatch(/Checked — every part of a Sprntly document/)
+      }
+    }
+  })
+
+  it("reasonLine answers something for the four states that need one", () => {
     for (const status of [
       "pending",
       "compiling",
-      "ready",
       "needs_review",
       "failed",
     ] as CompileStatus[]) {
       expect(reasonLine(row({ compile_status: status }), false).length).toBeGreaterThan(10)
     }
+    // Ready and an unknown status both stay silent rather than inventing copy.
+    expect(reasonLine(row({ compile_status: "ready" }), false)).toBe("")
     expect(
-      reasonLine(row({ compile_status: "wat" as CompileStatus }), false).length,
-    ).toBeGreaterThan(10)
+      reasonLine(row({ compile_status: "wat" as CompileStatus }), false),
+    ).toBe("")
   })
 
   it("marks an in-flight row aria-busy off its own status, not off the poller's bookkeeping", () => {
