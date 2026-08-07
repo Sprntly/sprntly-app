@@ -135,8 +135,13 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     successful extract, so a failed doc retries on the next run. Missing corpus
     is not fatal — a company might be connector-only.
     """
+    # Lazy import — matches the lazy-import style this module already uses
+    # for connector-path imports (see _seed_from_connectors below), so no
+    # module-load cycle is created between synthesis_brief and connectors.
+    from app.connectors.slack_sync import SLACK_CORPUS_DOC_STEM
+
     totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0,
-              "unreadable": 0}
+              "unreadable": 0, "kg_excluded": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
@@ -169,6 +174,12 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
         # recording, so it re-enters the moment we can read its type.
         if is_unparsed_stub(doc.text):
             totals["unreadable"] += 1
+            continue
+        # Slack reaches the KG per-channel via kg_ingest.slack_extract, which
+        # carries channel-level provenance this wholesale doc cannot. The file
+        # itself stays — the corpus loader still feeds it to briefs and Ask.
+        if doc.name == SLACK_CORPUS_DOC_STEM:
+            totals["kg_excluded"] += 1
             continue
         sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
         if sha in existing:

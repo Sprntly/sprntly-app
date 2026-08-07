@@ -11,6 +11,7 @@ import contextvars
 import json
 import logging
 import re
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from app.corpus import load_corpus
@@ -20,8 +21,18 @@ from app.db import (
     find_cached_ask,
     start_cached_ask,
 )
+from app.document_bodies import BodyResolver
+from app.document_catalog import (
+    PROVIDER_CHAT_ATTACHMENT,
+    PROVIDER_CONFLUENCE,
+    PROVIDER_GOOGLE_DRIVE,
+    PROVIDER_UPLOADS,
+    find_candidates as find_catalog_candidates,
+    list_documents as list_catalog_documents,
+)
 from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
+from app.prompt_history import render_history_block
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -29,6 +40,7 @@ from app.prompts import (
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -149,12 +161,42 @@ MAX_SELECTED_DOCUMENTS = 3
 #: Index entries rendered before the list is visibly truncated.
 MAX_INDEX_ENTRIES = 200
 
-#: Tokens shorter than this cannot carry a token-overlap match alone (so
-#: "vs", "of", "q3" can't spuriously select a document).
-_MIN_MATCH_TOKEN_LEN = 3
+#: EVERY provider is selectable. There is deliberately no provider predicate
+#: here any more: the previous one existed only because Drive files and
+#: Confluence pages had no body reader, and both now resolve through
+#: `document_bodies`. If a provider ever does need excluding, that belongs in
+#: `document_find_candidates`, where the candidate window is COMPUTED — a
+#: Python filter over the top-k the RPC already chose silently shrinks the
+#: result set instead of asking for a different one, and starves selection
+#: without saying so.
+#:
+#: What remains below is dispatch, not selection: uploads read from
+#: `document_source_file`, chat attachments already reached the model through
+#: their own turn's folded history, and everything else — today Drive and
+#: Confluence, tomorrow whatever registers next — is read by
+#: `document_bodies.BodyResolver`, which answers with a stated reason rather
+#: than an exception when it does not know a source.
 
-#: Matched-stem-tokens ÷ total-stem-tokens threshold for a fuzzy match.
-_TOKEN_OVERLAP_RATIO = 0.8
+#: Providers whose documents are ALREADY represented in the index by another
+#: read, and so must not also be rendered as connected-source entries.
+#: `uploads` come from `list_company_files`; `chat_attachment` rows come from
+#: the active conversation's turns.
+_LOCALLY_INDEXED_PROVIDERS = frozenset({PROVIDER_UPLOADS, PROVIDER_CHAT_ATTACHMENT})
+
+#: How a connected-source document names its origin in an index line. A
+#: provider with no entry here renders under its own key rather than being
+#: hidden — an unlabelled document is still a document that exists.
+_PROVIDER_LABELS = {
+    PROVIDER_GOOGLE_DRIVE: "Google Drive",
+    PROVIDER_CONFLUENCE: "Confluence",
+}
+
+#: Candidates requested from the hybrid rank per question. Comfortably above
+#: MAX_SELECTED_DOCUMENTS so rows that cannot be turned into a body (an
+#: upload deleted since it was catalogued, a chat attachment already folded
+#: into history) do not starve selection. A capacity number, not a relevance
+#: one: raising it cannot change which document ranks first.
+_CATALOG_CANDIDATE_K = 25
 
 _EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 _SEPARATOR_RE = re.compile(r"[_\-.]+")
@@ -169,47 +211,118 @@ def _normalize(text: str) -> str:
     return " ".join(spaced.lower().split())
 
 
-def _tokens(text: str) -> set[str]:
-    """Normalized words, dropping anything shorter than
-    `_MIN_MATCH_TOKEN_LEN` so short words can't carry a match alone."""
-    return {t for t in _normalize(text).split() if len(t) >= _MIN_MATCH_TOKEN_LEN}
-
-
 def _select_documents(
     question: str, refs: list[DocumentFileRef]
 ) -> list[DocumentFileRef]:
-    """Deterministic, pure selection — no I/O, no LLM call, no new latency
-    leg. A ref matches when its normalized filename stem is a substring of
-    the normalized question, or its normalized source name is, or its stem
-    tokens overlap the question's tokens at ratio >= _TOKEN_OVERLAP_RATIO.
-    Ranked by ratio descending, then uploaded_at descending; keeps the first
-    MAX_SELECTED_DOCUMENTS.
+    """Stage N — the documents the question NAMES. Deterministic, pure, no
+    I/O: a ref matches when its normalized filename stem is a substring of the
+    normalized question, or its normalized source name is. Ranked by
+    uploaded_at descending; keeps the first MAX_SELECTED_DOCUMENTS.
 
-    Fail-closed on selection, never on existence: no match means no bodies
-    load, but the index still renders every document, so the honest "I have
-    it, I did not load it" answer stays available. A wrong load costs
-    budget; a wrong denial is the incident."""
+    Both arms are binary and have no tunable, which is why they survive
+    unchanged. The third arm — filename-token overlap at a fixed ratio — is
+    GONE, and is not replaced by another number. It was a relevance GATE: set
+    too high (it was) a user asking about their document's topic silently got
+    nothing, and every value is wrong for somebody's filename. Topical
+    matching is now `_topical_candidates` below, where it is a RANK — ordered
+    candidates filling the remaining slots, with no threshold to re-tune.
+
+    Named matches load FIRST: naming a document is an unambiguous request for
+    that document, and no ranking should be able to outrank it."""
     question_norm = _normalize(question)
-    question_tokens = _tokens(question)
-    candidates: list[tuple[float, DocumentFileRef]] = []
+    named: list[DocumentFileRef] = []
     for ref in refs:
         stem_norm = _normalize(ref.filename)
         source_norm = _normalize(ref.source_name) if ref.source_name else ""
-        stem_tokens = _tokens(ref.filename)
-        ratio = (
-            len(stem_tokens & question_tokens) / len(stem_tokens)
-            if stem_tokens
-            else 0.0
+        if (bool(stem_norm) and stem_norm in question_norm) or (
+            bool(source_norm) and source_norm in question_norm
+        ):
+            named.append(ref)
+    named.sort(key=lambda ref: ref.uploaded_at or "", reverse=True)
+    return named[:MAX_SELECTED_DOCUMENTS]
+
+
+def _topical_candidates(
+    enterprise_id: str,
+    question: str,
+    *,
+    question_embedding: list[float] | None,
+    conversation_id: int | None,
+    user_id: str | None,
+    exclude_external_ids: set[str],
+) -> list[dict]:
+    """Stage T — the documents the question is ABOUT, by fused rank.
+
+    Delegates to the catalog's `document_find_candidates`, which fuses a
+    lexical channel (tsvector over title/source/summary/topics) and a semantic
+    channel (cosine kNN over the summary embedding) by reciprocal rank fusion,
+    and which holds the tenant filter and the conversation-ownership join
+    inside its own body — there is no argument here that widens scope.
+
+    Every provider the catalog holds is a candidate. Nothing is filtered out
+    of the RPC's result here — see the note on `_LOCALLY_INDEXED_PROVIDERS`
+    above for why a Python-side provider filter is the wrong shape and where
+    one would belong instead.
+
+    **There is no similarity floor and no score threshold.** RRF is rank-based
+    by construction; the fusion constants are fusion shape, not a relevance
+    knob. The consequence is deliberate and stated: whenever the catalog is
+    non-empty, this returns candidates — including for questions no document
+    is relevant to. Cost is bounded by the caps that already exist
+    (MAX_SELECTED_DOCUMENTS documents, _DOCUMENT_CHAR_BUDGET chars), and the
+    answer is kept honest by the prompt's ignore-if-irrelevant rule rather
+    than by a score nobody can see. A wrong load costs budget; a wrong denial
+    is the incident.
+
+    `question_embedding` of None (unavailable, or all-zero — the accessor
+    treats a zero vector as no vector, since a zero vector in cosine kNN ranks
+    arbitrarily) drops the semantic channel and ranks on the lexical one
+    alone: degraded, not dead. The caller records that degradation.
+
+    Fails open to no candidates: discovery must never break an answer."""
+    try:
+        rows = find_catalog_candidates(
+            enterprise_id,
+            query=question,
+            embedding=question_embedding,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            k=_CATALOG_CANDIDATE_K,
         )
-        is_match = (
-            (bool(stem_norm) and stem_norm in question_norm)
-            or (bool(source_norm) and source_norm in question_norm)
-            or ratio >= _TOKEN_OVERLAP_RATIO
+    except Exception:  # noqa: BLE001 — discovery must never break an answer
+        logger.warning(
+            "document catalog candidate search failed for %s; "
+            "topical selection contributes nothing this question",
+            enterprise_id, exc_info=True,
         )
-        if is_match:
-            candidates.append((ratio, ref))
-    candidates.sort(key=lambda pair: (pair[0], pair[1].uploaded_at or ""), reverse=True)
-    return [ref for _, ref in candidates[:MAX_SELECTED_DOCUMENTS]]
+        return []
+
+    out: list[dict] = []
+    for position, row in enumerate(rows or [], start=1):
+        external_id = row.get("external_id")
+        if not external_id or external_id in exclude_external_ids:
+            continue
+        out.append({
+            "provider": row.get("provider"),
+            "external_id": external_id,
+            "title": row.get("title") or "",
+            "source_name": row.get("source_name") or "",
+            "summary": row.get("summary") or "",
+            "topics": list(row.get("topics") or []),
+            "doc_date": row.get("doc_date"),
+            "conversation_id": row.get("conversation_id"),
+            "score": float(row.get("score") or 0.0),
+            "rank": position,
+        })
+
+    # A conversation-scoped document outranks a workspace one ON EQUAL MATCH.
+    # The SQL orders by fused score only, so this tie-break is stated here
+    # rather than assumed: score first (unchanged ordering), then session
+    # scope, then the rank the function returned. A document the user attached
+    # to THIS conversation is the more likely referent of an ambiguous
+    # question — but it does not get to jump a genuinely better match.
+    out.sort(key=lambda c: (-c["score"], c["conversation_id"] is None, c["rank"]))
+    return out
 
 
 # ── Conversation-scoped attachments (chat attachments in the index) ─────────
@@ -256,6 +369,56 @@ def reset_active_conversation(tokens) -> None:
     token_conversation, token_user = tokens
     _active_conversation_id.reset(token_conversation)
     _active_conversation_user_id.reset(token_user)
+
+
+# ── The question embedding, by the same request-scoped route ────────────────
+# Stage T's semantic channel was dead on the skill-routed path, which is the
+# path most of this traffic actually takes: `qa_agent._answer_single_shot`
+# calls `document_grounding(enterprise_id, question)` positionally, so
+# `question_embedding` stayed at its default of None and the catalog search ran
+# with `p_embedding => null`. Every candidate then scored on the lexical
+# channel alone, and where that channel ties, the SQL's last-resort ordering is
+# recency — so the newest document was returned for whatever was asked, and
+# labelled a topic match.
+#
+# Giving `answer()` an embedding parameter would mean threading it through
+# `answer() -> _answer_single_shot -> document_grounding`: the same four edits
+# inside qa_agent.py that the conversation pair above exists to avoid. So the
+# embedding rides the same request-scoped ContextVar route, set once per ask in
+# `ask_job_runner._run_sync` and read by whichever grounding call site runs.
+#
+# ONE ContextVar holding a `(vector, degraded)` tuple rather than a pair of
+# them, because "unset" and "set to None" mean different things here and must
+# stay distinguishable: None-because-nobody-set-it lets a caller compute its
+# own, whereas None-because-embedding-failed must NOT trigger a second attempt.
+# The sentinel is the tuple's presence, not the vector's value.
+_active_question_embedding: contextvars.ContextVar[
+    tuple[list[float] | None, bool] | None
+] = contextvars.ContextVar("ask_runner_active_question_embedding", default=None)
+
+
+def set_active_question_embedding(embedding: list[float] | None, degraded: bool):
+    """Record THIS ask's question embedding for every consumer on this thread's
+    context. Call from `ask_job_runner._run_sync` beside
+    `set_active_conversation`, and always undo in the same `finally`.
+
+    `degraded` is carried alongside so the consumer that logs can say WHY the
+    semantic channel was absent — a failed embedding and a caller that simply
+    had no vector look identical at the point of use.
+
+    Returns an opaque token for `reset_active_question_embedding`."""
+    return _active_question_embedding.set((embedding, degraded))
+
+
+def reset_active_question_embedding(token) -> None:
+    """Undo `set_active_question_embedding` — call from a `finally`."""
+    _active_question_embedding.reset(token)
+
+
+def _carried_question_embedding() -> tuple[list[float] | None, bool] | None:
+    """This ask's already-computed `(vector, degraded)`, or None if nothing set
+    one. Never computes — see `_resolve_question_embedding`."""
+    return _active_question_embedding.get()
 
 
 def _owned_conversation_attachments(
@@ -374,8 +537,119 @@ def active_conversation_attachment_names(enterprise_id: str) -> list[str]:
     return names
 
 
+def _catalog_documents(
+    enterprise_id: str, conversation_id: int | None, user_id: str | None
+) -> list:
+    """Every catalog row this caller may see. [] on any read failure.
+
+    Serves two jobs at once, which is why it returns the rows rather than a
+    map. It ENRICHES the index lines the uploads/attachment reads already
+    produced — for those, the catalog is not the index's spine, so a catalog
+    that is empty, stale or unreadable costs summaries and topics, never
+    existence. And it SUPPLIES the entries for documents that live in a
+    connected system, which have no other read: a Confluence page or a Drive
+    file is in this workspace's index only because the catalog says so.
+
+    That asymmetry is worth stating plainly, because it is a real reduction in
+    robustness for those two providers: a catalog outage downgrades an upload
+    to a summary-less line, but makes a connected-source document invisible.
+    It is still strictly better than the alternative it replaces, which was
+    that they were never in the index at all."""
+    try:
+        return list_catalog_documents(
+            enterprise_id, conversation_id=conversation_id, user_id=user_id
+        )
+    except Exception:  # noqa: BLE001 — enrichment must never break an answer
+        logger.warning(
+            "document catalog read failed for %s; index renders without "
+            "summaries and without connected-source documents",
+            enterprise_id, exc_info=True,
+        )
+        return []
+
+
+def _connected_source_head(doc) -> str:
+    """The `- {name} ({where}, updated {date})` head for a document that lives
+    in a connected system rather than in this workspace's uploads.
+
+    Deliberately NOT phrased like an upload. The prompt's existence rules key
+    off the difference: the model must be able to say "that is a Confluence
+    page in the SD space", not describe a wiki page as something the workspace
+    uploaded."""
+    label = _PROVIDER_LABELS.get(doc.provider, doc.provider)
+    source_name = (doc.source_name or "").strip()
+    where = (
+        f"{label}: {source_name}"
+        if source_name and source_name != label
+        else label
+    )
+    date = (doc.doc_date or doc.updated_at or "")[:10]
+    head = f"- {doc.title} ({where}"
+    return f"{head}, updated {date})" if date else f"{head})"
+
+
+def _index_line(
+    head: str, catalog_doc, loaded: bool, partial_index: bool,
+    unavailable_reason: str = "",
+) -> str:
+    """One index entry: the existing `- {name} ({scope}, {date})` head, then
+    the catalog's one-line summary, then its topics, then whether the body is
+    loaded for THIS question.
+
+    The summary is the routing hint that lets the model notice a selection
+    mistake — "the loaded documents don't cover this, but X looks relevant" —
+    which is the point of showing it. The loaded-marker is what stops the
+    model treating a one-line summary as if it had read the document.
+
+    `unavailable_reason` is the THIRD state, and the one this whole line of
+    work exists for: a document that WAS selected and whose contents could not
+    be fetched. It is not "not loaded" (nobody asked for it) and it is
+    emphatically not absent — the entry is right there in the index. The
+    marker says so in words the model can repeat to the user without turning a
+    fetch failure into a denial that the document exists."""
+    parts = [head]
+    if catalog_doc is not None:
+        summary = (catalog_doc.summary or "").strip()
+        if summary:
+            parts.append(f"— {summary}")
+        topics = [t for t in (catalog_doc.topics or []) if t]
+        if topics:
+            parts.append(f"Topics: {', '.join(topics)}.")
+    if unavailable_reason:
+        parts.append(
+            f"[this document exists, but its contents could not be loaded for "
+            f"this question: {unavailable_reason}]"
+        )
+    else:
+        parts.append(
+            "[loaded for this question]" if loaded
+            else "[not loaded for this question]"
+        )
+    return " ".join(parts)
+
+
+@dataclass
+class _Chosen:
+    """One document selection has picked, whatever it is stored in.
+
+    `key` is the manifest's `file_id` — an upload's own id, the synthetic
+    `turn:{id}:attachment:{i}` for a chat attachment, or `{provider}:{id}`
+    for a document that lives in a connected system. `name` is what the model
+    is told to cite, and must match the Index line exactly."""
+
+    key: str
+    name: str
+    provider: str
+    ref: DocumentFileRef | None = None
+    catalog_doc: object | None = None
+
+
 def document_grounding(
-    enterprise_id: str | None, question: str, conversation_id: int | None = None
+    enterprise_id: str | None,
+    question: str,
+    conversation_id: int | None = None,
+    *,
+    question_embedding: list[float] | None = None,
 ) -> tuple[str, list[dict]]:
     """Render the "UPLOADED DOCUMENTS" block (index of every uploaded file,
     plus the bodies selected for this question) and its server-derived
@@ -394,6 +668,43 @@ def document_grounding(
     wrong user, unset, or any read error — behaves exactly as if it had never
     been passed: no attachment entries, no error.
 
+    Selection runs in two stages. **Stage N** loads the documents the question
+    NAMES (`_select_documents`, substring match, binary, no tunable). **Stage
+    T** fills whatever slots remain with the documents the question is ABOUT,
+    by the catalog's fused lexical+semantic rank (`_topical_candidates`, no
+    floor, no threshold). Named beats topical always.
+
+    BOTH STAGES COVER EVERY PROVIDER. Documents that live in a connected
+    system — Confluence pages, Drive files — are indexed from the catalog and
+    their bodies resolve through `document_bodies`: Drive from the corpus
+    markdown its sync already wrote, Confluence by fetching the page live.
+    Until that existed those two were reachable only by NAMING them, which is
+    the same defect, one layer up, as needing to spell a filename: a user who
+    asked what their wiki said about a topic got nothing, and was told to go
+    ask about Confluence specifically.
+
+    A connected-source document whose body cannot be fetched stays in the
+    index with its summary and a marker saying its contents could not be
+    loaded AND WHY. It must never read as absence — "we could not reach
+    Confluence" and "you have no such page" are different sentences, and
+    collapsing them is the incident this exists to close.
+
+    `question_embedding` is computed ONCE per ask by the caller and threaded
+    in, because this function runs BEFORE knowledge-graph retrieval and on
+    PRD-grounded asks that retrieval never runs at all — so there is no
+    existing embedding here to reuse. When it is left at its default — which
+    is what `qa_agent._answer_single_shot`'s positional call does, and that is
+    the path most traffic takes — it resolves from the request-scoped
+    ContextVar `ask_job_runner._run_sync` sets, exactly as `conversation_id`
+    above does. This function NEVER embeds on its own behalf: it uses what it
+    was handed or what the ask already computed, so an ask can only ever pay
+    for one embedding however many grounding calls it makes.
+
+    Passing None with no ContextVar set is still legitimate and means Stage T
+    ranks lexically only (see `_topical_candidates`) — but it now means a
+    caller genuinely had no vector, rather than a call site forgetting to pass
+    one.
+
     Returns ("", []) for every degradation path — no tenant, nothing to show
     (no uploaded files AND no conversation attachments), or any read failure
     — so composition is byte-identical to today for a tenant with no uploads
@@ -409,16 +720,54 @@ def document_grounding(
         )
         return "", []
 
+    # Same request-scoped route as the conversation pair below it. `degraded`
+    # is only meaningful when the ask computed the vector, so a caller that
+    # threaded one in explicitly is recorded as not-degraded.
+    embedding_degraded = False
+    if question_embedding is None:
+        carried = _carried_question_embedding()
+        if carried is not None:
+            question_embedding, embedding_degraded = carried
+
     if conversation_id is None:
         conversation_id = _active_conversation_id.get()
+    caller_user_id = _active_conversation_user_id.get()
     conv_attachments = _owned_conversation_attachments(
-        enterprise_id, conversation_id, _active_conversation_user_id.get()
+        enterprise_id, conversation_id, caller_user_id
     )
 
-    if not refs and not conv_attachments:
+    catalog_docs = _catalog_documents(
+        enterprise_id, conversation_id, caller_user_id
+    )
+    catalog = {doc.external_id: doc for doc in catalog_docs}
+
+    # Documents that live in a connected system. `uploads` and
+    # `chat_attachment` rows are dropped here NOT as a selection filter but
+    # because they are already in the index by another route, and listing them
+    # twice would tell the model the workspace holds two copies of one file.
+    connected = [
+        doc for doc in catalog_docs
+        if doc.provider not in _LOCALLY_INDEXED_PROVIDERS
+    ]
+    connected.sort(key=lambda d: (d.doc_date or d.updated_at or ""), reverse=True)
+
+    if not refs and not conv_attachments and not connected:
+        # Nothing to show — recorded rather than silent, so "this workspace has
+        # no documents" stays distinguishable from "selection found none of
+        # the documents it has" (AC7's two cases look identical in an answer).
+        _log_document_selection(
+            enterprise_id,
+            manifest=[],
+            catalog_size=len(catalog_docs),
+            topical_ran=False,
+            topical_candidates=0,
+            question_embedding=question_embedding,
+            embedding_degraded=embedding_degraded,
+            index_empty=True,
+        )
         return "", []
 
-    total = len(refs)
+    total = len(refs) + len(connected)
     truncated_index = total > MAX_INDEX_ENTRIES
     # Truncate BEFORE selecting: if selection ran against the untruncated
     # list, a matched document ranked outside the visible index could have
@@ -426,35 +775,142 @@ def document_grounding(
     # the rendered Index and the manifest — reproducing, inside a
     # >MAX_INDEX_ENTRIES tenant, the exact content-present/existence-missing
     # inconsistency this ticket exists to eliminate.
+    #
+    # Uploads and connected-source documents share ONE cap rather than getting
+    # one each, so connecting a wiki cannot grow the worst-case prompt: the
+    # ceiling on rendered entries is exactly what it was before. Uploads fill
+    # it first, which means a workspace already at the cap on uploads alone
+    # sees no connected-source entries — visibly, via the PARTIAL marker,
+    # rather than silently.
     refs = refs[:MAX_INDEX_ENTRIES]
+    connected = connected[:max(0, MAX_INDEX_ENTRIES - len(refs))]
 
-    selected = _select_documents(question, refs)
-    selected_ids = {ref.id for ref in selected}
+    def _connected_key(doc) -> str:
+        return f"{doc.provider}:{doc.external_id}"
 
-    lines = [
-        f"# {DOCUMENT_INDEX_HEADER}",
-        "",
-        "## Index — every document this workspace has uploaded",
+    connected_by_external_id = {doc.external_id: doc for doc in connected}
+
+    # ── Stage N: the documents the question NAMES. These load first, and a
+    #    ranking never displaces them.
+    selected: list[_Chosen] = [
+        _Chosen(key=ref.id, name=ref.filename, provider=PROVIDER_UPLOADS, ref=ref)
+        for ref in _select_documents(question, refs)
     ]
-    for ref in refs:
-        date = (ref.uploaded_at or "")[:10]
-        lines.append(f"- {ref.filename} (source: {ref.source_name}, uploaded {date})")
-    for turn_id, index, attachment, turn_created_at in conv_attachments:
-        date = (turn_created_at or "")[:10]
-        lines.append(
-            f"- {attachment['name']} (attached to this conversation, {date})"
-        )
-    if truncated_index:
-        lines.append(
-            f"[This list shows the {MAX_INDEX_ENTRIES} most recently uploaded "
-            f"of {total} documents.]"
-        )
+    # Stage N over the catalog too, so naming a wiki page or a Drive file
+    # lands the same way naming an upload does. Same binary substring rule,
+    # same no-tunable: a title the question spells out is an unambiguous
+    # request for that document whatever system it happens to live in.
+    named_keys = {chosen.key for chosen in selected}
+    question_norm = _normalize(question)
+    for doc in connected:
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        title_norm = _normalize(doc.title)
+        if not title_norm or title_norm not in question_norm:
+            continue
+        key = _connected_key(doc)
+        if key in named_keys:
+            continue
+        named_keys.add(key)
+        selected.append(_Chosen(
+            key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+        ))
+    selected = selected[:MAX_SELECTED_DOCUMENTS]
+    match_by_id: dict[str, tuple[str, int | None]] = {
+        chosen.key: ("named", None) for chosen in selected
+    }
 
+    # ── Stage T: fill whatever slots remain by fused rank.
+    #
+    # `match: "topic"` is set ONLY inside the loop below, once per candidate
+    # the fused rank actually returned. So a question that ranks nothing —
+    # both channels empty — produces no topic labels at all, and selection
+    # ends with whatever Stage N named. There is deliberately no fallback
+    # here: ordering the catalog by recency and calling the head of that list
+    # a topic match is how "the newest document, whatever you asked" came to
+    # be presented as a ranked answer, and it must not be reachable.
+    by_ref_id = {ref.id: ref for ref in refs}
+    topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
+    topical_candidates: list[dict] = []
+    if topical_ran:
+        topical_candidates = _topical_candidates(
+            enterprise_id,
+            question,
+            question_embedding=question_embedding,
+            conversation_id=conversation_id,
+            user_id=caller_user_id,
+            exclude_external_ids=set(match_by_id),
+        )
+    for candidate in topical_candidates:
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        # A chat attachment's text already reached the model through its
+        # own turn's folded history, so ranking one is informative but
+        # loading it again would duplicate it into the prompt. It is
+        # accounted for below, not re-rendered, and does not consume a
+        # body slot that a workspace document could use.
+        if candidate["provider"] == PROVIDER_CHAT_ATTACHMENT:
+            continue
+        external_id = candidate["external_id"]
+        if candidate["provider"] == PROVIDER_UPLOADS:
+            ref = by_ref_id.get(external_id)
+            # A catalog row whose upload has since been deleted (or is
+            # below the index cap) has no body to resolve — skip rather
+            # than render an entry with nothing behind it.
+            if ref is None or ref.id in match_by_id:
+                continue
+            selected.append(_Chosen(
+                key=ref.id, name=ref.filename,
+                provider=PROVIDER_UPLOADS, ref=ref,
+            ))
+            match_by_id[ref.id] = ("topic", candidate["rank"])
+            continue
+        # A connected-source document. Same rule as above about the index
+        # cap: only rows that are actually RENDERED may be selected, so a
+        # body can never appear under "Contents loaded" for a document the
+        # Index does not list.
+        doc = connected_by_external_id.get(external_id)
+        if doc is None:
+            continue
+        key = _connected_key(doc)
+        if key in match_by_id:
+            continue
+        selected.append(_Chosen(
+            key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
+        ))
+        match_by_id[key] = ("topic", candidate["rank"])
+
+    selected_ids = {chosen.key for chosen in selected}
+
+    # ── Bodies. Resolved BEFORE the index renders, because whether a
+    #    connected-source fetch succeeded is part of that document's index
+    #    line: a page whose body could not be loaded says so there, next to
+    #    its summary, instead of being silently marked loaded with nothing
+    #    behind it.
+    resolver = BodyResolver(enterprise_id)
     bodies: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
     if selected:
         per_doc_budget = max(1, _DOCUMENT_CHAR_BUDGET // len(selected))
-        for ref in selected:
-            text = get_file_text(enterprise_id, ref.id) or ""
+        for chosen in selected:
+            if chosen.ref is not None:
+                text = get_file_text(enterprise_id, chosen.ref.id) or ""
+            else:
+                # At most MAX_SELECTED_DOCUMENTS of these per ask (3), so the
+                # worst case is three page fetches — the cap that already
+                # bounds how much document text an answer carries also bounds
+                # how much network an answer does.
+                resolved = resolver.resolve(chosen.provider, chosen.catalog_doc.external_id)
+                if not resolved.resolved:
+                    unavailable[chosen.key] = resolved.reason
+                    continue
+                text = resolved.text or ""
+                if not text:
+                    # Read successfully and genuinely empty. Distinct from
+                    # unavailable, and said so: "this document has no text" is
+                    # true, "we could not load it" would not be.
+                    bodies[chosen.key] = "[This document has no readable text.]"
+                    continue
             if len(text) > per_doc_budget:
                 body = (
                     text[:per_doc_budget]
@@ -463,18 +919,60 @@ def document_grounding(
                 )
             else:
                 body = text
-            bodies[ref.id] = body
+            bodies[chosen.key] = body
+
+    lines = [
+        f"# {DOCUMENT_INDEX_HEADER}",
+        "",
+        "## Index — every document this workspace has uploaded or connected",
+    ]
+    for ref in refs:
+        date = (ref.uploaded_at or "")[:10]
+        lines.append(_index_line(
+            f"- {ref.filename} (source: {ref.source_name}, uploaded {date})",
+            catalog.get(ref.id), ref.id in selected_ids, truncated_index,
+        ))
+    for turn_id, index, attachment, turn_created_at in conv_attachments:
+        date = (turn_created_at or "")[:10]
+        external_id = f"turn:{turn_id}:attachment:{index}"
+        lines.append(_index_line(
+            f"- {attachment['name']} (attached to this conversation, {date})",
+            catalog.get(external_id), True, truncated_index,
+        ))
+    for doc in connected:
+        key = _connected_key(doc)
+        lines.append(_index_line(
+            _connected_source_head(doc), doc, key in bodies, truncated_index,
+            unavailable_reason=unavailable.get(key, ""),
+        ))
+    if truncated_index:
+        # The marker states PARTIAL explicitly, because above the cap the
+        # existence contract genuinely changes: the index is no longer the
+        # complete inventory, so an absence from it stops being evidence of
+        # absence. The prompt's existence rule keys off this wording.
+        lines.append(
+            f"[This list is PARTIAL: it shows {MAX_INDEX_ENTRIES} of {total} "
+            f"documents in this workspace. A document missing from this list "
+            f"may still exist.]"
+        )
 
     if bodies:
         lines.append("")
         lines.append("## Contents loaded for this question")
-        for ref in selected:
+        for chosen in selected:
+            if chosen.key not in bodies:
+                continue
             lines.append("")
-            lines.append(f"### {ref.filename}")
-            lines.append(bodies[ref.id])
+            lines.append(f"### {chosen.name}")
+            lines.append(bodies[chosen.key])
 
     block = "\n".join(lines)
 
+    # `match` and `rank` are the audit trail that distinguishes "was never
+    # selected" from "was selected and turned out unhelpful" — the two cases
+    # that look identical in an answer but mean opposite things about whether
+    # selection is working. Counts-only discipline still applies to the
+    # decision log; this manifest is already per-document and server-derived.
     manifest = [
         {
             "file_id": ref.id,
@@ -482,6 +980,9 @@ def document_grounding(
             "source_name": ref.source_name,
             "uploaded_at": ref.uploaded_at,
             "loaded": ref.id in selected_ids,
+            "scope": "workspace",
+            "match": match_by_id.get(ref.id, (None, None))[0],
+            "rank": match_by_id.get(ref.id, (None, None))[1],
         }
         for ref in refs
     ]
@@ -489,6 +990,11 @@ def document_grounding(
         {
             "file_id": f"turn:{turn_id}:attachment:{index}",
             "filename": attachment["name"],
+            "scope": "conversation",
+            # Not chosen by either stage: this document reached the model
+            # because the user attached it to this turn.
+            "match": "attached",
+            "rank": None,
             # Not a workspace upload — nothing named it "source: X" in the
             # index either (see B2/B3); left unset rather than invented.
             "source_name": None,
@@ -503,7 +1009,140 @@ def document_grounding(
         }
         for turn_id, index, attachment, turn_created_at in conv_attachments
     )
+    manifest.extend(
+        {
+            "file_id": _connected_key(doc),
+            "filename": doc.title,
+            # The system it lives in, which is what a reader of this manifest
+            # needs to tell a Confluence page from a same-named upload.
+            "source_name": (
+                doc.source_name or _PROVIDER_LABELS.get(doc.provider, doc.provider)
+            ),
+            "uploaded_at": doc.doc_date or doc.updated_at,
+            # `loaded` means THE BODY REACHED THE PROMPT — never merely that
+            # selection wanted it. A page selected and then unfetchable is
+            # loaded=False, which is what keeps the manifest honest about a
+            # degraded answer instead of recording an intent as a fact.
+            "loaded": _connected_key(doc) in bodies,
+            "scope": "workspace",
+            "match": match_by_id.get(_connected_key(doc), (None, None))[0],
+            "rank": match_by_id.get(_connected_key(doc), (None, None))[1],
+        }
+        for doc in connected
+    )
+    _log_document_selection(
+        enterprise_id,
+        manifest=manifest,
+        catalog_size=len(catalog_docs),
+        topical_ran=topical_ran,
+        topical_candidates=len(topical_candidates),
+        question_embedding=question_embedding,
+        embedding_degraded=embedding_degraded,
+    )
     return block, manifest
+
+
+#: How Stage T ended, as one value the audit spine can group by.
+#: `catalog_empty` — nothing to search; a selection miss here means the
+#:     document was never registered, which is an ingest problem.
+#: `searched_no_match` — the catalog held documents, both channels ran, and
+#:     neither ranked anything. A selection miss here is a ranking problem.
+#: These two are indistinguishable in an answer and mean opposite things, so
+#: they are recorded apart. `not_run` keeps them honest: Stage N had already
+#: filled every slot, so no absence of topical matches can be read from it.
+#: `no_documents_indexed` is the earlier exit still — the workspace has
+#: nothing to show at all, so grounding returned before either stage.
+TOPICAL_CATALOG_EMPTY = "catalog_empty"
+TOPICAL_SEARCHED_NO_MATCH = "searched_no_match"
+TOPICAL_RANKED = "ranked"
+TOPICAL_NOT_RUN = "not_run"
+TOPICAL_NO_INDEX = "no_documents_indexed"
+
+
+def _topical_outcome(
+    catalog_size: int,
+    topical_ran: bool,
+    topical_candidates: int,
+    *,
+    index_empty: bool = False,
+) -> str:
+    """Which Stage-T ending this ask hit. No new query: the caller already
+    holds `catalog_docs` for the index it just rendered."""
+    if index_empty:
+        return TOPICAL_NO_INDEX
+    if not topical_ran:
+        return TOPICAL_NOT_RUN
+    if catalog_size == 0:
+        return TOPICAL_CATALOG_EMPTY
+    return TOPICAL_RANKED if topical_candidates else TOPICAL_SEARCHED_NO_MATCH
+
+
+def _log_document_selection(
+    enterprise_id: str,
+    *,
+    manifest: list[dict],
+    catalog_size: int,
+    topical_ran: bool,
+    topical_candidates: int,
+    question_embedding: list[float] | None,
+    embedding_degraded: bool,
+    index_empty: bool = False,
+) -> None:
+    """Record how document selection went, from the ONE function both grounding
+    call sites share.
+
+    Written here rather than in `compose_ask_answer` because that is the direct
+    path only. The skill-routed path — `qa_agent._answer_single_shot`, which is
+    where most of this traffic goes — wrote none of this, so when topical
+    selection returned the wrong document there for a whole day, nothing in the
+    record said so. Putting the write in the shared callee is what gives both
+    paths the same visibility without touching qa_agent.py.
+
+    Costs one extra `agent_decision_log` row per ask, and on the direct path
+    some of these counts also appear on that path's own `answer` row. That
+    duplication is deliberate: the `answer` row is not written at all on the
+    skill path, so removing the overlap here would take the parity back out.
+
+    Counts and enums only — never a filename, a title, a summary or any
+    document text. Best-effort: an audit write must never break an answer."""
+    if not enterprise_id:
+        return
+    try:
+        from app.graph.decision_log import log_agent_decision
+
+        log_agent_decision(
+            enterprise_id=enterprise_id,
+            agent="ask",
+            decision_type="document_selection",
+            factors={
+                "documents": len(manifest),
+                "documents_loaded": sum(1 for d in manifest if d.get("loaded")),
+                "documents_named": sum(
+                    1 for d in manifest if d.get("match") == "named"
+                ),
+                "documents_topical": sum(
+                    1 for d in manifest if d.get("match") == "topic"
+                ),
+                # How many rows the catalog held for this caller, which is what
+                # separates "nothing to find" from "found nothing".
+                "catalog_size": catalog_size,
+                "topical_candidates": topical_candidates,
+                "topical_outcome": _topical_outcome(
+                    catalog_size, topical_ran, topical_candidates,
+                    index_empty=index_empty,
+                ),
+                # Whether the semantic channel ran at all this ask. False here
+                # with a non-empty catalog is the exact condition that made
+                # ranking query-independent, and it was invisible.
+                "semantic_channel": question_embedding is not None,
+                "retrieval_embedding_degraded": embedding_degraded,
+            },
+        )
+    except Exception:  # noqa: BLE001 — audit write must not block the answer
+        logger.exception(
+            "document selection decision-log write failed for enterprise=%s",
+            enterprise_id,
+        )
 
 
 # Prompt version stamped onto the Ask decision-log row so the §4d audit spine
@@ -581,9 +1220,80 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
         )
 
 
-def _retrieve_kg_bundle(enterprise_id: str | None, question: str) -> dict | None:
+def _question_embedding(
+    enterprise_id: str | None, question: str
+) -> tuple[list[float] | None, bool]:
+    """Embed the question ONCE per ask. Returns `(vector, degraded)`.
+
+    Computed here, at the top of the ask, because both consumers need it and
+    neither can produce it for the other: `document_grounding` runs BEFORE
+    knowledge-graph retrieval, so there is no earlier embedding to reuse, and
+    on PRD-grounded asks KG retrieval never runs at all — on that branch this
+    is the only embedding computed, and topical document selection would
+    otherwise have no semantic channel whatsoever.
+
+    `degraded` is True when no usable vector came back — no key configured
+    (the accessor hands back a zero vector, which in cosine kNN ranks
+    arbitrarily and is worse than nothing), or the call failed. Both consumers
+    then rank on their lexical channels alone. The flag exists because that
+    degradation is otherwise invisible: the system keeps answering, slightly
+    worse, with nothing in the record to say why."""
+    if not enterprise_id:
+        return None, False
+    try:
+        from app.graph.embeddings import embed_texts
+
+        vecs = embed_texts(
+            [question], enterprise_id=enterprise_id, purpose="ask_retrieval"
+        )
+    except Exception as exc:  # noqa: BLE001 — never break an answer
+        logger.info("Ask: question embedding unavailable (%s); lexical only", exc)
+        return None, True
+    vec = vecs[0] if vecs else None
+    if not vec or not any(vec):
+        logger.info(
+            "Ask: question embedding unusable (missing or all-zero); "
+            "document and KG retrieval rank on their lexical channels only"
+        )
+        return None, True
+    return vec, False
+
+
+def _resolve_question_embedding(
+    enterprise_id: str | None, question: str
+) -> tuple[list[float] | None, bool]:
+    """This ask's `(vector, degraded)`, computing it only if nothing already
+    has.
+
+    `ask_job_runner._run_sync` embeds once per ask and publishes the result on
+    the request-scoped ContextVar, so on the worker path this returns that
+    value and issues no call. It falls through to `_question_embedding` for
+    callers that reach `compose_ask_answer` without the worker in front of them
+    — direct invocation, and the tests that do the same — which is what keeps
+    the embedding count at exactly one per ask on every path rather than one
+    per consumer."""
+    carried = _carried_question_embedding()
+    if carried is not None:
+        return carried
+    return _question_embedding(enterprise_id, question)
+
+
+def _retrieve_kg_bundle(
+    enterprise_id: str | None,
+    question: str,
+    *,
+    question_embedding: list[float] | None = None,
+    embedding_unavailable: bool = False,
+) -> dict | None:
     """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
     or None when there's no tenant context or the KG yields nothing / errors.
+
+    `embedding_unavailable` carries forward `_question_embedding`'s degraded
+    flag: True means the caller already determined there is no usable vector
+    (no key configured, or the accessor's own zero-vector check tripped) —
+    passed through to `retrieve_context` as `skip_semantic` so the KG neither
+    runs kNN on a zero vector nor re-embeds a question that's already known to
+    embed to nothing.
 
     Resilient by construction: a missing tenant, an empty KG, a fake backend
     with no pgvector, or any read failure all collapse to None so the caller
@@ -595,7 +1305,11 @@ def _retrieve_kg_bundle(enterprise_id: str | None, question: str) -> dict | None
         from app.graph.retrieval import retrieve_context
 
         facade = GraphFacade()
-        bundle = retrieve_context(facade, enterprise_id, question)
+        bundle = retrieve_context(
+            facade, enterprise_id, question,
+            question_embedding=question_embedding,
+            skip_semantic=embedding_unavailable,
+        )
     except Exception:  # noqa: BLE001 — KG must never break Ask
         logger.exception("Ask KG retrieval failed for enterprise=%s", enterprise_id)
         return None
@@ -610,6 +1324,8 @@ def compose_ask_answer(
     *,
     enterprise_id: str | None = None,
     prd_context: str = "",
+    history: list[dict] | None = None,
+    live_context: str = "",
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -628,6 +1344,38 @@ def compose_ask_answer(
       - Decision-log the ask (agent="ask", decision_type="answer") with
         kg_refs = the signal/entity ids that fed the answer.
 
+    `question` is the user's bare current-turn message — never fold prior
+    turns into it. It drives all FOUR retrieval consumers below (the shared
+    embedding, KG theme kNN, the document catalog's lexical channel, and
+    Stage N filename matching), so a folded thread turns each of those into a
+    thread-wide search instead of a question-scoped one — see `history` below
+    for where prior turns actually belong.
+
+    `history`, when given, is rendered once (`render_history_block`, same
+    budget/clamping as every other fold site) and prepended to the composed
+    user turn ahead of the question — the model still sees the whole
+    conversation; retrieval never does. Mirrors what
+    `qa_agent._answer_single_shot` already does for the skill-routed path.
+
+    `live_context`, when given, is a pre-assembled block of LIVE reads from the
+    company's connected tools (app/connector_lookup/sweep.py — the caller runs
+    the sweep, this function only composes it). It rides the SAME slot as the KG
+    bundle, and for the same reason: both are per-question retrieval and neither
+    may enter the cacheable prefix, which exists to be byte-stable across every
+    ask in a dataset. A sweep block in that prefix would invalidate the shared
+    corpus cache on every single question.
+
+    It is a FIFTH consumer of the bare `question` above, and for exactly the
+    reason stated there: the sweep derives keyword terms, so a folded thread
+    would search every connector for the previous turn's vocabulary. The sweep
+    has always run on the raw question — that independent choice and this
+    contract now agree, rather than one having to be retrofitted to the other.
+
+    It is composed even when the KG bundle is empty — a company whose graph has
+    nothing on a topic but whose Jira and Slack do is exactly the case this
+    exists for — and it never reaches the PRD-grounded branch, which skips
+    corpus and KG retrieval by design and would lose that saving.
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -637,12 +1385,38 @@ def compose_ask_answer(
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
+    try:
+        history_block = render_history_block(history)
+    except Exception:  # noqa: BLE001 — history is prompt context, never the
+        # reason retrieval or the answer fails; degrade to no history block
+        # rather than lose the ask.
+        logger.warning(
+            "history render failed for enterprise=%s; answering without "
+            "conversation context",
+            enterprise_id, exc_info=True,
+        )
+        history_block = ""
     facts = company_facts_block(enterprise_id)
+    # ONE embedding per ask, computed before either consumer and shared by
+    # both. Document grounding runs first and the PRD branch skips KG
+    # retrieval entirely, so there is no existing vector either could inherit
+    # — computing it here is what stops this being two calls (or, on the PRD
+    # branch, no semantic channel at all).
+    #
+    # The Ask worker now embeds one step earlier still (so the skill-routed
+    # path gets a semantic channel too), so this RESOLVES rather than computes:
+    # when the worker already published a vector this reuses it, and the ask
+    # pays for one embedding, not two.
+    question_embedding, embedding_degraded = _resolve_question_embedding(
+        enterprise_id, question
+    )
     # Computed once, beside `facts`, so it rides EVERY branch's cacheable
     # prefix — including the PRD-grounded branch below, which skips corpus +
     # KG for cost reasons but must not go blind to uploads (that would
     # reintroduce the false-denial bug inside PRD-tab chat).
-    docs_block, documents = document_grounding(enterprise_id, question)
+    docs_block, documents = document_grounding(
+        enterprise_id, question, question_embedding=question_embedding
+    )
 
     if prd_context:
         # PRD-grounded ask (PRD-tab chat): the PRD context block (PRD + insight
@@ -665,34 +1439,66 @@ def compose_ask_answer(
         bundle = None
         system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
                   + connected_sources_line(enterprise_id))
-        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
         corpus = load_corpus(dataset)
         cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
 
-        bundle = _retrieve_kg_bundle(enterprise_id, question)
+        bundle = _retrieve_kg_bundle(
+            enterprise_id, question, question_embedding=question_embedding,
+            embedding_unavailable=embedding_degraded,
+        )
 
+        # The KG bundle and the live sweep share one "connected sources" slot.
+        # Keeping them in ONE section (rather than adding a second template)
+        # is what stops the prompt fragmenting into four shapes, and it is
+        # also true to what they are: two readers of the same connected
+        # sources, one a sync-time snapshot and one read just now. The
+        # addendum below is what tells the model which is which.
+        context_sections: list[str] = []
         if bundle:
             from app.graph.retrieval import render_context_section
 
-            system = (ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM + today_line()
-                      + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_WITH_KG.format(
-                kg_context=render_context_section(bundle), question=question
+            context_sections.append(render_context_section(bundle))
+        if live_context:
+            context_sections.append(live_context)
+
+        if context_sections:
+            # Each addendum is gated on ITS OWN section being present. The KG
+            # addendum names a "LIVE CONTEXT FROM CONNECTED SOURCES" heading
+            # that only `render_context_section` emits, so appending it for a
+            # sweep-only prompt would point the model at a section that is not
+            # there.
+            system = (ASK_SYSTEM
+                      + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
+                      + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
+                      + today_line() + connected_sources_line(enterprise_id))
+            user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
+                kg_context="\n\n---\n\n".join(context_sections), question=question
             )
         else:
             system = (ASK_SYSTEM + today_line()
                       + connected_sources_line(enterprise_id))
-            user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+            user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once
     # above so it rides EVERY branch's cacheable prefix, first — a long corpus
     # or PRD block can never push it out. facts == "" ⇒ cacheable/system are
     # byte-identical to the pre-fix composition (including the None case).
-    # Documents sit after facts and before the corpus/PRD/KG block.
+    #
+    # `docs_block` trails the corpus/PRD/KG block, not the other way around.
+    # Prompt caching is prefix-matched: it hits only up to the first differing
+    # byte. `docs_block` is stamped with a per-question "[loaded for this
+    # question]"/"[not loaded]" marker on every catalogued document
+    # (`_index_line`) and carries the selected bodies themselves, so it is
+    # volatile on every single ask. `facts` and the corpus/PRD block are
+    # stable (per tenant, per dataset/PRD respectively). Putting the volatile
+    # block last means the shared prefix — the whole stable part — still
+    # matches across two different questions in the same dataset; putting it
+    # first (the old order) invalidated the cache on every ask.
     cacheable = (
-        "\n\n---\n\n".join(p for p in (facts, docs_block, cacheable) if p) or None
+        "\n\n---\n\n".join(p for p in (facts, cacheable, docs_block) if p) or None
     )
     if facts:
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
@@ -703,6 +1509,12 @@ def compose_ask_answer(
     # (non-gateway) answer call. See app.llm_keys.
     from app.llm_keys import company_llm_key
 
+    # Best-effort cache/usage telemetry for the answer decision-log row below
+    # — makes the cache-prefix reorder's win measurable rather than asserted.
+    # `call_json` populates this from the provider's usage object; it stays
+    # `{}` (and every counter below defaults to 0) if the provider returns
+    # none.
+    meta_out: dict = {}
     with company_llm_key(enterprise_id):
         payload = call_json(
             system=system,
@@ -710,6 +1522,7 @@ def compose_ask_answer(
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
+            meta_out=meta_out,
             # Token-streaming a chat answer implies the streaming transport
             # (and its long read timeout) — same pattern as the gateway.
             stream=on_delta is not None,
@@ -736,12 +1549,48 @@ def compose_ask_answer(
                     "dataset": dataset,
                     "question": question,
                     "kg_used": bool(bundle),
+                    # Whether the answer additionally read connected tools LIVE.
+                    # Recorded because a sweep that silently stops firing —
+                    # a flag flipped, a connection expiring, terms never
+                    # extracting — looks exactly like "the sweep found
+                    # nothing" from the outside, and nothing else in the
+                    # record would distinguish them.
+                    "live_sweep": bool(live_context),
+                    "live_sweep_chars": len(live_context),
                     "prd_grounded": bool(prd_context),
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
                     # Counts only — never filenames or document text.
                     "documents": len(documents),
                     "documents_loaded": sum(d["loaded"] for d in documents),
+                    # Which STAGE did the loading, as counts. Selection
+                    # quality is otherwise unobservable after the fact: a
+                    # sudden collapse in topic-matched loads is the signal
+                    # that ranking has drifted, and it looks identical to
+                    # "nobody asked about documents" without this split.
+                    "documents_named": sum(
+                        1 for d in documents if d.get("match") == "named"
+                    ),
+                    "documents_topical": sum(
+                        1 for d in documents if d.get("match") == "topic"
+                    ),
+                    # The semantic channel was unavailable for this ask, so
+                    # topical selection ran on keyword matching alone. Recorded
+                    # because the system keeps answering — slightly worse —
+                    # and nothing else in the record would say why.
+                    "retrieval_embedding_degraded": embedding_degraded,
+                    # Cache/usage counts only — never text (see the rule
+                    # above this block). Makes the cacheable-prefix ordering
+                    # measurable: a healthy cache hit shows up here as a
+                    # non-zero `cache_read_input_tokens` on the second+ ask
+                    # in a dataset within the cache TTL.
+                    "cache_read_input_tokens": meta_out.get(
+                        "cache_read_input_tokens", 0
+                    ),
+                    "cache_creation_input_tokens": meta_out.get(
+                        "cache_creation_input_tokens", 0
+                    ),
+                    "input_tokens": meta_out.get("input_tokens", 0),
                 },
                 output={
                     "key_points": payload.get("key_points", []),

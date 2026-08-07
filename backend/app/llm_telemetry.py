@@ -81,6 +81,47 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.0,
         "output":         0.0,
     },
+    # --- OpenAI chat models -------------------------------------------------
+    # For companies whose `llm_provider` is 'openai'. `app.openai_client` maps
+    # the repo's three Claude tiers onto these three, so a workspace switching
+    # provider produces rows here instead of in the claude-* rows above.
+    #
+    # Rates from OpenAI's published pricing (developers.openai.com/api/docs/
+    # pricing, read 2026-08-07). Unlike the sonnet/opus rows above, `cache_write_1h`
+    # here is the rate the code's OWN requests actually earn: OpenAI's prompt
+    # caching is automatic with no TTL to choose, and GPT-5.6+ bills cache writes
+    # at 1.25x the input rate. So these three are correctly rated and need none
+    # of the 1.6x caveat documented above.
+    "gpt-5.6-sol": {  # flagship — the claude-opus-4-7 tier
+        "input":          5.0 / 1_000_000,
+        "cache_write_1h": 6.25 / 1_000_000,
+        "cache_read":     0.5 / 1_000_000,
+        "output":         30.0 / 1_000_000,
+    },
+    "gpt-5.6-terra": {  # balanced — the claude-sonnet-4-6 default tier
+        "input":          2.0 / 1_000_000,
+        "cache_write_1h": 2.5 / 1_000_000,
+        "cache_read":     0.2 / 1_000_000,
+        "output":         12.0 / 1_000_000,
+    },
+    "gpt-5.6-luna": {  # low-cost — the claude-haiku-4-5 router/classifier tier
+        "input":          0.2 / 1_000_000,
+        "cache_write_1h": 0.25 / 1_000_000,
+        "cache_read":     0.02 / 1_000_000,
+        "output":         1.2 / 1_000_000,
+    },
+    # Search-model variant used for `call_with_web_search` on OpenAI — Chat
+    # Completions has no web_search TOOL, so search is a property of the model.
+    # OpenAI does not publish a separate token rate for it; priced at the gpt-5
+    # base rate it derives from, which is what the tokens are billed at. The
+    # per-search request fee is NOT captured here — like every figure in this
+    # table, `est_cost_usd` is a token estimate, not an invoice.
+    "gpt-5-search-api": {
+        "input":          1.25 / 1_000_000,
+        "cache_write_1h": 1.5625 / 1_000_000,
+        "cache_read":     0.125 / 1_000_000,
+        "output":         10.0 / 1_000_000,
+    },
 }
 
 

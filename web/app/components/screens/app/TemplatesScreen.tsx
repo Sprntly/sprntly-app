@@ -1,18 +1,39 @@
 "use client"
 
-// Templates · "what good looks like".
+// Templates · TWO libraries, and this screen's whole job is keeping them apart.
 //
-// Top-level surface (design data-view="templates", bookmark icon) where the
-// company uploads its gold-standard examples — the benchmarks the team has
-// marked as "what good looks like". Each upload is stored as a company document
-// (POST /v1/company/templates) and its extracted text is fed to the prd-author
-// skill as a FORMAT/STYLE EXEMPLAR, so every PRD Sprntly writes follows the
-// team's format and voice. Many templates are allowed; each is removable.
+//   §1  Formats we write in    — ArtifactFormatsSection, the GOVERNING library.
+//                                One active format per document type; every new
+//                                PRD / ticket / engineering spec is written into
+//                                it. Structure comes from here.
+//   §2  Examples we learn from — this file's TemplatesView, the EXEMPLAR
+//                                library it has always been. Finished documents
+//                                the team is proud of, stored as company
+//                                documents (POST /v1/company/templates) and fed
+//                                to the prd-author skill as a FORMAT/STYLE
+//                                EXEMPLAR for voice, depth and tone. It changes
+//                                nothing structural.
 //
-// What's REAL here (wired to the backend): upload, list, filter-by-type, and
+// §1 sits ON TOP and is a grouped list; §2 stays the card grid it has always
+// been. Different silhouettes on purpose — a PM has to know in under three
+// seconds which of the two decides what their next PRD looks like, and the
+// shape does that work before a word is read.
+//
+// §2's copy changed when §1 arrived, and that change is part of the feature
+// rather than a drive-by: "Upload a standard" had to lose the word "standard"
+// (with a governing library on the same screen it reads like the thing that
+// governs), and the old intro's promise that Sprntly "follows your format" was
+// left factually wrong — that is §1's job now. "Gold standard" survives where
+// it is still true, as the card's quality chip.
+//
+// What's REAL in §2 (wired to the backend): upload, list, filter-by-type, and
 // remove. The design also shows per-template quality SCORES and a "Quality
 // check — last generated PRD" panel; those are demo-only fabricated numbers
-// with no backend, so they are intentionally omitted rather than faked.
+// with no backend, so they are intentionally omitted rather than faked. §1
+// deliberately does NOT inherit that language: a score is a judgement of
+// quality, compile status is a statement of readiness, and "78" beside a format
+// about to go company-wide would be a confidently false conclusion drawn over
+// data we don't have.
 //
 // The view layer (TemplatesView) is a pure, prop-driven component so it can be
 // markup-tested without the API; TemplatesScreen owns the state + API calls.
@@ -27,6 +48,7 @@ import {
   IconUpload,
 } from "@tabler/icons-react"
 import { AppLayout } from "./AppLayout"
+import { ArtifactFormatsSection } from "./ArtifactFormatsSection"
 import { templatesApi, type CompanyTemplate } from "../../../lib/api"
 
 // The type filters along the top. "all" is a UI-only pseudo-filter; the rest
@@ -95,13 +117,17 @@ export function TemplatesView({
         data-testid="template-file-input"
       />
 
-      {/* Header */}
+      {/* Header. Names the OTHER section explicitly and says who owns
+          structure — the two libraries are only distinguishable if each one
+          points at its neighbour. */}
       <div className="tpl-top">
         <div className="tpl-title">
           <IconBookmark size={16} className="tpl-title-icon" />
-          Templates
+          Examples we learn from
           <span className="tpl-sub">
-            What good looks like — the team&apos;s gold-standard examples
+            What good looks like — finished documents your team is proud of.
+            Sprntly reads them for voice and depth. They don&apos;t change a
+            document&apos;s structure; the active format above does that.
           </span>
         </div>
         <button
@@ -111,7 +137,7 @@ export function TemplatesView({
           disabled={uploading}
         >
           <IconUpload size={14} />
-          {uploading ? "Uploading…" : "Upload a standard"}
+          {uploading ? "Uploading…" : "Upload an example"}
         </button>
       </div>
 
@@ -121,9 +147,9 @@ export function TemplatesView({
           <IconSparkles size={16} className="tpl-intro-icon" />
           <span>
             These are the benchmarks your team has marked as{" "}
-            <strong>gold standard</strong>. Sprntly studies them so every PRD it
-            writes follows your format and voice — quality holds even as output
-            speeds up.
+            <strong>gold standard</strong>. Sprntly studies them for voice,
+            depth and tone — so its writing sounds like your team&apos;s.
+            Structure comes from the active format above.
           </span>
         </div>
 
@@ -191,7 +217,7 @@ export function TemplatesView({
               disabled={uploading}
             >
               <IconPlus size={22} />
-              <div className="tpl-add-t">Add a standard</div>
+              <div className="tpl-add-t">Add an example</div>
               <div className="tpl-add-s">
                 Upload a doc your team agrees is &quot;what good looks like&quot;
               </div>
@@ -282,21 +308,46 @@ export function TemplatesScreen() {
   }
 
   return (
-    <AppLayout mainClassName="main--templates">
-      <TemplatesView
-        templates={visible}
-        loading={loading}
-        uploading={uploading}
-        removingId={removingId}
-        activeFilter={activeFilter}
-        error={error}
-        message={message}
-        onPickFile={onPickFile}
-        onRemove={(id) => void onRemove(id)}
-        onFilter={setActiveFilter}
-        fileInputRef={fileInputRef}
-        onFileChange={(e) => void onFileChange(e)}
-      />
+    // ONE scroller for both sections (.tplpage). `.tpl-wrap` used to be the
+    // full-height flex column and `.tpl-body` the scroller — with a second
+    // section stacked above it that shape traps §2's content inside its own
+    // pane and leaves §1 unreachable below the fold. The scroll moves up a
+    // level and both headers scroll with their content. Deliberately NOT
+    // sticky: two stacked sticky bars eat half a narrow viewport.
+    // hideChromeStrip, matching SkillsScreen: the formats section carries its
+    // own .afmt-top title bar, so the main-column strip only put a second,
+    // emptier "Templates" above it. It was tolerable while two sections shared
+    // the page and neither owned the page name; with §2 hidden, the section
+    // header IS the page header.
+    <AppLayout mainClassName="main--templates" hideChromeStrip>
+      <div className="tplpage">
+        <ArtifactFormatsSection />
+        {/* §2 "Examples we learn from" — HIDDEN, not deleted (owner, 2026-08-06).
+            The exemplar library still works and is still wired end to end; it is
+            withheld from the screen while the governing formats library above
+            settles, so there is only one thing on /templates to understand at a
+            time. Everything it needs is still built and tested — `TemplatesView`
+            and its own suite are untouched, and the fetch/upload/remove handlers
+            above it still run — so restoring it is uncommenting this block and
+            nothing else. Do NOT delete the surrounding state: `visible`,
+            `activeFilter`, `onPickFile`, `onRemove` and `fileInputRef` exist
+            only for this and would have to be rebuilt.
+        <TemplatesView
+          templates={visible}
+          loading={loading}
+          uploading={uploading}
+          removingId={removingId}
+          activeFilter={activeFilter}
+          error={error}
+          message={message}
+          onPickFile={onPickFile}
+          onRemove={(id) => void onRemove(id)}
+          onFilter={setActiveFilter}
+          fileInputRef={fileInputRef}
+          onFileChange={(e) => void onFileChange(e)}
+        />
+        */}
+      </div>
     </AppLayout>
   )
 }

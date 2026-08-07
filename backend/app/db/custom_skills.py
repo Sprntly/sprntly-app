@@ -161,6 +161,82 @@ def get_custom_skill_by_id(company_id: str, skill_id: str) -> dict | None:
     return _decode(resp.data[0]) if resp.data else None
 
 
+def update_custom_skill(
+    *,
+    company_id: str,
+    skill_id: str,
+    workspace_id: str,
+    name: str,
+    description: str,
+    method: str,
+    modules: dict[str, str],
+    references: dict[str, str],
+    content_hash: str,
+    storage_key: str | None,
+    uploader_id: str,
+    uploader_name: str,
+    slug: str | None = None,
+) -> dict | None:
+    """Replace one company-owned skill's content and metadata in place; returns
+    the decoded row, or None when the id is missing or belongs to another
+    company (indistinguishable, like the by-id lookup).
+
+    This is the re-upload path: a company uploading a skill under a name it has
+    already used updates that row instead of getting a second entry. `created_at`
+    is deliberately NOT in the patch — the library's newest-first order should
+    not reshuffle because someone refreshed a skill's text. `workspace_id` and
+    the uploader fields ARE refreshed: the row describes the version it now
+    holds, so it records who last uploaded it and from where.
+
+    `slug` DEFAULTS TO None meaning "leave the trigger alone", and the re-upload
+    path relies on that: `/estimation-helper` has to keep working across a new
+    version, and the router has to keep offering the same id. Only the in-place
+    EDIT path passes a slug, and only when the edit renamed the skill — a new
+    name derives a new trigger through the same deconfliction the upload uses.
+    Passing one re-opens the (company_id, slug) unique constraint, so that call
+    can raise DuplicateSkillSlug; the no-slug call still cannot trip it.
+
+    Both the existence check and the update are company-filtered, so a racing
+    caller can never write a foreign row."""
+    row = get_custom_skill_by_id(company_id, skill_id)
+    if row is None:
+        return None
+    patch = {
+        "workspace_id": workspace_id,
+        "name": name,
+        "description": description,
+        "method": method,
+        "modules": json.dumps(modules or {}),
+        "refs": json.dumps(references or {}),
+        "content_hash": content_hash,
+        "storage_key": storage_key,
+        "uploader_id": uploader_id,
+        "uploader_name": uploader_name,
+    }
+    if slug is not None:
+        patch["slug"] = slug
+    c = require_client()
+    try:
+        resp = (
+            c.table("custom_skills")
+            .update(patch)
+            .eq("company_id", company_id)
+            .eq("id", skill_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — narrow to unique-violation below
+        # Only reachable on a slug-changing edit: another row in this company
+        # took the trigger between the caller's library read and this write.
+        if slug is not None and _is_unique_violation(exc):
+            raise DuplicateSkillSlug(slug) from exc
+        raise
+    # PostgREST returns the updated representation; fall back to the row we
+    # already read merged with the patch rather than reporting a failed update
+    # (the caller reads None as "the row is gone" and would then create a
+    # second entry under the same name — exactly what this path prevents).
+    return _decode(resp.data[0] if resp.data else {**row, **patch})
+
+
 def delete_custom_skill(company_id: str, skill_id: str) -> dict | None:
     """Delete one company-owned skill row; returns the decoded deleted row
     (the route needs storage_key to clean up the original file), or None when

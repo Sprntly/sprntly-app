@@ -229,6 +229,15 @@ export async function postLoginPath(): Promise<string> {
       // naturally on this very next call.
       await tryAutoJoinCompanyOnDomainMatch(pendingToken)
       const outcome = await resolveArtifactShare(pendingToken)
+      if (outcome?.outcome === "member") {
+        // The auto-join above left them able to act in the artifact's
+        // workspace already (an unbound legacy dataset, or a company whose
+        // membership implies it) — send them to the plain deep link, NOT
+        // the `share=` one, so AuthGate hands them the real editable app
+        // instead of the read-only guest viewer.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}`
+      }
       if (outcome?.outcome === "guest_view") {
         // public_id (never artifact_id, the raw sequential id) is what this
         // guest's own landing URL should carry — the fallback to the int
@@ -266,6 +275,11 @@ export async function postLoginPath(): Promise<string> {
       )
       await tryAutoJoinCompanyOnDomainMatchForPrd(pendingPrdPublicId)
       const outcome = await resolvePrdAccess(pendingPrdPublicId)
+      if (outcome?.outcome === "member") {
+        // No `access=guest` marker — the real app, editable. Same rationale
+        // as the pendingToken branch's own `member` case above.
+        return `/?prd=${encodeURIComponent(pendingPrdPublicId)}`
+      }
       if (outcome?.outcome === "guest_view") {
         return `/?prd=${encodeURIComponent(pendingPrdPublicId)}&access=guest`
       }

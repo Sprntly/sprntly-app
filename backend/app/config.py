@@ -9,7 +9,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
-    openai_api_key: str = ""  # embeddings (text-embedding-3-small)
+    # Two jobs, one key. Embeddings (text-embedding-3-small) have always run on
+    # it, and it is now ALSO the platform fallback for companies whose
+    # llm_provider is 'openai' but which have not supplied a key of their own —
+    # the mirror of what anthropic_api_key does for Claude workspaces.
+    openai_api_key: str = ""
+    # Override for an OpenAI-compatible gateway (Azure OpenAI, a proxy, a
+    # self-hosted relay). Unset means api.openai.com. Applies only to the chat
+    # client in app/openai_client.py; embeddings keep their own hardcoded URL.
+    openai_base_url: str = ""
     # Design Agent uses a dedicated key for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
@@ -169,6 +177,28 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
+    #
+    # Sharing was the original design (one Cloud project, one client, a second
+    # redirect URI), and it works when both connectors live in the same Google
+    # account. They need not: an operator can run Drive against one Workspace
+    # and Meet against another, which is exactly how this was first deployed.
+    # A shared client cannot express that — the client belongs to one project
+    # in one account — so Meet carries its own triple and FALLS BACK TO
+    # NOTHING. An unset Meet client makes `google_meet_configured()` False and
+    # the connector renders as not-configured, which is a legible state; a
+    # silent fallback to Drive's client would instead authorize against the
+    # wrong Google project and fail deep inside the consent flow with a
+    # redirect_uri_mismatch nobody can trace back to here.
+    #
+    # The SCOPES are deliberately NOT shared either: google_oauth.DRIVE_SCOPES
+    # must never grow a Meet scope. Scopes bake into a token at consent and a
+    # refresh carries the old set forward, so widening the constant would leave
+    # every stored Drive token claiming a capability it does not have — silent
+    # 403s on a connection that reports healthy. See google_meet.MEET_SCOPES.
+    google_meet_client_id: str = ""
+    google_meet_client_secret: str = ""
+    google_meet_oauth_redirect_uri: str = ""
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 
@@ -207,6 +237,18 @@ class Settings(BaseSettings):
     confluence_client_id: str = ""
     confluence_client_secret: str = ""
     confluence_oauth_redirect_uri: str = ""
+
+    # Zoom connector (OAuth 2.0 authorization-code flow; ~1h access tokens and
+    # 90-day refresh tokens that ROTATE on every refresh). A General,
+    # ADMIN-MANAGED app in the Zoom Marketplace — a user-managed app cannot be
+    # granted the `:admin` scopes at all, and Server-to-Server apps cannot hold
+    # the granular cloud_recording scopes either. The scopes are admin-level
+    # (`…:admin`), so the person who clicks Connect must be a Zoom account
+    # owner/admin: the connection is org-wide, reading every host's cloud
+    # recordings, not just the connector's own.
+    zoom_client_id: str = ""
+    zoom_client_secret: str = ""
+    zoom_oauth_redirect_uri: str = ""
 
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
@@ -318,6 +360,15 @@ class Settings(BaseSettings):
     # can't be resolved. Empty => fall back to signin_monitor_alert_email; both
     # empty => unrouted connectors are log-only.
     connector_health_alert_email: str = ""
+
+    # Cross-connector chat sweep (app/connector_lookup/sweep.py). A GLOBAL kill
+    # switch, separate from the per-company `chat_cross_connector_sweep` feature
+    # flag: the flag is the product control (one company opts out in the staff
+    # panel), this is the operational one. The sweep adds a bounded round of I/O
+    # to the default chat answer, so if it ever costs more latency than it earns
+    # we need an off switch that does not require a DB write per company.
+    # Setting it false disables the sweep for EVERY company regardless of flags.
+    chat_cross_connector_sweep: bool = True
 
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left

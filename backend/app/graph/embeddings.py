@@ -32,6 +32,17 @@ EMBEDDING_DIM = 1536
 _URL = "https://api.openai.com/v1/embeddings"
 _MAX_ATTEMPTS = 3
 
+#: Chars-per-token, matching the graph/retrieval.py + ask_runner.py idiom.
+_CHARS_PER_TOKEN = 4
+#: text-embedding-3-small accepts 8192 tokens per input. 6000 tokens of
+#: headroom at the 4-chars/token approximation. Same magnitude as
+#: artifact_summary._CONTENT_MAX_CHARS (24_000) and ask_runner's
+#: _DOCUMENT_CHAR_BUDGET (24_000) — this is the repo's existing budget unit,
+#: not a new one. A real tokenizer (tiktoken) would close the residual risk
+#: on dense CJK/base64 content that runs nearer 1-2 chars/token, but that is
+#: a new top-level dependency and is out of scope here.
+_MAX_EMBED_CHARS = _CHARS_PER_TOKEN * 6_000  # 24_000
+
 
 def _log_embedding_usage(
     usage_obj: dict | None,
@@ -122,7 +133,18 @@ def embed_texts(
         logger.warning("OPENAI_API_KEY not configured — returning zero vectors "
                        "(KG search will be degraded until a key is set)")
         return [[0.0] * EMBEDDING_DIM for _ in texts]
-    body = json.dumps({"model": model, "input": texts}).encode()
+    bounded_texts: list[str] = []
+    for i, t in enumerate(texts):
+        if len(t) > _MAX_EMBED_CHARS:
+            logger.warning(
+                "embeddings: input truncated enterprise_id=%s purpose=%s "
+                "index=%d original_chars=%d truncated_to=%d",
+                enterprise_id or "", purpose, i, len(t), _MAX_EMBED_CHARS,
+            )
+            bounded_texts.append(t[:_MAX_EMBED_CHARS])
+        else:
+            bounded_texts.append(t)
+    body = json.dumps({"model": model, "input": bounded_texts}).encode()
     last: Exception | None = None
     for attempt in range(_MAX_ATTEMPTS):
         req = urllib.request.Request(
@@ -146,6 +168,17 @@ def embed_texts(
                 time.sleep(delay)
                 last = e
                 continue
+            if e.code not in (429, 500, 502, 503):
+                # Permanent client error (e.g. 400 — input still exceeds the
+                # API's token ceiling even after truncation, most likely on
+                # dense CJK/base64 content). Not retried — see module docstring
+                # on the char-bound's residual risk. Diagnosable, not silent.
+                max_chars = max((len(t) for t in bounded_texts), default=0)
+                logger.warning(
+                    "embeddings: OpenAI rejected request (%s, not retried) "
+                    "enterprise_id=%s purpose=%s max_element_chars=%d",
+                    e.code, enterprise_id or "", purpose, max_chars,
+                )
             raise
         except urllib.error.URLError as e:
             if attempt < _MAX_ATTEMPTS - 1:

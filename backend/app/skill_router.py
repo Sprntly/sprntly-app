@@ -879,6 +879,21 @@ _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
         r"\b(google\s+drive|g\s?drive|my\s+drive|drive\s+(?:files?|docs?|folder)|"
         r"google\s+docs?)\b", re.I,
     ),
+    # STRONG tier, but only ever as a MULTI-WORD name — the pattern can never
+    # match a bare "meet". That distinction is the whole design here, and it is
+    # the opposite of how `zoom` is handled one dict down.
+    #
+    # `zoom` sits in the ambiguous tier because "zoom in on the churn numbers"
+    # is ordinary product-analysis English, and a read-context gate plus an
+    # in/out veto is enough to rescue it. "meet" cannot be rescued the same way:
+    # `_CONNECTOR_READ_CONTEXT` matches `meetings?`, `calls?`, `find` and
+    # `check`, so "can we meet to go over the tickets" would satisfy BOTH halves
+    # of the ambiguous gate and get hijacked into a connector lookup — turning a
+    # scheduling question into "Google Meet syncs into your knowledge graph, but
+    # I can't query it live". Requiring the qualifier makes the false positive
+    # impossible rather than merely unlikely. The cost is that a bare "meet"
+    # never routes here, which is correct: nobody names this product that way.
+    "google_meet": re.compile(r"\b(google\s+meet|g[\s-]?meet)\b", re.I),
     "asana": re.compile(r"\basana\b", re.I),
     "zendesk": re.compile(r"\bzen\s?desk\b", re.I),
     "gong": re.compile(r"\bgong\b", re.I),
@@ -898,12 +913,36 @@ _CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
 _CONNECTOR_AMBIGUOUS_NAMES: dict[str, re.Pattern] = {
     "linear": re.compile(r"\blinear\b", re.I),
     "notion": re.compile(r"\bnotion\b", re.I),
+    # "zoom in on the churn numbers", "let's zoom out and see the quarter" — the
+    # verb is ordinary product-analysis English, and unlike `linear growth` it
+    # usually arrives WITH a read verb ("see", "look at"), so the read-context
+    # gate alone would not save it; the in/out veto below is what does.
+    # Deliberately ambiguous-tier rather than strong: a false positive here
+    # costs a real analysis question, which is the expensive direction.
+    # Deliberately absent from _FUZZY_PROVIDER_WORDS too — at four letters a
+    # typo and a different word are the same thing (`room`, `boom`, `zoos`).
+    "zoom": re.compile(r"\bzoom\b", re.I),
 }
-_CONNECTOR_AMBIGUOUS_VETO = re.compile(
-    r"\blinear\s+(?:growth|regression|scale|relationship|model|algebra|time)\b|"
-    r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b",
-    re.I,
-)
+# PER-PROVIDER, and that is the whole point. This used to be one whole-message
+# pattern gating the entire ambiguous loop, so ANY veto phrase dropped ALL
+# ambiguous providers: adding the zoom-verb veto made "zoom in on the linear
+# tickets for payments" return nothing, when it plainly names Linear and plainly
+# asks to read it. The same latent flaw was already there — "we saw linear
+# growth, which notion doc covers it" lost `notion` to Linear's veto. A veto is
+# a statement about ONE product name being used as ordinary English, so it can
+# only ever suppress that one name.
+_CONNECTOR_AMBIGUOUS_VETOES: dict[str, re.Pattern] = {
+    "linear": re.compile(
+        r"\blinear\s+(?:growth|regression|scale|relationship|model|algebra|time)\b",
+        re.I,
+    ),
+    "notion": re.compile(
+        r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b",
+        re.I,
+    ),
+    # "zoom in on the churn numbers", "let's zoom out and see the quarter".
+    "zoom": re.compile(r"\bzoom(?:ing|ed|s)?\s+(?:in|out)\b", re.I),
+}
 # A read context: the tracker read verbs, plus the verbs people use for tools
 # ("check", "search", "look in", "what did … say").
 _CONNECTOR_READ_CONTEXT = re.compile(
@@ -1084,10 +1123,16 @@ def _named_connector_providers(text: str) -> set[str]:
         found |= _misspelled_connector_providers(text)
     if _SLACK_CHANNEL_REF.search(text):
         found.add("slack")
-    if not _CONNECTOR_AMBIGUOUS_VETO.search(text) and _CONNECTOR_READ_CONTEXT.search(text):
+    if _CONNECTOR_READ_CONTEXT.search(text):
         for provider, pattern in _CONNECTOR_AMBIGUOUS_NAMES.items():
-            if pattern.search(text):
-                found.add(provider)
+            if not pattern.search(text):
+                continue
+            # One provider's ordinary-English usage says nothing about another's
+            # — see _CONNECTOR_AMBIGUOUS_VETOES.
+            veto = _CONNECTOR_AMBIGUOUS_VETOES.get(provider)
+            if veto is not None and veto.search(text):
+                continue
+            found.add(provider)
     return found
 
 

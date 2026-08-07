@@ -141,6 +141,20 @@ from app.db.datasets import (
     list_datasets,
 )
 
+# Artifact format templates (company-scoped, user-uploaded PRD/ticket/spec FORMS)
+from app.db.artifact_templates import (
+    ActiveTemplateConflict,
+    activate_template,
+    deactivate_template,
+    delete_template,
+    get_active_template,
+    get_template_by_id,
+    insert_template,
+    list_templates,
+    set_compile_result,
+    update_template,
+)
+
 # Custom skills (workspace-scoped, user-uploaded — PRD 1854)
 from app.db.custom_skills import (
     DuplicateSkillSlug,
@@ -149,13 +163,16 @@ from app.db.custom_skills import (
     get_custom_skill_by_id,
     insert_custom_skill,
     list_custom_skills,
+    update_custom_skill,
 )
 
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
     delete_slack_connection,
+    delete_slack_connection_by_id,
     get_connection,
+    get_orphan_slack_connection,
     get_slack_connection,
     list_all_active_connections,
     list_connections,
@@ -302,6 +319,17 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # artifact format templates
+    "ActiveTemplateConflict",
+    "activate_template",
+    "deactivate_template",
+    "delete_template",
+    "get_active_template",
+    "get_template_by_id",
+    "insert_template",
+    "list_templates",
+    "set_compile_result",
+    "update_template",
     # custom skills
     "DuplicateSkillSlug",
     "delete_custom_skill",
@@ -309,6 +337,7 @@ __all__ = [
     "get_custom_skill_by_id",
     "insert_custom_skill",
     "list_custom_skills",
+    "update_custom_skill",
     # input sources
     "delete_input_source",
     "list_input_sources",
@@ -316,7 +345,9 @@ __all__ = [
     # connections
     "delete_connection",
     "delete_slack_connection",
+    "delete_slack_connection_by_id",
     "get_connection",
+    "get_orphan_slack_connection",
     "get_slack_connection",
     "list_all_active_connections",
     "list_connections",

@@ -258,6 +258,150 @@ def test_render_iterate_user_never_mutates_caller_screenshot_blocks():
     assert all("cache_control" not in b for b in blocks)
 
 
+def test_iterate_system_summary_rule_states_non_technical_audience():
+    # The completion-summary instruction (rule 4) must tell the agent to write
+    # for a non-technical audience -- David's feedback was that the summary
+    # named implementation details instead of the visible effect.
+    assert "NON-TECHNICAL PRODUCT MANAGER" in DESIGN_AGENT_ITERATE_SYSTEM
+
+
+def test_iterate_system_summary_rule_forbids_code_identifiers():
+    # The instruction must explicitly forbid the three concrete identifier
+    # shapes David's report named: a CSS custom property, a hex color code,
+    # and a file path.
+    assert "CSS custom" in DESIGN_AGENT_ITERATE_SYSTEM
+    assert "hex color code" in DESIGN_AGENT_ITERATE_SYSTEM
+    assert "file path" in DESIGN_AGENT_ITERATE_SYSTEM
+
+
+def test_iterate_system_summary_rule_gives_contrastive_example():
+    # A positive + negative example anchors the instruction concretely rather
+    # than leaving "plain language" to interpretation.
+    lines = DESIGN_AGENT_ITERATE_SYSTEM.splitlines()
+    anchor_idx = next(
+        i for i, line in enumerate(lines) if "NON-TECHNICAL PRODUCT MANAGER" in line
+    )
+    window = lines[anchor_idx : anchor_idx + 20]
+    window_text = "\n".join(window)
+    assert "Good:" in window_text
+    assert "Bad:" in window_text
+
+
+def test_iterate_system_added_summary_instruction_stays_within_length_budget():
+    # Property test: the added rule-4 text has headroom for minor rewording,
+    # not a license to expand into a second paragraph.
+    anchor = "do NOT polish things the request did not ask for."
+    idx = DESIGN_AGENT_ITERATE_SYSTEM.index(anchor) + len(anchor)
+    end_idx = DESIGN_AGENT_ITERATE_SYSTEM.index("\n\n[3b]")
+    added = DESIGN_AGENT_ITERATE_SYSTEM[idx:end_idx]
+    assert len(added) <= 550
+
+
+def test_scaffold_system_summary_rule_not_touched():
+    # Scope-boundary pin: the plain-language instruction was added ONLY to the
+    # iterate prompt, never to the scaffold/generate prompt.
+    assert "NON-TECHNICAL PRODUCT MANAGER" not in DESIGN_AGENT_SCAFFOLD_SYSTEM
+
+
+def test_render_iterate_user_volatile_trailer_reinforces_plain_language():
+    # Relies on `mode`'s "execute" default (no mode kwarg passed).
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=None,
+    )
+    assert "non-technical product manager" in volatile["text"]
+
+
+def test_render_iterate_user_execute_mode_explicit_still_gets_reinforcement():
+    # Same as above but with mode passed EXPLICITLY -- proves the "execute"
+    # branch itself, not just the default.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=None,
+        mode="execute",
+    )
+    assert "non-technical product manager" in volatile["text"]
+
+
+def test_render_iterate_user_plan_mode_omits_plain_language_reinforcement():
+    # The Gate-1-BLOCKER regression test: DESIGN_AGENT_PLAN_SYSTEM requires the
+    # agent to NAME FILES in its plan output, which directly conflicts with
+    # "never name...a file path." A plan-mode call must NOT carry the
+    # reinforcement at all.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=None,
+        mode="plan",
+    )
+    text_lower = volatile["text"].lower()
+    assert "non-technical product manager" not in text_lower
+    assert "CSS custom" not in volatile["text"]
+    assert "hex color code" not in volatile["text"]
+    assert "file path" not in volatile["text"]
+
+
+def test_render_iterate_user_plan_mode_trailer_byte_identical_to_pre_fix_original():
+    # Proves full omission (not a scoped rewording): a plan-mode call's trailer
+    # ends with the ORIGINAL sentence, byte-for-byte, nothing appended after it.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=None,
+        mode="plan",
+    )
+    assert volatile["text"].endswith(
+        "Apply this change with the smallest possible diff, then end your turn "
+        "with a 1-2 sentence summary."
+    )
+
+
+def test_render_iterate_user_volatile_trailer_stays_within_length_budget():
+    # Property test: the reinforcement added for an EXECUTE-mode call stays
+    # within its own budget, separate from rule 4's larger one.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=None,
+        mode="execute",
+    )
+    anchor = "with a 1-2 sentence summary."
+    idx = volatile["text"].index(anchor) + len(anchor)
+    added = volatile["text"][idx:]
+    assert len(added) <= 300
+
+
+@pytest.mark.parametrize(
+    "applied_comment",
+    [
+        None,
+        {"anchor_id": "deadbeef", "body": "make this bolder"},
+        {"anchor_id": None, "body": "ship it"},
+    ],
+    ids=["none", "anchored", "unanchored"],
+)
+def test_render_iterate_user_volatile_trailer_reinforcement_present_for_every_applied_comment_shape(
+    applied_comment,
+):
+    # The reinforcement applies uniformly regardless of comment shape, for
+    # every EXECUTE-mode call -- orthogonal to the applied_comment dimension.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="x",
+        applied_comment=applied_comment,
+        mode="execute",
+    )
+    assert "non-technical product manager" in volatile["text"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 2 — iterate_prototype runner entry (recording fake client)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1082,6 +1226,77 @@ async def test_stage_iterate_run_advances_current_checkpoint(env, monkeypatch, c
     # No-bypass migration: the iterate path stores the authed proxy URL for the
     # prototype id, not whatever stage_bundle returned.
     assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in row["bundle_url"]
+
+
+# ─── AC6: execute-mode iterate defers its `done` close too ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_done_terminal_fires_after_advance_checkpoint(env, monkeypatch):
+    """AC1/AC6: mirrors the generate-side terminal-ordering test — `done` fires AFTER
+    advance_current_checkpoint, not at agent-completion (agent_loop's
+    mode="execute" defers _finish's close the same way mode="scaffold" does)."""
+    events: list[str] = []
+    real_advance = env.routes.advance_current_checkpoint
+
+    def _advance_spy(**kwargs):
+        events.append("advance_current_checkpoint")
+        return real_advance(**kwargs)
+
+    monkeypatch.setattr(env.routes, "advance_current_checkpoint", _advance_spy)
+
+    def _capture_close(pid, *, kind, summary=""):
+        events.append(f"sse_close:{kind}")
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    async def fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def fake_stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        return "https://bundle/iterated"
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", fake_stage)
+    monkeypatch.setattr(env.routes, "create_checkpoint", lambda **k: 111)
+    pid = _seed_ready(env)
+
+    ok = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="make it blue",
+        summary="Made the button blue.",
+    )
+
+    assert ok is True
+    assert events == ["advance_current_checkpoint", "sse_close:done"]
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_staging_failure_emits_error_not_done(env, monkeypatch):
+    """AC3: an iterate whose agent succeeded but whose staging failed
+    produces an error terminal, never `done` — mirrors the generate-side test."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(env.routes, "_sse_close", _capture_close)
+
+    async def fake_vite_raises(vfs):
+        raise FileNotFoundError("missing scaffold file")
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite_raises)
+    pid = _seed_ready(env)
+
+    ok = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="make it blue",
+    )
+
+    assert ok is False
+    assert closed == [(pid, "error")]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "failed"
 
 
 @pytest.mark.asyncio

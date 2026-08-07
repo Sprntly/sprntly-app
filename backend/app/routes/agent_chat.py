@@ -34,6 +34,8 @@ from app.config import settings
 from app.entitlements import require_agents_module
 from app.llm import DEFAULT_MODEL
 from app.llm_metering import install_metering
+from app.llm_providers import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from app.openai_client import OpenAIMessagesClient
 from app.usage_context import Feature, usage_scope
 
 logger = logging.getLogger(__name__)
@@ -62,25 +64,46 @@ _SYSTEM_PROMPT = (
 )
 
 
-# Lazy-init the Anthropic client so importing this module doesn't 500 in
-# test environments without ANTHROPIC_API_KEY set.
+# Lazy-init the client so importing this module doesn't 500 in test
+# environments without ANTHROPIC_API_KEY set.
 @lru_cache(maxsize=16)
 def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     # Instrumented for usage metering before caching, so the tool-use loop's
     # per-turn calls land in `llm_usage_events` like every other surface.
     client = Anthropic(api_key=api_key, max_retries=0)
-    return install_metering(client, key_mode)
+    return install_metering(client, key_mode, provider=PROVIDER_ANTHROPIC)
 
 
-def get_llm_client() -> Anthropic:
-    """Return the Anthropic client for the acting company (see app.llm_keys):
-    the company's own key when configured, the platform key only when allowed,
-    else raise. Tests patch this."""
-    from app.llm_keys import resolve_llm_api_key_with_mode
+@lru_cache(maxsize=16)
+def _openai_client_for_key(
+    api_key: str, key_mode: str = "platform"
+) -> OpenAIMessagesClient:
+    """The OpenAI counterpart. The tool loop below is written against the shared
+    `messages.create` surface, so it runs unchanged on either client — the
+    Anthropic tool blocks it builds are translated inside the client."""
+    client = OpenAIMessagesClient(api_key=api_key)
+    return install_metering(client, key_mode, provider=PROVIDER_OPENAI)
 
-    key, key_mode = resolve_llm_api_key_with_mode(settings.anthropic_api_key or None)
+
+def get_llm_client() -> Anthropic | OpenAIMessagesClient:
+    """Return the client for the acting company's provider (see app.llm_keys):
+    the company's own key when configured, that provider's platform key
+    otherwise, else raise. Tests patch this."""
+    from app.llm_keys import resolve_llm_client_config
+
+    provider, key, key_mode = resolve_llm_client_config(
+        anthropic_platform_key=settings.anthropic_api_key or None,
+        openai_platform_key=settings.openai_api_key or None,
+    )
     if not key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+        raise HTTPException(
+            500,
+            "OPENAI_API_KEY not configured"
+            if provider == PROVIDER_OPENAI
+            else "ANTHROPIC_API_KEY not configured",
+        )
+    if provider == PROVIDER_OPENAI:
+        return _openai_client_for_key(key, key_mode)
     return _client_for_key(key, key_mode)
 
 

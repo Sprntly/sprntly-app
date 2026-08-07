@@ -644,29 +644,189 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
-  /** The name was already taken when this skill was uploaded, so its trigger
-   *  was disambiguated away from the name's plain slug (`/prd-author-2` for a
-   *  skill named "PRD Author"). Nothing was replaced — the skill that owned
-   *  the name keeps its own trigger and both are invocable. */
+  /** A BUILT-IN skill's name was already taken when this skill was uploaded,
+   *  so its trigger was disambiguated away from the name's plain slug
+   *  (`/prd-author-2` for a skill named "PRD Author"). Nothing was replaced —
+   *  the skill that owned the name keeps its own trigger and both are
+   *  invocable. */
   name_conflict: boolean
+  /** POST only: this upload REPLACED the company's existing skill of the same
+   *  name (same id, same trigger, new content) rather than adding a new one.
+   *  Absent on list items, where it would mean nothing. */
+  replaced?: boolean
+}
+
+/** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
+ *  edit form pre-fills from. Split from the list because a method can run to
+ *  50,000 characters and the library grid needs none of it.
+ *
+ *  `modules`/`references` are FILENAMES only: editing swaps the main method
+ *  and leaves a .zip's supporting files attached untouched, so the form
+ *  reports them rather than editing them. `attached_chars` is what those files
+ *  contribute toward the 50,000-character cap, which is measured over the
+ *  whole parsed skill — without it a client-side check would be wrong for
+ *  every skill uploaded as an archive. */
+export type CustomSkillDetail = CustomSkillInfo & {
+  method: string
+  modules: string[]
+  references: string[]
+  attached_chars: number
+}
+
+/** The PATCH result: the edited skill, plus the id of the company's OTHER
+ *  skill this edit absorbed (a rename onto a name they already used replaces
+ *  that skill). `null` means nothing else changed. */
+export type CustomSkillEditResult = CustomSkillDetail & {
+  replaced_skill_id: string | null
+}
+
+/** A skill folder inside a multi-skill archive that could NOT be imported.
+ *  `path` is the folder it sat in ("" for the archive root), `name` whatever
+ *  name we could derive, and `reason` is written for a person to act on
+ *  (a missing `description:`, an over-cap method). */
+export type SkippedSkill = {
+  path: string
+  name: string
+  reason: string
+}
+
+/** POST /v1/skills when the uploaded .zip held SEVERAL skills — one folder per
+ *  skill, the layout a zipped `skills/` directory has. Each one became its own
+ *  row with its own trigger, named from its own SKILL.md frontmatter rather
+ *  than from the form (which can only name one), so the answer is a LIST
+ *  instead of the single object. Folders that couldn't be imported are in
+ *  `skipped` with a reason and cost the others nothing; an archive that
+ *  yielded no skills at all fails the request instead. */
+export type MultiSkillUploadResult = {
+  skills: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+}
+
+/** What an upload answers: one skill, or the multi-skill archive result. */
+export type SkillUploadResult = CustomSkillInfo | MultiSkillUploadResult
+
+/** One skill found in a connected GitHub repo, as the picker needs it.
+ *
+ *  `status` is the server's verdict, computed against the company's own
+ *  library with the same rules the write path uses — never guessed here:
+ *    - `new`      → imports as a new skill at `trigger_preview`
+ *    - `replaces` → the company already has this name; importing updates that
+ *                   skill in place and keeps its trigger
+ *    - `invalid`  → cannot be imported; `reason` says why (no description, a
+ *                   file over GitHub's 1 MB text ceiling, over the 50k cap) */
+export type GithubSkillPreview = {
+  path: string
+  name: string
+  description: string
+  slug_preview: string
+  trigger_preview: string
+  file_count: number
+  char_count: number
+  status: "new" | "replaces" | "invalid"
+  reason: string
+}
+
+/** GET /v1/skills/github/discover — read-only; writes nothing.
+ *  `truncated` + `notes` report anything the repo was too big to show. */
+export type GithubSkillDiscovery = {
+  repo: string
+  ref: string
+  commit_sha: string
+  truncated: boolean
+  notes: string[]
+  skills: GithubSkillPreview[]
+}
+
+/** POST /v1/skills/github/import — the same per-skill payloads an upload
+ *  returns (each with `replaced`), plus what it couldn't import. */
+export type GithubSkillImportResult = {
+  imported: CustomSkillInfo[]
+  skipped: SkippedSkill[]
+  commit_sha: string
+  ref: string
+}
+
+/** Discriminates the two upload bodies by shape (the multi one has no `id`).
+ *  Exported because every caller has to branch on it. */
+export function isMultiSkillUpload(
+  result: SkillUploadResult,
+): result is MultiSkillUploadResult {
+  return Array.isArray((result as MultiSkillUploadResult).skills)
 }
 
 export const skillsApi = {
   /** The company's custom skills, newest first (metadata only). */
   list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
+  /** One skill with its method text (the edit form's source). 404s on a
+   *  foreign or unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<CustomSkillDetail>(`/v1/skills/${encodeURIComponent(id)}`),
+  /** Edit a skill's name, description, and method in place — same row, same
+   *  id. All three are always sent: the form owns the complete set it
+   *  rendered, so a partial write could revert a field.
+   *
+   *  Two consequences the caller has to handle. RENAMING re-derives the
+   *  trigger (the response's `slug`/`trigger` are authoritative — a name
+   *  shared with a built-in lands on the `-2` series, and the old `/slug`
+   *  stops working). Renaming onto one of the company's OWN skill names
+   *  REPLACES that skill: it is deleted and its id comes back as
+   *  `replaced_skill_id`, so the caller must drop that card. That is
+   *  destructive — confirm it with the user before calling. */
+  update: (
+    id: string,
+    patch: { name: string; description: string; method: string },
+  ) =>
+    api.patch<CustomSkillEditResult>(
+      `/v1/skills/${encodeURIComponent(id)}`,
+      patch,
+    ),
   /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
-   *  Server is the authoritative validator (422/400/413/409 with readable
+   *  Server is the authoritative validator (422/400/413 with readable
    *  `detail`); the modal mirrors the cheap checks client-side. A name shared
    *  with a BUILT-IN skill is accepted (the 201's `trigger`/`name_conflict`
    *  report the disambiguated trigger); a name already used by one of the
-   *  company's OWN custom skills is the 409. */
+   *  company's OWN custom skills REPLACES that skill in place — same id, same
+   *  trigger, new content — and the 201 comes back with `replaced: true`.
+   *
+   *  A .zip holding SEVERAL SKILL.md files imports as several skills and
+   *  answers `{skills, skipped}` instead of the single object — branch with
+   *  `isMultiSkillUpload`. The name and description sent here apply to a
+   *  single skill only; a multi-skill archive names each skill from its own
+   *  SKILL.md, and the per-skill collision rules (replace-in-place, the `-2`
+   *  built-in series) apply to each of them independently. */
   upload: (file: File, name: string, description: string) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("name", name)
     form.append("description", description)
-    return api.post<CustomSkillInfo>("/v1/skills", form)
+    return api.post<SkillUploadResult>("/v1/skills", form)
   },
+  /** The skills a CONNECTED GitHub repo holds, at `ref` (default branch when
+   *  omitted), optionally scoped to one folder. Read-only — it writes nothing,
+   *  so it is safe to call as the user types a branch.
+   *
+   *  The repo's installation is resolved server-side from the caller's company;
+   *  a repo this company hasn't connected 404s (never 403 — that would confirm
+   *  someone else connected it). A GitHub outage is a 502, a missing branch a
+   *  404, both with a readable `detail`. */
+  discoverGithub: (repo: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ repo })
+    if (opts?.ref) params.set("ref", opts.ref)
+    if (opts?.path) params.set("path", opts.path)
+    return api.get<GithubSkillDiscovery>(`/v1/skills/github/discover?${params}`)
+  },
+  /** Import the selected skills from that repo. `paths` FILTER the server's
+   *  own re-run of discovery — they are never fetch targets, so a path that
+   *  isn't a skill in that repo imports nothing rather than reading a file.
+   *  Each imported skill follows the upload rules: a name the company already
+   *  used replaces that skill in place, a built-in's name takes the next free
+   *  trigger. Per-skill failures come back in `skipped`. */
+  importGithub: (body: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+  }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(
@@ -719,6 +879,22 @@ export const chatIntentApi = {
       ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
+    }),
+}
+
+/** Next-prompt suggestions for a chat thread — `POST /v1/chat/suggestions`.
+ *
+ *  Fetched AFTER an answer has rendered, never before or during: it is a
+ *  separate round trip so it cannot delay, block or fail the answer stream.
+ *  An empty array is the ORDINARY result, not a failure — the backend abstains
+ *  whenever the conversation doesn't point at a specific next step (see
+ *  app/chat_suggestions.py). Callers must treat `[]` and a rejected promise
+ *  identically: render nothing. */
+export const chatSuggestionsApi = {
+  next: (conversationId: number, opts?: { prdId?: number | null }) =>
+    api.post<{ suggestions: string[] }>("/v1/chat/suggestions", {
+      conversation_id: conversationId,
+      ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
     }),
 }
 
@@ -1372,6 +1548,207 @@ export const templatesApi = {
     ),
 }
 
+// ---- artifact format templates ----------------------------------------------
+//
+// The company's own PRD / ticket / engineering-spec FORMS. Distinct from
+// `templatesApi` directly above, which is the "what good looks like" exemplar
+// library — additive prose the prd-author skill reads as voice guidance. These
+// are a GOVERNING skeleton: at most one active per artifact type, and every
+// document of that type gets written into it. The two coexist.
+//
+// Mirrors backend/app/routes/artifact_templates.py. `X-Workspace-Id` is
+// injected centrally in this file's `request()` — never add it per call.
+
+/** Which generator a format governs. `impl_spec` is the implementation-spec
+ *  skill's Part B (the markdown the ticket generator consumes). */
+export type ArtifactTemplateType = "prd" | "tickets" | "impl_spec"
+
+/** Where a format is in the checking pipeline.
+ *    pending      — queued, nothing has checked it yet
+ *    compiling    — being checked right now
+ *    ready        — checked clean; can be activated
+ *    needs_review — checked, but something in it has no home; see compile_notes
+ *    failed       — could not be read at all */
+export type CompileStatus =
+  | "pending"
+  | "compiling"
+  | "ready"
+  | "needs_review"
+  | "failed"
+
+/** One problem found while checking a format. NEVER rendered raw — `code` keys
+ *  the translation table in lib/compileNotes.ts, because the backend's own
+ *  wording names CSS classes (`ul.ev`) that must never reach a screen.
+ *  `message` is plain-language and is the fallback for an unknown code. */
+export type CompileNote = {
+  code: string
+  message: string
+}
+
+/** How a section of the customer's format is written. Closed set, validated
+ *  server-side at compile time so one concept never gets two labels. */
+export type SectionForm = "prose" | "bullets" | "table" | "stories"
+
+/** One row of "how we mapped your format": the customer's section name, what
+ *  Sprntly writes into it, and the shape it takes. */
+export type SectionMapEntry = {
+  id: string
+  /** The Sprntly concept that lands here (plain words). */
+  house: string
+  /** The customer's own name for the section. */
+  customer: string
+  order: number
+  form: SectionForm
+}
+
+export type SectionMap = {
+  sections: SectionMapEntry[]
+  /** Sprntly elements the format has no section for — placed where they fit. */
+  unmapped_house: string[]
+  /** Sections that are the customer's alone, filled from their evidence. */
+  extra_sections: string[]
+}
+
+/** One library row. Carries everything the list screen renders, so no row ever
+ *  needs a detail fetch to display. */
+export type ArtifactTemplate = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  uploader_name: string
+  created_at: string | null
+  updated_at: string | null
+  compile_status: CompileStatus
+  is_active: boolean
+  /** Characters in the uploaded markdown. */
+  source_chars: number
+  /** The FIRST compile note's message, or null. */
+  compile_summary: string | null
+  /** How many notes there are — the "See all 3" affordance needs the count,
+   *  and it cannot be derived from `compile_summary`. */
+  compile_note_count: number
+}
+
+/** A row PLUS its uploaded source and full mapping — the edit form's source. */
+export type ArtifactTemplateDetail = ArtifactTemplate & {
+  source_md: string
+  content_hash: string
+  compile_notes: CompileNote[]
+  section_map: SectionMap
+}
+
+/** What the preview modal renders. `format` is an EXPLICIT discriminator —
+ *  never sniff a leading `<`, which is guesswork on model output. `body` is ""
+ *  until a compiler has run, which renders as "we couldn't build a preview
+ *  from this format yet", not as an error. */
+export type ArtifactTemplatePreview = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  compile_status: CompileStatus
+  compile_notes: CompileNote[]
+  format: "html" | "markdown"
+  body: string
+  section_map: SectionMap
+}
+
+/** Which generators actually honour a custom format yet — TOP-LEVEL on the list
+ *  response, not per row, because the common state is zero rows and the screen
+ *  still renders all three group headers. Never hardcode this client-side. */
+export type GenerationEnabled = Record<ArtifactTemplateType, boolean>
+
+export type ArtifactTemplateList = {
+  templates: ArtifactTemplate[]
+  generation_enabled: GenerationEnabled
+}
+
+export type ArtifactTemplateDeleteResult = {
+  deleted: true
+  id: string
+  artifact_type: ArtifactTemplateType
+  /** True when this delete dropped the company back to the built-in format. */
+  fell_back_to_builtin: boolean
+}
+
+export const artifactTemplatesApi = {
+  /** The company's format library, newest first, optionally one type only.
+   *  Poll THIS (not each row) while anything is compiling — one request covers
+   *  every in-flight row. */
+  list: (type?: ArtifactTemplateType) => {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : ""
+    return api.get<ArtifactTemplateList>(`/v1/artifact-templates${qs}`)
+  },
+  /** One format WITH its markdown source and mapping. 404s on a foreign or
+   *  unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+  /** Add a format from PASTED markdown. The server is the authoritative
+   *  validator (422 name/type, 400 empty, 413 over 50,000 characters); the
+   *  modal mirrors the cheap checks. Names are free text and are NOT
+   *  deconflicted — two formats may share a name and neither replaces the
+   *  other. */
+  create: (body: {
+    name: string
+    artifact_type: ArtifactTemplateType
+    source_md: string
+  }) => api.post<ArtifactTemplateDetail>("/v1/artifact-templates", body),
+  /** Add a format from an uploaded `.md` (≤ 2 MB). Same route as `create`,
+   *  multipart instead of JSON; the name defaults to the filename when
+   *  omitted. */
+  upload: (file: File, artifactType: ArtifactTemplateType, name?: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("artifact_type", artifactType)
+    if (name) form.append("name", name)
+    return api.post<ArtifactTemplateDetail>("/v1/artifact-templates", form)
+  },
+  /** Rename a format and/or replace its markdown. Send only what changed — an
+   *  omitted field is left alone, so the rename modal never blanks a source it
+   *  didn't render. Replacing the source re-queues the check; an ACTIVE format
+   *  stays active and keeps serving its last good skeleton meanwhile. */
+  update: (id: string, patch: { name?: string; source_md?: string }) =>
+    api.patch<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+      patch,
+    ),
+  /** Queue a (re)check of this format. Answers the preview shape with the row's
+   *  new status, so the caller can restart polling from the response. */
+  compile: (id: string) =>
+    api.post<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/compile`,
+    ),
+  /** The compiled skeleton + how we mapped the format onto it. Available at
+   *  every status — it is the diagnostic for a format that didn't map
+   *  cleanly. */
+  preview: (id: string) =>
+    api.get<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/preview`,
+    ),
+  /** Make this THE format for its type, company-wide. Admin only (403
+   *  otherwise). 409 with a `{message, code, notes}` detail when the format
+   *  hasn't compiled clean — translate those notes, never print them. */
+  activate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/activate`,
+    ),
+  /** Go back to Sprntly's built-in format for this type. The format stays in
+   *  the library. Admin only (403 otherwise); idempotent. */
+  deactivate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/deactivate`,
+    ),
+  /** Remove a format for the whole company. Deleting the ACTIVE one is admin
+   *  only (403) — it falls back to the built-in, which is what deactivating
+   *  does, and that is admin-gated. `fell_back_to_builtin` says whether it did,
+   *  so the toast can name it. */
+  remove: (id: string) =>
+    api.delete<ArtifactTemplateDeleteResult>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+}
+
 // ---- company documents (onboarding strategy step — scene onbstrat) ----------
 //
 // The strategy/context files a PM uploads on the FINAL onboarding step: a typed
@@ -1588,6 +1965,20 @@ export type ConnectionSummary = {
     cloud_id?: string
     sync_space_ids?: string[]
     sync_space_keys?: Record<string, string>
+    // Zoom — which hosts' cloud recordings the KG ingest reads. Empty/absent =
+    // every licensed host on the account. COMPANY-wide, admin-only to change.
+    // Names are stored alongside the ids so a host who has since been
+    // deactivated (and so is absent from the live listing) can still be shown
+    // by name rather than as an opaque Zoom user id.
+    sync_user_ids?: string[]
+    sync_user_names?: Record<string, string>
+    // …and the last run's counters. The GAP between them is the signal: a
+    // sync that found meetings but read no transcripts almost always means
+    // Audio transcript is switched off in the customer's Zoom account, which
+    // is a setting they can fix. Absent (undefined) means "never synced" —
+    // which is NOT the same as zero and must not be rendered as one.
+    last_sync_meetings?: number
+    last_sync_transcripts?: number
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1700,6 +2091,21 @@ export type ConfluenceSpace = {
   name: string | null
   /** "global" | "personal" — personal spaces are filtered out server-side. */
   type: string | null
+}
+
+export type ZoomUser = {
+  id: string
+  email: string
+  display_name: string
+  /** Only Licensed Zoom accounts can record to the cloud, so an unlicensed
+   *  host has nothing to sync. Surfaced rather than filtered so a user looking
+   *  for a colleague finds them with an explanation instead of an absence. */
+  licensed: boolean
+  /** How many recordings this host has. ALWAYS PRESENT, and null until the
+   *  count is cheap to compute — it needs one windowed recordings call per
+   *  host. Declared null rather than omitted so the UI renders its degraded
+   *  line from day one instead of gaining a field later. */
+  recording_count: number | null
 }
 
 // Multitenant: connector routes resolve the active company entirely
@@ -1817,6 +2223,51 @@ export const connectorsApi = {
       { spaces },
     ),
 
+  // ---- Google Meet ---------------------------------------------------------
+  /** Drops the company's Google Meet connection, revoking the grant at Google
+   *  first. Admin-only — a member gets 403 with the admin-gate message.
+   *
+   *  There is no `listGoogleMeet…` picker counterpart on purpose: coverage is
+   *  fixed to the connecting account's own meetings (Google exposes nothing
+   *  else) and the 30-day window is Google's, so there is nothing to choose. */
+  disconnectGoogleMeet: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/google-meet`),
+
+  // ---- Zoom ----------------------------------------------------------------
+  disconnectZoom: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/zoom`),
+
+  /** The active hosts on the connected Zoom account, plus the persisted
+   *  selection.
+   *
+   *  `total` is HOW MANY WE FETCHED, not how many exist on the account, and
+   *  `fetch_capped` says Zoom still had pages when the listing budget ran out
+   *  — the two together are what let the UI say "the first N" honestly instead
+   *  of asserting a number it cannot know.
+   *
+   *  `selected_names` matters because the listing is ACTIVE-ONLY: a selected
+   *  host who has since been deactivated is absent from `users`, and without
+   *  their stored name the picker could only show a bare id. */
+  listZoomUsers: () =>
+    api.get<{
+      users: ZoomUser[]
+      selected_ids: string[]
+      selected_names: Record<string, string>
+      total: number
+      fetch_capped: boolean
+      truncated: boolean
+    }>(`/v1/connectors/zoom/users`),
+
+  /** Choose which hosts' recordings the KG ingest pulls from (stored on the
+   *  company's Zoom connection config as sync_user_ids / sync_user_names). An
+   *  empty list clears the selection back to every licensed host.
+   *  Admin-only — a member gets 403 with the admin-gate message. */
+  setZoomSyncUsers: (users: { id: string; email?: string | null }[]) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/zoom/users`,
+      { users },
+    ),
+
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
@@ -1869,12 +2320,28 @@ export const connectorsApi = {
    * connection config as sync_channel_ids / sync_channel_names). An empty
    * list clears the selection — the sync reverts to every channel the bot
    * is a member of. `joined` echoes the public channels the bot could
-   * self-join right away. */
+   * self-join right away.
+   *
+   * Unticking is the reverse of ticking, so the response also reports the
+   * teardown: `left` are the channels the bot walked out of, `leave_failed`
+   * the ones Slack refused (today that is every one of them until the app
+   * gains the `channels:manage` scope — the bot only holds `channels:join`),
+   * `delivery_skipped` the ones deliberately kept because somebody delivers
+   * briefs there, and `purged` how much synced content was removed. All four
+   * are advisory: the selection itself always saves. */
   setSlackSyncChannels: (channels: { id: string; name?: string }[]) =>
     api.post<{
       ok: true
       config: ConnectionSummary["config"]
       joined: string[]
+      left: string[]
+      leave_failed: string[]
+      delivery_skipped: string[]
+      purged: {
+        datasets: string[]
+        sections_removed: number
+        reseeded: string[]
+      }
     }>(`/v1/connectors/slack/sync-channels`, { channels }),
 
   // ---- Sprinklr ------------------------------------------------------------
@@ -3196,6 +3663,19 @@ export type StoryCache = {
   generated_at?: string
 }
 
+/** What POST /v1/stories/generate hands back on both paths.
+ *
+ *  `ticket_set_id` is present ONLY on the insight (no-PRD) path: the backend
+ *  creates the durable `ticket_sets` row at kick-off, BEFORE scheduling the
+ *  job, and the client never posts stories back — which is what makes a
+ *  double-poll or a StrictMode double-effect unable to produce two sets. A
+ *  re-attaching call (the in-flight dedupe) returns the SAME set id. */
+export type StoryGenerateStart = {
+  job_id: number
+  status: string
+  ticket_set_id?: number
+}
+
 export const storiesApi = {
   /** Persisted tickets for a PRD + whether they're still fresh. Read this first;
    *  only regenerate when missing/stale (`fresh` false). No LLM call. */
@@ -3204,7 +3684,22 @@ export const storiesApi = {
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
    *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
-    api.post<{ job_id: number; status: string }>("/v1/stories/generate", { prd_id: prdId }),
+    api.post<StoryGenerateStart>("/v1/stories/generate", { prd_id: prdId }),
+  /** Kick off tickets from a free-form INSIGHT instead of a PRD — the chat's
+   *  "generate tickets" ask in a thread that has no PRD. Same job contract as
+   *  `generate` (poll `getJob`), plus a `ticket_set_id` for the durable
+   *  `ticket_sets` row the run fills. `conversationId` stamps the thread the
+   *  set was born in so it can be reopened from there; the backend 404s a
+   *  conversation that isn't the caller's company's.
+   *
+   *  Callers should go through `lib/runTicketSetGeneration.ts` rather than
+   *  calling this directly — it owns the kick-off/poll/publish arc, and one
+   *  owner is what keeps the panel from starting a second run of its own. */
+  generateFromInsight: (insight: string, conversationId?: number | null) =>
+    api.post<StoryGenerateStart>("/v1/stories/generate", {
+      insight,
+      ...(conversationId != null ? { conversation_id: conversationId } : {}),
+    }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */
   getJob: (jobId: number) =>
     api.get<StoryJob>(`/v1/stories/jobs/${jobId}`),
@@ -3267,6 +3762,85 @@ export const storiesApi = {
       destination_id: string | null
       meta: TrackerMeta | null
     }>(`/v1/stories/sync/${prdId}/tracker-meta${refresh ? "?refresh=1" : ""}`),
+}
+
+// ── Standalone ticket sets ───────────────────────────────────────────────────
+// Tickets generated from a chat with NO PRD behind them (backend:
+// app/routes/ticket_sets.py). A set is a durable artifact, not a chat bubble:
+// it is created by POST /v1/stories/generate's insight path (see
+// `storiesApi.generateFromInsight`), and these routes are the read + tracker
+// surface over the result.
+//
+// The tracker routes MIRROR the per-PRD ones exactly and share the backend
+// implementation (app/stories/sync_control.py), so a set syncs two-way with
+// Jira / ClickUp / Asana on identical terms — same first-push binding, same
+// interval auto-sync, same last-writer-wins reconciliation. The shapes below
+// are therefore the same shapes the per-PRD calls return.
+
+/** One ticket set with its tickets (GET /v1/ticket-sets/{id}).
+ *  `title` and `source_text` come back even when empty — the API does not
+ *  decide that a blank line should disappear; the panel renders its own
+ *  fallback copy. DELETED tickets are already dropped and EXCLUDED ones tagged,
+ *  exactly as `getForPrd` does. */
+export type TicketSetRecord = {
+  id: number
+  title: string
+  /** "generating" | "ready" | "failed" */
+  status: string
+  stories: GeneratedStory[]
+  ticket_count: number
+  conversation_id: number | null
+  source_text: string
+  created_at?: string | null
+}
+
+/** One row of a thread's ticket-set list (GET /v1/ticket-sets/by-conversation/
+ *  {id}) — the same set as `TicketSetRecord` minus `stories`, which the listing
+ *  deliberately never carries (it is the resume read, not a document fetch). */
+export type TicketSetSummary = {
+  id: number
+  title: string
+  /** "generating" | "ready" | "failed" */
+  status: string
+  created_at: string | null
+}
+
+export const ticketSetsApi = {
+  /** One ticket set with its tickets. 404 for an unknown id AND for another
+   *  tenant's — deliberately indistinguishable, so never surface the
+   *  difference in copy. */
+  get: (setId: number) => api.get<TicketSetRecord>(`/v1/ticket-sets/${setId}`),
+  /** The sets born in one chat, newest first — the THREAD-RESUME read.
+   *
+   *  Reopening a chat asks this so it can put the panel back on what that chat
+   *  produced: a `generating` set reopens on the live run, a finished one on its
+   *  tickets. Company-scoped in the backend query, so a conversation id that
+   *  isn't the caller's company's comes back as an empty list rather than a 403
+   *  (routes/ticket_sets.py::sets_for_conversation). */
+  byConversation: (conversationId: number) =>
+    api.get<{ ticket_sets: TicketSetSummary[] }>(
+      `/v1/ticket-sets/by-conversation/${conversationId}`,
+    ),
+  /** This set's tracker-sync state. Same shape as `storiesApi.getSyncState`. */
+  getSyncState: (setId: number) =>
+    api.get<TicketSyncState>(`/v1/ticket-sets/${setId}/sync`),
+  /** Run a two-way sync pass in the background. Pass `dest` on the FIRST push
+   *  (or to switch tool/destination); omit it to re-sync the configured one. */
+  triggerSync: (setId: number, dest?: {
+    provider: TrackerProvider; destination_id: string; destination_name?: string
+  }) =>
+    api.post<{ status: "syncing" }>(`/v1/ticket-sets/${setId}/sync`, dest ?? {}),
+  /** The destination's vocabulary (statuses/priorities/issue types/custom
+   *  fields). Same three-way contract as the PRD route: bound → the bound
+   *  destination's meta, unbound-but-connected → the connect-time warm cache,
+   *  no tracker → all-null and the web keeps its defaults. */
+  getTrackerMeta: (setId: number, refresh = false) =>
+    api.get<{
+      configured: boolean
+      provider: TrackerProvider | null
+      destination_id: string | null
+      meta: TrackerMeta | null
+    }>(`/v1/ticket-sets/${setId}/tracker-meta${refresh ? "?refresh=1" : ""}`),
 }
 
 export type ClickUpTicketState = {
@@ -3370,23 +3944,57 @@ export const teamApi = {
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
-// ── Admin (owner/admin only): per-company Claude API key ──
-// When configured, ALL of the company's Claude LLM calls use THIS key instead
+// ── Admin (owner/admin only): LLM provider + per-company API keys ──
+// A workspace runs on Claude (Anthropic) or OpenAI. When a key is configured
+// for the ACTIVE provider, ALL of the company's LLM calls use THAT key instead
 // of the platform key. The full key is never returned — reads carry a masked
 // preview only.
+//
+// The two keys are independent of the provider switch: a workspace can hold
+// both and flip between them without re-entering either.
+
+/** The providers the backend can run on. Mirrors app/llm_providers.py. */
+export const LLM_PROVIDERS = ["anthropic", "openai"] as const
+export type LlmProvider = (typeof LLM_PROVIDERS)[number]
 
 export type LlmKeyStatus = { configured: boolean; masked: string | null }
 
+/** Which provider is live plus the key status of BOTH, in one request — so the
+ *  Admin pane can show "Claude key saved" on an inactive card without a second
+ *  round trip. */
+export type LlmConfig = {
+  provider: LlmProvider
+  providers: Record<LlmProvider, LlmKeyStatus>
+}
+
+/** `?provider=` on every key route. Omitted for Anthropic so the requests the
+ *  onboarding step and older clients send stay byte-identical. */
+function providerQuery(provider: LlmProvider): string {
+  return provider === "anthropic" ? "" : `?provider=${encodeURIComponent(provider)}`
+}
+
 export const adminApi = {
-  /** Current key status (masked preview, never the full key). */
-  getLlmKey: () => api.get<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Store / replace the company Claude key. */
-  setLlmKey: (apiKey: string) =>
-    api.put<LlmKeyStatus>("/v1/admin/llm-key", { api_key: apiKey }),
-  /** Remove the key (revert to the platform key). */
-  deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Explicit, opt-in live validation of the stored key (one cheap call). */
-  testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
+  /** Active provider + both key statuses. */
+  getLlmConfig: () => api.get<LlmConfig>("/v1/admin/llm-config"),
+  /** Switch which provider this workspace's LLM calls run on. Allowed with no
+   *  key stored for the target — it then runs on Sprntly's key for that
+   *  provider, the same posture a keyless Claude workspace has always had. */
+  setLlmProvider: (provider: LlmProvider) =>
+    api.put<LlmConfig>("/v1/admin/llm-config", { provider }),
+  /** Current key status for one provider (masked preview, never the full key). */
+  getLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.get<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Store / replace the company key for one provider. */
+  setLlmKey: (apiKey: string, provider: LlmProvider = "anthropic") =>
+    api.put<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`, {
+      api_key: apiKey,
+    }),
+  /** Remove the key (revert to the platform key). Does not change the provider. */
+  deleteLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.delete<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Explicit, opt-in live validation of the stored key. */
+  testLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.post<{ ok: true }>(`/v1/admin/llm-key/test${providerQuery(provider)}`),
 }
 
 // ── Usage (owner/admin only): LLM spend + token usage for this workspace ──
@@ -3409,8 +4017,8 @@ export type UsageBucket = {
 export type UsageSummary = {
   range: { start: string; end: string; days: number; tz: string }
   cost_basis: string
-  /** Always "customer_key": only calls billed to the company's OWN Anthropic
-   *  key are counted. Usage on Sprntly's platform key is spend we absorb and is
+  /** Always "customer_key": only calls billed to the company's OWN provider key
+   *  are counted. Usage on Sprntly's platform key is spend we absorb and is
    *  deliberately excluded — it is not the customer's to see or pay. */
   scope: string
   totals: UsageBucket
@@ -4052,6 +4660,34 @@ export type ArtifactItem =
       /** The listing carries no `html` — the body is fetched by id on open. */
       open: { report_id: number }
     }
+  | {
+      /** A STANDALONE ticket set — tickets generated from a chat with no PRD
+       *  behind them (`ticket_sets`). A PRD's tickets are NOT in this library:
+       *  they belong to the PRD row, which is already here. */
+      type: "ticket_set"
+      id: number
+      /** The set's LLM-derived name, or "" before the naming leg ran. The row
+       *  renders its own fallback rather than a fabricated title. */
+      title: string
+      /** Lifecycle. Aggregation filters to generating|ready — a `failed` run
+       *  produced nothing and is not an artifact (db/artifacts.py). */
+      status: "generating" | "ready"
+      created_at: string
+      /** How many tickets the set holds. Counted server-side from `stories`,
+       *  which is never shipped to the client on this listing. */
+      ticket_count: number
+      /** The chat the set was born in. `conversation_id` with a null
+       *  `conversation_title` means that chat was deleted (`on delete set
+       *  null` leaves the id): the row then omits the "from <chat>" clause
+       *  rather than inventing a label. `question` is the original request
+       *  (`ticket_sets.source_text`). */
+      source: {
+        conversation_id: number | null
+        conversation_title: string | null
+        question: string
+      }
+      open: { ticket_set_id: number }
+    }
 
 /** One captured report, body included (GET /v1/reports/{id}). */
 export type ReportDoc = {
@@ -4080,7 +4716,7 @@ export const artifactsApi = {
   /** LLM chat summary of a freshly generated artifact. Best-effort by
    *  contract: the backend returns {summary: null} on any summarizer failure
    *  (never an error), and callers skip posting in that case. */
-  chatSummary: (kind: "prd" | "evidence" | "prototype", id: number) =>
+  chatSummary: (kind: "prd" | "evidence" | "prototype" | "ticket_set", id: number) =>
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 

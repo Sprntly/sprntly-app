@@ -131,8 +131,30 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
     Returns one of:
       {"outcome": "not_found"}
       {"outcome": "blocked", "reason": "different_company", "share": <row>}
+      {"outcome": "member", "share": <row>, "sharer_name": str|None,
+       "owning_company_name": str|None, "same_company": True}
       {"outcome": "guest_view", "share": <row>, "sharer_name": str|None,
        "owning_company_name": str|None, "same_company": True}
+
+    `member` vs `guest_view` (2026-08-04). Both are same-company callers —
+    the ONLY difference is whether the caller can already reach the artifact
+    through the ORDINARY app. Before this split, every same-company caller
+    got `guest_view`, and the gate renders that as GuestArtifactViewer: a
+    READ-ONLY shell. So a colleague who opened a teammate's share link could
+    not edit the PRD or its tickets, purely because of how they arrived —
+    the same person navigating to the same PRD from the sidebar could edit
+    it fine. Editing rights belong to COMPANY MEMBERSHIP, not to who created
+    the artifact or who minted the link, so a caller who can act in the
+    artifact's owning workspace now resolves to `member` and the gate sends
+    them into the real, editable app.
+
+    `guest_view` survives for the case it was actually built for: a
+    same-company caller with NO access to the owning workspace (a fresh
+    domain-matched signup who holds a company_members row but no workspace
+    row yet, or a member of a DIFFERENT workspace). Routing those into the
+    app would strand them on `require_owned_prd`'s 404 — they keep the
+    read-only viewer plus its "Join workspace" path, which grants the
+    workspace row and then re-resolves to `member` naturally.
 
     Revision note: a caller with ZERO company memberships is now ALWAYS
     blocked, regardless of email domain — sign-in (or any call into this
@@ -165,9 +187,16 @@ def resolve_share_access(*, token: str, user_id: str, user_email: str | None) ->
         return {"outcome": "blocked", "reason": "different_company", "share": share}
 
     from app.db.companies import display_name_for_company_id, profile_name_for_user
+    from app.db.workspaces import user_can_act_in_workspace
 
+    in_app = user_can_act_in_workspace(
+        workspace_id=share.get("owner_workspace_id"),
+        user_id=user_id,
+        company_id=share["owner_company_id"],
+        company_role=memberships[0].get("role") or "member",
+    )
     return {
-        "outcome": "guest_view",
+        "outcome": "member" if in_app else "guest_view",
         "share": share,
         "sharer_name": profile_name_for_user(share["created_by_user_id"]),
         "owning_company_name": display_name_for_company_id(share["owner_company_id"]),

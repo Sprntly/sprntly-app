@@ -12,6 +12,7 @@ import pytest
 
 from app.auth import CompanyContext
 from app.stories.generate import Story
+from app.stories.scope import prd_scope
 
 # Pin every test that touches this shared CID / FakeTracker / prd_id fixture
 # family to the SAME xdist worker (requires `--dist=loadgroup`), run as one
@@ -339,7 +340,7 @@ def _sync_cfg(prd_id: int, statuses: dict | None = None) -> None:
     from app.db.client import require_client
     from app.db.ticket_sync import upsert_sync_config
 
-    upsert_sync_config(CID, prd_id, provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(prd_id), provider="clickup", destination_id="L1")
     if statuses is not None:
         require_client().table("prd_ticket_sync").update(
             {"statuses": statuses}
@@ -368,7 +369,7 @@ def test_first_sync_bulk_creates_and_baselines(isolated_settings, fake_tracker):
     tracker = fake_tracker.instances[0]
     assert tracker.created == ["Login"]
     assert result["pushed"] == 1 and result["imported"] == 0
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     entry = cfg["statuses"][base["id"]]
     # Baselined: tracker content fingerprint + pass timestamp recorded.
     assert entry["content_hash"] and entry["synced_at"]
@@ -404,7 +405,7 @@ def test_tracker_side_deletion_repushes(isolated_settings, fake_tracker):
     assert "Login" in tracker.created
     assert result["pushed"] >= 1
     # It re-baselines cleanly: a fresh fingerprint is recorded again.
-    cfg = get_sync_config(CID, 30)
+    cfg = get_sync_config(CID, prd_scope(30))
     assert cfg["statuses"][tid]["content_hash"] and cfg["statuses"][tid]["synced_at"]
 
 
@@ -631,7 +632,7 @@ def test_assignee_resolves_by_email_and_pushes_out(isolated_settings, fake_track
     tracker = fake_tracker.instances[0]
     # Matched case-insensitively → the tracker issue is assigned by accountId.
     assert tracker.assignee_sets == [(f"ref-{tid}", "acct-sam")]
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     assert cfg["statuses"][tid]["assignee_account_id"] == "acct-sam"
 
     # Second pass, nothing changed → the already-set assignee is NOT re-pushed.
@@ -675,7 +676,7 @@ def test_run_prd_sync_records_failure_and_reraises(isolated_settings, monkeypatc
     from app.stories.push import ClickUpNotConnectedError
 
     _seed_prd_tickets(CID, 7, [Story(title="T", body="B").to_dict()])
-    upsert_sync_config(CID, 7, provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(7), provider="clickup", destination_id="L1")
 
     def _boom(*a, **k):
         raise ClickUpNotConnectedError("ClickUp is not connected")
@@ -684,7 +685,7 @@ def test_run_prd_sync_records_failure_and_reraises(isolated_settings, monkeypatc
     with pytest.raises(ClickUpNotConnectedError):
         sync_mod.run_prd_sync(CID, 7)
 
-    cfg = get_sync_config(CID, 7)
+    cfg = get_sync_config(CID, prd_scope(7))
     assert cfg["sync_status"] == "idle"  # never wedged in 'syncing'
     assert "not connected" in cfg["last_error"]
     assert cfg["last_synced_at"] is None
@@ -781,10 +782,10 @@ def test_sync_state_unconfigured(isolated_settings):
 def test_trigger_sync_registers_destination_and_runs(isolated_settings, monkeypatch):
     from app.routes import stories as routes
 
-    ran: list[tuple[str, int]] = []
+    ran: list[tuple[str, object]] = []
     monkeypatch.setattr(
-        "app.stories.sync.run_prd_sync",
-        lambda cid, prd_id: ran.append((cid, prd_id)) or {"pushed": 0},
+        "app.stories.sync.run_ticket_sync",
+        lambda cid, scope: ran.append((cid, scope)) or {"pushed": 0},
     )
 
     async def _flow():
@@ -803,7 +804,7 @@ def test_trigger_sync_registers_destination_and_runs(isolated_settings, monkeypa
             await asyncio.sleep(0.01)
 
     asyncio.run(_flow())
-    assert ran == [(CID, 7)]
+    assert ran == [(CID, prd_scope(7))]
 
     state = routes.sync_state(7, _ctx())
     assert state["configured"] is True
@@ -858,12 +859,12 @@ def test_trigger_sync_is_idempotent_while_in_flight(isolated_settings, monkeypat
     from app.db.ticket_sync import get_sync_config, mark_syncing, upsert_sync_config
     from app.routes import stories as routes
 
-    upsert_sync_config(CID, 7, provider="clickup", destination_id="L1")
-    mark_syncing(CID, 7)
+    upsert_sync_config(CID, prd_scope(7), provider="clickup", destination_id="L1")
+    mark_syncing(CID, prd_scope(7))
 
     called = []
     monkeypatch.setattr(
-        "app.stories.sync.run_prd_sync", lambda *a: called.append(a)
+        "app.stories.sync.run_ticket_sync", lambda *a: called.append(a)
     )
 
     async def _flow():
@@ -872,7 +873,7 @@ def test_trigger_sync_is_idempotent_while_in_flight(isolated_settings, monkeypat
 
     asyncio.run(_flow())
     assert called == []
-    assert get_sync_config(CID, 7)["sync_status"] == "syncing"
+    assert get_sync_config(CID, prd_scope(7))["sync_status"] == "syncing"
 
 
 # ── Scheduler cycle ──────────────────────────────────────────────────────────
@@ -884,19 +885,268 @@ def test_scheduler_cycle_syncs_each_auto_row_isolated(isolated_settings, monkeyp
     from app.db.ticket_sync import mark_syncing, upsert_sync_config
     from app import scheduler as sched
 
-    upsert_sync_config(CID, 1, provider="clickup", destination_id="L1")
-    upsert_sync_config(CID, 2, provider="jira", destination_id="SPR")
-    upsert_sync_config(CID, 3, provider="clickup", destination_id="L3")
-    mark_syncing(CID, 3)  # in flight → skipped
+    upsert_sync_config(CID, prd_scope(1), provider="clickup", destination_id="L1")
+    upsert_sync_config(CID, prd_scope(2), provider="jira", destination_id="SPR")
+    upsert_sync_config(CID, prd_scope(3), provider="clickup", destination_id="L3")
+    mark_syncing(CID, prd_scope(3))  # in flight → skipped
 
     ran: list[int] = []
 
-    def _run(cid, prd_id):
-        if prd_id == 1:
+    def _run(cid, scope):
+        if scope.id == 1:
             raise RuntimeError("boom")
-        ran.append(prd_id)
+        ran.append(scope.id)
         return {"pushed": 0, "push_errors": 0}
 
-    monkeypatch.setattr("app.stories.sync.run_prd_sync", _run)
+    monkeypatch.setattr("app.stories.sync.run_ticket_sync", _run)
     asyncio.run(sched._run_ticket_sync_cycle())
     assert ran == [2]  # prd 1 failed (isolated), prd 3 skipped, prd 2 ran
+
+
+# ── the four-mirror round trip (ticket description layout) ───────────────────
+#
+# `to_description` (push), `story_editable_text` (what the web edits and the
+# sync compares), and `_IMPORT_LABELS` (tracker -> Sprntly) are three renderings
+# of ONE layout. If any two disagree about a label,
+# `normalize_imported_description` stops recognising what the push just wrote,
+# `content_hash(title, description)` differs on every pass, and the tracker sync
+# reports a phantom remote change on every ticket, forever.
+
+_M6_CUSTOM_LAYOUT = [
+    {"label": "Summary", "source": "what"},
+    {"label": "Acceptance owner", "source": "custom:acceptance_owner"},
+    {"label": "The ask", "source": "user_story"},
+    {"label": "Covers", "source": "scope"},
+]
+
+
+def _m6_story(**kw):
+    from app.stories.generate import Story
+
+    base = dict(
+        title="Ship it", body="As a user, I want X, so that Y.",
+        what="Build the thing", why_now="Churn is up 12%",
+        user_story="As a user, I want X, so that Y.",
+        scope=["cover A", "cover B"], out_of_scope="Not the mobile app",
+        acceptance_criteria=["Given A When B Then C"],
+        subtasks=["child one"], prd_section="R3", route="agent-ready",
+    )
+    base.update(kw)
+    return Story(**base)
+
+
+def _assert_round_trip_stable(story):
+    """Push it, read it back, and assert the sync sees NO change.
+
+    This is the exact comparison `sync_prd_tickets` makes: the tracker's
+    description normalised back must equal the local editable text, and the
+    content hash of the two must match. A mismatch here IS the permanent
+    phantom diff."""
+    from app.stories.sync import (
+        content_hash,
+        normalize_imported_description,
+        story_editable_text,
+    )
+
+    pushed = story.to_description()
+    normalised = normalize_imported_description(pushed, story.description_layout)
+    local = story_editable_text(story)
+
+    assert normalised == local, (
+        "the push labels and the editable labels disagree — this is the "
+        "permanent phantom-diff bug"
+    )
+    assert content_hash(story.title, normalised) == content_hash(story.title, local)
+
+
+def test_round_trip_is_stable_under_the_default_layout():
+    _assert_round_trip_stable(_m6_story())
+
+
+def test_round_trip_is_stable_under_a_custom_layout():
+    _assert_round_trip_stable(_m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    ))
+
+
+def test_the_import_labels_are_derived_from_the_layout():
+    # The default map must be exactly the one this used to hard-code, including
+    # the Scope -> "The ticket must cover" rename.
+    from app.stories.sync import _IMPORT_LABELS, import_labels_for
+
+    assert _IMPORT_LABELS == {
+        "**What**": "What",
+        "**Why now**": "Why now",
+        "**User story**": "User story",
+        "**Scope**": "The ticket must cover",
+        "**Out of scope**": "Out of scope",
+    }
+    custom = import_labels_for(_M6_CUSTOM_LAYOUT)
+    # A custom layout uses ONE label for both vocabularies — there is no legacy
+    # rename to preserve for a section the customer just named.
+    assert custom["**Summary**"] == "Summary"
+    assert custom["**Acceptance owner**"] == "Acceptance owner"
+
+
+def test_a_ticket_normalises_under_its_own_layout_not_the_companys_current_one():
+    """A ticket pushed under last month's format keeps round-tripping.
+
+    The layout is carried ON THE STORY, so changing the company's active format
+    cannot retroactively break the sync for tickets already in the tracker."""
+    old = _m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    _assert_round_trip_stable(old)
+    # Normalising the same pushed text under the DEFAULT layout would not
+    # recognise "**Summary**" — which is precisely why the story carries its own.
+    from app.stories.sync import normalize_imported_description, story_editable_text
+
+    wrong = normalize_imported_description(old.to_description(), None)
+    assert wrong != story_editable_text(old)
+
+
+def test_the_generated_tail_is_still_cut_under_a_custom_layout():
+    # Acceptance criteria / child issues / provenance live as their own fields
+    # in Sprntly and must never duplicate into the description on import.
+    from app.stories.sync import normalize_imported_description
+
+    s = _m6_story(
+        description_layout=_M6_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    out = normalize_imported_description(s.to_description(), s.description_layout)
+    assert "Acceptance criteria" not in out
+    assert "Child issues" not in out
+    assert "Provenance" not in out
+
+
+def test_scheduler_cycle_also_syncs_standalone_ticket_sets(
+    isolated_settings, monkeypatch
+):
+    """A set-owned sync row is scheduler work exactly like a PRD-owned one.
+
+    The row identifies its artifact by which owner column is populated, so a
+    set row must NOT be skipped as "no prd_id" — the bug the old
+    `if prd_id is None: continue` guard would have introduced silently, leaving
+    standalone sets bound to a tracker but never auto-syncing."""
+    from app.db.ticket_sync import upsert_sync_config
+    from app.stories.scope import set_scope
+    from app import scheduler as sched
+
+    upsert_sync_config(CID, prd_scope(4), provider="clickup", destination_id="L4")
+    upsert_sync_config(CID, set_scope(9), provider="jira", destination_id="KAN")
+
+    ran: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "app.stories.sync.run_ticket_sync",
+        lambda cid, scope: ran.append((scope.kind, scope.id))
+        or {"pushed": 0, "push_errors": 0},
+    )
+    asyncio.run(sched._run_ticket_sync_cycle())
+    assert sorted(ran) == [("prd", 4), ("set", 9)]
+
+
+# ── the round trip for a PRD-LESS (chat-generated) ticket ────────────────────
+#
+# `main` grew tickets that exist without a PRD: a chat thread with no PRD open
+# can now produce a real `ticket_sets` artifact, synced through the same engine
+# under a `set` scope instead of a `prd` one.
+#
+# Those tickets go through the SAME `generate_user_stories(company_id, ...)`
+# entry point, so `generate_from_input` resolves the company's active ticket
+# format for them exactly as it does for a PRD's tickets — the format is a
+# COMPANY-level artifact ("how our team writes tickets"), not a PRD-level one,
+# so a company that uploaded one gets it on every ticket regardless of where the
+# ticket came from. A company with no active format gets the default layout,
+# which is every chat ticket today.
+#
+# What has to hold, and what these prove: the layout survives the ticket_sets
+# storage round trip (same `stories` jsonb payload, same to_dict/from_dict), and
+# the push -> normalise -> compare invariant is stable for a set-scoped ticket
+# under both layouts. If it were not, the sync would report a phantom remote
+# change on every chat ticket on every pass.
+
+
+def _seed_chat_ticket_set(stories: list[dict]) -> int:
+    """A finished, PRD-less ticket set holding `stories`, via the real writers."""
+    from app.db.ticket_sets import create_set, finish_set
+
+    set_id = create_set(CID, workspace_id=None, conversation_id=None,
+                        source_text="generate tickets for the retry banner")
+    finish_set(set_id, title="Retry banner", stories=stories)
+    return set_id
+
+
+def _round_trip_from_storage(set_id: int):
+    """Read the set back the way the sync engine does and assert the invariant."""
+    from app.stories.generate import Story
+    from app.stories.scope import set_scope
+    from app.stories.sync import (
+        content_hash,
+        normalize_imported_description,
+        story_editable_text,
+    )
+
+    raw = set_scope(set_id).stories(CID)
+    assert raw, "the set stored no stories"
+    story = Story.from_dict(raw[0])
+
+    pushed = story.to_description()
+    normalised = normalize_imported_description(pushed, story.description_layout)
+    local = story_editable_text(story)
+    assert normalised == local, (
+        "a chat ticket's push labels and editable labels disagree — this is the "
+        "permanent phantom-diff bug, on the PRD-less path"
+    )
+    assert content_hash(story.title, normalised) == content_hash(story.title, local)
+    return story
+
+
+def test_a_chat_ticket_round_trips_under_the_default_layout(isolated_settings):
+    set_id = _seed_chat_ticket_set([_m6_story().to_dict()])
+    story = _round_trip_from_storage(set_id)
+    # No company format ⇒ the default layout, and nothing extra is stored.
+    assert story.description_layout is None
+    assert story.to_description().startswith("**What**")
+
+
+def test_a_chat_ticket_round_trips_under_a_custom_layout(isolated_settings):
+    set_id = _seed_chat_ticket_set([
+        _m6_story(
+            description_layout=_M6_CUSTOM_LAYOUT,
+            custom_sections={"acceptance_owner": "QA lead"},
+        ).to_dict()
+    ])
+    story = _round_trip_from_storage(set_id)
+    # The layout survived the ticket_sets storage round trip...
+    assert story.description_layout == _M6_CUSTOM_LAYOUT
+    assert story.custom_sections == {"acceptance_owner": "QA lead"}
+    # ...and the company's own labels are what the tracker gets.
+    assert "**Summary**" in story.to_description()
+    assert "**What**" not in story.to_description()
+
+
+def test_a_chat_ticket_gets_the_companys_active_format(isolated_settings, monkeypatch):
+    """The PRD-less path reaches `resolve_ticket_layout` through the same
+    `generate_from_input` a PRD's tickets do — it is keyed on the COMPANY, so
+    there is no PRD to be missing."""
+    import app.stories.generate as gen
+
+    seen: dict = {}
+
+    def _fake_resolve(company_id):
+        seen["company_id"] = company_id
+        return _M6_CUSTOM_LAYOUT, "tpl-1"
+
+    monkeypatch.setattr(gen, "resolve_ticket_layout", _fake_resolve)
+    monkeypatch.setattr(
+        gen, "_generate_single",
+        lambda *a, **k: [gen.Story(title="T", body="b", user_story="As a user…")],
+    )
+
+    stories = gen.generate_from_input(CID, prd_input="a chat brief, no PRD")
+
+    assert seen["company_id"] == CID
+    assert stories[0].description_layout == _M6_CUSTOM_LAYOUT

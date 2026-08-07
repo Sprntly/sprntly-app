@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Google Meet connector mark. Hand-built here rather than hotlinked from
+  Google's CDN — a remote logo is a third-party request on every render of the
+  Settings screen and a broken image the day it moves (precedent: eb12a756).
+  Geometry is our own simplified rendering of the Meet camera glyph in Google's
+  brand palette, sized to sit alongside zoom.svg on the same shelf.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 200" width="256" height="200" preserveAspectRatio="xMidYMid">
+    <title>Google Meet</title>
+    <!-- Screen body -->
+    <rect x="40" y="40" width="140" height="120" rx="18" fill="#2684FC"/>
+    <!-- Top-left and bottom-left corner blocks, traced along the body's own
+         rounded corners so they sit flush inside it at any render size. -->
+    <path d="M40 80 V58 A18 18 0 0 1 58 40 H80 V80 Z" fill="#EA4335"/>
+    <path d="M40 120 H80 V160 H58 A18 18 0 0 1 40 142 Z" fill="#FFBA00"/>
+    <!-- Camera lens wedge -->
+    <path d="M180 76 L232 46 A12 12 0 0 1 250 56 V144 A12 12 0 0 1 232 154 L180 124 Z" fill="#00832D"/>
+</svg>

@@ -309,7 +309,9 @@ def test_answer_out_of_scope_returns_canned(monkeypatch):
     assert out["_skill_source"] == "scope_gate"
 
 
-def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
+def test_answer_scope_gate_spares_anaphoric_followup_history_travels_separately(
+    monkeypatch,
+):
     # A follow-up whose subject lives in the previous turn ("...about it?") reads
     # as topic-less on its own, which is what the router mistook for
     # out-of-domain. It must answer in context instead of getting the refusal.
@@ -319,7 +321,8 @@ def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, **k: seen.update(q=q) or {"answer": "Here you go.", "citations": []},
+        lambda dataset, q, **k: seen.update(q=q, history=k.get("history"))
+        or {"answer": "Here you go.", "citations": []},
     )
     history = [
         {"role": "user", "content": "what did users say about the onboarding flow?"},
@@ -332,8 +335,12 @@ def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
         history=history,
     )
     assert out["answer"] != qa.OUT_OF_SCOPE_MESSAGE
-    # ...and the prior turns rode along, so "it" is resolvable.
-    assert "onboarding flow" in seen["q"]
+    # The prior turns still reach the composer — but as the SEPARATE `history`
+    # argument, not folded into the retrieval question. Retrieval sees only
+    # the bare follow-up; the model still gets "onboarding flow" via history.
+    assert seen["q"] == "can you get me all the details about it?"
+    assert "onboarding flow" not in seen["q"]
+    assert seen["history"] == history
 
 
 def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
@@ -417,19 +424,346 @@ def test_answer_voc_request_diverts_to_digest_when_source_connected(monkeypatch)
     assert router_calls == []  # never reached the router/answer LLM
 
 
-def test_answer_voc_request_falls_through_when_no_source(monkeypatch):
-    # With NO call source connected, the same bare request must fall through to
-    # the normal skill route (which explains what to connect), NOT the digest.
+def test_answer_voc_request_without_a_call_source_still_reaches_the_merged_path(
+    monkeypatch,
+):
+    """CHANGED 2026-08-05 with the VoC merge. This case used to assert the
+    opposite — that with no call source `call_digest.answer` must NOT run and
+    the turn fell through to the generic skill answer. That assertion encoded
+    the either/or that WAS the reported bug: `has_call_source` decided whether a
+    company saw live calls or its knowledge graph, never both.
+
+    `call_digest.answer` now merges the two and degrades per-source on its own,
+    so there is nothing left for a capability gate to decide. A company with no
+    call source but a populated graph belongs on the merged path (it degrades to
+    KG-only and answers); a company with neither gets the digest's own
+    what-to-connect message, which is the same guidance the generic skill answer
+    used to give. What is pinned here is the ROUTE: the bare request still
+    declines the fast-path interception and arrives via normal routing.
+    """
     import app.call_digest as cd
 
     monkeypatch.setattr(cd, "has_call_source", lambda cid: False)
+    seen: list = []
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: seen.append(k) or {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me a voice of customer report",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    # Reached from the VoC dispatch, not the interception the capability gate
+    # still (correctly) declines.
+    assert len(seen) == 1 and seen[0]["question"] == "give me a voice of customer report"
+
+
+def test_voc_dispatch_no_longer_consults_the_call_source_gate(monkeypatch):
+    """The gate is gone from this branch, not merely satisfied. If any code path
+    still asks `has_call_source` before dispatching VoC, the either/or can grow
+    back the next time someone edits it."""
+    import app.call_digest as cd
+
+    def _must_not_ask(cid):
+        raise AssertionError("the VoC dispatch must not gate on has_call_source")
+
+    monkeypatch.setattr(qa, "_answer_voc_report",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("KG-only path taken")))
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "route",
+        lambda q, **k: qa.RouteDecision("voice-of-customer-report", 1.0, "llm"),
+    )
+    monkeypatch.setattr(cd, "has_call_source", _must_not_ask)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="what are customers feedback",
+                    dataset="acme")
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_llm_routed_voc_reaches_the_merged_path(monkeypatch):
+    """The reported question matched NO regex — the haiku router classified it
+    voice-of-customer-report and it landed on this dispatch. Fixing the dispatch
+    is what covers every entry path, so pin the LLM-routed one explicitly."""
+    import app.call_digest as cd
+    import app.skill_router as sr
+
+    assert sr.is_call_digest("what are customers feedback") is False
+    assert sr.is_voc_report_request("what are customers feedback") is False
+
+    seen: list = []
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: seen.append(k) or {"answer": "merged", "_skill_source": "call-digest"},
+    )
+    monkeypatch.setattr(
+        qa, "route",
+        lambda q, **k: qa.RouteDecision("voice-of-customer-report", 0.9, "llm"),
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="what are customers feedback",
+                    dataset="acme")
+
+    assert out["_skill_source"] == "call-digest" and len(seen) == 1
+
+
+def test_pinned_voc_still_answers_from_the_kg_alone(monkeypatch):
+    """`pinned_skill` behaviour is deliberately unchanged: a pinned
+    voice-of-customer-report is a pipeline id, survives `_invocable`, and runs
+    `_answer_voc_report` over the KG bundle with no live fetch. This is the one
+    caller that keeps that function alive — it is not dead code."""
+    import app.call_digest as cd
+
     def _no_digest(**k):
-        raise AssertionError("call_digest.answer must not run when no source is connected")
+        raise AssertionError("a pinned VoC must not run the live digest")
+
     monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    import app.graph.retrieval as retrieval
+    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
-    out = qa.answer(enterprise_id="ent", question="give me a voice of customer report", dataset="acme")
-    assert out["_skill"] == "voice-of-customer-report"  # regex fast-path → skill route
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me a voice of customer report",
+        dataset="acme", pinned_skill="voice-of-customer-report",
+    )
+
+    assert out["_skill"] == "voice-of-customer-report"
+    assert captured["purpose"] == "voc_from_kg"
+    assert "KG SIGNAL" in captured["input"]
+
+
+# ─── interception contest: a company's own skill may beat the call digest ────
+
+
+def _contest_out(slug, confidence, reason="fits"):
+    return _Result({
+        "reason": reason, "company_skill_id": slug, "confidence": confidence,
+    })
+
+
+def _no_digest(**k):  # pragma: no cover — asserted by not being called
+    raise AssertionError("call_digest.answer must not run")
+
+
+def test_a_company_skill_can_beat_the_digest_interception(monkeypatch):
+    """The reported bug: a company uploads its own churn method, asks the exact
+    question it exists for, and the deterministic interception answers instead
+    because the router never ran. With uploads present the interception is now
+    contested, and a confident company skill wins."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, 0.95)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill"] == CUSTOM_SKILL
+
+
+def test_the_contest_reports_the_skill_to_on_route(monkeypatch):
+    """Closes the observability gap that hid this bug: an intercepted turn used
+    to report routed_skill=None because interceptions never reach the hook."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", _no_digest)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, 0.9)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+    seen: list = []
+
+    qa.answer(
+        enterprise_id="ent", question="summarize the customer calls from last week",
+        dataset="acme", on_route=lambda sid, action: seen.append(sid),
+    )
+
+    assert seen == [CUSTOM_SKILL]
+
+
+def test_a_weak_contest_pick_leaves_the_digest_alone(monkeypatch):
+    """The bar to override a deterministic path that works is HIGHER than the
+    ordinary routing threshold — a marginal call must not steal the turn."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out(CUSTOM_SKILL, qa._INTERCEPT_CONTEST_FLOOR - 0.01)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    assert qa._INTERCEPT_CONTEST_FLOOR > qa._LLM_ROUTE_THRESHOLD
+
+
+def test_a_none_verdict_leaves_the_digest_alone(monkeypatch):
+    """The control case: the company HAS uploads, but this question is ordinary
+    call analysis, so the built-in keeps it. 'none' is the common answer."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out("none", 0.0)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_company_with_no_uploads_never_pays_for_the_contest(monkeypatch):
+    """Cost gate, matching `_keyword_prior`'s: a tenant with no uploads must
+    reach the interception with no model call of any kind — same behaviour and
+    same latency as before this existed."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(custom_skills_db, "list_custom_skills", lambda cid: [])
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    calls: list = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+    assert calls == []
+
+
+def test_the_cheap_call_index_listing_is_never_contested(monkeypatch):
+    """Control case that must not regress: the interceptions delivering DATA a
+    skill cannot obtain keep their turn. A listing is a ~4s table read — a
+    vaguely-related upload must not be allowed to steal it and turn it into a
+    minutes-long generation."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "is_listing_request", lambda q: True)
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index"},
+    )
+    calls: list = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="which calls did we have last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index"
+    assert calls == [], "the listing path must not run a contest"
+
+
+def test_a_contest_failure_keeps_the_built_in(monkeypatch):
+    """Fails CLOSED, the opposite of `_custom_skill_block`'s fail-open: the
+    fallback here is the interception that would have run anyway, so a gateway
+    hiccup costs the caller their override and nothing else."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+
+    def _boom(**k):
+        if k.get("purpose") == "intercept_contest":
+            raise RuntimeError("gateway down")
+        return _answer_out()
+
+    monkeypatch.setattr(qa, "llm_call", _boom)
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_foreign_slug_from_the_contest_is_refused(monkeypatch):
+    """The tenant boundary holds here too — a hallucinated or another company's
+    slug must never displace the built-in."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _contest_out("someone-elses-skill", 0.99)
+        if k.get("purpose") == "intercept_contest" else _answer_out(),
+    )
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls from last week",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_the_contest_runs_at_most_once_per_answer(monkeypatch):
+    """Memoized: the three digest entry points are checked in sequence, and a
+    question matching more than one must not pay for two model calls."""
+    _seed_custom_skill(monkeypatch)
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(cd, "answer", lambda **k: {"_skill_source": "call-digest"})
+    contests: list = []
+
+    def _fake(**k):
+        if k.get("purpose") == "intercept_contest":
+            contests.append(k)
+            return _contest_out("none", 0.0)
+        return _answer_out()
+
+    monkeypatch.setattr(qa, "llm_call", _fake)
+
+    qa.answer(
+        enterprise_id="ent",
+        question="summarize the customer calls and give me a voice of customer report",
+        dataset="acme",
+    )
+
+    assert len(contests) == 1
 
 
 def test_answer_pinned_skill_bypasses_call_digest(monkeypatch):
@@ -447,7 +781,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -526,6 +860,29 @@ def test_single_shot_stays_corpus_less_when_kg_empty(monkeypatch):
     assert "LIVE CONTEXT" not in captured["input"]
     assert qa.ASK_SYSTEM_KG_ADDENDUM not in captured["system"]
     assert captured["input"] == "Question: score the billing epic"
+
+
+def test_skill_path_kg_grounding_honours_the_sentinel(isolated_settings):
+    """`_kg_grounding` calls `_retrieve_kg_bundle(enterprise_id, question)`
+    with no `question_embedding` at all — the second route into the same
+    hole `compose_ask_answer` has. `isolated_settings` never sets
+    `OPENAI_API_KEY`, so this exercises the REAL no-key `embed_texts`
+    fallback (unmocked): `_kg_grounding` gets the same "no theme kNN on a
+    zero vector" guarantee as the direct-path ask (AC1), with no change
+    required to `qa_agent.py` itself — the guarantee lives in
+    `retrieve_context`'s own defence-in-depth check."""
+    from unittest.mock import patch
+
+    from app.graph.facade import GraphFacade
+
+    calls: list = []
+    with patch.object(
+        GraphFacade, "find_candidates",
+        lambda self, ent, typ, vec, k=10: calls.append(vec) or [],
+    ):
+        qa._kg_grounding("ent-skill", "how is the pipeline?")
+
+    assert calls == [], f"find_candidates called for theme kNN with no key: {calls}"
 
 
 def test_kg_grounding_does_not_touch_wired_call_digest_path(monkeypatch):
@@ -789,7 +1146,7 @@ def test_on_route_reports_none_when_no_skill_is_routed(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -998,7 +1355,7 @@ def test_answer_prd_id_grounds_direct_answer(monkeypatch):
     )
     seen = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
         seen.update(question=q, prd_context=prd_context)
         return {"answer": "generic", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -1024,7 +1381,7 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "plain", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1074,7 +1431,7 @@ def test_answer_does_not_route_attached_document_to_tracker(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "grounded", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1128,7 +1485,7 @@ def test_named_document_question_reaches_route_in_scope(monkeypatch):
     # answer-generation call so an in-scope result returns fast.
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "grounded", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1165,7 +1522,7 @@ def test_route_input_carries_a_document_name_from_the_measured_case(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1192,7 +1549,7 @@ def test_routing_text_stops_at_marker_grounding_keeps_full_question(monkeypatch)
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     seen_grounding_arg = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
         seen_grounding_arg["question"] = q
         return {"answer": "ok", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -1246,7 +1603,7 @@ def test_route_input_carries_filenames_and_never_a_document_body(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1270,7 +1627,7 @@ def test_empty_document_index_leaves_routing_unchanged(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1318,7 +1675,7 @@ def test_no_interceptor_ever_sees_the_filename_augmented_string(monkeypatch):
     )
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "ok", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1348,7 +1705,7 @@ def test_tracker_lookup_requires_capability(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer about the launch", "key_points": [],
             "citations": [], "confidence": 0.5, "unanswered": "",
         },
@@ -1371,7 +1728,7 @@ def test_data_analysis_requires_tabular_data(monkeypatch, tmp_path):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1399,7 +1756,7 @@ def test_call_index_listing_already_gates_on_call_source(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "a real answer", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -1425,7 +1782,7 @@ def test_declined_precondition_falls_through_to_a_real_answer(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     monkeypatch.setattr(
         qa, "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
             "answer": "the launch board has 12 open items", "key_points": [],
             "citations": [], "confidence": 0.5, "unanswered": "",
         },
@@ -1461,3 +1818,341 @@ def test_tracker_lookup_still_fires_when_connected(monkeypatch):
     )
     assert out["_skill_source"] == "connector-lookup"
     assert out["_skill_action"] == "Tracker lookup"
+
+
+# ═══════ Direct-path retrieval sees the question, not the thread ═══════════
+#
+# `qa_agent.answer`'s direct path used to fold the whole rendered history onto
+# the question and hand THAT string to `compose_ask_answer` — one string that
+# then drove all four retrieval consumers (the shared embedding, KG theme
+# kNN, the document catalog's lexical channel, and Stage N filename
+# matching) plus the model's own view of "the question". A long thread turned
+# each of those into a thread-wide search instead of a question-scoped one,
+# and any filename the ASSISTANT happened to cite earlier in the thread
+# permanently outranked whatever the current turn was actually about. History
+# still reaches the model — it rides `compose_ask_answer`'s own `history`
+# argument now, exactly as the skill-routed path (`_answer_single_shot`,
+# already correct) has always done.
+
+
+def test_direct_path_embeds_the_message_not_the_thread(monkeypatch, fake_llm):
+    """AC1 — regression, RED today. The text embedded for retrieval on the
+    direct path must be the user's current message, byte-identical to
+    `question` — never the folded thread."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # → direct path
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    embedded_texts: list = []
+
+    def _embed(texts, **kw):
+        embedded_texts.append(list(texts))
+        return [[0.03] * 1536 for _ in texts]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _embed)
+
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=history,
+    )
+
+    assert embedded_texts == [["how do we price?"]]
+
+
+def test_prior_turn_filename_is_not_a_named_match(monkeypatch, fake_llm):
+    """AC3 — regression, RED today, the sharpest one. History contains an
+    ASSISTANT turn citing a filename; the current message names no document.
+    Stage N must return zero named matches for that file — it must not be
+    force-loaded ahead of topical rank."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        "app.ask_runner.list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Pricing_2025.docx", uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    history = [
+        {"role": "user", "content": "what's our latest pricing?"},
+        {"role": "assistant", "content": "Per Pricing_2025.docx, tiers are..."},
+    ]
+
+    out = qa.answer(
+        enterprise_id="ent", question="how many customers signed up last quarter?",
+        dataset="acme", history=history,
+    )
+
+    named = [d for d in out.get("documents", []) if d.get("match") == "named"]
+    assert named == [], f"Pricing_2025.docx force-loaded from a prior turn: {named}"
+
+
+def test_direct_path_lexical_query_is_the_message_not_the_thread(monkeypatch, fake_llm):
+    """AC2 — regression, RED today. `find_catalog_candidates`'s `query=`
+    argument (the lexical channel) must be the bare message, not the folded
+    thread."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    # Stage T only runs once the index is non-empty (`document_grounding`
+    # short-circuits to `("", [])` for a company with no uploads/attachments/
+    # connected docs at all) — seed one upload so the lexical channel is
+    # actually reached.
+    monkeypatch.setattr(
+        "app.ask_runner.list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="unrelated.docx", uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    seen_queries: list = []
+
+    def _find_catalog_candidates(enterprise_id, *, query, **kw):
+        seen_queries.append(query)
+        return []
+
+    monkeypatch.setattr(
+        "app.ask_runner.find_catalog_candidates", _find_catalog_candidates
+    )
+
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=history,
+    )
+
+    assert seen_queries == ["how do we price?"]
+
+
+def test_history_still_reaches_the_prompt(monkeypatch, fake_llm):
+    """AC5 — the rendered history is still present in the composed user
+    content. This fix changes only what RETRIEVAL sees, not what the model
+    sees."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=history,
+    )
+
+    rendered = qa._render_history(history)
+    assert rendered
+    assert rendered in fake_llm["calls"][0]["user"]
+
+
+def test_decision_log_question_is_the_bare_message(
+    monkeypatch, fake_llm, isolated_settings
+):
+    """AC6 — the `agent_decision_log` row for decision_type='answer' records
+    the bare message in factors['question'], not the folded thread."""
+    import json
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="co-decision-log", question="how do we price?", dataset="acme",
+        history=history,
+    )
+
+    rows = (
+        isolated_settings["supabase"].table("agent_decision_log").select("*")
+        .eq("decision_type", "answer").execute().data
+    )
+    assert len(rows) == 1
+    factors = rows[0]["factors"]
+    if isinstance(factors, str):
+        factors = json.loads(factors)
+    assert factors["question"] == "how do we price?"
+    assert len(factors["question"]) < 200  # not thread-scale
+
+
+def test_no_history_composition_is_byte_identical(monkeypatch, fake_llm):
+    """AC8 — `history=None` and `history=[]` both produce identical retrieval
+    inputs and an identical composed prompt."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=None,
+    )
+    qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=[],
+    )
+
+    assert fake_llm["calls"][0]["user"] == fake_llm["calls"][1]["user"]
+    assert (
+        fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+        == fake_llm["calls"][1]["kwargs"]["user_cacheable_prefix"]
+    )
+
+
+def test_empty_message_with_long_history_retrieves_on_the_empty_message(
+    monkeypatch, fake_llm
+):
+    """A whitespace-only message does not silently fall back to retrieving on
+    the thread — retrieval sees exactly the (whitespace) message, stated
+    explicitly rather than left emergent."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    embedded_texts: list = []
+
+    def _embed(texts, **kw):
+        embedded_texts.append(list(texts))
+        return [[0.03] * 1536 for _ in texts]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _embed)
+
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="ent", question="   ", dataset="acme", history=history,
+    )
+
+    assert embedded_texts == [["   "]]
+
+
+def test_history_render_failure_does_not_break_retrieval(monkeypatch, fake_llm):
+    """`render_history_block` raising must not fail the answer — it degrades
+    to no history block and retrieval still runs on the bare message."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+
+    def _boom(history, **kw):
+        raise RuntimeError("history render blew up")
+
+    monkeypatch.setattr("app.ask_runner.render_history_block", _boom)
+    embedded_texts: list = []
+
+    def _embed(texts, **kw):
+        embedded_texts.append(list(texts))
+        return [[0.03] * 1536 for _ in texts]
+
+    monkeypatch.setattr("app.graph.embeddings.embed_texts", _embed)
+
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+    ]
+    out = qa.answer(
+        enterprise_id="ent", question="how do we price?", dataset="acme",
+        history=history,
+    )
+
+    assert out["answer"] == "x"
+    assert embedded_texts == [["how do we price?"]]
+
+
+def test_no_turn_text_in_logs(monkeypatch, fake_llm, caplog):
+    """AC10 — no log record emitted across a direct-path answer with history
+    contains a turn body, a rendered-history fragment, a document title, or a
+    filename."""
+    from app.document_sources import DocumentFileRef
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        "app.ask_runner.list_company_files",
+        lambda cid: [
+            DocumentFileRef(
+                id="f1", source_id="s1", source_name="uploads",
+                filename="Pricing_2025.docx", uploaded_at="2026-08-01",
+            )
+        ],
+    )
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    history = [
+        {"role": "user", "content": "SECRET_TURN_MARKER what's our pricing?"},
+        {"role": "assistant", "content": "Per Pricing_2025.docx, tiers are ANSWER_BODY_TEXT."},
+    ]
+
+    with caplog.at_level("DEBUG"):
+        qa.answer(
+            enterprise_id="ent", question="anything else?", dataset="acme",
+            history=history,
+        )
+
+    for record in caplog.records:
+        msg = record.getMessage()
+        assert "SECRET_TURN_MARKER" not in msg
+        assert "ANSWER_BODY_TEXT" not in msg
+        assert "Pricing_2025.docx" not in msg
+
+
+def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
+    """AC7 — the skill-routed path is byte-unchanged: `_kg_grounding` and
+    `document_grounding` still receive the bare question, never the folded
+    thread. It was already correct; this fix must not touch it."""
+    _seed_custom_skill(monkeypatch)
+    seen: dict = {}
+
+    def _fake_kg(eid, q):
+        seen["kg_question"] = q
+        return "", False
+
+    def _fake_docs(eid, q):
+        seen["docs_question"] = q
+        return "", []
+
+    monkeypatch.setattr(qa, "_kg_grounding", _fake_kg)
+    monkeypatch.setattr(qa, "document_grounding", _fake_docs)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    history = [
+        {"role": "user", "content": "what did users say about onboarding?"},
+        {"role": "assistant", "content": "Mostly about the email step."},
+    ]
+    qa.answer(
+        enterprise_id="ent", question="turn that into a plan", dataset="acme",
+        pinned_skill=CUSTOM_SKILL, history=history,
+    )
+
+    assert seen["kg_question"] == "turn that into a plan"
+    assert seen["docs_question"] == "turn that into a plan"

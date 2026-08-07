@@ -84,7 +84,15 @@ vi.mock("next/navigation", () => ({
 }))
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
-  useWorkspace: () => ({ loading: false, profile: null, workspace: null, refresh: async () => {} }),
+  // Envelope dispatch is DEFAULT ON, so a null/flagless workspace no longer
+  // means "flag off" — this suite locks the LEGACY regex ladder, so it asks for
+  // the kill switch by name.
+  useWorkspace: () => ({
+    loading: false,
+    profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
 }))
 vi.mock("../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn() }),

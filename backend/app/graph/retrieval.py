@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from app.graph.embeddings import EMBEDDING_DIM
 from app.graph.facade import GraphFacade
 from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
 
@@ -47,6 +48,14 @@ _SIGNALS_PER_THEME = 6
 # Recent non-stale signals to fold in regardless of theme match (covers
 # fresh connector data not yet wired to a resolved theme).
 _RECENT_SIGNALS = 8
+
+#: Cosine similarity below which a theme match is indistinguishable from
+#: noise. `kg_find_candidates` is a pure kNN (ORDER BY <=> ... LIMIT k) — it
+#: returns the NEAREST themes, never the RELEVANT ones, so on a KG with >= k
+#: themes every question matched all k. text-embedding-3-small places
+#: unrelated English text pairs near 0.0-0.1; a genuine topical match sits
+#: well above 0.15. This is a noise gate, not a tuned relevance knob.
+_MIN_THEME_SCORE = 0.15
 
 
 def _recency_factor(signal: Signal, now: datetime) -> float:
@@ -189,14 +198,29 @@ def retrieve_context(
     *,
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    question_embedding: Optional[list[float]] = None,
+    skip_semantic: bool = False,
+    min_theme_score: float = _MIN_THEME_SCORE,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
+
+    `question_embedding=None` (the default) means "compute one for me" —
+    self-embeds unless `skip_semantic=True`, which means "there is no usable
+    embedding, do not try": the theme kNN step is skipped entirely rather than
+    running on a zero vector. A zero or wrong-dimension vector reaching
+    `qvec` by any route is also dropped before it can reach `find_candidates`
+    (see the defence-in-depth check below) — `skip_semantic` avoids the
+    redundant embedding call; the dimension/zero check is the belt-and-braces
+    behind it.
 
     Steps:
       1. Embed the question (best-effort; if embeddings are unavailable we
          skip the kNN theme match and fall back to recent signals only).
-      2. `find_candidates(type="theme")` → the question-relevant themes.
-      3. For each candidate theme, gather its inbound signal edges
+      2. `find_candidates(type="theme")` → the k nearest themes, then drop
+         anything scoring below `min_theme_score` (default `_MIN_THEME_SCORE`)
+         — the kNN primitive returns nearest, not relevant, so this is the
+         gate that keeps noise themes out of the bundle entirely.
+      3. For each surviving candidate theme, gather its inbound signal edges
          (`edges_to`, source_kind == "signal"), boosted by the theme's
          similarity score.
       4. Fold in recent non-stale `active_signals` (fresh connector data not
@@ -233,15 +257,44 @@ def retrieve_context(
 
     # 1) Embed the question. Embeddings can be unconfigured (no OPENAI key) or
     #    the call can fail; either way we still return recent signals.
-    qvec: Optional[list[float]] = None
+    #
+    #    `question_embedding`, when the caller supplies it, is used as-is and
+    #    no embedding call is made here. The ask path computes the question's
+    #    vector once and shares it with document selection, which runs before
+    #    this does — without that sharing the same question would be embedded
+    #    twice per ask. A caller that passes nothing AND does not set
+    #    `skip_semantic` keeps the original self-contained behaviour, which is
+    #    what every other caller relies on.
+    #
+    #    `skip_semantic=True` is the caller stating "there is no embedding, do
+    #    not compute one" — distinct from the `question_embedding=None`
+    #    default, which means "compute one for me". Without this distinction a
+    #    caller that already determined its embedding is unusable (no key, or
+    #    an all-zero vector came back) had no way to say so: `None` collapsed
+    #    back to "self-embed", which re-issued the same doomed call and got the
+    #    same zero vector back. Set by the Ask path whenever its shared
+    #    embedding is degraded; every other caller leaves it at the default and
+    #    is unaffected.
+    qvec: Optional[list[float]] = question_embedding
     try:
-        from app.graph.embeddings import embed_texts
+        if qvec is None and not skip_semantic:
+            from app.graph.embeddings import embed_texts
 
-        vecs = embed_texts([question], enterprise_id=enterprise_id,
-                           purpose="kg_retrieval")
-        qvec = vecs[0] if vecs else None
+            vecs = embed_texts([question], enterprise_id=enterprise_id,
+                               purpose="kg_retrieval")
+            qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
+
+    # 1b) Defence-in-depth: a zero-vector or wrong-dimension "embedding" is not
+    #     a real one — the no-key fallback in `embed_texts` returns an
+    #     all-zero vector, which in cosine kNN ranks arbitrarily and is worse
+    #     than nothing. Mirrors `document_catalog.find_candidates`'s exact
+    #     check so the invariant holds even for a caller (this module's own
+    #     self-embed above, or an external caller) that hands a zero vector to
+    #     `qvec` directly rather than going through `skip_semantic`.
+    if qvec is not None and (len(qvec) != EMBEDDING_DIM or not any(qvec)):
+        qvec = None
 
     # 2) kNN theme match (returns [] on the fake/no-pgvector backend).
     matched_themes: list[tuple[Any, float]] = []
@@ -251,6 +304,38 @@ def retrieve_context(
         except Exception as exc:  # noqa: BLE001
             logger.info("Ask KG retrieval: find_candidates failed (%s)", exc)
             matched_themes = []
+
+    # 2b) Noise floor. `find_candidates` is a pure kNN — nearest, not
+    #     relevant — so on a KG with >= k themes every question returns all
+    #     k candidates regardless of topical fit. Drop anything below
+    #     `min_theme_score` here, before a theme's label is rendered as
+    #     first-class evidence and before its signals are pulled into the
+    #     budget below; everything downstream (the signal walk, kg_refs,
+    #     themes_out) reads the filtered list, so admission is fixed, not
+    #     just rendering.
+    returned_count = len(matched_themes)
+    top_score = 0.0
+    for _, score in matched_themes:
+        try:
+            top_score = max(top_score, float(score))
+        except (TypeError, ValueError):
+            continue
+
+    def _clears_floor(score: Any) -> bool:
+        try:
+            return float(score) >= min_theme_score
+        except (TypeError, ValueError):
+            return False
+
+    matched_themes = [(theme, score) for theme, score in matched_themes if _clears_floor(score)]
+
+    if len(matched_themes) < returned_count:
+        logger.info(
+            "Ask KG retrieval: theme candidates below noise floor dropped "
+            "enterprise_id=%s returned=%d kept=%d floor=%s top_score=%s",
+            enterprise_id, returned_count, len(matched_themes), min_theme_score,
+            round(top_score, 4),
+        )
 
     # 3) Per-theme inbound signals, boosted by theme similarity.
     #    by_id dedupes; we keep the highest rank seen for any signal.

@@ -45,6 +45,7 @@ from app.routes import (
     admin,
     agent_chat,
     artifact_share,
+    artifact_templates as artifact_templates_routes,
     artifacts,
     ask,
     brief,
@@ -76,6 +77,7 @@ from app.routes import (
     stories,
     synthesis,
     team,
+    ticket_sets,
     tickets,
     transcripts,
     usage as usage_routes,
@@ -393,6 +395,10 @@ app.include_router(chat.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)
+# Standalone ticket sets (chat-born tickets with no PRD). Registered before
+# tickets.router only for readability — the prefixes (/v1/ticket-sets vs
+# /v1/tickets) are disjoint, so order carries no routing consequence here.
+app.include_router(ticket_sets.router)
 app.include_router(jira_write.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
@@ -421,6 +427,10 @@ app.include_router(onboarding.router)
 app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(custom_skills_routes.router)
+# Beside custom skills, its structural twin: a skill is the METHOD a document is
+# reasoned with, an artifact template is the FORM it is written in. Both are
+# company-scoped libraries of untrusted customer-uploaded text.
+app.include_router(artifact_templates_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(workspaces_routes.router)

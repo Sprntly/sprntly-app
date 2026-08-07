@@ -523,7 +523,9 @@ def test_supported_hint_runs_the_loop_with_that_provider(monkeypatch):
     assert [p.provider for p in seen["providers"]] == ["slack"]
 
 
-def test_at_most_two_providers_per_lookup_prefers_connected_ones(monkeypatch):
+def test_three_named_providers_all_get_tools(monkeypatch):
+    """The cap was 2, which truncated a three-source question into an apology.
+    Three named sources now all reach the loop."""
     from app import db
 
     monkeypatch.setattr(db, "list_connections", lambda cid: [{"provider": "clickup"}])
@@ -535,8 +537,176 @@ def test_at_most_two_providers_per_lookup_prefers_connected_ones(monkeypatch):
         history=None, hints={"slack", "jira", "clickup"},
     )
     chosen = {p.provider for p in seen["providers"]}
-    assert len(chosen) == registry.MAX_PROVIDERS_PER_LOOKUP
-    assert chosen == {"clickup", "slack"}  # jira has no connection row
+    assert chosen == {"clickup", "slack", "jira"}
+    assert len(chosen) == registry.MAX_TOOL_PROVIDERS
+    # Everything fit, so nothing was primed and nothing is written off.
+    assert seen["primed_context"] == ""
+    assert seen["budget_penalty_s"] == 0.0
+    assert seen["unavailable_names"] == []
+
+
+def test_tool_cap_still_prefers_connected_providers_when_it_binds(monkeypatch):
+    """With more named sources than tool slots, the ones we can actually read
+    keep priority — a cap must never spend a slot on a disconnected source."""
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "clickup"}, {"provider": "confluence"}, {"provider": "hubspot"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    monkeypatch.setattr(registry, "MAX_TOOL_PROVIDERS", 2)
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+    monkeypatch.setattr(
+        "app.connector_lookup.sweep.sweep",
+        lambda eid, q, **k: _StubSweep([]),
+    )
+    registry.answer_for_hints(
+        enterprise_id="co-a", question="check jira, clickup and confluence",
+        history=None, hints={"jira", "clickup", "confluence"},
+    )
+    chosen = {p.provider for p in seen["providers"]}
+    assert chosen == {"clickup", "confluence"}  # jira has no connection row
+
+
+class _StubSweep:
+    """Stands in for a SweepResult without touching a connector.
+
+    Takes PROVIDER KEYS, matching `covered_providers()` — the real contract.
+    Display names would not do: the sweep qualifies some of them ("HubSpot
+    (deals)") and a local leg reports under what it reads ("calls") rather than
+    the provider feeding it.
+    """
+
+    def __init__(self, covered, block="LIVE CROSS-SOURCE SWEEP — ...\n### HubSpot\nrows"):
+        self._covered = set(covered)
+        self._block = block if covered else ""
+
+    def covered_providers(self):
+        return set(self._covered)
+
+    def render(self):
+        return self._block
+
+
+def test_overflow_sources_are_swept_and_primed_into_the_loop(monkeypatch):
+    """BREADTH: a source past the tool cap is no longer apologised for — it is
+    searched in parallel and its results are handed to the model."""
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "jira"}, {"provider": "clickup"},
+        {"provider": "confluence"}, {"provider": "hubspot"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    swept = {}
+
+    def _fake_sweep(eid, q, **kwargs):
+        swept.update(enterprise_id=eid, question=q, **kwargs)
+        return _StubSweep({"hubspot"})
+
+    monkeypatch.setattr("app.connector_lookup.sweep.sweep", _fake_sweep)
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+
+    registry.answer_for_hints(
+        enterprise_id="co-a",
+        question="what do jira, clickup, confluence and hubspot say about billing",
+        history=None, hints={"jira", "clickup", "confluence", "hubspot"},
+    )
+
+    # The three that fit get tools; the fourth got the parallel probe instead.
+    assert len(seen["providers"]) == registry.MAX_TOOL_PROVIDERS
+    assert swept["only"] == {"hubspot"}
+    assert swept["min_terms"] == 1
+    assert swept["budget_s"] == registry.SWEEP_PRIME_BUDGET_S
+    assert "LIVE CROSS-SOURCE SWEEP" in seen["primed_context"]
+    # And crucially it is NOT reported as a source we failed to check.
+    assert seen["unavailable_names"] == []
+    # The loop's wall clock shrinks by what priming spent, rather than stacking.
+    assert seen["budget_penalty_s"] == registry.SWEEP_PRIME_BUDGET_S
+
+
+def test_overflow_source_the_sweep_could_not_read_stays_in_the_honest_list(
+    monkeypatch
+):
+    """Breadth must not become a lie: a source the sweep failed to read is still
+    declared uncovered."""
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "jira"}, {"provider": "clickup"},
+        {"provider": "confluence"}, {"provider": "hubspot"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    monkeypatch.setattr(
+        "app.connector_lookup.sweep.sweep", lambda eid, q, **k: _StubSweep([])
+    )
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+
+    registry.answer_for_hints(
+        enterprise_id="co-a",
+        question="what do jira, clickup, confluence and hubspot say about billing",
+        history=None, hints={"jira", "clickup", "confluence", "hubspot"},
+    )
+
+    assert seen["primed_context"] == ""
+    assert "HubSpot" in seen["unavailable_names"]
+
+
+def test_priming_failure_never_breaks_the_lookup(monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "jira"}, {"provider": "clickup"},
+        {"provider": "confluence"}, {"provider": "hubspot"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+
+    def _boom(eid, q, **k):
+        raise RuntimeError("sweep exploded")
+
+    monkeypatch.setattr("app.connector_lookup.sweep.sweep", _boom)
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+
+    out = registry.answer_for_hints(
+        enterprise_id="co-a",
+        question="what do jira, clickup, confluence and hubspot say about billing",
+        history=None, hints={"jira", "clickup", "confluence", "hubspot"},
+    )
+
+    assert out == {"answer": "x"}
+    assert seen["primed_context"] == ""
+    assert "HubSpot" in seen["unavailable_names"]
+
+
+def test_one_and_two_provider_lookups_never_prime(monkeypatch):
+    """The common case must compose byte-identically to before this change —
+    including the Jira shim, whose verbatim prompt knows nothing of priming."""
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "jira"}, {"provider": "clickup"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    called = []
+    monkeypatch.setattr(
+        "app.connector_lookup.sweep.sweep",
+        lambda eid, q, **k: called.append(eid) or _StubSweep([]),
+    )
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+
+    registry.answer_for_hints(
+        enterprise_id="co-a", question="check jira and clickup",
+        history=None, hints={"jira", "clickup"},
+    )
+
+    assert called == []
+    assert seen["primed_context"] == ""
+    assert seen["budget_penalty_s"] == 0.0
 
 
 def test_connected_display_names_include_per_user_slack(monkeypatch):
@@ -568,7 +738,12 @@ def test_registry_tells_the_loop_which_half_it_is_not_reading(monkeypatch):
     assert seen["unavailable_names"] == ["Zendesk"]
 
 
-def test_registry_reports_providers_dropped_by_the_two_cap(monkeypatch):
+def test_three_connected_sources_are_all_covered_and_none_apologised_for(
+    monkeypatch
+):
+    """Was `test_registry_reports_providers_dropped_by_the_two_cap`, which
+    asserted that one of three named sources got dropped and named as unread.
+    That WAS the bug — three named, three covered, nothing to apologise for."""
     from app import db
 
     monkeypatch.setattr(db, "list_connections",
@@ -579,6 +754,32 @@ def test_registry_reports_providers_dropped_by_the_two_cap(monkeypatch):
     registry.answer_for_hints(enterprise_id="co-a",
                               question="check slack, jira and clickup",
                               history=None, hints={"slack", "jira", "clickup"})
-    # Whichever one the cap dropped is named as unread, not silently omitted.
-    assert len(seen["unavailable_names"]) == 1
-    assert seen["unavailable_names"][0] in {"Slack", "Jira", "ClickUp"}
+    assert {p.provider for p in seen["providers"]} == {"slack", "jira", "clickup"}
+    assert seen["unavailable_names"] == []
+
+
+def test_a_source_the_sweep_cannot_reach_wins_a_tool_slot(monkeypatch):
+    """Selection is not alphabetical. Google Drive has no sweep leg, so losing a
+    slot would make it unreachable; a sweepable source is still covered."""
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections", lambda cid: [
+        {"provider": "jira"}, {"provider": "clickup"},
+        {"provider": "confluence"}, {"provider": "google_drive"},
+    ])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    monkeypatch.setattr(
+        "app.connector_lookup.sweep.sweep",
+        lambda eid, q, **k: _StubSweep({"jira"}),
+    )
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+
+    registry.answer_for_hints(
+        enterprise_id="co-a",
+        question="check jira, clickup, confluence and google drive for billing",
+        history=None,
+        hints={"jira", "clickup", "confluence", "google_drive"},
+    )
+
+    assert "google_drive" in {p.provider for p in seen["providers"]}

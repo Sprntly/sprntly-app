@@ -456,3 +456,94 @@ def test_apply_chat_edit_raises_on_empty_html(isolated_settings, monkeypatch):
     import pytest as _pytest
     with _pytest.raises(RuntimeError):
         prd_questions.apply_chat_edit("<html>v1</html>", "shorten", enterprise_id="e")
+
+
+# ── a COMPILED customer format still feeds extraction ────────────────────────
+#
+# Input questions are the feature that dies most quietly under a custom PRD
+# format. `extract_input_questions` reads the "User input needed" items out of
+# the PRD's HTML, and both its prompt and the scoped answer-editor above name
+# `<ul class="inputs">` inside `.appendix` explicitly. A compiled skeleton that
+# dropped that hook would produce PRDs whose chat offers no answer buttons at
+# all — no error, no log line, nothing to attribute it to weeks later.
+#
+# So the artifact-template validator refuses to mark a skeleton `ready` without
+# it. These two tests are the other half of that contract: they prove the hook
+# the validator insists on is the one extraction actually finds, so the two can
+# never drift apart into "both individually correct, jointly useless".
+
+_COMPILED_SKELETON = (
+    "<!DOCTYPE html><html><head><style></style></head><body>"
+    '<div class="frame"><div class="page" contenteditable="true">'
+    "<h1>{{title}}</h1><div class=\"byline\">{{author}}</div>"
+    '<div class="eyebrow">Background</div><p>{{context}}</p>'
+    '<div class="eyebrow">Evidence</div><ul class="ev"><li>{{claim}}</li></ul>'
+    "<table><tbody><tr><td>R1</td>"
+    '<td><span class="pill h">Happy path</span></td></tr></tbody></table>'
+    '<div class="appendix"><h3>User input needed</h3>'
+    '<ul class="inputs">'
+    '<li><span class="tag esc">[ESCALATE]</span> Reminders on by default? '
+    '<span class="owner">— owner: PM</span></li>'
+    '<li><span class="tag need">[NEED]</span> Manual follow-up rate today? '
+    '<span class="owner">— owner: Data</span></li>'
+    "</ul></div></div></div></body></html>"
+)
+
+
+def test_a_compiled_skeleton_keeps_the_hook_extraction_reads(isolated_settings):
+    """The validator's `missing_input_questions` gate and extraction's own
+    prompt must be talking about the same element."""
+    from app.artifact_templates.validate import validate_prd_skeleton
+
+    section_map = {
+        "sections": [
+            {"id": "s1", "house": "Requirements", "customer": "Scope",
+             "order": 1, "form": "table"},
+        ],
+        "unmapped_house": [], "extra_sections": [],
+    }
+    # A skeleton the validator will let a company activate...
+    assert validate_prd_skeleton(_COMPILED_SKELETON, section_map).status == "ready"
+    # ...carries the marker the lazy on-open backfill gates on
+    # (routes/prd.py::_INPUT_SECTION_MARKER) and the list extraction reads.
+    from app.routes.prd import _INPUT_SECTION_MARKER
+
+    assert _INPUT_SECTION_MARKER in _COMPILED_SKELETON
+    assert '<ul class="inputs">' in _COMPILED_SKELETON
+
+    # And the same skeleton WITHOUT it is refused, so the two can't drift.
+    stripped = _COMPILED_SKELETON.replace('class="inputs"', 'class="notes"')
+    verdict = validate_prd_skeleton(stripped, section_map)
+    assert verdict.status == "needs_review"
+    assert "missing_input_questions" in [n["code"] for n in verdict.notes]
+
+
+def test_extraction_still_finds_items_in_a_compiled_skeleton(
+    isolated_settings, monkeypatch
+):
+    """End of the chain: a PRD written into a compiled customer format still
+    reaches `extract_input_questions` with its items intact, and they persist."""
+    _, prd_id = _seed_prd(isolated_settings["db"], html=_COMPILED_SKELETON)
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"questions": [
+            {"tag": "escalate", "prompt": "Reminders on by default?",
+             "owner": "PM", "options": [{"label": "On"}, {"label": "Off"}]},
+            {"tag": "need", "prompt": "Manual follow-up rate today?",
+             "owner": "Data", "options": []},
+        ]})
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    rows = prd_questions.extract_input_questions(prd_id)
+
+    assert len(rows) == 2
+    # The document the extractor was handed is the compiled skeleton, with the
+    # items still inside their `ul.inputs`.
+    assert '<ul class="inputs">' in seen["input"]
+    assert "Reminders on by default?" in seen["input"]
+
+    import app.db.prd_input_questions as q
+
+    assert [r["tag"] for r in q.list_questions(prd_id)] == ["escalate", "need"]

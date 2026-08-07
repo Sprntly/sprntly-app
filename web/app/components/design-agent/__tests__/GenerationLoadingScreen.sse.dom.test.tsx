@@ -9,9 +9,20 @@
 // dedicated `.cancel.dom.test.tsx` sibling for the same component's other
 // DOM-only behaviour.
 //
-// FAIL-WITHOUT-FIX direction: against the pre-fix code, the SSE effect's deps
-// array is `[open, prototypeId, mode]` and `onerror` unconditionally calls
-// `close()` — both regression assertions below fail on unfixed code.
+// FAIL-WITHOUT-FIX direction: against the pre-fix code, `onerror` unconditionally
+// calls `close()` — the AC4 regression assertion below fails on that unfixed
+// code.
+//
+// The stream-cleanup block below (previously named for a DIFFERENT ticket's
+// "AC1", asserting the OPPOSITE of what it now asserts) was rewritten: the
+// SSE effect's deps were `[prototypeId, mode]`, `open` absent — a hidden
+// overlay left its stream connected indefinitely (measured live: one connect,
+// no disconnect for 5m41s). `open` now joins the deps AND gates the effect
+// body directly, so the stream's liveness cannot diverge from the overlay's
+// visibility. Against the pre-fix code (deps `[prototypeId, mode]`, no `open`
+// check), the two tests in that block below fail: the first because `close()`
+// is never called on `open` going false; the second because reopening reuses
+// the still-open connection instead of establishing a fresh one.
 import * as React from "react"
 import { act, cleanup, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -74,8 +85,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("GenerationLoadingScreen — SSE effect survives open toggling (AC1)", () => {
-  it("test_sse_effect_survives_open_toggle_false_to_true: does NOT close EventSource on an open=true→false→true toggle for the same prototypeId; no second connection opens", async () => {
+describe("GenerationLoadingScreen — stream liveness tracks overlay visibility", () => {
+  it("test_sse_effect_closes_stream_when_overlay_hides: hiding the overlay (open goes false) closes the EventSource — no connect-without-disconnect", async () => {
     const { rerender } = render(
       React.createElement(GenerationLoadingScreen, {
         open: true,
@@ -88,6 +99,7 @@ describe("GenerationLoadingScreen — SSE effect survives open toggling (AC1)", 
     })
     expect(MockEventSource.instances.length).toBe(1)
     const es = MockEventSource.latest()
+    expect(es.close).not.toHaveBeenCalled()
 
     rerender(
       React.createElement(GenerationLoadingScreen, {
@@ -99,7 +111,39 @@ describe("GenerationLoadingScreen — SSE effect survives open toggling (AC1)", 
     await act(async () => {
       await flushMicrotasks()
     })
-    expect(es.close).not.toHaveBeenCalled()
+
+    expect(es.close).toHaveBeenCalled()
+  })
+
+  it("test_sse_effect_reattaches_fresh_connection_on_reopen: reopening for the same prototypeId opens a NEW connection and renders live progress reported on it, not a frozen snapshot of the closed run", async () => {
+    const { rerender, container } = render(
+      React.createElement(GenerationLoadingScreen, {
+        open: true,
+        prototypeId: 100,
+        mode: "generate",
+      }),
+    )
+    await act(async () => {
+      await flushMicrotasks()
+    })
+    const first = MockEventSource.latest()
+    await act(async () => {
+      first.emit({ kind: "step", text: "Reading the PRD" })
+    })
+    expect(container.textContent).toContain("Reading the PRD")
+
+    // Hide, then reopen for the SAME prototypeId.
+    rerender(
+      React.createElement(GenerationLoadingScreen, {
+        open: false,
+        prototypeId: 100,
+        mode: "generate",
+      }),
+    )
+    await act(async () => {
+      await flushMicrotasks()
+    })
+    expect(first.close).toHaveBeenCalled()
 
     rerender(
       React.createElement(GenerationLoadingScreen, {
@@ -111,9 +155,19 @@ describe("GenerationLoadingScreen — SSE effect survives open toggling (AC1)", 
     await act(async () => {
       await flushMicrotasks()
     })
-    expect(es.close).not.toHaveBeenCalled()
-    // Still exactly one connection — no second EventSource for the same id.
-    expect(MockEventSource.instances.length).toBe(1)
+
+    // A genuinely fresh connection — not the same (already-closed) instance —
+    // and exactly one more than before, not a third/fourth leaked connection.
+    expect(MockEventSource.instances.length).toBe(2)
+    const second = MockEventSource.latest()
+    expect(second).not.toBe(first)
+
+    // A step reported on the fresh connection reaches the live UI, proving
+    // the re-attach is genuinely live.
+    await act(async () => {
+      second.emit({ kind: "step", text: "Planning the layout" })
+    })
+    expect(container.textContent).toContain("Planning the layout")
   })
 })
 

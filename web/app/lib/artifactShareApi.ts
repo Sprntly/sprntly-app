@@ -11,17 +11,34 @@ export type ArtifactShareMetadata = {
   required_email_domain: string | null
 }
 
+/** The two same-company outcomes carry an identical payload; only the
+ *  routing differs, so they share one shape.
+ *
+ *  `member`  — the caller can already act in the artifact's owning
+ *              workspace. They belong in the REAL app, where the PRD and
+ *              its tickets are editable. Arriving via a share link must not
+ *              downgrade a colleague to read-only.
+ *  `guest_view` — same company, but no access to that workspace yet (a
+ *              fresh domain-matched signup, or a member of a different
+ *              workspace). Read-only shell + the Join prompt, which grants
+ *              the workspace and then re-resolves to `member`. */
+type ArtifactShareSameCompany = {
+  artifact_type: "prd"
+  artifact_id: number
+  /** The PRD's opaque, unguessable external identifier — what a
+   *  redirect/copyable link should use instead of artifact_id. */
+  public_id: string | null
+  /** The workspace the artifact lives in. Null for an unbound legacy
+   *  dataset. A `member` redirect makes this the caller's active workspace
+   *  so the app opens the PRD instead of 404ing on the wrong one. */
+  owner_workspace_id: string | null
+  owning_company_name: string
+  sharer_name: string
+}
+
 export type ArtifactShareResolveOutcome =
-  | {
-      outcome: "guest_view"
-      artifact_type: "prd"
-      artifact_id: number
-      /** The PRD's opaque, unguessable external identifier — what a
-       *  redirect/copyable link should use instead of artifact_id. */
-      public_id: string | null
-      owning_company_name: string
-      sharer_name: string
-    }
+  | ({ outcome: "member" } & ArtifactShareSameCompany)
+  | ({ outcome: "guest_view" } & ArtifactShareSameCompany)
   // "domain_mismatch" is retired as a /resolve reason (revision 2026-08-02):
   // it now only ever originates from the sign-up form's client-side gate
   // (validateShareDomainEmail), which never calls /resolve at all — a

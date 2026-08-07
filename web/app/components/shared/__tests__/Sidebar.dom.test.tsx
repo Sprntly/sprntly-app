@@ -152,7 +152,7 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(openPalette).not.toHaveBeenCalled()
   })
 
-  it("renders New chat, Workbench, Top Insights, All chats, Guide, Settings + Feedback", () => {
+  it("renders New chat, Workbench, Top Insights, All chats, Templates, Guide, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
@@ -160,12 +160,29 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
       "Top Insights",
       "Chat history",
       "Ideation",
+      "Templates",
       "Guide",
       "Settings",
       "Feedback",
     ]) {
       expect(screen.getByLabelText(label)).toBeTruthy()
     }
+  })
+
+  // Templates came back on the rail with artifact formats (2026-08): the screen
+  // now decides what every PRD, ticket and engineering spec Sprntly writes
+  // LOOKS like, not only which finished examples it reads for voice. That is a
+  // setting a PM sets up once and returns to, so it needs a door of its own —
+  // while the screen was exemplars-only the item stayed commented out.
+  it("renders the Templates rail item and navigates to the /templates screen", () => {
+    render(React.createElement(Sidebar))
+    const item = screen.getByLabelText("Templates")
+    expect(item).toBeTruthy()
+    fireEvent.click(item)
+    // goTo("templates") is what routes.ts maps to "/templates"; the label
+    // deliberately still matches ScreenId, MAIN_CHROME_TITLE and the palette.
+    expect(goTo).toHaveBeenCalledWith("templates")
+    expect(goToNewChat).not.toHaveBeenCalled()
   })
 
   it("Guide is an anchor to the public /docs site (not a goTo screen), opening safely in a new tab", () => {

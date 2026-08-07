@@ -272,6 +272,60 @@ def get_workspace_member(workspace_id: str, user_id: str) -> dict | None:
     return row
 
 
+def user_can_act_in_workspace(
+    *, workspace_id: str | None, user_id: str, company_id: str, company_role: str
+) -> bool:
+    """True when `user_id` could reach `workspace_id` through the ORDINARY
+    app (i.e. `auth._resolve_workspace` would hand them a WorkspaceContext
+    for it), rather than needing the read-only guest surface.
+
+    A deliberate mirror of `auth._resolve_workspace`'s access rule, not a
+    second policy: org owner/admin implicitly administer every workspace of
+    their company; everyone else needs a `workspace_members` row. Kept here
+    (db layer) instead of in `auth` because the callers — the share /
+    bare-link resolvers — must ask the question WITHOUT a FastAPI request
+    to build a context from.
+
+    `workspace_id=None` is an unbound legacy dataset (pre-multi-workspace
+    rollout). `deps.ownership._dataset_in_workspace` DOES accept those from
+    any workspace of the owning company — but only once the request already
+    holds a WorkspaceContext, and `_resolve_workspace` is what decides that.
+    A plain member with no `workspace_members` row anywhere never gets one:
+    the no-header path falls back to `ensure_default_workspace` and then
+    403s "Not a member of this workspace". So an unbound dataset is NOT
+    unconditionally reachable, and answering True for everyone sent exactly
+    the caller `ArtifactShareGate` exists to protect — a domain-matched
+    fresh signup holding company membership and no workspace row — into an
+    app that 403s, with no Join prompt, when they used to get a working
+    read-only viewer. The question here is therefore "can this caller
+    obtain a WorkspaceContext at all?", which is what
+    `list_workspaces_for_user` answers.
+
+    That null branch is not hypothetical: measured 2026-08-05, 68 of 93
+    `datasets` rows are unbound and 448 PRDs hang off them, including two
+    live tenants (210 and 70 PRDs). It had zero currently-affected users
+    only because the break additionally requires a caller who is
+    `role='member'` AND holds no `workspace_members` row — every member of
+    those tenants happened to be owner/admin or already granted. One
+    domain-matched fresh signup on either tenant arms it.
+
+    Every other unresolvable case fails CLOSED (missing workspace, or one
+    belonging to a different company): returning False only ever costs the
+    caller the guest viewer they already get, whereas a wrong True routes
+    them into an app view that 404s or 403s.
+    """
+    if workspace_id is None:
+        if company_role in ("owner", "admin"):
+            return True
+        return bool(list_workspaces_for_user(company_id, user_id, company_role))
+    ws = get_workspace(workspace_id)
+    if not ws or ws.get("company_id") != company_id:
+        return False
+    if company_role in ("owner", "admin"):
+        return True
+    return get_workspace_member(workspace_id, user_id) is not None
+
+
 @retry_on_disconnect
 def list_workspace_members(workspace_id: str) -> list[dict]:
     """workspace_members rows enriched with profile display data (mirrors

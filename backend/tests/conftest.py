@@ -180,7 +180,14 @@ CREATE TABLE prds (
     -- defaults this via gen_random_uuid(), which sqlite has no equivalent
     -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
     -- stamp a real uuid4 explicitly via an UPDATE after seeding.
-    public_id        TEXT
+    public_id        TEXT,
+    -- Which uploaded FORMAT produced this PRD (mirrors
+    -- 20260806160000_prds_artifact_template.sql). NULL = Sprntly's built-in
+    -- format, which is every pre-existing row and every PRD from a company that
+    -- never uploads one. Deliberately NOT a foreign key in either engine: a
+    -- format is deletable, and an FK would either erase this PRD's provenance
+    -- when the library is tidied or make the format undeletable.
+    artifact_template_id TEXT
 );
 
 CREATE TABLE evidences (
@@ -419,6 +426,13 @@ CREATE TABLE companies (
     -- Fernet-encrypted per-company Claude key (mirrors
     -- 20260711120000_company_llm_api_key.sql). Read by app.llm_keys.
     llm_api_key_encrypted TEXT,
+    -- The OpenAI counterpart, plus which of the two the company actually runs
+    -- on (mirrors 20260807120000_company_openai_key_and_provider.sql). Both
+    -- keys may be set at once; llm_provider decides which is live. Defaults to
+    -- 'anthropic' so an untouched row behaves exactly as it did before OpenAI
+    -- was an option.
+    openai_api_key_encrypted TEXT,
+    llm_provider        TEXT NOT NULL DEFAULT 'anthropic',
     -- Platform-key fallback flag + onboarding-completion marker. Read by
     -- app.llm_keys to decide whether a keyless company may use the platform key
     -- (mirrors 20260712120000_company_use_platform_key.sql +
@@ -956,15 +970,46 @@ CREATE TABLE prd_tickets (
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
--- Per-PRD tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql).
--- One row per (company, prd): the ClickUp list / Jira project the PRD's
--- tickets sync with, the last sync outcome, and the pulled per-ticket
--- tracker statuses (jsonb → TEXT here).
+-- Standalone ticket sets (mirrors 20260806120000_ticket_sets.sql): tickets
+-- generated from a chat with NO PRD behind them. Same `stories` JSON payload
+-- shape as prd_tickets; its tickets are keyed `set-{id}-{story_id}` so they
+-- share ticket_edits / ticket_comments / ticket_attachments with PRD tickets
+-- while staying in a disjoint key namespace.
+CREATE TABLE ticket_sets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    title           TEXT NOT NULL DEFAULT '',
+    source_text     TEXT NOT NULL DEFAULT '',
+    stories         TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'generating',
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX ticket_sets_company_idx ON ticket_sets (company_id, id DESC);
+CREATE INDEX ticket_sets_conversation_idx ON ticket_sets (conversation_id);
+
+-- Per-artifact tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql
+-- + 20260806120000_ticket_sets.sql). One row per (company, PRD) OR
+-- (company, ticket set): the ClickUp list / Jira project that artifact's
+-- tickets sync with, the last sync outcome, and the pulled per-ticket tracker
+-- statuses (jsonb → TEXT here).
+--
+-- prd_id is NULLABLE here exactly as the migration leaves it, and
+-- ticket_set_id is its mutually-exclusive counterpart. Both UNIQUE constraints
+-- are non-partial and rely on SQLite treating NULLs as distinct — the same
+-- property Postgres has — so a set row (prd_id NULL) never collides with the
+-- PRD constraint and vice versa. The fake client translates upsert
+-- on_conflict= into a real SQLite ON CONFLICT target, so both indexes have to
+-- exist for upsert_sync_config to resolve on either owner.
 CREATE TABLE prd_ticket_sync (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id       TEXT NOT NULL,
     workspace_id     TEXT,
-    prd_id           INTEGER NOT NULL,
+    prd_id           INTEGER,
+    ticket_set_id    INTEGER,
     provider         TEXT NOT NULL,
     destination_id   TEXT NOT NULL,
     destination_name TEXT,
@@ -976,7 +1021,8 @@ CREATE TABLE prd_ticket_sync (
     statuses         TEXT NOT NULL DEFAULT '{}',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id, prd_id)
+    UNIQUE (company_id, prd_id),
+    UNIQUE (company_id, ticket_set_id)
 );
 
 -- Idempotent Jira push mapping (mirrors 20260708120000_jira_issue_map.sql).
@@ -1108,6 +1154,56 @@ CREATE TABLE document_source_file (
 CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
 CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
 
+-- Document catalog (mirrors 20260803120000_document_catalog.sql, SQLite-ized).
+-- One row per document-shaped item from ANY source, carrying an extractive
+-- summary + topics + a summary embedding, so a document can be found by what
+-- it is about. Both constraints that carry meaning are mirrored faithfully:
+-- the unique triple the registration upsert conflicts on, and the check that
+-- makes an ownerless session-scoped row unrepresentable.
+--
+-- NOT mirrored (no SQLite equivalent, and nothing under test needs them):
+-- `search_tsv` (a generated tsvector maintained by Postgres) and the
+-- ivfflat/GIN indexes. `embedding` and `topics` are JSON-encoded TEXT via the
+-- fake's _JSONB_COLUMNS map. `document_find_candidates` is a Postgres
+-- function; its tenancy filter is exercised against real Postgres, not here
+-- (the fake's rpc() returns whatever a test registers).
+CREATE TABLE document_catalog (
+    -- Postgres fills this with gen_random_uuid(); the registration upsert
+    -- deliberately never sends an `id` (sending one would rewrite the PK on
+    -- every re-registration), so the mirror needs its own uuid4 default.
+    id              TEXT PRIMARY KEY DEFAULT (
+                        lower(hex(randomblob(4))) || '-'
+                        || lower(hex(randomblob(2))) || '-4'
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || substr('89ab', abs(random()) % 4 + 1, 1)
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || lower(hex(randomblob(6)))
+                    ),
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    user_id         TEXT,
+    provider        TEXT NOT NULL,
+    external_id     TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    source_name     TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    doc_date        TEXT,
+    content_hash    TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    topics          TEXT NOT NULL DEFAULT '[]',
+    summary_model   TEXT,
+    summary_version TEXT,
+    embedding       TEXT,
+    body_text       TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider, external_id),
+    CONSTRAINT document_catalog_session_needs_owner
+        CHECK (conversation_id IS NULL OR user_id IS NOT NULL)
+);
+CREATE INDEX document_catalog_company_idx ON document_catalog (company_id);
+
 -- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
 -- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
 -- share one library; workspace_id records the uploading workspace only):
@@ -1133,6 +1229,46 @@ CREATE TABLE custom_skills (
     UNIQUE (company_id, slug)
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+
+-- Artifact format templates (mirrors 20260805120000_artifact_templates.sql,
+-- SQLite-ized). COMPANY-scoped uploaded PRD / ticket / engineering-spec FORMS
+-- (all workspaces in a company share one library and one active format per
+-- type; workspace_id records the uploading workspace only and is never a query
+-- filter). section_map / compile_notes are JSON-encoded TEXT, matching the real
+-- column type. No company/workspace FKs, matching the workspaces-table note:
+-- route tests fabricate tenant ids that have no parent rows.
+--
+-- `is_active INTEGER` + the PARTIAL unique index below are the load-bearing
+-- part of this mirror: they are what makes activate_template's
+-- deactivate-siblings-then-activate order testable, because the other order
+-- trips the constraint here exactly as it does in Postgres.
+CREATE TABLE artifact_templates (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL,
+    workspace_id   TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL
+                     CHECK (artifact_type IN ('prd', 'tickets', 'impl_spec')),
+    name           TEXT NOT NULL,
+    source_md      TEXT NOT NULL,
+    source_chars   INTEGER NOT NULL DEFAULT 0,
+    compiled       TEXT NOT NULL DEFAULT '',
+    section_map    TEXT NOT NULL DEFAULT '{}',
+    compile_status TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (compile_status IN
+                            ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
+    compile_notes  TEXT NOT NULL DEFAULT '[]',
+    content_hash   TEXT NOT NULL DEFAULT '',
+    is_active      INTEGER NOT NULL DEFAULT 0,
+    uploader_id    TEXT NOT NULL,
+    uploader_name  TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX artifact_templates_company_id_idx ON artifact_templates (company_id);
+CREATE INDEX artifact_templates_company_type_idx
+    ON artifact_templates (company_id, artifact_type);
+CREATE UNIQUE INDEX artifact_templates_active_uniq
+    ON artifact_templates (company_id, artifact_type) WHERE is_active = 1;
 
 -- Captured HTML report documents (mirrors 20260730120000_reports.sql,
 -- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
@@ -1458,6 +1594,49 @@ def _no_background_connector_sync(request, monkeypatch):
         monkeypatch.setattr(scheduler_mod, "kickoff_sync", _noop_sync, raising=False)
     except Exception:
         pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_template_compile(request, monkeypatch):
+    """Keep POST/PATCH /v1/artifact-templates from starting a real format check.
+
+    `schedule_compile` (app.artifact_templates.compile_prd) claims the row and
+    runs the compile on a background thread — and that compile goes through
+    `graph.gateway.llm_call`, which holds its OWN `call_json` reference bound at
+    import time. The `fake_llm` fixture patches `app.llm.call_json`, which does
+    NOT reach the gateway's binding, so an unguarded upload in any route test
+    would fire a REAL Anthropic request from a daemon thread, against the
+    mid-reset in-memory DB — the same pair of hazards
+    `_no_background_connector_sync` above exists for.
+
+    Returning False (not True) is what keeps the route's contract intact under
+    the patch: `_with_compile_started` reads False as "a check is already in
+    flight", leaves the row alone, and the response still describes the row the
+    write produced.
+
+    Opt out with `@pytest.mark.real_template_compile` — the compile suite does,
+    and drives the gateway with its own stub."""
+    if request.node.get_closest_marker("real_template_compile"):
+        yield
+        return
+    import importlib
+
+    def _noop_schedule(company_id, template_id):  # noqa: ARG001
+        return False
+
+    # Patched on BOTH modules: routes/artifact_templates.py does
+    # `from ...compile_prd import schedule_compile`, so its binding is fixed at
+    # import and patching only the source module cannot reach it.
+    for mod_name in ("app.artifact_templates.compile_prd",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_compile"):
+            monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
+                                raising=False)
     yield
 
 

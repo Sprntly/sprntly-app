@@ -152,6 +152,34 @@ def ds_claude_analysis_enabled(flags: dict | None) -> bool:
     return True
 
 
+def cross_connector_sweep_enabled(flags: dict | None) -> bool:
+    """Resolve the `chat_cross_connector_sweep` flag from a raw feature_flags dict.
+
+    Gates the cross-connector sweep (app/connector_lookup/sweep.py): whether a
+    source-agnostic chat question additionally reads the company's connected
+    tools live before answering, instead of answering from the corpus + KG
+    snapshot alone.
+
+    Fail-open like `agents` / `top_insights` / `company_research`: a missing key
+    is ON, so existing companies get the capability without a backfill and only
+    an explicit `chat_cross_connector_sweep: false` in the staff panel opts out.
+
+    Fail-open is right HERE, unlike `ds_claude_analysis`, and the difference is
+    what the flag governs. That one decides whether a tenant's raw uploaded CSVs
+    leave the box, so an unknown state must resolve to "no". This one only
+    decides whether we ALSO read sources the tenant has already connected to
+    Sprntly, through the same tenant-bound, read-only adapters chat uses when a
+    question names them. Nothing leaves the tenant that was not already theirs,
+    so the cost of being wrong is latency, not exposure — and `settings.
+    chat_cross_connector_sweep` is the global lever for that.
+    """
+    if not isinstance(flags, dict):
+        return True
+    if "chat_cross_connector_sweep" in flags:
+        return bool(flags["chat_cross_connector_sweep"])
+    return True
+
+
 def ask_planner_shadow_enabled(flags: dict | None) -> bool:
     """Resolve the `ask_planner_shadow` flag from a raw feature_flags dict.
 

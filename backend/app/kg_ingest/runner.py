@@ -29,15 +29,18 @@ from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
+    asana,
     clickup,
     confluence,
     fireflies,
     github,
+    google_meet,
     hubspot,
     jira,
     sprinklr,
     superset,
     uploads,
+    zoom,
 )
 from app.kg_ingest.types import RawRecord
 
@@ -48,9 +51,18 @@ _BATCH_CHAR_BUDGET = 6000
 # provider → (puller fn, token_json key, source-type hint for the extractor)
 PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "clickup":   (clickup.pull,   "access_token", "project_mgmt (work items; classify bug/feature/fix)"),
+    "asana":     (asana.pull,     "access_token", "project_mgmt (tasks: no native type or priority — classify bug/feature/fix from title+notes; status is the SECTION the task sits in within its project, completed is the done boolean; custom fields carry the team's own taxonomy where set)"),
     "jira":      (jira.pull,      "access_token", "project_mgmt (issues: bugs/stories/tasks/epics with native type + status + priority)"),
     "hubspot":   (hubspot.pull,   "access_token", "revenue + support + customer_voice (deals: blockers/feature gaps; tickets: support pain/churn risk; notes/emails: voice-of-customer; owners: attribution; line items: revenue detail)"),
     "fireflies": (fireflies.pull, "api_key",      "customer_voice / communication (meeting transcripts)"),
+    # Like uploads and confluence, the "credential" is the company id — a Zoom
+    # pull needs the picked hosts and the incremental cursor off the connection
+    # row, and token_for can only hand a puller one field.
+    "zoom":      (zoom.pull,      "company_id",   "customer_voice / communication (Zoom cloud-recorded meeting transcripts, speaker-attributed: what customers, prospects and the team actually SAID on a call — treat a quoted line as first-party evidence of that person's view, not as a decision. A record whose text states no transcript was available is a recording we could not read, NOT an empty meeting)"),
+    # Like zoom/uploads/confluence, the "credential" is the company id — a Meet
+    # pull needs the connected account's identity off the connection row, and
+    # token_for can only hand a puller one field.
+    "google_meet": (google_meet.pull, "company_id", "customer_voice / communication (Google Meet transcripts, speaker-attributed: what customers, prospects and the team actually SAID on a call — treat a quoted line as first-party evidence of that person's view, not as a decision. COVERAGE IS ONE PERSON'S CALENDAR: Google only exposes meetings the connected account ORGANIZED, and only for 30 days, so absence of a meeting is never evidence it did not happen. A record whose text states no transcript was available is a call we could not read, NOT an empty meeting)"),
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
     "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),

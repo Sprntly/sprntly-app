@@ -24,7 +24,11 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask, resolveIntent } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration } = vi.hoisted(() => ({
+  runTicketSetGeneration: vi.fn().mockResolvedValue({
+    ok: true,
+    set: { id: 7, title: "Webhook retries", stories: [], conversationId: 1, status: "ready" },
+  }),
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "CSV export", status: "generating", variant: "v3" }),
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
@@ -46,12 +50,24 @@ vi.mock("../../../../lib/api", () => {
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
     prdApi: { generateFromTask, classifyCommand, clarifyTask },
     chatIntentApi: { resolve: resolveIntent },
+    // The thread-resume probe reads this on every chat open; it must find a
+    // callable here even in a suite that is not about ticket sets.
+    ticketSetsApi: {
+      byConversation: vi.fn().mockResolvedValue({ ticket_sets: [] }),
+      get: vi.fn(),
+    },
+    artifactsApi: { chatSummary: vi.fn().mockResolvedValue({ summary: null }) },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
     },
   }
 })
+
+vi.mock("../../../../lib/runTicketSetGeneration", () => ({
+  runTicketSetGeneration: (...a: unknown[]) => runTicketSetGeneration(...a),
+  loadTicketSet: vi.fn().mockResolvedValue({ ok: true }),
+}))
 
 const runPrdGeneration = vi.fn().mockResolvedValue({
   ok: true, prd: { prd_id: 77, title: "Generated PRD", metaLine: "", sections: [] },
@@ -80,8 +96,11 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useSearchParams: () => new URLSearchParams("new=1"),
 }))
-// Flag ON — the whole point of this suite. (The sibling command suites mock
-// workspace: null, so they lock the flag-OFF ladder.)
+// Flag EXPLICITLY on — the whole point of this suite. The other two states of
+// the flag (key absent, explicit false) have their own suites:
+// ChatScreen.envelope-default.dom.test.tsx. (The sibling command suites now
+// mock an explicit `chat_intent_envelope: false`, since a null/flagless
+// workspace resolves to ON.)
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
   useWorkspace: () => ({
@@ -201,17 +220,22 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     expect(resolveIntent).not.toHaveBeenCalled()
   })
 
-  it("generate_tickets with no PRD on the tab falls through to the ask path", async () => {
+  it("generate_tickets with no PRD on the tab builds a STANDALONE ticket set", async () => {
     resolveIntent.mockResolvedValue({
-      intent: "generate_tickets", confidence: 0.9, task: null, instruction: null,
-      reason: "tickets", source: "llm", prd_id: null, prd_title: null,
+      intent: "generate_tickets", confidence: 0.9, task: "the webhook retry work",
+      instruction: null, reason: "tickets", source: "llm", prd_id: null, prd_title: null,
     })
     renderChat()
     await typeAndSend("break this into work items")
 
-    // No PRD anywhere → the user-stories skill answers in markdown (parity
-    // with the ladder's fall-through), no crash, no generation.
-    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    // No PRD anywhere used to mean the ask agent answered with the
+    // user-stories skill's raw markdown — a wall of ticket bodies in a chat
+    // bubble that could not be pushed to a tracker, reopened or found again.
+    // It now produces a durable `ticket_sets` artifact that reads in the panel
+    // (feat/tickets/standalone-from-chat). No PRD is generated either way.
+    await waitFor(() => expect(runTicketSetGeneration).toHaveBeenCalledTimes(1))
+    expect(runTicketSetGeneration.mock.calls[0][0]).toBe("the webhook retry work")
+    expect(runAskGeneration).not.toHaveBeenCalled()
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 })

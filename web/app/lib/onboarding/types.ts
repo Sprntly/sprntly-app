@@ -480,6 +480,34 @@ export function parseFeatureFlags(raw: unknown): FeatureFlags {
   return flags
 }
 
+/**
+ * Is action-envelope chat dispatch on? DEFAULT ON (2026-08-03) — the staff
+ * checkbox is a per-company KILL SWITCH, not an opt-in.
+ *
+ * THREE states, and the third is why this isn't inlined at each call site:
+ *   * explicit `false`         → OFF (the kill switch)
+ *   * key absent               → ON  (grandfathered / newly onboarded)
+ *   * flags UNKNOWN (no
+ *     workspace loaded, or a
+ *     failed workspace read)   → ON, deliberately — it FAILS OPEN
+ *
+ * That last case is the opposite of `ds_claude_analysis` (backend
+ * app/qa_agent.py::_ds_claude_enabled), and the divergence is intentional:
+ * this flag picks a ROUTING STRATEGY, while that one decides whether a
+ * tenant's raw CSVs leave the box. "I couldn't read your flags" must not
+ * resolve to "so I shipped your data" — but it SHOULD resolve to the better
+ * router, since the envelope call carries its own fail-open fallback to the
+ * legacy ladder if the request itself fails.
+ *
+ * Takes the flags dict rather than a workspace so the app gates, the staff
+ * panel and the parsed/unparsed shapes all share ONE definition.
+ */
+export function chatIntentEnvelopeOn(
+  flags: Partial<FeatureFlags> | Record<string, boolean> | null | undefined,
+): boolean {
+  return flags?.chat_intent_envelope !== false
+}
+
 export function parseCompanyIcp(raw: unknown): CompanyIcp {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null)

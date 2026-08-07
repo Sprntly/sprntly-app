@@ -2,9 +2,10 @@
 
 Covers:
   - tenant scoping (caller sees only their own dataset; 404 on an unowned slug)
-  - unified shape across all four artifact types (prd / prototype / evidence /
-    report), including a report's chat/PRD attachment and the omission of its
-    (potentially huge) html body from the listing
+  - unified shape across all five artifact types (prd / prototype / evidence /
+    report / ticket_set), including a report's chat/PRD attachment and the
+    omission of its (potentially huge) html body from the listing, and a ticket
+    set's chat attachment + count without its ticket payloads
   - per-source PRD dedupe: only the newest row per regeneration FAMILY lists,
     where a family is theme_id (chat/ideation), the row itself (upload), or
     insight_index (brief) — see db/artifacts._prd_family_key
@@ -166,6 +167,27 @@ def _seed_report(*, company_id: str, skill: str, title: str,
     if created_at is not None:
         row["created_at"] = created_at
     resp = require_client().table("reports").insert(row).execute()
+    return resp.data[0]["id"]
+
+
+def _seed_ticket_set(*, company_id: str, title: str = "", stories: list | None = None,
+                     status: str = "ready", source_text: str = "",
+                     conversation_id: int | None = None,
+                     created_at: str | None = None) -> int:
+    """Seed a standalone ticket set (tickets born in a chat, no PRD behind
+    them). `conversation_id` is its attachment and may be absent/dangling."""
+    from app.db.client import require_client
+    row = {
+        "company_id": company_id,
+        "title": title,
+        "stories": stories if stories is not None else [],
+        "status": status,
+        "source_text": source_text,
+        "conversation_id": conversation_id,
+    }
+    if created_at is not None:
+        row["created_at"] = created_at
+    resp = require_client().table("ticket_sets").insert(row).execute()
     return resp.data[0]["id"]
 
 
@@ -547,3 +569,114 @@ def test_reports_sort_into_the_unified_recency_order(artifacts_env, monkeypatch)
     r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
     order = [(a["type"], a["title"]) for a in r.json()["artifacts"]]
     assert order == [("report", "Newer report"), ("prd", "Older PRD")]
+
+
+# ─── Standalone ticket sets (the fifth artifact type) ────────────────────────
+
+
+def _story(title: str) -> dict:
+    from app.stories.generate import Story
+    return Story(title=title, body="b").to_dict()
+
+
+def test_ticket_set_lists_with_its_count_and_chat_attachment(artifacts_env, monkeypatch):
+    """The row carries what it takes to render "6 tickets · from <chat>" without
+    a second request — and NOT the ticket bodies."""
+    ctx = _client(monkeypatch)
+    conv = _seed_conversation(company_id=ctx.company_id, title="Checkout drop-off")
+    _seed_ticket_set(
+        company_id=ctx.company_id, title="Checkout Retry Fixes",
+        stories=[_story("A"), _story("B"), _story("C")],
+        source_text="turn this into tickets", conversation_id=conv,
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    item = next(a for a in r.json()["artifacts"] if a["type"] == "ticket_set")
+    assert item["title"] == "Checkout Retry Fixes"
+    assert item["ticket_count"] == 3
+    assert item["source"]["conversation_title"] == "Checkout drop-off"
+    assert item["source"]["question"] == "turn this into tickets"
+    assert item["open"] == {"ticket_set_id": item["id"]}
+    # The listing must never ship the ticket payloads themselves.
+    assert "stories" not in item
+
+
+def test_ticket_set_with_a_deleted_chat_omits_the_label(artifacts_env, monkeypatch):
+    """`on delete set null` leaves a dangling id; the row must not fabricate a
+    thread name for a conversation that no longer exists."""
+    ctx = _client(monkeypatch)
+    _seed_ticket_set(company_id=ctx.company_id, title="Orphaned",
+                     stories=[_story("A")], conversation_id=9999)
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    item = next(a for a in r.json()["artifacts"] if a["type"] == "ticket_set")
+    assert item["source"]["conversation_id"] == 9999
+    assert item["source"]["conversation_title"] is None
+
+
+def test_generating_ticket_set_lists_but_failed_one_does_not(artifacts_env, monkeypatch):
+    """A set the user just asked for appears immediately (marked building, like
+    an in-progress prototype); a failed run is not an artifact."""
+    ctx = _client(monkeypatch)
+    _seed_ticket_set(company_id=ctx.company_id, title="Building", status="generating")
+    _seed_ticket_set(company_id=ctx.company_id, title="Broken", status="failed")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    sets = {a["title"]: a for a in r.json()["artifacts"] if a["type"] == "ticket_set"}
+    assert set(sets) == {"Building"}
+    assert sets["Building"]["status"] == "generating"
+    assert sets["Building"]["ticket_count"] == 0
+
+
+def test_ticket_set_with_no_title_keeps_the_empty_string(artifacts_env, monkeypatch):
+    """Empty until the naming leg lands. The API returns it blank rather than
+    inventing a label — the panel owns that copy."""
+    ctx = _client(monkeypatch)
+    _seed_ticket_set(company_id=ctx.company_id, title="", stories=[_story("A")])
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    item = next(a for a in r.json()["artifacts"] if a["type"] == "ticket_set")
+    assert item["title"] == ""
+
+
+def test_ticket_sets_are_tenant_scoped(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    other_company_id = seed_company(user_id="intruder", slug="rival")
+    _seed_ticket_set(company_id=other_company_id, title="Rival tickets",
+                     stories=[_story("A")])
+    _seed_ticket_set(company_id=ctx.company_id, title="My tickets",
+                     stories=[_story("A")])
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    titles = [a["title"] for a in r.json()["artifacts"] if a["type"] == "ticket_set"]
+    assert titles == ["My tickets"]
+
+
+def test_ticket_sets_sort_into_the_unified_recency_order(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    _seed_prd(brief_id=brief_id, title="Older PRD",
+              generated_at="2026-06-01T00:00:00+00:00")
+    _seed_ticket_set(company_id=ctx.company_id, title="Newer tickets",
+                     stories=[_story("A")],
+                     created_at="2026-06-05T00:00:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    order = [(a["type"], a["title"]) for a in r.json()["artifacts"]]
+    assert order == [("ticket_set", "Newer tickets"), ("prd", "Older PRD")]
+
+
+def test_one_conversation_lookup_serves_reports_and_ticket_sets(artifacts_env, monkeypatch):
+    """Both types name the chat they were born in; the block hoists the lookup
+    so a listing with both does not run two conversation queries."""
+    ctx = _client(monkeypatch)
+    conv = _seed_conversation(company_id=ctx.company_id, title="Shared thread")
+    _seed_report(company_id=ctx.company_id, skill="voice-of-customer-report",
+                 title="VoC", conversation_id=conv)
+    _seed_ticket_set(company_id=ctx.company_id, title="Tickets",
+                     stories=[_story("A")], conversation_id=conv)
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    by_type = {a["type"]: a for a in r.json()["artifacts"]}
+    assert by_type["report"]["source"]["conversation_title"] == "Shared thread"
+    assert by_type["ticket_set"]["source"]["conversation_title"] == "Shared thread"

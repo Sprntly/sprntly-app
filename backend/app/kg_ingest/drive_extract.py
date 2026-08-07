@@ -30,10 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import uuid
 from dataclasses import dataclass
 
-from app import db
+from app import db, document_bodies, document_catalog
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.graph.types import Source
@@ -42,14 +41,17 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_DRIVE_PROVIDER = "google_drive"
 
-_NS = uuid.UUID("c0ffee00-0000-4000-8000-00000000d21e")
-
 # Matches the runner's per-extraction char budget — one extract_document call
 # per ~6k chars keeps the LLM focused and the output schema within caps.
 _CHUNK_CHARS = 6000
 # Hard per-file cap: a 20MB PDF can convert to megabytes of markdown; beyond
 # this the tail is dropped (logged) rather than burning unbounded LLM calls.
 _MAX_KG_CHARS = 60_000
+
+#: Catalog `source_name` for Drive documents. Drive has no named bundle the
+#: way an uploads source does, so every Drive row carries the connector's own
+#: label — which is what a user would say ("the doc in Google Drive").
+_DRIVE_SOURCE_NAME = "Google Drive"
 
 _DRIVE_SOURCE_HINT = (
     "documents (Google Drive product docs — PRDs, specs, research notes, "
@@ -60,13 +62,22 @@ _DRIVE_SOURCE_HINT = (
 
 @dataclass
 class DriveDoc:
-    """One changed Drive file, converted to markdown, ready for extraction."""
+    """One changed Drive file, converted to markdown, ready for extraction.
+
+    `dataset` + `md_file` say WHERE that markdown was written in the corpus.
+    They travel with the doc rather than being recomputed here because only
+    the sync knows them: `datasets.ingest_file` normalises the name and
+    suffixes collisions (`.1.md`), so the path it returns is the only record
+    of which file took which name. Both are empty for a file whose markdown
+    this pass did not (re-)write — see the sync's KG-only refresh branch."""
     file_id: str
     name: str
     modified: str
     text: str
     mime: str = ""
     link: str = ""
+    dataset: str = ""
+    md_file: str = ""
 
 
 def _chunks(text: str) -> list[str]:
@@ -128,8 +139,37 @@ def extract_drive_docs(
             # File-level provenance in the source registry — upserted on a
             # stable per-file id, so re-extracting a new version updates the
             # same row instead of accumulating one row per edit.
+            #
+            # This row is also WHERE THE FILE'S TEXT CAN BE FOUND. The
+            # converted markdown lives in the dataset corpus under a name
+            # nothing could reconstruct (md_filename normalises the stem, and
+            # a collision appends `.1.md`), so the location the sync actually
+            # wrote to is recorded here, keyed by the same Drive file id the
+            # catalog row carries as its external_id. Without it a Drive
+            # document can be indexed, summarised and ranked and still have no
+            # readable body — catalogued but unquotable.
+            #
+            # NO LOCAL try/except, and that is the point. A failure to persist
+            # this must take the file down with it: swallowing it would let
+            # the file reach `ok` below, advance its `kg_file_mtime`, and —
+            # because Drive re-fetches a file only when its modifiedTime
+            # changes — leave it permanently unresolvable until a human edits
+            # it in Drive. Letting it propagate to the per-file handler costs
+            # one re-extraction on the next sync.
+            #
+            # When this pass did not write the markdown (the KG-only refresh
+            # path, where the corpus copy is already current) the location is
+            # carried forward off the existing row instead of being blanked:
+            # `create_source` upserts the WHOLE row, so a retry that knows
+            # less than its predecessor would otherwise erase what the first
+            # sync learned.
+            location = document_bodies.markdown_location(doc.dataset, doc.md_file)
+            if not location:
+                location = document_bodies.stored_markdown_location(
+                    facade, company_id, doc.file_id
+                )
             facade.create_source(company_id, Source(
-                id=str(uuid.uuid5(_NS, f"gdrive-file|{company_id}|{doc.file_id}")),
+                id=document_bodies.drive_source_id(company_id, doc.file_id),
                 enterprise_id=company_id,
                 source_type=GOOGLE_DRIVE_PROVIDER,
                 label=doc.name[:200],
@@ -138,8 +178,44 @@ def extract_drive_docs(
                     "modified": doc.modified,
                     "mime": doc.mime,
                     "link": doc.link,
+                    **location,
                 },
             ))
+            # Register in the document catalog, and DELIBERATELY WITHOUT a
+            # local try/except — the one call site in this change where a
+            # registration failure is allowed to fail its host operation.
+            #
+            # Everywhere else "log and continue" is right. Here it would be a
+            # data-loss bug: swallowing the error would let this file reach
+            # `ok` below, advance its `kg_file_mtime`, and — because Drive
+            # re-fetches a file only when its modifiedTime changes — leave it
+            # PERMANENTLY unregistered, never retried until a human edits it.
+            # Letting it propagate to the per-file handler below costs one
+            # re-extraction on the next sync. The other files in the batch
+            # still succeed, which is the isolation guarantee that matters.
+            #
+            # No `body_text`: the catalog is a POINTER to a document — its
+            # summary, topics and link — never a COPY of it. Drive content
+            # already has a home, written to the dataset corpus as markdown by
+            # google_drive_sync (datasets.ingest_file), so storing it here
+            # again would be duplicate storage of a customer's files.
+            document_catalog.register_document(
+                company_id,
+                provider=document_catalog.PROVIDER_GOOGLE_DRIVE,
+                external_id=doc.file_id,
+                title=doc.name,
+                source_name=_DRIVE_SOURCE_NAME,
+                url=doc.link or None,
+                doc_date=doc.modified or None,
+                # Over the FULL converted markdown, not the _MAX_KG_CHARS
+                # extraction slice: an edit past the truncation point must
+                # still re-hash, or the summary freezes at an old version.
+                content_hash=document_catalog.content_hash_for(doc.text),
+                # Already off the request path (kickoff_drive_extract's daemon
+                # thread, or the brief's inline seed), so summarisation runs
+                # inline here rather than spawning a thread per file.
+                get_text=lambda text=doc.text: text,
+            )
             ok[doc.file_id] = doc.modified
             totals["files"] += 1
         except Exception as e:  # noqa: BLE001 — error-isolation per file
