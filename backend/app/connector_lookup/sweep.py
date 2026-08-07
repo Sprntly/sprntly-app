@@ -427,9 +427,28 @@ _LIVE_LEGS: dict[str, _AdapterLeg] = {
     "clickup": _AdapterLeg(
         "clickup", "clickup_search_tasks", lambda t: {"text": " ".join(t)}
     ),
+    # `fallback_to_recent` is what makes this leg contribute anything at all to
+    # a source-agnostic question, and it is not optional polish.
+    #
+    # Slack matches literal message text, AND-ish across the query. This leg
+    # joins up to MAX_TERMS topic words the user never aimed at Slack, so the
+    # common outcome is zero real hits plus the occasional coincidence —
+    # observed on staging 2026-08-07 as ONE stray hit from a channel nobody had
+    # selected, while the channels holding the actual discussion returned
+    # nothing. The existing `slack._GENERIC_QUERY_TERMS` mitigation cannot help
+    # here: it is gated on sort=newest AND is single-word-only by design, and
+    # this query is always multi-word.
+    #
+    # With the flag, a literal miss falls through to the recency window and is
+    # LABELLED as unrelated background rather than rendered as topic evidence.
+    # Slack is the richest source a topic question has, so a leg that reliably
+    # returns noise is worse than one that says what it is looking at.
     "slack": _AdapterLeg(
         "slack", "slack_search_messages",
-        lambda t: {"query": " ".join(t), "sort": "relevance"},
+        lambda t: {
+            "query": " ".join(t), "sort": "relevance",
+            "fallback_to_recent": True,
+        },
     ),
     "confluence": _AdapterLeg(
         "confluence", "confluence_search", lambda t: {"text": " ".join(t)}
