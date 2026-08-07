@@ -83,7 +83,7 @@ def test_list_projects_spans_all_workspaces():
     list_projects unions projects across every visible workspace."""
     from app.connectors import asana_oauth
 
-    def _get(_tok, path, params=None):
+    def _get(_tok, path, params=None, **kw):
         if path == "/workspaces":
             return [{"gid": "ws1"}, {"gid": "ws2"}]
         assert path == "/projects"
@@ -103,7 +103,7 @@ def test_list_project_tasks_returns_the_page(monkeypatch):
 
     captured = {}
 
-    def _get(_tok, path, params=None):
+    def _get(_tok, path, params=None, **kw):
         captured["path"] = path
         captured["params"] = params
         return [{"gid": "t1", "name": "Fix login bug"}]

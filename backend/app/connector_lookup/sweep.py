@@ -26,7 +26,7 @@ Latency contract, in order of how much it saves:
 
 - Nothing is swept unless the question yields real search terms. A greeting, a
   "make it shorter", a bare pronoun follow-up produce none, so they pay nothing.
-- Two of the seven sources never touch the network: recorded calls come from
+- Two of the nine sources never touch the network: recorded calls come from
   `call_index` (the same index that made listing fast) and GitHub comes from the
   already-synced `github_pull_requests` rows. There is no live Fireflies leg for
   exactly this reason — the index is strictly faster and strictly fresher-bounded.
@@ -54,7 +54,27 @@ TWO SOURCES ARE DELIBERATELY NOT SWEPT:
   open indefinitely rather than merely missing the budget. It also needs no leg:
   `ask_runner.document_grounding` already puts connected Drive files in the
   prompt, and picking WHICH document to read is a separate surface.
+
+  TRACED, not assumed, when the sweep grew to cover every connector: Drive
+  files reach the answer through `document_grounding`'s Stage T — the catalog's
+  fused lexical+semantic rank over every non-locally-indexed provider — and
+  their BODIES resolve through `document_bodies.resolve_drive_body`, from the
+  markdown `google_drive_sync` already wrote. Both stages cover Drive without
+  the question naming it, so there is no gap between sweep and grounding for a
+  Drive file to fall through. The two honest limits, neither of them a gap in
+  this module: Drive is answered from SYNCED markdown, so a file added since
+  the last sync is not there (the sweep's live legs would have seen it), and a
+  Drive file with no catalog row is not ranked. Both belong to the sync, not to
+  the fan-out. A `google_drive` test in test_cross_connector_sweep.py pins the
+  no-leg decision so nobody adds a deadline-less one back.
 - `fireflies` live — superseded by the `call_index` leg above.
+
+MEETINGS ARE COVERED BY TWO DIFFERENT MECHANISMS, ON PURPOSE. Zoom and
+Fireflies ride the `call_index` leg (a DB read — the index holds both). Google
+Meet cannot: `call_index.CALL_PROVIDERS` is fireflies+zoom, Meet is in neither,
+and a Meet conference record carries no title for an index to hold anyway. So
+Meet is a LIVE leg that reads transcripts, and it is the only leg that carries
+its own deadline — see connector_lookup/google_meet.py.
 """
 from __future__ import annotations
 
@@ -95,7 +115,20 @@ TOTAL_CHARS = 12_000
 
 #: Most sources probed in one sweep. Every current leg fits under it; the cap
 #: exists so adding connectors cannot quietly widen the fan-out.
-MAX_SOURCES = 8
+#:
+#: Ten, raised from eight when Asana and Google Meet gained live-read adapters:
+#: 2 local legs (calls, github — DB reads, no network) + 7 live providers = 9,
+#: with one slot of headroom. The arithmetic is asserted by a test rather than
+#: kept in this comment, because the comment is what rots. It matters because
+#: the cap counts BOTH kinds of leg, so at eight a company
+#: with everything connected would have had two live legs truncated in
+#: `LIVE_PROVIDERS` order — silently, since a provider dropped before the
+#: fan-out never becomes a SourceResult and so is never named in the unread
+#: list. Raising it is a deliberate widening and cheap in the dimension that
+#: matters: the legs share ONE wall-clock budget, so two more of them cost two
+#: more threads, not two more seconds. What still bounds the PROMPT is
+#: TOTAL_CHARS, which drops whole low-priority sources and NAMES them.
+MAX_SOURCES = 10
 
 #: Terms carried into the probes. Past ~8 the queries stop narrowing and start
 #: matching nothing at all (an AND-ish search over a whole sentence).
@@ -115,7 +148,16 @@ MIN_TERMS = 2
 
 #: Live-readable providers this sweep probes, in render priority order. Each is
 #: gated on an actual connection before anything is opened.
-LIVE_PROVIDERS: tuple[str, ...] = ("jira", "clickup", "slack", "confluence", "hubspot")
+#:
+#: Order is render priority and therefore also DROP priority when TOTAL_CHARS
+#: runs out, so it is not alphabetical and not arbitrary. `google_meet` sits
+#: last of the live legs deliberately: it is the only one whose probe must read
+#: transcripts to match at all (a Meet conference carries no title — see
+#: connector_lookup/google_meet.py), so it is both the slowest to answer and
+#: the one whose full content is most cheaply re-reachable by naming it.
+LIVE_PROVIDERS: tuple[str, ...] = (
+    "jira", "clickup", "slack", "confluence", "hubspot", "asana", "google_meet",
+)
 
 
 # ── query terms ──────────────────────────────────────────────────────────────
@@ -193,11 +235,21 @@ STATUS_DROPPED = "dropped"
 #: different sentences in the answer, and collapsing them would have the model
 #: report an unopened source as a searched one.
 STATUS_UNAVAILABLE = "unavailable"
+#: Skipped because opening it would have rotated the tenant's OAuth token.
+#: A healthy connector we declined to touch — not a broken one.
+STATUS_REFRESH_DUE = "refresh_due"
 
 
 class _SessionUnavailable(Exception):
     """A leg's connector could not be opened. Carried as an exception so it
     crosses the worker-thread boundary distinctly from an empty result."""
+
+
+class _RefreshWouldBeRequired(Exception):
+    """Opening this session would rotate and persist the tenant's OAuth token,
+    so the sweep declines. Distinct from _SessionUnavailable because the user-
+    facing reason differs: the connector is healthy, we simply refuse to be the
+    caller that mutates its credential."""
 
 
 @dataclass
@@ -227,6 +279,12 @@ class SourceResult:
             return "did not answer within the time budget"
         if self.status == STATUS_ERROR:
             return self.detail or "could not be read just now"
+        if self.status == STATUS_REFRESH_DUE:
+            return (
+                "was NOT searched — its access token is due for renewal, and "
+                "this cross-source sweep deliberately never renews one. Ask "
+                "about this source directly and it will be read live"
+            )
         if self.status == STATUS_UNAVAILABLE:
             return (
                 "is connected but could not be opened — it was NOT searched, and "
@@ -341,6 +399,12 @@ class _AdapterLeg:
         adapter = registry.provider_for(self.provider)
         if adapter is None:
             raise _SessionUnavailable(self.provider)
+        # Checked BEFORE open_session, because open_session is where the write
+        # happens. See _credential_is_refresh_free.
+        if self.provider in _REFRESHES_ON_OPEN and not _credential_is_refresh_free(
+            enterprise_id, self.provider
+        ):
+            raise _RefreshWouldBeRequired(self.provider)
         session = adapter.open_session(enterprise_id)
         if session is None:
             raise _SessionUnavailable(self.provider)
@@ -377,6 +441,20 @@ _LIVE_LEGS: dict[str, _AdapterLeg] = {
     "hubspot": _AdapterLeg(
         "hubspot", "hubspot_search",
         lambda t: {"object_type": "deals", "query": " ".join(t)},
+    ),
+    "asana": _AdapterLeg(
+        "asana", "asana_search_tasks", lambda t: {"text": " ".join(t)}
+    ),
+    # Meet's probe reads TRANSCRIPTS — there is no metadata to match, because a
+    # Meet conference record has no title. That makes it the one leg whose cost
+    # is not a single search call, so the adapter carries its own deadline
+    # (google_meet.SCAN_BUDGET_S, asserted below BUDGET_S) and stops itself
+    # whether or not this sweep is still waiting. Without that, an abandoned
+    # leg would keep a worker thread walking a customer's calls for minutes —
+    # exactly the reason `google_drive` has no leg at all.
+    "google_meet": _AdapterLeg(
+        "google_meet", "google_meet_search_transcripts",
+        lambda t: {"keywords": " ".join(t)},
     ),
 }
 
@@ -516,6 +594,90 @@ def _live_candidates(enterprise_id: str) -> list[str]:
     return [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
 
 
+#: Providers whose `open_session` is a WRITE path: it notices a near-expiry
+#: access token, POSTs the refresh token and PERSISTS what comes back.
+#:
+#: That is the whole reason this guard exists. Those refresh tokens ROTATE (for
+#: Atlassian and HubSpot), so two callers reading one stale row present the SAME
+#: token; providers keep a reuse grace window precisely because clients race, so
+#: both can succeed and return different new tokens, and whichever write lands
+#: LAST wins the row. If that is the earlier-issued payload, the stored
+#: credential is one the provider has already retired — the tenant's connector
+#: is dead until a human reconnects, surfacing only as a later 401.
+#:
+#: `asana` and `google_meet` are here for the same MECHANISM even though their
+#: blast radius is smaller. Neither rotates its refresh token, so a lost race
+#: strands nothing; but both `stories.push._asana_creds` and
+#: `connectors.google_meet.sync_context` still call `db.update_connection_tokens`
+#: on open. The rule this set encodes is "a background sweep never mutates auth
+#: state", not "a background sweep never bricks a connector" — a write is a
+#: write, and the day one of these providers starts rotating, nothing here has
+#: to be remembered.
+_REFRESHES_ON_OPEN: frozenset[str] = frozenset(
+    {"jira", "confluence", "hubspot", "asana", "google_meet"}
+)
+
+#: Skew, in seconds, before expiry at which we treat a credential as too close
+#: to refresh to touch. Must be >= the LARGEST skew any guarded provider uses,
+#: or we would open a session inside their refresh window and trigger the very
+#: write this avoids: jira 300 (jira_fetch._TOKEN_REFRESH_SKEW_S), confluence
+#: 120, hubspot 120, asana 120 (stories.push._asana_creds), google_meet 120
+#: (connectors.google_meet.sync_context). 300 is therefore the floor, not a
+#: preference, and a test asserts it dominates jira's — so a future provider
+#: with a wider window fails loudly instead of silently reopening the write
+#: path.
+CREDENTIAL_SKEW_S = 300
+
+
+def _credential_is_refresh_free(enterprise_id: str, provider: str) -> bool:
+    """True when opening this session will NOT rotate the stored token.
+
+    THE SWEEP MUST NEVER BE THE THING THAT MUTATES AUTH STATE. It is
+    opportunistic breadth on an ordinary chat turn, running several sources in
+    parallel with no coordination — the worst possible caller to hand a rotating
+    credential to. Refreshing stays the job of the paths that are
+    user-intent-driven or scheduled: the named connector-lookup path and
+    `auto_sync`.
+
+    So the sweep reads the row itself and declines when a refresh is due, rather
+    than letting `open_session` decide. The result is that a stale-token source
+    is SKIPPED and reported honestly, which costs one unread source on one turn.
+    The alternative cost is a bricked connector. That trade is not close.
+
+    Fails CLOSED — anything unreadable, unparseable or unexpected returns False,
+    because the safe answer to "I cannot tell whether opening this will write"
+    is not to open it. An unguarded provider (Slack, ClickUp: no refresh on
+    open) never reaches here.
+    """
+    import json
+    import time as _time
+
+    from app import db
+    from app.connectors.tokens import decrypt_token_json
+
+    try:
+        row = db.get_connection(enterprise_id, provider)
+        if not row:
+            return False
+        token = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        obtained_at = token.get("obtained_at")
+        expires_in = token.get("expires_in")
+        if not isinstance(obtained_at, (int, float)) or not isinstance(
+            expires_in, (int, float)
+        ):
+            # Freshness cannot be proven, so every guarded provider would
+            # refresh. Decline.
+            return False
+        return _time.time() < obtained_at + expires_in - CREDENTIAL_SKEW_S
+    except Exception:  # noqa: BLE001 — unreadable credential ⇒ do not touch it
+        logger.warning(
+            "cross-connector sweep: could not check %s credential freshness for "
+            "%s — skipping rather than risking a token rotation",
+            provider, enterprise_id, exc_info=True,
+        )
+        return False
+
+
 def can_sweep(provider: str) -> bool:
     """True when this provider has a probe the sweep can run for it.
 
@@ -523,8 +685,16 @@ def can_sweep(provider: str) -> bool:
     tool slot: a provider the sweep cannot reach (Google Drive, live Fireflies)
     becomes unreachable entirely if it loses its slot, while a sweepable one is
     still covered. Coverage should never depend on alphabetical luck.
+
+    A live provider must be in BOTH `_LIVE_LEGS` (there is a probe) and
+    `LIVE_PROVIDERS` (the sweep will actually run it) — `_live_candidates`
+    intersects the two, so a provider in only one of them would answer True
+    here and then never be swept, which is exactly the "reported as covered,
+    silently not read" failure the whole unread list exists to prevent.
     """
-    return provider in _LIVE_LEGS or provider in _LOCAL_LEG_FOR_PROVIDER
+    if provider in _LOCAL_LEG_FOR_PROVIDER:
+        return True
+    return provider in _LIVE_LEGS and provider in LIVE_PROVIDERS
 
 
 def _display(provider: str) -> str:
@@ -614,6 +784,13 @@ def _run_live(
             result = SourceResult(key=provider, display_name=_display(provider))
             try:
                 text, records = future.result()
+            except _RefreshWouldBeRequired:
+                logger.info(
+                    "cross-connector sweep: skipped %s for %s — refresh due, and "
+                    "the sweep does not rotate tokens",
+                    provider, enterprise_id,
+                )
+                result.status = STATUS_REFRESH_DUE
             except _SessionUnavailable:
                 logger.info(
                     "cross-connector sweep: %s connected but not openable for %s",

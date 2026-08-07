@@ -227,16 +227,136 @@ def _raise_for(resp: requests.Response, what: str) -> None:
         raise HTTPException(502, f"Asana {what} failed")
 
 
-def _get(access_token: str, path: str, params: dict | None = None) -> Any:
+def _get(
+    access_token: str, path: str, params: dict | None = None,
+    *, timeout: int | None = None,
+) -> Any:
     r = requests.get(f"{ASANA_API}{path}", params=params or {},
-                     headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+                     headers=_headers(access_token),
+                     timeout=timeout or _WRITE_TIMEOUT)
     _raise_for(r, "read")
     return (r.json() or {}).get("data")
 
 
-def list_workspaces(access_token: str) -> list[dict[str, Any]]:
-    """The workspaces the token can see (GET /workspaces → [{gid, name}])."""
-    return [w for w in (_get(access_token, "/workspaces") or []) if isinstance(w, dict)]
+def list_workspaces(
+    access_token: str, *, timeout: int | None = None
+) -> list[dict[str, Any]]:
+    """The workspaces the token can see (GET /workspaces → [{gid, name}]).
+
+    `timeout` is additive with an inert default — every existing caller keeps
+    `_WRITE_TIMEOUT`. It exists because the chat read surface below has a
+    tighter bound (`connector_lookup/base.py`'s HTTP_TIMEOUT) and this listing
+    is the first request a chat search makes, so leaving it on the sync path's
+    longer bound would let one slow call outlive the answer it belongs to.
+    """
+    return [
+        w for w in (_get(access_token, "/workspaces", timeout=timeout) or [])
+        if isinstance(w, dict)
+    ]
+
+
+# ─────────────────────────── Live chat-read surface ──────────────────────────
+#
+# The two calls `connector_lookup/asana.py` needs, kept here with the rest of
+# the Asana HTTP layer rather than in the adapter, exactly as Zoom's adapter
+# reads through `zoom_oauth`. Both pass `_READ_TIMEOUT`, NOT `_WRITE_TIMEOUT`:
+# `connector_lookup/base.py` requires every connector read reached from chat to
+# be bounded by its `HTTP_TIMEOUT`, because one slow upstream must not hold a
+# chat answer open. The write surface above keeps its own, longer bound.
+
+#: Mirror of `connector_lookup.base.HTTP_TIMEOUT`. Not imported from there —
+#: `connectors/` must not depend on `connector_lookup/`, which imports it — so
+#: the coupling is held by a test asserting the two are equal instead.
+_READ_TIMEOUT = 15
+
+#: Fields asked of a typeahead hit. Asana returns `gid` + `name` by default;
+#: everything else here is what turns a bare hit into a line a person can act
+#: on (where it lives, who has it, whether it's done) without a second fetch.
+#:
+#: `notes` is deliberately ABSENT. It is a valid task field, but asking for it
+#: on a 20-hit typeahead pulls twenty full task descriptions across the wire on
+#: a call whose whole justification is that it is one small round trip inside a
+#: chat turn — and nothing rendered from a search hit shows a description
+#: anyway. `asana_get_task` is where a body is worth paying for.
+TYPEAHEAD_FIELDS = (
+    "name,completed,permalink_url,modified_at,due_on,start_on,"
+    "assignee.name,assignee.email,"
+    "memberships.project.gid,memberships.project.name,"
+    "memberships.section.gid,memberships.section.name"
+)
+
+#: Hits asked of ONE typeahead call. Asana caps `count` at 100; a keyword probe
+#: that returns more than this is a query too broad to be useful, and the whole
+#: point of the bound is that a live chat read stays one small round trip.
+TYPEAHEAD_COUNT = 20
+
+
+def typeahead_tasks(
+    access_token: str,
+    workspace_gid: str,
+    query: str,
+    *,
+    count: int = TYPEAHEAD_COUNT,
+) -> list[dict[str, Any]]:
+    """Tasks in one workspace whose NAME matches `query`
+    (GET /workspaces/{gid}/typeahead).
+
+    TYPEAHEAD, NOT SEARCH, AND THAT IS A PLAN CONSTRAINT RATHER THAN A CHOICE.
+    Asana's real search endpoint (`/workspaces/{gid}/tasks/search`, which does
+    match task NOTES) is a Premium/Business-only API: on a free or Starter
+    workspace it answers 402 and a connector built on it would work in
+    development and fail for a real customer. Typeahead is available on every
+    plan. The cost is honest and stated to the model in the adapter's system
+    block: this matches TASK TITLES only, so a task whose description discusses
+    the topic and whose title does not will not be found.
+
+    Returns [] for an empty query — typeahead with no query returns the
+    workspace's recently-viewed tasks, which is not what any caller here wants
+    and would read as "these tasks match your topic".
+    """
+    if not (query or "").strip() or not workspace_gid:
+        return []
+    r = requests.get(
+        f"{ASANA_API}/workspaces/{workspace_gid}/typeahead",
+        params={
+            "resource_type": "task",
+            "query": query,
+            "count": max(1, min(count, 100)),
+            "opt_fields": TYPEAHEAD_FIELDS,
+        },
+        headers=_headers(access_token),
+        timeout=_READ_TIMEOUT,
+    )
+    _raise_for(r, "typeahead")
+    data = (r.json() or {}).get("data")
+    return [t for t in (data or []) if isinstance(t, dict) and t.get("gid")]
+
+
+def get_task_raw(access_token: str, task_gid: str) -> dict[str, Any] | None:
+    """One task as Asana's OWN dict (GET /tasks/{gid}), or None when it is gone.
+
+    Deliberately NOT `get_task` above: that one normalizes into the shape the
+    two-way ticket sync reconciles and needs a `project_gid` to resolve the
+    task's section. A chat read has no project in hand — it arrives with a gid
+    off a typeahead hit — and the KG record it builds wants Asana's raw fields,
+    so this returns them unshaped and lets the caller pick.
+
+    Raises AsanaAuthExpiredError on 401/403 (via `_raise_for`) so a dead token
+    surfaces as a reconnect rather than an empty answer; 404/410 is None.
+    """
+    if not (task_gid or "").strip():
+        return None
+    r = requests.get(
+        f"{ASANA_API}/tasks/{task_gid}",
+        params={"opt_fields": _TASK_OPT_FIELDS},
+        headers=_headers(access_token),
+        timeout=_READ_TIMEOUT,
+    )
+    if r.status_code in (404, 410):
+        return None
+    _raise_for(r, "get_task_raw")
+    data = (r.json() or {}).get("data")
+    return data if isinstance(data, dict) else None
 
 
 def _projects_in_workspace(access_token: str, ws: str) -> list[dict[str, Any]]:
