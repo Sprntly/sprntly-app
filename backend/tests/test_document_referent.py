@@ -248,12 +248,19 @@ _KITCHEN_SINK_SUMMARY = (
     "Pricing strategy for enterprise accounts, revenue booked last quarter, "
     "engineering team headcount and billing squads, customer and customers "
     "complaints, churn and churning drivers, activation for new signups, and "
-    "what we should build next."
+    "what we should build next. Also covers the roadmap, support and the "
+    "outage, sales and pricing pushback, the migration, and the new dashboard "
+    "for users."
 )
 _KITCHEN_SINK_TOPICS = [
     "pricing strategy", "revenue", "team headcount", "billing", "engineers",
     "customer complaints", "customers", "churn", "churning", "activation",
     "signups", "roadmap", "enterprise accounts", "prices",
+    # Vocabulary for HUMAN_SUBJECT_QUESTIONS below, for the same reason: two
+    # of those seven survived the guard-1 mutation because the floor caught
+    # them, so they were not testing guard 1 either.
+    "support", "outage", "sales", "pushback", "migration", "dashboard",
+    "users", "onboarding", "headcount",
 ]
 
 
@@ -394,6 +401,91 @@ REAL_PRODUCT_MESSAGES_WITHOUT_DOCUMENT_CUE = [
     "is it a web-rendered page, a data-driven report component, or something else?",
     "page is sign in page What should the toast say",
 ]
+
+
+#: "What does <a human group> say about X" — a question about PEOPLE, not
+#: about a document, and the residual of the exact failure this task exists to
+#: prevent.
+#:
+#: The cue pattern used to carry a third alternative,
+#: `what (does|did) .{0,40}? <reading verb>`, with no requirement that the
+#: subject be a document. All seven of these cleared guard 1 on the strength
+#: of the verb alone, and against a plausible one-entry shortlist they cleared
+#: guard 2 as well — leaving the adjudicator, the ONE guard no test can
+#: exercise, as the only thing between "what does the team say about the
+#: roadmap?" and a wiki page asserted as its subject.
+#:
+#: These are also precisely the phrasings the Slack voice-of-customer work
+#: makes routine — "what did customers say about onboarding?" is its flagship
+#: question — and both features ship into the same chat.
+HUMAN_SUBJECT_QUESTIONS = [
+    "what does the team say about the roadmap?",
+    "what did customers say about onboarding?",
+    "what does support say about the outage?",
+    "what does sales say about pricing pushback?",
+    "what did engineering say about the migration?",
+    "what does the CEO say about headcount?",
+    "what did users say about the new dashboard?",
+]
+
+
+@pytest.mark.parametrize("question", HUMAN_SUBJECT_QUESTIONS)
+def test_a_question_about_what_people_said_is_not_a_document_question(question):
+    """Guard 1 must stop these deterministically, not delegate them to a model.
+
+    A reading verb describes what a SOURCE did, and people are sources too. A
+    document question says which document with a noun ("what does the SPEC
+    say") or refers back to one ("what does IT say"); neither of those routes
+    is affected by refusing this one."""
+    from app.document_referent import has_anaphor, has_document_cue
+
+    assert has_document_cue(question) is False
+    assert has_anaphor(question) is False
+
+
+@pytest.mark.parametrize("question", HUMAN_SUBJECT_QUESTIONS)
+def test_human_subject_questions_never_reach_the_adjudicator(
+    isolated_settings, catalog_candidates, adjudicator, confluence_pages, question
+):
+    """The same seven, end to end, with every other guard defeated on purpose:
+    the shortlist is a single entry whose title and topics carry the question's
+    content words (so the floor passes), and the fake adjudicator is set to say
+    yes to anything. Only guard 1 can hold this line, and the assertion is that
+    the model is never even asked."""
+    from app.ask_runner import document_grounding
+    from app.prompts import DOCUMENT_REFERENT_HEADING
+
+    db = isolated_settings["supabase"]
+    _seed_floor_defeating_page(db)
+    catalog_candidates([_candidate(
+        provider="confluence", external_id="page-everything",
+        title="Company Overview 2026", source_name="Strategy",
+        summary=_KITCHEN_SINK_SUMMARY, topics=_KITCHEN_SINK_TOPICS,
+    )])
+    confluence_pages(page={"id": "page-everything", "text": "Everything."})
+    adjudicator.picks(1)
+
+    block, manifest = document_grounding(_CID, question)
+
+    assert adjudicator.calls == [], (
+        f"{question!r} reached the adjudicator — a question about what PEOPLE "
+        f"said must be stopped by the deterministic gate, not by a model"
+    )
+    assert _referent_matches(manifest) == []
+    assert DOCUMENT_REFERENT_HEADING not in block
+
+
+def test_naming_a_document_kind_still_works_after_the_human_subject_fix():
+    """The other side of that removal: refusing "what does the team say" must
+    not cost "what does the spec say". Both are `what does X say`; only the
+    document noun separates them, and that separation is the whole fix."""
+    from app.document_referent import has_document_cue
+
+    assert has_document_cue("what does the spec say about rollbacks?") is True
+    assert has_document_cue("what does the onboarding doc say?") is True
+    assert has_document_cue("according to the security review, what changed?") is True
+    # And the anaphoric route is untouched.
+    assert has_document_cue("what does it say about pricing?") is True
 
 
 @pytest.mark.parametrize("message", REAL_PRODUCT_MESSAGES_WITHOUT_DOCUMENT_CUE)
@@ -821,6 +913,92 @@ class TestCarryForward:
         entry = next(m for m in manifest if m["file_id"] == "confluence:page-team")
         assert entry["match"] == "named"
         assert _referent_matches(manifest) == []
+
+    def test_a_versioned_title_family_is_not_a_false_ambiguity(self):
+        """"See Q3 Roadmap v2 for the plan" names ONE document, but titles are
+        matched as substrings so it hits both "Q3 Roadmap v2" and "Q3 Roadmap".
+
+        Reported as an ambiguity, that turn would make the model stop and ask
+        which document the user meant — on a turn that was perfectly clear.
+        Confluence page families ("... v2", "... 2026", "... (draft)") make
+        this the normal case, and a spurious "which did you mean?" is its own
+        wrong answer. The longer title is the one actually written; the
+        shorter matched only as its prefix."""
+        from app.document_referent import (
+            MATCH_CARRIED,
+            KnownDocument,
+            carried_referent,
+        )
+
+        known = [
+            KnownDocument(key="c:1", title="Q3 Roadmap", provider="confluence"),
+            KnownDocument(key="c:2", title="Q3 Roadmap v2", provider="confluence"),
+        ]
+        result = carried_referent(
+            "what does it say about the plan?",
+            [{"role": "assistant", "content": "See Q3 Roadmap v2 for the plan."}],
+            known,
+        )
+
+        assert result.ambiguous_titles == []
+        assert result.how == MATCH_CARRIED
+        assert result.referent.title == "Q3 Roadmap v2"
+
+    def test_genuinely_distinct_titles_still_tie(self):
+        """The guard against over-collapsing: "Q3 Roadmap" and "Q4 Roadmap" do
+        not contain one another, so a turn naming both is still an ambiguity.
+        Keeping the longest must not become "keep any one of them"."""
+        from app.document_referent import KnownDocument, carried_referent
+
+        known = [
+            KnownDocument(key="c:1", title="Q3 Roadmap", provider="confluence"),
+            KnownDocument(key="c:2", title="Q4 Roadmap", provider="confluence"),
+        ]
+        result = carried_referent(
+            "what does it say about the plan?",
+            [{"role": "user", "content": "compare Q3 Roadmap with Q4 Roadmap"}],
+            known,
+        )
+
+        assert result.referent is None
+        assert sorted(result.ambiguous_titles) == ["Q3 Roadmap", "Q4 Roadmap"]
+
+    def test_a_short_title_still_counts_toward_an_AMBIGUITY(self):
+        """The short-title rule bars a document from BEING the referent. It
+        must not also hide that document from the tie check.
+
+        Filtering short titles before the naming scan meant a turn citing both
+        `[Source: Pricing]` and `[Source: Enterprise Pricing Model 2026]` saw
+        only one carryable name and asserted it — a silent pick on a turn that
+        cited two sources, which is exactly what the ambiguity branch exists
+        to prevent. A short title is weak evidence for what the user MEANT; it
+        is perfectly good evidence that two documents were on the table."""
+        from app.document_referent import KnownDocument, carried_referent
+
+        known = [
+            KnownDocument(key="c:1", title="Pricing", provider="confluence"),
+            KnownDocument(
+                key="c:2", title="Enterprise Pricing Model 2026",
+                provider="confluence",
+            ),
+        ]
+        result = carried_referent(
+            "what does it say about seat bands?",
+            [{
+                "role": "assistant",
+                "content": (
+                    "Both cover it. [Source: Pricing] "
+                    "[Source: Enterprise Pricing Model 2026]"
+                ),
+            }],
+            known,
+        )
+
+        assert result.referent is None, (
+            "two cited sources must not resolve to one silently, even when "
+            "one of them is too short to carry on its own"
+        )
+        assert "Pricing" in result.ambiguous_titles
 
     def test_a_short_generic_title_does_not_carry(self, isolated_settings):
         """A title short enough to substring-match ordinary prose ("Notes")

@@ -183,10 +183,32 @@ _ANAPHOR_RE = re.compile(
 #: Pointing at a document at all — by description, by anaphor, or by asking
 #: what a source says. A message with none of this is not a document question,
 #: and no amount of ranking may turn it into one.
+#: Pointing at a document at all — by naming the kind of thing it is, or by
+#: attribution ("according to ..."). A message matching neither of these, and
+#: carrying no anaphor, is not a document question and no amount of ranking
+#: may turn it into one.
+#:
+#: THERE USED TO BE A THIRD ALTERNATIVE HERE and its removal is the most
+#: important line in this file. It read
+#: `what (does|did) .{0,40}? <reading verb>` — any subject at all — so
+#: "what does the TEAM say about the roadmap?" and "what did CUSTOMERS say
+#: about onboarding?" cleared guard 1 on the strength of a verb. Seven such
+#: phrasings then cleared guard 2 as well against a plausible shortlist,
+#: leaving the adjudicator as the only thing between an ordinary question
+#: about people and a wiki page asserted as its subject. Those are also
+#: precisely the phrasings the Slack voice-of-customer work will make routine,
+#: so the two features would have collided in the same chat.
+#:
+#: Deleting it costs nothing measurable. Over 986 real user turns from the
+#: shared database it was the SOLE match for three messages — "what does the
+#: transcripts say?", "what does the research connector says", "What did the
+#: App Store say?" — and not one of those is a catalogued document either. A
+#: question that genuinely points at a document says so with a noun
+#: ("what does the SPEC say") and is caught by the first alternative, or
+#: refers back ("what does IT say") and is caught by `_ANAPHOR_RE`.
 _CUE_RE = re.compile(
     rf"\b{_CUE_NOUNS}\b"
-    rf"|\b(?:according\s+to|as\s+per)\b"
-    rf"|\bwhat\s+(?:does|did)\s+.{{0,40}}?\b{_READING_VERBS}\b",
+    rf"|\b(?:according\s+to|as\s+per)\b",
     re.I,
 )
 
@@ -320,11 +342,17 @@ def carried_referent(
     unverifiable by the very model being told to rely on it."""
     if not has_anaphor(question):
         return Resolution()
-    carryable = [
-        doc for doc in known
-        if len(doc.title_norm) >= MIN_CARRY_TITLE_CHARS
-    ]
-    if not carryable:
+    # EVERY known document is scanned for, including titles too short to
+    # carry. The short-title rule bars a document from BEING the referent; it
+    # must not also hide that document from the TIE CHECK. Filtering here (the
+    # original shape) meant a turn citing both `[Source: Pricing]` and
+    # `[Source: Enterprise Pricing Model 2026]` saw only one carryable name
+    # and asserted it — a silent pick on a turn that cited two sources, which
+    # is the exact outcome the ambiguity branch exists to prevent. A short
+    # title is weak evidence for what the user MEANT; it is perfectly good
+    # evidence that more than one document was on the table.
+    candidates_by_title = [doc for doc in known if doc.title_norm]
+    if not candidates_by_title:
         return Resolution()
     turns = list(history or [])[-HISTORY_TURNS_SCANNED:]
     for turn in reversed(turns):
@@ -334,16 +362,67 @@ def carried_referent(
         turn_norm = _normalize(text)
         named: list[KnownDocument] = []
         seen: set[str] = set()
-        for doc in carryable:
+        for doc in candidates_by_title:
             if doc.title_norm in turn_norm and doc.key not in seen:
                 seen.add(doc.key)
                 named.append(doc)
+        named = _drop_contained_titles(named)
         if not named:
             continue
         if len(named) == 1:
-            return Resolution(referent=named[0], how=MATCH_CARRIED)
+            document = named[0]
+            # Found exactly one, but it is too short to trust as a referent —
+            # "Notes" substring-matches ordinary prose. No referent, and no
+            # ambiguity either: nothing conflicted, we simply cannot tell.
+            if len(document.title_norm) < MIN_CARRY_TITLE_CHARS:
+                return Resolution()
+            return Resolution(referent=document, how=MATCH_CARRIED)
         return Resolution(ambiguous_titles=[doc.title for doc in named])
     return Resolution()
+
+
+def _drop_contained_titles(named: list[KnownDocument]) -> list[KnownDocument]:
+    """Collapse a VERSION FAMILY — a title that is a whole-word prefix of
+    another — keeping the longer.
+
+    Titles are matched as substrings, so an assistant turn saying "See Q3
+    Roadmap v2 for the plan" names BOTH "Q3 Roadmap v2" and "Q3 Roadmap": one
+    mention, two hits, reported as an ambiguity. The block would then order the
+    model to stop and ask which document was meant, on a turn that was
+    completely unambiguous. Confluence page families ("... v2", "... 2026",
+    "... (draft)") make this routine, and a spurious "which did you mean?" is
+    its own kind of wrong answer.
+
+    PREFIX, not containment, and the difference is load-bearing. A version
+    suffix is by definition appended, so the base title is a prefix of the
+    variant. Plain containment over-collapses: "Pricing" sits inside
+    "Enterprise Pricing Model 2026" without being any version of it, and
+    collapsing those two would silently resolve a turn that cited two
+    genuinely different documents — reintroducing the silent pick one line
+    below the code that exists to prevent it.
+
+    The prefix must also end on a word boundary, so "Q3 Road" does not swallow
+    "Q3 Roadmap". Genuinely distinct titles — "Q3 Roadmap" and "Q4 Roadmap" —
+    are neither, and still tie, correctly."""
+    if len(named) < 2:
+        return named
+
+    def _is_version_prefix(shorter: str, longer: str) -> bool:
+        return (
+            len(shorter) < len(longer)
+            and longer.startswith(shorter)
+            and longer[len(shorter)] == " "
+        )
+
+    out: list[KnownDocument] = []
+    for doc in named:
+        if any(
+            other is not doc and _is_version_prefix(doc.title_norm, other.title_norm)
+            for other in named
+        ):
+            continue
+        out.append(doc)
+    return out or named
 
 
 def eligible_candidates(question: str, candidates: list[dict]) -> list[dict]:

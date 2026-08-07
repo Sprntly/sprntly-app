@@ -307,10 +307,20 @@ def test_zero_drive_rows_yields_no_referent_and_no_failure_language(
     false statement dressed as a diagnosis — nothing was ever searched,
     because nothing was ever registered.
 
-    Adjudication is forced ON here (the autouse guard would mask the path) and
-    set to accept whatever it is given, so the only reason no referent appears
-    is that there is no Drive row to resolve to."""
+    Adjudication is replaced with a fake that accepts whatever it is given,
+    and — this is the part the first version of this test got wrong — the
+    candidate RPC is stubbed to return the Confluence row, so the shortlist is
+    genuinely NON-EMPTY and the adjudicator is genuinely REACHED. Without that
+    stub the shortlist was empty before guard 3 ever ran, and the test passed
+    for a reason its own docstring denied: it was proving "an empty shortlist
+    resolves nothing", not "a tenant with no Drive rows resolves no Drive
+    document".
+
+    So the fake is now offered a real, plausible candidate and says yes to it —
+    and the assertion is that what comes back is still not a Drive referent,
+    and that nothing in the block reports anything about Drive at all."""
     from app import ask_runner, document_referent
+    from tests._fake_supabase import FakeSupabaseClient
 
     db = isolated_settings["supabase"]
     _seed_company(db)
@@ -321,25 +331,70 @@ def test_zero_drive_rows_yields_no_referent_and_no_failure_language(
         "summary": "Ship dates for the August release.",
         "topics": ["release notes"], "doc_date": "2026-08-02T10:00:00+00:00",
     }).execute()
+    FakeSupabaseClient.rpc_returns["document_find_candidates"] = [{
+        "id": "cat-page-1", "provider": "confluence", "external_id": "page-1",
+        "title": "Release notes", "source_name": "SD",
+        "summary": "Ship dates for the August release.",
+        "topics": ["release notes"], "url": None,
+        "doc_date": "2026-08-02T10:00:00+00:00",
+        "conversation_id": None, "score": 0.04,
+    }]
+    consulted: list[list] = []
+
+    def _yes(**kw):
+        consulted.append(kw["candidates"])
+        return kw["candidates"][0].get("external_id") if kw["candidates"] else None
+
+    monkeypatch.setattr(document_referent, "adjudicate", _yes)
     monkeypatch.setattr(
-        document_referent, "adjudicate",
-        lambda **kw: kw["candidates"][0].get("external_id") if kw["candidates"] else None,
+        document_referent, "eligible_candidates",
+        lambda question, candidates: candidates[:5],
+    )
+    # Let the Confluence body fetch SUCCEED. Unstubbed it raises, and the
+    # honesty contract then (correctly) writes "its contents could not be
+    # loaded" into the block — true of Confluence, and nothing to do with
+    # Drive. Leaving it failing would make this test trip over an unrelated
+    # correct behaviour instead of isolating the property it is named for.
+    from app.connectors import confluence_fetch
+
+    monkeypatch.setattr(confluence_fetch, "open_session", lambda eid: object())
+    monkeypatch.setattr(
+        confluence_fetch, "get_page",
+        lambda session, page_id: {"id": page_id, "text": "August ships on the 14th."},
+    )
+    try:
+        block, manifest = ask_runner.document_grounding(
+            _CID, "what does the billing doc say about usage?"
+        )
+    finally:
+        FakeSupabaseClient.rpc_returns.pop("document_find_candidates", None)
+
+    # The precondition the first version of this test silently lacked.
+    assert consulted and consulted[0], (
+        "the adjudicator was never offered a candidate — this test would pass "
+        "against an empty shortlist and prove nothing about Drive"
     )
 
-    block, manifest = ask_runner.document_grounding(
-        _CID, "what does the billing doc in google drive say about usage?"
-    )
-
-    assert not [
+    # The claim is specifically that no GOOGLE DRIVE document is resolved —
+    # not that nothing resolves. The forced-yes fake does pick the Confluence
+    # page, which is the correct shape of behaviour for a tenant whose only
+    # catalogued document is that page; asserting "no referent at all" here
+    # would be asserting the fake's leniency rather than the Drive property.
+    referents = [
         m for m in manifest
         if m.get("match") in (document_referent.MATCH_CARRIED,
                               document_referent.MATCH_RESOLVED)
     ]
+    assert not [m for m in referents if m["file_id"].startswith("google_drive:")], (
+        "a Drive document was resolved on a tenant with zero Drive catalog rows"
+    )
+    # Drive is not mentioned AT ALL — not as a source, not as a failure, not
+    # as an absence. Nothing was searched, so there is nothing truthful to
+    # say, and "we could not find that in your Drive" would be a false
+    # statement wearing the costume of a diagnosis.
     lowered = block.lower()
-    for forbidden in (
-        "could not be loaded", "does not exist", "no such document",
-        "not in any connected source", "google drive",
-    ):
+    for forbidden in ("google drive", "gdrive", "does not exist",
+                      "no such document", "not in any connected source"):
         assert forbidden not in lowered, (
             f"a tenant with no Drive rows emitted {forbidden!r} — nothing was "
             f"searched, so nothing may be reported about Drive"

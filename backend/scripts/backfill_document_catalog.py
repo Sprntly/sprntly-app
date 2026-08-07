@@ -43,6 +43,12 @@ unresolved.
     # Then commit both steps:
     python scripts/backfill_document_catalog.py --drive --derive-locations --apply
 
+READ THE DRY RUN CAREFULLY: because it persists nothing, the derived locations
+are not visible to the catalog pass that follows, so files that WOULD be
+registered are still counted `no_body` and the run reports `registered: 0`.
+The log says so explicitly at the point it happens. The number to read in a
+dry run is `locations {updated: N}` — that N is what `--apply` will register.
+
 Cost + safety, stated plainly because this script spends money:
 
   * Each newly registered document costs ONE fast-model summary call plus one
@@ -152,6 +158,23 @@ def main() -> int:
                         "%s %s — locations %s",
                         "OK   " if args.apply else "WOULD", company_id, located,
                     )
+                    # A dry run derives locations WITHOUT writing them, so the
+                    # catalog pass below still reads md_file as unset and
+                    # counts every one of these files `no_body` — reporting
+                    # `registered: 0` for a tenant that is in fact fully
+                    # reachable. Left unsaid, the operator reads those two
+                    # lines together and concludes there is nothing to
+                    # register, which is the precise wrong conclusion this
+                    # script exists to prevent. So say it, on the line right
+                    # before the misleading one.
+                    if not args.apply and located.get("updated"):
+                        logger.info(
+                            "      %s — NOTE: %s file(s) would gain a location, "
+                            "but a dry run does not persist it, so they are "
+                            "counted `no_body` below. Re-run with --apply to "
+                            "register them.",
+                            company_id, located["updated"],
+                        )
             if args.drive:
                 # Drive's dry run goes through the SAME function with
                 # apply=False rather than a separate count, so what a dry run
