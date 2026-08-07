@@ -132,6 +132,14 @@ def _run_sync(
     embedding_token = ask_runner.set_active_question_embedding(
         embedding, embedding_degraded
     )
+    # The prior turns, by the same route and for the same reason: document
+    # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
+    # is without them, and the skill-routed path reaches document grounding
+    # through `qa_agent._answer_single_shot`, which calls it positionally.
+    # `history` is already loaded and already this function's parameter —
+    # `routes.ask._load_history` fetched it, ownership-checked, before the job
+    # started — so this publishes what is in hand rather than reading again.
+    history_token = ask_runner.set_active_history(history)
     try:
         payload = qa_agent.answer(
             enterprise_id=enterprise_id,
@@ -158,6 +166,7 @@ def _run_sync(
     finally:
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
+        ask_runner.reset_active_history(history_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask

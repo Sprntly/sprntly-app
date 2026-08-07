@@ -599,6 +599,23 @@ present both and label which one is the company's stated view.
 does not contain, and never extend it by inference."""
 
 
+# ── Ask × document resolution: the two markers rules 10-11 key off ──────────
+# Emitted into the rendered documents block by
+# `document_referent.render_referent_block`, quoted verbatim by
+# ASK_SYSTEM_DOCUMENTS_ADDENDUM below. They live in THIS module, not in
+# `document_referent`, because prompts.py is a leaf with no imports and must
+# stay one — the dependency runs resolver → prompts, never the reverse.
+#
+# One definition, two consumers, on purpose. The previous attempt at document
+# resolution shipped an abstention guard that was DEAD IN PRODUCTION: the
+# heading it searched for was emitted into the system prompt and matched
+# against assistant content, so the two strings could never meet. Sharing the
+# constant makes that drift impossible to write, and
+# `test_document_referent.py` asserts both ends still point at it.
+DOCUMENT_REFERENT_HEADING = "The document this question is about"
+DOCUMENT_AMBIGUOUS_HEADING = "Which document this question is about is UNCLEAR"
+
+
 # ── Ask × uploaded documents (existence-vs-retrieval contract) ──────────────
 # When `document_grounding` (app.ask_runner) renders a non-empty "UPLOADED
 # DOCUMENTS" block into the cacheable prefix, this clause is appended to
@@ -671,7 +688,21 @@ selected and could NOT be fetched, and the entry says why. This is NOT \
 absence. Say the document exists, say plainly that its contents could not be \
 loaded and give the stated reason, and offer to try again. Never turn a \
 failure to fetch into a claim that the document does not exist, is not \
-connected, or was never uploaded."""
+connected, or was never uploaded.""" + f"""
+10. A section headed "{DOCUMENT_REFERENT_HEADING}" names the one document the user's \
+message is about — worked out from what they wrote and from the earlier turns \
+of this conversation, which is how a message like "what does it say about \
+pricing?" gets a subject at all. When that section is present, answer about \
+THAT document. It tells you which document is meant and nothing more: whether \
+its contents were loaded is the Index's business, and rules 2 and 9 above \
+still decide what you may say about it. Most questions have no such section, \
+and that is normal — it means the question was not about a specific document, \
+so do not go looking for one to answer about.
+11. A section headed "{DOCUMENT_AMBIGUOUS_HEADING}" means the message refers to a \
+document but more than one could be it, and it names them. Ask the user which \
+one they mean. Do not choose for them, and do not answer from one of them \
+while mentioning the others — the whole point of that section is that the \
+answer depends on a choice only the user can make."""
 
 
 # Post-corpus user template used when a KG context section is composed in.

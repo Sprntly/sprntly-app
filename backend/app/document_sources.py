@@ -399,6 +399,112 @@ def backfill_catalog(company_id: str, *, limit: Optional[int] = None) -> dict:
     return counts
 
 
+def backfill_drive_catalog(
+    company_id: str, *, apply: bool = True, limit: Optional[int] = None
+) -> dict:
+    """Register every ALREADY-SYNCED Google Drive file for one company.
+
+    THIS EXISTS BECAUSE DRIVE'S CATALOG IS EFFECTIVELY EMPTY, and no amount of
+    resolution cleverness can find a document that was never registered.
+    Measured on the shared database 2026-08-07: 27 `confluence` rows across
+    two tenants, and ONE `google_drive` row — for a file edited the day
+    before. That single row is the signature of the bug rather than a
+    counter-example to it.
+
+    The cause is an asymmetry between the two pullers. `drive_extract` only
+    ever sees files whose `modifiedTime` moved since the last sync, and
+    catalog registration lives inside that per-file loop — so every Drive file
+    synced before the catalog shipped (2026-08-03) stays invisible to it until
+    a human happens to edit it in Drive. Confluence's puller re-reads its
+    pages, so Confluence backfilled itself on the next sync and looked fine.
+    `scripts/backfill_document_catalog.py` says both connectors are "covered
+    by their next sync", which was true of one of them.
+
+    Reads NOTHING from Google. The body comes from the converted markdown the
+    sync already wrote to the corpus, located through the same `kg_source`
+    provenance row `document_bodies.resolve_drive_body` reads at answer time —
+    so a file this registers is a file that will actually resolve a body, and
+    one whose location is unknown is skipped rather than registered as an
+    entry with nothing behind it. No OAuth, no Drive API quota, no chance of a
+    token refresh race.
+
+    Deliberately does NOT touch `kg_file_mtime`. Advancing the sync's
+    bookkeeping to mean "catalogued" would conflate two different ledgers and
+    could suppress a genuine re-extraction later.
+
+    Idempotent by content hash exactly like `backfill_catalog`: a second run
+    finds every hash unchanged and pays for no summaries.
+
+    Returns {registered, skipped, no_body, errors}. `no_body` is counted apart
+    from `errors` on purpose — it is the expected, non-alarming outcome for a
+    file whose markdown location was never recorded (see
+    `document_bodies.backfill_drive_markdown_paths`, which should be run
+    first), and burying it in an error count would hide how much of a tenant's
+    Drive is genuinely reachable."""
+    from app import document_bodies
+    from app.graph.facade import GraphFacade
+
+    counts = {"registered": 0, "skipped": 0, "no_body": 0, "errors": 0}
+    try:
+        sources = GraphFacade().list_sources(
+            company_id, document_catalog.PROVIDER_GOOGLE_DRIVE
+        )
+    except Exception:  # noqa: BLE001 — per-tenant isolation
+        logger.exception("drive catalog backfill: source list failed for %s", company_id)
+        counts["errors"] += 1
+        return counts
+
+    for source in sources:
+        if limit is not None and counts["registered"] >= limit:
+            break
+        config = dict(source.config or {})
+        file_id = str(config.get("file_id") or "").strip()
+        if not file_id:
+            counts["errors"] += 1
+            continue
+        try:
+            resolved = document_bodies.resolve_drive_body(company_id, file_id)
+            if not resolved.resolved or not (resolved.text or "").strip():
+                # Registering here would put a title in the Index that
+                # resolution could pick as a referent and grounding could
+                # never quote — an entry with nothing behind it, which is the
+                # one shape the index contract forbids.
+                counts["no_body"] += 1
+                continue
+            text = resolved.text or ""
+            content_hash = document_catalog.content_hash_for(text)
+            existing = document_catalog.fetch_document(
+                company_id, document_catalog.PROVIDER_GOOGLE_DRIVE, file_id
+            )
+            if (
+                existing is not None
+                and existing.content_hash == content_hash
+                and existing.summary
+            ):
+                counts["skipped"] += 1
+                continue
+            counts["registered"] += 1
+            if not apply:
+                continue
+            document_catalog.register_document(
+                company_id,
+                provider=document_catalog.PROVIDER_GOOGLE_DRIVE,
+                external_id=file_id,
+                title=(source.label or file_id)[:200],
+                source_name="Google Drive",
+                url=str(config.get("link") or "") or None,
+                doc_date=str(config.get("modified") or "") or None,
+                content_hash=content_hash,
+                get_text=lambda body=text: body,
+            )
+        except Exception:  # noqa: BLE001 — per-file isolation
+            logger.exception(
+                "drive catalog backfill failed for %s/%s", company_id, file_id
+            )
+            counts["errors"] += 1
+    return counts
+
+
 def has_document_sources(company_id: str) -> bool:
     """True iff the company has at least one named document source."""
     return bool(list_document_sources(company_id))
