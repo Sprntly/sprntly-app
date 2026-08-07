@@ -1,0 +1,320 @@
+"""Every test must actually RUN in some CI lane.
+
+THE DEFECT THIS EXISTS FOR (2026-08-07, PR #1109 / T5). The whole
+open-vs-generate eval table — including the three `…-still-generates` negatives,
+which ARE the feature's headline safety property — was `@pytest.mark.integration`
+plus `skipif(not os.getenv("ANTHROPIC_API_KEY"))`. **No workflow anywhere under
+`.github/workflows/` sets that secret.** So those tests skipped in the fast lane
+(excluded by the marker) AND in the integration lane (excluded by the skipif).
+The feature shipped with its safety property covered only by tests that had
+never executed once, and CI was green the entire time.
+
+That is the worst possible state: not "nobody checked", but "someone checked and
+it's fine" — a passing checkmark that stops anyone looking again. See
+`~/sprntly-brain/learnings/guards-that-are-not-guards.md` §3.
+
+WHAT THIS TEST DOES. It reads two things and diffs them:
+
+  1. every environment variable name any workflow under `.github/workflows/`
+     provides — as an `env:` key, or referenced as `${{ secrets.X }}` /
+     `${{ vars.X }}`;
+  2. every environment variable name any `skipif`/`skipUnless` in this suite
+     makes a test's execution CONDITIONAL on.
+
+A name in (2) that is not in (1) is a test that cannot run in CI, ever, under
+any lane. Those are listed in `_KNOWN_UNRUNNABLE` below, each with the reason it
+is tolerated and what deterministic coverage stands in for it. Anything NOT on
+that list fails this test.
+
+WHY A BASELINE REGISTRY AND NOT A FLAT FAIL. Failing outright today would make
+this test red on main from the moment it lands, and a test that is red on main
+gets deleted rather than fixed — which would leave the class unguarded. The
+registry is a ratchet: it names exactly what is currently unexecuted, it is
+checked for staleness (see `test_no_stale_unrunnable_entries`) so it can only
+shrink, and any NEW env-gated test fails closed.
+
+KNOWN BLIND SPOT, stated here rather than discovered later: the registry is
+keyed by (file, env var). Adding a SECOND test gated on `ANTHROPIC_API_KEY` to
+an already-listed file will not fire this check. Keying more finely than the
+file would make the registry churn on every line move, which is worse. The
+mitigation is the reason column: an entry says what deterministic coverage
+stands in for the gated tests in that file, and that claim is a review target.
+
+NOT MARKED `integration` ON PURPOSE — it reads files, costs milliseconds, and
+its entire value is being answerable before a merge.
+"""
+from __future__ import annotations
+
+import ast
+import re
+import warnings
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+TESTS = Path(__file__).resolve().parent
+
+
+# ---------------------------------------------------------------------------
+# The baseline: env-gated tests that no CI lane can run today.
+#
+# Each entry is (test file, env var) -> why it is tolerated. A reason must say
+# what runs INSTEAD, because "this never runs" plus "nothing else covers it" is
+# the exact state that shipped #1109's unguarded safety property.
+#
+# To remove an entry: either provide the variable in a workflow, or delete the
+# skipif. Do not add an entry to make this test green — add it only when the
+# deterministic backstop it names genuinely exists.
+# ---------------------------------------------------------------------------
+_KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
+    ("test_chat_intent_evals.py", "ANTHROPIC_API_KEY"): (
+        "Live-model eval table for the chat intent router. Deterministic "
+        "backstop: the unmarked rule-level tests in the same file, which run "
+        "in the fast lane."
+    ),
+    ("test_qa_agent.py", "ANTHROPIC_API_KEY"): (
+        "One live-model smoke test. The rest of the file is deterministic and "
+        "runs in the fast lane."
+    ),
+    ("test_voc_routing_phrases.py", "ANTHROPIC_API_KEY"): (
+        "Live-model recall/precision measurement for VoC routing. Deterministic "
+        "backstop: the unmarked regex-level phrase tests in the same file."
+    ),
+    ("test_cir_routing_phrases.py", "ANTHROPIC_API_KEY"): (
+        "Live-model recall/precision measurement for CIR routing. Deterministic "
+        "backstop: the unmarked regex-level phrase tests in the same file."
+    ),
+    ("test_document_catalog_ranking_live.py", "DOCUMENT_CATALOG_TEST_DSN"): (
+        "Needs a real Postgres with pgvector to exercise the catalog's ranking "
+        "SQL; psycopg is deliberately absent from requirements. Run locally "
+        "against a scratch database when touching the ranking migration."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# (1) What the workflows provide
+# ---------------------------------------------------------------------------
+
+_CONTEXT_REF = re.compile(r"\$\{\{\s*(?:secrets|vars|env)\.([A-Za-z_][A-Za-z0-9_]*)")
+#: `        FOO: bar` — a mapping key that looks like an env var name. Matched
+#: textually rather than by parsing YAML so this test needs no yaml dependency
+#: and cannot be defeated by an expression the parser chokes on. Over-matching
+#: here is SAFE in the only direction that matters: it can only ever make the
+#: "provided" set larger, i.e. make this test quieter, never louder — so a
+#: false positive from this regex is impossible by construction.
+_ENV_KEY = re.compile(r"^\s{2,}([A-Z][A-Z0-9_]{2,}):\s", re.MULTILINE)
+
+
+def _workflow_env_names() -> set[str]:
+    names: set[str] = set()
+    for path in sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        names.update(_CONTEXT_REF.findall(text))
+        names.update(_ENV_KEY.findall(text))
+    return names
+
+
+# ---------------------------------------------------------------------------
+# (2) What the suite gates execution on
+# ---------------------------------------------------------------------------
+
+_GETENV_FUNCS = {"getenv", "environ"}
+
+
+def _env_names_in(node: ast.AST) -> set[str]:
+    """Every env var name this expression reads.
+
+    Covers `os.getenv("X")`, `os.environ.get("X")` and `os.environ["X"]`.
+    """
+    found: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            fn = sub.func
+            name = getattr(fn, "attr", None)
+            if name in {"getenv", "get"} and sub.args:
+                first = sub.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    # `os.getenv("X")` or `os.environ.get("X")` — but not an
+                    # unrelated `d.get("x")`. Require the receiver to mention os
+                    # or environ.
+                    receiver = ast.unparse(fn)
+                    if "getenv" in receiver or "environ" in receiver:
+                        found.add(first.value)
+        elif isinstance(sub, ast.Subscript):
+            receiver = ast.unparse(sub.value)
+            if "environ" in receiver and isinstance(sub.slice, ast.Constant):
+                if isinstance(sub.slice.value, str):
+                    found.add(sub.slice.value)
+    return found
+
+
+def _module_env_aliases(tree: ast.Module) -> dict[str, set[str]]:
+    """`_DSN = os.getenv("X")` -> {"_DSN": {"X"}}.
+
+    Without this the check is blind to the very common shape of hoisting the
+    lookup to module level and writing `skipif(not _DSN, ...)` — which is how
+    `test_document_catalog_ranking_live.py` is written, so this is load-bearing
+    and not defensive over-engineering.
+    """
+    aliases: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = _env_names_in(node.value)
+            if not names:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    aliases.setdefault(target.id, set()).update(names)
+    return aliases
+
+
+def _is_skip_marker(call: ast.Call) -> bool:
+    fn = ast.unparse(call.func)
+    return fn.endswith("skipif") or fn.endswith("skipUnless")
+
+
+def _gated_env_names(path: Path) -> set[str]:
+    """Env var names this file makes test EXECUTION conditional on."""
+    try:
+        with warnings.catch_warnings():
+            # Some suite files contain regexes with invalid escapes; compiling
+            # their AST is not the place to relitigate that.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:  # pragma: no cover - a broken test file fails elsewhere
+        return set()
+
+    aliases = _module_env_aliases(tree)
+    gated: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_skip_marker(node)):
+            continue
+        condition = node.args[0] if node.args else None
+        if condition is None:
+            continue
+        gated.update(_env_names_in(condition))
+        for sub in ast.walk(condition):
+            if isinstance(sub, ast.Name) and sub.id in aliases:
+                gated.update(aliases[sub.id])
+    return gated
+
+
+def _suite_gates() -> dict[tuple[str, str], None]:
+    out: dict[tuple[str, str], None] = {}
+    for path in sorted(TESTS.rglob("test_*.py")):
+        for name in _gated_env_names(path):
+            out[(path.relative_to(TESTS).as_posix(), name)] = None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The checks
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_env_extraction_is_not_vacuously_empty():
+    """A guard whose input silently became empty passes forever.
+
+    If the workflow glob stops matching (directory moved, files renamed to an
+    extension this does not read), `_workflow_env_names()` returns the empty set
+    — and then EVERY gated var reads as unprovided, which is loud, not silent.
+    The dangerous direction is the reverse: an extraction bug that returns
+    everything. This pins both ends by asserting on a name we know is there.
+    """
+    assert WORKFLOWS.is_dir(), f"no workflows directory at {WORKFLOWS}"
+    provided = _workflow_env_names()
+    assert "NODE_OPTIONS" in provided, (
+        "workflow env extraction found no NODE_OPTIONS — test-web.yml sets it, "
+        f"so the extraction is broken. Found: {sorted(provided)}"
+    )
+
+
+def test_skipif_extraction_is_not_vacuously_empty():
+    """Same argument, other side of the diff.
+
+    This one matters MORE: an extraction that quietly finds nothing makes this
+    whole file a green checkmark over an unread question. Pinned against a shape
+    the suite genuinely contains — a module-level alias (`_DSN = os.getenv(...)`
+    then `skipif(not _DSN)`), which is the harder of the two shapes to parse.
+    """
+    gates = _suite_gates()
+    assert ("test_document_catalog_ranking_live.py", "DOCUMENT_CATALOG_TEST_DSN") in gates, (
+        "skipif extraction missed the module-level-alias shape "
+        "(`_DSN = os.getenv(...)`; `skipif(not _DSN, ...)`). Found: "
+        f"{sorted(gates)}"
+    )
+    assert any(name == "ANTHROPIC_API_KEY" for _f, name in gates), (
+        "skipif extraction missed the direct `skipif(not os.getenv(...))` shape"
+    )
+
+
+def test_no_test_is_gated_on_an_env_var_no_workflow_provides():
+    """A skipif on a variable CI never sets is a test that never runs.
+
+    Fix, in preference order:
+      1. Make the test deterministic so it needs no secret at all — the fix
+         #1109 took, and the only one that actually restores coverage.
+      2. Provide the variable in the workflow that should run it.
+      3. If neither is possible, add it to `_KNOWN_UNRUNNABLE` above WITH the
+         deterministic coverage that stands in for it. An entry with no such
+         coverage is a lie that will pass this test and fail a customer.
+    """
+    provided = _workflow_env_names()
+    unrunnable = {
+        key for key in _suite_gates() if key[1] not in provided
+    }
+    new = sorted(unrunnable - set(_KNOWN_UNRUNNABLE))
+    assert not new, (
+        "these tests are gated on environment variables that NO workflow under "
+        ".github/workflows/ provides, so they skip in EVERY CI lane:\n"
+        + "\n".join(f"  {path}  needs  {var}" for path, var in new)
+        + "\n\nA green CI run says nothing about them. This is how #1109 shipped "
+        "its headline safety property covered only by tests that had never "
+        "executed. Make the test deterministic, or provide the variable, or "
+        "record it in _KNOWN_UNRUNNABLE with the coverage that replaces it."
+    )
+
+
+def test_no_stale_unrunnable_entries():
+    """The baseline may only shrink.
+
+    Without this, an exemption outlives the skipif it excused and the registry
+    slowly becomes a list of things nobody can check — which reads as
+    permission rather than as debt.
+    """
+    gates = set(_suite_gates())
+    provided = _workflow_env_names()
+    stale = sorted(
+        key for key in _KNOWN_UNRUNNABLE
+        if key not in gates or key[1] in provided
+    )
+    assert not stale, (
+        "these _KNOWN_UNRUNNABLE entries no longer describe reality — the "
+        "skipif is gone, the file moved, or CI now provides the variable:\n"
+        + "\n".join(f"  {path}  /  {var}" for path, var in stale)
+        + "\n\nDelete them. The baseline is a ratchet; it only shrinks."
+    )
+
+
+@pytest.mark.parametrize(
+    "marker_line",
+    [
+        '@pytest.mark.skipif(not os.getenv("TOTALLY_UNSET_SECRET"), reason="x")',
+        'pytestmark = pytest.mark.skipif(not os.environ.get("TOTALLY_UNSET_SECRET"), reason="x")',
+        '_K = os.getenv("TOTALLY_UNSET_SECRET")\npytestmark = pytest.mark.skipif(not _K, reason="x")',
+    ],
+)
+def test_the_detector_sees_each_gating_shape(tmp_path, marker_line):
+    """Self-test: the detector is run against known-bad input, in the suite.
+
+    The three shapes are the ones this repo actually uses. A detector that
+    silently stopped recognising one of them would leave this whole file green
+    while the class went unguarded — which is the failure mode the file exists
+    to prevent, so it is checked here rather than trusted.
+    """
+    src = tmp_path / "test_probe.py"
+    src.write_text(f"import os\nimport pytest\n{marker_line}\n\ndef test_x():\n    pass\n")
+    assert _gated_env_names(src) == {"TOTALLY_UNSET_SECRET"}
