@@ -524,6 +524,11 @@ CREATE TABLE connections (
     account_label        TEXT,
     scopes               TEXT NOT NULL DEFAULT '',
     token_json_encrypted TEXT NOT NULL,
+    -- Service-account private key (Fernet-encrypted), separate from the OAuth
+    -- user token above so both coexist on one connection. Mirrors migration
+    -- 20260807120000_connections_sa_key.sql. Never in the client-facing
+    -- serializer's allowlist.
+    sa_key_encrypted     TEXT,
     config               TEXT NOT NULL DEFAULT '{}',
     last_sync_at         TEXT,
     last_sync_error      TEXT,

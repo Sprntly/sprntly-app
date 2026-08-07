@@ -169,6 +169,19 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Drive access mode TOGGLE. "oauth" (DEFAULT) = the existing per-user OAuth
+    # Picker route (drive.file/readonly), unchanged. "service_account" = mint a
+    # per-company service account, the customer shares a folder with its email
+    # out-of-band, and Sprntly enumerates + ingests what the SA can see. The
+    # Drive connector branches on this one value.
+    google_drive_access_mode: str = "oauth"
+    # Bootstrap credential for service_account mode: a GCP project with the IAM
+    # API enabled and a bootstrap SA holding iam.serviceAccountAdmin +
+    # iam.serviceAccountKeyAdmin. Used ONLY to mint per-company SAs. Unset →
+    # service_account mode reports "not configured" rather than half-working.
+    gcp_sa_bootstrap_project: str = ""
+    # Path to the bootstrap SA key JSON on disk, OR the inline JSON itself.
+    gcp_sa_bootstrap_key_json: str = ""
     # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
     #
     # Sharing was the original design (one Cloud project, one client, a second

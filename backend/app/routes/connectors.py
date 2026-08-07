@@ -79,6 +79,7 @@ from app.connectors import (
     github_app,
     google_meet,
     google_oauth,
+    google_service_account,
     hubspot_oauth,
     jira_oauth,
     slack_oauth,
@@ -90,6 +91,7 @@ from app.connectors import (
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     _refresh_credentials,
+    merge_config as _drive_merge_config,
     normalize_picked_files,
     sync_google_drive,
 )
@@ -970,6 +972,112 @@ def google_drive_disconnect(
 
     db.delete_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     return {"deleted": True, "provider": google_oauth.GOOGLE_DRIVE_PROVIDER}
+
+
+# ─────────── Google Drive — SERVICE-ACCOUNT mode ───────────
+# Active only when settings.google_drive_access_mode == "service_account". The customer
+# shares a Drive folder WITH the per-company SA's email out-of-band (Viewer),
+# then Scan enumerates + walks + ingests what the SA can see. No OAuth Picker.
+
+
+class GoogleDriveScanIn(BaseModel):
+    dataset: str | None = None
+
+
+@router.get("/google-drive/mode")
+def google_drive_mode(
+    company: CompanyContext = Depends(require_company),
+):
+    """Which Drive access route is active — so the connector UI knows whether to
+    show the OAuth Picker or the service-account panel. Side-effect free; the
+    single ``GOOGLE_DRIVE_ACCESS_MODE`` env var drives it."""
+    return {
+        "mode": settings.google_drive_access_mode,
+        "service_account_configured": (
+            google_service_account.service_account_mode_configured()
+        ),
+    }
+
+
+def _drive_sa_state(company_id: str) -> dict:
+    """The SA-mode pieces the connector UI needs: email, the walked tree, and
+    the enumerated top-level shared roots (so the tree's roots can be labelled)."""
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = {}
+    if row and row.get("config_json"):
+        try:
+            cfg = json.loads(row["config_json"])
+        except (TypeError, ValueError):
+            cfg = {}
+    return {
+        "service_account_email": cfg.get("service_account_email"),
+        "folder_contents": cfg.get("folder_contents") or {},
+        "shared_roots": cfg.get("sa_shared_roots") or [],
+    }
+
+
+@router.get("/google-drive/service-account")
+def google_drive_service_account(
+    dataset: str | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    """Provision (idempotently) this company's service account and return its
+    email + any already-scanned tree. The customer shares a folder with this
+    email, then calls Scan. Admin-only, like every org-connector mutation."""
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not google_service_account.service_account_mode_enabled():
+        raise HTTPException(400, "Service-account mode is not enabled")
+    if not google_service_account.service_account_mode_configured():
+        raise HTTPException(
+            400,
+            "Service-account mode not configured — set GCP_SA_BOOTSTRAP_PROJECT "
+            "and GCP_SA_BOOTSTRAP_KEY_JSON.",
+        )
+    # Persist the dataset (like OAuth's ?dataset=) so Scan resolves it later.
+    gated = _gate_effective_drive_dataset(dataset, company.company_id)
+    try:
+        email = google_service_account.mint_company_service_account(
+            company.company_id
+        )
+    except google_service_account.ServiceAccountModeError as e:
+        raise HTTPException(400, str(e)) from e
+    if gated:
+        row = db.get_connection(
+            company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER
+        )
+        if row:
+            _drive_merge_config(row, {"dataset": gated})
+    state = _drive_sa_state(company.company_id)
+    # email from the mint is authoritative even if config read raced.
+    state["service_account_email"] = email
+    return state
+
+
+@router.post("/google-drive/service-account/scan")
+def google_drive_service_account_scan(
+    body: GoogleDriveScanIn | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    """Enumerate everything the SA can see (folders shared with it), walk each
+    folder's subtree, and ingest through the same download → KG path as OAuth."""
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not google_service_account.service_account_mode_enabled():
+        raise HTTPException(400, "Service-account mode is not enabled")
+    payload = body or GoogleDriveScanIn()
+    dataset = _gate_effective_drive_dataset(payload.dataset, company.company_id)
+    try:
+        result = google_service_account.sync_service_account(
+            company.company_id, dataset
+        )
+    except google_service_account.ServiceAccountModeError as e:
+        raise HTTPException(400, str(e)) from e
+    except SyncConfigError as e:
+        raise HTTPException(400, str(e)) from e
+    _auto_enable_drive_input_source(company.company_id, dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
+    out = result.to_dict()
+    out.update(_drive_sa_state(company.company_id))
+    return out
 
 
 # ─────────────────────── Figma ───────────────────────

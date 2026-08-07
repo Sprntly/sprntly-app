@@ -2050,6 +2050,15 @@ export type GoogleDriveTreeNode = GoogleDrivePickedFile & {
   parentId?: string | null
 }
 
+/** Service-account mode state for the Drive connector: the per-company SA email
+ *  the customer shares folders with, the enumerated top-level shared roots, and
+ *  the walked subtree keyed by folder id (same shape as OAuth folder_contents). */
+export type GoogleDriveServiceAccountState = {
+  service_account_email?: string | null
+  shared_roots?: GoogleDriveTreeNode[]
+  folder_contents?: Record<string, GoogleDriveTreeNode[]>
+}
+
 /** Short-lived, drive.file-scoped access token for the browser Google Picker. */
 export type GoogleDrivePickerToken = {
   access_token: string
@@ -2149,6 +2158,15 @@ export const connectorsApi = {
     api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
     }),
+  /** Which Drive access route is active ("oauth" | "service_account"). */
+  getGoogleDriveMode: () =>
+    api.get<{ mode: string; service_account_configured: boolean }>(`/v1/connectors/google-drive/mode`),
+  /** SA mode: provision (idempotent) this company's service account; returns its email + any scanned tree. */
+  provisionGoogleDriveServiceAccount: (dataset?: string) =>
+    api.get<GoogleDriveServiceAccountState>(`/v1/connectors/google-drive/service-account${dataset ? `?dataset=${encodeURIComponent(dataset)}` : ""}`),
+  /** SA mode: enumerate + walk + ingest everything shared with the SA. */
+  scanGoogleDriveServiceAccount: (dataset?: string) =>
+    api.post<GoogleDriveSyncResult & GoogleDriveServiceAccountState>(`/v1/connectors/google-drive/service-account/scan`, { dataset }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
     `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
