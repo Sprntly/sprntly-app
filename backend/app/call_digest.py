@@ -1183,7 +1183,8 @@ def _answer_query(
         "_skill_action": (
             f"Voice of customer · answered from {window.label}"
             + (
-                f" + {len(voc.covered_channels)} Slack feedback channels"
+                f" + {len(voc.covered_channels)} Slack feedback channel"
+                f"{'s' if len(voc.covered_channels) != 1 else ''}"
                 if voc and voc.present else ""
             )
             + (f" + {kg.signal_count} stored signals" if kg and kg.present else "")

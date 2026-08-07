@@ -361,8 +361,9 @@ _VOC_CHANNEL_RULE = re.compile(
 _VOC_SAYING_RULE = re.compile(
     r"\b(?:customer|user|client)s?\b(?:\s+\w+){0,3}\s+"
     r"\b(?:say(?:ing|s)?|said|telling|told|complain\w*|report(?:ing|ed)?|"
-    r"flag(?:ging|ged)|ask(?:ing)?\s+for|request(?:ing|ed)?|"
-    r"push(?:ing)?\s+for|unhappy|frustrated)\b",
+    r"flag(?:ging|ged)|ask(?:ing|ed|s)?|request(?:ing|ed|s)?|"
+    r"want(?:ing|s)?|need(?:ing|s)?|push(?:ing)?\s+for|struggl\w*|"
+    r"unhappy|frustrated|confused)\b",
     re.I,
 )
 
@@ -404,6 +405,11 @@ _VOC_RECALL_RULES: list[re.Pattern] = [
     # "what's the sentiment on the redesign", "reaction to the pricing change"
     re.compile(_VOICE_NOUN + r"\s+(?:about|on|around|regarding|towards?|to|with)\b",
                re.I),
+    # Same idea with words in between: "what complaints DO WE HAVE ABOUT order
+    # management?". Only the unambiguous topic markers are allowed to span a
+    # gap — `on`/`to`/`with` are too common to float 25 chars away from their
+    # noun without dragging in unrelated sentences.
+    re.compile(_VOICE_NOUN + r"\b.{0,25}\b(?:about|regarding|concerning)\b", re.I),
     # "what feedback did we get on onboarding", "what feedback has come in"
     re.compile(
         _VOICE_NOUN + r"\b.{0,30}\b(?:did|have|has|are|is)?\s*we?\s*"
@@ -491,23 +497,79 @@ _VOC_RECALL_RULES: list[re.Pattern] = [
 #: the last one is the sharpest, since the user wants a PRD edited and gets a
 #: report.
 #:
-#: Position is NOT used here, unlike `_vetoed_as_creation`. That function needs
-#: it because a create verb can appear inside the thing being searched for
-#: ("ticket about car build thread"); these verbs govern from anywhere in the
-#: sentence ("add X to the backlog", "take the complaints and prioritise them"),
-#: and none of them reads naturally as part of a topic.
+#: POSITION IS USED, and an earlier version of this comment argued it was not.
+#: That argument was wrong and cost 8-in-15 recall on ordinary customer-voice
+#: questions. Every one of these is a real VoC question the position-free veto
+#: stood down, because the "action verb" was the CUSTOMER's action or an
+#: ordinary noun sitting inside the topic:
+#:
+#:   "users complain they can't LOG INTO the app"          log … into
+#:   "customers asking us to ADD TO THE ROADMAP"           add … to the roadmap
+#:   "what do customers want us to PRIORITIZE next?"       prioritize
+#:   "what did users say about the ticket TRIAGE flow?"    triage
+#:   "what complaints about ORDER management?"             order
+#:   "our delivery ESTIMATE is always wrong"               estimate
+#:   "the UPDATE TO THE TICKET flow"                       update … ticket
+#:   "users can't FILE A CLAIM AS a guest"                 file … as
+#:
+#: Two independent guards, because either alone still leaks:
+#:
+#:  1. POSITION (`_vetoed_as_action`) — the verb must appear BEFORE the
+#:     customer/voice noun. A verb buried after a question stem ("what did users
+#:     say about the … triage flow") is part of what is being ASKED ABOUT, not a
+#:     command. Exactly the rule `_vetoed_as_creation` already uses, and for the
+#:     same reason.
+#:  2. AN OBJECT. `order`, `estimate`, `rank`, `schedule`, `triage` are nouns
+#:     first — an order page, a delivery estimate, a triage flow. Requiring a
+#:     determiner-led object ("prioritise THE …", "rank OUR …") is what
+#:     separates the verb sense from the noun sense; a bare verb alternation has
+#:     no way to tell them apart.
 _VOC_ACTION_VETO = re.compile(
+    # transform: "turn X into tickets", "file the complaints as bugs"
     r"\b(?:turn|convert|translate|transform|make|move|pull|push|drop|put|file|"
     r"promote|copy|log|raise|open)\b[^.?!]{0,60}\b(?:into|onto|as)\b"
+    # open a work item: "file a ticket for …", "raise a bug about …"
+    r"|\b(?:file|open|raise|log|create|cut)\s+(?:a|an|the|some)?\s*"
+    r"(?:ticket|bug|issue|story|epic|task)s?\b"
+    # append to a named surface: "add X to the backlog"
     r"|\badd\b[^.?!]{0,60}\bto\s+(?:the\s+)?"
     r"(?:backlog|roadmap|sprint|board|prd|ideation|epic|list|queue)\b"
+    # reprioritise, WITH a determiner-led object so the noun senses are excluded
     r"|\b(?:prioriti[sz]e|re-?prioriti[sz]e|rank|order|triage|groom|estimate|"
-    r"assign|schedule)\b"
+    r"assign|schedule)\s+(?:the|these|those|our|all|top|every|"
+    r"customers?|users?|clients?)\b"
+    # amend a named artifact: "update the PRD with …"
     r"|\b(?:update|amend|revise|edit|append|extend|augment|incorporate|"
     r"fold|merge|add)\b[^.?!]{0,40}\b(?:prd|ticket|spec|backlog|roadmap|"
     r"document|doc|story|stories|epic|brief)\b",
     re.I,
 )
+
+#: The noun an action veto has to GOVERN to count. Position is measured against
+#: the first of these — the thing the question is about.
+_VOC_SUBJECT = re.compile(
+    _VOICE_NOUN + r"|" + _CUSTOMER_NOUN + r"|" + _AMBIGUOUS_NOUN, re.I
+)
+
+
+def _vetoed_as_action(question: str) -> bool:
+    """True when an action verb GOVERNS this request rather than sitting inside
+    the topic it asks about.
+
+    Same shape as `_vetoed_as_creation`, and deliberately so: a verb before the
+    customer/voice noun is a command about what to DO with customer feedback; a
+    verb after it is part of what is being asked about. "add the top complaints
+    to the backlog" is a command; "what features are customers asking us to add
+    to the roadmap?" is a question whose ANSWER happens to mention adding.
+
+    A veto with no subject noun at all is still a veto — "turn it into tickets"
+    names nothing customer-ish and is plainly an action.
+    """
+    m_veto = _VOC_ACTION_VETO.search(question)
+    if m_veto is None:
+        return False
+    m_subject = _VOC_SUBJECT.search(question)
+    return m_subject is None or m_veto.start() < m_subject.start()
 
 #: A request for feedback ON OUR OWN WORK is not voice of customer.
 #: "give me feedback on my PRD draft" and "summarize the feedback from the beta
@@ -538,9 +600,12 @@ def is_voc_report_request(question: str) -> bool:
 
     ACTION REQUESTS. "turn what customers are asking for into tickets", "add the
     top complaints to the backlog", "prioritize the top customer requests",
-    "update the PRD with what customers are saying". See `_VOC_ACTION_VETO` —
+    "update the PRD with what customers are saying". See `_vetoed_as_action` —
     these are the verb families `_vetoed_as_creation` does not cover, and every
-    one is an everyday phrasing.
+    one is an everyday phrasing. It is POSITION-AWARE and object-constrained;
+    a version without either stood down 8-in-15 real customer-voice questions,
+    because the same verbs appear as the customer's own action ("can't log into
+    the app") or as ordinary nouns ("delivery estimate", "order management").
 
     GENERATIVE REQUESTS. "write a PRD for the feature customers are asking for"
     and "our users are frustrated with onboarding — draft tickets for it" are
@@ -558,7 +623,7 @@ def is_voc_report_request(question: str) -> bool:
     """
     if (
         _vetoed_as_creation(question)
-        or _VOC_ACTION_VETO.search(question)
+        or _vetoed_as_action(question)
         or _VOC_SELF_REVIEW_VETO.search(question)
     ):
         return False

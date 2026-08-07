@@ -881,6 +881,43 @@ def test_ambiguous_nouns_need_a_customer_noun_to_count_as_voice():
         assert is_voc_report_request(q), q
 
 
+def test_a_real_voc_question_containing_an_action_verb_still_routes():
+    """THE AXIS BOTH EARLIER SETS WERE MISSING, and the reason 14/14 and then
+    22/22 both looked clean while the veto was eating real questions.
+
+    Every one of these is a genuine customer-voice question that HAPPENS to
+    contain a word the action veto keys on — because the verb is the CUSTOMER's
+    own action ("can't log into the app", "can't file a claim as a guest") or an
+    ordinary noun sitting in the topic ("order management", "delivery estimate",
+    "triage flow", "the schedule screen").
+
+    A position-free, object-free veto stood down 8 of 15 of these. Two guards
+    fix it and both are needed: the verb must come BEFORE the customer/voice
+    noun (`_vetoed_as_action`, the same rule `_vetoed_as_creation` uses), and
+    the bare reprioritise verbs need a determiner-led object so the noun senses
+    are excluded."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "users complain they can't log into the app",
+        "what features are customers asking us to add to the roadmap?",
+        "what do customers want us to prioritize next quarter?",
+        "what did users say about the ticket triage flow?",
+        "what complaints do we have about order management?",
+        "customers say our delivery estimate is always wrong",
+        "what do customers say about the update to the ticket flow?",
+        "users complain they can't file a claim as a guest",
+        "what do customers think of the new order flow",
+        "users say the schedule screen is confusing",
+        "what feedback did we get about the assign-to-me button",
+        "customers complain the rank ordering is wrong",
+        "what are users saying about triage times",
+        "clients keep asking us to add dark mode",
+        "what do customers say about how we estimate delivery",
+    ]:
+        assert is_voc_report_request(q), q
+
+
 def test_an_action_request_is_never_diverted_into_a_voc_report():
     """The verb families `_vetoed_as_creation` does NOT cover — transform,
     append, reprioritise, amend. Every one carries a customer noun and a
@@ -910,6 +947,11 @@ def test_an_action_request_is_never_diverted_into_a_voc_report():
         "assign the top user complaints to me",
         "append the customer requests to the roadmap",
         "promote the top customer requests into epics",
+        # "file a ticket FOR …" has no into/onto/as, so the transform rule
+        # missed it and `_RANK_WORD + pain points` then claimed it.
+        "file a ticket for the top pain points",
+        "raise a bug for the top complaint",
+        "open a ticket for the biggest complaint",
     ]:
         assert not is_voc_report_request(q), q
 
@@ -1229,6 +1271,42 @@ def test_a_stored_only_answer_does_not_report_zero_slack_channels(slack_env,
     action = payload["_skill_action"]
     assert "0 Slack feedback channels" not in action
     assert "1 Slack feedback channel" in action
+
+
+def test_the_report_path_run_line_counts_slack_channels(slack_env, monkeypatch):
+    """The surviving mutation from the review: the REPORT path's run-line count
+    was unpinned, because every existing test asks a query-shaped question and
+    reaches `_answer_query` instead. A report-shaped ask is needed to exercise
+    it at all.
+
+    Also pins the pluralisation — the label read "1 Slack feedback channels"
+    because the 's' was hardcoded."""
+    import app.call_digest as cd
+    import app.graph.gateway as gateway_mod
+
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    slack_env["catalog"] = []
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "build_kg_context", lambda *a, **k: cd.KgContext())
+    # Report-shaped, not query-shaped — this is what reaches the report path.
+    monkeypatch.setattr(cd, "is_voc_query", lambda q: False)
+
+    class _R:
+        output = {"answer": "## Voice of customer", "key_points": [],
+                  "citations": [], "confidence": 0.6, "unanswered": ""}
+
+    monkeypatch.setattr(gateway_mod, "llm_call", lambda **kw: _R())
+    payload = cd.answer(
+        enterprise_id=COMPANY, question="give me a voice of customer report"
+    )
+
+    action = payload["_skill_action"]
+    assert "1 Slack feedback channel" in action
+    assert "1 Slack feedback channels" not in action     # pluralisation
+    assert "0 Slack feedback" not in action
 
 
 def test_config_keys_match_the_sync_paths_keys():
