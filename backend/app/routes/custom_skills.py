@@ -9,6 +9,16 @@
   GET    /v1/skills/{id}/file       -> signed view/download URLs for the original upload
   DELETE /v1/skills/{id}            -> delete a skill (row + original file)
 
+An import can also REGISTER THE FOLDER rather than just read it (`sync: true`).
+That writes a `skill_sources` row and a half-hourly sweep re-imports whatever
+markdown the folder holds from then on, so a skill added to the repo appears
+without anyone reopening the picker. It changes two things about the skills it
+produces: the tick list stops being the unit (every .md in the folder is a
+skill, later ones included), and they become read-only here — PATCH answers 409,
+because the repo owns the text and the sweep would overwrite a local edit inside
+the half hour. Syncing needs a folder; an empty path is the repo root and is
+refused, since a repository's worth of markdown is not a skill library.
+
 The two `/github/*` routes are declared ABOVE the `/{skill_id}` family, since
 FastAPI matches in declaration order and the catch-all would otherwise answer
 "Skill not found." for them. They read a repo through the GitHub App
@@ -158,6 +168,11 @@ def _skill_payload(row: dict, *, replaced: bool | None = None) -> dict:
         "created_at": row.get("created_at"),
         "has_file": bool(row.get("storage_key")),
         "name_conflict": row["slug"] != slugify(row["name"]),
+        # This skill belongs to a synced GitHub folder, so the repo owns its
+        # text: the Skills screen disables the pencil and PATCH refuses. Derived
+        # from source_id rather than sent as an id, because the client needs the
+        # CONSEQUENCE, not the source's identity.
+        "synced": bool(row.get("source_id")),
     }
     if replaced is not None:
         payload["replaced"] = replaced
@@ -493,6 +508,11 @@ class GithubImportIn(BaseModel):
     path: str = ""
     #: Repo-relative skill folders, exactly as `discover` returned them.
     paths: list[str] = []
+    #: Keep re-reading `path` on the half-hourly sweep, importing whatever
+    #: markdown appears there later. Changes the meaning of the import from
+    #: "these skills I ticked" to "this folder, now and later" — see the
+    #: `sync` handling in the route for why an empty `path` can't have it.
+    sync: bool = False
 
 
 @router.post(
@@ -517,13 +537,39 @@ async def import_github_skills(
     built-in's) and the per-row stored original are identical whether a skill
     arrived in a zip or from a repo. Per-skill failures land in `skipped` and
     the rest still import.
+
+    `sync` REGISTERS THE FOLDER instead of just reading it: a `skill_sources`
+    row is written and the half-hourly sweep re-imports whatever markdown the
+    folder holds from then on, with no one picking anything. Two consequences
+    the caller is buying, both surfaced in the UI before the request is sent:
+
+      - the tick list stops being the unit. Discovery treats every .md under
+        the folder as a skill, so a file added later is imported whether or not
+        anyone would have ticked it — including a README that lives there.
+      - the imported skills become READ-ONLY (PATCH 409s, the pencil is
+        disabled), because the repo owns their text and a local edit would be
+        overwritten within the half hour.
+
+    Syncing needs a real folder. An empty `path` means the repository ROOT, and
+    every markdown file in a whole repo is emphatically not a skill library —
+    so sync is refused there rather than quietly importing a repo's worth of
+    documentation every thirty minutes. The one-shot import at the root is
+    untouched: a human is still ticking those boxes.
     """
     repo = (body.repo or "").strip()
+    folder = (body.path or "").strip().strip("/")
     wanted = {p.strip() for p in (body.paths or [])}
     if not wanted:
         raise HTTPException(422, "Select at least one skill to import.")
+    if body.sync and not folder:
+        raise HTTPException(
+            422,
+            "Choose the folder your skills live in before turning on syncing — "
+            "syncing a whole repository would import every Markdown file in it "
+            "as a skill.",
+        )
 
-    result = _discover(repo, (body.ref or "").strip(), (body.path or "").strip(), company)
+    result = _discover(repo, (body.ref or "").strip(), folder, company)
     selected = [s for s in result.skills if s.path in wanted]
     if not selected:
         raise HTTPException(
@@ -531,6 +577,39 @@ async def import_github_skills(
             "We couldn't find those skills in the repository any more — "
             "search again and retry.",
         )
+    if body.sync:
+        # A synced folder is the unit, so the tick list stops applying the
+        # moment it is switched on: the sweep would import the unticked ones
+        # within half an hour anyway, and a library that silently grows later
+        # is worse than one that matches what the checkbox said up front. The
+        # ticks still gate the one-shot import — this only widens the synced
+        # case, which is the one where the user asked for the whole folder.
+        selected = [s for s in result.skills if s.importable] or selected
+
+    # The source row is written BEFORE the skills so each one can be stamped
+    # with it in the same pass. A failure here fails the import: a caller who
+    # asked for a synced folder and silently got a one-shot copy would believe
+    # the folder was live when nothing was watching it.
+    source_id: str | None = None
+    if body.sync:
+        try:
+            source = db.upsert_skill_source(
+                company_id=company.company_id,
+                workspace_id=company.workspace_id,
+                installation_id=_installation_for(repo, company),
+                repo=repo,
+                ref=(body.ref or "").strip(),
+                path=folder,
+                created_by=company.user_id,
+            )
+            source_id = str(source["id"])
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("custom_skills_sync_source_failed repo_present=%s", bool(repo))
+            raise HTTPException(
+                500, "We couldn't set this folder up to sync. Please try again."
+            ) from exc
 
     imported: list[dict] = []
     skipped: list[dict] = []
@@ -554,6 +633,7 @@ async def import_github_skills(
                 ext=ext,
                 builtin_slugs=set(list_skills()),
                 max_content_chars=MAX_SKILL_CONTENT_CHARS,
+                source_id=source_id,
             )
         except SkillStoreError as e:
             skipped.append({"path": skill.path, "name": skill.name, "reason": str(e)})
@@ -566,16 +646,130 @@ async def import_github_skills(
             "No skills could be imported. "
             + " ".join(f"{s['name'] or s['path'] or 'A skill'}: {s['reason']}." for s in skipped),
         )
+    # Stamp the commit this import just read. Without it the source's sha stays
+    # empty and the very next sweep does a full tree walk to re-import files it
+    # has already stored — correct, but a wasted round trip per folder against
+    # an installation's shared REST budget.
+    if source_id:
+        db.record_skill_source_sync(source_id=source_id, commit_sha=result.commit_sha)
     logger.info(
-        "custom_skills_github_imported company_present=%s imported=%s skipped=%s",
-        bool(company.company_id), len(imported), len(skipped),
+        "custom_skills_github_imported company_present=%s imported=%s skipped=%s synced=%s",
+        bool(company.company_id), len(imported), len(skipped), bool(source_id),
     )
     return {
         "imported": imported,
         "skipped": skipped,
         "commit_sha": result.commit_sha,
         "ref": result.branch,
+        "synced": bool(source_id),
     }
+
+
+# ─── synced folders ──────────────────────────────────────────────────────────
+#
+# Also declared ABOVE `/{skill_id}`, for the same declaration-order reason the
+# `/github/*` routes are: `/sources` would otherwise be read as a skill id.
+
+
+def _source_payload(row: dict) -> dict:
+    """One synced folder as the Skills screen's panel needs it.
+
+    `ref` is echoed as the empty string the row stores rather than resolved to a
+    branch name — the row means "whatever the default branch is", and printing a
+    resolved name would claim a pin that isn't there. The client renders the
+    blank as "default branch"."""
+    return {
+        "id": row["id"],
+        "repo": row.get("repo") or "",
+        "ref": row.get("ref") or "",
+        "path": row.get("path") or "",
+        "active": bool(row.get("active")),
+        "last_synced_at": row.get("last_synced_at"),
+        "last_commit_sha": (row.get("last_commit_sha") or "")[:7],
+        "last_error": row.get("last_error") or "",
+    }
+
+
+@router.get("/sources")
+def list_skill_sources_route(company: WorkspaceContext = Depends(require_workspace)):
+    """The company's synced folders — what the panel lists.
+
+    Includes INACTIVE sources: a folder someone stopped syncing is still the
+    origin of skills in the library, and hiding it would make those skills look
+    like they came from nowhere."""
+    rows = db.list_skill_sources(company.company_id)
+    return {"sources": [_source_payload(r) for r in rows]}
+
+
+@router.post(
+    "/sources/{source_id}/sync",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def sync_skill_source_now(
+    source_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Re-read one synced folder immediately instead of waiting for the sweep.
+
+    Runs with `force=True`, so it re-reads even when the commit hasn't moved —
+    the button exists precisely for the case where someone can see the library
+    doesn't match the folder, and answering "nothing changed" would be useless
+    there.
+
+    Runs INLINE, like `/github/discover` does: the work is bounded by the same
+    per-call budgets (one tree walk, at most MAX_FILE_FETCHES file reads) and a
+    user who pressed a button is waiting for its result. The sync never raises,
+    so a GitHub failure comes back as a 200 carrying the error for the panel to
+    show rather than an exception the button can't explain."""
+    row = db.get_skill_source(company.company_id, source_id)
+    if row is None:
+        raise HTTPException(404, "Synced folder not found.")
+    if not row.get("active"):
+        raise HTTPException(409, "This folder isn't being synced any more.")
+
+    from app.skills.github_sync import sync_source
+
+    result = await sync_source(row, force=True)
+    fresh = db.get_skill_source(company.company_id, source_id) or row
+    return {
+        "source": _source_payload(fresh),
+        "imported": result.imported,
+        "replaced": result.replaced,
+        "skipped": result.skipped,
+        "error": result.error,
+    }
+
+
+@router.delete(
+    "/sources/{source_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def stop_syncing_source(
+    source_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Stop syncing a folder. The skills it produced STAY.
+
+    Deactivating is not deleting: the sweep skips the folder from now on, and
+    every skill it imported remains in the library — still working, still on its
+    trigger, and editable again now that nothing will overwrite it. That last
+    part is the reason this is a button rather than a DB chore: 'stop syncing'
+    is also how you take ownership of a method the repo used to own.
+
+    The source row itself survives so `last_commit_sha` is still there if the
+    folder is ever synced again."""
+    row = db.get_skill_source(company.company_id, source_id)
+    if row is None:
+        raise HTTPException(404, "Synced folder not found.")
+    db.deactivate_skill_source(company_id=company.company_id, source_id=source_id)
+    # Order matters: the sweep is off before the skills are released, so there
+    # is no window where a sync could re-stamp a skill this call just freed.
+    released = db.detach_skills_from_source(company.company_id, source_id)
+    logger.info(
+        "skill_source_deactivated company_present=%s released=%s",
+        bool(company.company_id), released,
+    )
+    return {"stopped": True, "id": source_id, "released": released}
 
 
 @router.get("/{skill_id}")
@@ -645,6 +839,20 @@ async def edit_skill(
     row = db.get_custom_skill_by_id(company.company_id, skill_id)
     if row is None:
         raise HTTPException(404, "Skill not found.")
+
+    # A skill from a synced folder is the repo's, not ours to rewrite. Accepting
+    # this edit would look like it worked and then be silently reverted by the
+    # next sweep within half an hour, which is a worse outcome than refusing —
+    # so the refusal names where the text actually lives. The Skills screen
+    # disables the pencil for these, and this is the same rule server-side,
+    # because every check has to hold against a direct API call.
+    if row.get("source_id"):
+        raise HTTPException(
+            409,
+            "This skill is synced from GitHub, so it's edited in the repository "
+            "it came from. Changes made here would be overwritten the next time "
+            "the folder syncs.",
+        )
 
     # Editing swaps the METHOD only — a .zip skill keeps every module and
     # reference the archive carried. content_hash_for is content-derived, so
@@ -785,10 +993,28 @@ async def delete_skill(
     so it disappears from every workspace's library and stops routing on the
     next invocation — the resolver reads the DB fresh each time).
 
+    A skill from a SYNCED folder cannot be deleted here (409). Deleting one
+    would appear to work and then be undone by the next sweep within half an
+    hour, because the sweep imports whatever the folder holds and does not
+    remember what anybody removed — so the refusal points at the two things
+    that actually work: delete the file from the folder, or stop syncing the
+    folder. Checked BEFORE the delete, so the refusal costs the row nothing.
+
     Row first, then the staged original: a failed storage delete leaves an
     orphaned file (best-effort, delete_skill_file never raises) rather than a
     ghost skill that still routes. 404 on a foreign or missing id, made
     indistinguishable by the company-filtered lookup."""
+    existing = db.get_custom_skill_by_id(company.company_id, skill_id)
+    if existing is None:
+        raise HTTPException(404, "Skill not found.")
+    if existing.get("source_id"):
+        raise HTTPException(
+            409,
+            "This skill is synced from a GitHub folder, so it would come back "
+            "the next time that folder syncs. Remove it from the folder in your "
+            "repository, or stop syncing the folder from the Skills screen.",
+        )
+
     row = db.delete_custom_skill(company.company_id, skill_id)
     if row is None:
         raise HTTPException(404, "Skill not found.")

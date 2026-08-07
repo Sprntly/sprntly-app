@@ -159,11 +159,23 @@ from app.db.artifact_templates import (
 from app.db.custom_skills import (
     DuplicateSkillSlug,
     delete_custom_skill,
+    detach_skills_from_source,
     get_custom_skill,
     get_custom_skill_by_id,
     insert_custom_skill,
     list_custom_skills,
     update_custom_skill,
+)
+
+# Synced skill folders (the GitHub folders kept live — 20260807170000)
+from app.db.skill_sources import (
+    deactivate_skill_source,
+    get_skill_source,
+    get_skill_source_for_folder,
+    list_active_skill_sources,
+    list_skill_sources,
+    record_skill_source_sync,
+    upsert_skill_source,
 )
 
 # Connections (OAuth)
@@ -333,11 +345,20 @@ __all__ = [
     # custom skills
     "DuplicateSkillSlug",
     "delete_custom_skill",
+    "detach_skills_from_source",
     "get_custom_skill",
     "get_custom_skill_by_id",
     "insert_custom_skill",
     "list_custom_skills",
     "update_custom_skill",
+    # synced skill folders
+    "deactivate_skill_source",
+    "get_skill_source",
+    "get_skill_source_for_folder",
+    "list_active_skill_sources",
+    "list_skill_sources",
+    "record_skill_source_sync",
+    "upsert_skill_source",
     # input sources
     "delete_input_source",
     "list_input_sources",

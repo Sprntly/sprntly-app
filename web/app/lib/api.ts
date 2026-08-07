@@ -654,6 +654,11 @@ export type CustomSkillInfo = {
    *  name (same id, same trigger, new content) rather than adding a new one.
    *  Absent on list items, where it would mean nothing. */
   replaced?: boolean
+  /** This skill comes from a SYNCED GitHub folder, so the repository owns its
+   *  text: it is re-imported on every sweep, the edit form is closed to it, and
+   *  deleting it is refused (both 409 server-side). Stopping the folder's sync
+   *  releases it and this goes false. */
+  synced?: boolean
 }
 
 /** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
@@ -744,6 +749,39 @@ export type GithubSkillImportResult = {
   skipped: SkippedSkill[]
   commit_sha: string
   ref: string
+  /** The folder was registered to keep syncing, so the imported skills are
+   *  read-only and the folder's later contents will arrive on their own. */
+  synced: boolean
+}
+
+/** One folder a company keeps synced — GET /v1/skills/sources.
+ *
+ *  `ref` empty means "whatever the repo's default branch is", deliberately not
+ *  resolved to a name: the folder follows the default branch rather than being
+ *  pinned to whatever it was called at import time. `last_error` is the last
+ *  failure verbatim and is cleared by the next clean sync, so a non-empty value
+ *  is a live problem rather than history. */
+export type SyncedFolder = {
+  id: string
+  repo: string
+  ref: string
+  path: string
+  active: boolean
+  last_synced_at: string | null
+  last_commit_sha: string
+  last_error: string
+}
+
+/** POST /v1/skills/sources/{id}/sync — what one forced re-read did. `error`
+ *  non-empty means the sync itself failed; the call still answers 200, because
+ *  a GitHub outage is something the panel shows, not an exception it can't
+ *  explain. */
+export type SyncedFolderSyncResult = {
+  source: SyncedFolder
+  imported: number
+  replaced: number
+  skipped: string[]
+  error: string
 }
 
 /** Discriminates the two upload bodies by shape (the multi one has no `id`).
@@ -820,13 +858,39 @@ export const skillsApi = {
    *  isn't a skill in that repo imports nothing rather than reading a file.
    *  Each imported skill follows the upload rules: a name the company already
    *  used replaces that skill in place, a built-in's name takes the next free
-   *  trigger. Per-skill failures come back in `skipped`. */
+   *  trigger. Per-skill failures come back in `skipped`.
+   *
+   *  `sync: true` also REGISTERS the folder: the half-hourly sweep re-imports
+   *  whatever markdown it holds from then on, so the ticked list stops being
+   *  the unit — a file added to that folder later arrives on its own, whether
+   *  or not anyone would have ticked it. The skills it produces become
+   *  read-only (edit and delete both 409). Requires a non-empty `path`; the
+   *  server 422s a synced repo ROOT, since a whole repository's markdown is not
+   *  a skill library. */
   importGithub: (body: {
     repo: string
     ref?: string
     path?: string
     paths: string[]
+    sync?: boolean
   }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
+  /** The company's synced folders, active and stopped alike — a stopped folder
+   *  is still where its skills came from. */
+  listSources: () => api.get<{ sources: SyncedFolder[] }>("/v1/skills/sources"),
+  /** Re-read one folder now instead of waiting for the sweep. Forced, so it
+   *  re-imports even when the commit hasn't moved — the button exists for the
+   *  case where the library visibly doesn't match the folder. */
+  syncSource: (id: string) =>
+    api.post<SyncedFolderSyncResult>(
+      `/v1/skills/sources/${encodeURIComponent(id)}/sync`,
+      {},
+    ),
+  /** Stop syncing a folder. Its skills STAY in the library and become editable
+   *  again — `released` is how many were handed back. */
+  stopSyncingSource: (id: string) =>
+    api.delete<{ stopped: true; id: string; released: number }>(
+      `/v1/skills/sources/${encodeURIComponent(id)}`,
+    ),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(
