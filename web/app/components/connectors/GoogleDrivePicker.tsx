@@ -19,6 +19,7 @@ import {
   apiErrorMessage,
   connectorsApi,
   type GoogleDrivePickedFile,
+  type GoogleDriveTreeNode,
 } from "../../lib/api"
 
 // ─────────────── Minimal typings for the Google Picker globals ───────────────
@@ -115,6 +116,52 @@ function loadPicker(): Promise<void> {
 
 // ─────────────────────────── Pure View ───────────────────────────
 
+const GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
+
+function isFolderNode(n: GoogleDriveTreeNode): boolean {
+  return (n.mimeType ?? "") === GOOGLE_FOLDER_MIME
+}
+
+/** Recursively render the children of `parentId` from a flat node list (the
+ * shape `google_drive_sync.expand_folder` stores). Folders become nested
+ * disclosures; files become leaf rows. Legacy flat data (nodes with no
+ * `parentId`) is treated as a direct child of `rootId`, so it renders as a
+ * flat list rather than disappearing. */
+function DriveTreeChildren({
+  nodes,
+  parentId,
+  rootId,
+}: {
+  nodes: GoogleDriveTreeNode[]
+  parentId: string
+  rootId: string
+}) {
+  const children = nodes.filter((n) => (n.parentId ?? rootId) === parentId)
+  if (children.length === 0) return null
+  return (
+    <ul className="conn-drive-folder-children">
+      {children.map((n) =>
+        isFolderNode(n) ? (
+          <li key={n.id}>
+            <details className="conn-drive-folder conn-drive-subfolder">
+              <summary className="conn-drive-file-name">
+                <span aria-hidden="true">📁 </span>
+                {n.name ?? n.id}
+              </summary>
+              <DriveTreeChildren nodes={nodes} parentId={n.id} rootId={rootId} />
+            </details>
+          </li>
+        ) : (
+          <li key={n.id} className="conn-drive-tree-file">
+            <span aria-hidden="true">📄 </span>
+            {n.name ?? n.id}
+          </li>
+        ),
+      )}
+    </ul>
+  )
+}
+
 export type GoogleDrivePickerViewProps = {
   savedFiles: GoogleDrivePickedFile[]
   /** True when the API key env is missing — the Picker can't be configured. */
@@ -131,11 +178,11 @@ export type GoogleDrivePickerViewProps = {
    * else — one shared flag made the Add button announce "Opening…" during a
    * delete, which is a different action on a different control. */
   removingId: string | null
-  /** folder id -> the files that folder expanded to on the last sync. An entry
-   * present here IS a folder; absent means a plain file. Written by the sync,
-   * because only Drive knows what is inside a folder and only the sync has
-   * looked. */
-  folderContents?: Record<string, GoogleDrivePickedFile[]>
+  /** folder id -> the subtree that folder expanded to on the last sync. An
+   * entry present here IS a folder; absent means a plain file. Written by the
+   * sync, because only Drive knows what is inside a folder and only the sync
+   * has looked. */
+  folderContents?: Record<string, GoogleDriveTreeNode[]>
 }
 
 export function GoogleDrivePickerView({
@@ -172,6 +219,15 @@ export function GoogleDrivePickerView({
               // which is a different (and reportable) state.
               const contents = folderContents?.[f.id]
               const isFolder = contents !== undefined
+              // Count only FILE nodes for the summary; sub-folders are shown
+              // as nested nodes, not counted as files. Legacy flat data (no
+              // mimeType) counts every entry as a file, matching prior copy.
+              const fileCount = contents
+                ? contents.filter((c) => !isFolderNode(c)).length
+                : 0
+              const subfolderCount = contents
+                ? contents.filter((c) => isFolderNode(c)).length
+                : 0
               return (
               <li key={f.id} className="conn-drive-file">
                 {isFolder ? (
@@ -181,22 +237,22 @@ export function GoogleDrivePickerView({
                       {f.name ?? f.id}{" "}
                       <span className="conn-drive-folder-count">
                         {contents.length === 0
-                          ? "— no readable files"
-                          : `— ${contents.length} file${contents.length === 1 ? "" : "s"}`}
+                          ? "— empty"
+                          : `— ${fileCount} file${fileCount === 1 ? "" : "s"}` +
+                            (subfolderCount > 0
+                              ? `, ${subfolderCount} folder${subfolderCount === 1 ? "" : "s"}`
+                              : "")}
                       </span>
                     </summary>
                     {contents.length > 0 ? (
-                      <ul className="conn-drive-folder-children">
-                        {contents.map((c) => (
-                          <li key={c.id}>{c.name ?? c.id}</li>
-                        ))}
-                      </ul>
+                      <DriveTreeChildren
+                        nodes={contents}
+                        parentId={f.id}
+                        rootId={f.id}
+                      />
                     ) : (
                       <p className="conn-drive-folder-empty">
-                        Google grants Sprntly access to the items you pick, not
-                        to what is inside them — so a folder comes through
-                        empty. Open this folder in the picker and select the
-                        files themselves (you can select several at once).
+                        This folder has no readable files inside it.
                       </p>
                     )}
                   </details>
@@ -283,13 +339,163 @@ export function mergePickedFiles(
   return [...byId.values()]
 }
 
+// ───────────────── Service-account mode (Pure View) ─────────────────
+// Shown when the backend reports google_drive_access_mode = "service_account". The
+// customer shares a Drive folder WITH the per-company SA email (out-of-band,
+// Viewer), then clicks Scan — no OAuth Picker. Reuses DriveTreeChildren so the
+// scanned tree looks identical to the OAuth/drive.readonly tree.
+
+export type GoogleDriveServiceAccountViewProps = {
+  email: string | null
+  sharedRoots: GoogleDriveTreeNode[]
+  folderContents: Record<string, GoogleDriveTreeNode[]>
+  scanning: boolean
+  error: string | null
+  copied: boolean
+  onCopy: () => void
+  onScan: () => void
+}
+
+export function GoogleDriveServiceAccountView({
+  email,
+  sharedRoots,
+  folderContents,
+  scanning,
+  error,
+  copied,
+  onCopy,
+  onScan,
+}: GoogleDriveServiceAccountViewProps) {
+  if (!email) {
+    // Provisioning failed (e.g. the bootstrap SA lacks IAM roles) — show the
+    // backend's error instead of spinning on "Setting up…" forever.
+    if (error) {
+      return (
+        <div className="conn-drive-setup">
+          <p className="conn-drive-error" role="alert">
+            Couldn&apos;t set up the service account: {error}
+          </p>
+        </div>
+      )
+    }
+    return (
+      <div className="conn-drive-setup">
+        <p className="conn-drive-empty">Setting up a service account…</p>
+      </div>
+    )
+  }
+  return (
+    <div className="conn-drive-setup">
+      <p className="conn-drive-selected-label">
+        Share a Google Drive folder with this address as Viewer, then click Scan.
+      </p>
+      <div className="conn-drive-file-list">
+        <div className="conn-drive-file">
+          <span className="conn-drive-file-name">{email}</span>
+          <button
+            type="button"
+            className="conn-drive-file-remove"
+            aria-label={copied ? "Copied" : "Copy service account email"}
+            title={copied ? "Copied" : "Copy"}
+            onClick={onCopy}
+          >
+            {copied ? "✓" : "⧉"}
+          </button>
+        </div>
+      </div>
+
+      {/* Same wrapper + classes as the "Add Drive files" button so the two
+          read as consistent, equally-sized siblings (not full-width). */}
+      <div className="conn-drive-browser-actions">
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={scanning}
+          onClick={onScan}
+        >
+          {scanning ? "Scanning…" : "Scan shared folders"}
+        </button>
+      </div>
+
+      {sharedRoots.length > 0 ? (
+        <div className="conn-drive-saved">
+          <span className="conn-drive-selected-label">Shared with Sprntly</span>
+          <ul className="conn-drive-file-list">
+            {sharedRoots.map((root) => {
+              const nodes = folderContents[root.id] ?? []
+              const fileCount = nodes.filter((n) => !isFolderNode(n)).length
+              const subfolderCount = nodes.filter((n) => isFolderNode(n)).length
+              return isFolderNode(root) ? (
+                <li key={root.id} className="conn-drive-file">
+                  <details className="conn-drive-folder">
+                    <summary className="conn-drive-file-name">
+                      <span aria-hidden="true">📁 </span>
+                      {root.name ?? root.id}{" "}
+                      <span className="conn-drive-folder-count">
+                        {nodes.length === 0
+                          ? "— empty"
+                          : `— ${fileCount} file${fileCount === 1 ? "" : "s"}` +
+                            (subfolderCount > 0
+                              ? `, ${subfolderCount} folder${subfolderCount === 1 ? "" : "s"}`
+                              : "")}
+                      </span>
+                    </summary>
+                    {nodes.length > 0 ? (
+                      <DriveTreeChildren
+                        nodes={nodes}
+                        parentId={root.id}
+                        rootId={root.id}
+                      />
+                    ) : (
+                      <p className="conn-drive-folder-empty">
+                        This folder has no readable files inside it.
+                      </p>
+                    )}
+                  </details>
+                </li>
+              ) : (
+                <li key={root.id} className="conn-drive-file">
+                  <span className="conn-drive-file-name">
+                    <span aria-hidden="true">📄 </span>
+                    {root.name ?? root.id}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ) : (
+        <p className="conn-drive-empty">
+          Nothing shared with this service account yet. Share a folder with the
+          address above, then Scan.
+        </p>
+      )}
+
+      {error ? (
+        <p className="conn-drive-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
 type Props = {
   dataset: string
   savedFiles?: GoogleDrivePickedFile[]
-  /** folder id -> files it expanded to, straight off the connection config. */
-  folderContents?: Record<string, GoogleDrivePickedFile[]>
+  /** folder id -> subtree it expanded to, straight off the connection config. */
+  folderContents?: Record<string, GoogleDriveTreeNode[]>
+  /** Whether the Picker offers folder selection. Gated by the connection's
+   * granted OAuth scope (see ConfigureConnectorDrawer): under drive.file a
+   * picked folder grants the folder object but nothing beneath it, so
+   * offering it is a trap. Defaults to false — the safe, do-nothing-different
+   * behaviour when the caller doesn't pass it. Flips on automatically, no
+   * other code change needed, once the connection's `scopes` actually
+   * contains drive.readonly (a separate, post-CASA change to the scope this
+   * app requests). */
+  folderSelectEnabled?: boolean
   /** Fired after a successful save so the parent can reload connections. */
   onSaved?: () => void
 }
@@ -298,6 +504,7 @@ export function GoogleDrivePicker({
   dataset: _dataset,
   savedFiles,
   folderContents,
+  folderSelectEnabled = false,
   onSaved,
 }: Props) {
   const [busy, setBusy] = useState(false)
@@ -316,6 +523,76 @@ export function GoogleDrivePicker({
     savedFilesRef.current = savedFiles ?? []
   }, [savedFiles])
 
+  // ── Service-account mode ──────────────────────────────────────────────
+  // The single GOOGLE_DRIVE_ACCESS_MODE backend env var decides which route is live;
+  // we learn it here and, in SA mode, provision (idempotently) the per-company
+  // service account so its email can be shown for the customer to share with.
+  const [saMode, setSaMode] = useState<boolean | null>(null)
+  const [saEmail, setSaEmail] = useState<string | null>(null)
+  const [saRoots, setSaRoots] = useState<GoogleDriveTreeNode[]>([])
+  const [saTree, setSaTree] = useState<Record<string, GoogleDriveTreeNode[]>>({})
+  const [scanning, setScanning] = useState(false)
+  const [saError, setSaError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const m = await connectorsApi.getGoogleDriveMode()
+        if (cancelled) return
+        if (m.mode !== "service_account") {
+          setSaMode(false)
+          return
+        }
+        setSaMode(true)
+        const st = await connectorsApi.provisionGoogleDriveServiceAccount(
+          _dataset || undefined,
+        )
+        if (cancelled) return
+        setSaEmail(st.service_account_email ?? null)
+        setSaRoots(st.shared_roots ?? [])
+        setSaTree(st.folder_contents ?? {})
+      } catch (e) {
+        if (!cancelled) setSaError(toMessage(e))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [_dataset])
+
+  const handleScan = useCallback(async () => {
+    setScanning(true)
+    setSaError(null)
+    try {
+      const res = await connectorsApi.scanGoogleDriveServiceAccount(
+        _dataset || undefined,
+      )
+      setSaEmail(res.service_account_email ?? saEmail)
+      setSaRoots(res.shared_roots ?? [])
+      setSaTree(res.folder_contents ?? {})
+      const failure = syncFailureMessage(res.errors)
+      if (failure) setSaError(failure)
+      onSaved?.()
+    } catch (e) {
+      setSaError(toMessage(e))
+    } finally {
+      setScanning(false)
+    }
+  }, [_dataset, saEmail, onSaved])
+
+  const handleCopyEmail = useCallback(() => {
+    if (!saEmail) return
+    void navigator.clipboard?.writeText(saEmail).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      },
+      () => {},
+    )
+  }, [saEmail])
+
   const handleAddFiles = useCallback(async () => {
     if (!apiKey) return
     setBusy(true)
@@ -332,16 +609,14 @@ export function GoogleDrivePicker({
         // Folders are shown so people can BROWSE INTO them and pick the files
         // inside — the natural way to connect "everything in this folder".
         .setIncludeFolders(true)
-        // …but deliberately NOT selectable. Verified against a live Drive on
-        // 2026-08-03: under drive.file the Picker grants the folder OBJECT and
-        // nothing beneath it. Listing a granted folder returns zero children
-        // rather than an error, so a picked folder cannot be detected as
-        // broken — it just silently contributes no documents. Letting someone
-        // select one would mean discovering that only later, from an empty
-        // list. Selecting the files themselves grants each of them properly,
-        // and multiselect makes that one trip. Folder-as-a-source needs
-        // drive.readonly, which is a scope decision, not a code one.
-        .setSelectFolderEnabled(false)
+        // Folder SELECTION is gated by `folderSelectEnabled` (see the Props
+        // doc): under drive.file a picked folder grants the folder object but
+        // nothing beneath it, so offering it is a trap — only offer it once
+        // the connection actually holds drive.readonly. In service_account
+        // mode the Picker is deliberately individual-FILES-only (drive.file,
+        // no CASA) — folders come via the SA share route — so folder selection
+        // is force-disabled there regardless of the connection's scope.
+        .setSelectFolderEnabled(folderSelectEnabled && !saMode)
 
       const builder = new picker.PickerBuilder()
         .setDeveloperKey(apiKey)
@@ -392,7 +667,7 @@ export function GoogleDrivePicker({
     } finally {
       setBusy(false)
     }
-  }, [apiKey, onSaved])
+  }, [apiKey, folderSelectEnabled, saMode, onSaved])
 
   /**
    * Disconnect one file. The endpoint replaces the stored list, so "remove" is
@@ -423,6 +698,36 @@ export function GoogleDrivePicker({
     },
     [onSaved],
   )
+
+  // Service-account mode shows BOTH routes: the individual-file OAuth Picker
+  // (drive.file, exactly like main) AND the SA share panel (folders shared with
+  // the SA email). OAuth mode shows the Picker only, unchanged.
+  if (saMode) {
+    return (
+      <>
+        <GoogleDrivePickerView
+          savedFiles={savedFiles ?? []}
+          configured={configured}
+          busy={busy}
+          error={error}
+          onAddFiles={() => void handleAddFiles()}
+          onRemoveFile={(id) => void handleRemoveFile(id)}
+          removingId={removingId}
+          folderContents={folderContents}
+        />
+        <GoogleDriveServiceAccountView
+          email={saEmail}
+          sharedRoots={saRoots}
+          folderContents={saTree}
+          scanning={scanning}
+          error={saError}
+          copied={copied}
+          onCopy={handleCopyEmail}
+          onScan={() => void handleScan()}
+        />
+      </>
+    )
+  }
 
   return (
     <GoogleDrivePickerView
