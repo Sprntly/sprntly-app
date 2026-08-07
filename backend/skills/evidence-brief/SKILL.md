@@ -1,117 +1,112 @@
 ---
 name: evidence-brief
-description: Synthesize data-science analysis, competitive analysis, voice of customer, and market signals — plus the business context and company goals you provide — into a single visual evidence brief that tells one data story and lands on a testable, value-driven hypothesis a product team can act on. Use when the user says "evidence brief", "insight brief", "make the case for", "what's the opportunity here", "synthesize these signals", "turn this analysis into an insight", or provides one or more analyses and wants the opportunity surfaced for a product team. Actively converges independent signals where they genuinely agree, picks the best chart per finding so the visuals collectively tell the story, never invents data or quotes, and produces the artifact that feeds prd-author. Body voice is a data scientist on the team; the title is a product-led strategic thesis.
+description: >
+  The RENDERING CONTRACT for Sprntly's evidence brief — the markup, class
+  vocabulary and component set every brief must be emitted in, so two briefs
+  side by side read as the same template. This skill governs FORM ONLY: what
+  the document is made of, not what it says. The analysis, the findings, the
+  choice of what to show and the honesty rules are the calling prompt's job;
+  this file never decides content. Bound by the evidence runner
+  (app.evidence_kg / app.evidence_runner) on every evidence generation.
 ---
 
-# Evidence Brief — the data story that justifies a bet
+# Evidence Brief — the rendering contract
 
-## What this is used for
-The evidence brief is the **upstream artifact in the product pipeline**: it turns scattered analysis into one defensible opportunity and a testable hypothesis, which then **feeds `prd-author`**. Its job is to help a product team decide *where to invest* — not to specify what to build (that's the PRD) and not to run the analysis (it synthesizes analysis that already exists). One brief = one opportunity = one hypothesis.
+You are given the content decisions by the prompt around this method. **This
+document decides only how that content is rendered.** Where the prompt and this
+file appear to conflict about *what to say*, the prompt wins; this file is
+authoritative for *markup*.
 
-Pipeline: **signals + business context → `evidence-brief` → `prd-author` → `implementation-spec`.**
+## The artifact
 
-## When to use / when NOT to use
-- **Use** to assemble signals (data science + competitive + VoC + market) into one case for a product team, or to convert a single analysis into a sharable opportunity.
-- **Do NOT use** to write requirements (`prd-author`, run *after* this), to run the underlying analysis (this synthesizes, never fabricates), or to brief leadership on an external shock (`leadership-brief`).
+ONE self-contained HTML document, `1–3` pages, rendered in a **sandboxed iframe
+with scripts disabled**. Nothing that needs JavaScript can ever run: no chart
+library, no runtime, no inline handler, no `<script>` — such an element is not
+merely discouraged, it renders as nothing at all.
 
-## Inputs (the kind of information that goes in)
-- **Required:** at least one signal — data-science analysis, competitive analysis, voice of customer, or a market signal — **and** the business context + company goal/North Star the opportunity must ladder up to.
-- **Optional (each strengthens it; each absent is omitted, never invented):** more signal types, baselines/targets, segment cuts, prior experiments, the metric tree.
-- **Hard rule:** use **only data the user provides.** Missing numbers are omitted or named as a gap — never estimated, rounded into existence, or inferred onto a chart. Quotes are used **only if real VoC is provided** and only where they align with the other signals.
+## Hard rules
 
-## Method (run in this order — same inputs should yield the same brief)
-1. **Frame from the goal.** One line: the behavior/outcome under investigation and the company goal it serves. Anchor here so "business value" later is concrete.
-2. **Read each signal for its one finding** — the thing that matters, not a summary. For **competitive**, extract *where we're weak and why that's the opportunity*, never a feature checklist.
-3. **Converge (the spine).** Find where **≥2 independent signals agree**. Genuine agreement among separately-gathered sources is the strongest part of the case — center it. **Do not force it:** if signals diverge or only one exists, say so and lower the confidence. Flag suspected shared causes (one signal counted twice ≠ convergence).
-4. **Find the wedge** — the strongest single proof the opportunity is real (often a segment already behaving the desired way). State its strength honestly (correlational, small-n).
-5. **Pick the best chart per finding and sequence them as ONE story** (see chart guide). Every visual must advance the narrative; cut any chart that's decorative or duplicative. The reader should be able to follow the argument through the charts alone.
-6. **Voice of customer matters** — when real VoC exists and aligns, include actual quotes across channels (review / support / sales). Customer words turn a data point into a reason; they are not optional flavor when available.
-7. **Reason toward the value-driven hypothesis (internal — do not render it).** Form: *"We believe that by introducing **[X]**, **[users]** will **[change in behavior]**, which will drive **[business value: retention / revenue / engagement / DAU / market share]**."* Behavior change and business value are named separately; value ties to step 1's goal. This hypothesis is the brief's analytical conclusion; it is **not** painted as a section of the brief (no hypothesis card / "input to PRD" block).
-8. **Hand off to the PRD** — this hypothesis flows to `prd-author` through the pipeline (the shared KG hypothesis), not through a rendered card in the brief.
-9. **Honesty pass (mandatory).** Every figure traces to a provided input; every quote is real; correlation is never called causation; the strength of agreement is conveyed in prose (never as a "Confidence:" label or score); non-converging signals are not hidden. If nothing can be supported, say the evidence is insufficient rather than manufacture a story.
+1. **Emit HTML and nothing else.** The first characters of your response are the
+   document itself (`<meta …`). No preamble, no sign-off, no explanation, no
+   markdown code fence. A single sentence before the first tag can make the
+   whole brief fail to render.
+2. **Document shape**, exactly:
+   `<meta charset="utf-8">` → an **EMPTY** `<style></style>` → one
+   `<div class="wrap">` holding the brief.
+3. **Write no CSS.** Leave `<style>` empty. Sprntly splices the canonical
+   stylesheet (`assets/evidence.css`) into that element server-side after
+   generation, so every brief renders from one design system. CSS you emit is
+   discarded — it only costs output tokens and drifts the look.
+4. **Use only the canonical class vocabulary below.** A class the stylesheet
+   does not define renders unstyled; an invented CSS variable renders as
+   nothing.
+5. **Charts are hand-authored inline `<svg viewBox="…">`**, drawn from the
+   numbers you were given — never a chart library, an `<img>`, a screenshot or a
+   placeholder. Keep the SVG responsive (the stylesheet already sets
+   `svg{width:100%}`); wrap every chart in `<figure>` … `<figcaption>`.
+6. **No external resources at all** — no web fonts, no stylesheets, no images,
+   no network URLs. The document must render with no network.
+7. **Never emit `class="hyp"`** or a "hypothesis / input to PRD" card. That
+   component was retired and the viewer strips anything matching it.
+8. **Omit, never stub.** A component with no content is left out entirely — no
+   empty shell, no placeholder text.
 
-### Chart guide (variable — best fit, not a fixed set)
-| The finding is about… | Use |
+## Canonical class vocabulary
+
+Every class the injected stylesheet defines, and nothing else:
+
+`.wrap` · `.eyebrow` · `.deck` · `.meta` · `.demo` · `.context` · `.tldr` ·
+`.opp-top` + `.tag` · `.kicker` (+ `.o` opportunity-tone, `.n` neutral) ·
+`.voc` · `.q` + `.ch` (+ `.rev` / `.sup` / `.sale`) · `.extract` ·
+`.yes` / `.no` / `.us` (table cells) · `.ax` / `.vlabel` / `.blabel` (SVG text)
+
+Plain elements are styled too and need no class: `h1`, `h2`, `p`, `section`,
+`figure`, `figcaption`, `svg`, `table`, `th`, `td`.
+
+Colour tokens available inside SVG (`fill`/`stroke="var(--…)"`): `--ink`,
+`--paper`, `--muted`, `--hair`, `--problem`, `--problem-soft`, `--opp`,
+`--opp-soft`, `--grid`, `--bar-neutral`.
+
+## Component table — section → required markup
+
+| Section | Markup |
 |---|---|
-| Change over time (retention, ratings, adoption) | line / area |
-| Ranking or composition of categories (VoC themes) | bar (horizontal for labels) |
-| Drop-off across stages (churn by step) | funnel / waterfall |
-| Two-group comparison (segment A vs B, the wedge) | paired bars |
-| Relationship between two measures | scatter |
-| Capability gap vs competitors | matrix + an explicit "what we extract" |
-| Multiple independent signals agreeing | **convergence diagram** (signals → one opportunity) |
-Collectively the chosen charts tell **one** story; if two say the same thing, cut one.
-
-## Output spec
-A single **visual brief (HTML), 1–3 pages**, audience = **product team**, body voice = **a data scientist on the team** who found something worth investing in. Order:
-- **Title** — a **product-led, strategic thesis** naming the lever and/or outcome (e.g. "Unlock Retention by Letting Beginners Speak", "The Two Drivers of Activation", "Five Signals, One Bet"). **Never a first-person/opinion line** ("I went looking…", "Some thoughts on…").
-- **TL;DR** — the whole story in ~5 lines, for someone who reads nothing else.
-- **Opportunity** — one simple line.
-- **Context** — *after* TL;DR and Opportunity: 1–2 lines on what the product is and the behavior under investigation.
-- **The evidence** — findings, each with its best-fit visual, sequenced as a data story; VoC quotes if real and aligned; competitive as an extraction.
-- **Convergence** — the diagram/section of agreeing independent signals (or an honest note that they don't agree). The brief ends here.
-- **No footer, no methods boilerplate, no machinery** (never mention agents, the platform, or how it was produced). **Do not render a hypothesis card or any "input to PRD" section** — the hypothesis is the brief's internal analytical conclusion (method steps 7–8) that hands off to `prd-author` through the pipeline, not a visible section of the brief.
-
-## Output format — HTML rendering contract (mandatory)
-The brief **is** rendered HTML, not a description of one. Every brief uses the **same shared design system** so a team reads each one the same way; only the content and the charts flex. **Render, don't drift.**
-
-**Hard rules**
-- Output is **one HTML file**: a `<meta charset="utf-8">`, an EMPTY `<style></style>` element, then one `<div class="wrap">` holding the brief. **No external CSS/JS, no web fonts, no chart libraries, no build step, no `<img>` for charts.**
-- **Leave the `<style>` block EMPTY — do NOT write any CSS rules.** Sprntly injects the canonical design system (`assets/evidence.css`) into that block server-side at save time, so the stored file is self-contained and every brief renders from the *same* stylesheet — two briefs side by side look like the same template by construction. Use the canonical class names (`.wrap`, `.eyebrow`, `.deck`, `.meta`, `.tldr`, `.opp-top`, `.kicker`, `.voc`, `.q`, `figure`, `table`, `.extract`, …) so your markup matches the injected stylesheet; the reference briefs in your prompt show the full class vocabulary. CSS you emit yourself is discarded — do not spend output on it.
-- **Charts are hand-authored inline `<svg viewBox="…">`**, drawn directly from the provided numbers — never a JS chart, never a screenshot, never a placeholder. Use the chart-text classes (`.ax` axis labels, `.vlabel` value labels, `.blabel` bar/category labels) and the color tokens (`--problem` for the leak/problem, `--opp` for the opportunity/wedge, `--bar-neutral` for the comparison baseline, `--grid` for gridlines). Wrap each chart in `<figure>…<figcaption>` and keep `svg{width:100%}` so it scales.
-
-**Section → required HTML component** (use these classes; this is what makes every brief render identically)
-
-| Brief section | HTML component |
-|---|---|
-| Eyebrow / kicker line above the title | `<p class="eyebrow">Evidence Brief · <source> → <team></p>` |
-| Title (strategic thesis) | `<h1>` + italic `<p class="deck">` subtitle |
-| Author / date / status / "Pairs with → … PRD" line | `<p class="meta">` (and `<p class="demo">` only for illustrative/example data) |
+| Eyebrow line above the title | `<p class="eyebrow">Evidence Brief · <source> → <team></p>` |
+| Title + subtitle | `<h1>` then italic `<p class="deck">` |
+| Author / date / status / pairs-with line | `<p class="meta">` (add `<p class="demo">` only for illustrative data) |
 | TL;DR | `<div class="tldr"><h4>TL;DR</h4><p>…</p></div>` |
 | Opportunity (one line) | `<div class="opp-top"><span class="tag">OPPORTUNITY</span><p>…</p></div>` |
 | Context | `<p class="context"><b>Context.</b> …</p>` |
-| Each evidence finding | `<section>` → `<p class="kicker">` (use `.o` for opportunity-tone, `.n` for neutral) → `<h2>` → `<p>` → `<figure>` chart |
-| VoC quotes | `<div class="voc">` of `<div class="q"><p class="ch rev|sup|sale">channel</p><p>quote</p></div>` |
-| Competitive extraction | `<table>` with `.yes`/`.no`/`.us` cells, then `<div class="extract"><b>What I extract:</b> …</div>` |
-| Convergence | `<section>` with an inline-SVG **convergence diagram** (signal nodes → one opportunity box), as in `01`/`05` |
+| Each finding | `<section>` → `<p class="kicker">` → `<h2>` → `<p>` → `<figure>` chart |
+| Customer quotes | `<div class="voc">` of `<div class="q"><p class="ch rev\|sup\|sale">channel</p><p>quote</p></div>` |
+| Competitive comparison | `<table>` with `.yes`/`.no`/`.us` cells, then `<div class="extract"><b>What I extract:</b> …</div>` |
+| Convergence | `<section>` with an inline-SVG diagram: source nodes → one outcome box |
 
-**Do not render a hypothesis card.** Earlier versions ended the brief with a `<div class="hyp">` "input to PRD" card; that section is intentionally removed. The brief ends at convergence. The value-driven hypothesis (method step 7) is still reasoned internally and flows to `prd-author` via the pipeline — it is just not painted as a section of the brief.
+Document order is: eyebrow → title → deck → meta → TL;DR → opportunity →
+context → findings → convergence. Components the prompt gives you no content
+for are omitted, and the order of what remains does not change.
 
-If a section's signal is absent (e.g. no VoC, single signal), **omit that component** — never render an empty shell or invented filler. The five reference briefs (folded into the METHOD above as `### REFERENCE: 0N-*.html`) are the authoritative rendering reference: match their markup, not just their wording.
+## Chart markup
 
-## Repeatability
-This skill is meant to be run the same way every time: the ordered method + fixed output sequence + chart guide make the brief reproducible across products and analysts. Given comparable scattered inputs, two runs should produce structurally identical briefs that differ only in their content — that consistency is the point, so a team learns to read every brief the same way.
+Axis lines and gridlines: thin `stroke="var(--grid)"` / `stroke="var(--hair)"`.
+Axis text `class="ax"`, value labels `class="vlabel"`, category labels
+`class="blabel"`. Use `--problem` for the leak/problem series, `--opp` for the
+opportunity/wedge series, `--bar-neutral` for a comparison baseline. Give the
+`<svg>` a `role="img"` and an `aria-label`. Every `<figcaption>` is a
+complete-sentence takeaway, not a label.
 
-## Integration & degradation (Sprntly)
-- **Inputs from Sprntly:** DS / competitive / VoC / market analyses as signals; **business-context** (goals, North Star, segments) from the knowledge graph.
-- **Output to Sprntly:** the hypothesis flows into `prd-author` as the grounded problem + evidence for Part A; the brief is the product team's shareable opportunity artifact.
-- **Degrades to:** a single-signal brief — fewer convergence claims, more labeled gaps, lower stated confidence. With no goal given, it asks rather than assumes.
+## Rendering checklist
 
-## Quality checklist (the bar)
-- [ ] Title is a product-led strategic thesis, not a first-person/opinion line.
-- [ ] Order is TL;DR → Opportunity → Context → evidence → convergence. **The brief ends at convergence — no rendered hypothesis card / "input to PRD" section.**
-- [ ] Anchored to a stated company goal; the opportunity ladders up to it.
-- [ ] **Every number traces to a provided input; nothing invented, estimated, or rounded into existence.**
-- [ ] **Every quote is real VoC**, across channels, aligned with the other signals (or VoC omitted).
-- [ ] Competitive is an **extraction** (where we're weak → the opportunity), not a checklist.
-- [ ] **Convergence** of ≥2 independent signals surfaced where real; divergence/single-signal stated with lower confidence.
-- [ ] Charts chosen per finding; collectively one sequenced story; none decorative/duplicate.
-- [ ] Correlation vs causation labeled; the wedge's strength stated plainly.
-- [ ] The value-driven hypothesis is reasoned internally (behavior change → business value, testable) and handed to `prd-author`, but is **not rendered as a card/section in the brief**.
-- [ ] ≤ 3 pages; data-scientist body voice; product-team audience; **no footer/methods/machinery.**
-- [ ] **Emits ONE HTML file with an EMPTY `<style></style>`** (the server injects `assets/evidence.css`), a single `.wrap`, no external CSS/JS, no chart libs.
-- [ ] **Uses the canonical class names** so the markup matches the injected stylesheet; each section uses its required component class. Do NOT write CSS rules yourself.
-- [ ] **Every chart is hand-authored inline `<svg>`** from the provided numbers, in a `figure`/`figcaption`, using the `.ax/.vlabel/.blabel` + color tokens — no JS charts, screenshots, or placeholders.
+- [ ] Response begins with `<meta` — no prose, no fence, before or after.
+- [ ] `<style></style>` is empty; no CSS anywhere in the document.
+- [ ] Exactly one `<div class="wrap">`, and every class used is in the
+      vocabulary above.
+- [ ] Every chart is inline `<svg>` in a `<figure>` with a `<figcaption>`.
+- [ ] No `<script>`, no external URL, no `class="hyp"`.
+- [ ] Empty components omitted rather than stubbed.
 
-## Known gaps / limitations
-- Synthesis layer, not an analysis engine — it structures and visualizes provided analysis but cannot validate the underlying numbers (garbage in, garbage out).
-- Convergence is only as independent as the sources; signals sharing a root cause can masquerade as agreement — note suspected shared causes.
-- The wedge is usually correlational; the brief should drive an experiment, not a launch.
-- Without a stated goal it cannot judge business value; it asks, it doesn't assume.
+## Reference
 
-## Worked example (abridged — Lyra, a language app)
-**Inputs:** DS retention analysis; VoC (reviews + support + sales notes); competitive teardown; market note on AI voice; goal = subscription retention/LTV.
-**Output:** Title "Unlock Retention by Letting Beginners Speak" → TL;DR → Opportunity → Context. Findings: retention cliff at the intermediate gate + the speaking-cohort wedge 2.3× labeled correlational (line + paired bars); VoC across three channels, "no way to speak" as the aligned theme (quotes + bar); competitive **extraction** (rivals invest where we leak). **Convergence:** data + VoC + sales + competitive + market all point to speaking practice at the plateau (diagram) — the brief ends here. The internal hypothesis ("By introducing adaptive conversation practice at the transition, learners will start speaking early and feel progress, which will drive week-4 retention and renewals (LTV)") is what feeds the "Conversation Practice" PRD through the pipeline, but is not rendered as a card. No footer.
-
-## Reference examples
-Five worked briefs are IN YOUR PROMPT, folded into the METHOD block above under `### REFERENCE: 01-lyra-language-app.html` … `05-aperture-analytics.html`. They hold the structure constant while varying business, charts, available signals, and convergence strength — including honest weak-convergence (`03`) and single-signal degradation (`04`). Scroll up and read them to calibrate before generating; there is no filesystem to fetch them from.
+`references/component-reference.html` is in your prompt: one document showing
+every component and chart form in the canonical markup, with placeholder text.
+Match its markup — its words are deliberately meaningless.

@@ -41,10 +41,9 @@ from typing import Optional
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
+from app.evidence_html import normalize_evidence_html
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Signal, signal_is_retired
-from app.html_style import inject_canonical_css
-from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
@@ -209,22 +208,22 @@ def build_evidence_kg(
         prompt_version=EVIDENCE_KG_PROMPT_VERSION,
         system=EVIDENCE_KG_SYSTEM,
         input=user,
-        # Bind the evidence-brief skill: its SKILL.md is the METHOD *and* the
-        # OUTPUT contract — the runner emits the skill's self-contained HTML
-        # visual brief (converge ≥2 signals → wedge → best-chart-per-finding →
-        # honesty pass → value-driven hypothesis), grounded in the trail. The
-        # `evidence-brief` skill is a long-output skill (large HTML payload).
+        # Bind the evidence-brief skill: as of evidence-kg-v6 its SKILL.md is the
+        # RENDERING CONTRACT only (document shape, canonical classes, chart
+        # markup, the no-script boundary). The analysis — converge ≥2 signals →
+        # wedge → best-chart-per-finding → honesty pass — is owned by
+        # EVIDENCE_KG_SYSTEM above, so the model does the reasoning here and the
+        # skill only decides how it looks. `evidence-brief` is a long-output
+        # skill (large HTML payload), so the gateway streams it.
         skill="evidence-brief",
         on_delta=on_delta,
     )
-    raw = result.output if isinstance(result.output, str) else str(result.output)
-    # The model occasionally wraps the document in a ```html code fence despite
-    # the prompt; strip it so the stored payload is raw HTML the UI can iframe.
-    html = strip_code_fence(raw)
-    # The model emits an EMPTY `<style>`; inject the canonical stylesheet here so
-    # the stored brief is self-contained and every brief shares one design system
-    # (see app.html_style) — the model no longer re-emits ~90 lines of CSS.
-    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
+    # Normalise to the stored render contract: fence off, nothing outside the
+    # document, no <script>, canonical stylesheet spliced in. Raises when there
+    # is no document at all — see app.evidence_html.
+    html = normalize_evidence_html(
+        result.output, get_skill("evidence-brief").assets["evidence.css"]
+    )
 
     signal_ids = [t["signal_id"] for t in trail]
     kg_refs = list(signal_ids)
@@ -343,9 +342,9 @@ def _run_sync_task(evidence_id: int, insight: dict, trail_signals: list[dict],
         input=user,
         skill="evidence-brief",
     )
-    raw = result.output if isinstance(result.output, str) else str(result.output)
-    html = strip_code_fence(raw)
-    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
+    html = normalize_evidence_html(
+        result.output, get_skill("evidence-brief").assets["evidence.css"]
+    )
 
     log_agent_decision(
         enterprise_id=enterprise_id,
