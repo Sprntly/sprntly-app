@@ -114,6 +114,7 @@ function HeroFindingCard({
               title={card.chart.title}
               subtitle={card.chart.subtitle}
               data={card.chart.data}
+              spec={card.chart.spec}
             />
           </div>
         ) : null}

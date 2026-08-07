@@ -4301,6 +4301,99 @@
     width: 100%;
   }
 
+  /* Vega-rendered charts (spec path). The DOM kinds above are unchanged. */
+  .vega-chart-host {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .vega-chart-host svg {
+    max-width: 100%;
+    height: auto;
+  }
+
+  .vega-chart-loading {
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 18px 0;
+  }
+
+  .prd-chart-caption {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+
+  /* Expand-to-table disclosure under every chart, and the degrade-to-table
+     stand-in when a spec fails to render. */
+  .chart-data-disclosure {
+    margin-top: 10px;
+  }
+
+  .chart-data-summary {
+    font-size: 11.5px;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+
+  .chart-data-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .chart-data-summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 0.15s ease;
+  }
+
+  .chart-data-disclosure[open] .chart-data-summary::before {
+    transform: rotate(90deg);
+  }
+
+  .chart-data-summary:hover {
+    color: var(--ink);
+  }
+
+  .chart-data-table-wrap {
+    margin-top: 8px;
+    overflow-x: auto;
+  }
+
+  .chart-data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .chart-data-table th,
+  .chart-data-table td {
+    text-align: left;
+    padding: 5px 10px 5px 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  .chart-data-table th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .chart-data-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .chart-data-fallback-note {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
   .prd-bars {
     display: flex;
     flex-direction: column;
