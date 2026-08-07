@@ -396,6 +396,19 @@ class Settings(BaseSettings):
     chat_sweep_asana: bool = False
     chat_sweep_google_meet: bool = False
 
+    # Live read of the configured Slack customer-feedback channels
+    # (app/connector_lookup/slack_voc.py), which the voice-of-customer pass runs
+    # for every feedback-shaped question. Same operational-kill-switch shape and
+    # same reasoning as `chat_cross_connector_sweep` above: it adds a bounded,
+    # parallel round of I/O to a path that is already the slowest in chat, so it
+    # needs an off switch that is not a DB write per company.
+    #
+    # Checked inside `slack_voc.read` itself — the CHOKE POINT, not the call
+    # sites — so a future caller cannot bypass it. The sweep learned that the
+    # hard way (2026-08-05): it had two entry points and its flag only gated
+    # one, so "disabled" left half the feature running.
+    slack_voc_channels: bool = True
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
