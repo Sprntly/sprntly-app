@@ -3689,10 +3689,19 @@ export function ChatScreen() {
 
   /** Post an assistant turn that opens NOTHING — the ambiguous and not-found
    *  halves of the contract. Mirrors ticketSetCommandFlow's seeding so the
-   *  exchange lands in the rail and Supabase like any other turn. */
+   *  exchange lands in the rail and Supabase like any other turn.
+   *
+   *  It appends to whatever chat the user is in — including a PRD-bound one —
+   *  because unlike the command flows this turn is pure text: it binds nothing
+   *  to the tab, so there is no binding to protect and no reason to answer a
+   *  question in a tab the user wasn't looking at. Only the thread-less brief
+   *  tab (and no tab at all) spawns a chat, matching submitAsk. */
   const postOpenArtifactReply = useCallback(
     (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => {
-      const inTab = reusableActiveTab()
+      const activeId = activeTabIdRef.current
+      const inTab = activeId && activeId !== BRIEF_TAB_ID
+        ? tabsRef.current.find((t) => t.id === activeId)
+        : undefined
       const turnId =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       const reply: AskResponse = {
@@ -3725,7 +3734,7 @@ export function ChatScreen() {
       // conversation record is what the assistant SAID.
       void finalizeConversationTurn(turnId, { reply }, tabId)
     },
-    [reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn],
+    [openTab, pushPendingConversation, finalizeConversationTurn],
   )
 
   /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so. */
