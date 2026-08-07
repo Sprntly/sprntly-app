@@ -172,11 +172,16 @@ export type GithubPanelProps = {
   /** Skill paths the user ticked. Nothing is ticked by default — see the
    *  wrapper for why a bulk import is opt-in. */
   selected: string[]
+  /** Keep re-reading this folder every half hour, importing whatever markdown
+   *  turns up in it later. Only meaningful with a folder set — the server
+   *  refuses a synced repo root — so the control hides itself without one. */
+  sync: boolean
   importing: boolean
   error: string | null
   onRepoChange: (next: string) => void
   onBranchChange: (next: string) => void
   onFolderChange: (next: string) => void
+  onSyncChange: (next: boolean) => void
   onSearch: () => void
   onToggle: (path: string) => void
 }
@@ -473,7 +478,15 @@ export function UploadSkillModalView({
  *    - A SKILL MAY REPLACE ONE YOU HAVE. The server already computed that
  *      against your library, so the row says so before you import, not after.
  *    - SOME SKILLS CAN'T BE IMPORTED. They are listed, disabled, with the
- *      reason — hiding them would just look like the repo has fewer skills. */
+ *      reason — hiding them would just look like the repo has fewer skills.
+ *
+ *  KEEPING THE FOLDER SYNCED is the fourth, and it is the one that changes what
+ *  the tick list means. Synced, the folder is the unit rather than the boxes:
+ *  every Markdown file in it is a skill from then on, including ones nobody has
+ *  seen yet. That is why the checkbox spells out "every Markdown file" rather
+ *  than saying "keep up to date", and why it only appears once a folder is
+ *  named — the server refuses to sync a repo root, and a control that offers
+ *  something the server will reject is worse than no control. */
 function GithubSkillPanel({
   connected,
   repos,
@@ -484,11 +497,13 @@ function GithubSkillPanel({
   searching,
   discovery,
   selected,
+  sync,
   importing,
   error,
   onRepoChange,
   onBranchChange,
   onFolderChange,
+  onSyncChange,
   onSearch,
   onToggle,
 }: GithubPanelProps) {
@@ -669,6 +684,33 @@ function GithubSkillPanel({
               ? "Nothing selected yet — tick the skills you want."
               : `${selected.length} selected.`}
           </p>
+
+          {/* Only offered with a folder named: syncing a repo ROOT would treat
+              every .md in the repository as a skill, and the server 422s it. */}
+          {folder.trim() ? (
+            <label className="skill-gh-sync">
+              <input
+                type="checkbox"
+                className="skill-gh-check"
+                checked={sync}
+                disabled={importing}
+                onChange={(e) => onSyncChange(e.target.checked)}
+              />
+              <span className="skill-gh-sync-text">
+                <span className="skill-gh-sync-label">
+                  Keep <code>{folder.trim()}</code> synced
+                </span>
+                {/* Says what it actually does, not what it sounds like. A user
+                    who reads only this line should still know that a README
+                    dropped into the folder becomes a skill. */}
+                <span className="skill-gh-sync-hint muted">
+                  Every Markdown file in this folder becomes a skill, now and
+                  whenever one is added — checked every 30 minutes. Synced
+                  skills are edited in GitHub, not here.
+                </span>
+              </span>
+            </label>
+          ) : null}
         </div>
       ) : null}
 
@@ -825,6 +867,9 @@ type Props = {
     ref?: string
     path?: string
     paths: string[]
+    /** Register the folder so the half-hourly sweep keeps importing what lands
+     *  in it. Only ever true alongside a non-empty `path`. */
+    sync?: boolean
   }) => Promise<MultiSkillUploadResult | void>
 }
 
@@ -856,6 +901,11 @@ export function UploadSkillModal({
   const [searching, setSearching] = useState(false)
   const [discovery, setDiscovery] = useState<GithubSkillDiscovery | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  // Default ON, unlike the per-skill ticks. Someone who has just told us which
+  // folder their skills live in has said the thing that makes syncing correct,
+  // and the checkbox states plainly what it will do; the ticks stay opt-in
+  // because those are a bulk import nobody asked for.
+  const [sync, setSync] = useState(true)
 
   // The connector lookups are LAZY — they run the first time the GitHub tab is
   // opened, so the file flow (which is most uploads) costs no extra requests.
@@ -944,6 +994,10 @@ export function UploadSkillModal({
         ref: branch.trim(),
         path: folder.trim(),
         paths: selected,
+        // Never sent for a repo root: the checkbox is hidden without a folder,
+        // and the server 422s it anyway. Sending false there keeps the request
+        // honest rather than relying on the control being absent.
+        sync: sync && Boolean(folder.trim()),
       })
       if (imported && Array.isArray(imported.skills)) {
         setResult(imported)
@@ -1059,11 +1113,13 @@ export function UploadSkillModal({
         searching,
         discovery,
         selected,
+        sync,
         importing: submitting,
         error,
         onRepoChange: pickRepo,
         onBranchChange: setBranch,
         onFolderChange: setFolder,
+        onSyncChange: setSync,
         onSearch: () => void handleSearch(),
         onToggle: (path) =>
           setSelected((prev) =>

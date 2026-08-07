@@ -25,6 +25,9 @@ const customGetMock = vi.fn()
 const customUpdateMock = vi.fn()
 const githubDiscoverMock = vi.fn()
 const githubImportMock = vi.fn()
+const listSourcesMock = vi.fn()
+const syncSourceMock = vi.fn()
+const stopSyncingMock = vi.fn()
 const connectorsListMock = vi.fn()
 const githubReposMock = vi.fn()
 const goToMock = vi.fn()
@@ -40,6 +43,9 @@ vi.mock("../../../../lib/api", () => ({
     update: (...a: unknown[]) => customUpdateMock(...a),
     discoverGithub: (...a: unknown[]) => githubDiscoverMock(...a),
     importGithub: (...a: unknown[]) => githubImportMock(...a),
+    listSources: (...a: unknown[]) => listSourcesMock(...a),
+    syncSource: (...a: unknown[]) => syncSourceMock(...a),
+    stopSyncingSource: (...a: unknown[]) => stopSyncingMock(...a),
   },
   // The upload modal's GitHub source checks the connector itself (same
   // pattern DesignSourceSettings uses for its repo picker).
@@ -129,6 +135,9 @@ beforeEach(() => {
   githubReposMock.mockResolvedValue({
     repositories: [{ full_name: "octocat/methods", default_branch: "main" }],
   })
+  // No synced folders by default — the panel is absent for most companies, and
+  // the tests that care about it override this.
+  listSourcesMock.mockResolvedValue({ sources: [] })
   searchParamsMock = new URLSearchParams()
 })
 
@@ -720,6 +729,9 @@ describe("SkillsScreen", () => {
         ref: "main",
         path: "",
         paths: ["skills/journey-mapper", "skills/estimation-helper"],
+        // No folder was named, so this import cannot be synced — the checkbox
+        // isn't offered for a repo root and the server refuses one anyway.
+        sync: false,
       }),
     )
     // One added, one updated — the same merge and the same counting sentence a
@@ -734,6 +746,127 @@ describe("SkillsScreen", () => {
     expect(screen.getAllByText("Estimation helper").length).toBe(1)
     expect(screen.getByText("Scores features, from the repo")).toBeTruthy()
     expect(screen.getByText("Journey mapper")).toBeTruthy()
+  })
+
+  // ─── keeping the folder synced ─────────────────────────────────────────────
+
+  /** Drive the modal to a discovered repo, optionally naming a folder first —
+   *  the sync checkbox only exists once one is named. */
+  async function openGithubPanel(folder?: string) {
+    githubDiscoverMock.mockResolvedValue({
+      repo: "octocat/methods",
+      ref: "main",
+      commit_sha: "c0ffee",
+      truncated: false,
+      notes: [],
+      skills: [
+        {
+          path: "journey-mapper", name: "Journey mapper",
+          description: "Maps a journey.", slug_preview: "journey-mapper",
+          trigger_preview: "/journey-mapper", file_count: 1, char_count: 100,
+          status: "new", reason: "",
+        },
+      ],
+    })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(customListMock).toHaveBeenCalled())
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /from github/i }))
+    })
+    await waitFor(() => expect(githubReposMock).toHaveBeenCalled())
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/repository/i), {
+        target: { value: "octocat/methods" },
+      })
+    })
+    if (folder != null) {
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText(/folder/i), { target: { value: folder } })
+      })
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /find skills/i }))
+    })
+  }
+
+  it("offers to keep a folder synced, and says what that will do", async () => {
+    await openGithubPanel("skills")
+    const box = screen.getByRole("checkbox", { name: /keep skills synced/i })
+    // Default ON: naming the folder is the thing that makes syncing correct.
+    expect((box as HTMLInputElement).checked).toBe(true)
+    // The label has to spell out the consequence — a README dropped into that
+    // folder becomes a skill, and this line is where the user learns it.
+    expect(screen.getByText(/Every Markdown file in this folder becomes a skill/)).toBeTruthy()
+    expect(screen.getByText(/edited in GitHub, not here/)).toBeTruthy()
+  })
+
+  it("does not offer syncing for a repo root", async () => {
+    // No folder named → the whole repository, which is not a skill library.
+    await openGithubPanel()
+    expect(screen.queryByRole("checkbox", { name: /keep .* synced/i })).toBeNull()
+  })
+
+  it("sends sync and reports the standing arrangement in the toast", async () => {
+    githubImportMock.mockResolvedValue({
+      imported: [{ ...OTHER_SKILL, replaced: false, synced: true }],
+      skipped: [],
+      commit_sha: "c0ffee",
+      ref: "main",
+      synced: true,
+    })
+    listSourcesMock.mockResolvedValue({ sources: [] })
+    await openGithubPanel("skills")
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: /journey mapper/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /import 1 skill/i }))
+    })
+
+    await waitFor(() =>
+      expect(githubImportMock).toHaveBeenCalledWith({
+        repo: "octocat/methods",
+        ref: "main",
+        path: "skills",
+        paths: ["journey-mapper"],
+        sync: true,
+      }),
+    )
+    // The last thing the user sees should name the arrangement they just made,
+    // not just the count of what landed.
+    await waitFor(() =>
+      expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/skills stays synced/),
+    )
+  })
+
+  it("can turn syncing off for a folder import", async () => {
+    githubImportMock.mockResolvedValue({
+      imported: [{ ...OTHER_SKILL, replaced: false }],
+      skipped: [],
+      commit_sha: "c0ffee",
+      ref: "main",
+      synced: false,
+    })
+    await openGithubPanel("skills")
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: /keep skills synced/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: /journey mapper/i }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /import 1 skill/i }))
+    })
+    await waitFor(() =>
+      expect(githubImportMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sync: false }),
+      ),
+    )
   })
 
   it("filters cards by search query, over name / trigger / description", async () => {

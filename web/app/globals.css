@@ -16252,6 +16252,31 @@
     color: var(--muted);
   }
 
+  /* "Keep <folder> synced". Set apart from the tick list above it by a rule
+     and its own background, because it is a different kind of decision: the
+     ticks pick skills, this one changes what the import MEANS. */
+  .skill-gh-sync {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 9px 11px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+  .skill-gh-sync .skill-gh-check { margin-top: 2px; flex-shrink: 0; }
+  .skill-gh-sync-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .skill-gh-sync-label { font-size: 12.5px; font-weight: 600; color: var(--ink-1); }
+  .skill-gh-sync-label code {
+    font-size: 12px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--surface-3);
+  }
+  .skill-gh-sync-hint { font-size: 11.5px; line-height: 1.45; }
+
   /* ─── Upload-a-skill modal: what the import created ─── */
   /* Deliberately block rows, not flex: each line is "Name — /trigger" as a
      single sentence, and splitting the name into its own box would break that
@@ -21963,6 +21988,78 @@
   color: var(--danger);
   border-color: var(--danger-border);
   background: var(--danger-soft);
+}
+
+/* A synced skill has no edit/delete pair — the repo owns its text. The badge
+   takes the same corner, but is ALWAYS visible rather than hover-revealed:
+   it is a statement about the skill, not a control you go looking for. */
+.skl-card-synced {
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: default;
+}
+.skl-card-synced svg { color: var(--accent); }
+
+/* Synced-folders panel: the settings half of the screen. One row per folder,
+   label left, actions right, collapsing to stacked rows on narrow screens. */
+.skl-sec-sub {
+  margin: -2px 0 10px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.skl-synced-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skl-synced-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+.skl-synced-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.skl-synced-label {
+  font-size: 12px;
+  color: var(--ink-1);
+  overflow-wrap: anywhere;
+}
+.skl-synced-when { font-size: 11px; }
+.skl-synced-err {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.skl-synced-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 .skl-card-confirm {
   position: absolute;
