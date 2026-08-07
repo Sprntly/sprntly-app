@@ -1183,7 +1183,7 @@ def _answer_query(
         "_skill_action": (
             f"Voice of customer · answered from {window.label}"
             + (
-                f" + {len(voc.read_channels)} Slack feedback channels"
+                f" + {len(voc.covered_channels)} Slack feedback channels"
                 if voc and voc.present else ""
             )
             + (f" + {kg.signal_count} stored signals" if kg and kg.present else "")
@@ -1597,9 +1597,15 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         docs_label = f"{corpus.doc_count} uploaded doc{'s' if corpus.doc_count != 1 else ''}"
         sources = f"{sources} + {docs_label}" if corpus.count else docs_label
     if voc.present:
+        # COUNTS `covered_channels`, not `read_channels`. `present` is true for
+        # a stored-only contribution, so counting live reads printed
+        # "+ 0 Slack feedback channels" on an answer that was partly built from
+        # Slack — a run line that contradicts its own corpus. The label says
+        # which kind, so the count and the claim agree.
+        live, covered = len(voc.read_channels), len(voc.covered_channels)
         voc_label = (
-            f"{len(voc.read_channels)} Slack feedback channel"
-            f"{'s' if len(voc.read_channels) != 1 else ''}"
+            f"{covered} Slack feedback channel{'s' if covered != 1 else ''}"
+            + ("" if live == covered else f" ({live} read live)")
         )
         sources = (f"{sources} + {voc_label}"
                    if (corpus.count or corpus.doc_count) else voc_label)

@@ -393,6 +393,11 @@ _RANK_WORD = (
     r"(?:top|biggest|main|most\s+common|most\s+frequent|number\s*(?:one|1)|"
     r"loudest|worst|key|recurring)"
 )
+#: Nouns that mean customer voice ONLY in context — they are equally at home in
+#: a tracker query ("top issues in Jira") or a release-status question ("main
+#: issues blocking the release"), so they are admitted only next to a customer
+#: noun. Kept apart from `_VOICE_NOUN` for exactly that reason.
+_AMBIGUOUS_NOUN = r"(?:issues?|problems?|asks?|requests?)"
 
 _VOC_RECALL_RULES: list[re.Pattern] = [
     # "any complaints about the new pricing?", "concerns around the redesign",
@@ -426,16 +431,83 @@ _VOC_RECALL_RULES: list[re.Pattern] = [
         r"(?:of|about)\b",
         re.I,
     ),
-    # "what's the biggest problem our customers have", "top issues right now".
-    # `issues`/`problems` are ALSO tracker nouns, so they are admitted only with
-    # a ranking word — `_stateless_tracker_lookup` needs a read VERB on a PM
-    # noun and matches none of these, verified, so no tracker turn is stolen.
+    # "the biggest complaints", "top pain points" — a ranking word over a noun
+    # that can ONLY mean customer voice. No customer noun needed: nothing else
+    # in the product is called a complaint or a pain point.
     re.compile(
-        _RANK_WORD + r"\b.{0,30}\b(?:issues?|problems?|complaints?|"
-        r"pain[-\s]*points?|asks?|requests?)\b",
+        _RANK_WORD + r"\b.{0,30}\b(?:complaints?|pain[-\s]*points?|gripes?|"
+        r"frustrations?)\b",
+        re.I,
+    ),
+    # "what's the biggest problem our customers have", "top requests from users".
+    #
+    # `issues`, `problems`, `asks` and `requests` are AMBIGUOUS — they are also
+    # tracker and release-status nouns — so here they require a CUSTOMER noun
+    # nearby, in either order. An earlier version admitted them on the ranking
+    # word alone, with a docstring claiming no tracker turn was stolen; that
+    # claim was checked against `_stateless_tracker_lookup` returning False and
+    # was the wrong test. "what are the top issues in Jira" and "what are the
+    # main issues blocking the release" both matched, and the second names no
+    # source at all, so nothing downstream could stand it back down — a release
+    # -status question answered with a customer-feedback report.
+    #
+    # The cost is deliberate and accepted: a bare "what are the top issues right
+    # now" no longer routes here. It is genuinely ambiguous, and a miss falls
+    # through to the old behaviour while a false positive replaces the answer
+    # the user asked for.
+    re.compile(
+        # ranking … ambiguous-noun … customer  ("top issues our customers hit")
+        _RANK_WORD + r"\b.{0,30}\b" + _AMBIGUOUS_NOUN + r"\b.{0,30}\b"
+        + _CUSTOMER_NOUN + r"\b",
+        re.I,
+    ),
+    re.compile(
+        # customer … ranking … ambiguous-noun  ("customers' biggest problems")
+        _CUSTOMER_NOUN + r"\b.{0,30}\b" + _RANK_WORD + r"\b.{0,30}\b"
+        + _AMBIGUOUS_NOUN + r"\b",
+        re.I,
+    ),
+    re.compile(
+        # ranking … customer … ambiguous-noun  ("top customer requests")
+        _RANK_WORD + r"\b.{0,20}\b" + _CUSTOMER_NOUN + r"\b.{0,20}\b"
+        + _AMBIGUOUS_NOUN + r"\b",
         re.I,
     ),
 ]
+
+#: Verbs that make the request an ACTION ON an artifact rather than a question
+#: about customers. `_vetoed_as_creation` covers CREATE verbs (write, draft,
+#: generate, build); these are the four families it does not, every one of them
+#: an everyday phrasing:
+#:
+#:   transform   "turn what customers are asking for into tickets"
+#:   append      "add the top complaints to the backlog"
+#:   reprioritise "prioritize the top customer requests"
+#:   amend       "update the PRD with what customers are saying"
+#:
+#: Each carries a customer noun and a feedback noun on its way to asking for
+#: work to be done, so every recall rule above matches them. Returning a
+#: voice-of-customer report instead is a regression against pre-PR behaviour —
+#: the last one is the sharpest, since the user wants a PRD edited and gets a
+#: report.
+#:
+#: Position is NOT used here, unlike `_vetoed_as_creation`. That function needs
+#: it because a create verb can appear inside the thing being searched for
+#: ("ticket about car build thread"); these verbs govern from anywhere in the
+#: sentence ("add X to the backlog", "take the complaints and prioritise them"),
+#: and none of them reads naturally as part of a topic.
+_VOC_ACTION_VETO = re.compile(
+    r"\b(?:turn|convert|translate|transform|make|move|pull|push|drop|put|file|"
+    r"promote|copy|log|raise|open)\b[^.?!]{0,60}\b(?:into|onto|as)\b"
+    r"|\badd\b[^.?!]{0,60}\bto\s+(?:the\s+)?"
+    r"(?:backlog|roadmap|sprint|board|prd|ideation|epic|list|queue)\b"
+    r"|\b(?:prioriti[sz]e|re-?prioriti[sz]e|rank|order|triage|groom|estimate|"
+    r"assign|schedule)\b"
+    r"|\b(?:update|amend|revise|edit|append|extend|augment|incorporate|"
+    r"fold|merge|add)\b[^.?!]{0,40}\b(?:prd|ticket|spec|backlog|roadmap|"
+    r"document|doc|story|stories|epic|brief)\b",
+    re.I,
+)
 
 #: A request for feedback ON OUR OWN WORK is not voice of customer.
 #: "give me feedback on my PRD draft" and "summarize the feedback from the beta
@@ -462,7 +534,13 @@ def is_voc_report_request(question: str) -> bool:
     them (`call_digest._slack_voc_read`), and this is what sends a
     source-agnostic feedback question to the digest in the first place.
 
-    TWO VETOES, BOTH LOAD-BEARING, both checked before any positive rule:
+    THREE VETOES, ALL LOAD-BEARING, all checked before any positive rule:
+
+    ACTION REQUESTS. "turn what customers are asking for into tickets", "add the
+    top complaints to the backlog", "prioritize the top customer requests",
+    "update the PRD with what customers are saying". See `_VOC_ACTION_VETO` —
+    these are the verb families `_vetoed_as_creation` does not cover, and every
+    one is an everyday phrasing.
 
     GENERATIVE REQUESTS. "write a PRD for the feature customers are asking for"
     and "our users are frustrated with onboarding — draft tickets for it" are
@@ -478,7 +556,11 @@ def is_voc_report_request(question: str) -> bool:
     FEEDBACK ON OUR OWN WORK. "give me feedback on my PRD draft" is not customer
     voice. See `_VOC_SELF_REVIEW_VETO`.
     """
-    if _vetoed_as_creation(question) or _VOC_SELF_REVIEW_VETO.search(question):
+    if (
+        _vetoed_as_creation(question)
+        or _VOC_ACTION_VETO.search(question)
+        or _VOC_SELF_REVIEW_VETO.search(question)
+    ):
         return False
     return bool(
         _VOC_COMPLAINT_RULE.search(question)

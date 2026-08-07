@@ -162,6 +162,11 @@ class VocChannel:
 
     id: str
     name: str = ""
+    #: The Slack workspace (`team.id`) of the connection row that selected this
+    #: channel, or "" when the row recorded none. Carried so the set can be
+    #: resolved BEFORE a session exists and filtered by workspace afterwards,
+    #: rather than re-reading the rows once the token's workspace is known.
+    team_id: str = ""
 
     @property
     def label(self) -> str:
@@ -358,11 +363,29 @@ class VocRead:
             "channel selection is saved, which the Settings picker treats as "
             "\"read them all\")"
         )
+        # The header states what this block IS, and it has to change when
+        # nothing was read live. "read live just now … 0 returned messages"
+        # contradicted the correctly-labelled stored sections underneath it,
+        # which is the header asserting a provenance its own content denies.
+        live = len(self.read_channels)
+        if live:
+            head = (
+                "SLACK CUSTOMER-FEEDBACK CHANNELS — read live just now, "
+                f"covering the last {self.days} days. These are {origin}. "
+                f"{len(self.reads)} channel(s) were in scope; "
+                f"{live} returned messages."
+            )
+        else:
+            head = (
+                "SLACK CUSTOMER-FEEDBACK CHANNELS — NOTHING was read live this "
+                f"turn. These are {origin}. {len(self.reads)} channel(s) were "
+                "in scope; everything below is either a stored, dated summary "
+                "or a channel that could not be read, and each section says "
+                "which. Do NOT describe any of it as this week's traffic, and "
+                "do not state message volumes."
+            )
         parts = [
-            "SLACK CUSTOMER-FEEDBACK CHANNELS — read live just now, covering "
-            f"the last {self.days} days. These are {origin}. "
-            f"{len(self.reads)} channel(s) were in scope; "
-            f"{len(self.read_channels)} returned messages.",
+            head,
             "Attribute every quote to ITS OWN channel — this block aggregates "
             "several, and a theme heard in one channel is not a theme heard "
             "across the company.",
@@ -513,7 +536,9 @@ def configured_channels(
             if cid in seen:
                 continue
             seen.add(cid)
-            out.append(VocChannel(id=cid, name=str(names.get(cid) or "").strip()))
+            out.append(VocChannel(
+                id=cid, name=str(names.get(cid) or "").strip(), team_id=row_team,
+            ))
     return out, explicit
 
 
@@ -598,7 +623,11 @@ def _attach_stored(
         read.stored = stored
 
 
-def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> None:
+def _append_stored_only(
+    result: VocRead,
+    catalog: dict[str, StoredSummary],
+    allowed: "set[str] | None" = None,
+) -> None:
     """Add channels the catalog knows about that the live scope did not cover.
 
     THE CONFIGURED SET AND THE INGESTED SET DIVERGE IN THE LIVE DATA, in both
@@ -614,14 +643,22 @@ def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> N
     selection that created it — permanently. The rows are a record of what was
     ever synced, not of what is configured now.
 
-    WHICH IS WHY THIS ONLY FIRES WITHOUT AN EXPLICIT SELECTION. When an admin
-    has ticked channels, that selection is a deliberate narrowing, and a
-    never-collected row from before it would put deselected content back into a
-    customer-feedback answer — the one company with a live example
-    (`#agent-escalations`, ingested, since deselected) is exactly the
-    case that must NOT resurface. With nothing ticked the product's own
-    contract is "read them all", so the catalog is additional evidence about
-    the same set rather than a way around a choice.
+    `allowed` IS WHAT KEEPS A DESELECTED CHANNEL OUT. When an admin has ticked
+    channels, that selection is a deliberate narrowing — the unticking flow
+    purges synced data precisely to remove that content — so a never-collected
+    catalog row from before it must not put the content back. `allowed` is the
+    ticked id set, and nothing outside it is appended. `None` means nothing was
+    ticked, where the product's own contract is "read them all" and the catalog
+    is additional evidence about the same set rather than a way around a choice.
+
+    This replaced a guard of `selection == SELECTION_CONFIGURED and connected`,
+    which failed open on the exact path it mattered most: when `open_session`
+    fails, the old code had not resolved the selection yet, so `selection` was
+    still its `MEMBERSHIP` default AND `connected` was False — both halves
+    false, every catalog row appended, the deselected channel back in the
+    answer. A guard whose inputs are computed after the early return it guards
+    is not a guard. `allowed` is now resolved before the session, so it is
+    correct on every path including the failure ones.
 
     A CONFIGURED channel that merely could not be READ still gets its stored
     summary — that is `_attach_stored`, and it is unaffected by this guard. The
@@ -634,10 +671,6 @@ def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> N
     """
     if not catalog:
         return
-    if result.selection == SELECTION_CONFIGURED and result.connected:
-        # …unless Slack could not be opened at all, in which case the stored
-        # rows are the only thing left and withholding them helps nobody.
-        return
     # Computed here rather than passed in: every call site would otherwise have
     # to remember to include NAMES as well as ids, and the one that forgot
     # would silently render a channel twice.
@@ -649,6 +682,8 @@ def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> N
         # id is uppercase C/G/D + uppercase alphanumerics and a channel NAME is
         # lowercase-only, so the two can never collide.
         if not key or not key[0].isupper():
+            continue
+        if allowed is not None and key not in allowed:
             continue
         if key in seen or key.lower() in seen_lower:
             continue
@@ -885,6 +920,21 @@ def read(
     # for.
     catalog = catalog_summaries(company_id)
 
+    # RESOLVED BEFORE THE SESSION, and that ordering is load-bearing. It used to
+    # run after, so on the open_session failure path it never ran at all:
+    # `result.selection` kept its `SELECTION_MEMBERSHIP` default while a
+    # selection genuinely existed, which (a) let `_append_stored_only`'s guard
+    # fail open and hand back a DESELECTED channel from a stale catalog row, and
+    # (b) made `render()` state the wrong provenance for its own content —
+    # "no explicit channel selection is saved" when one was. One DB read either
+    # way; doing it first makes both correct on every path.
+    selected, explicit = configured_channels(company_id)
+    result.selection = SELECTION_CONFIGURED if explicit else SELECTION_MEMBERSHIP
+    #: The ids an admin actually ticked. `None` (not `set()`) means "nothing
+    #: ticked", which is the read-them-all fallback; an empty set would read as
+    #: "ticked nothing", the opposite.
+    allowed = {c.id for c in selected} if explicit else None
+
     if handle is None:
         try:
             from app.connector_lookup import slack as slack_lookup
@@ -900,17 +950,22 @@ def read(
                 "Slack is not connected for this company, or its stored "
                 "credential could not be used"
             )
-            _append_stored_only(result, catalog)
+            _append_stored_only(result, catalog, allowed)
             return result
         handle = session.handle
 
     try:
-        selected, explicit = configured_channels(
-            company_id, getattr(handle, "team_id", "") or ""
-        )
-        result.selection = (
-            SELECTION_CONFIGURED if explicit else SELECTION_MEMBERSHIP
-        )
+        team_id = getattr(handle, "team_id", "") or ""
+        if team_id:
+            # Same rule as `configured_channels`' own filter, applied to the set
+            # already resolved above: drop a channel only when both workspace
+            # ids are known and differ.
+            selected = [
+                c for c in selected
+                if not (c.team_id and c.team_id != team_id)
+            ]
+            if explicit:
+                allowed = {c.id for c in selected}
         # Warm the directory + user map on THIS thread. Both are lazily loaded
         # and shared by every worker below; letting N threads race to populate
         # them costs N identical fetches and (worse) makes the rendered author
@@ -933,7 +988,7 @@ def read(
             readable = readable[:max_channels]
         if not readable:
             _attach_stored(result.reads, catalog)
-            _append_stored_only(result, catalog)
+            _append_stored_only(result, catalog, allowed)
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
             return result
         handle.user_map()
@@ -941,10 +996,18 @@ def read(
         logger.exception("slack-voc: channel resolution failed for %s", company_id)
         result.unavailable = "the Slack channel list could not be read"
         _attach_stored(result.reads, catalog)
-        _append_stored_only(result, catalog)
+        _append_stored_only(result, catalog, allowed)
         return result
 
-    deadline = started + max(budget_s, 0.0)
+    # THE BUDGET STARTS HERE, NOT AT `started`. `budget_s` bounds the parallel
+    # fan-out — the thing that can hang on a dead upstream — and everything
+    # above it is preparation: the catalog round-trip, the connection read, the
+    # channel directory, the user map. Charging those to the same clock meant a
+    # slow `document_catalog` read could consume the entire budget and every
+    # channel came back TIMEOUT with zero reads attempted, reported as if Slack
+    # had been unresponsive. Measured: a 0.6s catalog read against a 0.5s
+    # budget returned all-timeout, nothing read.
+    deadline = time.monotonic() + max(budget_s, 0.0)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         result.budget_exceeded = True
@@ -952,7 +1015,7 @@ def read(
             ChannelRead(channel=c, status=STATUS_TIMEOUT) for c in readable
         )
         _attach_stored(result.reads, catalog)
-        _append_stored_only(result, catalog)
+        _append_stored_only(result, catalog, allowed)
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
@@ -991,7 +1054,7 @@ def read(
     fanned.sort(key=lambda r: order.get(r.channel.id, len(order)))
     result.reads.extend(fanned)
     _attach_stored(result.reads, catalog)
-    _append_stored_only(result, catalog)
+    _append_stored_only(result, catalog, allowed)
     _apply_caps(result.reads)
     result.elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.info(

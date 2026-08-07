@@ -596,16 +596,111 @@ def test_a_deselected_channel_does_not_resurface_from_the_catalog(slack_env):
     assert "a" in result.reads[0].stored.summary
 
 
-def test_a_dead_connection_falls_back_to_stored_even_with_a_selection(slack_env):
-    """The narrowing above is about not overriding a choice, not about hiding
-    data when there is nothing else. With Slack unopenable the stored rows are
-    all that is left."""
-    slack_env["rows"] = []
+def test_a_deselected_channel_does_not_resurface_when_slack_cannot_be_opened(
+    slack_env, monkeypatch
+):
+    """THE GUARD'S WORST PATH, and the one the earlier version failed open on.
+
+    The old guard was `selection == CONFIGURED and connected`. On the
+    `open_session` failure path the selection had not been resolved yet, so
+    `selection` was still its MEMBERSHIP default AND `connected` was False —
+    both halves false, every catalog row appended, the deselected channel back
+    in the answer. A guard whose inputs are computed after the early return it
+    guards is not a guard.
+
+    Fixture has a REAL selection AND a failing session — the combination the
+    superseded test never actually built."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
+    slack_env["catalog"] = [
+        _Doc("C1", "#product-feedback", summary="selected summary", topics=["x"]),
+        _Doc("C7", "#agent-escalations", summary="deselected summary",
+             topics=["t"]),
+    ]
+    result = voc.read(COMPANY)
+
+    assert result.connected is False
+    block = result.render()
+    assert "selected summary" in block          # the ticked channel is served
+    assert "deselected summary" not in block    # the unticked one is NOT
+    assert "#agent-escalations" not in block
+
+
+def test_a_dead_connection_with_no_selection_still_serves_stored_summaries(
+    slack_env, monkeypatch
+):
+    """The narrowing is about not overriding a choice, not about hiding data
+    when there is nothing else. With NOTHING ticked and Slack unopenable, the
+    stored rows are all that is left and withholding them helps nobody.
+
+    (The superseded version of this test set `rows = []`, so it had no
+    connection and therefore no selection either — it passed without ever
+    exercising the "even with a selection" case its name claimed.)"""
+    slack_env["rows"] = [_row()]                # connected, nothing ticked
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
     slack_env["catalog"] = [_Doc("C7", "#agent-escalations",
                                  summary="escalations", topics=["t"])]
     result = voc.read(COMPANY)
     assert result.connected is False
     assert "escalations" in result.render()
+
+
+def test_the_block_never_claims_the_wrong_provenance(slack_env, monkeypatch):
+    """The header states where its own content came from. With a selection saved
+    it must not say "no explicit channel selection is saved" — which is exactly
+    what it said on the failure path, because `selection` was never resolved
+    before the early return."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
+    slack_env["catalog"] = [_Doc("C1", "#product-feedback", summary="s",
+                                 topics=["x"])]
+    result = voc.read(COMPANY)
+    assert result.selection == voc.SELECTION_CONFIGURED
+    block = result.render()
+    assert "no explicit channel selection is saved" not in block
+    assert "Voice of Customer & Support" in block
+
+
+def test_an_all_stored_block_does_not_claim_to_be_a_live_read(slack_env,
+                                                              monkeypatch):
+    """The header used to open "read live just now … 0 returned messages" over
+    correctly-labelled stored sections — asserting a provenance its own content
+    denies."""
+    slack_env["rows"] = [_row()]
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
+    slack_env["catalog"] = [_Doc("C3", "#demos", summary="stored gist",
+                                 topics=["t"], doc_date="2026-08-05T00:00:00Z")]
+    block = voc.read(COMPANY).render()
+    assert "read live just now" not in block
+    assert "NOTHING was read live this turn" in block
+    assert "do not state message volumes" in block
+
+
+def test_catalog_and_warmup_are_not_charged_to_the_fan_out_budget(slack_env,
+                                                                  monkeypatch):
+    """`budget_s` bounds the parallel fan-out — the part that can hang on a dead
+    upstream. Charging the catalog round-trip and the directory warm-up to the
+    same clock meant a slow `document_catalog` read consumed the whole budget
+    and every channel came back TIMEOUT with zero reads attempted, reported as
+    if Slack had been unresponsive."""
+    import time as _t
+
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+
+    def _slow_catalog(cid, **kw):
+        _t.sleep(0.6)
+        return []
+
+    import app.document_catalog as dc
+    monkeypatch.setattr(dc, "list_documents", _slow_catalog)
+
+    result = voc.read(COMPANY, budget_s=0.5)
+    assert slack_env["calls"] == ["C1"], "the channel must still be read"
+    assert [r.status for r in result.reads] == [voc.STATUS_OK]
+    assert result.budget_exceeded is False
 
 
 def test_configured_but_never_ingested_says_so(slack_env):
@@ -742,7 +837,6 @@ def test_the_rules_reach_the_phrasings_people_actually_use():
         "what pain points came up this week",
         "how did people react to the pricing change",
         "what's the biggest problem our customers have",
-        "what are the top issues right now",
         "what did customers think of the new checkout",
         "anything customers are unhappy about",
         "what's been happening in our feedback channels",
@@ -750,6 +844,74 @@ def test_the_rules_reach_the_phrasings_people_actually_use():
     ]:
         assert is_voc_report_request(q), q
         assert "slack" not in q.lower()
+
+
+def test_ambiguous_nouns_need_a_customer_noun_to_count_as_voice():
+    """A DELIBERATE RECALL LOSS, recorded so it is not silently reverted.
+
+    `issues`, `problems`, `asks` and `requests` are equally at home in a tracker
+    query and a release-status question, so a ranking word alone is not enough —
+    they need a customer noun nearby. The cost is the first list: those no
+    longer route here. The benefit is the second: a release-status question
+    naming no source ("main issues blocking the release") used to return a
+    customer-feedback report, and because it names no source nothing downstream
+    could stand it back down.
+
+    The asymmetry is the reason to accept the trade. A miss falls through to the
+    behaviour that existed before this PR; a false positive REPLACES the answer
+    the user asked for."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [                                   # given up, knowingly
+        "what are the top issues right now",
+        "what are the main problems",
+    ]:
+        assert not is_voc_report_request(q), q
+    for q in [                                   # what the narrowing protects
+        "what are the top issues in Jira",
+        "what are the main issues blocking the release",
+        "what are the biggest blockers this sprint",
+    ]:
+        assert not is_voc_report_request(q), q
+    for q in [                                   # still claimed, customer named
+        "what's the biggest problem our customers have",
+        "what are the top customer requests",
+        "the most common issues users hit",
+    ]:
+        assert is_voc_report_request(q), q
+
+
+def test_an_action_request_is_never_diverted_into_a_voc_report():
+    """The verb families `_vetoed_as_creation` does NOT cover — transform,
+    append, reprioritise, amend. Every one carries a customer noun and a
+    feedback noun on its way to asking for work to be done, so every recall rule
+    matches them, and returning a report instead is a regression against pre-PR
+    behaviour. "update the PRD with what customers are saying" is the sharpest:
+    the user wants a PRD edited and got a report.
+
+    These came from an INDEPENDENT phrasing set, not the one the rules were
+    written against — the first set measured 14/14 and this one found six
+    leaks."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "turn what customers are asking for into tickets",
+        "add the top complaints to the backlog",
+        "prioritize the top customer requests",
+        "update the PRD with what customers are saying",
+        "move the top complaints into the sprint",
+        "convert customer feedback into epics",
+        "file the user complaints as bugs",
+        "rank the user requests for next sprint",
+        "triage the user issues",
+        "estimate the customer requests",
+        "fold what customers are saying into the PRD",
+        "incorporate customer feedback into the spec",
+        "assign the top user complaints to me",
+        "append the customer requests to the roadmap",
+        "promote the top customer requests into epics",
+    ]:
+        assert not is_voc_report_request(q), q
 
 
 def test_a_generative_request_is_never_diverted_into_a_voc_report():
@@ -1038,6 +1200,35 @@ def test_the_per_channel_cap_cannot_exceed_the_total_ceiling():
     ever grows past `TOTAL_CHARS`, the drop path stops being a rare overflow
     and becomes the common case — this fails loudly instead."""
     assert voc.PER_CHANNEL_CHARS <= voc.TOTAL_CHARS
+
+
+def test_a_stored_only_answer_does_not_report_zero_slack_channels(slack_env,
+                                                                  monkeypatch):
+    """`VocRead.present` is true for a stored-only contribution, so a run line
+    counting `read_channels` printed "+ 0 Slack feedback channels" on an answer
+    partly built from Slack — a run line contradicting its own corpus."""
+    import app.call_digest as cd
+    import app.graph.gateway as gateway_mod
+
+    slack_env["rows"] = [_row()]
+    monkeypatch.setattr(sl.PROVIDER, "open_session", lambda eid: None)
+    slack_env["catalog"] = [_Doc("C3", "#demos", summary="stored gist",
+                                 topics=["t"], doc_date="2026-08-05T00:00:00Z")]
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "build_kg_context", lambda *a, **k: cd.KgContext())
+
+    class _R:
+        output = {"answer": "themes", "key_points": [], "citations": [],
+                  "confidence": 0.6, "unanswered": ""}
+
+    monkeypatch.setattr(gateway_mod, "llm_call", lambda **kw: _R())
+    payload = cd.answer(enterprise_id=COMPANY, question="what are customers saying?")
+
+    action = payload["_skill_action"]
+    assert "0 Slack feedback channels" not in action
+    assert "1 Slack feedback channel" in action
 
 
 def test_config_keys_match_the_sync_paths_keys():
