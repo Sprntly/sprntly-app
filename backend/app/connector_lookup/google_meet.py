@@ -24,12 +24,26 @@ self-terminates whether or not anyone is still waiting for it, and the worst
 case after abandonment is the one HTTP call already in flight, bounded by
 `google_meet._TIMEOUT`.
 
-`SCAN_BUDGET_S` is 6.0 against `sweep.BUDGET_S` of 8.0 — strictly under it, so
-the scan stops itself before the sweep would give up on it, and what it did
-read still lands. A partial scan says how far it got, in the rendered result
-and in the not-found copy, because "I read your 6 most recent Meet calls and
-none mention this" and "you have no Meet call about this" are different
-sentences.
+`SCAN_BUDGET_S` is 6.0 against `sweep.BUDGET_S` of 8.0. THE TWO ARE NOT
+MEASURED FROM THE SAME INSTANT, and an earlier version of this docstring
+claimed they were, which a review correctly called out as a false guarantee:
+`BUDGET_S` starts at the top of `sweep.sweep()`, while this deadline is
+anchored when `_search` is ENTERED. Everything in between — the local legs on
+the calling thread, `connected_providers`, the credential-freshness read, and
+`open_session` itself, all DB round trips against a shared Supabase — is
+charged to the sweep's budget and not to this one. So under real latency the
+scan's deadline can land AFTER the sweep has already given up.
+
+What that costs is bounded and honest, which is why the anchor is left where it
+is rather than plumbed through `_AdapterLeg`: the sweep reports the leg as
+`STATUS_TIMEOUT` (unread, named, not persisted) and the abandoned thread stops
+itself within `SCAN_BUDGET_S` of its own start. The guarantee this file
+actually makes is therefore the useful one — **an abandoned Meet leg
+terminates in bounded time** — not the stronger one it used to claim.
+
+A partial scan says how far it got, in the rendered result and in the not-found
+copy, because "I read your 6 most recent Meet calls and none mention this" and
+"you have no Meet call about this" are different sentences.
 
 DEPTH IS UNBOUNDED, BREADTH IS NOT. `google_meet_get_transcript` reads ONE
 named conference in full and is not under the scan budget — the model reaches
@@ -74,12 +88,15 @@ logger = logging.getLogger(__name__)
 
 DISPLAY_NAME = "Google Meet"
 
-#: Wall-clock one `google_meet_search_transcripts` scan may spend, checked
-#: between conferences. MUST stay under `connector_lookup.sweep.BUDGET_S` (8.0)
-#: — a test asserts it — so an abandoned sweep leg has already stopped itself
-#: rather than running on against Google with nobody listening. See the module
-#: docstring for why this adapter needs a deadline of its own where the others
-#: do not.
+#: Wall-clock one `google_meet_search_transcripts` scan may spend, measured
+#: from when the scan STARTS (not from when the sweep started — see the module
+#: docstring, which no longer claims otherwise).
+#:
+#: Kept under `connector_lookup.sweep.BUDGET_S` (8.0) so that in the common
+#: case the scan finishes on its own terms and its partial results still land.
+#: The property that holds unconditionally, and the one that matters, is that
+#: an ABANDONED leg terminates within this many seconds of its own start
+#: instead of running on against Google with nobody listening.
 SCAN_BUDGET_S = 6.0
 
 #: Conferences one scan will read transcripts for, newest first. The second
@@ -88,6 +105,13 @@ SCAN_BUDGET_S = 6.0
 _MAX_SCAN_CONFERENCES = 8
 
 #: Conferences named in one search result.
+#:
+#: Currently equal to `_MAX_SCAN_CONFERENCES`, so `cap_items` can never
+#: actually truncate: hits are a subset of the conferences read, and the scan
+#: reads at most that many. The cap is kept as a backstop for the day the scan
+#: cap is raised, and a test pins the relationship — so raising
+#: `_MAX_SCAN_CONFERENCES` past this number becomes a deliberate decision about
+#: how many calls to NAME, rather than a silent one.
 _MAX_HITS = 8
 
 #: Characters of a matching transcript quoted per hit in the SEARCH result.
@@ -363,6 +387,31 @@ class GoogleMeetProvider:
         reported: `read` is how many transcripts were actually opened and
         `stopped_early` is why the scan ended, so a partial scan can never be
         rendered as a complete search.
+
+        A FAILED LISTING RAISES; IT DOES NOT RETURN PROSE. That distinction is
+        the whole of a HIGH review finding against the first version of this
+        file, and the failure mode is worth stating because it is not obvious
+        from either side alone:
+
+          `sweep._run_live` promotes ANY non-empty text to `STATUS_OK`. So a
+          carefully-worded "(Google Meet could not be listed — NOT an absence
+          of calls)" was, to the sweep, a source that had been READ. It
+          rendered under `### Google Meet` inside the "read from the connected
+          sources just now" block instead of the not-covered list;
+          `covered_providers()` reported Meet as covered, which deleted it from
+          `registry.answer_for_hints`'s `unavailable_names`; and worst,
+          `sweep_persist.kickoff_sweep_persist` takes `list(result.read)`, so
+          the error STRING was handed to `extract_document` and written into
+          the tenant's knowledge graph on the shared prod Supabase — where it
+          would later resurface as evidence, indistinguishable from something a
+          customer actually said on a call.
+
+        Raising is the fix and it costs nothing, because both callers already
+        do the right thing with an exception: the sweep maps it to
+        `STATUS_ERROR` (unread, named, never persisted) and `answer.py`'s
+        dispatch wrapper renders it as a sentence for the model. Prose is only
+        ever returned for outcomes that genuinely ARE reads — including the
+        legitimate empty result, which is a real answer about a real search.
         """
         needles = [w for w in (inp.get("keywords") or "").split() if w.strip()]
         if not needles:
@@ -379,25 +428,10 @@ class GoogleMeetProvider:
         # between conferences would leave one rate-limited call free to sleep
         # ~30s twice, which is the whole failure this leg has to be immune to.
         with read_deadline(deadline):
-            try:
-                conferences = self._conferences(handle)
-            except MeetAuthExpiredError:
-                raise
-            except MeetDeadlineExceeded:
-                return (
-                    "(Google Meet was not searched — listing the calls did not "
-                    "finish inside this lookup's time budget. NOT an absence "
-                    "of calls.)"
-                ), []
-            except Exception:  # noqa: BLE001 — one dead listing is not an answer
-                logger.info(
-                    "google-meet-lookup: conference listing failed for %s",
-                    handle.ctx.company_id, exc_info=True,
-                )
-                return (
-                    "(Google Meet could not be listed just now — this is a "
-                    "failure to read, NOT an absence of calls.)"
-                ), []
+            # No `except` here at all: MeetAuthExpiredError, MeetDeadlineExceeded
+            # and any transport failure all propagate, for the reason in the
+            # docstring above. A listing we could not read is NOT a search.
+            conferences = self._conferences(handle)
 
             total = len(conferences)
             for conference in conferences:
@@ -429,6 +463,17 @@ class GoogleMeetProvider:
                 read += 1
                 if text and _snippet(text, needles):
                     hits.append(conference)
+
+        if total and not read:
+            # The smaller form of the same defect. "0 of 12 calls had their
+            # transcript read" is honest PROSE, but it is not a SEARCH — and
+            # non-empty text is exactly what `sweep._run_live` turns into
+            # STATUS_OK and `sweep_persist` writes to the graph. A scan that
+            # opened nothing is a failure to read, so it raises like one.
+            raise MeetDeadlineExceeded(
+                "google_meet: no transcript could be opened before the scan "
+                f"budget expired ({total} call(s) were listed)"
+            )
 
         kept, marker = cap_items(hits, _MAX_HITS)
         return self._render_search(

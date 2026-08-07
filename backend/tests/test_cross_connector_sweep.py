@@ -1123,3 +1123,184 @@ def test_every_connected_source_is_swept_in_one_pass(monkeypatch, wire):
     }
     for provider in adapters:
         assert adapters[provider].opened_with == ["ent-1"], provider
+
+
+# ─── a leg that FAILED must never be reported as read (review HIGH) ───
+#
+# `_run_live` promotes ANY non-empty text to STATUS_OK. So an adapter that
+# returns a carefully-worded failure SENTENCE instead of raising is, to the
+# sweep, a source that was read: it renders under the "read from the connected
+# sources just now" heading rather than the not-covered list,
+# `covered_providers()` reports it as covered (which deletes it from
+# `registry.answer_for_hints`'s unavailable_names), and — the part that makes
+# this HIGH — `sweep_persist` takes `list(result.read)` and hands the error
+# string to `extract_document`, writing it into the tenant's knowledge graph on
+# the shared prod Supabase, where it later resurfaces as evidence.
+#
+# The suite had a test for the legitimate EMPTY case and none for the FAILURE
+# case, which is exactly why fully green CI shipped it.
+
+
+class RaisingAdapter(FakeAdapter):
+    """An adapter whose tool call raises, as every adapter must when it could
+    not read rather than read-and-found-nothing."""
+
+    def __init__(self, name, exc):
+        super().__init__(name)
+        self._exc = exc
+
+    def dispatch(self, session, name, inp):
+        raise self._exc
+
+    def dispatch_records(self, session, name, inp):
+        raise self._exc
+
+
+@pytest.mark.parametrize("provider", ["asana", "google_meet"])
+def test_a_failed_leg_is_unread_never_ok_and_never_persisted(provider, wire):
+    """The regression this locks. Four properties, each of which broke
+    separately in the shipped version, and the last is the expensive one."""
+    adapter = RaisingAdapter(provider, RuntimeError("listing failed"))
+    other = FakeAdapter("clickup", result="CU-1 Checkout redesign")
+    wire({provider: adapter, "clickup": other})
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    by_key = {s.key: s for s in result.sources}
+    assert by_key[provider].status == cs.STATUS_ERROR
+    assert by_key[provider].usable is False
+    # (a) not in the read set, so not under the "read just now" heading;
+    assert [s.key for s in result.read] == ["clickup"]
+    # (b) not reported as covered, so the honesty machinery still names it;
+    assert provider not in result.covered_providers()
+    # (c) named in the not-covered list with a reason;
+    block = result.render()
+    assert "Sources NOT covered by this sweep" in block
+    assert by_key[provider].display_name in block
+    # (d) THE expensive one — nothing about it can reach the KG writer, which
+    # consumes exactly `result.read`.
+    assert by_key[provider] not in result.read
+    assert all(s.text for s in result.read), "a read source with no text"
+
+
+def test_sweep_persist_only_ever_sees_sources_that_were_really_read(wire):
+    """The property `sweep_persist`'s docstring claims ("never an
+    unread_reason") asserted from the sweep's side, against a failing leg —
+    because that claim held only while no adapter smuggled a failure through
+    `read`."""
+    from app.connector_lookup import sweep_persist
+
+    wire({
+        "google_meet": RaisingAdapter("google_meet", RuntimeError("boom")),
+        "asana": RaisingAdapter("asana", TimeoutError("no budget")),
+    })
+    started: list = []
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+    # Nothing was read at all, so persistence must not even start a thread.
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False
+    assert started == []
+
+
+# ─── a connected source with no index yet is NAMED, not silent (finding 4) ───
+
+
+def test_a_connected_local_leg_provider_with_no_index_is_named_as_unread(
+    monkeypatch, wire
+):
+    """Zoom's ONLY sweep coverage is the `calls` index, gated on
+    `call_index.has_index`. Before a company's first sync that probe says no
+    and `_run_local` drops the leg silently — right for a company with no Zoom,
+    wrong for one that has connected it and is waiting on the first sync, which
+    got no coverage AND no mention anywhere. Silence about a source the user
+    connected is the same false-completeness the unread list exists to stop.
+    """
+    wire({"clickup": FakeAdapter("clickup", result="CU-1 Checkout")},
+         connected=["clickup", "zoom"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    unread = {s.key: s for s in result.unread}
+    assert "zoom" in unread, "a connected Zoom was not mentioned at all"
+    assert "nothing of it has been indexed yet" in unread["zoom"].unread_reason()
+    assert "NOT evidence there is nothing there" in unread["zoom"].unread_reason()
+    assert "Zoom" in result.render()
+
+
+def test_a_provider_that_is_not_connected_stays_silent(monkeypatch, wire):
+    """The other half, and the reason `_run_local` drops a leg quietly in the
+    first place: "Zoom could not be read", told to a company that has no Zoom,
+    is a worse answer than saying nothing."""
+    wire({"clickup": FakeAdapter("clickup", result="CU-1 Checkout")},
+         connected=["clickup"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert "zoom" not in {s.key for s in result.sources}
+    assert "Zoom" not in result.render()
+
+
+def test_a_connected_provider_with_an_index_is_read_not_flagged(monkeypatch, wire):
+    """And the leg still wins when there IS an index — the unread entry must
+    not shadow a working local leg."""
+    from app import call_index
+
+    wire({}, connected=["zoom"])
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: True)
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q, **k: [
+        type("C", (), {"call_date": "2026-08-01", "title": "Acme QBR",
+                       "account": "Acme", "summary": "checkout redesign"})(),
+    ])
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    assert "calls" in {s.key for s in result.read}
+    assert "zoom" not in {s.key for s in result.sources}
+    assert "zoom" in result.covered_providers()
+
+
+def test_the_real_meet_adapter_in_the_real_sweep_reports_a_failure_as_unread(
+    monkeypatch,
+):
+    """END TO END, through the REAL adapter — the test that would actually have
+    caught the shipped bug.
+
+    The two tests above use a fake that raises, so they pin the SWEEP's
+    contract and would have stayed green against the defect: the real
+    `google_meet` adapter returned prose, the sweep dutifully called it
+    STATUS_OK, and no fake-based test could see it. Wiring the real adapter in
+    is what closes that gap, and it is worth the extra stubbing.
+    """
+    from app.connector_lookup import google_meet as gm
+    from app.connector_lookup import registry, sweep_persist
+    from app.connectors.google_meet import MeetContext
+
+    monkeypatch.setattr(
+        registry, "connected_providers", lambda eid: ["google_meet"]
+    )
+    monkeypatch.setattr(cs, "_has_calls", lambda eid: False)
+    monkeypatch.setattr(cs, "_has_github", lambda eid: False)
+    monkeypatch.setattr(cs, "_credential_is_refresh_free", lambda eid, p: True)
+    monkeypatch.setattr(
+        gm, "sync_context",
+        lambda cid: MeetContext(company_id=cid, access_token="tok",
+                                account_email="pm@acme.com"),
+    )
+
+    def _boom(tok, **kw):
+        raise RuntimeError("502 from Google")
+
+    monkeypatch.setattr(gm, "list_conference_records", _boom)
+
+    result = cs.sweep("ent-1", "where did the checkout redesign land?")
+
+    meet = {s.key: s for s in result.sources}["google_meet"]
+    assert meet.status == cs.STATUS_ERROR
+    assert meet.usable is False
+    assert meet.text == "", "a failed leg carried text into the prompt"
+    assert result.read == []
+    assert "google_meet" not in result.covered_providers()
+    # And with nothing read, the KG writer is never even started.
+    assert sweep_persist.kickoff_sweep_persist("ent-1", result) is False

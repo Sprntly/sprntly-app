@@ -22,6 +22,7 @@ assignee, section, custom fields — once a search says which task matters.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,33 @@ DISPLAY_NAME = "Asana"
 #: extra coverage is worth inside a chat turn. The rendered result says how
 #: many were searched, so a capped search never reads as a complete one.
 _MAX_WORKSPACES = 3
+
+#: Wall-clock one search may spend, checked between calls AND used to clamp
+#: each call's own socket timeout.
+#:
+#: A count cap is not a time bound, and that gap was a real review finding
+#: against the first version of this file. One search is `list_workspaces`
+#: followed by up to `_MAX_WORKSPACES` typeahead calls — four SEQUENTIAL
+#: requests at `_READ_TIMEOUT` each, so ~60s worst case. `sweep._run_live`
+#: abandons a leg at `BUDGET_S` (8s) with `shutdown(wait=False)`, which does
+#: not cancel a running thread: the worker would keep calling a customer's
+#: Asana for the better part of a minute after nobody was listening. That is
+#: the same failure the Meet leg carries `SCAN_BUDGET_S` for, and the same
+#: reason `google_drive` has no leg at all.
+#:
+#: HONEST BOUND, because this is not a hard one: `requests`' `timeout` is
+#: per-socket-operation, not total, so a server that drips bytes can outlast
+#: it. Clamping each call to the REMAINING budget plus checking the clock
+#: between calls turns a ~60s worst case into a few seconds in every realistic
+#: failure mode; it does not make it provable. A hard bound would need the
+#: request on its own thread, which buys little for a leg the sweep already
+#: abandons.
+SCAN_BUDGET_S = 5.0
+
+#: Floor on a clamped socket timeout. Below this the clamp starts CAUSING the
+#: timeouts it exists to bound — a 0.05s budget turns a healthy call into a
+#: failure — so a search this close to its deadline stops instead.
+_MIN_CALL_TIMEOUT_S = 0.5
 
 #: Hits kept from one search, across every workspace.
 _MAX_HITS = 15
@@ -127,15 +155,19 @@ class AsanaHandle:
     company_id: str = ""
     _workspaces: "list[dict[str, Any]] | None" = field(default=None, repr=False)
 
-    def workspaces(self) -> list[dict[str, Any]]:
+    def workspaces(
+        self, *, timeout: float | None = None
+    ) -> list[dict[str, Any]]:
         if self._workspaces is None:
             from app.connectors import asana_oauth
 
             # The chat HTTP bound, not the sync path's longer one — this is the
             # first request a chat search makes, and `base.HTTP_TIMEOUT` is the
             # framework's promise that no single upstream outlives the answer.
+            # `timeout` narrows it further to whatever is left of SCAN_BUDGET_S.
             self._workspaces = asana_oauth.list_workspaces(
-                self.access_token, timeout=asana_oauth._READ_TIMEOUT
+                self.access_token,
+                timeout=timeout or asana_oauth._READ_TIMEOUT,
             )
         return self._workspaces
 
@@ -179,7 +211,8 @@ def _render_hit(task: dict[str, Any]) -> str:
 
 
 def render_search(
-    hits: list[dict[str, Any]], workspaces_searched: int, *, truncation: str = ""
+    hits: list[dict[str, Any]], workspaces_searched: int, *,
+    truncation: str = "", stopped_early: bool = False,
 ) -> str:
     """The rendered `asana_search_tasks` result.
 
@@ -192,6 +225,8 @@ def render_search(
         if workspaces_searched
         else "no Asana workspaces were readable"
     )
+    if stopped_early:
+        scope += " (stopped at this lookup's time budget — more workspaces exist)"
     if not hits:
         return (
             f"(no Asana task TITLE matches these terms — {scope}. This does not "
@@ -364,6 +399,18 @@ class AsanaProvider:
         number actually searched rather than the number attempted. An auth
         failure is not skipped: it means the whole token is bad, so it
         propagates and the leg reports the source as unread.
+
+        BOUNDED BY `SCAN_BUDGET_S`, checked between calls and used to clamp
+        each call's own socket timeout — see that constant for why four
+        sequential 15s requests is not an acceptable shape for a leg the sweep
+        abandons at 8s.
+
+        A search that opened NOTHING raises rather than returning prose. A
+        workspace listing we could not read is not a search, and non-empty text
+        is what `sweep._run_live` promotes to STATUS_OK and `sweep_persist`
+        writes into the tenant's graph — the HIGH finding this file's Meet
+        sibling was fixed for. Partial coverage is different and stays prose:
+        the result says how many workspaces were actually searched.
         """
         from app.connectors import asana_oauth
 
@@ -371,15 +418,36 @@ class AsanaProvider:
         if not text:
             return "(asana_search_tasks: 'text' is required)", []
 
+        deadline = time.monotonic() + SCAN_BUDGET_S
+
+        def _remaining() -> float | None:
+            """Seconds left, or None when there is no longer enough to try."""
+            left = deadline - time.monotonic()
+            return left if left >= _MIN_CALL_TIMEOUT_S else None
+
+        budget = _remaining()
+        if budget is None:
+            raise TimeoutError("asana: no budget left to list workspaces")
+        # Not wrapped: a workspace listing we cannot read is a failed search,
+        # and the leg must report it as unread rather than as an empty result.
+        workspaces = handle.workspaces(timeout=budget)
+
         hits: list[dict[str, Any]] = []
         searched = 0
+        stopped_early = False
         seen: set[str] = set()
-        for workspace in handle.workspaces()[:_MAX_WORKSPACES]:
+        for workspace in workspaces[:_MAX_WORKSPACES]:
             gid = workspace.get("gid")
             if not gid:
                 continue
+            budget = _remaining()
+            if budget is None:
+                stopped_early = True
+                break
             try:
-                found = asana_oauth.typeahead_tasks(handle.access_token, str(gid), text)
+                found = asana_oauth.typeahead_tasks(
+                    handle.access_token, str(gid), text, timeout=budget
+                )
             except asana_oauth.AsanaAuthExpiredError:
                 raise
             except Exception:  # noqa: BLE001 — one bad workspace must not end the search
@@ -396,8 +464,21 @@ class AsanaProvider:
                 seen.add(key)
                 hits.append(task)
 
+        if workspaces and not searched:
+            # Every workspace failed, or the budget expired before any was
+            # reached. Nothing was searched, so this is not an empty RESULT.
+            raise TimeoutError(
+                "asana: no workspace could be searched "
+                f"({len(workspaces)} visible)"
+            ) if stopped_early else RuntimeError(
+                f"asana: every one of {len(workspaces)} workspace(s) failed to "
+                "answer"
+            )
+
         kept, marker = cap_items(hits, _MAX_HITS)
-        return render_search(kept, searched, truncation=marker), kept
+        return render_search(
+            kept, searched, truncation=marker, stopped_early=stopped_early,
+        ), kept
 
     def _get_task(self, handle: AsanaHandle, inp: dict) -> str:
         from app.connectors import asana_oauth

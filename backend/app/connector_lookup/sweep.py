@@ -913,8 +913,12 @@ def sweep(
     except Exception:  # noqa: BLE001
         logger.exception("cross-connector sweep: local legs failed for %s", enterprise_id)
 
+    connected: set[str] = set()
     try:
-        providers = _live_candidates(enterprise_id)
+        from app.connector_lookup import registry as _registry
+
+        connected = set(_registry.connected_providers(enterprise_id))
+        providers = [p for p in LIVE_PROVIDERS if p in connected and p in _LIVE_LEGS]
         if only is not None:
             providers = [p for p in providers if p in only]
     except Exception:  # noqa: BLE001
@@ -922,6 +926,38 @@ def sweep(
             "cross-connector sweep: provider discovery failed for %s", enterprise_id
         )
         providers = []
+
+    # A provider whose ONLY coverage is a local leg, that IS connected, and
+    # whose leg produced nothing, must still be named.
+    #
+    # `_run_local` drops a leg whose connectedness probe says no, and that is
+    # right for a company that simply has no GitHub — "GitHub could not be
+    # read" would be a worse answer than silence. It is WRONG once we know the
+    # provider is connected. Zoom is the case that exposed it: its only sweep
+    # coverage is the `calls` index (`_LOCAL_LEG_FOR_PROVIDER`), gated on
+    # `call_index.has_index`, so a Zoom-connected company before its first sync
+    # got no Zoom coverage AND no mention of Zoom anywhere — the sweep quietly
+    # answered as though Zoom did not exist. Silence about a source the user
+    # has connected is the same false-completeness this module's unread list
+    # exists to prevent.
+    seen_keys = {s.key for s in result.sources}
+    for provider, leg in _LOCAL_LEG_FOR_PROVIDER.items():
+        if provider not in connected or leg in seen_keys:
+            continue
+        if only is not None and provider not in only:
+            continue
+        if provider in providers:
+            continue  # it also has a live leg; that one will report for it
+        result.sources.append(SourceResult(
+            key=provider, display_name=_display(provider),
+            detail=(
+                "is connected, but nothing of it has been indexed yet — this "
+                "sweep reads the synced index rather than the live API, so "
+                "there is nothing to search until the first sync completes. "
+                "That is NOT evidence there is nothing there"
+            ),
+        ))
+
     room = max(MAX_SOURCES - len(result.sources), 0)
     if len(providers) > room:
         providers = providers[:room]

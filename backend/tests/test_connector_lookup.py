@@ -1419,3 +1419,190 @@ def test_meet_deep_read_is_not_bounded_by_the_scan_budget(monkeypatch):
     )
 
     assert seen == [None], "the deep read inherited the scan's deadline"
+
+
+# ─── the adapter side of the review findings ───
+
+
+def test_meet_listing_failure_raises_rather_than_returning_prose(monkeypatch):
+    """Review HIGH, at the source. Returning a failure SENTENCE made
+    `sweep._run_live` mark the leg STATUS_OK and `sweep_persist` write the
+    error string into the tenant's graph. Both failure modes of the listing —
+    the deadline and a transport error — must raise."""
+    from app.connector_lookup import google_meet as gm
+    from app.connectors.google_meet import MeetDeadlineExceeded
+
+    provider, session, _reads = _meet_session(
+        monkeypatch, conferences=[], transcripts={}
+    )
+
+    def _deadline(tok, **kw):
+        raise MeetDeadlineExceeded("listing ran out of budget")
+
+    monkeypatch.setattr(gm, "list_conference_records", _deadline)
+    with pytest.raises(MeetDeadlineExceeded):
+        provider.dispatch(
+            session, "google_meet_search_transcripts", {"keywords": "checkout"}
+        )
+
+    def _broken(tok, **kw):
+        raise RuntimeError("502 from Google")
+
+    monkeypatch.setattr(gm, "list_conference_records", _broken)
+    with pytest.raises(RuntimeError):
+        provider.dispatch(
+            session, "google_meet_search_transcripts", {"keywords": "checkout"}
+        )
+
+
+def test_meet_a_scan_that_opened_nothing_raises(monkeypatch):
+    """The smaller form of the same defect. "0 of 12 calls had their transcript
+    read" is honest prose and is still not a SEARCH — and non-empty text is
+    what becomes STATUS_OK and gets persisted."""
+    from app.connector_lookup import google_meet as gm
+    from app.connectors.google_meet import MeetDeadlineExceeded
+
+    monkeypatch.setattr(gm, "SCAN_BUDGET_S", -1.0)  # already expired on entry
+    provider, session, reads = _meet_session(
+        monkeypatch,
+        conferences=[_conf(str(i)) for i in range(1, 5)],
+        transcripts={},
+    )
+
+    with pytest.raises(MeetDeadlineExceeded):
+        provider.dispatch(
+            session, "google_meet_search_transcripts", {"keywords": "checkout"}
+        )
+    assert reads == []
+
+
+def test_meet_a_genuine_empty_result_is_still_prose(monkeypatch):
+    """The other side of the line, so the fix does not over-reach: a search
+    that really ran and matched nothing is a REAL answer about a real search
+    and must stay a rendered result, not an exception."""
+    provider, session, reads = _meet_session(
+        monkeypatch,
+        conferences=[_conf("1")],
+        transcripts={"conferenceRecords/1": "Sam Lee: renewal pricing"},
+    )
+
+    out = provider.dispatch(
+        session, "google_meet_search_transcripts", {"keywords": "checkout"}
+    )
+
+    assert reads == ["conferenceRecords/1"]
+    assert "no Google Meet transcript mentions these terms" in out
+
+
+def test_meet_hit_cap_relationship_is_pinned():
+    """`cap_items(hits, _MAX_HITS)` is unreachable while the two caps are
+    equal, because hits are a subset of the conferences read. Kept as a
+    backstop and pinned here, so raising the scan cap past it becomes a
+    deliberate decision about how many calls to NAME."""
+    from app.connector_lookup import google_meet as gm
+
+    assert gm._MAX_HITS >= gm._MAX_SCAN_CONFERENCES
+
+
+def test_asana_search_is_bounded_by_its_own_wall_clock(monkeypatch):
+    """Review MEDIUM. One search was `list_workspaces` + up to 3 sequential
+    typeahead calls at 15s each — ~60s — while `sweep._run_live` abandons the
+    leg at 8s with `shutdown(wait=False)`, which does not cancel a running
+    thread. The worker kept calling a customer's Asana for ~52s with nobody
+    listening: the exact shape `google_drive` is kept out of the sweep for.
+
+    Asserts the clamp (each call gets what is LEFT, never the full 15s) and the
+    stop (the scan abandons remaining workspaces rather than walking them all).
+    """
+    import time as _t
+
+    from app.connector_lookup import asana as ad
+    from app.connectors import asana_oauth
+
+    # Above _MIN_CALL_TIMEOUT_S, or the first call is skipped before it is
+    # ever made and the clamp has nothing to demonstrate.
+    monkeypatch.setattr(ad, "SCAN_BUDGET_S", 1.4)
+    timeouts: list = []
+
+    def _slow_typeahead(tok, gid, query, *, timeout=None, **kw):
+        timeouts.append(timeout)
+        _t.sleep(0.6)
+        return []
+
+    provider, session = _asana_session(
+        monkeypatch,
+        workspaces=[{"gid": "w1"}, {"gid": "w2"}, {"gid": "w3"}],
+        typeahead={"w1": [_asana_hit("1", "Checkout redesign spec")]},
+    )
+    monkeypatch.setattr(asana_oauth, "typeahead_tasks", _slow_typeahead)
+
+    started = _t.monotonic()
+    try:
+        provider.dispatch(session, "asana_search_tasks", {"text": "checkout"})
+    except (TimeoutError, RuntimeError):
+        pass  # "nothing searched" is a legitimate outcome at this budget
+    elapsed = _t.monotonic() - started
+
+    assert elapsed < 3.0, "the scan ran past its own budget"
+    assert len(timeouts) < 3, "walked every workspace regardless of the clock"
+    assert timeouts and all(
+        t is not None and t <= ad.SCAN_BUDGET_S for t in timeouts
+    ), f"a call was given the full socket timeout instead of the remainder: {timeouts}"
+
+
+def test_asana_partial_coverage_says_it_stopped_early(monkeypatch):
+    """A budget stop is honest prose, not an exception, PROVIDED something was
+    actually searched — the result must say more workspaces exist."""
+    import time as _t
+
+    from app.connector_lookup import asana as ad
+    from app.connectors import asana_oauth
+
+    monkeypatch.setattr(ad, "SCAN_BUDGET_S", 0.9)
+    provider, session = _asana_session(
+        monkeypatch, workspaces=[{"gid": "w1"}, {"gid": "w2"}, {"gid": "w3"}],
+        typeahead={},
+    )
+
+    def _one_then_slow(tok, gid, query, *, timeout=None, **kw):
+        _t.sleep(0.5)
+        return [_asana_hit("1", "Checkout redesign spec")] if gid == "w1" else []
+
+    monkeypatch.setattr(asana_oauth, "typeahead_tasks", _one_then_slow)
+
+    out = provider.dispatch(session, "asana_search_tasks", {"text": "checkout"})
+
+    assert "stopped at this lookup's time budget" in out
+    assert "Checkout redesign spec" in out
+
+
+def test_asana_nothing_searched_raises_rather_than_reporting_empty(monkeypatch):
+    """Same HIGH-finding line as Meet's: a search where every workspace failed
+    is not an empty RESULT, and prose here would be promoted to STATUS_OK and
+    written to the graph."""
+    from app.connectors import asana_oauth
+
+    def _always_fails(gid):
+        raise RuntimeError("500 from Asana")
+
+    provider, session = _asana_session(
+        monkeypatch, workspaces=[{"gid": "w1"}, {"gid": "w2"}],
+        typeahead=_always_fails,
+    )
+
+    with pytest.raises(RuntimeError):
+        provider.dispatch(session, "asana_search_tasks", {"text": "checkout"})
+
+
+def test_asana_read_helpers_accept_a_clamped_timeout():
+    """The clamp needs somewhere to land. Additive with inert defaults, so the
+    sync path and the KG puller keep `_READ_TIMEOUT`."""
+    import inspect
+
+    from app.connectors import asana_oauth
+
+    for fn in (asana_oauth.typeahead_tasks, asana_oauth.get_task_raw,
+               asana_oauth.list_workspaces):
+        sig = inspect.signature(fn)
+        assert "timeout" in sig.parameters, fn.__name__
+        assert sig.parameters["timeout"].default is None, fn.__name__

@@ -297,6 +297,7 @@ def typeahead_tasks(
     query: str,
     *,
     count: int = TYPEAHEAD_COUNT,
+    timeout: float | None = None,
 ) -> list[dict[str, Any]]:
     """Tasks in one workspace whose NAME matches `query`
     (GET /workspaces/{gid}/typeahead).
@@ -325,14 +326,16 @@ def typeahead_tasks(
             "opt_fields": TYPEAHEAD_FIELDS,
         },
         headers=_headers(access_token),
-        timeout=_READ_TIMEOUT,
+        timeout=timeout or _READ_TIMEOUT,
     )
     _raise_for(r, "typeahead")
     data = (r.json() or {}).get("data")
     return [t for t in (data or []) if isinstance(t, dict) and t.get("gid")]
 
 
-def get_task_raw(access_token: str, task_gid: str) -> dict[str, Any] | None:
+def get_task_raw(
+    access_token: str, task_gid: str, *, timeout: float | None = None,
+) -> dict[str, Any] | None:
     """One task as Asana's OWN dict (GET /tasks/{gid}), or None when it is gone.
 
     Deliberately NOT `get_task` above: that one normalizes into the shape the
@@ -350,7 +353,7 @@ def get_task_raw(access_token: str, task_gid: str) -> dict[str, Any] | None:
         f"{ASANA_API}/tasks/{task_gid}",
         params={"opt_fields": _TASK_OPT_FIELDS},
         headers=_headers(access_token),
-        timeout=_READ_TIMEOUT,
+        timeout=timeout or _READ_TIMEOUT,
     )
     if r.status_code in (404, 410):
         return None
