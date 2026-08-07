@@ -468,6 +468,26 @@ def test_the_digest_banner_names_a_channel_it_could_not_read(slack_env, monkeypa
     assert "coverage caveat" in banner
 
 
+def test_the_kill_switch_gates_the_choke_point_not_the_call_sites(slack_env, monkeypatch):
+    """Off means off for EVERY caller, including the adapter tool — the sweep's
+    2026-08-05 lesson, where a flag checked at one of two entry points left half
+    the feature running. Asserted by going in through a DIFFERENT door than the
+    digest does and confirming no Slack call is made."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "slack_voc_channels", False, raising=False)
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1", "C2"]})]
+
+    result = voc.read(COMPANY)
+    assert result.render() == ""
+    assert "switched off" in result.unavailable
+
+    session = sl.PROVIDER.open_session(COMPANY)
+    out = sl.PROVIDER.dispatch(session, "slack_voc_channels", {})
+    assert "switched off" in out
+    assert slack_env["calls"] == []          # no channel was read by any route
+
+
 def test_config_keys_match_the_sync_paths_keys():
     """slack_voc holds its own copies of the two config keys so it stays
     importable without the sync path. Copies drift; this is the assertion that

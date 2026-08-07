@@ -405,6 +405,26 @@ def _gate_and_name(
     return readable, excluded
 
 
+def _enabled() -> bool:
+    """The operational kill switch, read at the ONE choke point every caller
+    goes through (`read`). Put here rather than at the call sites for the reason
+    the sweep's flag failed in 2026-08-05: a per-call-site check disarms exactly
+    the call sites someone remembered, and the next caller added is exposed.
+
+    Fails OPEN — an unreadable setting means the feature stays on, matching
+    `_cross_connector_sweep_enabled`: this read is over sources the tenant
+    already connected, through the same read-only adapter, so an unknown flag
+    state risks latency rather than exposure, and latency is what the switch is
+    for in the first place.
+    """
+    try:
+        from app.config import settings
+
+        return bool(getattr(settings, "slack_voc_channels", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _shareable(channel: dict, bot_ids: set[str]) -> bool:
     from app.connector_lookup.slack import is_shareable_channel
 
@@ -479,6 +499,9 @@ def read(
     result = VocRead(days=max(1, min(int(days or DEFAULT_DAYS), 90)))
     if not company_id:
         result.unavailable = "no company in scope"
+        return result
+    if not _enabled():
+        result.unavailable = "the live Slack feedback-channel read is switched off"
         return result
     if handle is None:
         try:
