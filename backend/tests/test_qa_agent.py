@@ -2137,8 +2137,9 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
         seen["kg_question"] = q
         return "", False
 
-    def _fake_docs(eid, q):
+    def _fake_docs(eid, q, **k):
         seen["docs_question"] = q
+        seen["docs_history"] = k.get("history")
         return "", []
 
     monkeypatch.setattr(qa, "_kg_grounding", _fake_kg)
@@ -2156,3 +2157,9 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
 
     assert seen["kg_question"] == "turn that into a plan"
     assert seen["docs_question"] == "turn that into a plan"
+    # Document selection ALSO receives the prior turns — but as their own
+    # argument, never folded into the question. That separation is what this
+    # test protects, and it is what lets Stage R resolve "turn that into a
+    # plan" against the document the thread established while KG retrieval
+    # and the catalog's lexical channel stay question-scoped.
+    assert seen["docs_history"] == history

@@ -30,6 +30,10 @@ from app.document_catalog import (
     find_candidates as find_catalog_candidates,
     list_documents as list_catalog_documents,
 )
+from app.document_reference import (
+    UNRESOLVED_REFERENCE_HEADING as _UNRESOLVED_REFERENCE_HEADING,
+    resolve_documents as resolve_document_reference,
+)
 from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
 from app.prompt_history import render_history_block
@@ -157,6 +161,17 @@ _DOCUMENT_CHAR_BUDGET = DOCUMENT_TOKEN_BUDGET * _CHARS_PER_TOKEN  # 24000
 
 #: At most this many documents load per question, however many match.
 MAX_SELECTED_DOCUMENTS = 3
+
+#: Heading of the block that says a document reference could NOT be resolved.
+#: Defined in `document_reference` (the leaf) and re-exported here, because
+#: that module needs it too — it is the marker a later turn matches on to
+#: recognise that we asked "which document?" and read the user's answer.
+#: Re-exported rather than moved outright so `ask_runner.
+#: UNRESOLVED_REFERENCE_HEADING` keeps resolving for anything bound to it here,
+#: including #1060's assertion.
+#:
+#: A CROSS-PR CONTRACT. See the definition site for who binds to it.
+UNRESOLVED_REFERENCE_HEADING = _UNRESOLVED_REFERENCE_HEADING
 
 #: Index entries rendered before the list is visibly truncated.
 MAX_INDEX_ENTRIES = 200
@@ -590,7 +605,7 @@ def _connected_source_head(doc) -> str:
 
 def _index_line(
     head: str, catalog_doc, loaded: bool, partial_index: bool,
-    unavailable_reason: str = "",
+    unavailable_reason: str = "", referent: bool = False,
 ) -> str:
     """One index entry: the existing `- {name} ({scope}, {date})` head, then
     the catalog's one-line summary, then its topics, then whether the body is
@@ -606,7 +621,13 @@ def _index_line(
     be fetched. It is not "not loaded" (nobody asked for it) and it is
     emphatically not absent — the entry is right there in the index. The
     marker says so in words the model can repeat to the user without turning a
-    fetch failure into a denial that the document exists."""
+    fetch failure into a denial that the document exists.
+
+    `referent` marks the document Stage R resolved as the one the message is
+    ABOUT — named outright, or established earlier in the thread and pointed at
+    with "it". Distinct from `loaded`, which only says the body arrived: three
+    documents can be loaded while exactly one is the one that was asked for,
+    and the model needs to know which."""
     parts = [head]
     if catalog_doc is not None:
         summary = (catalog_doc.summary or "").strip()
@@ -625,6 +646,8 @@ def _index_line(
             "[loaded for this question]" if loaded
             else "[not loaded for this question]"
         )
+    if referent:
+        parts.append("[THIS is the document the user's message refers to]")
     return " ".join(parts)
 
 
@@ -644,12 +667,65 @@ class _Chosen:
     catalog_doc: object | None = None
 
 
+def _selectable_catalog_documents(
+    catalog_docs: list, by_ref_id: dict, connected_by_external_id: dict
+) -> list:
+    """Catalog rows that can actually be rendered AND loaded for this question.
+
+    Stage R may only pin something the user will see in the Index and whose
+    body can arrive — so a row whose upload has since been deleted, or one
+    pushed below MAX_INDEX_ENTRIES, is not offered to it. Chat attachments are
+    excluded for the reason Stage T already excludes them: their text reached
+    the model through their own turn's folded history, so pinning one would
+    duplicate it into the prompt rather than add anything.
+    """
+    out = []
+    for doc in catalog_docs:
+        if doc.provider == PROVIDER_CHAT_ATTACHMENT:
+            continue
+        if doc.provider == PROVIDER_UPLOADS:
+            if doc.external_id in by_ref_id:
+                out.append(doc)
+            continue
+        if doc.external_id in connected_by_external_id:
+            out.append(doc)
+    return out
+
+
+def _chosen_for_catalog_doc(
+    doc, by_ref_id: dict, connected_by_external_id: dict
+) -> _Chosen | None:
+    """A resolved catalog row as a selection, or None when it cannot back one.
+
+    Uploads are cited by FILENAME and read from `document_source_file`;
+    connected-source documents are cited by title and read by `BodyResolver`.
+    Returning None rather than a half-built `_Chosen` keeps a row that slipped
+    out of the renderable set between the two calls from reaching the body
+    loop, where `chosen.ref` and `chosen.catalog_doc` are both assumed usable.
+    """
+    if doc.provider == PROVIDER_UPLOADS:
+        ref = by_ref_id.get(doc.external_id)
+        if ref is None:
+            return None
+        return _Chosen(
+            key=ref.id, name=ref.filename, provider=PROVIDER_UPLOADS, ref=ref,
+        )
+    resolved = connected_by_external_id.get(doc.external_id)
+    if resolved is None:
+        return None
+    return _Chosen(
+        key=f"{resolved.provider}:{resolved.external_id}",
+        name=resolved.title, provider=resolved.provider, catalog_doc=resolved,
+    )
+
+
 def document_grounding(
     enterprise_id: str | None,
     question: str,
     conversation_id: int | None = None,
     *,
     question_embedding: list[float] | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Render the "UPLOADED DOCUMENTS" block (index of every uploaded file,
     plus the bodies selected for this question) and its server-derived
@@ -668,13 +744,42 @@ def document_grounding(
     wrong user, unset, or any read error — behaves exactly as if it had never
     been passed: no attachment entries, no error.
 
-    Selection runs in two stages. **Stage N** loads the documents the question
-    NAMES (`_select_documents`, substring match, binary, no tunable). **Stage
-    T** fills whatever slots remain with the documents the question is ABOUT,
-    by the catalog's fused lexical+semantic rank (`_topical_candidates`, no
-    floor, no threshold). Named beats topical always.
+    Selection runs in three stages. **Stage R** resolves the document the
+    message REFERS TO — either named in its own words or established earlier
+    in the thread and pointed at with "it" (`document_reference`, guarded and
+    abstaining). **Stage N** loads the documents the question NAMES
+    (`_select_documents`, substring match, binary, no tunable). **Stage T**
+    fills whatever slots remain with the documents the question is ABOUT, by
+    the catalog's fused lexical+semantic rank (`_topical_candidates`, no
+    floor, no threshold). Referenced beats named beats topical.
 
-    BOTH STAGES COVER EVERY PROVIDER. Documents that live in a connected
+    Stage R is a stronger claim than the other two — it tells the model *this
+    is the document the user asked for* — so it is the only stage that can
+    ABSTAIN, and it does so on any ambiguity. Abstaining never blanks the
+    prompt: Stage T runs regardless, so the fallback is the behaviour that
+    shipped before this stage existed. What an abstention DOES buy is a
+    sentence in the block telling the model the reference was unresolved, so
+    a follow-up like "what does it say about pricing?" that we cannot pin asks
+    which document rather than answering confidently from whichever one topical
+    rank happened to surface.
+
+    `history` is what makes the anaphoric half possible. Without it a
+    thread-dependent follow-up carries no naming words at all, Stage N finds
+    nothing, and Stage T ranks on the leftover verbs — which is how "what does
+    it say about pricing?" used to land on whichever document mentioned
+    pricing rather than the one under discussion.
+
+    Stage R reads `question` directly, and relies on this function's existing
+    contract that it is the user's BARE current-turn message with no prior
+    turns folded in. That contract is not incidental to this stage — resolving
+    a reference against a folded thread would let a document named five turns
+    ago count as named by this turn, which is the exact overreach Stage R is
+    built to prevent. An earlier revision of this branch carried a separate
+    `reference_question` parameter to work around callers that folded; #1046
+    removed the folding at the call sites instead, which is the better fix and
+    makes the parameter dead weight.
+
+    ALL THREE STAGES COVER EVERY PROVIDER. Documents that live in a connected
     system — Confluence pages, Drive files — are indexed from the catalog and
     their bodies resolve through `document_bodies`: Drive from the corpus
     markdown its sync already wrote, Confluence by fetching the page live.
@@ -789,18 +894,67 @@ def document_grounding(
         return f"{doc.provider}:{doc.external_id}"
 
     connected_by_external_id = {doc.external_id: doc for doc in connected}
+    by_ref_id = {ref.id: ref for ref in refs}
 
-    # ── Stage N: the documents the question NAMES. These load first, and a
+    # ── Stage R: the document the message REFERS to, named outright or
+    #    established earlier in the thread. Pure and I/O-free — it ranks over
+    #    the catalog rows already read above, so it adds no latency.
+    #
+    #    Offered only the documents that can actually be RENDERED and LOADED:
+    #    pinning a row whose upload has since been deleted, or one below the
+    #    index cap, would tell the model "this is the document you asked for"
+    #    about an entry it cannot see and a body that will not arrive.
+    reference = resolve_document_reference(
+        question,
+        _selectable_catalog_documents(
+            catalog_docs, by_ref_id, connected_by_external_id
+        ),
+        history=history,
+    )
+    selected: list[_Chosen] = []
+    match_by_id: dict[str, tuple[str, int | None]] = {}
+    # Tracked separately from `match_by_id`, NOT derived from it. The manifest
+    # label describes the EVIDENCE ("named" / "anaphoric") and is shared with
+    # Stage N, so there is no label value that means "Stage R pinned this" —
+    # deriving the marker from one silently stopped rendering it the moment the
+    # labels were made honest.
+    referent_keys: set[str] = set()
+    for doc in reference.documents:
+        chosen = _chosen_for_catalog_doc(
+            doc, by_ref_id, connected_by_external_id
+        )
+        if chosen is None:
+            continue
+        selected.append(chosen)
+        referent_keys.add(chosen.key)
+        # Labelled by HOW it was found, not by which stage found it. A document
+        # the message names is "named" whether Stage N's substring rule or
+        # Stage R's ranking got there — the manifest contract describes the
+        # evidence, and that evidence is the same. Only "anaphoric" is new,
+        # because resolving against the THREAD is a genuinely different claim
+        # and an auditor needs to be able to find those.
+        match_by_id[chosen.key] = (reference.basis, None)
+    if reference.abstained:
+        logger.info(
+            "document reference unresolved for %s (%s): %s",
+            enterprise_id, reference.basis, reference.reason,
+        )
+
+    # ── Stage N: the documents the question NAMES. These load next, and a
     #    ranking never displaces them.
-    selected: list[_Chosen] = [
-        _Chosen(key=ref.id, name=ref.filename, provider=PROVIDER_UPLOADS, ref=ref)
-        for ref in _select_documents(question, refs)
-    ]
+    for ref in _select_documents(question, refs):
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        if ref.id in match_by_id:
+            continue
+        selected.append(_Chosen(
+            key=ref.id, name=ref.filename, provider=PROVIDER_UPLOADS, ref=ref,
+        ))
+        match_by_id[ref.id] = ("named", None)
     # Stage N over the catalog too, so naming a wiki page or a Drive file
     # lands the same way naming an upload does. Same binary substring rule,
     # same no-tunable: a title the question spells out is an unambiguous
     # request for that document whatever system it happens to live in.
-    named_keys = {chosen.key for chosen in selected}
     question_norm = _normalize(question)
     for doc in connected:
         if len(selected) >= MAX_SELECTED_DOCUMENTS:
@@ -809,27 +963,24 @@ def document_grounding(
         if not title_norm or title_norm not in question_norm:
             continue
         key = _connected_key(doc)
-        if key in named_keys:
+        if key in match_by_id:
             continue
-        named_keys.add(key)
         selected.append(_Chosen(
             key=key, name=doc.title, provider=doc.provider, catalog_doc=doc
         ))
+        match_by_id[key] = ("named", None)
     selected = selected[:MAX_SELECTED_DOCUMENTS]
-    match_by_id: dict[str, tuple[str, int | None]] = {
-        chosen.key: ("named", None) for chosen in selected
-    }
 
     # ── Stage T: fill whatever slots remain by fused rank.
     #
     # `match: "topic"` is set ONLY inside the loop below, once per candidate
     # the fused rank actually returned. So a question that ranks nothing —
     # both channels empty — produces no topic labels at all, and selection
-    # ends with whatever Stage N named. There is deliberately no fallback
-    # here: ordering the catalog by recency and calling the head of that list
-    # a topic match is how "the newest document, whatever you asked" came to
-    # be presented as a ranked answer, and it must not be reachable.
-    by_ref_id = {ref.id: ref for ref in refs}
+    # ends with whatever Stage R and Stage N named. There is deliberately no
+    # fallback here: ordering the catalog by recency and calling the head of
+    # that list a topic match is how "the newest document, whatever you
+    # asked" came to be presented as a ranked answer, and it must not be
+    # reachable.
     topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
     topical_candidates: list[dict] = []
     if topical_ran:
@@ -931,6 +1082,7 @@ def document_grounding(
         lines.append(_index_line(
             f"- {ref.filename} (source: {ref.source_name}, uploaded {date})",
             catalog.get(ref.id), ref.id in selected_ids, truncated_index,
+            referent=ref.id in referent_keys,
         ))
     for turn_id, index, attachment, turn_created_at in conv_attachments:
         date = (turn_created_at or "")[:10]
@@ -944,6 +1096,7 @@ def document_grounding(
         lines.append(_index_line(
             _connected_source_head(doc), doc, key in bodies, truncated_index,
             unavailable_reason=unavailable.get(key, ""),
+            referent=key in referent_keys,
         ))
     if truncated_index:
         # The marker states PARTIAL explicitly, because above the cap the
@@ -955,6 +1108,27 @@ def document_grounding(
             f"documents in this workspace. A document missing from this list "
             f"may still exist.]"
         )
+
+    # An UNRESOLVED reference is stated, not swallowed. The message pointed at
+    # a specific document and we declined to guess which — so the model is told
+    # exactly that, and told to ask. Without this line the abstention would be
+    # invisible: the prompt would look like any other topical-fill prompt, and
+    # the model would answer from whatever Stage T surfaced as though it were
+    # the document the user meant. That IS the confidently-wrong-document
+    # failure, just moved one layer along.
+    if reference.abstained:
+        lines.append("")
+        lines.append(f"## {UNRESOLVED_REFERENCE_HEADING}")
+        lines.append(
+            f"This message refers to a specific document, but {reference.reason}. "
+            "Do NOT assume any loaded document below is the one meant. Ask which "
+            "document the user means before answering from one."
+        )
+        if reference.candidates:
+            lines.append("Closest matches, to offer as choices:")
+            for candidate in reference.candidates:
+                origin = _PROVIDER_LABELS.get(candidate.provider, candidate.provider)
+                lines.append(f"- {candidate.title} ({origin})")
 
     if bodies:
         lines.append("")
@@ -1414,8 +1588,14 @@ def compose_ask_answer(
     # prefix — including the PRD-grounded branch below, which skips corpus +
     # KG for cost reasons but must not go blind to uploads (that would
     # reintroduce the false-denial bug inside PRD-tab chat).
+    # `history` additionally reaches document selection, which is the ONLY
+    # retrieval consumer that legitimately wants prior turns: Stage R resolves
+    # an anaphoric reference ("what does it say about pricing?") against the
+    # document the thread established. The other three consumers named in this
+    # function's docstring stay question-scoped, exactly as it requires.
     docs_block, documents = document_grounding(
-        enterprise_id, question, question_embedding=question_embedding
+        enterprise_id, question, question_embedding=question_embedding,
+        history=history,
     )
 
     if prd_context:

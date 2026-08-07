@@ -671,7 +671,17 @@ selected and could NOT be fetched, and the entry says why. This is NOT \
 absence. Say the document exists, say plainly that its contents could not be \
 loaded and give the stated reason, and offer to try again. Never turn a \
 failure to fetch into a claim that the document does not exist, is not \
-connected, or was never uploaded."""
+connected, or was never uploaded.
+10. An entry marked "[THIS is the document the user's message refers to]" is \
+the one the message means — it names that document, or an earlier turn \
+established it. Answer FROM it; the other loaded documents are context. Rule \
+6 does not apply to it: if it does not cover what was asked, say so about \
+THAT document by name rather than answering from a different one.
+11. A section headed "The document this message refers to is UNRESOLVED" \
+means the message points at a specific document and Sprntly would not guess \
+which. Do not treat any loaded document as the one meant. Name the \
+possibilities it lists and ask which they mean — a confidently wrong document \
+is worse than one short question."""
 
 
 # Post-corpus user template used when a KG context section is composed in.
