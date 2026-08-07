@@ -416,13 +416,12 @@ def test_a_live_read_also_carries_its_stored_gist_labelled(slack_env):
     assert "VOC skill needs user input shaping" in block
 
 
-def test_catalog_channels_outside_the_live_scope_are_added_not_dropped(slack_env):
-    """The configured set and the ingested set diverge in BOTH directions in the
-    live data — staging-test's catalog holds four channels while its connection
-    row selects none. Covering only the intersection would make the answer
-    narrower than either set the user can see in the product."""
-    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
-                               "sync_channel_names": {"C1": "product-feedback"}})]
+def test_catalog_channels_are_added_when_nothing_is_ticked(slack_env):
+    """staging-test's shape: no explicit selection, so the product's contract is
+    "read them all" — and the catalog holds channels the bot's CURRENT
+    membership no longer lists. Covering only the intersection would make the
+    answer narrower than either set the user can see."""
+    slack_env["rows"] = [_row()]                       # no sync_channel_ids
     slack_env["catalog"] = [
         _Doc("C1", "#product-feedback", summary="a", topics=["x"]),
         _Doc("C9", "#working-group-for-june-9", summary="wg summary",
@@ -434,6 +433,42 @@ def test_catalog_channels_outside_the_live_scope_are_added_not_dropped(slack_env
     assert "C9" not in slack_env["calls"]     # added from storage, never read
     block = result.render()
     assert "wg summary" in block and "NOT read live" in block
+
+
+def test_a_deselected_channel_does_not_resurface_from_the_catalog(slack_env):
+    """`deregister_document` is never called for Slack, so a catalog row
+    outlives the selection that created it — permanently. One live company has
+    exactly this: #agent-escalations is in its catalog and NOT in its
+    three-channel selection.
+
+    An explicit selection is a deliberate narrowing. Putting a deselected
+    channel's content back into a customer-feedback answer, from a row nothing
+    ever collects, would quietly override that choice."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    slack_env["catalog"] = [
+        _Doc("C1", "#product-feedback", summary="a", topics=["x"]),
+        _Doc("C7", "#agent-escalations", summary="escalations",
+             topics=["agent ship failures"]),
+    ]
+    result = voc.read(COMPANY)
+    labels = {r.channel.label for r in result.reads}
+    assert labels == {"#product-feedback"}
+    assert "escalations" not in result.render()
+    # The channel that IS selected still gets its stored gist.
+    assert "a" in result.reads[0].stored.summary
+
+
+def test_a_dead_connection_falls_back_to_stored_even_with_a_selection(slack_env):
+    """The narrowing above is about not overriding a choice, not about hiding
+    data when there is nothing else. With Slack unopenable the stored rows are
+    all that is left."""
+    slack_env["rows"] = []
+    slack_env["catalog"] = [_Doc("C7", "#agent-escalations",
+                                 summary="escalations", topics=["t"])]
+    result = voc.read(COMPANY)
+    assert result.connected is False
+    assert "escalations" in result.render()
 
 
 def test_configured_but_never_ingested_says_so(slack_env):

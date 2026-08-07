@@ -571,21 +571,41 @@ def _append_stored_only(result: VocRead, catalog: dict[str, StoredSummary]) -> N
     """Add channels the catalog knows about that the live scope did not cover.
 
     THE CONFIGURED SET AND THE INGESTED SET DIVERGE IN THE LIVE DATA, in both
-    directions, and this closes one direction. One company's catalog holds four
-    channels while its connection row carries no selection at all and the bot's
-    membership list shows a different five; three other companies have
-    configured channels and zero catalog rows. An answer that silently covered
-    only the intersection would be narrower than either set the user can see in
-    the product.
+    directions. One company's catalog holds four channels while its connection
+    row carries no selection at all and the bot's membership shows a different
+    five; three other companies have configured channels and zero catalog rows.
+    An answer that silently covered only the intersection would be narrower
+    than either set the user can see in the product.
 
-    The other direction — configured but never ingested — is handled by the
-    render's NOTHING-stored-either section, which names those channels rather
-    than dropping them.
+    WHY THE SETS DIVERGE, traced: `register_slack_catalog` upserts one row per
+    channel the SYNC passed it, and `deregister_document` is never called for
+    Slack anywhere in the codebase. So a catalog row outlives the membership or
+    selection that created it — permanently. The rows are a record of what was
+    ever synced, not of what is configured now.
+
+    WHICH IS WHY THIS ONLY FIRES WITHOUT AN EXPLICIT SELECTION. When an admin
+    has ticked channels, that selection is a deliberate narrowing, and a
+    never-collected row from before it would put deselected content back into a
+    customer-feedback answer — the one company with a live example
+    (`#agent-escalations`, ingested, since deselected) is exactly the
+    case that must NOT resurface. With nothing ticked the product's own
+    contract is "read them all", so the catalog is additional evidence about
+    the same set rather than a way around a choice.
+
+    A CONFIGURED channel that merely could not be READ still gets its stored
+    summary — that is `_attach_stored`, and it is unaffected by this guard. The
+    other direction, configured but never ingested, is handled by the render's
+    NOTHING-stored-either section, which names those channels rather than
+    dropping them.
 
     These are added as STATUS_STORED: represented, clearly second-hand, and
     never counted as a live read.
     """
     if not catalog:
+        return
+    if result.selection == SELECTION_CONFIGURED and result.connected:
+        # …unless Slack could not be opened at all, in which case the stored
+        # rows are the only thing left and withholding them helps nobody.
         return
     # Computed here rather than passed in: every call site would otherwise have
     # to remember to include NAMES as well as ids, and the one that forgot
