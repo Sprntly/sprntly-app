@@ -71,6 +71,7 @@ import {
   ARTIFACT_TYPE_LABELS,
   ARTIFACT_TYPE_NOUN,
   ARTIFACT_TYPE_PLURAL,
+  VISIBLE_ARTIFACT_TYPE_IDS,
   activationRefusal,
   addFormatLabel,
   builtinFormatName,
@@ -84,24 +85,13 @@ import {
   type ArtifactTemplateGroups,
 } from "../../../lib/useArtifactTemplates"
 
-/** Document types withheld from the UI (owner, 2026-08-06) — HIDDEN, not
- *  removed. Engineering-spec formats are built end to end: the routes accept
- *  them, the compiler compiles them, `resolve_impl_spec_template` reads them and
- *  `GENERATION_ENABLED.impl_spec` is true. Only the tab and its group are
- *  withheld, so /templates asks a user to understand two document types instead
- *  of three while this settles.
- *
- *  Restoring it is emptying this set. Nothing else — no route, no test of the
- *  backend behaviour, and no data — is conditioned on it, and a company that
- *  already activated an engineering-spec format keeps generating into it. That
- *  is deliberate: hiding a surface must never silently change what the product
- *  produces. */
-const HIDDEN_TYPES = new Set<ArtifactTemplateType>(["impl_spec"])
-
-/** The types this screen offers. Derived, so the tab row and the group list can
- *  never disagree about what is on screen. */
-export const VISIBLE_TYPE_IDS: readonly ArtifactTemplateType[] =
-  ARTIFACT_TYPE_IDS.filter((t) => !HIDDEN_TYPES.has(t))
+/** The types this screen offers. The withheld set now lives in `compileNotes`
+ *  beside `ARTIFACT_TYPE_IDS` itself, because the upload modal renders its own
+ *  chip row and was still offering the type this screen withholds — see
+ *  `HIDDEN_ARTIFACT_TYPE_IDS` there for what hiding does and does not change.
+ *  Kept under this name so the tab row, the group list and this screen's tests
+ *  read the same way as before. */
+export const VISIBLE_TYPE_IDS = VISIBLE_ARTIFACT_TYPE_IDS
 
 /** The denial lines. Two, not one — activate/deactivate and deleting the active
  *  row are different actions and saying the same thing for both would leave a

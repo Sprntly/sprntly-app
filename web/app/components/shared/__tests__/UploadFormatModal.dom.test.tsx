@@ -105,28 +105,46 @@ describe("pure helpers", () => {
 })
 
 describe("the form", () => {
-  it("opens on Paste — a format lives in Confluence or a Doc, not on disk", () => {
+  it("opens on Upload a file — a format is a document the team already has", () => {
     mount()
     expect(
-      screen.getByRole("button", { name: "Paste Markdown" }).getAttribute("aria-pressed"),
+      screen.getByRole("button", { name: "Upload a file" }).getAttribute("aria-pressed"),
     ).toBe("true")
-    expect(screen.getByLabelText("Paste your format as Markdown")).toBeTruthy()
+    expect(
+      screen.getByRole("button", { name: "Paste Markdown" }).getAttribute("aria-pressed"),
+    ).toBe("false")
+    expect(fileInput()).toBeTruthy()
+    expect(screen.queryByLabelText("Paste your format as Markdown")).toBeNull()
   })
 
   it("pre-selects the type the caller opened with", () => {
-    mount({ initialType: "impl_spec" })
+    mount({ initialType: "tickets" })
     expect(
-      screen.getByRole("button", { name: "Engineering spec" }).getAttribute("aria-pressed"),
+      screen.getByRole("button", { name: "Tickets" }).getAttribute("aria-pressed"),
     ).toBe("true")
     expect(
       screen.getByRole("button", { name: "PRD" }).getAttribute("aria-pressed"),
     ).toBe("false")
   })
 
+  it("offers no chip for a withheld type, and never opens on one", () => {
+    // Engineering specs are withheld from the UI (HIDDEN_ARTIFACT_TYPE_IDS).
+    // The screen behind this modal has no tab and no group for them, so a chip
+    // here would file a format somewhere the user cannot then manage it.
+    mount({ initialType: "impl_spec" })
+    expect(screen.queryByRole("button", { name: "Engineering spec" })).toBeNull()
+    // The withheld type it was opened with falls back to a visible one rather
+    // than leaving the row with nothing pressed.
+    expect(
+      screen.getByRole("button", { name: "PRD" }).getAttribute("aria-pressed"),
+    ).toBe("true")
+  })
+
   it("gates submit until there is a source AND a name", () => {
     mount()
     expect(submitBtn().disabled).toBe(true)
 
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "# Product requirements" },
     })
@@ -154,6 +172,7 @@ describe("the form", () => {
 
   it("counts characters against the cap, live and always visible", () => {
     mount()
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     expect(screen.getByText(`0 / ${MAX_FORMAT_SOURCE_CHARS.toLocaleString()} characters`)).toBeTruthy()
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "abcde" },
@@ -163,6 +182,7 @@ describe("the form", () => {
 
   it("hands the paste through as markdown, never as a file", async () => {
     const { onSubmit, onClose } = mount()
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "# Product requirements" },
     })
@@ -214,6 +234,7 @@ describe("client mirrors of the server caps", () => {
 
   it("a paste over 50,000 characters shows the cap error and never submits", async () => {
     const { onSubmit } = mount()
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "x".repeat(MAX_FORMAT_SOURCE_CHARS + 1) },
     })
@@ -260,6 +281,7 @@ describe("duplicate name", () => {
 
   it("is a role=status FYI and leaves submit enabled — names are free text", () => {
     mount({ existing })
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "# x" },
     })
@@ -302,6 +324,7 @@ describe("server rejection", () => {
         onClose: vi.fn(),
       }),
     )
+    fireEvent.click(screen.getByRole("button", { name: "Paste Markdown" }))
     fireEvent.change(screen.getByLabelText("Paste your format as Markdown"), {
       target: { value: "# Ticket format" },
     })

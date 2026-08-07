@@ -8,11 +8,12 @@
  * copied verbatim from routes/artifact_templates.py so a rejection reads the
  * same whether it was caught here or there.
  *
- * PASTE IS THE DEFAULT SOURCE, unlike UploadSkillModal's file-first shape. A
- * team's PRD form lives in Confluence or a Google Doc, not on disk — the common
- * path is a copy-paste, and defaulting to the file tile would put a picker in
- * front of it. The cost if that's wrong is one extra click for teams who keep
- * their formats in a repo.
+ * THE FILE TILE IS THE DEFAULT SOURCE, matching UploadSkillModal's file-first
+ * shape. A team's format is a document — the .docx or PDF they already circulate
+ * — and the modal now takes every type and extracts the text server-side, so
+ * handing over the file itself is both the shortest path and the one that keeps
+ * the most structure. Paste is one click away for anyone who has the Markdown
+ * on their clipboard.
  *
  * A duplicate name is a NOTICE, not a block. Format names are free text and are
  * never deconflicted server-side (unlike custom skills, which are invoked by
@@ -28,9 +29,10 @@ import { useEffect, useState } from "react"
 import { IconCircleCheckFilled, IconUpload } from "@tabler/icons-react"
 import type { ArtifactTemplateType } from "../../lib/api"
 import {
-  ARTIFACT_TYPE_IDS,
   ARTIFACT_TYPE_LABELS,
   ARTIFACT_TYPE_NOUN,
+  HIDDEN_ARTIFACT_TYPE_IDS,
+  VISIBLE_ARTIFACT_TYPE_IDS,
 } from "../../lib/compileNotes"
 
 /** 25 MB — mirrors store.MAX_TEMPLATE_UPLOAD_BYTES. Sized for a real document
@@ -190,7 +192,12 @@ export function UploadFormatModalView({
             </p>
 
             {/* 1 — which document. Pre-selected from wherever the modal was
-                opened, so the common path is already answered. */}
+                opened, so the common path is already answered.
+
+                VISIBLE_ARTIFACT_TYPE_IDS, not ARTIFACT_TYPE_IDS: the screen
+                behind this modal withholds engineering specs, and a chip here
+                for a type with no tab, no group and nowhere to manage the
+                result is an offer the rest of the product doesn't honour. */}
             <div className="afmt-field">
               <span className="field-label" id="afmt-type-label">
                 Which document?
@@ -200,7 +207,7 @@ export function UploadFormatModalView({
                 role="group"
                 aria-label="Document type"
               >
-                {ARTIFACT_TYPE_IDS.map((t) => (
+                {VISIBLE_ARTIFACT_TYPE_IDS.map((t) => (
                   <button
                     key={t}
                     type="button"
@@ -440,7 +447,7 @@ export function UploadFormatModal({
   onClose,
 }: Props) {
   const [type, setType] = useState<ArtifactTemplateType>(initialType)
-  const [source, setSource] = useState<FormatSource>("paste")
+  const [source, setSource] = useState<FormatSource>("file")
   const [name, setName] = useState("")
   const [markdown, setMarkdown] = useState("")
   const [file, setFile] = useState<File | null>(null)
@@ -451,12 +458,22 @@ export function UploadFormatModal({
   // Adopt the type the caller opened with. Re-armed on every open so the
   // Tickets group's button never opens on PRD because the modal was last used
   // from the section header.
+  //
+  // A withheld type falls back to the first visible one. No caller passes one
+  // today — the section derives it from a tab row that is already filtered —
+  // but the alternative is a chip row with nothing pressed and a submit that
+  // files the format under a type with nowhere to manage it.
   useEffect(() => {
-    if (open) setType(initialType)
+    if (!open) return
+    setType(
+      HIDDEN_ARTIFACT_TYPE_IDS.has(initialType)
+        ? VISIBLE_ARTIFACT_TYPE_IDS[0]
+        : initialType,
+    )
   }, [open, initialType])
 
   function reset() {
-    setSource("paste")
+    setSource("file")
     setName("")
     setMarkdown("")
     setFile(null)
