@@ -410,6 +410,29 @@ describe("ChatScreen — the open acknowledgment is not a promise", () => {
     )
   })
 
+  it("still acknowledges when the document was ALREADY on screen", async () => {
+    // The instant path: the second open finds the PRD cached on the tab and
+    // returns before any load. Deferring the ack without settling it here left
+    // the turn under a thinking indicator forever — dead air in the one case
+    // where the panel opened immediately.
+    resolveIntent.mockResolvedValue(resolved2216())
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+    await waitFor(() =>
+      expect(screen.getByText(/Opening that PRD in the panel on the right/i)).toBeTruthy(),
+    )
+
+    await typeAndSend("open the PRD for compliance reporting")
+
+    // Two asks, two acknowledgments — and no second fetch for a cached doc.
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/Opening that PRD in the panel on the right/i),
+      ).toHaveLength(2),
+    )
+    expect(loadPrdById).toHaveBeenCalledTimes(1)
+  })
+
   it("says what really happened when the document refuses to load", async () => {
     // A PRD mid-regeneration: resolvable (it has an id) but not showable.
     // The old flow left "Opening that PRD…" in the thread beside a panel that

@@ -2097,6 +2097,13 @@ export function ChatScreen() {
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
+      // The document is on screen ALREADY, so the open command's deferred ack is
+      // true right now — and this return never reaches the async block that
+      // normally settles it. Without this the turn keeps a thinking indicator
+      // forever, which is the exact dead air the deferral was meant to avoid:
+      // the one case where the panel opens instantly is the one where the chat
+      // would have said nothing at all.
+      if (deferAck && seedTurn) settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
       return tabId
     }
     // Caller already holds the PRD — show it immediately, no async work.
