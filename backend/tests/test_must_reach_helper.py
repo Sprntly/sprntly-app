@@ -69,6 +69,28 @@ def test_restores_the_original_even_when_the_body_raises():
     assert mod.sniff is original
 
 
+def test_a_caller_that_bound_the_name_at_import_time_is_INVISIBLE():
+    """The documented false positive, pinned so the docstring stays honest.
+
+    `must_reach` replaces an attribute on the module object. A caller holding a
+    direct reference — the `from mod import fn` shape — never goes through it,
+    so the function runs and this still reports "never reached". Asserting the
+    limit rather than claiming it does not exist.
+    """
+    mod = _module_with_two_branches()
+    bound = mod.sniff  # the `from mod import sniff` shape, in miniature
+    ran: list[str] = []
+
+    with pytest.raises(AssertionError, match="never reached"):
+        with must_reach(mod, "sniff"):
+            ran.append(bound("payload"))
+
+    assert ran == ["sniffed"], (
+        "the function really did run — this is a FALSE POSITIVE, and it is "
+        "expected. See _must_reach.py's docstring for the workaround."
+    )
+
+
 def test_at_least_enforces_a_call_count():
     mod = _module_with_two_branches()
     with pytest.raises(AssertionError, match="needed 2"):

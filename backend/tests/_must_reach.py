@@ -39,9 +39,26 @@ Now the test fails if the fixture stops reaching the fallback — including if a
 future change makes an EARLIER branch handle the input, which is exactly how the
 `_SNIFF_RE` case went uncovered without anybody noticing.
 
-This module is opt-in: it flags nothing on its own and cannot produce a false
-positive. It is the mechanical half of the review practice; the other half is
-still reading the fixture.
+This module is opt-in: it flags nothing on its own. It is the mechanical half of
+the review practice; the other half is still reading the fixture.
+
+IT *CAN* PRODUCE A FALSE POSITIVE, and an earlier draft of this docstring
+claimed otherwise. `must_reach` swaps the attribute on the MODULE OBJECT, so it
+only observes callers that resolve the name through the module at call time
+(`mod.fn(...)`). A caller that bound the function at import time —
+`from mod import fn` at the top of the calling module, then a bare `fn(...)` —
+holds a direct reference this never replaces, so the function genuinely runs and
+this still reports "never reached". Practical risk is low (it is opt-in, and the
+failure is loud and immediately obvious to whoever wrote the assertion), but
+"cannot produce a false positive" was simply wrong.
+
+Workaround when you hit it: patch the name in the CALLING module's namespace
+(`must_reach(caller_module, "fn")`) rather than in the module that defines it.
+
+WHAT IT DOES NOT COVER AT ALL: branch granularity. It proves a function was
+ENTERED, never that the interesting branch inside it ran. One of this batch's
+four instances — a `has_anaphor` rule with zero coverage — would NOT be caught,
+because an earlier guard returned first inside the same call path.
 """
 from __future__ import annotations
 

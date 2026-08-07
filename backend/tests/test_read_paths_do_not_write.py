@@ -362,30 +362,54 @@ def test_no_write_operation_is_reachable_from_a_sweep_leg(provider):
     lives, #1111) — for every provider in `_LIVE_LEGS`, so a leg added later is
     included without anyone remembering this file.
 
-    HONEST LIMIT, stated rather than discovered: the real `open_session` here
-    finds no connection row and returns None, so this exercises `dispatch`
-    plus the session-open CALL, not the refresh branch inside it. It therefore
-    catches a write added to a dispatch path or to session-open's outer layer,
-    and does NOT catch one buried behind a stale-token branch. Covering that
-    needs a per-provider stale-credential fixture — worth building, not built
-    here. `test_the_spy_harness_actually_catches_a_write` above is what makes
-    this limit visible rather than silent.
+    HONEST LIMIT — this catches SHALLOW writes only, and the boundary is
+    narrower than "a write added to a dispatch path". Both `_DeadHandle` and
+    `_DeadTransport` make the FIRST outward interaction fail, so each adapter
+    stops at its first handle attribute access or first HTTP call. Concretely:
+
+      - a write reachable BEFORE that first failure  -> CAUGHT (exit 1);
+      - a write in a RECOVERY branch — `except ConfluenceAuthExpiredError:`,
+        an `if error == "not_in_channel":` retry — is NOT caught, because a
+        `requests.Timeout` never produces the error body those branches need.
+        That is precisely the shape of the #1111 auto_join defect, so the miss
+        is not hypothetical;
+      - `open_session`'s refresh branch is NOT reached either: with no
+        connection row it returns None before the stale-token check.
+
+    Covering the recovery branches needs a per-provider fixture that returns a
+    real error BODY rather than a transport failure. Worth building; not built
+    here. Check 1 above (`auto_join`, asserted on the ARGUMENT) is what covers
+    the #1111 shape today, and `_reached` below keeps this test from quietly
+    degrading further.
     """
     adapter = registry.provider_for(provider)
     assert adapter is not None, f"{provider} is in _LIVE_LEGS but has no adapter"
     leg = sweep._LIVE_LEGS[provider]
     inp = leg.build_input(sweep.sweep_terms(_QUESTION))
+    reached: list[str] = []
 
     with _WriteSpies() as spies, _DeadTransport():
         try:
             adapter.open_session(_EID)
+            reached.append("open_session")
         except Exception:  # noqa: BLE001 — no credentials here; the spies are the point
-            pass
+            reached.append("open_session")
         try:
             adapter.dispatch(_session_for(provider), leg.tool, inp)
+            reached.append("dispatch")
         except Exception:  # noqa: BLE001
-            pass
+            reached.append("dispatch")
 
+    # Non-vacuity pin. The sibling file learned this the hard way (67d483ec):
+    # its end-to-end check silently stopped covering 5 of 7 legs when new gates
+    # landed on main, and passed green throughout. Entry is not in doubt here
+    # because both calls are direct — but pinning it means a future refactor
+    # that routes the sweep through some third entry point fails HERE instead of
+    # turning this into a test of nothing.
+    assert reached == ["open_session", "dispatch"], (
+        f"{provider}: expected to enter both open_session and dispatch, got "
+        f"{reached}. This test asserts nothing until both are entered."
+    )
     assert not spies.calls, (
         f"answering a question by reading {provider} invoked write "
         f"operation(s) {spies.calls}. A read must not mutate a customer's "

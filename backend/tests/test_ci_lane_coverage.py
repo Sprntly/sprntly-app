@@ -15,9 +15,9 @@ it's fine" — a passing checkmark that stops anyone looking again. See
 
 WHAT THIS TEST DOES. It reads two things and diffs them:
 
-  1. every environment variable name any workflow under `.github/workflows/`
-     provides — as an `env:` key, or referenced as `${{ secrets.X }}` /
-     `${{ vars.X }}`;
+  1. every environment variable name any workflow that RUNS THIS SUITE provides
+     — as an `env:` key, or referenced as `${{ secrets.X }}` / `${{ vars.X }}`.
+     Deploy workflows are EXCLUDED — see `_runs_this_suite`;
   2. every environment variable name any `skipif`/`skipUnless` in this suite
      makes a test's execution CONDITIONAL on.
 
@@ -46,6 +46,7 @@ its entire value is being answerable before a merge.
 from __future__ import annotations
 
 import ast
+import functools
 import re
 import warnings
 from pathlib import Path
@@ -108,13 +109,51 @@ _CONTEXT_REF = re.compile(r"\$\{\{\s*(?:secrets|vars|env)\.([A-Za-z_][A-Za-z0-9_
 _ENV_KEY = re.compile(r"^\s{2,}([A-Z][A-Z0-9_]{2,}):\s", re.MULTILINE)
 
 
-def _workflow_env_names() -> set[str]:
+def _workflow_files() -> list[Path]:
+    return sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+
+
+def _runs_this_suite(text: str) -> bool:
+    """Can this workflow's env make a test in `backend/tests/` execute?
+
+    ONLY a workflow that runs pytest against this suite can. That distinction is
+    load-bearing and getting it wrong was a real defect in this file's first
+    version, in BOTH directions:
+
+      - FALSE GREEN. Unioning env across all 11 workflows meant a test gated on
+        `SUPABASE_DB_URL` / `TOKEN_ENCRYPTION_KEY` / `GOOGLE_CLIENT_SECRET` —
+        deploy-only secrets, and exactly the ones an integration test would gate
+        on — read as "provided" and passed this check while skipping in both
+        lanes. That is the #1109 defect itself, sailing through the guard
+        written for it.
+      - FALSE RED, which is worse. Adding `ANTHROPIC_API_KEY` to a DEPLOY
+        workflow (an ordinary, correct change) reddened four unrelated files
+        via `test_no_stale_unrunnable_entries`, whose message says "Delete them.
+        The baseline is a ratchet; it only shrinks." An author who complies
+        deletes all four entries and the guard goes PERMANENTLY BLIND to every
+        `ANTHROPIC_API_KEY`-gated test. A guard whose failure mode teaches
+        people to disable it is worse than no guard.
+
+    `prototype-runtime.yml` runs `npm test`, but in the `prototype-runtime`
+    package — it cannot make a `backend/tests/` test run, so it is correctly
+    excluded by the `working-directory: backend` half of this predicate.
+
+    Predicate, not a hardcoded filename: a new backend test lane is picked up by
+    construction.
+    """
+    return "pytest" in text and "working-directory: backend" in text
+
+
+@functools.lru_cache(maxsize=1)
+def _workflow_env_names() -> "frozenset[str]":
     names: set[str] = set()
-    for path in sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml")):
+    for path in _workflow_files():
         text = path.read_text(encoding="utf-8", errors="replace")
+        if not _runs_this_suite(text):
+            continue
         names.update(_CONTEXT_REF.findall(text))
         names.update(_ENV_KEY.findall(text))
-    return names
+    return frozenset(names)
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +241,16 @@ def _gated_env_names(path: Path) -> set[str]:
     return gated
 
 
-def _suite_gates() -> dict[tuple[str, str], None]:
-    out: dict[tuple[str, str], None] = {}
+@functools.lru_cache(maxsize=1)
+def _suite_gates() -> "frozenset[tuple[str, str]]":
+    """Cached: this AST-parses all ~412 suite files (~2.6s) and is called by
+    three tests. Uncached that was 8s of the ~10s this file cost, and the entire
+    value of these guards is being cheap enough that nobody minds them."""
+    out: set[tuple[str, str]] = set()
     for path in sorted(TESTS.rglob("test_*.py")):
         for name in _gated_env_names(path):
-            out[(path.relative_to(TESTS).as_posix(), name)] = None
-    return out
+            out.add((path.relative_to(TESTS).as_posix(), name))
+    return frozenset(out)
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +268,30 @@ def test_workflow_env_extraction_is_not_vacuously_empty():
     everything. This pins both ends by asserting on a name we know is there.
     """
     assert WORKFLOWS.is_dir(), f"no workflows directory at {WORKFLOWS}"
+
+    running = [
+        p.name for p in _workflow_files()
+        if _runs_this_suite(p.read_text(encoding="utf-8", errors="replace"))
+    ]
+    assert running, (
+        "no workflow appears to run this pytest suite — the scoping predicate "
+        "is broken, which would make EVERY gated var read as unprovided (loud, "
+        f"but wrong). Workflows present: {[p.name for p in _workflow_files()]}"
+    )
+    assert "test-backend.yml" in running, (
+        f"test-backend.yml is not recognised as running this suite: {running}"
+    )
+    # The scoping must EXCLUDE deploy workflows, or the false green returns.
+    assert "sync-backend-env.yml" not in running and "deploy-backend.yml" not in running, (
+        f"a deploy workflow is being counted as a test lane: {running}. Its "
+        "secrets cannot make a test run, and counting them is how a test gated "
+        "on a deploy-only secret passes this check while never executing."
+    )
+
     provided = _workflow_env_names()
-    assert "NODE_OPTIONS" in provided, (
-        "workflow env extraction found no NODE_OPTIONS — test-web.yml sets it, "
-        f"so the extraction is broken. Found: {sorted(provided)}"
+    assert "DESIGN_AGENT_NODE_PATH" in provided, (
+        "env extraction found no DESIGN_AGENT_NODE_PATH — test-backend.yml sets "
+        f"it, so the extraction is broken. Found: {sorted(provided)}"
     )
 
 
@@ -240,7 +303,7 @@ def test_skipif_extraction_is_not_vacuously_empty():
     the suite genuinely contains — a module-level alias (`_DSN = os.getenv(...)`
     then `skipif(not _DSN)`), which is the harder of the two shapes to parse.
     """
-    gates = _suite_gates()
+    gates = set(_suite_gates())
     assert ("test_document_catalog_ranking_live.py", "DOCUMENT_CATALOG_TEST_DSN") in gates, (
         "skipif extraction missed the module-level-alias shape "
         "(`_DSN = os.getenv(...)`; `skipif(not _DSN, ...)`). Found: "

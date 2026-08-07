@@ -83,10 +83,6 @@ function conversationsApiKeys(src: string): string[] | null {
     i++
   }
   const body = src.slice(start, i - 1)
-  // A spread (`...actual.conversationsApi`) means the literal's real key set is
-  // not knowable from source. Report "unknown" rather than guessing — a guess
-  // here is a false positive, and false positives are how this check dies.
-  if (body.includes("...")) return null
 
   const keys: string[] = []
   let inner = 0
@@ -101,7 +97,36 @@ function conversationsApiKeys(src: string): string[] | null {
       continue
     }
     if (inner !== 0) continue
-    if (j !== 0 && !/[\s,]/.test(body[j - 1])) continue
+    // A SPREAD at the top level of the literal (see below) is checked before
+    // the property-position test, because a spread is not in property position.
+    // A SPREAD at the top level of the literal (`...actual.conversationsApi`)
+    // means the real key set is not knowable from source, so report "unknown"
+    // rather than guessing.
+    //
+    // THIS TEST MUST BE DEPTH-AWARE AND IDENTIFIER-ANCHORED. The first version
+    // was `if (body.includes("...")) return null` over the whole body, which
+    // also matched a REST PARAMETER — and `ChatScreen.open-artifact.dom.test
+    // .tsx`, the file this guard was written for, contains the entirely
+    // ordinary `addTurn: (...a: unknown[]) => addTurn(...a),`. That silently
+    // exempted it forever: deleting `create:` from the one file carrying the
+    // original #1109 defect returned exit 0. Of 369 test files, 122 mock the
+    // module and only 26 were being checked.
+    //
+    // A rest parameter always sits inside parentheses, so `inner > 0` excludes
+    // it; requiring an identifier after the dots excludes stray ellipses in
+    // strings and comments.
+    if (/^\.\.\.\s*[A-Za-z_$]/.test(body.slice(j))) return null
+    // PROPERTY POSITION ONLY: the previous non-whitespace character must be a
+    // comma (or nothing, at the start of the literal). Accepting "any preceding
+    // whitespace" was too loose — in
+    // `addTurn: (...a: unknown[]) => addTurn(...a),` the arrow BODY's `addTurn(`
+    // sits back at depth 0 once the parameter parens close, and got counted as
+    // a second key. Harmless there, but the same looseness would report
+    // `create: (...a) => addTurn(...a)` as supplying `addTurn`, which it does
+    // not — a false NEGATIVE, the direction that actually hurts.
+    let k = j - 1
+    while (k >= 0 && /\s/.test(body[k])) k--
+    if (k >= 0 && body[k] !== ",") continue
     // `name:` (longhand), `name,` / `name` at the end (SHORTHAND), `name(`
     // (method shorthand). Missing the shorthand form is not a theoretical gap:
     // the first draft of this parser only matched `name:` and reported
@@ -194,9 +219,37 @@ function modulesReachingChatPersistence(): Set<string> {
   return reaching
 }
 
-/** Does the factory rebuild the module from the real one (`{ ...actual }`)? */
-function spreadsTheRealModule(src: string): boolean {
-  return /importOriginal|importActual/.test(src)
+/**
+ * The `vi.mock("…lib/api", <factory>)` call body, or null.
+ *
+ * Scoping matters: `spreadsTheRealModule` used to test the WHOLE FILE, so any
+ * file that mentioned `importOriginal` anywhere — including in a mock of some
+ * unrelated module — exempted its `lib/api` mock too. Same class of hole as the
+ * rest-parameter bug above: an over-broad match that silently switches the
+ * check off for a file.
+ */
+function libApiMockBody(src: string): string | null {
+  const marker = /vi\.mock\(\s*["'][^"']*\blib\/api["']/g
+  const found = marker.exec(src)
+  if (!found) return null
+  let i = src.indexOf("(", found.index)
+  let depth = 0
+  const start = i
+  while (i < src.length) {
+    const ch = src[i]
+    if (ch === "(") depth++
+    else if (ch === ")") {
+      depth--
+      if (depth === 0) return src.slice(start, i + 1)
+    }
+    i++
+  }
+  return src.slice(start)
+}
+
+/** Does THIS factory rebuild the module from the real one (`{ ...actual }`)? */
+function spreadsTheRealModule(factoryBody: string): boolean {
+  return /importOriginal|importActual/.test(factoryBody)
 }
 
 describe("partial mocks of dynamically-imported modules", () => {
@@ -253,6 +306,76 @@ describe("partial mocks of dynamically-imported modules", () => {
     expect(conversationsApiKeys(spread)).toBeNull()
   })
 
+  it("a REST PARAMETER is not mistaken for a spread", () => {
+    // Regression pin for this file's own worst bug. `if (body.includes("..."))`
+    // treated `(...a: unknown[])` as an object spread and exempted the file
+    // permanently — including ChatScreen.open-artifact.dom.test.tsx, the one
+    // carrying the original #1109 defect. The guard returned exit 0 on the
+    // exact defect in the exact file it was written for.
+    const restParam = `{
+      conversationsApi: {
+        create: vi.fn().mockResolvedValue({ id: 1 }),
+        addTurn: (...a: unknown[]) => addTurn(...a),
+      },
+    }`
+    expect(conversationsApiKeys(restParam)).toEqual(["create", "addTurn"])
+  })
+
+  it("scopes the spread check to the lib/api factory, not the whole file", () => {
+    // A file may mock several modules. `importOriginal` in an UNRELATED mock
+    // must not exempt the lib/api one.
+    const src = `
+      vi.mock("../../lib/other", async (importOriginal) => ({ ...(await importOriginal()) }))
+      vi.mock("../../lib/api", () => ({
+        conversationsApi: { addTurn: vi.fn() },
+      }))
+    `
+    const factory = libApiMockBody(src)
+    expect(factory).not.toBeNull()
+    expect(spreadsTheRealModule(factory!)).toBe(false)
+    expect(conversationsApiKeys(factory!)).toEqual(["addTurn"])
+  })
+
+  it("actually checks the files it claims to — sized, not assumed", () => {
+    // The reviewer's method, kept as a test: COUNT the coverage rather than
+    // trusting it. "122 files mock this module, 26 are checked" is the two-line
+    // measurement that exposed an 80% hole no amount of reading had surfaced.
+    const reaching = modulesReachingChatPersistence()
+    let mocks = 0
+    let checked = 0
+    for (const file of files) {
+      const src = fs.readFileSync(file, "utf8")
+      if (!mocksLibApi(src)) continue
+      mocks++
+      const factory = libApiMockBody(src)
+      if (factory === null || spreadsTheRealModule(factory)) continue
+      if (!relativeImports(file, src).some((d) => reaching.has(d))) continue
+      if (conversationsApiKeys(factory) === null) continue
+      checked++
+    }
+    // In-scope files are the ones rendering something that reaches
+    // chatPersistence; most lib/api mocks legitimately are not. The floor
+    // exists so a parser regression that silently exempts files fails HERE,
+    // loudly, instead of turning the check below into a no-op.
+    expect(mocks).toBeGreaterThan(50)
+    expect(checked).toBeGreaterThanOrEqual(30)
+  })
+
+  it("checks ChatScreen.open-artifact — the file the original defect shipped in", () => {
+    // Named explicitly, because a guard validated only against a RECONSTRUCTION
+    // of a defect is validated against the author's mental model. This file is
+    // the original location; it must be in scope, by name, forever.
+    const target = files.find((f) => f.endsWith("ChatScreen.open-artifact.dom.test.tsx"))
+    expect(target, "ChatScreen.open-artifact.dom.test.tsx not found").toBeTruthy()
+    const src = fs.readFileSync(target!, "utf8")
+    const factory = libApiMockBody(src)
+    expect(factory).not.toBeNull()
+    expect(spreadsTheRealModule(factory!)).toBe(false)
+    const keys = conversationsApiKeys(factory!)
+    expect(keys, "the file is being EXEMPTED — the guard is blind to it").not.toBeNull()
+    for (const m of required) expect(keys).toContain(m)
+  })
+
   it("the parser reports a MISSING method as missing", () => {
     // The known-bad input, in the suite: the #1109 shape, with `create` gone.
     const bad = `{
@@ -281,13 +404,15 @@ describe("partial mocks of dynamically-imported modules", () => {
     for (const file of files) {
       const src = fs.readFileSync(file, "utf8")
       if (!mocksLibApi(src)) continue
-      if (spreadsTheRealModule(src)) continue
+      const factory = libApiMockBody(src)
+      if (factory === null) continue
+      if (spreadsTheRealModule(factory)) continue
       // Only files that render something reaching chatPersistence. A chat LIST
       // screen or a command palette may mock a narrow conversationsApi slice
       // and be completely correct; flagging those would be noise, and noise is
       // how a guard gets deleted.
       if (!relativeImports(file, src).some((d) => reaching.has(d))) continue
-      const keys = conversationsApiKeys(src)
+      const keys = conversationsApiKeys(factory)
       if (keys === null) continue
       const missing = required.filter((m) => !keys.includes(m))
       if (missing.length) {
