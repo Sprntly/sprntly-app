@@ -11,7 +11,7 @@ from pathlib import Path
 
 MIGRATION = (
     Path(__file__).resolve().parents[2]
-    / "supabase" / "migrations" / "20260807120000_connections_sa_key.sql"
+    / "supabase" / "migrations" / "20260807130000_connections_sa_key.sql"
 )
 
 

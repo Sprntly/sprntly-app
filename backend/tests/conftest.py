@@ -526,7 +526,7 @@ CREATE TABLE connections (
     token_json_encrypted TEXT NOT NULL,
     -- Service-account private key (Fernet-encrypted), separate from the OAuth
     -- user token above so both coexist on one connection. Mirrors migration
-    -- 20260807120000_connections_sa_key.sql. Never in the client-facing
+    -- 20260807130000_connections_sa_key.sql. Never in the client-facing
     -- serializer's allowlist.
     sa_key_encrypted     TEXT,
     config               TEXT NOT NULL DEFAULT '{}',
