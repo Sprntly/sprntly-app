@@ -6,16 +6,25 @@ The frontend Picker POSTs the picked IDs (see ``routes/connectors.py``
 ``POST /v1/connectors/google-drive/files``) which we store in the connection
 config under ``config["files"]`` as ``{"id": "...", "name": "..."}`` entries.
 
-FOLDERS: the Picker shows them so a user can browse INTO one and pick the files
-inside, but does not let a folder itself be selected. Verified against a live
-Drive on 2026-08-03 — under ``drive.file`` the Picker grants the folder OBJECT
-and nothing beneath it: the folder's metadata reads fine while ``files.list``
-on it returns zero children, not a 403. A connected folder is therefore
-undetectably inert, contributing no documents while looking connected, so the
-selection is blocked at the Picker rather than failing quietly later. A folder
-still in ``config["files"]`` from before that change is skipped with copy
-saying what to do instead. Folder-as-a-source needs ``drive.readonly``, which
-is a scope decision, not a code one.
+FOLDERS: a picked folder id is stored in ``config["files"]`` exactly like a
+file id. Every sync recursively re-walks the folder's whole subtree
+(``expand_folder`` — paginated ``files.list("'<id>' in parents")``, bounded by
+``_MAX_FOLDER_DEPTH`` / ``_MAX_FOLDER_FILES``) down to every descendant file,
+which then flows through the same download + dedup + KG-ingest path as a
+directly picked file. This mirrors the Confluence connector: store the
+source, re-pull everything under it on schedule. Expanding at SYNC time (not
+pick time) is the point — files added to the folder later are picked up
+without re-opening the Picker.
+
+Whether ``files.list`` returns any descendants for a freshly-picked folder
+depends on the OAuth scope the connection actually holds: under the narrow
+``drive.file`` scope a picked folder grants the folder OBJECT but nothing
+beneath it, so the walk legitimately comes back empty (reported to the user
+as an honest "no files" skip, not an error) — folder-as-a-source needs
+``drive.readonly``. The frontend gates the Picker's folder-selection
+affordance on the connection's granted scope for exactly this reason (see
+``GoogleDrivePicker.tsx``): selecting a folder is only offered once the
+connection actually holds ``drive.readonly``.
 """
 from __future__ import annotations
 
@@ -58,6 +67,12 @@ _EXPORT = {
 }
 
 _NATIVE_SUFFIXES = {s.lower() for s in SUPPORTED_SUFFIXES}
+
+# Bound the recursive folder walk the same way the Confluence puller bounds a
+# space crawl: a runaway subtree (deep nesting or a huge shared drive) must
+# not turn one picked folder into an unbounded Drive scan.
+_MAX_FOLDER_DEPTH = 10
+_MAX_FOLDER_FILES = 500
 
 
 @dataclass
@@ -188,9 +203,122 @@ def get_file_metadata(service: Resource, file_id: str) -> dict:
     return (
         service.files()
         .get(fileId=file_id,
-             fields="id, name, mimeType, modifiedTime, size, webViewLink")
+             fields="id, name, mimeType, modifiedTime, size, webViewLink, driveId",
+             # supportsAllDrives so a picked folder/file living in a Shared
+             # Drive resolves (its own metadata 404s without this).
+             supportsAllDrives=True)
         .execute()
     )
+
+
+def _list_folder_children(service: Resource, folder_id: str) -> list[dict]:
+    """One folder's DIRECT children — files AND sub-folders — paginated.
+
+    ``files.list(q="'<id>' in parents and trashed = false")`` is the standard
+    Drive subtree step (the same query the Confluence puller's per-space page
+    fetch is the analogue of). Returns raw child metadata; the caller decides
+    which are folders to recurse into and which are files to ingest."""
+    children: list[dict] = []
+    page_token = None
+    q = f"'{folder_id}' in parents and trashed = false"
+    while True:
+        resp = (
+            service.files()
+            .list(
+                q=q,
+                fields=(
+                    "nextPageToken, "
+                    "files(id, name, mimeType, modifiedTime, size, "
+                    "webViewLink, driveId)"
+                ),
+                pageSize=100,
+                pageToken=page_token,
+                # Without these two, files.list only searches My Drive, so a
+                # folder that lives in a Shared Drive returns 0 children
+                # regardless of OAuth scope. Shared Drives are the "one shared
+                # team folder" use case, so this is required, not optional.
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        children.extend(resp.get("files") or [])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return children
+
+
+def expand_folder(
+    service: Resource, folder_id: str, folder_name: str
+) -> tuple[list[dict], list[dict]]:
+    """Recursively walk a picked folder. Returns ``(files, tree_nodes)``.
+
+    ``files`` is the flat list of every descendant FILE's metadata — the
+    ingest targets. ``tree_nodes`` additionally describes the SHAPE of the
+    subtree so the connector UI can render it as a nested tree instead of one
+    opaque row: every child encountered (sub-folder AND file) is emitted as
+    ``{"id", "name", "mimeType", "parentId"}`` where ``parentId`` is the id of
+    the folder it was listed under (the picked root's own id for a direct
+    child). A node with a folder ``mimeType`` is a sub-folder; anything else
+    is a file. The picked root itself is not a node — it is the dict key the
+    caller stores this under.
+
+    Bounded by ``_MAX_FOLDER_DEPTH`` and ``_MAX_FOLDER_FILES``. Dedupe of a
+    file reachable by more than one path is the caller's job.
+    """
+    files: list[dict] = []
+    tree_nodes: list[dict] = []
+    # (folder_id, display_name, depth); iterative to keep the depth bound cheap.
+    stack: list[tuple[str, str, int]] = [(folder_id, folder_name, 0)]
+    visited: set[str] = set()
+
+    while stack:
+        fid, fname, depth = stack.pop()
+        if fid in visited:
+            continue
+        visited.add(fid)
+
+        try:
+            children = _list_folder_children(service, fid)
+        except HttpError as e:
+            logger.warning(
+                "drive folder-walk: list failed for folder %s at depth %d: %s",
+                fid, depth, drive_http_error_message(e),
+            )
+            continue
+
+        for child in children:
+            if len(files) >= _MAX_FOLDER_FILES:
+                logger.warning(
+                    "drive folder-walk: %r hit _MAX_FOLDER_FILES=%d; truncating",
+                    folder_name, _MAX_FOLDER_FILES,
+                )
+                return files, tree_nodes
+            # Every child becomes a tree node, parented to the folder it was
+            # listed under, so the UI can reconstruct the subtree from a flat
+            # list without extra fetches.
+            tree_nodes.append({
+                "id": child.get("id"),
+                "name": child.get("name"),
+                "mimeType": child.get("mimeType"),
+                "parentId": fid,
+            })
+            if (child.get("mimeType") or "") == GOOGLE_FOLDER:
+                if depth + 1 <= _MAX_FOLDER_DEPTH:
+                    stack.append(
+                        (child["id"], child.get("name") or "Untitled", depth + 1)
+                    )
+                else:
+                    logger.warning(
+                        "drive folder-walk: %r hit _MAX_FOLDER_DEPTH=%d; not "
+                        "descending into %r",
+                        folder_name, _MAX_FOLDER_DEPTH, child.get("name"),
+                    )
+                continue
+            files.append(child)
+
+    return files, tree_nodes
 
 
 def _download_bytes(request) -> bytes:
@@ -223,7 +351,10 @@ def download_file_content(service: Resource, meta: dict) -> tuple[str, bytes] | 
     if size > MAX_SYNC_BYTES:
         raise ValueError(f"File exceeds {MAX_SYNC_BYTES // (1024 * 1024)}MB limit")
 
-    request = service.files().get_media(fileId=file_id)
+    # supportsAllDrives so a binary file living in a Shared Drive downloads
+    # (get_media 404s on a Shared-Drive file without it). files.export has no
+    # such parameter — native Google Docs export is unaffected.
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
     data = _download_bytes(request)
     return name, data
 
@@ -371,27 +502,45 @@ def sync_google_drive(
             _add_target(meta)
             continue
 
-        # A FOLDER. The Picker no longer lets one be selected — folders are
-        # browsable so the user can go inside and pick the files — so reaching
-        # here means a folder connected before that changed.
-        #
-        # Verified against a live Drive on 2026-08-03: under drive.file the
-        # Picker grants the folder OBJECT and nothing beneath it. The folder's
-        # own metadata reads fine while `files.list` on it returns zero children
-        # — not a 403, just an empty answer — so a folder cannot even be
-        # detected as broken; it silently contributes no documents. Walking it
-        # is therefore pointless rather than merely bounded, which is why the
-        # expansion machinery is gone instead of disabled. Folder-as-a-source
-        # needs drive.readonly, a scope decision rather than a code one.
-        folder_contents[file_id] = []
-        result.skipped.append({
-            "name": name,
-            "reason": (
-                "folder is connected but Google only grants access to items "
-                "picked directly — open it in the picker and select the "
-                "files inside"
-            ),
-        })
+        # A FOLDER. Store-the-folder + recursive-pull: the folder id is what's
+        # persisted in config["files"], and every sync re-walks its whole
+        # subtree here so files added to it later are ingested without the
+        # user re-picking — the same contract as the Confluence connector
+        # re-walking a stored space. Bounded by _MAX_FOLDER_DEPTH /
+        # _MAX_FOLDER_FILES.
+        try:
+            folder_files, folder_nodes = expand_folder(service, file_id, name)
+        except Exception as e:  # noqa: BLE001 — one bad folder must not fail the sync
+            result.errors.append(
+                {"name": name, "error": f"folder walk failed: {e}"}
+            )
+            folder_contents[file_id] = []
+            continue
+
+        # Store the SUBTREE SHAPE (sub-folders + files, each with parentId),
+        # not a flat leaf list, so the connector UI can render the folder as a
+        # tree instead of hoisting every descendant to the root.
+        folder_contents[file_id] = folder_nodes
+        logger.info(
+            "drive sync: picked folder %r expanded to %d descendant file(s)",
+            name, len(folder_files),
+        )
+        if not folder_files:
+            # Empty is a real, reportable outcome — most likely the drive.file
+            # no-cascade case (a picked folder grants the folder object but
+            # nothing beneath it). Surface it rather than looking silently
+            # connected-but-inert.
+            result.skipped.append({
+                "name": name,
+                "reason": (
+                    "folder is connected but returned no files — under the "
+                    "current Drive scope only items picked directly may be "
+                    "readable; pick the files inside, or grant broader Drive "
+                    "access"
+                ),
+            })
+        for m in folder_files:
+            _add_target(m)
 
     for meta in targets:
         file_id = meta["id"]
