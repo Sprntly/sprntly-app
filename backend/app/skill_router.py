@@ -333,17 +333,60 @@ _VOC_COMPLAINT_RULE = re.compile(
 )
 
 
+# "What's happening in our feedback channels?" / "anything new in the support
+# channels this week?" / "what came through the channels we connected for voice
+# of customer?" — the phrasing a user reaches for once Slack channels are
+# configured under Settings → Connectors → "Voice of Customer & Support".
+#
+# NONE of the rules above match these: they carry no call-noun, no
+# "voice of customer" literal, and "feedback CHANNELS" is a place, not the
+# top/summarize-feedback shape `_VOC_CUSTOMER_FEEDBACK_RULE` looks for. So they
+# fell to the generic path and were answered from the KG snapshot — the exact
+# report behind T3. Requires a CHANNEL noun next to a voice word, so an ordinary
+# "which channels do we sell through" never diverts.
+_VOC_CHANNEL_RULE = re.compile(
+    r"\b(?:customer\s+)?(?:feedback|support|voice[-\s]of[-\s]customer|voc)\b"
+    r"[\w\s]{0,20}\bchannels?\b"
+    r"|\bchannels?\b[\w\s]{0,30}\b(?:connected|configured|set\s*up|hooked\s*up)\b"
+    r"[\w\s]{0,20}\b(?:feedback|voc|voice[-\s]of[-\s]customer|customer)\b",
+    re.I,
+)
+
+# "What are customers saying?" / "what are users complaining about?" / "what
+# have customers been asking for lately?" — the single most natural way to ask
+# for voice of customer, and it names no source, no report and no call. Kept
+# tight: it needs a customer-noun IMMEDIATELY followed (within a few words) by a
+# SPEECH verb, so "what are our customers doing in the product" doesn't divert
+# to a feedback report.
+_VOC_SAYING_RULE = re.compile(
+    r"\b(?:customer|user|client)s?\b(?:\s+\w+){0,3}\s+"
+    r"\b(?:say(?:ing|s)?|said|telling|told|complain\w*|report(?:ing|ed)?|"
+    r"flag(?:ging|ged)|ask(?:ing)?\s+for|request(?:ing|ed)?|"
+    r"push(?:ing)?\s+for|unhappy|frustrated)\b",
+    re.I,
+)
+
+
 def is_voc_report_request(question: str) -> bool:
     """True for a bare 'voice of customer' / 'VoC report' request, a
-    feedback-from-customer-conversations phrasing, or a top/summarize-customer-
-    feedback phrasing. Distinct from is_call_digest (which needs a call-noun);
-    used by qa_agent to route these to the live call digest when a call source
-    is connected."""
+    feedback-from-customer-conversations phrasing, a top/summarize-customer-
+    feedback phrasing, a what-are-customers-saying phrasing, or a question about
+    the channels connected for voice of customer. Distinct from is_call_digest
+    (which needs a call-noun); used by qa_agent to route these to the live
+    voice-of-customer pass when a voice source is connected.
+
+    The last two rules are what make Slack's configured feedback channels
+    reachable WITHOUT the word "slack" ever appearing in the message: the
+    digest reads them (call_digest._slack_voc_read), and this predicate is what
+    sends a source-agnostic feedback question to the digest in the first place.
+    """
     return bool(
         _VOC_COMPLAINT_RULE.search(question)
         or _VOC_REPORT_RULE.search(question)
         or _VOC_FEEDBACK_CONVO_RULE.search(question)
         or _VOC_CUSTOMER_FEEDBACK_RULE.search(question)
+        or _VOC_CHANNEL_RULE.search(question)
+        or _VOC_SAYING_RULE.search(question)
     )
 
 
