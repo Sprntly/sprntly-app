@@ -134,7 +134,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
   useBriefPrototypeMap: () => ({ entriesByInsight: protoMap, loading: false, error: false, refetch: vi.fn() }),
 }))
 
-import { NavigationProvider } from "../../../../context/NavigationContext"
+import { NavigationProvider, useNavigation } from "../../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
@@ -400,6 +400,71 @@ describe("ChatScreen — open_artifact opens the panel", () => {
     expect(generateFromTask).not.toHaveBeenCalled()
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(screen.queryByTestId("open-artifact-chips")).toBeNull()
+  })
+})
+
+describe("ChatScreen — same-titled PRDs are told apart by id, never by title", () => {
+  // The ambiguity flow's own headline case. Two PRDs are both called
+  // "Compliance Reporting" — that is WHY they were ambiguous, and this feature
+  // deliberately offers both as clickable chips.
+  //
+  // The tab-reuse chain's last pass matched on DISPLAY TITLE. With 2216 already
+  // open in a tab titled "PRD · Compliance Reporting" (how every Artifacts /
+  // brief open names it), asking for 2214 found no holder by id, was declined
+  // by `reusableActiveTab` (that tab has a prd), and then matched 2216's tab BY
+  // NAME — hitting the cached early return and showing 2216 to a user who asked
+  // for 2214, with nothing signalling the substitution. #1039's lesson from a
+  // new entry point: where there is an identifier, never fall back to a string.
+  const PRD_2214 = { prd_id: 2214, title: "Compliance Reporting", metaLine: "", sections: [] }
+
+  /** Seeds the "already open from Artifacts" state: a tab whose TITLE is
+   *  `PRD · Compliance Reporting` and whose cached document is 2216. */
+  function WithOpenPrdTab() {
+    const { openPrdTab } = useNavigation()
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(
+        "button",
+        {
+          onClick: () =>
+            openPrdTab({
+              title: "PRD · Compliance Reporting",
+              source: { kind: "ready", prd: PRD_2216 as never, meta: null },
+            }),
+        },
+        "seed-2216-tab",
+      ),
+      React.createElement(ChatScreen),
+    )
+  }
+
+  it("opens the OTHER same-titled PRD rather than the one already on screen", async () => {
+    loadPrdById.mockImplementation((id: number) =>
+      Promise.resolve({ ok: true, prd: id === 2214 ? PRD_2214 : PRD_2216 }),
+    )
+    resolveIntent.mockResolvedValue(
+      openEnvelope({
+        status: "resolved",
+        artifact: candidate(2214, "Compliance Reporting"),
+        candidates: [candidate(2214, "Compliance Reporting")],
+      }),
+    )
+    render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(ContentProvider, null, React.createElement(WithOpenPrdTab)),
+      ),
+    )
+    await act(async () => { fireEvent.click(screen.getByText("seed-2216-tab")) })
+    await waitFor(() => expect(tabBar().getByText("PRD · Compliance Reporting")).toBeTruthy())
+
+    await typeAndSend("open the other compliance reporting PRD")
+
+    // The document the USER asked for is the one that gets fetched.
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(2214))
+    expect(loadPrdById.mock.calls.map((c) => c[0])).not.toContain(2216)
   })
 })
 

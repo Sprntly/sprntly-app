@@ -1984,11 +1984,24 @@ export function ChatScreen() {
     // (and a reload of one) always arrives with the generic title "PRD", which
     // never matches the real tab's "PRD · <name>", so title-matching alone
     // spawned a SECOND tab for a PRD that was already open.
+    //
+    // …and a `load` STOPS there: it always knows its prd id, so a title match
+    // can only ever be a DIFFERENT document that happens to share a name. That
+    // is not hypothetical here — same-titled PRDs are precisely what the open
+    // flow's disambiguation surfaces as chips, so "open 2216, then click the
+    // chip for the other Compliance Reporting" would have matched 2216's tab by
+    // title, found its cached `prd`, and shown 2216 while the user asked for
+    // 2214, with nothing signalling the substitution. #1039's lesson exactly:
+    // any dedupe keyed on a display string breaks as soon as two entries share
+    // one. Key on the identifier, and where there is an identifier, do not fall
+    // back to the string at all.
     const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
       ?? (source.kind === "load"
         ? tabsRef.current.find((t) => t.prdId === source.prdId)
         : undefined)
-      ?? tabsRef.current.find((t) => t.title === title)
+      ?? (source.kind === "load"
+        ? undefined
+        : tabsRef.current.find((t) => t.title === title))
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
     // "generate a PRD"): seed the thread with the user's message + an
