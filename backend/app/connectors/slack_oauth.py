@@ -649,6 +649,7 @@ def search_messages(
     page: int = 1,
     sort: str = SEARCH_SORT_RELEVANCE,
     sort_dir: str = "desc",
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Search the authorizing user's own content via search.messages.
 
@@ -677,7 +678,10 @@ def search_messages(
             "sort": sort,
             "sort_dir": sort_dir,
         },
-        timeout=15,
+        # Additive with an inert default: every pre-existing caller keeps the
+        # 15s bound. The cross-connector sweep clamps it to what is left of its
+        # own budget — see connector_lookup/slack.py's SCAN_BUDGET_S.
+        timeout=timeout or 15,
     )
     parsed: dict[str, Any] = {}
     try:

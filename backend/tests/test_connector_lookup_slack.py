@@ -265,7 +265,7 @@ def test_tokens_are_not_in_the_handle_repr():
 def test_search_with_a_user_token_renders_matches(monkeypatch):
     captured = {}
 
-    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc", **kw):
         captured.update({"token": token, "query": query, "count": count,
                          "sort": sort, "sort_dir": sort_dir})
         return {"matches": [
@@ -296,7 +296,7 @@ def test_search_with_a_user_token_renders_matches(monkeypatch):
 def _capture_search(monkeypatch, matches=None, total=1):
     captured = {}
 
-    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc", **kw):
         captured.update({"query": query, "sort": sort, "sort_dir": sort_dir})
         return {
             "matches": matches if matches is not None else [
@@ -517,7 +517,7 @@ def test_dispatch_records_text_matches_dispatch_exactly(monkeypatch):
     dispatch's own output for the identical search call — both now run
     `_search_and_hits` (the refactor), so this pins that the split changed
     nothing observable."""
-    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc"):
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc", **kw):
         return {"matches": [
             {"channel": {"id": "C1", "name": "general"}, "ts": "1750000000.1",
              "user": "U1", "text": "we ship pricing v2 <@U2>"},
@@ -968,3 +968,320 @@ def test_system_block_states_the_visibility_and_write_limits():
     assert "channels the Sprntly bot was added to" in block
     assert "NEVER \"it was never said\"" in block
     assert "READ-ONLY" in block
+
+
+# ─────── the sweep's recency fallback (RECENT_FALLBACK_INPUT_KEY) ───────
+#
+# Slack matches literal message TEXT, AND-ish across the query. That is right
+# for the named path — the user typed the words — and wrong for the
+# cross-connector sweep, which joins topic words the user never aimed at Slack
+# and asks for one message containing all of them. Observed on staging
+# 2026-08-07: a topic question returned ONE stray hit from a channel nobody had
+# selected while the channels holding the discussion returned nothing.
+#
+# Neither existing lever reaches it: `_GENERIC_QUERY_TERMS` is gated on
+# sort=newest AND is single-word-only by design, and the sweep's query is always
+# multi-word. So the fallback triggers on EVIDENCE (the literal search returned
+# nothing usable), not on a prediction about the words.
+
+
+def _searcher(monkeypatch, by_query):
+    """Stub `search.messages`, recording every query it was asked. `by_query`
+    maps a query string (or the prefix "after:") to its matches."""
+    seen: list[tuple[str, str]] = []
+
+    def fake_search(token, *, query, count=20, page=1, sort="score", sort_dir="desc",
+                    **kw):
+        seen.append((query, sort))
+        for key, matches in by_query.items():
+            if query == key or (key == "after:" and query.startswith("after:")):
+                return {"matches": matches, "total": len(matches)}
+        return {"matches": [], "total": 0}
+
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", fake_search)
+    return seen
+
+
+def _msg(channel="general", ts="1750000000.1", text="we ship pricing v2"):
+    return {"channel": {"id": "C1", "name": channel}, "ts": ts,
+            "user": "U1", "text": text}
+
+
+def test_literal_miss_falls_back_to_recent_and_says_it_is_not_topic_evidence(
+    monkeypatch,
+):
+    """THE fix. A literal miss must not leave the sweep's richest source
+    contributing nothing — and the recent messages it contributes instead must
+    be labelled, or the model reads a week of unrelated chatter as topic
+    evidence (the same false-positive as the stray hit, in a new costume)."""
+    seen = _searcher(monkeypatch, {"after:": [_msg(text="standup notes")]})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "customers saying onboarding flow", "sort": "relevance",
+         sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    # Two probes: the literal one, then the window.
+    assert len(seen) == 2
+    assert seen[0][0] == "customers saying onboarding flow"
+    assert seen[1][0].startswith("after:") and seen[1][1] == sl.slack_oauth.SEARCH_SORT_NEWEST
+    # Both halves of the honesty contract.
+    assert "NO Slack message contains the words" in text
+    assert "NOT evidence the topic was never discussed" in text
+    assert "may have nothing to do with the question" in text
+    assert "standup notes" in text
+    # NO records. This assertion was the opposite one commit ago, and the
+    # change is deliberate: recency-selected hits are legitimate context for
+    # the MODEL (with the note above attached) and illegitimate as graph
+    # evidence. See test_recency_fallback_hits_never_become_records.
+    assert records is None
+
+
+def test_a_literal_hit_never_pays_for_the_fallback(monkeypatch):
+    """The literal search stays the RIGHT probe whenever the topic word really
+    is in the messages — a product or customer name, the common case. One call,
+    and no unrelated-background warning attached to a real match."""
+    seen = _searcher(monkeypatch, {"pricing v2": [_msg()]})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "pricing v2", "sort": "relevance",
+         sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert len(seen) == 1, "paid for a second Slack call after a real hit"
+    assert "NO Slack message contains" not in text
+    assert "we ship pricing v2" in text
+    assert records is not None and len(records) == 1
+
+
+def test_the_fallback_is_inert_unless_the_caller_asks_for_it(monkeypatch):
+    """Additive with an inert default, asserted as an ABSENCE. On the named
+    path a literal miss is a TRUE and useful answer — the user typed the word —
+    and widening it to a week of unrelated chatter would be the worse answer.
+    So the model must not be able to reach this: it is not in the tool schema
+    either."""
+    seen = _searcher(monkeypatch, {})
+
+    text, _records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages", {"query": "pricing"},
+    )
+
+    assert len(seen) == 1, "the named path fell back without being asked"
+    assert "no Slack messages match 'pricing'" in text
+    assert "NO Slack message contains" not in text
+    props = sl.SEARCH_TOOL["input_schema"]["properties"]
+    assert sl.RECENT_FALLBACK_INPUT_KEY not in props
+
+
+def test_no_user_token_does_not_retry(monkeypatch):
+    """SEARCH_UNAVAILABLE is not a miss — there is no search grant at all, so a
+    second probe buys the identical answer for another round trip."""
+    seen = _searcher(monkeypatch, {})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session(), "slack_search_messages",
+        {"query": "checkout redesign", sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert seen == []
+    assert text == sl.SEARCH_UNAVAILABLE
+    assert records is None
+
+
+def test_a_window_first_probe_does_not_retry_itself(monkeypatch):
+    """An empty query is ALREADY the window path (`not query` at
+    `_search_once`), so there is nothing to fall back FROM."""
+    seen = _searcher(monkeypatch, {})
+
+    sl.PROVIDER.dispatch(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "", sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert len(seen) == 1
+
+
+def test_both_probes_empty_states_the_literal_limit_not_an_absence(monkeypatch):
+    """The worst case still must not license "Slack has nothing on this". The
+    literal miss and the empty window are different claims and both are said."""
+    seen = _searcher(monkeypatch, {})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "checkout redesign", sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert len(seen) == 2
+    assert "no Slack message contains 'checkout redesign'" in text
+    assert "NOT evidence the topic was never discussed" in text
+    assert records is None
+
+
+def test_the_sweep_leg_asks_for_the_fallback(monkeypatch):
+    """The wiring, pinned where it can regress. `sweep._LIVE_LEGS["slack"]`
+    building an input without this key is the exact bug this batch fixed, and
+    it is invisible in a diff of slack.py alone."""
+    from app.connector_lookup import sweep as cs
+
+    built = cs._LIVE_LEGS["slack"].build_input(["checkout", "redesign"])
+
+    assert built[sl.RECENT_FALLBACK_INPUT_KEY] is True
+    assert built["query"] == "checkout redesign"
+
+
+def test_recency_fallback_hits_never_become_records(monkeypatch):
+    """THE blocker from re-review, and the one the fallback's own copy could
+    not fix.
+
+    `dispatch_records`'s second element becomes `RawRecord`s and
+    `sweep_persist` writes those into the tenant's knowledge graph. The
+    fallback's hits are selected by RECENCY, not relevance — that is its whole
+    premise. `recent_fallback_note` warns the MODEL, but it is stripped from
+    the records, so it does not protect the GRAPH: a question whose literal
+    search missed (the common case, and the reason the fallback exists) would
+    extract unrelated messages into that company's KG as sweep-origin signals
+    on the shared prod Supabase.
+
+    It also contradicts the rule `sweep_persist.is_persistable` enforces — an
+    absence statement is the last thing that should become evidence — because a
+    recency fallback is exactly an absence statement with unrelated content
+    around it.
+
+    The prose still reaches the model. Only the write is refused.
+    """
+    from app.connector_lookup import sweep_persist
+
+    _searcher(monkeypatch, {"after:": [_msg(text="shipping the new flow tomorrow")]})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "customers saying onboarding", "sort": "relevance",
+         sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    # The model still gets the content AND the warning.
+    assert "shipping the new flow tomorrow" in text
+    assert "may have nothing to do with the question" in text
+    # The graph gets nothing.
+    assert records is None
+    source = cs_source_for(text, records)
+    assert sweep_persist.is_persistable(source) is False
+
+
+def test_a_real_literal_hit_still_becomes_a_record(monkeypatch):
+    """The other side of the line, so the fix does not over-reach: a message
+    that genuinely matched the topic words IS evidence and must still be
+    persistable, or the Slack leg would stop contributing to the graph
+    entirely."""
+    from app.connector_lookup import sweep_persist
+
+    _searcher(monkeypatch, {"pricing v2": [_msg()]})
+
+    text, records = sl.PROVIDER.dispatch_records(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "pricing v2", "sort": "relevance",
+         sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert records is not None and len(records) == 1
+    assert sweep_persist.is_persistable(cs_source_for(text, records)) is True
+
+
+def cs_source_for(text, records):
+    """A SourceResult shaped exactly as `sweep._run_live` would build it from
+    this adapter's return, so the persistence assertion above is about the real
+    pipeline rather than about a hand-made object."""
+    from app.connector_lookup import sweep as cs
+
+    return cs.SourceResult(
+        key="slack", display_name="Slack", status=cs.STATUS_OK,
+        text=text, records=records,
+    )
+
+
+def test_the_slack_leg_is_bounded_by_its_own_wall_clock(monkeypatch):
+    """The last unbounded worst case on the DEFAULT-ON path.
+
+    Slack shipped before the per-provider rollout switches, so unlike Asana and
+    Meet it reaches every tenant from the first deploy — and the recency
+    fallback made it the only leg issuing TWO sequential requests, doubling its
+    worst case to ~30s of leaked worker thread past `sweep.BUDGET_S` (8s), since
+    `_run_live` abandons with `shutdown(wait=False)` and that does not cancel a
+    running thread.
+
+    Asserts the clamp (each probe is given what is LEFT, never the full 15s),
+    not merely elapsed time.
+    """
+    import time as _t
+
+    timeouts: list = []
+
+    def fake_search(token, *, query, count=20, page=1, sort="score",
+                    sort_dir="desc", timeout=None, **kw):
+        timeouts.append(timeout)
+        _t.sleep(0.3)
+        return {"matches": [], "total": 0}
+
+    monkeypatch.setattr(sl, "SCAN_BUDGET_S", 1.2)
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", fake_search)
+
+    started = _t.monotonic()
+    sl.PROVIDER.dispatch(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "checkout redesign", sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+    elapsed = _t.monotonic() - started
+
+    assert elapsed < 3.0
+    assert timeouts, "no probe was made"
+    assert all(t is not None and t <= sl.SCAN_BUDGET_S for t in timeouts), (
+        f"a probe got the full socket timeout instead of the remainder: {timeouts}"
+    )
+
+
+def test_the_fallback_is_skipped_when_the_literal_probe_ate_the_budget(monkeypatch):
+    """The fallback is a nicety. Spending someone else's wall clock on it after
+    the real search has already used the budget is not."""
+    import time as _t
+
+    calls: list = []
+
+    def slow_then_fast(token, *, query, timeout=None, **kw):
+        calls.append(query)
+        _t.sleep(0.9)
+        return {"matches": [], "total": 0}
+
+    monkeypatch.setattr(sl, "SCAN_BUDGET_S", 1.0)
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", slow_then_fast)
+
+    sl.PROVIDER.dispatch(
+        _session("xoxp-1"), "slack_search_messages",
+        {"query": "checkout redesign", sl.RECENT_FALLBACK_INPUT_KEY: True},
+    )
+
+    assert calls == ["checkout redesign"], "paid for a fallback with no budget left"
+
+
+def test_slack_search_timeout_is_additive_with_an_inert_default(monkeypatch):
+    """Pinned as an ABSENCE: every pre-existing caller keeps the 15s bound."""
+    seen: list = []
+
+    class _Resp:
+        status_code = 200
+        ok = True
+
+        def json(self):
+            return {"ok": True, "messages": {"matches": [], "total": 0}}
+
+    monkeypatch.setattr(
+        sl.slack_oauth.requests, "get",
+        lambda url, **kw: (seen.append(kw["timeout"]), _Resp())[1],
+    )
+
+    sl.slack_oauth.search_messages("xoxp-1", query="x")
+    assert seen == [15]
+
+    sl.slack_oauth.search_messages("xoxp-1", query="x", timeout=2.5)
+    assert seen[-1] == 2.5
