@@ -194,6 +194,58 @@ def test_no_selection_falls_back_to_every_bot_member_channel(slack_env):
     assert set(slack_env["calls"]) == {"C1", "C2", "C3", "G9"}
 
 
+def test_the_fallback_includes_private_invited_channels(slack_env):
+    """APURVA'S SCOPE DECISION, 2026-08-07 — pinned so it is not "fixed".
+
+    With nothing ticked, every channel the bot was INVITED to is read, private
+    channels included. That is the Settings copy verbatim and it is what
+    `slack_sync.select_sync_channels` already does for the ingest sync, so chat
+    and the sync cannot disagree about what a company's voice of customer is.
+    An invitation IS the grant: the bot cannot see a private channel it was
+    never added to, so a public-only restriction would protect nothing and
+    would silently narrow the answer.
+
+    `#founders` here is private AND the bot is in it."""
+    private = [c for c in _MEMBER_CHANNELS if c["is_private"]]
+    assert private, "fixture must contain a private channel for this to mean anything"
+
+    voc.read(COMPANY)
+    for channel in private:
+        assert channel["id"] in slack_env["calls"], channel["name"]
+
+
+def test_a_delivery_only_install_still_has_voc_channels(slack_env):
+    """The same decision, at the routing gate. A company that connected Slack
+    only to receive its brief — `target_type: "dm"`, no selection anywhere — is
+    still answered from whatever channels the bot is in, rather than being
+    gated behind an explicit selection it never made. Reviewed as a possible
+    over-trigger and ACCEPTED; it is the majority shape in the live data."""
+    slack_env["rows"] = [_row({
+        "target_type": "dm", "channel_id": "", "channel_name": "demos",
+    })]
+    assert voc.has_voc_channels(COMPANY) is True
+
+    result = voc.read(COMPANY)
+    assert result.selection == voc.SELECTION_MEMBERSHIP
+    assert result.present is True
+    assert result.render() != ""
+
+
+def test_the_fallback_still_excludes_dms_and_uninvited_private_channels(slack_env):
+    """The decision above widens the SET, not the privacy rule. Membership is
+    what both turn on: an invited private channel is in, a DM and a private
+    channel the bot was never added to are out."""
+    slack_env["members"] = [{"id": "C1", "name": "product-feedback", "is_private": False}]
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "G9", "D7"],
+        "sync_channel_names": {"C1": "product-feedback", "G9": "founders", "D7": "ada"},
+    })]
+    result = voc.read(COMPANY)
+    excluded = {r.channel.id for r in result.reads if r.status == voc.STATUS_EXCLUDED}
+    assert excluded == {"G9", "D7"}
+    assert set(slack_env["calls"]) == {"C1"}
+
+
 # ── aggregation ──────────────────────────────────────────────────────────────
 
 

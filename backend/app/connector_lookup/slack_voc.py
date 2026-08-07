@@ -685,7 +685,30 @@ def has_voc_channels(company_id: str) -> bool:
 
 
 def _membership_channels(handle) -> list[VocChannel]:
-    """Fallback set: every channel the bot is a member of."""
+    """Fallback set: every channel the bot is a member of, PRIVATE ONES
+    INCLUDED.
+
+    DELIBERATE, AND APURVA-APPROVED 2026-08-07 — do not "fix" this. With no
+    explicit `sync_channel_*` selection the product's contract is the Settings
+    copy: "with nothing ticked, every channel the bot has been invited to is
+    read". `slack_sync.select_sync_channels` already implements exactly that for
+    the ingest sync, and this is the same set, so chat and the sync cannot
+    disagree about what a company's voice of customer is.
+
+    Three consequences that look like bugs and are not:
+
+      - a PRIVATE channel the bot was invited to IS read. An invitation is the
+        grant; the bot cannot see a private channel it was not invited to, so
+        there is nothing here for a public-only restriction to protect;
+      - a company that connected Slack only for brief DELIVERY still has VoC
+        channels, because the bot is in whatever it is in. Reviewed and
+        accepted rather than gated behind an explicit selection;
+      - `has_voc_channels` is therefore true for any active Slack row.
+
+    This does NOT weaken the privacy gate, which is a different question:
+    `_gate_and_name` still excludes DMs outright and still excludes private
+    conversations the bot is NOT in. Membership is what both rules turn on.
+    """
     out: list[VocChannel] = []
     seen: set[str] = set()
     for channel in handle.channel_list():
