@@ -21,16 +21,19 @@ import app.routes.chat as chat_route
 from app.db.client import require_client
 
 
-def _seed_prd(db_mod, dataset="acme", title="Dark mode"):
+def _seed_prd(db_mod, dataset="acme", title="Dark mode", theme_id="chat:seed"):
     brief_id = db_mod.save_brief(
         dataset=dataset, week_label="Week of stub",
         payload={"summary_headline": "s", "insights": [{"title": "I0"}],
                  "_schema_version": 1},
         schema_version=1,
     )
+    # A DISTINCT theme_id per seeded PRD: the artifact listing collapses one
+    # regeneration family to its newest row, and a shared theme would make two
+    # separately-seeded documents look like two generations of one.
     prd_id = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title=title,
-        template_version=1, variant="v3", source="chat", theme_id="chat:seed",
+        template_version=1, variant="v3", source="chat", theme_id=theme_id,
     )
     db_mod.complete_prd(prd_id, title=title, md="<html><body>Doc</body></html>")
     return prd_id
@@ -174,6 +177,105 @@ def test_empty_message_is_422_without_resolver_call(
     resp = t.client.post("/v1/chat/intent", json={"message": ""})
     assert resp.status_code == 422
     assert not seen
+
+
+def _open_envelope(monkeypatch, query, artifact_type="prd"):
+    """Force an open_artifact verdict so the route's LOOKUP is what's tested."""
+    return _capture_resolver(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.95, "task": None,
+        "instruction": None, "artifact_type": artifact_type,
+        "artifact_query": query, "reason": "open request", "source": "llm",
+    })
+
+
+def test_open_artifact_resolves_a_single_match(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    prd_id = _seed_prd(db, title="Compliance Reporting Automation", theme_id="chat:a")
+    _seed_prd(db, title="Dark mode", theme_id="chat:b")
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["intent"] == "open_artifact"
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["prd_id"] == prd_id
+    assert body["open"]["artifact"]["title"] == "Compliance Reporting Automation"
+
+
+def test_open_artifact_reports_every_tied_candidate(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The live baseline: two PRDs match and the assistant asks which. The
+    candidates must arrive with their ids, or the chips it offers are inert."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    a = _seed_prd(db, title="Compliance Reporting", theme_id="chat:a")
+    b = _seed_prd(db, title="Compliance Reporting", theme_id="chat:b")
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["open"]["status"] == "ambiguous"
+    assert body["open"]["artifact"] is None
+    assert {c["prd_id"] for c in body["open"]["candidates"]} == {a, b}
+
+
+def test_open_artifact_with_no_match_opens_nothing(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    _seed_prd(isolated_settings["db"], title="Dark mode")
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["open"]["status"] == "not_found"
+    assert body["open"]["artifact"] is None
+    assert body["open"]["candidates"] == []
+    # And it stays an OPEN request — the route never rewrites a miss into a
+    # generation.
+    assert body["intent"] == "open_artifact"
+
+
+def test_open_artifact_never_reaches_another_tenants_documents(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    tenant_client.make(slug="rival")
+    _seed_prd(isolated_settings["db"], dataset="rival",
+              title="Compliance Reporting", theme_id="chat:rival")
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["open"]["status"] == "not_found"
+
+
+def test_a_generate_envelope_carries_no_lookup(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """"write a PRD for X" must not acquire an open payload — the two verbs stay
+    on opposite sides of the envelope."""
+    t = tenant_client.make(slug="acme")
+    _seed_prd(isolated_settings["db"], title="Compliance Reporting")
+    _capture_resolver(monkeypatch, {
+        "intent": "generate_prd", "confidence": 0.95, "task": "compliance reporting",
+        "instruction": None, "artifact_type": None, "artifact_query": None,
+        "reason": "authoring verb", "source": "llm",
+    })
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "write a PRD for compliance reporting"},
+    ).json()
+    assert body["intent"] == "generate_prd"
+    assert "open" not in body
 
 
 def test_unauthenticated_is_401(unauth_client, monkeypatch):

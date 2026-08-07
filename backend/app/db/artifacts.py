@@ -86,16 +86,23 @@ def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
 
 
 @retry_on_disconnect
-def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
-    """Unified, recency-sorted artifact list for one company.
+def list_document_artifacts(*, dataset: str) -> list[dict]:
+    """The PRD + evidence half of the artifact list, on its own.
 
-    `dataset` is the company slug (scopes PRDs + evidences via briefs.dataset);
-    `company_id` is the company UUID (scopes prototypes via workspace_id). The
-    caller (routes/artifacts.py) has already tenant-gated both.
+    Split out of `list_artifacts_for_company` (which calls it) rather than
+    duplicated, so the two can never drift on what a PRD family is, what a row
+    normalizes to, or which brief scopes it — and so a caller that can only act
+    on documents does not pay for a five-table fan-out.
 
-    Returns a list of normalized dicts shaped:
-        {type, id, title, status, created_at, source, open}
-    sorted by created_at DESC and capped at 200.
+    That caller is app.artifact_open, resolving "open the PRD for X" INSIDE the
+    chat send path: prototypes, reports and ticket sets are not openable in the
+    chat's right-hand panel, so querying them there would be three round trips
+    spent on rows that can never be the answer.
+
+    `dataset` scopes both types via `briefs.dataset` and must already be
+    tenant-gated by the caller. Rows are normalized identically to the unified
+    listing ({type, id, title, status, created_at, source, open}) and returned
+    unsorted — every caller re-orders anyway.
     """
     c = require_client()
 
@@ -111,81 +118,103 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     )
     brief_ids = [r["id"] for r in brief_rows]
     week_label_by_brief = {r["id"]: r.get("week_label") for r in brief_rows}
+    if not brief_ids:
+        return []
 
     items: list[dict] = []
 
-    if brief_ids:
-        # ── PRDs (brief_id IN brief_ids) ────────────────────────────────────
-        prd_rows = (
-            c.table("prds")
-            .select(
-                "id, brief_id, insight_index, theme_id, source, "
-                "title, status, generated_at"
-            )
-            .in_("brief_id", brief_ids)
-            .execute()
-            .data
-            or []
+    # ── PRDs (brief_id IN brief_ids) ────────────────────────────────────────
+    prd_rows = (
+        c.table("prds")
+        .select(
+            "id, brief_id, insight_index, theme_id, source, "
+            "title, status, generated_at"
         )
-        # A PRD is regenerated in place: each attempt is a new prds row in the
-        # same family. The artifacts list shows only the LATEST generation per
-        # logical PRD; older generations are reachable from the PRD's Version
-        # History (see routes/prd.py /{prd_id}/generations). What counts as a
-        # family is per-source — see _prd_family_key.
-        latest_by_key: dict[tuple, dict] = {}
-        for r in prd_rows:
-            key = _prd_family_key(r)
-            cur = latest_by_key.get(key)
-            if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
-                latest_by_key[key] = r
-        for r in latest_by_key.values():
-            bid = r["brief_id"]
-            items.append({
-                "type": "prd",
-                "id": r["id"],
-                "title": r.get("title") or "Untitled PRD",
-                "status": r.get("status") or "",
-                "created_at": r.get("generated_at"),
-                "source": {
-                    "brief_id": bid,
-                    "week_label": week_label_by_brief.get(bid),
-                    "insight_index": r.get("insight_index"),
-                },
-                "open": {
-                    "brief_id": bid,
-                    "insight_index": r.get("insight_index"),
-                    "prd_id": r["id"],
-                },
-            })
+        .in_("brief_id", brief_ids)
+        .execute()
+        .data
+        or []
+    )
+    # A PRD is regenerated in place: each attempt is a new prds row in the
+    # same family. The artifacts list shows only the LATEST generation per
+    # logical PRD; older generations are reachable from the PRD's Version
+    # History (see routes/prd.py /{prd_id}/generations). What counts as a
+    # family is per-source — see _prd_family_key.
+    latest_by_key: dict[tuple, dict] = {}
+    for r in prd_rows:
+        key = _prd_family_key(r)
+        cur = latest_by_key.get(key)
+        if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
+            latest_by_key[key] = r
+    for r in latest_by_key.values():
+        bid = r["brief_id"]
+        items.append({
+            "type": "prd",
+            "id": r["id"],
+            "title": r.get("title") or "Untitled PRD",
+            "status": r.get("status") or "",
+            "created_at": r.get("generated_at"),
+            "source": {
+                "brief_id": bid,
+                "week_label": week_label_by_brief.get(bid),
+                "insight_index": r.get("insight_index"),
+            },
+            "open": {
+                "brief_id": bid,
+                "insight_index": r.get("insight_index"),
+                "prd_id": r["id"],
+            },
+        })
 
-        # ── Evidences (brief_id IN brief_ids) ───────────────────────────────
-        ev_rows = (
-            c.table("evidences")
-            .select("id, brief_id, insight_index, title, status, generated_at")
-            .in_("brief_id", brief_ids)
-            .execute()
-            .data
-            or []
-        )
-        for r in ev_rows:
-            bid = r["brief_id"]
-            items.append({
-                "type": "evidence",
-                "id": r["id"],
-                "title": r.get("title") or "Untitled evidence",
-                "status": r.get("status") or "",
-                "created_at": r.get("generated_at"),
-                "source": {
-                    "brief_id": bid,
-                    "week_label": week_label_by_brief.get(bid),
-                    "insight_index": r.get("insight_index"),
-                },
-                "open": {
-                    "brief_id": bid,
-                    "insight_index": r.get("insight_index"),
-                    "evidence_id": r["id"],
-                },
-            })
+    # ── Evidences (brief_id IN brief_ids) ───────────────────────────────────
+    ev_rows = (
+        c.table("evidences")
+        .select("id, brief_id, insight_index, title, status, generated_at")
+        .in_("brief_id", brief_ids)
+        .execute()
+        .data
+        or []
+    )
+    for r in ev_rows:
+        bid = r["brief_id"]
+        items.append({
+            "type": "evidence",
+            "id": r["id"],
+            "title": r.get("title") or "Untitled evidence",
+            "status": r.get("status") or "",
+            "created_at": r.get("generated_at"),
+            "source": {
+                "brief_id": bid,
+                "week_label": week_label_by_brief.get(bid),
+                "insight_index": r.get("insight_index"),
+            },
+            "open": {
+                "brief_id": bid,
+                "insight_index": r.get("insight_index"),
+                "evidence_id": r["id"],
+            },
+        })
+
+    return items
+
+
+@retry_on_disconnect
+def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
+    """Unified, recency-sorted artifact list for one company.
+
+    `dataset` is the company slug (scopes PRDs + evidences via briefs.dataset);
+    `company_id` is the company UUID (scopes prototypes via workspace_id). The
+    caller (routes/artifacts.py) has already tenant-gated both.
+
+    Returns a list of normalized dicts shaped:
+        {type, id, title, status, created_at, source, open}
+    sorted by created_at DESC and capped at 200.
+    """
+    c = require_client()
+
+    # PRDs + evidences, normalized and family-collapsed (shared with the
+    # chat's open-artifact lookup — see list_document_artifacts).
+    items: list[dict] = list_document_artifacts(dataset=dataset)
 
     # ── Prototypes (workspace_id = company UUID). Title is derived from the
     #    parent PRD (prototypes have no title column). ─────────────────────────

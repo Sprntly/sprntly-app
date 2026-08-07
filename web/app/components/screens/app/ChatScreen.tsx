@@ -36,7 +36,8 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
-import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -119,6 +120,16 @@ type ThreadTurn = {
    *  explanation. Never an error: the poll still delivers the real answer.
    *  Transient, like `partial`. */
   streamDropped?: boolean
+  /** "Open the PRD for X" matched SEVERAL documents — the candidates, rendered
+   *  as chips under this turn's reply. Each chip carries its artifact's ids and
+   *  opens the panel on click; it does NOT re-send its label as a message,
+   *  which is what made the old suggestion chip inert (it asked the same
+   *  question again and got the document read back as chat text).
+   *
+   *  PERSISTED with the turn (it rides the normal slim payload — only the
+   *  streaming fields below are stripped), so the chips are still answerable
+   *  after a reload instead of leaving an unanswerable question behind. */
+  openCandidates?: OpenArtifactCandidate[]
   /** The 12-minute client budget expired while the job was still generating.
    *  NOT a failure — the persisted ask_id is deliberately left in place, so a
    *  reload re-attaches and picks the answer up. Transient: after a reload the
@@ -458,11 +469,20 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   // thread. The copy said "above" for every case, so a command-opened chat
   // pointed the user at a button that was in fact sitting under this message.
   const inline = source.kind === "importDoc" || source.kind === "generateTask"
-    || (source.kind === "resume" && !!req.seedQuery)
+    || ((source.kind === "resume" || source.kind === "load") && !!req.seedQuery)
   const locator = inline
     ? "Use the View PRD button just below to reopen the panel anytime."
     : "Use the View PRD button above to reopen the panel anytime."
-  const lead = withTickets
+  // OPENING an existing document, not producing one — so the copy must not
+  // promise generation. Every other branch here describes work about to start;
+  // this one describes a document that already exists arriving on screen, which
+  // is the whole distinction the open_artifact action protects.
+  const opening = source.kind === "load" || source.kind === "evidence"
+  const lead = opening
+    ? source.kind === "evidence"
+      ? "Opening that evidence in the panel on the right."
+      : "Opening that PRD in the panel on the right."
+    : withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
     ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
@@ -1942,10 +1962,14 @@ export function ChatScreen() {
     // insight card + questions INLINE below the command turn. generateIdeation
     // carries a seedQuery too but is a HEADER open (its framing card stays on
     // top), so it's deliberately excluded here. See the render block below.
+    // A `load` carrying a seedQuery is the in-chat OPEN command ("open the PRD
+    // for X") — the same shape as the other command kinds, so its PRD card
+    // belongs inline under that command turn. A load WITHOUT one is a deep link
+    // / reload, which stays a header open exactly as before.
     const prdInFlow =
       source.kind === "importDoc" ||
       source.kind === "generateTask" ||
-      (source.kind === "resume" && !!req.seedQuery)
+      ((source.kind === "resume" || source.kind === "load") && !!req.seedQuery)
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
@@ -3601,6 +3625,144 @@ export function ChatScreen() {
     seedCommandTurn(req, tabId)
   }, [activeCompany, openPrdInTab, reusableActiveTab, seedCommandTurn])
 
+  // ── "Open the PRD for X" ───────────────────────────────────────────────────
+  // The ACTION half of the open_artifact envelope. The backend has already done
+  // the hard part (this is an OPEN, not a generate; here is the document, or
+  // here are the two it could be, or here is nothing) — everything below is
+  // about putting the named artifact in the right-hand panel of the CHAT, which
+  // is the part that was missing: the old flow answered with the document
+  // reconstructed as chat text and never opened a panel at all.
+
+  /** Put ONE artifact in the panel. Returns false for a candidate that carries
+   *  no openable id (nothing happens rather than an empty panel).
+   *
+   *  `seedQuery` seeds the user's typed command as a thread turn. A CHIP click
+   *  passes none — it is direct manipulation of the panel, not another message,
+   *  so it must not put words in the user's mouth or spend an ask. */
+  const openArtifactInPanel = useCallback(
+    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
+      if (candidate.type === "evidence") {
+        if (candidate.brief_id == null || candidate.insight_index == null) return false
+        const req: LocalPrdTabRequest = {
+          title: candidate.title || "Evidence",
+          ...(seedQuery ? { seedQuery } : {}),
+          ...(activeTabIdRef.current ? { inTabId: activeTabIdRef.current } : {}),
+          source: {
+            kind: "evidence",
+            meta: { briefId: candidate.brief_id, insightIndex: candidate.insight_index },
+            detail: null,
+          },
+        }
+        const tabId = openPrdInTab(req)
+        seedCommandTurn(req, tabId)
+        return true
+      }
+      const prdId = candidate.prd_id ?? candidate.id
+      if (prdId == null) return false
+      // Reuse BY PRD ID, never by title. A tab already holding this document
+      // wins over the tab the user is typing in, so opening a PRD that is
+      // already open focuses it instead of spawning a second tab for the same
+      // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
+      // this path would otherwise reintroduce from a different entry point (the
+      // titles here are real document titles, so a title match would look like
+      // it works right up until two documents share a name).
+      const holder = tabsRef.current.find(
+        (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
+      )
+      // Otherwise: the CHAT the user is in, so the panel opens beside the
+      // conversation that asked for it (the stated requirement) rather than in
+      // a tab of its own. `reusableActiveTab` declines a tab already bound to a
+      // different PRD/insight, which must not be repointed.
+      const inTab = holder ?? reusableActiveTab()
+      const req: LocalPrdTabRequest = {
+        title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
+        ...(seedQuery ? { seedQuery } : {}),
+        ...(inTab ? { inTabId: inTab.id } : {}),
+        source: { kind: "load", prdId, meta: null },
+      }
+      const tabId = openPrdInTab(req)
+      seedCommandTurn(req, tabId)
+      return true
+    },
+    [openPrdInTab, reusableActiveTab, seedCommandTurn],
+  )
+
+  /** Post an assistant turn that opens NOTHING — the ambiguous and not-found
+   *  halves of the contract. Mirrors ticketSetCommandFlow's seeding so the
+   *  exchange lands in the rail and Supabase like any other turn. */
+  const postOpenArtifactReply = useCallback(
+    (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => {
+      const inTab = reusableActiveTab()
+      const turnId =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      const reply: AskResponse = {
+        answer, sources: [], follow_ups: [], key_points: [], citations: [],
+        confidence: 1, unanswered: "",
+      } as AskResponse
+      const seedTurn: ThreadTurn = {
+        id: turnId,
+        query: seedQuery,
+        reply,
+        ...(candidates.length ? { openCandidates: candidates } : {}),
+      }
+      const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+      let tabId: string
+      if (inTab) {
+        tabId = inTab.id
+        setTabs((prev) => prev.map((t) => t.id === inTab.id
+          ? {
+              ...t,
+              title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+              thread: [...t.thread, seedTurn],
+            }
+          : t))
+        setDraft("")
+      } else {
+        tabId = openTab(handle, [seedTurn])
+      }
+      pushPendingConversation(turnId, seedQuery, tabId)
+      // Only the prose is persisted: the chips are a live affordance, and the
+      // conversation record is what the assistant SAID.
+      void finalizeConversationTurn(turnId, { reply }, tabId)
+    },
+    [reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn],
+  )
+
+  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so. */
+  const openArtifactFlow = useCallback(
+    (seedQuery: string, open: OpenArtifactResult) => {
+      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+      if (open.status === "resolved" && open.artifact) {
+        if (openArtifactInPanel(open.artifact, seedQuery)) return
+        // A match we cannot actually open (no usable id) is a NOT-FOUND from
+        // the user's side; saying so beats opening an empty panel.
+        postOpenArtifactReply(
+          seedQuery,
+          `I found "${open.artifact.title}" but couldn't open it — try it from the Artifacts tab.`,
+          [],
+        )
+        return
+      }
+      if (open.status === "ambiguous") {
+        postOpenArtifactReply(
+          seedQuery,
+          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
+          open.candidates,
+        )
+        return
+      }
+      // not_found. Deliberately does NOT offer to generate one: the user asked
+      // to open something, and turning that into a generation is the exact
+      // failure this action exists to prevent.
+      postOpenArtifactReply(
+        seedQuery,
+        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
+        [],
+      )
+    },
+    [openArtifactInPanel, postOpenArtifactReply],
+  )
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const trimmed = rawQuery.trim()
@@ -3768,6 +3930,20 @@ export function ChatScreen() {
             }
             // No resolvable target/instruction → grounded ask (it can at least
             // answer about the document).
+          } else if (envelope.intent === "open_artifact") {
+            // OPEN, never generate. The two verbs are told apart in exactly one
+            // place (backend app/chat_intent.py's OPEN-vs-GENERATE rule) and
+            // this branch is the whole of the client's half: it can open a
+            // document, ask which one, or say there isn't one — it has no path
+            // into any generation flow, so a misfire here can never cost the
+            // user an unwanted PRD.
+            if (envelope.open) {
+              openArtifactFlow(trimmed, envelope.open)
+              settlePendingSend()
+              return
+            }
+            // No lookup on the envelope (an older backend): fall through to the
+            // grounded ask, which at least answers about the document.
           } else if (envelope.intent === "generate_prd") {
             if (docFile) {
               setAttachments([])
@@ -4239,7 +4415,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, clearSuggestions, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, clearSuggestions, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -6152,6 +6328,20 @@ export function ChatScreen() {
                                 // this thread, and the turn itself is just the card
                                 // that opens it — on THIS report, not on a list.
                                 onOpenReport={openReportByTitle}
+                              />
+                            ) : null}
+                            {/* "Which PRD did you mean?" — the candidates, as
+                                buttons that OPEN their document. Rendered on
+                                the turn that asked (not in the composer's
+                                suggestion strip) because they answer that one
+                                question, and they stay clickable on older turns
+                                so scrolling back to an unanswered question
+                                still works. */}
+                            {turn.openCandidates?.length ? (
+                              <OpenArtifactChips
+                                candidates={turn.openCandidates}
+                                disabled={busy}
+                                onOpen={(candidate) => { openArtifactInPanel(candidate) }}
                               />
                             ) : null}
                             {isLast && turn.reply && activeTab?.prdCommandThinking ? (

@@ -201,6 +201,39 @@ EVALS: list[tuple[str, str, list[dict], dict, str]] = [
      "generate_prototype"),
     ("mock-up-a-report", "mock up a one-pager of our Q3 numbers", [], {},
      "answer"),
+    # ── OPEN an existing artifact ────────────────────────────────────────────
+    # The reported gap: these were understood well enough to find the document
+    # and disambiguate, but there was no ACTION behind them, so the panel never
+    # opened. They must route to open_artifact, never to a generation.
+    ("open-prd-for-x", "open the PRD for compliance reporting", [], {},
+     "open_artifact"),
+    ("pull-up-the-x-prd", "pull up the checkout abandonment PRD", [], {},
+     "open_artifact"),
+    ("show-me-the-prd-about", "show me the PRD about onboarding", [], {},
+     "open_artifact"),
+    ("bring-up-that-spec", "bring up the bulk export spec", [], {},
+     "open_artifact"),
+    ("open-deictic-mid-thread", "open that PRD again", _FEATURE_THREAD, {},
+     "open_artifact"),
+    ("open-the-evidence", "pull up the evidence behind the CSV export request",
+     [], {}, "open_artifact"),
+    # …and the OTHER direction, which is the dangerous one. Same object, same
+    # sentence shape, authoring verb — these must still generate. A change that
+    # makes the open cases pass by widening open_artifact will fail here.
+    ("write-a-prd-for-x-still-generates",
+     "write a PRD for compliance reporting", [], {}, "generate_prd"),
+    ("generate-a-prd-for-x-still-generates",
+     "generate a PRD for checkout abandonment", [], {}, "generate_prd"),
+    ("draft-a-prd-for-x-still-generates",
+     "draft a PRD for onboarding", [], {}, "generate_prd"),
+    # A question ABOUT a document is still an answer, not an open — the panel
+    # is not the answer to "what's in it".
+    ("whats-in-the-prd-is-not-an-open",
+     "what's in the PRD for compliance reporting?", [], {}, "answer"),
+    # An edit beside an open PRD must not be re-read as "open it" now that an
+    # open action exists.
+    ("edit-beside-open-prd-survives-open-action", "make it shorter", [],
+     _PRD_OPEN_CTX, "edit_prd"),
 ]
 
 
@@ -421,14 +454,108 @@ def test_prompt_still_carries_the_deictic_phrasings():
 
 
 def test_prompt_version_records_the_scoped_rule(monkeypatch):
-    """The decision log has to distinguish verdicts made under the scoped
+    """The decision log has to distinguish verdicts made under the current
     prompt from the ones before it — the eval table is the only other record
-    of which rule was live."""
+    of which rule was live. v3 adds the open_artifact action and the
+    OPEN-vs-GENERATE rule; a verdict logged under v2 was made by a prompt that
+    could not tell "open the PRD for X" from "write one"."""
     calls: list[dict] = []
     _patch_llm(monkeypatch, {"intent": "answer", "confidence": 0.9, "reason": "q"},
                calls)
     ci.resolve_chat_intent("ent-1", "put together a one-pager on our pricing", [])
-    assert calls[0]["prompt_version"] == "chat-intent-v2"
+    assert calls[0]["prompt_version"] == "chat-intent-v3"
+
+
+# ── open_artifact: opening an existing document is not writing a new one ─────
+
+def test_open_artifact_envelope_carries_the_type_and_subject(monkeypatch):
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.95, "artifact_type": "prd",
+        "artifact_query": "compliance reporting", "reason": "open",
+    })
+    env = ci.resolve_chat_intent(
+        "ent-1", "open the PRD for compliance reporting", []
+    )
+    assert env["intent"] == "open_artifact"
+    assert env["artifact_type"] == "prd"
+    assert env["artifact_query"] == "compliance reporting"
+    # The resolver names a subject; it does NOT look one up (that is
+    # app.artifact_open, called by the route where the tenant scope lives).
+    assert "open" not in env
+
+
+def test_open_artifact_accepts_evidence(monkeypatch):
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.9, "artifact_type": "evidence",
+        "artifact_query": "bulk export demand", "reason": "open",
+    })
+    env = ci.resolve_chat_intent("ent-1", "pull up the evidence for exports", [])
+    assert env["artifact_type"] == "evidence"
+
+
+def test_open_artifact_without_a_subject_downgrades_to_answer_not_generate(
+    monkeypatch,
+):
+    """THE guard. An open request that names nothing has to fall back to the
+    harmless action. Falling back to generate_prd would answer "open a PRD"
+    with a brand-new document — the single failure this action exists to
+    prevent."""
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.95, "artifact_type": "prd",
+        "artifact_query": "   ", "reason": "open",
+    })
+    env = ci.resolve_chat_intent("ent-1", "open a PRD", [])
+    assert env["intent"] == "answer"
+    assert env["source"] == "no_artifact_query"
+
+
+def test_open_artifact_defaults_an_unknown_kind_to_prd(monkeypatch):
+    """A kind we have no panel for must not abandon an otherwise valid open."""
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.9, "artifact_type": "prototype",
+        "artifact_query": "dark mode", "reason": "open",
+    })
+    env = ci.resolve_chat_intent("ent-1", "open the dark mode prototype", [])
+    assert env["intent"] == "open_artifact"
+    assert env["artifact_type"] == "prd"
+
+
+def test_low_confidence_open_downgrades_to_answer(monkeypatch):
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.3, "artifact_type": "prd",
+        "artifact_query": "dark mode", "reason": "unsure",
+    })
+    env = ci.resolve_chat_intent("ent-1", "the dark mode thing?", [])
+    assert env["intent"] == "answer"
+    assert env["source"] == "low_confidence"
+
+
+def test_non_open_intents_carry_null_artifact_fields(monkeypatch):
+    """The envelope shape is stable across intents, so the client reducer never
+    has to guess whether a key is missing or genuinely empty."""
+    _patch_llm(monkeypatch, {"intent": "generate_prd", "confidence": 0.9,
+                             "task": "dark mode", "reason": "cmd"})
+    env = ci.resolve_chat_intent("ent-1", "write a PRD for dark mode", [])
+    assert env["artifact_type"] is None and env["artifact_query"] is None
+
+
+def test_prompt_states_the_open_versus_generate_rule():
+    """The distinction is made in ONE place — this prompt — so the rule and
+    both verb lists have to be literally present. A future edit that trims
+    either side of it reintroduces the failure mode."""
+    system = ci._SYSTEM.lower()
+    assert "open is not generate" in system
+    # Opening verbs: what must route to open_artifact.
+    for verb in ("open", "pull up", "bring up", "show me", "take me to"):
+        assert verb in system, verb
+    # Authoring verbs: what must stay generate_prd.
+    for verb in ("write", "draft", "create", "generate"):
+        assert verb in system, verb
+    # …and the tie-break, which is what makes the rule decidable rather than
+    # a list of examples: the object is shared, so only the verb can decide,
+    # and an unclear verb resolves to the recoverable side.
+    assert "the object tells you nothing" in system
+    assert "prefer open_artifact over generate_prd" in system
 
 
 def test_tickets_without_target_keeps_intent(monkeypatch):

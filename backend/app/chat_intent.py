@@ -76,7 +76,13 @@ INTENTS = (
     "edit_prd",
     "generate_tickets",
     "generate_prototype",
+    "open_artifact",
 )
+
+# Artifact kinds `open_artifact` may name. Mirrors app.artifact_open's
+# OPENABLE_TYPES — the model must not be able to ask for a panel that doesn't
+# exist (a prototype opens on its own route, not the chat panel).
+OPEN_ARTIFACT_TYPES = ("prd", "evidence")
 
 # Intents that act ON an existing PRD. edit_prd with no resolvable target is
 # meaningless and downgrades to `answer`; tickets/prototype keep their intent
@@ -101,6 +107,21 @@ _SCHEMA: dict = {
             "description": (
                 "edit_prd only: the change to apply, self-contained. "
                 "Otherwise null."
+            ),
+        },
+        "artifact_type": {
+            "type": ["string", "null"],
+            "enum": [*OPEN_ARTIFACT_TYPES, None],
+            "description": (
+                "open_artifact only: which existing artifact to open. "
+                "Otherwise null."
+            ),
+        },
+        "artifact_query": {
+            "type": ["string", "null"],
+            "description": (
+                "open_artifact only: the SUBJECT the user named the document "
+                "by, with the document noun stripped. Otherwise null."
             ),
         },
         "reason": {"type": "string", "description": "One short clause."},
@@ -148,11 +169,37 @@ applies: a prototype shows a PRODUCT CHANGE working, so a request to lay out \
 or visualize existing information — a report, a summary, a deck, a one-pager \
 — is answer, not a prototype.
 
+- open_artifact — the user wants to SEE a document that ALREADY EXISTS, \
+brought up beside the chat: "open the PRD for compliance reporting", "pull up \
+the checkout abandonment PRD", "show me the PRD about onboarding", "bring up \
+the evidence for the export request", "can you open that spec again". Nothing \
+is written, generated or changed — an existing document is put on screen. \
+artifact_type: "prd" for a PRD / spec / requirements doc, "evidence" for the \
+research/evidence write-up behind a finding. artifact_query: the SUBJECT the \
+user named it by, with the document noun and the opening verb stripped — \
+"open the PRD for compliance reporting" → "compliance reporting", "pull up \
+the checkout abandonment PRD" → "checkout abandonment". Resolve a deictic \
+reference from the thread ("open that one" after discussing dark mode → "dark \
+mode"); leave artifact_query null only when the thread names no subject at \
+all.
+
 - answer — everything else: questions (including questions ABOUT PRDs or \
 tickets — "what's in the PRD for onboarding?", "what makes a good PRD?"), \
 discussion, analysis, feedback on a document, greetings. The default.
 
 Rules:
+- OPEN IS NOT GENERATE. This is the one distinction you must never get wrong, \
+because the two produce opposite outcomes: open_artifact shows a document the \
+user already has, generate_prd spends minutes writing a new one they did not \
+ask for. The VERB decides, and only the verb: open / pull up / bring up / show \
+me / find / take me to / go to / where is / let me see → open_artifact; write \
+/ draft / create / generate / make / spec out / put together → generate_prd. \
+Both take the same object ("a PRD for X"), so the object tells you nothing. \
+When the verb is an opening verb, choose open_artifact even if no such \
+document exists — whether one exists is not yours to decide, and answering \
+"there isn't one" is recoverable while writing an unwanted PRD is not. When \
+the verb is genuinely absent or ambiguous ("the compliance reporting PRD?"), \
+prefer open_artifact over generate_prd for the same reason.
 - FIRST resolve pronouns and ellipsis against the conversation; judge the \
 resolved meaning, not the surface words. Where a message sits in the thread \
 changes what it means: "generate a PRD" opening a thread is a bare command \
@@ -231,6 +278,8 @@ def _fallback(reason: str) -> dict:
         "confidence": 0.0,
         "task": None,
         "instruction": None,
+        "artifact_type": None,
+        "artifact_query": None,
         "reason": reason,
         "source": "fallback",
     }
@@ -247,9 +296,14 @@ def resolve_chat_intent(
 ) -> dict:
     """Decide the action envelope for one chat message, in context.
 
-    Returns {intent, confidence, task, instruction, reason, source} where
-    source is "llm" for a model verdict, "low_confidence" for a verdict
-    downgraded to answer, or "fallback" on any failure. Never raises.
+    Returns {intent, confidence, task, instruction, artifact_type,
+    artifact_query, reason, source} where source is "llm" for a model verdict,
+    "low_confidence" for a verdict downgraded to answer, or "fallback" on any
+    failure. Never raises.
+
+    This function does NOT resolve an `open_artifact` request to a document —
+    it only names the subject. The lookup (and its 0/1/many verdict) belongs to
+    app.artifact_open, called by the route where the tenant scope lives.
     """
     try:
         result = llm_call(
@@ -263,7 +317,7 @@ def resolve_chat_intent(
                 + _render_history(history)
                 + f"Newest message: {message}"
             ),
-            prompt_version="chat-intent-v2",
+            prompt_version="chat-intent-v3",
             json_schema=_SCHEMA,
             # The task field echoes requirement details verbatim from a long
             # thread — give it room.
@@ -278,11 +332,16 @@ def resolve_chat_intent(
         def _clean(value: object) -> Optional[str]:
             return value.strip() if isinstance(value, str) and value.strip() else None
 
+        artifact_type = _clean(out.get("artifact_type"))
         envelope = {
             "intent": intent,
             "confidence": confidence,
             "task": _clean(out.get("task")),
             "instruction": _clean(out.get("instruction")),
+            "artifact_type": (
+                artifact_type if artifact_type in OPEN_ARTIFACT_TYPES else None
+            ),
+            "artifact_query": _clean(out.get("artifact_query")),
             "reason": _clean(out.get("reason")) or "",
             "source": "llm",
         }
@@ -294,6 +353,17 @@ def resolve_chat_intent(
             # An edit with no instruction can't be applied; the ask path at
             # least answers the message.
             envelope.update(intent="answer", source="no_instruction")
+        if envelope["intent"] == "open_artifact":
+            # An open with no subject names nothing to look for. It degrades to
+            # `answer` — NEVER to generate_prd: "open a PRD" answered with a
+            # freshly written PRD is the single failure this action exists to
+            # prevent, so the downgrade path is deliberately the harmless one.
+            if not envelope["artifact_query"]:
+                envelope.update(intent="answer", source="no_artifact_query")
+            elif not envelope["artifact_type"]:
+                # PRDs are what people ask to open; an unset/unknown kind
+                # resolves there rather than abandoning a valid request.
+                envelope["artifact_type"] = "prd"
         return envelope
     except Exception:  # noqa: BLE001 — dispatch must never break the send
         logger.exception("chat intent resolve failed; falling back to answer")
