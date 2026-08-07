@@ -5,6 +5,7 @@ import {
   ApiError,
   apiErrorMessage,
   usageApi,
+  type LlmProvider,
   type UsageBucket,
   type UsageSummary,
 } from "../../../../lib/api"
@@ -13,7 +14,7 @@ import { SettingsSection, SettingsMessage } from "./SettingsLayout"
 /**
  * Usage — LLM spend and token usage for this workspace.
  *
- * Rendered inside the Admin pane, directly beneath the Claude API key it
+ * Rendered inside the Admin pane, directly beneath the provider + API key it
  * reports on (see AdminSettings): the key and what ran on it are one question,
  * so they share a screen rather than a nav entry each.
  *
@@ -24,7 +25,7 @@ import { SettingsSection, SettingsMessage } from "./SettingsLayout"
  * Every money figure is ESTIMATED. The provider APIs return token counts, never
  * dollars, so the backend prices tokens against the published rate card. The UI
  * says so in three places (hero caption, section hint, footnote) because the
- * single worst outcome here is someone reconciling this against an Anthropic
+ * single worst outcome here is someone reconciling this against a provider
  * invoice and concluding one of them is broken.
  *
  * Charts are inline SVG rather than a charting dependency — two forms, one
@@ -46,13 +47,27 @@ const RANGES = [
 /** Which breakdown the chart area is showing. The two tab groups are
  *  independent: the range filters the data, the view reshapes it, so any
  *  combination is valid and switching one never resets the other. */
-export type UsageView = "daily" | "feature" | "model"
+export type UsageView = "daily" | "feature" | "model" | "provider"
 
 const VIEWS: { id: UsageView; label: string; heading: string }[] = [
   { id: "daily", label: "Daily", heading: "Estimated daily spend" },
   { id: "feature", label: "By feature", heading: "Estimated spend by feature" },
   { id: "model", label: "By model", heading: "Estimated spend by model" },
+  // Last because it is the coarsest cut, and only interesting once a workspace
+  // has actually run on more than one provider.
+  { id: "provider", label: "By provider", heading: "Estimated spend by provider" },
 ]
+
+/** Product-facing provider names. The UI says "Claude", not "Anthropic" — the
+ *  same wording the provider chooser above uses. */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Claude",
+  openai: "OpenAI",
+}
+
+export function providerLabel(slug: string): string {
+  return PROVIDER_LABELS[slug] ?? slug.replace(/^\w/, (c) => c.toUpperCase())
+}
 
 const EMPTY_BUCKET: UsageBucket = {
   calls: 0,
@@ -296,10 +311,14 @@ export type UsageSettingsViewProps = {
   data: UsageSummary | null
   days: number
   view: UsageView
-  /** Whether this workspace has its own Anthropic key saved. Drives the empty
-   *  state: with no key there is nothing to bill and nothing to show, and the
-   *  reader needs telling why rather than being left with a blank chart. */
+  /** Whether this workspace has its own key saved for the ACTIVE provider.
+   *  Drives the empty state: with no key there is nothing to bill and nothing
+   *  to show, and the reader needs telling why rather than being left with a
+   *  blank chart. */
   keyConfigured: boolean
+  /** The active provider, so the empty state and the footnote name the console
+   *  the reader should actually go and check. */
+  provider: LlmProvider
   restricted: boolean
   loading: boolean
   error: string | null
@@ -312,6 +331,7 @@ export function UsageSettingsView({
   days,
   view,
   keyConfigured,
+  provider,
   restricted,
   loading,
   error,
@@ -353,11 +373,28 @@ export function UsageSettingsView({
     value: Number(m.est_cost_usd) || 0,
   }))
 
+  const providerRows: BreakdownRow[] = (data?.by_provider ?? []).map((p) => ({
+    key: p.provider ?? "unknown",
+    label: providerLabel(p.provider ?? "unknown"),
+    sub: `${formatCount(p.calls)} calls · ${formatCount(
+      p.input_tokens + p.output_tokens,
+    )} tokens`,
+    value: Number(p.est_cost_usd) || 0,
+  }))
+
+  const breakdownRows: Record<Exclude<UsageView, "daily">, BreakdownRow[]> = {
+    feature: featureRows,
+    model: modelRows,
+    provider: providerRows,
+  }
+
+  const providerName = providerLabel(provider)
+
   return (
     <>
       <SettingsSection
         title="Usage"
-        sub="What Sprntly has run on your own Anthropic key — the calls billed to your account. Costs are estimated from token counts, not billed amounts."
+        sub="What Sprntly has run on your own API key — the calls billed to your account. Costs are estimated from token counts, not billed amounts."
       >
         {/* Two independent filter groups on one row: WHEN on the left, WHAT on
             the right. Both use the same pill control so it reads as one bar. */}
@@ -396,9 +433,9 @@ export function UsageSettingsView({
           <p className="settings-placeholder">Loading usage…</p>
         ) : !keyConfigured ? (
           <p className="settings-placeholder">
-            No API key saved, so everything currently runs on Sprntly's key at
-            our cost — there is nothing billed to you to show. Add your own
-            Anthropic key above and usage on it will appear here.
+            No API key saved, so everything currently runs on Sprntly&apos;s key
+            at our cost — there is nothing billed to you to show. Add your own{" "}
+            {providerName} key above and usage on it will appear here.
           </p>
         ) : !hasUsage ? (
           <p className="settings-placeholder">
@@ -453,15 +490,13 @@ export function UsageSettingsView({
                 onHover={setHovered}
               />
             ) : (
-              <BreakdownBars
-                rows={view === "feature" ? featureRows : modelRows}
-              />
+              <BreakdownBars rows={breakdownRows[view]} />
             )}
 
             <p className="usage-foot">
-              Costs are estimated by pricing token counts against Anthropic's
-              published rates — the API returns token counts, not charges. Use
-              your Anthropic console for billed amounts.
+              Costs are estimated by pricing token counts against the
+              provider&apos;s published rates — the API returns token counts,
+              not charges. Use your {providerName} console for billed amounts.
             </p>
           </>
         )}
@@ -472,10 +507,12 @@ export function UsageSettingsView({
 
 export function UsageSettings({
   keyConfigured,
+  provider,
 }: {
-  /** Passed down from AdminSettings, which has already fetched the key status —
+  /** Passed down from AdminSettings, which has already fetched the config —
    *  avoids a second request for something the parent pane already knows. */
   keyConfigured: boolean
+  provider: LlmProvider
 }) {
   const [data, setData] = useState<UsageSummary | null>(null)
   const [days, setDays] = useState(30)
@@ -522,6 +559,7 @@ export function UsageSettings({
       days={days}
       view={view}
       keyConfigured={keyConfigured}
+      provider={provider}
       restricted={restricted}
       loading={loading}
       error={error}

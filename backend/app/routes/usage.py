@@ -1,8 +1,12 @@
 """Customer-key LLM usage + estimated cost — behind Settings → Admin → Usage.
 
-Reports ONLY calls billed to the company's own Anthropic key (see
-`_CUSTOMER_KEY_MODE`). A company with no key configured runs on Sprntly's
-platform key and correctly sees nothing here — it owes nothing.
+Reports ONLY calls billed to the company's own API key, whichever provider it
+runs on (see `_CUSTOMER_KEY_MODE`). A company with no key configured runs on
+Sprntly's platform key and correctly sees nothing here — it owes nothing.
+
+Provider-aware since a workspace can run on Anthropic or OpenAI: `by_provider`
+splits spend between them, which matters most for a workspace that has switched
+mid-period and needs to reconcile against two separate invoices.
 
 Grain is the COMPANY (tenant), not a `workspaces` row: `require_company` supplies
 the id and every row is keyed on it, so all workspaces under one company share a
@@ -46,7 +50,7 @@ router = APIRouter(prefix="/v1/admin/usage", tags=["admin"])
 
 _MAX_DAYS = 365
 
-# This surface reports ONLY what the customer's own Anthropic key paid for.
+# This surface reports ONLY what the customer's own provider key paid for.
 #
 # Calls made on Sprntly's platform key are spend WE absorb — a workspace that
 # has not configured a key owes nothing, so surfacing that spend here would
@@ -150,7 +154,11 @@ def usage_summary(
     tz: str = Query("UTC", max_length=64),
     company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
-    """Totals, a gap-filled daily series, and per-feature/model/provider splits."""
+    """Totals, a gap-filled daily series, and per-feature/model/provider splits.
+
+    Every breakdown ships in this one payload — the client switches views
+    without refetching, so a new dimension costs nothing at read time.
+    """
     _require_admin(company)
     rows, start, end = _load(company, days, tz)
 
@@ -175,8 +183,10 @@ def usage_summary(
         "daily": _daily_series(rows, start, days),
         "by_feature": _group_by(rows, "feature"),
         "by_model": _group_by(rows, "model"),
-        "by_provider": _group_by(rows, "provider") if rows and "provider" in rows[0]
-        else [],
+        # Unconditional since 20260807120100 added `provider` to the rollup.
+        # It used to be guarded on the column being present, which — because
+        # the RPC never selected it — made this a permanently empty list.
+        "by_provider": _group_by(rows, "provider"),
         "by_operation": _group_by(rows, "operation"),
     }
 
@@ -195,6 +205,7 @@ def usage_export_csv(
         "day",
         "feature",
         "operation",
+        "provider",
         "model",
         "key_mode",
         *_SUM_FIELDS,

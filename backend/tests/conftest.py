@@ -426,6 +426,13 @@ CREATE TABLE companies (
     -- Fernet-encrypted per-company Claude key (mirrors
     -- 20260711120000_company_llm_api_key.sql). Read by app.llm_keys.
     llm_api_key_encrypted TEXT,
+    -- The OpenAI counterpart, plus which of the two the company actually runs
+    -- on (mirrors 20260807120000_company_openai_key_and_provider.sql). Both
+    -- keys may be set at once; llm_provider decides which is live. Defaults to
+    -- 'anthropic' so an untouched row behaves exactly as it did before OpenAI
+    -- was an option.
+    openai_api_key_encrypted TEXT,
+    llm_provider        TEXT NOT NULL DEFAULT 'anthropic',
     -- Platform-key fallback flag + onboarding-completion marker. Read by
     -- app.llm_keys to decide whether a keyless company may use the platform key
     -- (mirrors 20260712120000_company_use_platform_key.sql +

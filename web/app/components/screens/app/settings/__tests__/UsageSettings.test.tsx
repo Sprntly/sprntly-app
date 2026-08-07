@@ -59,7 +59,9 @@ function summary(over: Partial<UsageSummary> = {}): UsageSummary {
     by_model: [
       { ...bucket({ calls: 120, est_cost_usd: 8.25 }), model: "claude-sonnet-4-6" },
     ],
-    by_provider: [],
+    by_provider: [
+      { ...bucket({ calls: 120, est_cost_usd: 8.25 }), provider: "anthropic" },
+    ],
     by_operation: [],
     ...over,
   }
@@ -74,6 +76,7 @@ function render(
       days={30}
       view="daily"
       keyConfigured={true}
+      provider="anthropic"
       restricted={false}
       loading={false}
       error={null}
@@ -158,8 +161,10 @@ describe("UsageSettingsView", () => {
     const html = render()
     expect(html).toMatch(/estimated/i)
     expect(html).not.toMatch(/billed amount(?!s)/i)
-    // The footnote points at the authoritative source.
-    expect(html).toMatch(/Anthropic console/i)
+    // The footnote points at the authoritative source — the console of
+    // whichever provider the workspace is actually running on.
+    expect(html).toMatch(/Claude console/i)
+    expect(render({ provider: "openai" })).toMatch(/OpenAI console/i)
   })
 
   it("frames the total as spend on the customer's OWN key", () => {
@@ -190,7 +195,7 @@ describe("UsageSettingsView", () => {
     expect(html).toMatch(/was on our key/i)
   })
 
-  it("offers both breakdown views alongside the date range", () => {
+  it("offers every breakdown view alongside the date range", () => {
     const html = render()
     // Two independent pill groups on one toolbar.
     expect(html).toMatch(/aria-label="Date range"/)
@@ -198,6 +203,7 @@ describe("UsageSettingsView", () => {
     expect(html).toMatch(/>Daily</)
     expect(html).toMatch(/>By feature</)
     expect(html).toMatch(/>By model</)
+    expect(html).toMatch(/>By provider</)
   })
 
   it("shows the daily chart by default, not a breakdown", () => {
@@ -225,6 +231,33 @@ describe("UsageSettingsView", () => {
     expect(html).toMatch(/claude-sonnet-4-6/)
     expect(html).toMatch(/120 calls/)
     expect(html).not.toMatch(/usage-chart-svg/)
+  })
+
+  it("splits spend by provider in product language, not slugs", () => {
+    // A workspace that switched providers mid-period reconciles against two
+    // separate invoices, so the split has to be legible here.
+    const html = render({
+      view: "provider",
+      data: summary({
+        by_provider: [
+          { ...bucket({ calls: 90, est_cost_usd: 6.0 }), provider: "openai" },
+          { ...bucket({ calls: 30, est_cost_usd: 2.25 }), provider: "anthropic" },
+        ],
+      }),
+    })
+    expect(html).toMatch(/Estimated spend by provider/)
+    expect(html).toMatch(/usage-bar-row/)
+    // "Claude", not "anthropic" — the same word the provider chooser uses.
+    expect(html).toMatch(/>Claude</)
+    expect(html).toMatch(/>OpenAI</)
+    expect(html).not.toMatch(/>anthropic</)
+    expect(html).not.toMatch(/usage-chart-svg/)
+  })
+
+  it("tells an OpenAI workspace which key to add", () => {
+    const html = render({ keyConfigured: false, provider: "openai" })
+    expect(html).toMatch(/No API key saved/i)
+    expect(html).toMatch(/your own OpenAI key/i)
   })
 
   it("marks the active view and leaves the range untouched", () => {

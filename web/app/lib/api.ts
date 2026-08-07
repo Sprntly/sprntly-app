@@ -3944,23 +3944,57 @@ export const teamApi = {
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
-// ── Admin (owner/admin only): per-company Claude API key ──
-// When configured, ALL of the company's Claude LLM calls use THIS key instead
+// ── Admin (owner/admin only): LLM provider + per-company API keys ──
+// A workspace runs on Claude (Anthropic) or OpenAI. When a key is configured
+// for the ACTIVE provider, ALL of the company's LLM calls use THAT key instead
 // of the platform key. The full key is never returned — reads carry a masked
 // preview only.
+//
+// The two keys are independent of the provider switch: a workspace can hold
+// both and flip between them without re-entering either.
+
+/** The providers the backend can run on. Mirrors app/llm_providers.py. */
+export const LLM_PROVIDERS = ["anthropic", "openai"] as const
+export type LlmProvider = (typeof LLM_PROVIDERS)[number]
 
 export type LlmKeyStatus = { configured: boolean; masked: string | null }
 
+/** Which provider is live plus the key status of BOTH, in one request — so the
+ *  Admin pane can show "Claude key saved" on an inactive card without a second
+ *  round trip. */
+export type LlmConfig = {
+  provider: LlmProvider
+  providers: Record<LlmProvider, LlmKeyStatus>
+}
+
+/** `?provider=` on every key route. Omitted for Anthropic so the requests the
+ *  onboarding step and older clients send stay byte-identical. */
+function providerQuery(provider: LlmProvider): string {
+  return provider === "anthropic" ? "" : `?provider=${encodeURIComponent(provider)}`
+}
+
 export const adminApi = {
-  /** Current key status (masked preview, never the full key). */
-  getLlmKey: () => api.get<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Store / replace the company Claude key. */
-  setLlmKey: (apiKey: string) =>
-    api.put<LlmKeyStatus>("/v1/admin/llm-key", { api_key: apiKey }),
-  /** Remove the key (revert to the platform key). */
-  deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Explicit, opt-in live validation of the stored key (one cheap call). */
-  testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
+  /** Active provider + both key statuses. */
+  getLlmConfig: () => api.get<LlmConfig>("/v1/admin/llm-config"),
+  /** Switch which provider this workspace's LLM calls run on. Allowed with no
+   *  key stored for the target — it then runs on Sprntly's key for that
+   *  provider, the same posture a keyless Claude workspace has always had. */
+  setLlmProvider: (provider: LlmProvider) =>
+    api.put<LlmConfig>("/v1/admin/llm-config", { provider }),
+  /** Current key status for one provider (masked preview, never the full key). */
+  getLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.get<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Store / replace the company key for one provider. */
+  setLlmKey: (apiKey: string, provider: LlmProvider = "anthropic") =>
+    api.put<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`, {
+      api_key: apiKey,
+    }),
+  /** Remove the key (revert to the platform key). Does not change the provider. */
+  deleteLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.delete<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Explicit, opt-in live validation of the stored key. */
+  testLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.post<{ ok: true }>(`/v1/admin/llm-key/test${providerQuery(provider)}`),
 }
 
 // ── Usage (owner/admin only): LLM spend + token usage for this workspace ──
@@ -3983,8 +4017,8 @@ export type UsageBucket = {
 export type UsageSummary = {
   range: { start: string; end: string; days: number; tz: string }
   cost_basis: string
-  /** Always "customer_key": only calls billed to the company's OWN Anthropic
-   *  key are counted. Usage on Sprntly's platform key is spend we absorb and is
+  /** Always "customer_key": only calls billed to the company's OWN provider key
+   *  are counted. Usage on Sprntly's platform key is spend we absorb and is
    *  deliberately excluded — it is not the customer's to see or pay. */
   scope: string
   totals: UsageBucket

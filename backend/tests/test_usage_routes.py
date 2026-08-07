@@ -27,6 +27,7 @@ def _row(**over):
         "day": _today(),
         "feature": "prd",
         "operation": "generate",
+        "provider": "anthropic",
         "model": "claude-sonnet-4-6",
         "key_mode": "customer",
         "calls": 1,
@@ -78,6 +79,32 @@ def test_summary_aggregates_totals_and_breakdowns(tenant_client):
         "claude-sonnet-4-6", "claude-opus-4-7",
     }
     assert body["scope"] == "customer_key"
+
+
+def test_summary_splits_spend_by_provider(tenant_client):
+    """A workspace that switched providers mid-period reconciles against two
+    separate invoices, so the split has to be on the page.
+
+    This breakdown shipped as a permanently empty list until the rollup started
+    returning `provider` (migration 20260807120100) — the API key existed, the
+    data behind it did not.
+    """
+    env = tenant_client.make("usage-providers")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", model="claude-sonnet-4-6", est_cost_usd=0.30, calls=2),
+        _row(provider="openai", model="gpt-5.6-terra", est_cost_usd=0.70, calls=5),
+        _row(provider="openai", model="gpt-5.6-luna", est_cost_usd=0.01, calls=9),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30").json()
+    by_provider = {b["provider"]: b for b in body["by_provider"]}
+
+    assert set(by_provider) == {"anthropic", "openai"}
+    # Ranked by spend, and the two openai rows roll up into one bucket.
+    assert body["by_provider"][0]["provider"] == "openai"
+    assert by_provider["openai"]["est_cost_usd"] == pytest.approx(0.71)
+    assert by_provider["openai"]["calls"] == 14
+    assert by_provider["anthropic"]["est_cost_usd"] == pytest.approx(0.30)
 
 
 def test_summary_gap_fills_days_with_no_usage(tenant_client):
@@ -154,7 +181,7 @@ def test_csv_export_has_a_header_and_one_row_per_group(tenant_client):
     assert "attachment" in resp.headers["content-disposition"]
 
     lines = [ln for ln in resp.text.splitlines() if ln.strip()]
-    assert lines[0].startswith("day,feature,operation,model,key_mode,")
+    assert lines[0].startswith("day,feature,operation,provider,model,key_mode,")
     assert len(lines) == 3  # header + 2 rows
 
 
