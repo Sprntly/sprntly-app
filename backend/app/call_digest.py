@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from app.prompt_history import clamp_turn_text
+from app.connector_lookup import slack_voc
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.connectors.zoom_oauth import (
     ZoomAuthExpiredError,
@@ -602,6 +603,15 @@ def has_call_source(company_id: str) -> bool:
         return True
     if _voice_docs(company_id, None):
         return True
+    # Slack's configured customer-feedback channels are a voice source too —
+    # Slack is dual-typed CUSTOMER_VOICE in connectors/catalog.py, and the
+    # Settings picker under "Voice of Customer & Support" is where a company
+    # says which channels carry feedback. Before this, a company whose ONLY
+    # voice source was Slack fell through to the what-to-connect guidance and
+    # was told to connect Fireflies — while its feedback channels sat connected
+    # and readable. One DB read, no decrypt, no network (see has_voc_channels).
+    if slack_voc.has_voc_channels(company_id):
+        return True
     return _zoom_context(company_id) is not None
 
 
@@ -930,15 +940,25 @@ def build_kg_context(
         return KgContext()
 
 
-def _merge_corpus_text(corpus: DigestCorpus, kg: KgContext) -> str:
-    """Live calls + uploaded docs first, stored signal after — the ordering the
-    corpus already uses for calls-then-docs, extended one step. Richest material
-    first, and a KG-only corpus is simply the tail with nothing ahead of it."""
-    if not kg.text:
-        return corpus.text
-    if not corpus.text:
-        return kg.text
-    return f"{corpus.text}\n\n{kg.text}"
+def _merge_corpus_text(
+    corpus: DigestCorpus, kg: KgContext, voc_block: str = ""
+) -> str:
+    """Live calls + uploaded docs, then the LIVE Slack feedback channels, then
+    stored signal — richest and freshest material first.
+
+    The Slack block sits between them on purpose: like the calls it is a live
+    read of verbatim customer words, so it outranks the KG's distillation; and
+    unlike the calls it is chat rather than a scheduled conversation, so it does
+    not displace a transcript. A corpus missing any of the three is simply that
+    section absent, never a reordering.
+
+    Each half carries its OWN budget (`_CORPUS_CHAR_BUDGET`,
+    `slack_voc.TOTAL_CHARS`, `_KG_CHAR_BUDGET`) rather than sharing one pool —
+    the same reason the KG merge gave: starvation becomes impossible by
+    construction instead of by careful arithmetic, and a calls-only company's
+    corpus stays byte-identical to what it was.
+    """
+    return "\n\n".join(p for p in (corpus.text, voc_block, kg.text) if p)
 
 
 # ── Answer assembly ──────────────────────────────────────────────────────────
@@ -1117,6 +1137,7 @@ def _answer_query(
     *, enterprise_id: str, question: str, corpus_text: str, source_line: str,
     window: Window, compare_boundary: str | None,
     history: list[dict] | None, kg: KgContext | None = None,
+    voc: "slack_voc.VocRead | None" = None,
 ) -> dict:
     """Answer a query-shaped ask directly from the merged corpus text.
 
@@ -1161,6 +1182,11 @@ def _answer_query(
         "_skill": _VOC_SKILL,
         "_skill_action": (
             f"Voice of customer · answered from {window.label}"
+            + (
+                f" + {len(voc.covered_channels)} Slack feedback channel"
+                f"{'s' if len(voc.covered_channels) != 1 else ''}"
+                if voc and voc.present else ""
+            )
             + (f" + {kg.signal_count} stored signals" if kg and kg.present else "")
         ),
         "_skill_source": "voc-query",
@@ -1168,7 +1194,72 @@ def _answer_query(
     return payload
 
 
-def _coverage_line(corpus: DigestCorpus, kg: KgContext, window: Window) -> str:
+def _voc_coverage_clause(voc) -> str:
+    """The Slack-feedback-channel clause of the coverage banner, or "".
+
+    NAMES the channels, both the ones that were read and the ones that were
+    not. A count ("3 Slack channels") is not something a user can check, and it
+    is precisely the shape that let "the live Slack sweep returned one result"
+    pass for coverage of a company's whole feedback surface. The unread half is
+    appended to the SAME clause rather than dropped, because the honesty
+    contract this leg exists to serve is that an unread channel is never
+    silently absent.
+    """
+    if voc is None or not voc.reads:
+        return ""
+    parts: list[str] = []
+    named = voc.channel_names()
+    if named:
+        parts.append(
+            f"{voc.message_count} live Slack message"
+            f"{'s' if voc.message_count != 1 else ''} from "
+            f"{len(named)} customer-feedback channel"
+            f"{'s' if len(named) != 1 else ''} ({', '.join(named)})"
+        )
+    stored = voc.stored_channels
+    if stored:
+        # Named and DATED, and never folded into the live count. A stored
+        # summary answers "does #demos exist and what is it about" — which is
+        # the question the reported answer got wrong — but it cannot answer
+        # "what was said there this week", and a banner that blurred the two
+        # would license exactly that overreach.
+        parts.append(
+            f"{len(stored)} further channel"
+            f"{'s' if len(stored) != 1 else ''} covered ONLY by a stored, "
+            "dated summary, not read live ("
+            + ", ".join(
+                f"{r.channel.label}{r.stored.as_of().strip()}" for r in stored
+            )
+            + ") — say what those channels are ABOUT, never what was said in "
+            "them during this window"
+        )
+    quiet = [
+        r for r in voc.unread_channels
+        if r.status == slack_voc.STATUS_EMPTY and not r.stored.present
+    ]
+    if quiet:
+        clause = (
+            ", ".join(r.channel.label for r in quiet)
+            + f" {'were' if len(quiet) != 1 else 'was'} read and had no messages "
+            "in this window"
+        )
+        parts.append(clause if parts else f"Slack: {clause}")
+    missed = [
+        r for r in voc.unread_channels
+        if r.status != slack_voc.STATUS_EMPTY and not r.stored.present
+    ]
+    if missed:
+        parts.append(
+            "NOT read and NOTHING stored: "
+            + "; ".join(f"{r.channel.label} ({r.reason()})" for r in missed)
+            + " — state this as a coverage caveat"
+        )
+    return "; ".join(parts)
+
+
+def _coverage_line(
+    corpus: DigestCorpus, kg: KgContext, window: Window, voc=None
+) -> str:
     """The `=== … ===` banner stating exactly what the answer was built from.
 
     This is the single most important observable in the merged path. A user has
@@ -1233,6 +1324,9 @@ def _coverage_line(corpus: DigestCorpus, kg: KgContext, window: Window) -> str:
             "for this window, so its calls are missing — state this as a "
             "coverage caveat"
         )
+    voc_clause = _voc_coverage_clause(voc)
+    if voc_clause:
+        coverage += f" + {voc_clause}"
     if kg.present:
         # The KG clause. Named sources, not just a count: "23 stored signals" is
         # not something a user can check, and "slack_channels, jira" is.
@@ -1260,10 +1354,31 @@ def _coverage_line(corpus: DigestCorpus, kg: KgContext, window: Window) -> str:
     if corpus.doc_count:
         header_parts.append("UPLOADED VOICE DOCUMENTS" if not corpus.count
                             else "UPLOADED DOCUMENTS")
+    if voc is not None and voc.present:
+        header_parts.append("SLACK FEEDBACK CHANNELS")
     if kg.present:
         header_parts.append("CONNECTED-SOURCE SIGNAL")
     header = " + ".join(header_parts) or "CUSTOMER CALLS"
     return f"=== {header} — {window.label} ({coverage}) ==="
+
+
+def _slack_voc_read(enterprise_id: str, window: Window) -> "slack_voc.VocRead":
+    """The company's configured Slack feedback channels, over `window`.
+
+    NEVER raises — `slack_voc.read` already guarantees that, and this wrapper
+    keeps the guarantee even if the window arithmetic below ever grows a way to
+    fail. One half of the corpus must not be able to cost the answer another,
+    the same isolation Fireflies and Zoom already hold inside `build_corpus`.
+    """
+    try:
+        span = window.until - window.since
+        days = max(1, min(int(span.total_seconds() // 86400) or 1, 90))
+        return slack_voc.read(enterprise_id, days=days)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "call-digest: slack VoC channel read failed for %s", enterprise_id
+        )
+        return slack_voc.VocRead(unavailable="the Slack read could not be run")
 
 
 def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict:
@@ -1321,11 +1436,59 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # duplicates — is only known once the live fetch has finally settled.
     kg = build_kg_context(enterprise_id, question, live_calls=bool(corpus.calls))
 
+    # The LIVE Slack half. Read after the auto-widen loop so it covers the same
+    # window the calls finally settled on — a "last 30 days" answer whose Slack
+    # section only spans 7 would be a coverage lie the banner could not express.
+    voc = _slack_voc_read(enterprise_id, window)
+    voc_block = voc.render()
+
     # Each of the three live-source dead ends now yields to the KG when the KG
     # has something: an expired Zoom grant is a reason to caveat an answer, not
     # to withhold one built from Slack and the ticket queue. With BOTH halves
     # empty these messages are exactly what they were.
-    if corpus.status == "not_connected" and not kg.present:
+    #
+    # `voc_block` joins them as a third half, and on a WIDER condition than
+    # `present`: a block is rendered when the feedback channels were READ, even
+    # if every one was quiet. "Your three feedback channels have had no messages
+    # this week" is a true, checkable answer that only this leg can support, and
+    # it is strictly better than "no call source is connected" told to a company
+    # whose Slack is connected and working.
+    # Slack IS the voice source here, and nothing came back from it. Telling
+    # this company to connect Fireflies is both wrong and unactionable — what
+    # it needs is the channel name and `/invite @Sprntly`, or the Settings
+    # picker. Placed ahead of the generic dead ends because it is strictly more
+    # specific than any of them.
+    #
+    # GATED ON `voc.connected`, NOT ON `voc.reads`. An earlier version required
+    # at least one channel in scope, which missed the single most likely shape
+    # in the live data: Slack connected, no explicit selection anywhere, and the
+    # bot in no channel — `connected=True, reads=0, render=""`. That fell
+    # through to "no call source is connected yet. Connect Fireflies or Zoom",
+    # told to a company whose Slack is connected and working. `has_call_source`
+    # now returns True for exactly these companies, so the digest CLAIMS the
+    # turn and must be able to finish it.
+    if (
+        not voc_block and voc.connected
+        and not corpus.calls and not corpus.docs and not kg.present
+    ):
+        if not voc.reads:
+            return _plain_payload(
+                "Slack is connected, but I couldn't find any customer-feedback "
+                "channels to read — the Sprntly bot isn't in any channel yet. "
+                "Pick the channels that carry customer feedback under "
+                "**Settings → Connectors → Voice of Customer & Support → "
+                "Slack**, and run `/invite @Sprntly` in each one. This is a "
+                "setup gap, not a sign that customers have said nothing."
+            )
+        blocked = "; ".join(
+            f"{r.channel.label} — {r.reason()}" for r in voc.unread_channels
+        )
+        return _plain_payload(
+            "I couldn't read any of your Slack customer-feedback channels, so "
+            "I have nothing to summarize — that is a read failure, not an "
+            f"absence of feedback. {blocked}"
+        )
+    if corpus.status == "not_connected" and not kg.present and not voc_block:
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "
             "yet. Connect **Fireflies** or **Zoom** in Settings → Connectors, or "
@@ -1333,7 +1496,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "& Support** category there, and I'll synthesize them into a "
             "voice-of-customer report."
         )
-    if corpus.status == "error" and not kg.present:
+    if corpus.status == "error" and not kg.present and not voc_block:
         # Names the source that actually failed. A Zoom-only company being told
         # to check its Fireflies API key is a dead end it cannot act on.
         broke = _sources_phrase(corpus.failed_sources)
@@ -1342,7 +1505,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "just now. Please retry in a moment — if it keeps failing, that "
             "connection may need reconnecting in Settings → Connectors."
         )
-    if corpus.status == "no_calls" and not kg.present:
+    if corpus.status == "no_calls" and not kg.present and not voc_block:
         connected = _sources_phrase(corpus.sources)
         if window.explicit:
             return _plain_payload(
@@ -1358,9 +1521,10 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             f"{connected} (Settings → Connectors)."
         )
 
-    # One corpus from here down: live calls + uploaded docs + stored signal.
-    source_line = _coverage_line(corpus, kg, window)
-    merged_text = _merge_corpus_text(corpus, kg)
+    # One corpus from here down: live calls + uploaded docs + live Slack
+    # feedback channels + stored signal.
+    source_line = _coverage_line(corpus, kg, window, voc)
+    merged_text = _merge_corpus_text(corpus, kg, voc_block)
 
     # Query-shaped ask → answer the question directly from the corpus (counts
     # bucketed by period, quotes with account+date) — the report artifact stays
@@ -1377,7 +1541,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
                 enterprise_id=enterprise_id, question=question,
                 corpus_text=merged_text, source_line=source_line,
                 window=window, compare_boundary=compare_boundary,
-                history=history, kg=kg,
+                history=history, kg=kg, voc=voc,
             )
         except Exception:  # noqa: BLE001 — degrade to the report, never a dead end
             logger.exception("voc query-mode answer failed; falling back to report")
@@ -1421,9 +1585,9 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         logger.exception("call-digest: VoC run failed for %s", enterprise_id)
         return _plain_payload(
             f"I gathered {corpus.count} call(s), {corpus.doc_count} uploaded "
-            f"document(s) and {kg.signal_count} stored signal(s) for "
-            f"{window.label} but hit an error synthesizing the answer. "
-            "Please retry."
+            f"document(s), {len(voc.read_channels)} Slack feedback channel(s) "
+            f"and {kg.signal_count} stored signal(s) for {window.label} but hit "
+            "an error synthesizing the answer. Please retry."
         )
 
     # The run line under the answer. It names the KG contribution for the same
@@ -1433,13 +1597,27 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     if corpus.doc_count:
         docs_label = f"{corpus.doc_count} uploaded doc{'s' if corpus.doc_count != 1 else ''}"
         sources = f"{sources} + {docs_label}" if corpus.count else docs_label
+    if voc.present:
+        # COUNTS `covered_channels`, not `read_channels`. `present` is true for
+        # a stored-only contribution, so counting live reads printed
+        # "+ 0 Slack feedback channels" on an answer that was partly built from
+        # Slack — a run line that contradicts its own corpus. The label says
+        # which kind, so the count and the claim agree.
+        live, covered = len(voc.read_channels), len(voc.covered_channels)
+        voc_label = (
+            f"{covered} Slack feedback channel{'s' if covered != 1 else ''}"
+            + ("" if live == covered else f" ({live} read live)")
+        )
+        sources = (f"{sources} + {voc_label}"
+                   if (corpus.count or corpus.doc_count) else voc_label)
     if kg.present:
         kg_label = (
             f"{kg.signal_count} stored signal"
             f"{'s' if kg.signal_count != 1 else ''}"
         )
         sources = (f"{sources} + {kg_label}"
-                   if (corpus.count or corpus.doc_count) else kg_label)
+                   if (corpus.count or corpus.doc_count or voc.present)
+                   else kg_label)
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
