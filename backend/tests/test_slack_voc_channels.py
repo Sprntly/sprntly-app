@@ -940,8 +940,98 @@ def test_recall_given_up_to_keep_precision():
         "clients keep asking us to add dark mode",
         "what are the top issues right now",
         "estimate accuracy is a common complaint",
+        # Bare ranked complaints — the cost of requiring a customer noun on the
+        # complaint rule, which is what stopped "biggest complaint from the
+        # on-call rotation" being answered from customer channels.
+        "what are the top complaints",
+        # The customer's OWN work-item action. Anchoring the action veto on a
+        # work artifact cannot tell whose action it is; making it try reopens
+        # every subject-first command.
+        "users complain they have to file a bug for every issue",
+        "customers say they can't create a ticket without an account",
     ]:
         assert not is_voc_report_request(q), q
+
+
+def test_a_complaint_from_a_non_customer_is_not_voice_of_customer():
+    """WRONG-PREMISE BUG, not an unenumerated phrasing. The ranked-complaint
+    rule omitted the customer noun on the stated premise that "nothing else in
+    the product is called a complaint or a pain point". Engineers, designers and
+    on-call rotations all have complaints — so these were answered out of the
+    customer feedback channels."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "what's the biggest complaint from the on-call rotation",
+        "top gripes from the design team",
+        "biggest frustrations from the engineering team",
+    ]:
+        assert not is_voc_report_request(q), q
+    # …while the customer forms still route.
+    for q in [
+        "the biggest complaint our customers have",
+        "top pain points for users",
+        "what are the top customer requests",
+    ]:
+        assert is_voc_report_request(q), q
+
+
+def test_an_artifact_request_is_never_hijacked_by_a_voc_report():
+    """The worst class on this surface — the user asks for a PRD and gets a
+    report — and the exact regression that opened this whole thread. These two
+    phrasings sit outside `_vetoed_as_creation`'s verb list."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "spec out what customers keep complaining about",
+        "put together a PRD on the complaints about pricing",
+        "throw together a brief on the top customer complaints",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
+def test_people_is_a_customer_noun_but_not_on_public_surfaces():
+    """`_CUSTOMER_NOUN` had `people`; the speech rule did not, and nobody chose
+    that. Adding it walked straight into a DIFFERENT pinned boundary, though:
+    public/anonymous channels route to the public-feedback report, never to
+    voice of customer (`test_voc_routing_phrases.py` NEGATIVES).
+
+    So the widening ships with a veto, and the marker that separates the two is
+    WHERE the talking happens, not WHO is doing it."""
+    from app.skill_router import is_voc_report_request
+
+    assert is_voc_report_request("what are people saying about the new billing page")
+    for q in [
+        "what are people saying about us online",
+        "what's trending about us on Reddit",
+        "what are customers saying about us on social media",
+        "what do people say about us in the press",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
+def test_known_leaks_are_recorded_not_silently_tolerated():
+    """THE LEAKS WE ARE KNOWINGLY SHIPPING, pinned so their status is a decision
+    rather than an oversight, and so the envelope migration inherits them as its
+    test set.
+
+    This test asserts the CURRENT (wrong) behaviour on purpose. When the intent
+    envelope takes over VoC classification it should start failing — that is the
+    signal the migration worked, and the test should then be inverted, not
+    deleted. `spin up`, `stick` and `sort` are ordinary words; five independent
+    phrasing sets produced five different leak sets, so enumerating these three
+    would produce a sixth rather than converge."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "spin up tickets from the customer complaints",
+        "stick the top complaints on the roadmap",
+        "sort the customer complaints by severity and assign them",
+    ]:
+        assert is_voc_report_request(q), (
+            f"{q!r} now routes correctly — if the intent envelope landed, "
+            "invert this test rather than deleting it"
+        )
 
 
 def test_ordinary_questions_with_wanting_verbs_are_not_voc():

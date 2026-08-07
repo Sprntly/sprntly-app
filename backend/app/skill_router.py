@@ -373,7 +373,10 @@ _VOC_CHANNEL_RULE = re.compile(
 #: fix is not admitting them, so the verbs stay out and the recall is given up
 #: knowingly (see MODULE LIMITS in `is_voc_report_request`).
 _VOC_SAYING_RULE = re.compile(
-    r"\b(?:customer|user|client)s?\b(?:\s+\w+){0,3}\s+"
+    # `people` is here because `_CUSTOMER_NOUN` has it and this list did not —
+    # "what are people saying about the new billing page" missed for no reason
+    # anyone chose.
+    r"\b(?:customer|user|client|people)s?\b(?:\s+\w+){0,3}\s+"
     r"\b(?:say(?:ing|s)?|said|telling|told|complain\w*|report(?:ing|ed)?|"
     r"flag(?:ging|ged)|push(?:ing)?\s+for|struggl\w*|"
     r"unhappy|frustrated|confused)\b",
@@ -450,12 +453,29 @@ _VOC_RECALL_RULES: list[re.Pattern] = [
         r"(?:of|about)\b",
         re.I,
     ),
-    # "the biggest complaints", "top pain points" — a ranking word over a noun
-    # that can ONLY mean customer voice. No customer noun needed: nothing else
-    # in the product is called a complaint or a pain point.
+    # "the biggest complaint our customers have", "top pain points for users".
+    #
+    # THIS RULE USED TO OMIT THE CUSTOMER NOUN, on the stated premise that
+    # "nothing else in the product is called a complaint or a pain point".
+    # That premise is simply false — engineers, designers and on-call rotations
+    # all have complaints, gripes and frustrations — so "what's the biggest
+    # complaint from the on-call rotation" and "top gripes from the design
+    # team" were answered out of the customer feedback channels. A wrong-premise
+    # bug, not an unenumerated phrasing, which is why the comment is corrected
+    # here rather than deleted: the false claim is how the next person rebuilds
+    # the same rule.
+    #
+    # The cost is the bare form: "what are the top complaints" no longer routes
+    # (see MODULE LIMITS). It cannot be distinguished from the on-call version
+    # without knowing whose complaints are meant, which is the judgement the
+    # envelope migration exists to make.
     re.compile(
         _RANK_WORD + r"\b.{0,30}\b(?:complaints?|pain[-\s]*points?|gripes?|"
-        r"frustrations?)\b",
+        r"frustrations?)\b.{0,30}\b" + _CUSTOMER_NOUN + r"\b"
+        r"|" + _CUSTOMER_NOUN + r"\b.{0,30}\b" + _RANK_WORD
+        + r"\b.{0,30}\b(?:complaints?|pain[-\s]*points?|gripes?|frustrations?)\b"
+        r"|" + _RANK_WORD + r"\b.{0,20}\b" + _CUSTOMER_NOUN
+        + r"\b.{0,20}\b(?:complaints?|pain[-\s]*points?|gripes?|frustrations?)\b",
         re.I,
     ),
     # "what's the biggest problem our customers have", "top requests from users".
@@ -582,6 +602,13 @@ _VOC_ACTION_ANY_POSITION = re.compile(
     # "these complaints should go onto the roadmap"
     r"|\b(?:should|shall|must|need\s+to|let'?s)\b[^.?!]{0,30}?\bgo(?:es)?\s+"
     r"(?:onto|into|on)\s+(?:the\s+)?" + _WORK_SURFACE + r"\b"
+    # Build an artifact, in phrasings `_vetoed_as_creation`'s verb list misses.
+    # Hijacking an ARTIFACT request is the worst class of leak on this surface —
+    # "put together a PRD on the complaints about pricing" asks for a PRD and
+    # got a voice-of-customer report — so these are position-independent too.
+    r"|\bspec(?:'?s)?\s+out\b"
+    r"|\b(?:put|throw|pull)\s+together\s+(?:a|an|the|some)?\s*"
+    r"(?:prd|spec|doc|document|brief|ticket|story|epic|plan|deck|write[\s-]?up)\b"
     # reprioritise an ANAPHORIC object — "prioritize them", "rank the top ones",
     # "prioritize what customers are asking for". A pronoun or `what` after one
     # of these verbs is always a command; it is never part of a topic.
@@ -647,6 +674,24 @@ def _vetoed_as_action(question: str) -> bool:
 #: "give me feedback on my PRD draft" and "summarize the feedback from the beta
 #: survey" are both pinned as negatives by the existing suite, and rule 1 above
 #: would otherwise claim the first of them.
+#: PUBLIC / ANONYMOUS channels are a DIFFERENT surface — the public-feedback
+#: report, not voice of customer — and `tests/test_voc_routing_phrases.py`
+#: pins that boundary ("what are people saying about us online", "summarize our
+#: app store reviews", "what's trending about us on Reddit").
+#:
+#: This veto exists because widening the speech rule to include `people` — a
+#: one-word change, correctly identified as trivial — walked straight into it.
+#: `people` is right for "what are people saying about the new billing page"
+#: and wrong for the public-web sense, and the marker that separates them is
+#: WHERE, not WHO.
+_VOC_PUBLIC_SURFACE_VETO = re.compile(
+    r"\b(?:online|on\s+the\s+(?:internet|web)|on\s+(?:twitter|x|reddit|"
+    r"linkedin|facebook|instagram|tiktok|hacker\s*news|hn)|in\s+the\s+press|"
+    r"publicly|app\s*store|play\s*store|g2|capterra|trustpilot|"
+    r"social\s+media|review\s+sites?)\b",
+    re.I,
+)
+
 _VOC_SELF_REVIEW_VETO = re.compile(
     r"\b(?:feedback|thoughts?|comments?|critique|notes?)\s+(?:on|about)\s+"
     r"(?:my|your|our|this|the)\b(?:\s+\w+){0,2}\s+"
@@ -716,20 +761,47 @@ def is_voc_report_request(question: str) -> bool:
     3. BARE VOICE NOUNS WITH NO TOPIC MARKER. "estimate accuracy is a common
        complaint" — a complaint noun with no `about`/ranking/speech verb near a
        customer noun matches nothing here.
+    4. BARE RANKED COMPLAINTS. "what are the top complaints" — no customer noun,
+       so indistinguishable from "the biggest complaint from the on-call
+       rotation". Requiring the customer noun is what closed that leak.
+    5. THE CUSTOMER'S OWN WORK-ITEM ACTION. "users complain they have to file a
+       bug for every issue", "customers say they can't create a ticket without
+       an account". This is the direct, designed cost of anchoring the action
+       veto on a work artifact and making that tier position-independent: the
+       anchor cannot tell WHOSE action the ticket-filing is. Making it try would
+       reopen every subject-first command in the KNOWN LEAKS below.
 
-    None of these is a regex that could not be written. Each is one that could
-    not be written WITHOUT reopening a leak, which is the whole finding: four
-    rounds of locally-correct rules each moved the failure to an unenumerated
-    phrasing. Recognising a customer QUESTION versus a command ABOUT customer
-    content is a judgement, and the durable home for it is the chat intent
-    envelope (the repo's convention for intent, already used for
-    open-vs-generate) rather than another rule here. That migration is tracked
-    as a follow-up; do not fix the misses above by widening these patterns.
+    ── KNOWN LEAKS — reproduced, recorded, deliberately not chased ────────────
+
+    These route to a voice-of-customer report and should not:
+
+        "spin up tickets from the customer complaints"
+        "stick the top complaints on the roadmap"
+        "sort the customer complaints by severity and assign them"
+
+    `spin up`, `stick` and `sort` are not exotic, and that is exactly the point.
+    FIVE independent phrasing sets have produced five different leak sets, every
+    time on verbs nobody had enumerated. Adding these three would produce a
+    sixth set, not a fix — the sequence does not converge, because the rule
+    cannot represent the thing being decided.
+
+    ── WHY THIS STOPS HERE ───────────────────────────────────────────────────
+
+    None of the misses or leaks above is a regex that could not be written. Each
+    is one that could not be written WITHOUT reopening something else, which is
+    the finding: recognising a customer QUESTION versus a command ABOUT customer
+    content is a judgement about intent, and a pattern language cannot hold it.
+    The durable home is the chat intent envelope — the repo's convention for
+    intent, already doing this job for open-vs-generate. That migration is
+    tracked as a follow-up and carries the leaks above as its test set.
+
+    DO NOT fix any of this by widening these patterns.
     """
     if (
         _vetoed_as_creation(question)
         or _vetoed_as_action(question)
         or _VOC_SELF_REVIEW_VETO.search(question)
+        or _VOC_PUBLIC_SURFACE_VETO.search(question)
     ):
         return False
     return bool(
