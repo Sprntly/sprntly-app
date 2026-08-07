@@ -252,3 +252,13 @@ def test_a_preamble_containing_angle_brackets_is_not_mistaken_for_the_document(g
     assert _SNIFF.match(html)
     assert "below" not in html.split("<div", 1)[0]
     assert '<div class="wrap"' in html
+
+
+def test_markup_before_the_wrapper_is_kept_not_cut(golden):
+    """The other side of the tie-break, and the one that would LOSE content:
+    a brief whose `<h1>` sits outside `<div class="wrap">` is off-contract but
+    real. Cutting to the first doc-start tag would silently delete the title, so
+    a closing tag ahead of the wrapper pins the cut to the earlier tag."""
+    html = _stored('<h1>Real title</h1>\n' + golden.split("\n", 2)[2])
+    assert "<h1>Real title</h1>" in html
+    assert _SNIFF.match(html)      # injection/meta prefix still makes it sniff

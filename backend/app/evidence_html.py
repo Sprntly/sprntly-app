@@ -66,12 +66,25 @@ def _strip_preamble_and_trailer(html: str) -> str:
     cosmetic — it renders as stray text under the brief — and is only removed
     when it is unambiguous: plain text after the final `>` with no markup in it.
     """
-    m = _DOC_START_RE.search(html) or _ANY_TAG_RE.search(html)
-    if not m:
+    first_tag = _ANY_TAG_RE.search(html)
+    if not first_tag:
         raise EvidenceHtmlError(
             "model output contains no HTML at all — the evidence brief must be "
             f"an HTML document (first 120 chars: {html.strip()[:120]!r})"
         )
+    m = first_tag
+    doc_start = _DOC_START_RE.search(html)
+    if doc_start and doc_start.start() > first_tag.start():
+        # Two readings of "where the document starts", and the tie-break is
+        # whether the span between them looks like MARKUP or like PROSE that
+        # happens to contain angle brackets. A closing tag means markup —
+        # `<h1>Title</h1>` ahead of the wrapper is a real (if off-contract) part
+        # of the brief and cutting it would silently delete the title. No closing
+        # tag means prose ("details <below>:"), and the document really starts at
+        # the doc-start tag. Preferring the earlier tag is the safe default: the
+        # worst case is visible junk, not lost content.
+        if "</" not in html[first_tag.start():doc_start.start()]:
+            m = doc_start
     if m.start() > 0:
         logger.warning(
             "evidence: dropped %d chars of preamble before the document (%r)",
