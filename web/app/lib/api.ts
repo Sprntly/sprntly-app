@@ -848,7 +848,16 @@ export const skillsApi = {
  *  tab-sent PRD, or the one the conversation is bound to) so the reducer acts
  *  on the same document the decision was grounded on. */
 export type ChatIntentEnvelope = {
-  intent: "answer" | "generate_prd" | "edit_prd" | "generate_tickets" | "generate_prototype"
+  /** `multi_agent` is the full seven-artifact suite and only the AI bar runs
+   *  it; a surface that cannot act on an intent falls through to its ask path,
+   *  which is why the union is wider than any one surface handles. */
+  intent:
+    | "answer"
+    | "generate_prd"
+    | "edit_prd"
+    | "generate_tickets"
+    | "generate_prototype"
+    | "multi_agent"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -859,27 +868,48 @@ export type ChatIntentEnvelope = {
   source: string
   prd_id: number | null
   prd_title: string | null
+  /** The full gated plan behind this verdict — action, method, sources, kg,
+   *  web search, constraints, and the model's one-clause reason. DIAGNOSTIC
+   *  ONLY: nothing branches on it, it is logged to the browser console so you
+   *  can see WHY a message went where it did without tailing the backend. */
+  plan?: Record<string, unknown>
 }
 
 export const chatIntentApi = {
-  /** Decide the action for one chat message (flag: chat_intent_envelope).
+  /** Decide the action for one chat message. Backed by the Ask Planner.
+   *
    *  Backend loads the conversation history itself; the client only ships the
    *  light tab context. Fail-open BY THE CALLER: any network/HTTP failure →
-   *  fall back to the legacy regex ladder, never block the send. */
-  resolve: (
+   *  the message is ANSWERED (the grounded ask path), never guessed at and
+   *  never blocked.
+   *
+   *  Logs the plan to the browser console. Every surface that dispatches an
+   *  action goes through here, so one place covers all of them — and "why did
+   *  my message go there?" is the question you actually have while testing. */
+  resolve: async (
     message: string,
     opts?: {
       conversationId?: number | null
       prdId?: number | null
       hasAttachments?: boolean
     },
-  ) =>
-    api.post<ChatIntentEnvelope>("/v1/chat/intent", {
+  ) => {
+    const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
       message,
       ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
-    }),
+    })
+    // Guarded so a console-less environment (SSR, a jsdom run without one)
+    // can never turn a diagnostic into a broken send.
+    if (typeof console !== "undefined" && console.log) {
+      console.log(
+        `[planner] ${envelope.intent}`,
+        { message, ...envelope.plan, source: envelope.source },
+      )
+    }
+    return envelope
+  },
 }
 
 /** Next-prompt suggestions for a chat thread — `POST /v1/chat/suggestions`.

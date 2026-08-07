@@ -1113,31 +1113,6 @@ function ChatTicketSetActions({
  *  matches to keep this turn out of a later PRD's grounding. Note what it does
  *  NOT contain — any ticket text. The whole point of the set is that the bodies
  *  live in the panel instead of being printed into the bubble. */
-/** An interrogative that merely MENTIONS making tickets — a question for the
- *  ask agent, not a request to build an artifact.
- *
- *  This guards the LEGACY LADDER only. `isTicketsCommand` is a bare
- *  verb-near-noun regex with no question gate of its own (unlike
- *  `isPrdCommand`, which has one), so "how should I create tickets for a
- *  migration?" matches it. That was harmless while a no-PRD tickets phrasing
- *  fell through to the ask agent; now that the same phrasing WRITES A DURABLE
- *  ARTIFACT and bills a multi-minute generation, an interrogative has to stay a
- *  question. The envelope path needs no equivalent — the backend resolver
- *  classifies that message as `answer` and never reaches the ticket branch.
- *
- *  Shaped after `prd-commands.ts`'s PRD_QUESTION_RE, including its one
- *  subtlety: an aux verb only reads as a question when a NON-"you" subject
- *  follows it, so the polite command "can you break this into tickets" is still
- *  a command while "can we split this into tickets?" is a question. */
-const TICKETS_QUESTION_RE = new RegExp(
-  "^\\s*(?:(?:hey|hi|hello|yo|ok|okay|so|also|and|but|btw|actually|question)\\b[\\s,:;–—-]*)*(?:" +
-    "(?:what|whats|what'?s|why|where|when|who|which|how)\\b" +
-    "|(?:do|does|did|should|shall|is|are|am|was|were|can|could|would|will|may|might)" +
-    "\\s+(?:we|i|the|this|that|it|there|a|an|our|my|your|their|these|those|he|she|they)\\b" +
-  ")",
-  "i",
-)
-
 const TICKET_SET_ACK =
   "Writing tickets for that — they'll open in the panel on the right when ready. " +
   "Use the View Tickets button in this chat to reopen them anytime."
@@ -1182,13 +1157,13 @@ export function ChatScreen() {
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
-  // Action-envelope dispatch (DEFAULT ON; staff-panel kill switch): one
-  // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
-  // decides what each message asks for, replacing the client regex/classifier
-  // ladder in submitAsk. Only an explicit `false` lands on that ladder — a
-  // missing key, and a workspace that hasn't loaded, both resolve to ON (see
-  // chatIntentEnvelopeOn for why an UNKNOWN flag state fails OPEN here).
-  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
+  // Action dispatch is UNCONDITIONAL: one backend call (POST /v1/chat/intent,
+  // backed by the Ask Planner — history-aware, sees the open PRD, the connected
+  // sources and the company's skills) decides what every message asks for.
+  //
+  // There is no flag and no fallback ladder. Both existed while this competed
+  // with a client-side regex cascade; that cascade is gone, so the kill switch
+  // would now only choose between "the planner decides" and "nothing decides".
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
@@ -2181,7 +2156,22 @@ export function ChatScreen() {
           }
           // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
+          //
+          // `setPrdPanelPending(null)` FIRST, and it is load-bearing. Opening a
+          // PRD tab arms a DEFERRED panel-open (`prdPanelPending`, drained by an
+          // effect a commit later) so the panel survives the route change that
+          // openPrdTab triggers. That deferred open lands on "prd" — and if it
+          // is still armed when we get here, it fires AFTER this line and puts
+          // the panel straight back on the PRD, silently undoing the switch the
+          // user actually asked for.
+          //
+          // Whether it has drained yet is a race between a React commit and the
+          // import + generation round trip, so it resolves one way against a
+          // real network and the other against a fast or cached import. Cancel
+          // it instead: by this point the destination is decided, and a default
+          // that arrived earlier has no business overriding it.
           if (wantsTickets && activeTabIdRef.current === tabId) {
+            setPrdPanelPending(null)
             openContentPanel("tickets")
           }
           // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
@@ -3688,9 +3678,11 @@ export function ChatScreen() {
         )
         return true
       }
+      // `isPrdTab` survives the ladder's removal because the ask path below
+      // still reads it. The two deictic regexes that sat here did not: they
+      // existed only to stop the ladder's own patterns from hijacking a PRD
+      // tab, and there are no patterns left to hijack anything.
       const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
-      const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
-      const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
       // Clarify-first answers: this tab's PRD task is parked behind the
       // sufficiency gate's questions — the message IS the answers (or a
       // "generate now" skip), never a fresh command/ask. Checked before every
@@ -3712,21 +3704,28 @@ export function ChatScreen() {
         settlePendingSend()
         return
       }
-      // ── Action-envelope dispatch (flag: chat_intent_envelope) ─────────────
-      // ONE backend decision per message (POST /v1/chat/intent): the resolver
-      // sees the conversation history and the open PRD, so keyword-free and
-      // deictic phrasings ("draft it up", "break this into work items", "make
-      // it shorter") resolve to the right executor — the regex ladder below
-      // judges only the newest message and cannot. Each intent maps onto the
-      // SAME flows the ladder drives today; `answer` (and any unhandled case)
-      // falls through to the grounded ask path. Fail-open: a network/HTTP
-      // failure falls back to the full legacy ladder, so command dispatch
-      // never degrades below today's behavior.
-      let envelopeDecided = false
+      // ── The planner decides. Nothing in this file guesses. ───────────────
+      // EVERY message goes to the backend first (POST /v1/chat/intent, now
+      // backed by the Ask Planner) and the verdict decides which flow runs.
+      // This browser used to decide for itself, with a ladder of regexes over
+      // the newest message — `isPrdCommand`, `isTicketsCommand`,
+      // `isPrdEditCommand`, `mentionsPrd` plus a haiku classifier behind it.
+      // That ladder is gone, and its removal is the point: a regex deciding to
+      // GENERATE A PRD means an oddly-phrased question spends minutes and real
+      // money building a document nobody asked for, and no amount of tuning the
+      // pattern fixes the class of bug. The planner reads the whole message and
+      // the whole thread, so it does not have that failure mode.
+      //
+      // FAILURE MODE ON PURPOSE: if the call fails, this falls through to the
+      // grounded ask path — the question gets ANSWERED. It does not fall back
+      // to guessing. The worst case is that a genuine "write me a PRD" is
+      // answered as a question and the user asks again; the alternative is
+      // exactly the accidental generation this removal exists to stop.
+      //
       // A "/skill …" message is EXPLICIT intent with its own backend fast-path
-      // (qa_agent's slash route) — never spend an envelope call reinterpreting
-      // it.
-      if (envelopeDispatchEnabled && !trimmed.startsWith("/")) {
+      // (qa_agent's slash route) — the user named the skill, so there is
+      // nothing to infer and no call to spend.
+      if (!trimmed.startsWith("/")) {
         const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
         const envelope = await import("../../../lib/api")
           .then(({ chatIntentApi }) =>
@@ -3738,7 +3737,6 @@ export function ChatScreen() {
           )
           .catch(() => null)
         if (envelope) {
-          envelopeDecided = true
           if (envelope.intent === "generate_tickets") {
             if (docFile) {
               setAttachments([])
@@ -3783,87 +3781,6 @@ export function ChatScreen() {
           // with the ladder, which never intercepted prototype phrasings here);
           // answer / unhandled → the ask path below.
         }
-      }
-      // ── Legacy ladder (flag off, or envelope fetch failed) ────────────────
-      if (!envelopeDecided) {
-      if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
-        if (docFile) {
-          setAttachments([])
-          importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
-          settlePendingSend()
-          return
-        }
-        // No document: mirror the reply-footer "Create tickets" action when this
-        // tab already carries a PRD.
-        if (activeTab?.prd) {
-          setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-          openContentPanel("tickets")
-          settlePendingSend()
-          return
-        }
-        // …and with no PRD either, the SAME standalone-set flow the envelope
-        // branch above runs. Mirrored deliberately rather than shared through a
-        // fall-through: the envelope is behind `chat_intent_envelope`, and a
-        // tenant with the kill switch on reaches this ladder instead. Without
-        // this the flag would decide whether tickets are a durable artifact or
-        // a markdown wall in a chat bubble. A QUESTION about tickets is still a
-        // question — see TICKETS_QUESTION_RE for why only this path needs it.
-        if (!TICKETS_QUESTION_RE.test(trimmed)) {
-          if (ticketSetInFlightGuard()) return
-          ticketSetCommandFlow(trimmed, trimmed)
-          settlePendingSend()
-          return
-        }
-      } else if (
-        !docFile && isPrdTab && isPrdEditCommand(trimmed) &&
-        (activeTab?.prd?.prd_id ?? activeTab?.prdId) != null
-      ) {
-        // Edit-phrased message beside an open, READY PRD → the scoped chat-edit
-        // flow: the document actually changes (issue b). This branch runs BEFORE
-        // the command branch below so a non-deictic edit ("add SSO to the PRD")
-        // can't fall into isPrdCommand and spawn an unrelated NEW PRD — the
-        // second failure mode of the old deictic guard. A still-generating tab
-        // (no prd id yet) skips this branch and gets a grounded text answer.
-        void prdChatEditFlow(trimmed, activeTab!.id, (activeTab!.prd?.prd_id ?? activeTab!.prdId)!)
-        settlePendingSend()
-        return
-      } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
-        if (docFile) {
-          setAttachments([])
-          importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
-          settlePendingSend()
-          return
-        }
-        // No document — open the PRD tab from the brief's top insight instead of
-        // sending it to the ask agent (which would answer with a raw prd-author
-        // HTML dump).
-        prdCommandFlow(trimmed)
-        settlePendingSend()
-        return
-      } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
-        // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
-        // recognize a command — "various words a person might use" ("let's get
-        // a PRD going for checkout") can't all be regexed. Ask haiku before
-        // letting it fall through to the ask agent. Skipped on a PRD tab with
-        // no attachment: there, a PRD mention is near-always about the OPEN
-        // artifact and belongs to the grounded ask path (same reasoning as the
-        // deictic guard above). Fail-open: classifier error/low confidence →
-        // the message proceeds to the ask path exactly as before this tier.
-        const verdict = await import("../../../lib/api")
-          .then(({ prdApi }) => prdApi.classifyCommand(trimmed))
-          .catch(() => null)
-        if (verdict?.is_prd_command && verdict.confidence >= 0.7) {
-          if (docFile) {
-            setAttachments([])
-            importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
-            settlePendingSend()
-            return
-          }
-          prdCommandFlow(trimmed, verdict.task)
-          settlePendingSend()
-          return
-        }
-      }
       }
       // Attached file content is folded into the ask as context. Text
       // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
@@ -4239,7 +4156,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, clearSuggestions, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

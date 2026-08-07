@@ -40,7 +40,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    # `ask_planner` imports several helpers back out of this module, so a
+    # runtime import in both directions is a cycle. Every real use is inside a
+    # function and imported lazily, matching how `call_digest`, `registry` and
+    # `tracker` are already resolved here.
+    from app.ask_planner import Plan as AskPlan
 
 from app import call_index, datasets
 from app.ask_runner import (
@@ -1264,6 +1271,261 @@ def _sweep_context(enterprise_id: Optional[str], question: str) -> str:
 _ATTACHED_FILES_MARKER = "\n\n[Attached files]\n"
 
 
+def _dispatch_planned_method(
+    plan: "AskPlan",
+    *,
+    enterprise_id: str,
+    question: str,
+    history: Optional[list[dict]],
+    prd_id: Optional[int],
+    dataset: str,
+    fresh: Callable[[], bool],
+    is_cancelled: Optional[Callable[[], bool]],
+) -> Optional[dict]:
+    """Run the machinery the PLANNER named, or return None to keep going.
+
+    This is the other half of switching the regex ladder off. Each engine below
+    is the SAME executor the corresponding interception called — `call_index.
+    answer_listing`, `call_digest.answer`, `ticket_update.answer` and so on. The
+    only thing that changed is who decides: a model reading the whole question
+    and the conversation, instead of a regex reading its surface words.
+
+    Returns None — meaning "not machinery, carry on to the routed/generic path"
+    — for the normal case where the plan named a pipeline, a company skill, or
+    nothing at all. Also returns None whenever an engine DECLINES (its index
+    resolved nothing, its precondition is unmet), so a plan that guessed wrong
+    degrades to a normal answer rather than to a canned refusal.
+
+    CAPABILITY PRECONDITIONS SURVIVE, and they are not routing heuristics — they
+    are "can this engine serve this company at all". `#1034` made them house
+    style after the tracker path claimed turns on a lexical match and then
+    answered "connect Jira" for a capability it never had. A planner can make
+    the same mistake for a different reason, so the checks stay where they were.
+    The costly one is `call-digest`: a live fetch of every call in a window,
+    measured at ~168s and ~$0.23, so it runs only when a call source is actually
+    connected.
+
+    Never raises. Every engine is wrapped exactly as it was inside the ladder.
+    """
+    method = plan.pipeline_id
+    if not method or method not in _PLANNED_MACHINERY:
+        return None
+
+    logger.info(
+        "[planner] exec method=%s company=%s", method, enterprise_id
+    )
+    try:
+        return _PLANNED_MACHINERY[method](
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            prd_id=prd_id,
+            dataset=dataset,
+            fresh=fresh,
+            is_cancelled=is_cancelled,
+            plan=plan,
+        )
+    except AskCancelled:
+        raise  # a user Stop is not an engine declining — it must reach the caller
+    except Exception:  # noqa: BLE001 — a declining engine must not break chat
+        logger.exception(
+            "[planner] method=%s failed for %s — falling through", method, enterprise_id
+        )
+        return None
+
+
+def _m_call_listing(*, enterprise_id, question, fresh, **_kw) -> Optional[dict]:
+    """List/count recorded calls, from the index. One Postgres query — this is
+    the path that took chat listing from ~168s to ~4s by refusing to live-fetch
+    what a table already holds."""
+    return call_index.answer_listing(enterprise_id, question, fresh=fresh())
+
+
+def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Optional[dict]:
+    """Read ONE named call. Returns None when the reference resolves to nothing,
+    which is a decline, not a failure — the turn continues."""
+    return call_index.answer_single_call(
+        enterprise_id, question, history=history, fresh=fresh()
+    )
+
+
+def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]:
+    """Live-fetch every call in a window and run a VoC pass over the corpus.
+
+    THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
+    is the one that matters most here. `has_call_source` is the same gate the
+    ladder's digest branch applies, and its comment records why it was added:
+    this was the only interceptor claiming its turn unconditionally, so a
+    company with no call source at all got the digest's empty-corpus answer
+    instead of falling through to routing that could actually serve them."""
+    from app import call_digest
+
+    if not call_digest.has_call_source(enterprise_id):
+        logger.info(
+            "[planner] call-digest declined for %s: no call source connected",
+            enterprise_id,
+        )
+        return None
+    return call_digest.answer(
+        enterprise_id=enterprise_id, question=question, history=history
+    )
+
+
+def _m_data_analysis(
+    *, enterprise_id, question, history, dataset, is_cancelled, **_kw
+) -> Optional[dict]:
+    """The DS engine, over the company's uploaded tables.
+
+    Two things carried over from the ladder's branch verbatim, because both are
+    incident-shaped rather than stylistic:
+
+      * the precondition is "are there tabular files on disk", a cheap local
+        check — never `_stage_workspace` or the engine itself, which would parse
+        every upload on every merely-matching question. No data ⇒ decline, so
+        the turn becomes a normal answer rather than a canned refusal;
+      * `_ds_claude_enabled` picks WHICH engine reads the data, and any failure
+        in the Claude one falls back to the deterministic battery. That fallback
+        is the permanent floor — this path can never 500 the chat.
+    """
+    raw_dir = datasets.raw_path(dataset)
+    if not (raw_dir.is_dir() and any(raw_dir.iterdir())):
+        logger.info(
+            "[planner] data-analysis declined for %s: no tabular data uploaded",
+            enterprise_id,
+        )
+        return None
+
+    if _ds_claude_enabled(enterprise_id):
+        try:
+            from app.ds import claude_analysis
+
+            return claude_analysis.answer(
+                enterprise_id=enterprise_id,
+                question=question,
+                history=history,
+                is_cancelled=is_cancelled,
+            )
+        except AskCancelled:
+            raise  # a user Stop must not spend a second (legacy) run
+        except Exception:  # noqa: BLE001 — fall back, never fail
+            logger.exception(
+                "DS Claude analysis failed for %s; falling back to the "
+                "deterministic engine", enterprise_id,
+            )
+    from app.ds import chat_analysis
+
+    return chat_analysis.answer(
+        enterprise_id=enterprise_id, question=question, history=history
+    )
+
+
+def _m_ticket_update(*, enterprise_id, question, history, prd_id, **_kw) -> Optional[dict]:
+    """Rewrite a ticket from a PRD or from this thread. Serves BOTH Sprntly and
+    Jira tickets, so — unlike the tracker read — it is NOT gated on a tracker
+    connection."""
+    from app import ticket_update
+
+    return ticket_update.answer(
+        enterprise_id=enterprise_id, question=question, history=history, prd_id=prd_id,
+    )
+
+
+def _m_tracker_lookup(*, enterprise_id, question, history, **_kw) -> Optional[dict]:
+    """Live ticket/epic state from whichever tracker the company connected
+    (Jira, else ClickUp). Declines when neither is connected rather than
+    answering "connect Jira" to someone who never asked about a tracker."""
+    from app.connector_lookup import tracker
+
+    if not tracker.any_connected(enterprise_id):
+        logger.info(
+            "[planner] tracker-lookup declined for %s: no tracker connected",
+            enterprise_id,
+        )
+        return None
+    return tracker.answer(
+        enterprise_id=enterprise_id, question=question, history=history
+    )
+
+
+#: Machinery id → executor. Keys are exactly `ask_planner._MACHINERY_IDS`, and a
+#: test asserts that, so the planner can never name an engine this cannot run.
+_PLANNED_MACHINERY: dict = {
+    "call-listing": _m_call_listing,
+    "single-call-read": _m_single_call_read,
+    "call-digest": _m_call_digest,
+    "data-analysis": _m_data_analysis,
+    "ticket-update": _m_ticket_update,
+    "tracker-lookup": _m_tracker_lookup,
+}
+
+
+def _planned_live_context(
+    enterprise_id: Optional[str], plan: "AskPlan", question: str
+) -> str:
+    """Read the sources the PLANNER named, and render them for the answer.
+
+    The counterpart of `_sweep_context` for a planned turn, and the difference
+    is the whole point of the planner: this reads the list a model chose because
+    those sources plausibly hold the answer, where the sweep probed everything
+    connected because two keywords survived a regex. There is no term floor
+    here — a one-noun question ("anything on Acme?") reaches its sources, which
+    the sweep's `MIN_TERMS` rejected outright.
+
+    The QUERY is the planner's `entity` when it extracted one, else the user's
+    own words. `entity` is the better probe when present: it is the subject the
+    planner isolated from a sentence, and every adapter's search is keyword-
+    based, so "Acme" outperforms "what's the latest on the Acme migration".
+
+    Never raises. A failed read degrades to no live block and a plain answer —
+    the same contract `_sweep_context` has, for the same reason.
+    """
+    if not enterprise_id or not plan.sources:
+        return ""
+    try:
+        from app import live_read
+
+        query = (plan.constraints.get("entity") or "").strip() or question
+        result = live_read.read_sources(
+            enterprise_id,
+            plan.sources,
+            query=query,
+            constraints=plan.constraints,
+        )
+        logger.info(
+            "[planner] exec live-read company=%s %s",
+            enterprise_id, result.outcome_summary(),
+        )
+        block = result.render_block()
+        # Fire-and-forget: persist whatever was read into the KG, exactly as the
+        # sweep path does, so a live read enriches the graph rather than being
+        # thrown away after one answer. Fully isolated — never raises.
+        _persist_live_records(enterprise_id, result)
+        return block
+    except Exception:  # noqa: BLE001 — a live read degrades, it never breaks chat
+        logger.exception("[planner] live-read failed for %s", enterprise_id)
+        return ""
+
+
+def _persist_live_records(enterprise_id: str, result) -> None:
+    """Hand what a live read produced to the KG persister.
+
+    Reuses the sweep's own fire-and-forget path rather than starting a second
+    one: it already owns the per-(company, provider) cooldown that bounds how
+    often a chat-triggered read may write to the graph, and a parallel persister
+    would mean a parallel bound that could not see the first.
+
+    `LiveReadResult` presents the same `.read` shape `kickoff_sweep_persist`
+    consumes — sources already filtered to "actually read from a connector",
+    each carrying `.key` and `.records` — so it is passed through directly
+    rather than reshaped."""
+    try:
+        from app.connector_lookup import sweep_persist
+
+        sweep_persist.kickoff_sweep_persist(enterprise_id, result)
+    except Exception:  # noqa: BLE001 — persistence is never the answer's problem
+        logger.debug("[planner] live-read persistence skipped", exc_info=True)
+
+
 def _routing_text(question: str) -> str:
     """The question up to (not including) the first `[Attached files]` block,
     for every ROUTING decision — every interceptor predicate and `route()`
@@ -1341,6 +1603,7 @@ def answer(
     on_delta: Optional[Callable[[str], None]] = None,
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
+    plan: Optional["AskPlan"] = None,
 ) -> dict:
     """Answer a question — directly by default, or via a dedicated pipeline or
     one of the company's own uploaded skills. `pinned_skill` skips routing (used
@@ -1378,7 +1641,20 @@ def answer(
     `on_phase(label)`, when supplied, receives a short label each time a new LEG
     of the answer begins (retrieval, generation, and — inside the staged
     competitive-intelligence sweep — capture and synthesis). Advisory display
-    only, same contract as `on_delta`; see `emit_phase`."""
+    only, same contract as `on_delta`; see `emit_phase`.
+
+    `plan` — an ALREADY-GATED `ask_planner.Plan` for this message, when the
+    caller ran the planner (see `app/ask_planner.py`). Supplying one changes
+    exactly one thing today: the live-source block is read from the plan's own
+    `sources` list through `app/live_read.py`, instead of being derived by the
+    keyword sweep. Everything else on this path is unchanged, and `plan=None`
+    is byte-identical to the behaviour before the planner existed — which is
+    what every caller that has not been migrated still gets.
+
+    It must arrive GATED. This function does not re-check sources against the
+    company's connections or re-check a skill id against the tenant boundary;
+    `ask_planner.apply_gates` owns that, and taking an ungated plan here would
+    move the tenant boundary to whoever called us."""
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
 
@@ -1405,7 +1681,10 @@ def answer(
     # A pinned turn is excluded (the user already chose; nothing to plan) and
     # a `/slug` turn is excluded inside `shadow_plan_async` for the same
     # reason. Wrapped anyway: shadow telemetry must never cost an answer.
-    if not pinned_skill:
+    # Skipped entirely when a plan was supplied: the planner already ran, for
+    # real, and shadowing it against a ladder it is about to replace would be a
+    # second paid call to measure a decision we are acting on anyway.
+    if not pinned_skill and plan is None:
         try:
             from app import ask_planner
 
@@ -1417,6 +1696,24 @@ def answer(
             )
         except Exception:  # noqa: BLE001 — shadow telemetry, never the answer
             logger.exception("ask-planner shadow dispatch failed")
+
+    # THE REGEX LADDER IS OFF WHEN A PLAN DECIDED THIS TURN.
+    #
+    # Every interception below is guarded on this instead of `not pinned_skill`.
+    # The interceptors do not disappear — their EXECUTORS are exactly what
+    # `_dispatch_planned_method` calls when the planner names one. What is
+    # switched off is their claim on the turn: a regex deciding, from the
+    # surface words, that this question belongs to the call digest.
+    #
+    # That claim is what the planner exists to replace, and it is worth naming
+    # what it cost. The ordering of these ten was load-bearing precisely because
+    # they compete: #7 sits above #8 because a write verb on a PM noun matched
+    # both; the call index sits above the digest because a listing phrasing
+    # matched both; "summarize the slack channel syncs from this week" named
+    # Slack and was answered from Fireflies transcripts because the digest's
+    # regex saw a verb and `syncs?`. A model reading the whole question does not
+    # have that failure mode, and no amount of reordering fixed it.
+    _regex_ladder = not pinned_skill and plan is None
 
     # The call index's freshness check, memoized for this answer. Computed
     # LAZILY and at most once: the interceptions below are each behind a cheap
@@ -1452,6 +1749,25 @@ def answer(
             )
         return _contest_memo[0]
 
+    # Dispatched HERE rather than at the top of the function because it needs
+    # `_index_fresh` — the call index's freshness memo, defined just above, so
+    # a planned call-listing pays the same one lazy check the ladder would.
+    if plan is not None:
+        planned = _dispatch_planned_method(
+            plan,
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            prd_id=prd_id,
+            dataset=dataset,
+            fresh=_index_fresh,
+            is_cancelled=is_cancelled,
+        )
+        if planned is not None:
+            return planned
+        # The plan named no machinery — which is the normal outcome — so this
+        # turn continues to the routed/generic path below with the ladder off.
+
     # Sources the user NAMED in this very message, and whether any of them is
     # one we can actually open live for this company. Naming a source is the
     # most explicit routing signal a person can give us, and until now it lost
@@ -1470,7 +1786,7 @@ def answer(
     # user has to have named the source in the words being routed, or a Slack
     # thread would quietly swallow the next call question asked inside it.
     named_sources: set[str] = set()
-    if not pinned_skill and not question.lstrip().startswith("/"):
+    if _regex_ladder and not question.lstrip().startswith("/"):
         named_sources = is_connector_lookup(routing_text) or set()
 
     _live_source_memo: list = []
@@ -1528,7 +1844,7 @@ def answer(
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
     if (
-        not pinned_skill
+        _regex_ladder
         and call_index.is_listing_request(routing_text)
         and not _names_live_source()
     ):
@@ -1548,7 +1864,7 @@ def answer(
     # via Fireflies)" — while Fireflies was connected and working. A wrong answer
     # that blames the user's setup is worse than a slow one, so this sits ahead
     # of the digest. Falls through when the reference resolves to nothing.
-    if not pinned_skill and call_index.is_single_call_request(routing_text, history):
+    if _regex_ladder and call_index.is_single_call_request(routing_text, history):
         try:
             single = call_index.answer_single_call(
                 enterprise_id, question, history=history, fresh=_index_fresh()
@@ -1577,7 +1893,7 @@ def answer(
     # source at all still got the digest's empty-corpus answer instead of
     # falling through to routing that could serve them.
     if (
-        not pinned_skill
+        _regex_ladder
         and is_call_digest(routing_text)
         and not _names_live_source()
     ):
@@ -1607,7 +1923,7 @@ def answer(
     # yields a real report; when it isn't, fall through to the skill route so it
     # can explain what to connect.
     if (
-        not pinned_skill
+        _regex_ladder
         and is_voc_report_request(routing_text)
         and not _names_live_source()
     ):
@@ -1623,7 +1939,7 @@ def answer(
     # Intercept before generic routing for the same reason as the call digest:
     # the keyword rules would send it to a synthesis skill, which answers from
     # the KG instead of computing over the actual data.
-    if not pinned_skill and is_data_analysis_request(routing_text):
+    if _regex_ladder and is_data_analysis_request(routing_text):
         # Capability gate: matching the lexical pattern is not enough — a
         # document question that happens to use a data-noun ("what does the
         # attached PDF's data show?") with no tabular data uploaded got sent
@@ -1694,7 +2010,7 @@ def answer(
     # explicit window, so gating only the digest above would have handed the
     # very same question to `call_digest.answer` one branch later — the fix
     # would have looked right in the diff and changed nothing in production.
-    if not pinned_skill and not _names_live_source():
+    if _regex_ladder and not _names_live_source():
         try:
             window = call_index.windowed_call_question(enterprise_id, routing_text)
         except Exception:  # noqa: BLE001 — routing must never break the answer
@@ -1714,7 +2030,7 @@ def answer(
     # kinds of ticket (Sprntly and Jira), so unlike the lookup it must not be
     # gated on a tracker connection.
     if (
-        not pinned_skill
+        _regex_ladder
         and not question.lstrip().startswith("/")
         and is_ticket_update(routing_text, history)
     ):
@@ -1738,7 +2054,7 @@ def answer(
     # returns a connect message rather than falling through. A slash command
     # (handled by route()) is exempt so an explicit skill invocation that merely
     # names Jira isn't hijacked.
-    if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
+    if _regex_ladder and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
         from app.connector_lookup import tracker
 
         # Capability gate: matching the PM-noun-plus-verb regex is not enough
@@ -1768,7 +2084,7 @@ def answer(
     # question NAMES a source none of them claimed. A source we cannot read live
     # is answered honestly here too (registry.not_supported_message), which is
     # better than the generic path guessing from the KG.
-    if not pinned_skill and not question.lstrip().startswith("/"):
+    if _regex_ladder and not question.lstrip().startswith("/"):
         connector_hints = is_connector_lookup(routing_text, history)
         if connector_hints:
             from app.connector_lookup import registry
@@ -1799,7 +2115,7 @@ def answer(
     #
     # Below every other interception for the usual reason — this trigger is the
     # broadest on the path, so it must only see what nothing else claimed.
-    if not pinned_skill and not question.lstrip().startswith("/"):
+    if _regex_ladder and not question.lstrip().startswith("/"):
         candidates = document_lookup_candidates(routing_text)
         if candidates:
             from app.connector_lookup import registry
@@ -1919,7 +2235,18 @@ def answer(
         # Skipped when a PRD is open — that branch skips corpus AND KG
         # retrieval on purpose (the PRD block is the grounding) and adding I/O
         # to it would spend exactly what it was built to save.
-        live_context = "" if prd_context else _sweep_context(enterprise_id, question)
+        #
+        # WITH A PLAN, the source list is the planner's and the keyword sweep is
+        # not consulted at all: `_planned_live_context` reads exactly what was
+        # planned, however many that is. Without one, the sweep still derives
+        # its own terms and probes everything connected — every caller that has
+        # not been migrated keeps today's behaviour exactly.
+        if prd_context:
+            live_context = ""
+        elif plan is not None:
+            live_context = _planned_live_context(enterprise_id, plan, question)
+        else:
+            live_context = _sweep_context(enterprise_id, question)
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context=live_context, on_delta=on_delta,

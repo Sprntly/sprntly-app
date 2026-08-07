@@ -236,6 +236,122 @@ def _fallback(reason: str) -> dict:
     }
 
 
+# ── planner-backed resolution ────────────────────────────────────────────────
+#
+# When the Ask Planner is deciding for this company, the action verdict comes
+# from IT rather than from the call below, and this module becomes an adapter
+# onto the envelope the client reducer already consumes.
+#
+# WHY FOLD THEM. Today a chat message costs two independent model calls that
+# cannot see each other: this one picks the action, `qa_agent.route` picks the
+# skill. Neither knows what the other decided, and neither knows what the
+# company has connected — so "write a PRD about what competitors are doing" is
+# judged twice, from different context, and the two verdicts can disagree with
+# nothing to reconcile them. The planner makes it one decision, and one call:
+# planner (sonnet) replaces this call (sonnet) PLUS the router (haiku), so the
+# fold is strictly cheaper per message than what it replaces.
+#
+# The ENVELOPE SHAPE IS UNCHANGED, deliberately. `ChatIntentEnvelope` in
+# web/app/lib/api.ts and the reducers in ChatScreen/BriefChat keep working
+# untouched — this is a swap of what is behind the endpoint, not a new contract.
+
+
+#: Intents a CLIENT can be handed. `INTENTS` is this module's own resolver
+#: vocabulary (unchanged, so its fallback path behaves exactly as before);
+#: this is the wider set the planner can produce and a surface may act on.
+#: Kept as its own name rather than widening `INTENTS`, because the resolver
+#: below cannot produce these and asserting that is worth a constant.
+_CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {"multi_agent"}
+
+
+def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
+    """A gated `ask_planner.Plan` in this module's envelope vocabulary.
+
+    Three of this module's own downgrade rules are re-applied HERE rather than
+    trusted to the planner, because each needs something the planner does not
+    have:
+
+      * the ACTION CONFIDENCE FLOOR. `_gate_action` validates that an action is
+        known and carries its argument; it does not judge conviction. Acting on a
+        0.2-confidence `generate_prd` is disruptive in a way that a 0.2-confidence
+        answer is not, so the floor stays exactly where it was and at the same
+        value.
+      * `_NEEDS_PRD`. Whether a target PRD exists is a tenant-scoped DB fact; the
+        planner runs with no `prd_id` and could not check it if it wanted to.
+      * the empty-instruction guard, for the same reason it exists here: an edit
+        with nothing to apply at least gets answered.
+
+    `update_ticket` maps to `answer`: it is not a client dispatch — the
+    ticket-update executor runs server-side off the answer path — so the client
+    has nothing to do with it beyond showing the reply.
+
+    Every OTHER action passes straight through, including ones only some
+    surfaces can act on. `multi_agent` is the case that makes this the right
+    shape: the AI bar runs it, ChatScreen does not, and a surface that cannot
+    handle an intent simply falls through to its ask path. Collapsing it here
+    instead would take the capability away from the surface that HAS it, to
+    protect one that never asked.
+    """
+    intent = plan.action
+    if intent == "update_ticket":
+        intent = "answer"
+    if intent not in _CLIENT_INTENTS:
+        return _fallback("unknown action")
+
+    envelope = {
+        "intent": intent,
+        "confidence": plan.confidence,
+        "task": plan.task or None,
+        "instruction": plan.instruction or None,
+        "reason": plan.reason or "",
+        "source": "planner",
+    }
+    if intent != "answer" and plan.confidence < _ACTION_CONFIDENCE_FLOOR:
+        envelope.update(intent="answer", source="low_confidence")
+    if envelope["intent"] in _NEEDS_PRD and not prd_id:
+        envelope.update(intent="answer", source="no_target_prd")
+    if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
+        envelope.update(intent="answer", source="no_instruction")
+    return envelope
+
+
+def _resolve_via_planner(
+    enterprise_id: str,
+    message: str,
+    history: Optional[list[dict]],
+    *,
+    prd_id: Optional[int],
+) -> Optional[dict]:
+    """The planner's verdict as an envelope, or None to use the call below.
+
+    None on every reason not to plan — decide mode off, no tenant, a planner
+    failure — so a planner outage degrades this endpoint to exactly the
+    behaviour it had before, which is a working product. `plan_for_answer`
+    already swallows and logs; this only has to handle "it declined"."""
+    from app import ask_planner
+
+    plan = ask_planner.plan_for_answer(
+        enterprise_id=enterprise_id, question=message, history=history
+    )
+    if plan is None:
+        return None
+    envelope = _plan_to_envelope(plan, prd_id=prd_id)
+    # The full gated plan rides along under `plan`, for the browser console.
+    # Everything on it was already decided server-side and is already visible in
+    # the backend log; this only saves someone testing from having to watch
+    # `docker logs` in another window to see WHY a message went where it did.
+    #
+    # Diagnostic only — no client branches on it, and it carries no secret: the
+    # sources are provider KEYS the caller's own company connected, and the
+    # reason is one clause the model wrote about the user's own message.
+    envelope["plan"] = plan.as_log_dict()
+    logger.info(
+        "[planner] intent company=%s intent=%s source=%s",
+        enterprise_id, envelope["intent"], envelope["source"],
+    )
+    return envelope
+
+
 def resolve_chat_intent(
     enterprise_id: str,
     message: str,
@@ -248,9 +364,22 @@ def resolve_chat_intent(
     """Decide the action envelope for one chat message, in context.
 
     Returns {intent, confidence, task, instruction, reason, source} where
-    source is "llm" for a model verdict, "low_confidence" for a verdict
-    downgraded to answer, or "fallback" on any failure. Never raises.
+    source is "planner" when the Ask Planner decided, "llm" for this module's
+    own model verdict, "low_confidence" / "no_target_prd" / "no_instruction" for
+    a verdict downgraded to answer, or "fallback" on any failure. Never raises.
     """
+    # The planner decides for enrolled companies; everyone else takes the call
+    # below, unchanged. Wrapped rather than trusted: this endpoint is on the
+    # send path, and a planner import or flag read must never break a send.
+    try:
+        planned = _resolve_via_planner(
+            enterprise_id, message, history, prd_id=prd_id
+        )
+        if planned is not None:
+            return planned
+    except Exception:  # noqa: BLE001 — fall through to the resolver below
+        logger.exception("planner-backed intent failed; using the intent resolver")
+
     try:
         result = llm_call(
             enterprise_id=enterprise_id,

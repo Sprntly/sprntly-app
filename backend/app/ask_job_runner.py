@@ -126,6 +126,26 @@ def _run_sync(
     # and returns `(None, True)` rather than raising, so today that window is
     # already closed; ordering it this way is what keeps it closed if that
     # ever stops being true.
+    # THE PLANNER RUNS FIRST — ahead of the embedding call below, which is a
+    # live HTTP round trip. The two are independent, and having the planner wait
+    # on it put a network hop in front of every planned answer for no reason.
+    #
+    # It runs HERE rather than inside `answer()` so that function stays a pure
+    # executor of a plan it is handed, rather than something that both decides
+    # and executes. `plan_for_answer` returns None on any planner failure, and
+    # `answer(plan=None)` is byte-identical to the pre-planner behaviour, so an
+    # outage degrades this path rather than breaking it.
+    #
+    # A pinned turn is never planned: the user already named the skill, so there
+    # is nothing to decide and no reason to bill them for a decision.
+    ask_plan = None
+    if not pinned_skill:
+        from app import ask_planner
+
+        ask_plan = ask_planner.plan_for_answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
     embedding, embedding_degraded = ask_runner._question_embedding(
         enterprise_id, question
     )
@@ -135,6 +155,7 @@ def _run_sync(
     )
     try:
         payload = qa_agent.answer(
+            plan=ask_plan,
             enterprise_id=enterprise_id,
             question=question,
             dataset=dataset,

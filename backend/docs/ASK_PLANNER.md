@@ -1,9 +1,26 @@
 # Ask Planner — implementation brief
 
-**Status:** slice 1 (shadow mode) implemented on branch `feat/ask-planner`,
-uncommitted by owner instruction. Audited by an adversarial review pass
-2026-08-03; the two behavioural findings (destination-vs-tier agreement, the
-slash-turn shadow) are fixed. Slices 2+ not started.
+**Status (2026-08-07):** SHIPPED as the front door. The planner decides every
+chat message — action, method and sources — and the regex cascades it replaced
+are deleted, in `qa_agent.answer` and in all three client dispatchers. Shadow
+mode is superseded; the slice table in §7 is kept below as the record of how it
+got here, not as work outstanding.
+
+**Two corrections to what this brief originally claimed**, both found by reading
+the code rather than the doc:
+
+1. §3 says "`qa_agent.answer` is Slack's front door." **There is no Slack chat
+   surface.** Slack appears only as a CONNECTOR (`slack_oauth.py`,
+   `routes/connectors.py`) — a source we read from. No route, no events handler,
+   no slash-command handler. Nothing about placement followed from it.
+2. §6 says live connector reads "carry constraints in the tool args, so the
+   connector half works without this." True of exactly ONE adapter: only
+   `slack_search_messages` accepts a window (`days`). `jira_search`,
+   `confluence_search`, `clickup_search_tasks` and `hubspot_search` take
+   keywords and filters and no date range. `app/live_read.py` applies `top_n`
+   itself and RECORDS the constraints an adapter cannot express rather than
+   discarding them silently.
+
 **Author:** research pass over `qa_agent` / `skill_router` / `connector_lookup`, 2026-08-03.
 
 A single LLM planner decides, per chat message, *what to gather* before the
@@ -127,9 +144,13 @@ capability it needs — choosing sources semantically.
 
 </details>
 
-**It must live in `qa_agent`, not `chat_intent`.** `qa_agent.answer` is Slack's
-front door and never sees `POST /v1/chat/intent`. A planner built into the
-intent route serves web only.
+**It lives in BOTH, and that turned out to be the point.** The original note
+here justified `qa_agent` over `chat_intent` on the grounds that the former was
+"Slack's front door" — which is not true (see the status block above). The real
+reason the two are different is narrower: `chat_intent` decided the ACTION and
+`qa_agent.route` decided the ROUTE, as two model calls that could not see each
+other. The planner is now behind both, so it is one decision and one call —
+strictly fewer round trips than what it replaced, not more.
 
 ---
 
@@ -234,8 +255,8 @@ with still-wrong *date arithmetic* on anything KG-grounded.
 |---|---|---|---|
 | 1 | `feat/ask/planner-shadow-mode` | Planner module + schema; runs alongside `route()`, logs to `agent_decision_log`, acts on nothing | **Built** (on `feat/ask-planner`). Two journal lines per shadowed message: `ask-planner raw:` (the model's ungated response + the clamped question) and `ask-planner shadow:` (the gated plan vs. the router's decision, with `agree` keyed on DESTINATION only and `same_tier` reported separately — tier equality would score every regex-terminal turn as a false disagreement). Slash turns are not shadowed (nothing to measure; billed to the customer's key). Known accepted trade-off: one extra uncached `feature_flags` read per message on the shadow's own daemon thread, and one bare thread per message rather than a pool — both invisible to answer latency, both worth revisiting if enrolment grows past a pilot |
 | 2 | `feat/ask/planner-decides-the-route` | Planner replaces the haiku router. No connector change | Round trips stay flat |
-| 3 | `feat/ask/planner-picks-the-sources` | Planner emits `sources[]`, replaces `is_connector_lookup`; cap stays 2 | The actual win — no more naming tools by hand |
-| 4 | `feat/ask/read-more-than-two-tools-at-once` | Cap → 3–4, parameterized | Watch tool-list size |
+| 3 | `feat/ask/planner-picks-the-sources` | Planner emits `sources[]`, replaces `is_connector_lookup` | **Done.** Executed by `app/live_read.py` |
+| 4 | `feat/ask/read-more-than-two-tools-at-once` | Cap → 3–4, parameterized | **Superseded — the cap is GONE.** `MAX_PROVIDERS_PER_LOOKUP` bounds the serial TOOL LOOP, where accuracy degrades past ~30–50 tools. `live_read` is a parallel fan-out with the model not in the loop, so its costs are wall clock (one shared deadline: breadth costs the slowest source, not the sum) and prompt characters. Both are bounded in the executor, so a question that genuinely spans every connected tool may name every connected tool |
 | 5 | `feat/ask/planner-can-call-for-a-web-search` | `web_search` action | |
 | 6 | *blocked* | Constraints honoured end-to-end | Needs KG constraint slices 1–3 first |
 

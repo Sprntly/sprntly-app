@@ -1,41 +1,56 @@
-"""Ask Planner — SHADOW MODE (slice 1 of `backend/docs/ASK_PLANNER.md` §7).
+"""Ask Planner — the single decision behind every chat message.
 
-One LLM call that decides, per chat message, WHAT TO GATHER before the answer
-runs: which pipeline or company skill applies, which connected tools should be
-read live, whether the knowledge graph rides along, whether the public web is
-searched, and under what constraints. It returns one JSON envelope.
+One LLM call that decides, per message, WHAT THE USER WANTS DONE and — when the
+answer is "answer their question" — WHAT TO GATHER first: which pipeline or
+company skill applies, which connected tools to read live, whether the knowledge
+graph rides along, whether the public web is searched, and under what
+constraints. It returns one JSON envelope and the app executes it.
 
-IT DECIDES NOTHING TODAY. The planner runs FIRST — dispatched from the top of
-`qa_agent.answer`, before any interceptor, by owner decision (2026-08-03: "the
-planner should be the first thing, and the planner tells us the remaining
-things what to do") — but in this slice it only OBSERVES: it judges every
-message and logs its full plan, while the existing ladder answers exactly as
-before. Nothing in `qa_agent.answer` reads the plan, no interception moves,
-and every answer is byte-identical with the planner on or off. The deliverable
-is the pair of journal lines (`ask-planner raw:` / `ask-planner shadow:`) plus
-the runner's `ask-planner actual:` line — joined on `question`, they say what
-the planner would have done versus what the ladder really did, for EVERY
-message. That is the data that decides whether the planner starts deciding.
+IT DECIDES EVERYTHING. That is a change from slice 1, which shadowed: the plan
+was logged and discarded while a ladder of regexes answered. The regexes are
+gone — from `qa_agent.answer` (eleven guards), from ChatScreen and BriefChat
+(two copies of a PRD/tickets cascade), and from the AI bar (a private copy that
+gated the seven-artifact multi-agent run). What replaced them is this call.
 
-Three properties this module is built around, all of them load-bearing:
+Why they went, in one example: "summarize the slack channel syncs from this
+week" named Slack and was answered from Fireflies transcripts, because the call
+digest's rule saw a verb next to `syncs?`. The ordering of those ten
+interceptions was load-bearing precisely because their rules competed, and no
+reordering fixed that class of bug. A model reading the whole message does not
+have it.
 
-  * NEVER on the critical path. `shadow_plan_async` spawns a daemon thread and
-    returns; the user's answer never waits on a planner call, a flag read, or a
-    planner failure. A shadow feature that adds latency to every message makes
-    the product slower for a capability nobody is using yet.
-  * NEVER able to break an answer. Every entry point is wrapped. A raised
-    exception, a dead thread, a DB read failure and a malformed model payload
-    all resolve to "no comparison line was logged", which is the whole blast
-    radius.
-  * OFF by default. `ask_planner_shadow` in companies.feature_flags, and unlike
-    every other module flag it fails CLOSED — see `_shadow_enabled`.
+WHAT IT DECIDES
+---------------
+  * `action` — answer, generate_prd, edit_prd, generate_tickets,
+    generate_prototype, update_ticket, multi_agent. Absorbs `chat_intent`'s five
+    intents, so ONE call now makes a decision that used to take two model calls
+    that could not see each other.
+  * `pipeline_id` — a dedicated pipeline, or one of the machinery ids the
+    interceptors used to claim by pattern (`call-digest`, `call-listing`, …).
+    Their executors are unchanged; only the deciding moved.
+  * `sources` — connectors to read LIVE, executed by `app/live_read.py` in
+    parallel under one deadline. Not capped: breadth costs the slowest source,
+    not the sum.
+  * `company_skill_id`, `include_knowledge_graph`, `web_search`, `constraints`.
 
-Prompt layout follows `backend/docs/ASK_PLANNER_PROMPT.md` §0 exactly, and the
-split is a security and cost decision rather than a style one: the CATALOG of
-what Sprntly can read is tenant-invariant and lives in the cacheable `system`
-block; the list of what THIS company HAS connected, its uploaded skills, the
-keyword prior, the history and the question ride the uncached `input`. Same
-trap CLAUDE.md documents for the router's skills menu — per-company data in a
+MODEL PROPOSES, PYTHON DISPOSES. `apply_gates` is not advisory. A source the
+company has not connected is dropped; a skill id outside the tenant is refused;
+an action whose argument is missing degrades to `answer`; a capability
+precondition (a connected call source before the ~168s digest, tabular data
+before the DS engine) still runs in the executor. The model's word is an input
+to those checks, never a substitute for them.
+
+FAIL TOWARDS ANSWERING. `plan_for_answer` returns None on any failure and
+`qa_agent.answer(plan=None)` is byte-identical to the pre-planner behaviour, so
+a planner outage degrades chat to a working product rather than breaking it. No
+caller falls back to guessing.
+
+Prompt layout follows `backend/docs/ASK_PLANNER_PROMPT.md` §0, and the split is
+a security and cost decision rather than a style one: the CATALOG of what
+Sprntly can read is tenant-invariant and lives in the cacheable `system` block;
+the list of what THIS company HAS connected, its uploaded skills, the keyword
+prior, the history and the question ride the uncached `input`. Same trap
+CLAUDE.md documents for the router's skills menu — per-company data in a
 cache-controlled prefix forks the cache entry per tenant AND lets one company's
 connector/skill names be reached through another company's entry.
 """
@@ -56,16 +71,23 @@ if TYPE_CHECKING:  # pragma: no cover — typing only, never imported at runtime
 
 logger = logging.getLogger(__name__)
 
-# Slice 1 exists to measure whether the SMALL model suffices. `chat_intent`
-# argues in its own docstring that argument synthesis is what the smallest model
-# does worst, and picks sonnet for it; source SELECTION may well be an easier
-# problem than task synthesis, and the planner runs on every message, so the
-# tier difference is real money. Start on haiku — the same model the router this
-# would replace already uses, which makes the shadow comparison like-for-like —
-# and flip this one constant to `claude-sonnet-4-6` to measure the other tier.
-# Deliberately a bare module constant, not config: it is meant to be edited,
-# measured, and edited back. See ASK_PLANNER_PROMPT.md §7 open question 1.
-PLANNER_MODEL = "claude-haiku-4-5"
+# SONNET, and the reason changed with v3.
+#
+# In shadow mode this was haiku: the planner only SELECTED (a pipeline, a skill,
+# some sources), selection is classification, and haiku was the like-for-like
+# comparison against the router it shadowed.
+#
+# v3 gave it `task` and `instruction` — synthesising a self-contained brief from
+# a whole conversation. That is precisely the job `chat_intent` picked sonnet
+# for, and its docstring says why: "compressing a long thread into a
+# self-contained task brief is exactly what the smallest model does worst." A
+# haiku planner would reintroduce the vague-task failure `chat_intent` was built
+# to fix, in the same product surface.
+#
+# It is NOT a cost increase. The planner replaces `chat_intent`'s sonnet call
+# AND `qa_agent.route`'s haiku call with one call, so a planned message is
+# strictly cheaper than the two it supersedes.
+PLANNER_MODEL = "claude-sonnet-4-6"
 
 # v1: the planner shadowed only the routed path — its menu was the four
 #     pipelines plus the company's uploads, and the comparison ran against a
@@ -76,13 +98,70 @@ PLANNER_MODEL = "claude-haiku-4-5"
 #     destinations. A v2 row covers a strictly wider population AND a different
 #     menu than v1, so the two must not be pooled — same convention as
 #     qa-router-v1..v7.
-_PROMPT_VERSION = "ask-planner-v2"
+# v3: the planner became the FRONT DOOR and stopped shadowing. Two changes to
+#     the menu, both widening: an ACTION field absorbing `chat_intent`'s five
+#     intents plus `update_ticket` (so one call decides "build something" vs
+#     "answer something", which used to be a separate Sonnet call that could not
+#     see the routing decision), and `sources` now driving a real parallel read
+#     (`app/live_read.py`) instead of being logged and discarded.
+_PROMPT_VERSION = "ask-planner-v3"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
 # imported so the planner's gate can be retuned on shadow data without moving
 # the live router's threshold underneath it.
 _PLANNER_THRESHOLD = 0.6
+
+# ── actions ──────────────────────────────────────────────────────────────────
+#
+# What the user is asking the assistant to DO, as opposed to what to gather.
+#
+# This vocabulary is NOT invented here — it is `chat_intent._INTENTS` plus
+# `update_ticket`, because `chat_intent` already makes exactly this decision on
+# the web chat surface and its five values already map to shipped endpoints
+# (generate_prd → POST /v1/prd/generate-from-task, edit_prd →
+# POST /v1/prd/{id}/chat-edit, generate_tickets → POST /v1/stories/generate,
+# generate_prototype → the design-agent flow, answer → POST /v1/ask). Folding
+# that call into this one is the point: today the action decision and the
+# routing decision are two separate model calls that cannot see each other, so
+# "write a PRD about what competitors are doing" is judged twice, independently,
+# by two models with different context.
+#
+# `update_ticket` joins them from the other side: it was interceptor #7 in
+# `qa_agent.answer`, reached by regex, and it is an ACTION (it rewrites a
+# ticket) rather than a way of answering a question.
+ACTION_ANSWER = "answer"
+_ACTIONS: frozenset[str] = frozenset({
+    ACTION_ANSWER,
+    "generate_prd",
+    "edit_prd",
+    "generate_tickets",
+    "generate_prototype",
+    "update_ticket",
+    "multi_agent",
+})
+
+#: Actions that need a `task` brief, and ones that need an `instruction`. An
+#: action whose argument is missing falls back to `answer` rather than
+#: dispatching a builder with nothing to build — the same rule `chat_intent`
+#: applies to `edit_prd` with no instruction.
+#:
+#: `generate_prd` IS DELIBERATELY ABSENT, and it is the one exception. A bare
+#: "generate a PRD" with no subject anywhere in the thread is a real request —
+#: the user does want a PRD — and the chat screen already handles it well: with
+#: no task it asks "What should the PRD cover?" and waits. Degrading that to
+#: `answer` would reply with prose to someone who asked for a document, and
+#: forcing a synthesized task would build a PRD about nothing. So an empty task
+#: is allowed to pass through here precisely so that prompt still fires.
+#: Tickets and prototypes have no such fallback surface, so they keep the rule.
+_NEEDS_TASK: frozenset[str] = frozenset({
+    "generate_tickets", "generate_prototype", "multi_agent",
+})
+_NEEDS_INSTRUCTION: frozenset[str] = frozenset({"edit_prd", "update_ticket"})
+
+#: A synthesized brief is prose, not a clause. Bounded because it is logged and
+#: because a runaway generation should not become the whole prompt downstream.
+_TASK_CHARS = 4000
 
 # A `constraints.entity` is free text the model composed from the user's
 # question; it is logged, so it gets the same one-line clamp every other
@@ -116,6 +195,34 @@ _PLANNER_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "reason": {"type": "string", "description": "One short clause."},
+        # `action` sits directly after `reason` because it is the TOP-LEVEL
+        # fork: everything below it only matters when the action is `answer`.
+        # Schema order is generation order, so deciding "is this a question or a
+        # request to build something" before choosing a pipeline stops the model
+        # picking a research pipeline for "write me a PRD about competitors".
+        "action": {
+            "type": "string",
+            "enum": sorted(_ACTIONS),
+            "description": (
+                "What the user is asking the assistant to DO. 'answer' is the "
+                "normal outcome — the rest each hand off to a builder."
+            ),
+        },
+        "task": {
+            "type": "string",
+            "description": (
+                "generate_prd / generate_tickets / generate_prototype only: a "
+                "self-contained brief for the thing to build, synthesized from "
+                "the WHOLE conversation, not the words of the last message."
+            ),
+        },
+        "instruction": {
+            "type": "string",
+            "description": (
+                "edit_prd / update_ticket only: the change to apply, "
+                "self-contained."
+            ),
+        },
         "company_skill_id": {
             "type": "string",
             "description": (
@@ -177,8 +284,11 @@ _PLANNER_SCHEMA: dict = {
     },
     # `constraints` is the one optional field — a question that carries no
     # window, count or entity should omit it rather than invent one.
+    # `task` / `instruction` are optional because they belong to specific
+    # actions; `constraints` because a question carrying no window, count or
+    # entity should omit it rather than invent one.
     "required": [
-        "reason", "company_skill_id", "company_confidence",
+        "reason", "action", "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "sources",
         "include_knowledge_graph", "web_search", "in_scope",
     ],
@@ -208,14 +318,75 @@ _PLANNER_SCHEMA: dict = {
 _PLANNER_SYSTEM = """You are the planner for a product-management assistant. Every question that
 reaches the assistant's answering path arrives here first.
 
-Your job is NOT to answer the question. Your job is to decide WHAT TO GATHER so
-that the next model can answer it well: which dedicated pipeline should run (if
-any), whether one of this company's own uploaded skills applies, which connected
-sources should be read live, whether the knowledge graph should be consulted,
-whether the public web should be searched, and what constraints the question
-carries.
+Your job is NOT to answer the question. Your job is to decide two things:
+
+1. WHAT THE USER IS ASKING FOR — a question answered, or a thing built.
+2. If it is a question: WHAT TO GATHER so the next model can answer it well —
+   which dedicated pipeline should run (if any), whether one of this company's
+   own uploaded skills applies, which connected sources should be read live,
+   whether the knowledge graph should be consulted, whether the public web
+   should be searched, and what constraints the question carries.
 
 You output one JSON plan. Code executes it. You never see the result.
+
+=== ACTION: WHAT THE USER WANTS DONE ===
+
+Decide this FIRST. When the action is anything other than `answer`, every other
+field is ignored — the builder has its own inputs — so do not also pick a
+pipeline or sources.
+
+- answer — the user is asking a question and wants a reply. This is the normal
+  outcome and most messages are this.
+- generate_prd — the user wants a PRD written: "write this up", "draft a PRD",
+  "put together a spec for it". Set `task` to a self-contained brief.
+
+  A TASK MUST NAME ITS SUBJECT. A phrase that only POINTS at a subject is not
+  one: "this", "that", "the top insight", "our biggest opportunity", "our top
+  product opportunity", "the latest finding", "this week's priority". Those are
+  references, not descriptions — a PRD built from one is a PRD about nothing,
+  which is the single worst outcome on this path because it costs minutes and
+  real money before anyone can see it is wrong.
+
+  So, when the request points instead of naming:
+    * RESOLVE IT FIRST from the conversation. If the thread actually discussed
+      the thing being pointed at, `task` is that subject, described in full —
+      "generate a PRD for what we just discussed" after twenty turns about
+      magic-link sign-in becomes a brief about magic-link sign-in. This is the
+      case you are better at than anything that came before you, so do it.
+    * LEAVE `task` EMPTY when the conversation does not resolve it. Do not
+      invent a subject, and do not fall back to `answer` — the user did ask for
+      a PRD. The product responds by asking what it should cover, which is the
+      correct outcome and better than either alternative.
+- edit_prd — the user wants the PRD that is already open CHANGED: "make it
+  shorter", "add a risks section", "tighten the scope". Set `instruction`.
+- generate_tickets — break a PRD or spec into tickets / stories / work items.
+  Set `task`.
+- generate_prototype — an interactive prototype or mockup. Set `task`.
+- update_ticket — rewrite an EXISTING ticket from a PRD or from this thread
+  ("update the ticket with the PRD details"). Set `instruction`.
+- multi_agent — the full multi-agent analysis suite: a PRD, an evidence report
+  and four analysis documents (technical design, QA test cases, risk analysis,
+  traceability matrix), all cross-referenced. Set `task`.
+  THE MOST EXPENSIVE THING THE PRODUCT DOES — minutes of work and seven
+  artifacts. Choose it ONLY when the user asks for that depth outright, by
+  naming it ("multi-agent", "aggressive analysis") or by asking for the full
+  suite. "Generate a PRD" alone is generate_prd, never this.
+
+Rules that decide the close calls:
+
+- SUBJECT MATTER decides generate_prd, never document shape. A PRD specifies a
+  product change.
+- generate_prd vs edit_prd: no PRD exists in this thread yet → generate_prd; one
+  exists and the message asks to change it → edit_prd. "Redo it with X" aimed at
+  an existing PRD is still edit_prd.
+- DIRECTION decides edit_prd vs update_ticket, and the same words run both ways.
+  "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
+  "Update the ticket with the PRD details" changes the TICKET → update_ticket.
+- ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
+  auth?" is `answer`.
+- The task brief must be self-contained and drawn from the WHOLE conversation.
+  If the thread spent twenty turns specifying a feature and the last message is
+  "draft it up", the brief describes the feature, not the words "draft it up".
 
 === DEDICATED PIPELINES ===
 
@@ -451,6 +622,9 @@ class Plan:
     consumer has to remember which sentinel it is looking at."""
 
     reason: str = ""
+    action: str = ACTION_ANSWER
+    task: str = ""
+    instruction: str = ""
     company_skill_id: Optional[str] = None
     company_confidence: float = 0.0
     pipeline_id: Optional[str] = None
@@ -460,6 +634,31 @@ class Plan:
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     in_scope: bool = True
+
+    @property
+    def is_answer(self) -> bool:
+        """True when this plan answers a question rather than building
+        something. Everything below `action` on this object — pipeline, sources,
+        kg, web search — only applies in that case."""
+        return self.action == ACTION_ANSWER
+
+    def as_log_dict(self) -> dict:
+        """The plan as one flat, greppable record for the `[planner] plan` line
+        and for the browser console. `task`/`instruction` are included but
+        length-clamped upstream, so this stays one readable line."""
+        return {
+            "action": self.action,
+            "method": self.company_skill_id or self.pipeline_id or "generic",
+            "sources": self.sources,
+            "kg": self.include_knowledge_graph,
+            "web": self.web_search,
+            "constraints": self.constraints,
+            "in_scope": self.in_scope,
+            "confidence": round(
+                self.company_confidence if self.company_skill_id else self.confidence, 3
+            ),
+            "reason": self.reason,
+        }
 
     def as_route_like(self) -> tuple[Optional[str], str, float]:
         """(skill_id, source, confidence) in `RouteDecision`'s own vocabulary.
@@ -602,13 +801,25 @@ def _gate_sources(raw: Any, connected: list[str]) -> list[str]:
     message, and `registry.not_supported_message` already owns the honest copy
     for a source the user actually named.
 
-    Order is the model's own, so the cap keeps the sources it ranked first;
-    de-duplicated because a model listing "slack" twice should not consume two
-    of the two slots."""
-    from app.connector_lookup.registry import (
-        LOOKUP_PROVIDERS,
-        MAX_PROVIDERS_PER_LOOKUP,
-    )
+    NOT capped at `MAX_PROVIDERS_PER_LOOKUP`. That cap (3) belongs to the TOOL
+    LOOP in `connector_lookup/answer.py`, where each provider contributes a whole
+    toolset the model works through SERIALLY and tool-selection accuracy degrades
+    past ~30-50 tools. This path does not use a tool loop: `app/live_read.py`
+    fires one deterministic call per source, all in parallel, and the model is
+    not in that loop at all. So the costs here are wall clock (one shared
+    deadline, so breadth costs the slowest source rather than the sum) and prompt
+    characters (a total budget that drops whole sources, named) — both bounded in
+    the executor, neither improved by refusing to plan a source in the first
+    place.
+
+    The consequence is the point: when a question genuinely spans every connected
+    tool, the plan may name every connected tool. Ordering still matters and is
+    the model's own — the executor renders in this order, so a source the model
+    ranked first is the one that survives the character budget.
+
+    De-duplicated because a model listing "slack" twice should not occupy two
+    slots in that ordering."""
+    from app.connector_lookup.registry import LOOKUP_PROVIDERS
 
     if not isinstance(raw, list):
         return []
@@ -620,7 +831,7 @@ def _gate_sources(raw: Any, connected: list[str]) -> list[str]:
         key = item.strip().lower()
         if key in allowed and key not in kept:
             kept.append(key)
-    return kept[:MAX_PROVIDERS_PER_LOOKUP]
+    return kept
 
 
 def _gate_company_skill(raw: Any, confidence: float, enterprise_id: str) -> Optional[str]:
@@ -718,6 +929,45 @@ def _gate_constraints(raw: Any) -> dict:
     return out
 
 
+def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
+    """`(action, task, instruction)`, with an unusable action degraded to
+    `answer` rather than dispatched.
+
+    Two rules, both of them "fail towards answering":
+
+      * An action outside the known set is the model improvising. `answer` is
+        the safe landing — it is what every message did before the planner
+        existed, and it cannot destroy anything.
+      * An action whose ARGUMENT is missing is worse than no action: dispatching
+        `generate_prd` with no brief builds a document from nothing, and
+        `edit_prd` with no instruction rewrites a document toward nothing.
+        `chat_intent` already applies exactly this rule (`no_instruction` →
+        answer); it is reproduced here because this call replaces that one.
+
+    Deliberately NOT gated here: whether the target PRD/ticket exists. That is
+    ownership, it needs a tenant-scoped DB read, and the route that dispatches
+    the action already does it — `require_owned_prd` on a foreign id is a 404,
+    and duplicating it here would mean duplicating the tenancy check too.
+    """
+    action = raw.strip() if isinstance(raw, str) else ""
+    if action not in _ACTIONS:
+        return ACTION_ANSWER, "", ""
+
+    task_text = " ".join(task.split())[:_TASK_CHARS] if isinstance(task, str) else ""
+    instruction_text = (
+        " ".join(instruction.split())[:_TASK_CHARS]
+        if isinstance(instruction, str) else ""
+    )
+
+    if action in _NEEDS_TASK and not task_text:
+        logger.info("[planner] %s dropped to answer: no task brief", action)
+        return ACTION_ANSWER, "", ""
+    if action in _NEEDS_INSTRUCTION and not instruction_text:
+        logger.info("[planner] %s dropped to answer: no instruction", action)
+        return ACTION_ANSWER, "", ""
+    return action, task_text, instruction_text
+
+
 def _as_float(value: Any) -> float:
     """A confidence the model may have emitted as a string, None, or junk."""
     try:
@@ -732,6 +982,10 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
     Split out from `plan()` so the gates are testable without a stubbed LLM
     call, and so slice 2 can reuse them unchanged when the planner starts
     actually deciding."""
+    action, task, instruction = _gate_action(
+        out.get("action"), out.get("task"), out.get("instruction")
+    )
+
     company_confidence = _as_float(out.get("company_confidence"))
     confidence = _as_float(out.get("confidence"))
     company_skill_id = _gate_company_skill(
@@ -741,6 +995,18 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
 
     sources = _gate_sources(out.get("sources"), connected)
     web_search = bool(out.get("web_search"))
+
+    if action != ACTION_ANSWER:
+        # ACTION EXCLUSIVITY. A plan that builds something does not also gather
+        # for an answer that is never composed — the builder has its own inputs
+        # (the `task` brief, the target document). A model that emits both is
+        # describing work nobody will run, and leaving it on the plan would make
+        # the log say sources were read when they were not.
+        company_skill_id = None
+        pipeline_id = None
+        sources = []
+        web_search = False
+
     if pipeline_id is not None:
         # PIPELINE EXCLUSIVITY. A chosen pipeline owns the answer and does its
         # own gathering (a paid web sweep, a live call fetch), so a plan that
@@ -752,6 +1018,9 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
     reason = out.get("reason")
     return Plan(
         reason=(" ".join(reason.split())[:_REASON_CHARS] if isinstance(reason, str) else ""),
+        action=action,
+        task=task,
+        instruction=instruction,
         company_skill_id=company_skill_id,
         company_confidence=company_confidence,
         pipeline_id=pipeline_id,
@@ -872,6 +1141,77 @@ def _force_enabled() -> bool:
     One reader for the env var, shared by `shadow_enabled` and `_log_prompt`,
     so "this box is a dev box" is decided one way everywhere."""
     return os.getenv("ASK_PLANNER_SHADOW_FORCE", "").strip().lower() in {"1", "true"}
+
+
+# ── decide mode ──────────────────────────────────────────────────────────────
+#
+# The planner stops observing and starts DECIDING. Separate from the shadow flag
+# on purpose: shadow costs a model call and changes nothing, decide changes the
+# answer. A box or a company can be in either, neither, or (pointlessly) both,
+# and the two must never be confused for one another in a log or an incident.
+
+
+def decide_enabled(enterprise_id: Optional[str]) -> bool:
+    """Whether the planner's plan is ACTED ON. On for everyone.
+
+    DELIBERATELY NOT A FLAG ANY MORE. It was one while the planner competed with
+    two regex cascades — the backend ladder in `qa_agent.answer` and the client
+    ladder in ChatScreen/BriefChat — and a flag then chose between two working
+    implementations. Both cascades are gone. A kill switch now would not fall
+    back to the old behaviour; it would fall back to NOTHING deciding, which is
+    strictly worse than the thing it was meant to protect against.
+
+    `ASK_PLANNER_DECIDE=0` still forces it off, for an operator who needs the
+    planner out of the path during an incident. That is an escape hatch, not an
+    enrolment gate: unset means ON.
+
+    Degradation lives where it belongs instead — in `plan_for_answer`, which
+    returns None on any planner failure, and in the callers, which answer the
+    question rather than guess at an action.
+    """
+    override = os.getenv("ASK_PLANNER_DECIDE", "").strip().lower()
+    if override in {"0", "false", "off"}:
+        return False
+    return bool(enterprise_id)
+
+
+def plan_for_answer(
+    *,
+    enterprise_id: Optional[str],
+    question: str,
+    history: Optional[list[dict]] = None,
+) -> Optional[Plan]:
+    """The plan to execute for this turn, or None to answer the old way.
+
+    The one entry point a caller needs in decide mode. Returns None — never
+    raises — for every reason a turn should not be planned:
+
+      * decide mode is off for this company
+      * no tenant to plan for
+      * the planner call failed, returned junk, or timed out
+
+    That last one is the fail-open contract `plan()` deliberately does not
+    provide (see its docstring): fail-open belongs to the caller, and this is
+    the caller. A planner outage degrades chat to exactly the behaviour it had
+    before the planner existed, which is a working product.
+
+    The `[planner] plan` line is emitted here rather than inside `plan()`
+    because this is where a plan becomes something that will actually run —
+    `plan()` is also reached by the shadow path, where nothing runs.
+    """
+    if not enterprise_id or not decide_enabled(enterprise_id):
+        return None
+    try:
+        result = plan(question, enterprise_id=enterprise_id, history=history)
+    except Exception:  # noqa: BLE001 — a planner outage must not break chat
+        logger.exception("[planner] plan failed for %s — answering unplanned", enterprise_id)
+        return None
+    logger.info(
+        "[planner] plan company=%s %s",
+        enterprise_id,
+        json.dumps(result.as_log_dict(), sort_keys=True, default=str),
+    )
+    return result
 
 
 def _log_prompt(*, enterprise_id: str, input_text: str) -> None:

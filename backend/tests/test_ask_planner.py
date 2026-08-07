@@ -169,17 +169,23 @@ def test_a_source_that_is_not_a_connector_at_all_is_dropped():
     assert plan.sources == []
 
 
-def test_sources_are_capped_at_the_provider_limit():
-    """The ≤2 cap is not arbitrary — each provider contributes a whole toolset
-    to the lookup loop, and tool-selection accuracy degrades past ~30-50 tools.
-    Raising it is its own slice."""
-    connected = ["slack", "confluence", "github", "hubspot"]
+def test_sources_are_not_capped_at_the_tool_loop_limit():
+    """Breadth is NOT capped here, and that is a deliberate reversal.
+
+    `MAX_PROVIDERS_PER_LOOKUP` (3) bounds the TOOL LOOP, where each provider
+    contributes a whole toolset the model works through serially. This path uses
+    `app/live_read.py` instead: one deterministic call per source, all in
+    parallel, model not in the loop. Its costs are wall clock (one shared
+    deadline, so breadth costs the slowest source, not the sum) and prompt
+    characters (a total budget that drops whole sources, named) — both bounded
+    in the executor. So when a question genuinely spans every connected tool,
+    the plan may name every connected tool."""
+    connected = ["slack", "confluence", "github", "hubspot", "jira"]
     plan = ap.apply_gates(
         _plan_out(sources=connected), enterprise_id=COMPANY, connected=connected,
     )
-    assert len(plan.sources) == registry.MAX_PROVIDERS_PER_LOOKUP
-    # …and the cap keeps the ones the model ranked FIRST, not an arbitrary two.
-    assert plan.sources == connected[: registry.MAX_PROVIDERS_PER_LOOKUP]
+    assert plan.sources == connected
+    assert len(plan.sources) > registry.MAX_PROVIDERS_PER_LOOKUP
 
 
 def test_duplicate_sources_do_not_consume_two_slots():
@@ -544,28 +550,181 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v2"
-    assert kw["model"] == ap.PLANNER_MODEL == "claude-haiku-4-5"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v3"
+    # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
+    # is the job `chat_intent` picked sonnet for ("compressing a long thread
+    # into a self-contained task brief is exactly what the smallest model does
+    # worst"). Still cheaper than what it replaces — one sonnet call instead of
+    # chat_intent's sonnet call plus the router's haiku call.
+    assert kw["model"] == ap.PLANNER_MODEL == "claude-sonnet-4-6"
     assert kw["temperature"] == 0
     assert kw["json_schema"] is ap._PLANNER_SCHEMA
 
 
 def test_the_schema_property_order_is_load_bearing():
     """Forced-tool JSON generates in schema order, so whatever comes first is
-    decided first: `reason` before any choice, and the company's own library
-    before the pipeline list is considered at all."""
+    decided first:
+
+      * `reason` before any choice, so the tokens explaining it exist before it
+        rather than after (post-hoc rationalisation);
+      * `action` second, because it is the TOP-LEVEL fork — deciding "build
+        something" vs "answer something" before choosing a pipeline stops
+        "write me a PRD about competitors" reaching a research pipeline;
+      * the company's own library before the pipeline list is considered at all.
+    """
     assert list(ap._PLANNER_SCHEMA["properties"]) == [
         "reason",
+        "action", "task", "instruction",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
         "sources", "include_knowledge_graph", "web_search",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
-    # Everything but `constraints` is required — a question carrying no window,
-    # count or entity should omit it rather than invent one.
-    assert "constraints" not in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 9
+    # `constraints` is optional (a question carrying no window, count or entity
+    # should omit it rather than invent one) and so are `task`/`instruction`,
+    # which belong to specific actions.
+    for optional in ("constraints", "task", "instruction"):
+        assert optional not in ap._PLANNER_SCHEMA["required"]
+    assert len(ap._PLANNER_SCHEMA["required"]) == 10
+
+
+# ── the action fork (v3) ─────────────────────────────────────────────────────
+#
+# `action` folds `chat_intent`'s five intents plus `update_ticket` into this one
+# call. Every rule below fails TOWARDS answering: an action the code cannot
+# dispatch, or one whose argument is missing, degrades to `answer` — which is
+# what every message did before the planner existed and cannot destroy anything.
+
+
+def test_the_action_vocabulary_covers_every_client_intent():
+    """Not invented here. `chat_intent.INTENTS` already maps to shipped
+    endpoints; this call replaces that one, so it must speak the same words —
+    plus the two actions that reached the client by other routes:
+
+      * `update_ticket`, which was interceptor #7 in `qa_agent.answer`, claimed
+        by regex, and is an ACTION (it rewrites a ticket) rather than a way of
+        answering;
+      * `multi_agent`, the seven-artifact suite the AI bar used to trigger from
+        its own private regex over "prd first" / "multi-agent".
+
+    Asserting the SUPERSET relation rather than equality is the point: the
+    planner must be able to name everything a surface can execute, and a new
+    client intent that nothing can plan is the drift this catches."""
+    from app.chat_intent import _CLIENT_INTENTS
+
+    assert _CLIENT_INTENTS <= ap._ACTIONS
+    assert {"update_ticket", "multi_agent"} <= ap._ACTIONS
+
+
+def test_an_unknown_action_degrades_to_answer():
+    assert ap._gate_action("summon_dragon", "x", "y") == ("answer", "", "")
+    assert ap._gate_action(None, "x", "y") == ("answer", "", "")
+    assert ap._gate_action(42, "x", "y") == ("answer", "", "")
+
+
+@pytest.mark.parametrize("action", ["generate_tickets", "generate_prototype"])
+def test_a_builder_without_a_brief_degrades_to_answer(action):
+    """Dispatching a builder with no brief builds something from nothing."""
+    assert ap._gate_action(action, "", "")[0] == "answer"
+    assert ap._gate_action(action, "   ", "")[0] == "answer"
+    assert ap._gate_action(action, "Build checkout v2", "")[0] == action
+
+
+def test_generate_prd_survives_an_empty_task_on_purpose():
+    """The one builder allowed through with no brief, and the exception is the
+    product working as intended.
+
+    A bare "generate a PRD" with no subject anywhere in the thread is a real
+    request. Degrading it to `answer` would reply with prose to someone who
+    asked for a document; synthesizing a task would build a PRD about nothing.
+    Passing it through with an empty task is what makes the chat screen ask
+    "What should the PRD cover?" and wait — the correct outcome, and the one
+    the client had before the planner existed."""
+    action, task, _ = ap._gate_action("generate_prd", "", "")
+    assert action == "generate_prd"
+    assert task == ""
+    assert "generate_prd" not in ap._NEEDS_TASK
+
+
+@pytest.mark.parametrize("action", ["edit_prd", "update_ticket"])
+def test_an_edit_without_an_instruction_degrades_to_answer(action):
+    """`chat_intent` already applies this rule (`no_instruction` → answer);
+    rewriting a document toward nothing is worse than not rewriting it."""
+    assert ap._gate_action(action, "", "")[0] == "answer"
+    assert ap._gate_action(action, "", "make it shorter") == (
+        action, "", "make it shorter",
+    )
+
+
+def test_action_arguments_are_clamped_and_whitespace_collapsed():
+    long_brief = "word " * 5000
+    action, task, _ = ap._gate_action("generate_prd", long_brief, "")
+    assert action == "generate_prd"
+    assert len(task) <= ap._TASK_CHARS
+    assert "\n" not in task
+
+
+def test_a_build_action_clears_every_gathering_field(monkeypatch):
+    """ACTION EXCLUSIVITY. A plan that builds something does not also gather for
+    an answer nobody composes — leaving sources on it would make the log claim a
+    read that never happened."""
+    _seed_custom_skill(monkeypatch)
+    plan = ap.apply_gates(
+        {
+            "action": "generate_prd",
+            "task": "Checkout v2",
+            "company_skill_id": CUSTOM_SKILL,
+            "company_confidence": 0.99,
+            "pipeline_id": "voice-of-customer-report",
+            "confidence": 0.99,
+            "sources": ["jira", "slack"],
+            "include_knowledge_graph": True,
+            "web_search": True,
+        },
+        enterprise_id=COMPANY,
+        connected=["jira", "slack"],
+    )
+    assert plan.action == "generate_prd" and plan.task == "Checkout v2"
+    assert plan.sources == []
+    assert plan.web_search is False
+    assert plan.pipeline_id is None
+    assert plan.company_skill_id is None
+    assert plan.is_answer is False
+
+
+def test_an_answer_plan_keeps_its_gathering(monkeypatch):
+    """The exclusivity rule must not fire on the normal path."""
+    plan = ap.apply_gates(
+        {
+            "action": "answer",
+            "sources": ["jira"],
+            "web_search": True,
+            "include_knowledge_graph": True,
+        },
+        enterprise_id=COMPANY,
+        connected=["jira"],
+    )
+    assert plan.is_answer
+    assert plan.sources == ["jira"]
+    assert plan.web_search is True
+
+
+def test_a_missing_action_defaults_to_answering(monkeypatch):
+    """A payload with no `action` at all is old-shaped or partial output. It
+    must answer, not refuse and not build."""
+    plan = ap.apply_gates({}, enterprise_id=COMPANY, connected=[])
+    assert plan.action == "answer"
+    assert plan.is_answer
+
+
+def test_the_log_dict_is_one_flat_greppable_record():
+    plan = ap.Plan(action="answer", sources=["jira"], reason="ticket context")
+    record = plan.as_log_dict()
+    assert record["action"] == "answer"
+    assert record["method"] == "generic"
+    assert record["sources"] == ["jira"]
+    assert record["reason"] == "ticket context"
 
 
 # ── the feature flag ─────────────────────────────────────────────────────────
