@@ -71,6 +71,22 @@ def _prd_family_key(row: dict) -> tuple:
     return (row["brief_id"], "insight", row.get("insight_index"))
 
 
+def prd_is_brief_anchored(row: dict) -> bool:
+    """True when this PRD's `insight_index` names a REAL brief insight.
+
+    Chat, ideation and uploaded PRDs anchor to a brief with `insight_index = 0`
+    as a pure STORAGE SENTINEL (see `_prd_family_key`) — that 0 is not insight
+    zero, it is "no insight". Anything that resolves the pair (brief_id,
+    insight_index) into content — the panel's Evidence tab loads by exactly
+    that pair — has to know the difference, or a chat PRD silently shows the
+    evidence belonging to the brief's first finding.
+
+    The distinction is derived here, in the one module that already owns what a
+    PRD family is, so callers never re-derive it from `theme_id` themselves.
+    """
+    return _prd_family_key(row)[1] == "insight"
+
+
 def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
     """prd_id → title for the ids given (empty dict for an empty list).
 
@@ -83,6 +99,148 @@ def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
         c.table("prds").select("id, title").in_("id", prd_ids).execute().data or []
     )
     return {r["id"]: r.get("title") for r in rows}
+
+
+# Statuses that are not a document anyone can open. `invalidated` is the one
+# that matters operationally: a backend restart flips every in-flight PRD to it
+# (invalidate_orphan_generating_prds), so it lands on real rows regularly.
+_UNOPENABLE_PRD_STATUSES = frozenset({"failed", "invalidated"})
+
+
+@retry_on_disconnect
+def list_document_artifacts(*, dataset: str, openable_only: bool = False) -> list[dict]:
+    """The PRD + evidence half of the artifact list, on its own.
+
+    Split out of `list_artifacts_for_company` (which calls it) rather than
+    duplicated, so the two can never drift on what a PRD family is, what a row
+    normalizes to, or which brief scopes it — and so a caller that can only act
+    on documents does not pay for a five-table fan-out.
+
+    That caller is app.artifact_open, resolving "open the PRD for X" INSIDE the
+    chat send path: prototypes, reports and ticket sets are not openable in the
+    chat's right-hand panel, so querying them there would be three round trips
+    spent on rows that can never be the answer.
+
+    `openable_only` drops failed/invalidated PRD rows BEFORE the regeneration
+    family collapses to its newest row, so a family whose newest attempt died
+    falls back to the newest attempt that DIDN'T. Order matters and is the whole
+    point of the flag: collapsing first and filtering after makes the whole
+    family invisible the moment one restart invalidates its head, even though a
+    perfectly readable generation sits right behind it. The default is False
+    because the Artifacts LISTING deliberately shows those rows (a failed PRD is
+    something the user should see); only an OPEN needs them gone.
+
+    `dataset` scopes both types via `briefs.dataset` and must already be
+    tenant-gated by the caller. Rows are normalized identically to the unified
+    listing ({type, id, title, status, created_at, source, open}) and returned
+    unsorted — every caller re-orders anyway.
+    """
+    c = require_client()
+
+    # ── Briefs for this dataset: id → week_label. Drives PRD/evidence scoping
+    #    and supplies the human "from Brief <week_label>" source line. ────────
+    brief_rows = (
+        c.table("briefs")
+        .select("id, week_label")
+        .eq("dataset", dataset)
+        .execute()
+        .data
+        or []
+    )
+    brief_ids = [r["id"] for r in brief_rows]
+    week_label_by_brief = {r["id"]: r.get("week_label") for r in brief_rows}
+    if not brief_ids:
+        return []
+
+    items: list[dict] = []
+
+    # ── PRDs (brief_id IN brief_ids) ────────────────────────────────────────
+    prd_rows = (
+        c.table("prds")
+        .select(
+            "id, brief_id, insight_index, theme_id, source, "
+            "title, status, generated_at"
+        )
+        .in_("brief_id", brief_ids)
+        .execute()
+        .data
+        or []
+    )
+    # A PRD is regenerated in place: each attempt is a new prds row in the
+    # same family. The artifacts list shows only the LATEST generation per
+    # logical PRD; older generations are reachable from the PRD's Version
+    # History (see routes/prd.py /{prd_id}/generations). What counts as a
+    # family is per-source — see _prd_family_key.
+    latest_by_key: dict[tuple, dict] = {}
+    for r in prd_rows:
+        # BEFORE the collapse, never after — see the `openable_only` note in
+        # the docstring.
+        if openable_only and (r.get("status") or "") in _UNOPENABLE_PRD_STATUSES:
+            continue
+        key = _prd_family_key(r)
+        cur = latest_by_key.get(key)
+        if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
+            latest_by_key[key] = r
+    for r in latest_by_key.values():
+        bid = r["brief_id"]
+        items.append({
+            "type": "prd",
+            "id": r["id"],
+            "title": r.get("title") or "Untitled PRD",
+            "status": r.get("status") or "",
+            "created_at": r.get("generated_at"),
+            # Whether `insight_index` names a real finding or is the storage
+            # sentinel — see prd_is_brief_anchored. Consumers that turn the
+            # (brief, insight) pair back into content must check it.
+            "brief_anchored": prd_is_brief_anchored(r),
+            "source": {
+                "brief_id": bid,
+                "week_label": week_label_by_brief.get(bid),
+                "insight_index": r.get("insight_index"),
+            },
+            "open": {
+                "brief_id": bid,
+                "insight_index": r.get("insight_index"),
+                "prd_id": r["id"],
+            },
+        })
+
+    # ── Evidences (brief_id IN brief_ids) ───────────────────────────────────
+    ev_rows = (
+        c.table("evidences")
+        .select("id, brief_id, insight_index, title, status, generated_at")
+        .in_("brief_id", brief_ids)
+        .execute()
+        .data
+        or []
+    )
+    for r in ev_rows:
+        # Evidence has no regeneration family, so order doesn't matter here —
+        # but a failed document is no more openable than a failed PRD.
+        if openable_only and (r.get("status") or "") in _UNOPENABLE_PRD_STATUSES:
+            continue
+        bid = r["brief_id"]
+        items.append({
+            "type": "evidence",
+            "id": r["id"],
+            "title": r.get("title") or "Untitled evidence",
+            "status": r.get("status") or "",
+            "created_at": r.get("generated_at"),
+            # Evidence has no sentinel form — it only ever exists FOR a finding.
+            "brief_anchored": True,
+            "source": {
+                "brief_id": bid,
+                "week_label": week_label_by_brief.get(bid),
+                "insight_index": r.get("insight_index"),
+            },
+            "open": {
+                "brief_id": bid,
+                "insight_index": r.get("insight_index"),
+                "evidence_id": r["id"],
+            },
+        })
+
+    return items
 
 
 @retry_on_disconnect
@@ -99,93 +257,9 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     """
     c = require_client()
 
-    # ── Briefs for this dataset: id → week_label. Drives PRD/evidence scoping
-    #    and supplies the human "from Brief <week_label>" source line. ────────
-    brief_rows = (
-        c.table("briefs")
-        .select("id, week_label")
-        .eq("dataset", dataset)
-        .execute()
-        .data
-        or []
-    )
-    brief_ids = [r["id"] for r in brief_rows]
-    week_label_by_brief = {r["id"]: r.get("week_label") for r in brief_rows}
-
-    items: list[dict] = []
-
-    if brief_ids:
-        # ── PRDs (brief_id IN brief_ids) ────────────────────────────────────
-        prd_rows = (
-            c.table("prds")
-            .select(
-                "id, brief_id, insight_index, theme_id, source, "
-                "title, status, generated_at"
-            )
-            .in_("brief_id", brief_ids)
-            .execute()
-            .data
-            or []
-        )
-        # A PRD is regenerated in place: each attempt is a new prds row in the
-        # same family. The artifacts list shows only the LATEST generation per
-        # logical PRD; older generations are reachable from the PRD's Version
-        # History (see routes/prd.py /{prd_id}/generations). What counts as a
-        # family is per-source — see _prd_family_key.
-        latest_by_key: dict[tuple, dict] = {}
-        for r in prd_rows:
-            key = _prd_family_key(r)
-            cur = latest_by_key.get(key)
-            if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
-                latest_by_key[key] = r
-        for r in latest_by_key.values():
-            bid = r["brief_id"]
-            items.append({
-                "type": "prd",
-                "id": r["id"],
-                "title": r.get("title") or "Untitled PRD",
-                "status": r.get("status") or "",
-                "created_at": r.get("generated_at"),
-                "source": {
-                    "brief_id": bid,
-                    "week_label": week_label_by_brief.get(bid),
-                    "insight_index": r.get("insight_index"),
-                },
-                "open": {
-                    "brief_id": bid,
-                    "insight_index": r.get("insight_index"),
-                    "prd_id": r["id"],
-                },
-            })
-
-        # ── Evidences (brief_id IN brief_ids) ───────────────────────────────
-        ev_rows = (
-            c.table("evidences")
-            .select("id, brief_id, insight_index, title, status, generated_at")
-            .in_("brief_id", brief_ids)
-            .execute()
-            .data
-            or []
-        )
-        for r in ev_rows:
-            bid = r["brief_id"]
-            items.append({
-                "type": "evidence",
-                "id": r["id"],
-                "title": r.get("title") or "Untitled evidence",
-                "status": r.get("status") or "",
-                "created_at": r.get("generated_at"),
-                "source": {
-                    "brief_id": bid,
-                    "week_label": week_label_by_brief.get(bid),
-                    "insight_index": r.get("insight_index"),
-                },
-                "open": {
-                    "brief_id": bid,
-                    "insight_index": r.get("insight_index"),
-                    "evidence_id": r["id"],
-                },
-            })
+    # PRDs + evidences, normalized and family-collapsed (shared with the
+    # chat's open-artifact lookup — see list_document_artifacts).
+    items: list[dict] = list_document_artifacts(dataset=dataset)
 
     # ── Prototypes (workspace_id = company UUID). Title is derived from the
     #    parent PRD (prototypes have no title column). ─────────────────────────
