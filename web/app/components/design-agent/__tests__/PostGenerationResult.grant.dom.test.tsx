@@ -86,7 +86,7 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
 
     // Resolve the mint → the viewer + overlay mount.
-    resolveMint?.()
+    ;(resolveMint as (() => void) | null)?.()
     await waitFor(() => {
       expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
     })

@@ -47,9 +47,34 @@ env:
   PORT:          ${{ github.ref == 'refs/heads/production' && '8000' || '8010' }}
 
 jobs:
+  # Backstop gate: re-run the backend fast lane before touching prod, so a red
+  # suite can never migrate the DB or restart the service — even on a direct
+  # push to main that bypassed the PR check. Fast lane only (~3-4 min); the
+  # integration lane already ran on the PR-to-main. Belt-and-braces with the
+  # branch-protection required check (test-backend.yml).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'  # MUST match the EC2 runtime (prod+staging venvs are 3.11) — newer CI Pythons accept syntax (e.g. PEP 701 f-strings) that breaks the deploy; see backend/tests/test_runtime_compat.py
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dev requirements
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run pytest (fast lane — no integration tests)
+        working-directory: backend
+        run: python -m pytest tests/ -q --strict-markers -m "not integration"
+
   # Apply pending DB migrations first. Gates the deploy: if a migration fails,
-  # the backend is NOT restarted onto code that needs it.
+  # the backend is NOT restarted onto code that needs it. Runs only after the
+  # test job is green so a broken build never mutates the schema.
   migrate:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

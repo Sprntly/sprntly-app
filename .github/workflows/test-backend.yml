@@ -6,10 +6,12 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/test-backend.yml'
-  pull_request:
-    paths:
-      - 'backend/**'
-      - '.github/workflows/test-backend.yml'
+  # No paths filter on PRs: these checks are REQUIRED in branch protection, and a
+  # required check that never runs (because a PR didn't touch its paths) leaves
+  # the PR stuck "pending" forever. Running on every PR guarantees the check
+  # always reports. The fast lane is ~3-4 min; the integration lane still gates
+  # itself to PRs→main via its job-level `if`.
+  pull_request: {}
   schedule:
     # Nightly full suite (integration lane) — 02:00 UTC
     - cron: '0 2 * * *'

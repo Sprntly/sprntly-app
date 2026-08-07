@@ -40,7 +40,32 @@ env:
   SUPA_ANON: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
 
 jobs:
+  # Backstop gate: run the web suite + typecheck before shipping the bundle, so a
+  # red suite or type error can never reach prod even on a direct push to main.
+  # Belt-and-braces with the branch-protection required check (test-web.yml).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install deps
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Vitest
+        working-directory: web
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm test
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

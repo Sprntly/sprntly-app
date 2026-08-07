@@ -64,7 +64,7 @@ describe("AppLayout — shell composition", () => {
 
   it("hideChromeStrip suppresses the chrome strip but keeps the rail + main", () => {
     const { container, queryByTestId, getByTestId } = render(
-      React.createElement(AppLayout, { hideChromeStrip: true }, "x"),
+      React.createElement(AppLayout, { hideChromeStrip: true, children: "x" }),
     )
     expect(queryByTestId("chrome")).toBeNull()
     expect(getByTestId("sidebar")).toBeTruthy()
@@ -73,7 +73,7 @@ describe("AppLayout — shell composition", () => {
 
   it("inlineChat renders the chat aside column alongside main", () => {
     const { container, getByTestId } = render(
-      React.createElement(AppLayout, { inlineChat: true }, "x"),
+      React.createElement(AppLayout, { inlineChat: true, children: "x" }),
     )
     expect(container.querySelector(".main-with-inline-chat")).toBeTruthy()
     expect(container.querySelector(".ai-inline-column")).toBeTruthy()
