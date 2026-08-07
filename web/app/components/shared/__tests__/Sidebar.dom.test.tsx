@@ -106,30 +106,26 @@ describe("Sidebar — New chat wiring", () => {
   })
 })
 
-// ── Workbench (2026-07-31) ───────────────────────────────────────────────────
-// The rail has two doors into the same tabbed home surface, and they must not
-// collapse into one: "Workbench" restores the last CHAT tab (goToWorkbench →
-// `/?tab=last`), "Top Insights" activates the pinned brief tab (goTo("brief")).
-describe("Sidebar — Workbench", () => {
-  it("renders Workbench directly above Top Insights", () => {
+// ── Workbench: hidden from the rail (2026-08-07) ─────────────────────────────
+// The Workbench trigger is commented out of the rail on a product call, the
+// same way Search is. The surface behind it is NOT gone: goToWorkbench and the
+// `/?tab=last` one-shot ChatScreen consumes are untouched, so these tests only
+// assert the rail no longer offers the door — never that the tab stopped
+// working. Top Insights keeps its own, separate door to the pinned brief tab.
+describe("Sidebar — Workbench (hidden)", () => {
+  it("no longer renders the Workbench trigger", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByTestId("sidebar-workbench")).toBeNull()
+    expect(screen.queryByLabelText("Workbench")).toBeNull()
+    expect(goToWorkbench).not.toHaveBeenCalled()
+  })
+
+  it("Top Insights is now the first rail item, and still routes to the pinned brief tab", () => {
     const { container } = render(React.createElement(Sidebar))
     const labels = Array.from(container.querySelectorAll(".sb-rail-nav .sb-rail-label")).map(
       (el) => el.textContent,
     )
-    expect(labels[0]).toBe("Workbench")
-    expect(labels[1]).toBe("Top Insights")
-  })
-
-  it("Workbench uses goToWorkbench — never the plain screen nav or new-chat", () => {
-    render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Workbench"))
-    expect(goToWorkbench).toHaveBeenCalledTimes(1)
-    expect(goTo).not.toHaveBeenCalled()
-    expect(goToNewChat).not.toHaveBeenCalled()
-  })
-
-  it("Top Insights still routes to the pinned brief tab, not the workbench", () => {
-    render(React.createElement(Sidebar))
+    expect(labels[0]).toBe("Top Insights")
     fireEvent.click(screen.getByLabelText("Top Insights"))
     expect(goTo).toHaveBeenCalledWith("brief")
     expect(goToWorkbench).not.toHaveBeenCalled()
@@ -152,11 +148,12 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(openPalette).not.toHaveBeenCalled()
   })
 
-  it("renders New chat, Workbench, Top Insights, All chats, Templates, Guide, Settings + Feedback", () => {
+  // Workbench is deliberately absent from this list — it is hidden on a product
+  // call (2026-08-07), guarded by the "Workbench (hidden)" suite above.
+  it("renders New chat, Top Insights, All chats, Templates, Guide, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
-      "Workbench",
       "Top Insights",
       "Chat history",
       "Ideation",
