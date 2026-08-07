@@ -75,6 +75,9 @@ def slack_env(monkeypatch):
         "history": {c["id"]: _messages(c["id"]) for c in _MEMBER_CHANNELS},
         "members": list(_MEMBER_CHANNELS),
         "calls": [],
+        #: {channel_id: auto_join flag the read was made with} — the write
+        #: side effect, recorded so a test can assert its ABSENCE.
+        "joins": {},
     }
 
     from app import db
@@ -90,6 +93,7 @@ def slack_env(monkeypatch):
 
     def _history(token, *, channel, limit=None, oldest=None, auto_join=False, **kw):
         env["calls"].append(channel)
+        env["joins"][channel] = auto_join
         found = env["history"].get(channel, [])
         if isinstance(found, Exception):
             raise found
@@ -367,6 +371,87 @@ def test_the_voc_tool_refuses_rather_than_guessing_a_tenant(slack_env):
     assert slack_env["calls"] == []
 
 
+# ── no writes to the customer's workspace ────────────────────────────────────
+
+
+def test_the_implicit_read_never_joins_a_channel(slack_env):
+    """`conversations.join` adds the Sprntly bot to a channel and Slack posts a
+    join notice into the customer's workspace — an outward-facing WRITE.
+
+    This path runs on a question that named no channel and no source ("what are
+    our customers saying?"), so it must not produce one. Asserting the FLAG the
+    read was made with, not just that no join happened, because
+    `fetch_conversation_history` only joins on a `not_in_channel` error: a test
+    that watched for the join itself would pass on healthy fixtures and let the
+    write ship anyway. Same shape as the 2026-08-05 sweep incident, where
+    `open_session` looked read-only and rotated OAuth tokens."""
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "C2"],
+        "sync_channel_names": {"C1": "product-feedback", "C2": "support-escalations"},
+    })]
+    voc.read(COMPANY)
+    assert slack_env["joins"] == {"C1": False, "C2": False}
+
+
+def test_the_voc_tool_never_joins_a_channel_either(slack_env):
+    """The named route reads the same channel SET, none of which the user
+    picked individually — so it inherits the same rule."""
+    slack_env["rows"] = [_row({"sync_channel_ids": ["C1"],
+                               "sync_channel_names": {"C1": "product-feedback"}})]
+    session = sl.PROVIDER.open_session(COMPANY)
+    sl.PROVIDER.dispatch(session, "slack_voc_channels", {})
+    assert set(slack_env["joins"].values()) == {False}
+
+
+def test_the_named_channel_tool_still_joins(slack_env):
+    """The default stays True where it belongs: the user named THAT channel and
+    asked for it, and joining is the obvious repair for the commonest failure.
+    Pinned so the fix above is scoped to the implicit path rather than quietly
+    changing a shipped tool's behaviour."""
+    session = sl.PROVIDER.open_session(COMPANY)
+    sl.PROVIDER.dispatch(session, "slack_channel_history", {"channel": "#demos"})
+    assert slack_env["joins"] == {"C3": True}
+
+
+# ── one workspace's channels, one workspace's token ──────────────────────────
+
+
+def test_the_selection_is_scoped_to_the_token_s_workspace(slack_env):
+    """Channels are merged across rows; the TOKEN comes from one. Two members
+    on different workspaces would otherwise have A's channel ids read with B's
+    token — Slack says `channel_not_found`, and this module would faithfully
+    report a healthy channel as unreadable and tell the user to invite a bot
+    that is already there."""
+    slack_env["rows"] = [
+        _row({"team": {"id": "T-A"}, "sync_channel_ids": ["C1"],
+              "sync_channel_names": {"C1": "product-feedback"}}),
+        _row({"team": {"id": "T-B"}, "sync_channel_ids": ["C2"],
+              "sync_channel_names": {"C2": "support-escalations"}}),
+    ]
+    channels, explicit = voc.configured_channels(COMPANY, "T-A")
+    assert explicit is True
+    assert [c.id for c in channels] == ["C1"]
+    # And the live read picks the scope up from the session's own team.
+    result = voc.read(COMPANY)
+    assert slack_env["calls"] == ["C1"]
+
+
+def test_rows_without_a_recorded_team_are_never_dropped(slack_env):
+    """Excluding on a comparison that cannot be made would lose real channels —
+    one live row carries no `team` at all. Filtering happens only when BOTH
+    sides are known and differ."""
+    slack_env["rows"] = [
+        _row({"sync_channel_ids": ["C1"]}),                       # no team
+        _row({"team": {"id": "T-A"}, "sync_channel_ids": ["C2"]}),
+        _row({"team": {"id": "T-B"}, "sync_channel_ids": ["C3"]}),
+    ]
+    channels, _ = voc.configured_channels(COMPANY, "T-A")
+    assert [c.id for c in channels] == ["C1", "C2"]
+    # No team on the reading side either → no filtering at all.
+    channels, _ = voc.configured_channels(COMPANY, "")
+    assert [c.id for c in channels] == ["C1", "C2", "C3"]
+
+
 # ── the stored catalog layer ─────────────────────────────────────────────────
 
 
@@ -590,10 +675,57 @@ def test_feedback_questions_route_to_the_voc_path_without_naming_slack():
         assert not is_connector_lookup(q), q
 
 
+def test_the_rules_reach_the_phrasings_people_actually_use():
+    """RECALL IS THE FEATURE. The requirement is that a user reaches their Slack
+    feedback channels without naming Slack; a rule set that only fires on "what
+    are our customers saying" ships a capability almost nobody can reach. These
+    eleven are natural phrasings measured against the pre-widening rules, where
+    only three matched."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "any complaints about the new pricing?",
+        "what feedback did we get on onboarding",
+        "what's the sentiment on the redesign",
+        "what pain points came up this week",
+        "how did people react to the pricing change",
+        "what's the biggest problem our customers have",
+        "what are the top issues right now",
+        "what did customers think of the new checkout",
+        "anything customers are unhappy about",
+        "what's been happening in our feedback channels",
+        "anything new in the support channels?",
+    ]:
+        assert is_voc_report_request(q), q
+        assert "slack" not in q.lower()
+
+
+def test_a_generative_request_is_never_diverted_into_a_voc_report():
+    """PRECISION, and the half that pulls AGAINST the recall above — which is
+    why they are one change.
+
+    Each of these carries a customer noun and a feedback noun on its way to
+    asking for an ARTIFACT. `is_voc_report_request` is consulted before
+    `route()`, so capturing one returns a voice-of-customer report instead of
+    the PRD or tickets the user asked for. The first two are the reported
+    regression; the rest are the same shape."""
+    from app.skill_router import is_voc_report_request
+
+    for q in [
+        "write a PRD for the feature customers are asking for",
+        "our users are frustrated with onboarding - draft tickets for it",
+        "draft a PRD from what customers are saying",
+        "create tickets for the top customer complaints",
+        "generate a spec for the thing users keep requesting",
+        "build a prototype for the top customer request",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
 def test_the_widened_rules_do_not_divert_ordinary_questions():
-    """The precision half. These carry a customer-noun or a channel-noun and
-    must still reach normal routing — a VoC rule that claims them turns every
-    product question into a feedback report."""
+    """The precision half. These carry a customer-noun, a channel-noun or a
+    feedback-noun and must still reach normal routing — a VoC rule that claims
+    them turns every product question into a feedback report."""
     from app.skill_router import is_voc_report_request
 
     for q in [
@@ -603,6 +735,16 @@ def test_the_widened_rules_do_not_divert_ordinary_questions():
         "generate a PRD for the onboarding channel picker",
         "what is our sales channel strategy",
         "summarize this document",
+        # Feedback on OUR OWN work is not voice of customer. Rule 1 of the
+        # recall set would claim the first of these without the veto.
+        "give me feedback on my PRD draft",
+        "summarize the feedback from the beta survey",
+        "we built this from customer feedback",
+        "draft a launch email for customers",
+        "update the ticket description",
+        "what is our churn rate",
+        "show me the open PRs",
+        "what did we ship last sprint",
     ]:
         assert not is_voc_report_request(q), q
 
@@ -760,6 +902,90 @@ def test_the_digest_banner_separates_live_reads_from_stored_summaries(
     assert "never what was said in them during this window" in banner
     # And the summary itself reached the corpus, so the answer can use it.
     assert "demo scheduling and renewal churn" in captured["input"]
+
+
+def test_a_connected_company_with_no_channels_is_not_told_to_connect_fireflies(
+    slack_env, monkeypatch
+):
+    """The most likely shape in the live data: Slack connected, no explicit
+    selection anywhere in the fleet, bot in no channel — `connected=True,
+    reads=0, render=""`. Gating the dead end on `render()` (or on `voc.reads`)
+    sent this company to "no call source is connected yet. Connect Fireflies or
+    Zoom", while its Slack sat connected and working. `has_call_source` returns
+    True for exactly these companies, so the digest CLAIMS the turn and has to
+    be able to finish it."""
+    import app.call_digest as cd
+    import app.graph.gateway as gateway_mod
+
+    slack_env["rows"] = [_row()]        # connected, no selection
+    slack_env["members"] = []           # bot in no channel
+    slack_env["catalog"] = []
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "build_kg_context", lambda *a, **k: cd.KgContext())
+
+    spent: list = []
+    monkeypatch.setattr(
+        gateway_mod, "llm_call", lambda **kw: spent.append(kw) or None
+    )
+
+    assert cd.has_call_source(COMPANY) is True      # the turn IS claimed
+    payload = cd.answer(enterprise_id=COMPANY, question="what are customers saying?")
+
+    assert spent == []
+    assert "Fireflies" not in payload["answer"]
+    assert "Zoom" not in payload["answer"]
+    assert "invite @Sprntly" in payload["answer"]
+    assert "Voice of Customer & Support" in payload["answer"]
+    assert "not a sign that customers have said nothing" in payload["answer"]
+
+
+def test_the_total_char_ceiling_drops_a_whole_channel_and_says_so(slack_env,
+                                                                  monkeypatch):
+    """The overflow path DROPS a whole low-priority channel rather than cutting
+    one mid-message — a half-rendered channel reads as a complete one. Honest
+    today and previously unpinned, so a future edit could start silently
+    truncating with every test still green."""
+    monkeypatch.setattr(voc, "TOTAL_CHARS", 200)
+    slack_env["rows"] = [_row({
+        "sync_channel_ids": ["C1", "C2", "C3"],
+        "sync_channel_names": {
+            "C1": "product-feedback", "C2": "support-escalations", "C3": "demos",
+        },
+    })]
+    for cid in ("C1", "C2", "C3"):
+        slack_env["history"][cid] = [
+            {"ts": f"178000000{i}.1", "user": "U1", "text": f"{cid} msg {i} " + "x" * 80}
+            for i in range(4)
+        ]
+
+    result = voc.read(COMPANY)
+    dropped = [r for r in result.reads if r.status == voc.STATUS_DROPPED]
+    assert dropped, "the ceiling must drop a channel, not trim every one"
+    # A dropped channel carries NO partial text and IS named with its reason.
+    for r in dropped:
+        assert r.text == ""
+        assert "dropped from this prompt for length" in r.reason()
+    block = result.render()
+    for r in dropped:
+        assert r.channel.label in block
+    # THE AGGREGATE NEVER VANISHES. Without a first-channel floor, one channel
+    # bigger than the ceiling drops every channel behind it, render() finds
+    # nothing usable and returns "", and the whole block disappears with
+    # nothing said about it — the silent-absence failure reached through the
+    # length path instead of the read path.
+    kept = [r for r in result.reads if r.usable]
+    assert kept, "the ceiling must not drop everything"
+    assert block, "the block must never silently vanish to the char ceiling"
+
+
+def test_the_per_channel_cap_cannot_exceed_the_total_ceiling():
+    """A constant that must dominate another is only correct on the day it is
+    written unless the relationship itself is asserted. If `PER_CHANNEL_CHARS`
+    ever grows past `TOTAL_CHARS`, the drop path stops being a rare overflow
+    and becomes the common case — this fails loudly instead."""
+    assert voc.PER_CHANNEL_CHARS <= voc.TOTAL_CHARS
 
 
 def test_config_keys_match_the_sync_paths_keys():

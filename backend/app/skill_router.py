@@ -367,19 +367,119 @@ _VOC_SAYING_RULE = re.compile(
 )
 
 
-def is_voc_report_request(question: str) -> bool:
-    """True for a bare 'voice of customer' / 'VoC report' request, a
-    feedback-from-customer-conversations phrasing, a top/summarize-customer-
-    feedback phrasing, a what-are-customers-saying phrasing, or a question about
-    the channels connected for voice of customer. Distinct from is_call_digest
-    (which needs a call-noun); used by qa_agent to route these to the live
-    voice-of-customer pass when a voice source is connected.
+# ── Recall: how people ACTUALLY ask for voice of customer ────────────────────
+#
+# The rules above were each written for one reported misroute, so between them
+# they cover the phrasings that happened to get reported. Measured against
+# eleven natural phrasings, only three matched; the rest fell through to the
+# generic path. Since the requirement is that a user reaches their Slack
+# feedback channels WITHOUT naming Slack, recall IS the feature here — a rule
+# set that only fires on "what are our customers saying" ships a capability
+# almost nobody can reach.
+#
+# WIDENING RECALL AND KEEPING PRECISION ARE ONE CHANGE, NOT TWO. Every rule
+# below makes a generative request more likely to be captured too ("write a PRD
+# for the feature customers are asking for" carries a customer noun and a
+# request noun), so the veto below is not a follow-up — it is what makes the
+# widening safe, and the two must be read together.
 
-    The last two rules are what make Slack's configured feedback channels
-    reachable WITHOUT the word "slack" ever appearing in the message: the
-    digest reads them (call_digest._slack_voc_read), and this predicate is what
-    sends a source-agnostic feedback question to the digest in the first place.
+#: Nouns that mean "something a customer expressed".
+_VOICE_NOUN = (
+    r"(?:complaints?|pain[-\s]*points?|gripes?|frustrations?|feedback|"
+    r"sentiment|reactions?|reception|praise|kudos|concerns?)"
+)
+_CUSTOMER_NOUN = r"(?:customer|user|client|buyer|subscriber|people|folks)s?"
+_RANK_WORD = (
+    r"(?:top|biggest|main|most\s+common|most\s+frequent|number\s*(?:one|1)|"
+    r"loudest|worst|key|recurring)"
+)
+
+_VOC_RECALL_RULES: list[re.Pattern] = [
+    # "any complaints about the new pricing?", "concerns around the redesign",
+    # "what's the sentiment on the redesign", "reaction to the pricing change"
+    re.compile(_VOICE_NOUN + r"\s+(?:about|on|around|regarding|towards?|to|with)\b",
+               re.I),
+    # "what feedback did we get on onboarding", "what feedback has come in"
+    re.compile(
+        _VOICE_NOUN + r"\b.{0,30}\b(?:did|have|has|are|is)?\s*we?\s*"
+        r"(?:get|got|receive[d]?|hear[d]?|see[n]?|collect(?:ed)?|come\s+in)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:get|got|receiv\w+|hear\w*|collect\w*)\b.{0,20}\b" + _VOICE_NOUN,
+               re.I),
+    # "what pain points came up this week", "complaints raised this month"
+    re.compile(
+        _VOICE_NOUN + r"\b.{0,30}\b(?:came?\s+up|com(?:e|ing)\s+up|raised|"
+        r"surfaced|flagged|reported|brought\s+up)\b",
+        re.I,
+    ),
+    # "how did people react to the pricing change", "how are users finding it"
+    re.compile(
+        r"\bhow\s+(?:did|do|are|is|has|have)\b.{0,25}\b" + _CUSTOMER_NOUN
+        + r"\b.{0,25}\b(?:react\w*|respond\w*|feel\w*|find\w*|tak(?:e|ing)|"
+        r"receiv\w*|like|liked)\b",
+        re.I,
+    ),
+    # "what did customers think of the new checkout"
+    re.compile(
+        _CUSTOMER_NOUN + r"\b.{0,25}\b(?:think|thought|feel|felt)\b\s*"
+        r"(?:of|about)\b",
+        re.I,
+    ),
+    # "what's the biggest problem our customers have", "top issues right now".
+    # `issues`/`problems` are ALSO tracker nouns, so they are admitted only with
+    # a ranking word — `_stateless_tracker_lookup` needs a read VERB on a PM
+    # noun and matches none of these, verified, so no tracker turn is stolen.
+    re.compile(
+        _RANK_WORD + r"\b.{0,30}\b(?:issues?|problems?|complaints?|"
+        r"pain[-\s]*points?|asks?|requests?)\b",
+        re.I,
+    ),
+]
+
+#: A request for feedback ON OUR OWN WORK is not voice of customer.
+#: "give me feedback on my PRD draft" and "summarize the feedback from the beta
+#: survey" are both pinned as negatives by the existing suite, and rule 1 above
+#: would otherwise claim the first of them.
+_VOC_SELF_REVIEW_VETO = re.compile(
+    r"\b(?:feedback|thoughts?|comments?|critique|notes?)\s+(?:on|about)\s+"
+    r"(?:my|your|our|this|the)\b(?:\s+\w+){0,2}\s+"
+    r"\b(?:prd|draft|doc|document|spec|ticket|design|copy|writing|code|plan|"
+    r"proposal|deck|email|answer|response|version|wording)\b"
+    r"|\bgive\s+me\s+feedback\b|\bfeedback\s+on\s+(?:my|mine)\b",
+    re.I,
+)
+
+
+def is_voc_report_request(question: str) -> bool:
+    """True for a bare 'voice of customer' / 'VoC report' request, or any of the
+    ways people actually ask what customers have said. Distinct from
+    is_call_digest (which needs a call-noun); used by qa_agent to route these to
+    the live voice-of-customer pass when a voice source is connected.
+
+    This predicate is what makes Slack's configured feedback channels reachable
+    WITHOUT the word "slack" ever appearing in the message — the digest reads
+    them (`call_digest._slack_voc_read`), and this is what sends a
+    source-agnostic feedback question to the digest in the first place.
+
+    TWO VETOES, BOTH LOAD-BEARING, both checked before any positive rule:
+
+    GENERATIVE REQUESTS. "write a PRD for the feature customers are asking for"
+    and "our users are frustrated with onboarding — draft tickets for it" are
+    commands to CREATE something, and they carry a customer noun and a feedback
+    noun on the way. Because this predicate is consulted at qa_agent:~1582,
+    BEFORE `route()`, capturing one returns a voice-of-customer report instead
+    of the artifact the user asked for. `_vetoed_as_creation` is reused rather
+    than reinvented: it is position-aware (a create verb BEFORE the noun governs
+    the request; after it, the verb is part of what is being looked for), it is
+    already tested, and it was measured on both sets here — true for every
+    generative phrasing, false for every read phrasing.
+
+    FEEDBACK ON OUR OWN WORK. "give me feedback on my PRD draft" is not customer
+    voice. See `_VOC_SELF_REVIEW_VETO`.
     """
+    if _vetoed_as_creation(question) or _VOC_SELF_REVIEW_VETO.search(question):
+        return False
     return bool(
         _VOC_COMPLAINT_RULE.search(question)
         or _VOC_REPORT_RULE.search(question)
@@ -387,6 +487,7 @@ def is_voc_report_request(question: str) -> bool:
         or _VOC_CUSTOMER_FEEDBACK_RULE.search(question)
         or _VOC_CHANNEL_RULE.search(question)
         or _VOC_SAYING_RULE.search(question)
+        or any(p.search(question) for p in _VOC_RECALL_RULES)
     )
 
 

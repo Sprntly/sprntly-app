@@ -309,6 +309,12 @@ class SlackHandle:
     #: (the voice-of-customer channel selection) without a second credential
     #: read, not so anything can name a tenant.
     company_id: str = ""
+    #: The Slack WORKSPACE (`team.id`) whose token this handle carries. A
+    #: company can hold rows for several workspaces, so any code pairing this
+    #: token with configuration stored on ANOTHER row must filter on it — see
+    #: `slack_voc.configured_channels`. "" means the row recorded no team, in
+    #: which case no filtering is possible and none is done.
+    team_id: str = ""
     users: dict[str, str] = field(default_factory=dict, repr=False)
     channels: list[dict] = field(default_factory=list, repr=False)
     workspace_channels: list[dict] = field(default_factory=list, repr=False)
@@ -420,6 +426,71 @@ class SlackHandle:
         return ref
 
 
+def _row_team_id(row: dict) -> str:
+    """The Slack workspace (`team.id`) a connection row belongs to, or "".
+
+    A company can hold rows for DIFFERENT workspaces — `db/connections.py`
+    already keys on this. Anything that pairs a token with configuration from
+    another row has to check it, or it reads workspace A's channel ids with
+    workspace B's token.
+    """
+    try:
+        config = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(config, dict):
+        return ""
+    team = config.get("team")
+    if isinstance(team, dict):
+        return str(team.get("id") or "").strip()
+    return ""
+
+
+def _load_session_tokens(company_id: str) -> tuple[str | None, str | None, str]:
+    """`(bot_token, user_token, team_id)` — `_load_tokens` plus the WORKSPACE
+    the chosen row belongs to.
+
+    Split from `_load_tokens` rather than widening it: that function's
+    two-tuple contract is what every existing caller and test binds to, and the
+    team id is only needed by the one caller that pairs this token with another
+    row's stored configuration (the voice-of-customer channel selection).
+    """
+    from app import db
+
+    rows: list[dict] = []
+    try:
+        rows = list(db.list_slack_connections(company_id) or [])
+    except Exception:  # noqa: BLE001 — fall back to the company-scoped row
+        logger.warning("slack-lookup: per-user row lookup failed", exc_info=True)
+    if not rows:
+        try:
+            row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
+        except Exception:  # noqa: BLE001
+            logger.warning("slack-lookup: connection lookup failed", exc_info=True)
+            row = None
+        rows = [row] if row else []
+
+    best: tuple[str | None, str | None, str] = (None, None, "")
+    for row in rows:
+        if not row:
+            continue
+        try:
+            token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        except (TokenEncryptionError, ValueError, KeyError, TypeError):
+            logger.warning("slack-lookup: could not decrypt a Slack token for %s",
+                           company_id)
+            continue
+        bot = token_json.get("access_token")
+        if not bot:
+            continue
+        user = token_json.get("user_access_token") or None
+        if user:
+            return bot, user, _row_team_id(row)
+        if best == (None, None, ""):
+            best = (bot, None, _row_team_id(row))
+    return best
+
+
 def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
     """Return `(bot_token, user_token)` for the company, or (None, None).
 
@@ -437,41 +508,13 @@ def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
 
     Tenancy: every read is keyed by the authenticated company_id — the only
     company id in scope. Nothing here is derived from model input.
+
+    Thin wrapper over `_load_session_tokens`, which additionally reports the
+    WORKSPACE the chosen row belongs to. Kept as a two-tuple because that is the
+    contract every existing caller binds to.
     """
-    from app import db
-
-    rows: list[dict] = []
-    try:
-        rows = list(db.list_slack_connections(company_id) or [])
-    except Exception:  # noqa: BLE001 — fall back to the company-scoped row
-        logger.warning("slack-lookup: per-user row lookup failed", exc_info=True)
-    if not rows:
-        try:
-            row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
-        except Exception:  # noqa: BLE001
-            logger.warning("slack-lookup: connection lookup failed", exc_info=True)
-            row = None
-        rows = [row] if row else []
-
-    best: tuple[str | None, str | None] = (None, None)
-    for row in rows:
-        if not row:
-            continue
-        try:
-            token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-        except (TokenEncryptionError, ValueError, KeyError, TypeError):
-            logger.warning("slack-lookup: could not decrypt a Slack token for %s",
-                           company_id)
-            continue
-        bot = token_json.get("access_token")
-        if not bot:
-            continue
-        user = token_json.get("user_access_token") or None
-        if user:
-            return bot, user
-        if best == (None, None):
-            best = (bot, None)
-    return best
+    bot, user, _team = _load_session_tokens(company_id)
+    return bot, user
 
 
 def is_shareable_channel(channel: dict, bot_channel_ids: set[str]) -> bool:
@@ -582,11 +625,24 @@ class ChannelHistory:
 
 
 def read_channel_history(
-    handle: SlackHandle, ref: str, days: object = None
+    handle: SlackHandle, ref: str, days: object = None, *, auto_join: bool = True
 ) -> ChannelHistory:
     """Read one channel's recent messages. Raises exactly what `_history` used
     to raise: a non-access `HTTPException` and any `requests` error pass
-    through, so `dispatch`'s wrapper still turns them into the same copy."""
+    through, so `dispatch`'s wrapper still turns them into the same copy.
+
+    `auto_join` IS A WRITE TO THE CUSTOMER'S WORKSPACE — `conversations.join`
+    adds the Sprntly bot to a channel and Slack posts a join notice into it.
+    It defaults True because this function's original caller is the
+    `slack_channel_history` TOOL, where the user named that channel and asked
+    for it; joining is then the obvious repair for the commonest failure.
+
+    It MUST be False on any implicit path — a question that named no channel,
+    or no source at all. See `slack_voc._read_one`: "what are our customers
+    saying?" is a read, and a read must not put the bot into a customer's
+    channels as a side effect. Same class as the 2026-08-05 sweep incident,
+    where `open_session` looked read-only and rotated OAuth tokens.
+    """
     try:
         window = int(days or _DEFAULT_DAYS)
     except (TypeError, ValueError):
@@ -600,9 +656,10 @@ def read_channel_history(
         # read fails, and a public channel is one idempotent
         # conversations.join away from working. Private channels can't be
         # self-joined, so those still fail — with copy that says why.
+        # Caller-controlled, and OFF on every implicit path (see the docstring).
         data = slack_oauth.fetch_conversation_history(
             handle.bot_token, channel=channel_id, limit=_MAX_MESSAGES,
-            oldest=oldest, auto_join=True,
+            oldest=oldest, auto_join=auto_join,
         )
     except HTTPException as exc:
         access = _channel_access_text(handle, ref, str(exc.detail))
@@ -651,7 +708,7 @@ class SlackProvider:
     keywords = ("slack", "#channel")
 
     def open_session(self, enterprise_id: str) -> LookupSession | None:
-        bot, user = _load_tokens(enterprise_id)
+        bot, user, team_id = _load_session_tokens(enterprise_id)
         if not bot:
             return None
         notes = [
@@ -670,7 +727,8 @@ class SlackProvider:
         return LookupSession(
             provider=self.provider,
             handle=SlackHandle(
-                bot_token=bot, user_token=user, company_id=enterprise_id
+                bot_token=bot, user_token=user, company_id=enterprise_id,
+                team_id=team_id,
             ),
             notes=notes,
         )

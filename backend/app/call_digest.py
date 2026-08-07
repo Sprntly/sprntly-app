@@ -610,8 +610,6 @@ def has_call_source(company_id: str) -> bool:
     # voice source was Slack fell through to the what-to-connect guidance and
     # was told to connect Fireflies — while its feedback channels sat connected
     # and readable. One DB read, no decrypt, no network (see has_voc_channels).
-    from app.connector_lookup import slack_voc
-
     if slack_voc.has_voc_channels(company_id):
         return True
     return _zoom_context(company_id) is not None
@@ -1454,14 +1452,33 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # this week" is a true, checkable answer that only this leg can support, and
     # it is strictly better than "no call source is connected" told to a company
     # whose Slack is connected and working.
-    # Slack IS the voice source here, and every one of its channels was
-    # unreadable. Telling this company to connect Fireflies is both wrong and
-    # unactionable: what it needs is the channel name and `/invite @Sprntly`.
-    # Placed ahead of the generic dead ends because it is strictly more
-    # specific than any of them, and it never fires when anything was read
-    # (`voc_block` is empty exactly when nothing reached the prompt).
-    if not voc_block and voc.reads and not corpus.calls and not corpus.docs \
-            and not kg.present:
+    # Slack IS the voice source here, and nothing came back from it. Telling
+    # this company to connect Fireflies is both wrong and unactionable — what
+    # it needs is the channel name and `/invite @Sprntly`, or the Settings
+    # picker. Placed ahead of the generic dead ends because it is strictly more
+    # specific than any of them.
+    #
+    # GATED ON `voc.connected`, NOT ON `voc.reads`. An earlier version required
+    # at least one channel in scope, which missed the single most likely shape
+    # in the live data: Slack connected, no explicit selection anywhere, and the
+    # bot in no channel — `connected=True, reads=0, render=""`. That fell
+    # through to "no call source is connected yet. Connect Fireflies or Zoom",
+    # told to a company whose Slack is connected and working. `has_call_source`
+    # now returns True for exactly these companies, so the digest CLAIMS the
+    # turn and must be able to finish it.
+    if (
+        not voc_block and voc.connected
+        and not corpus.calls and not corpus.docs and not kg.present
+    ):
+        if not voc.reads:
+            return _plain_payload(
+                "Slack is connected, but I couldn't find any customer-feedback "
+                "channels to read — the Sprntly bot isn't in any channel yet. "
+                "Pick the channels that carry customer feedback under "
+                "**Settings → Connectors → Voice of Customer & Support → "
+                "Slack**, and run `/invite @Sprntly` in each one. This is a "
+                "setup gap, not a sign that customers have said nothing."
+            )
         blocked = "; ".join(
             f"{r.channel.label} — {r.reason()}" for r in voc.unread_channels
         )

@@ -73,12 +73,24 @@ THE THREE PROPERTIES THAT MUST NOT DRIFT:
   hand-written `sync_channel_ids` containing a `D…` id cannot become a leak,
   and so there is one place to read when someone proposes widening it.
 
-TENANCY + WRITES. Every read is keyed by the authenticated company id. Opening
-the Slack session is READ-ONLY — `slack._load_tokens` decrypts stored tokens and
-never refreshes, because Slack bot tokens (`xoxb-…`) do not expire. That is what
-makes this safe to run on an implicit, source-agnostic question; see the
-2026-08-05 sweep/`open_session` incident for the providers where it is not
-(Jira, Confluence, HubSpot all WRITE on open).
+TENANCY + WRITES. Every read is keyed by the authenticated company id. TWO
+write paths had to be closed for this to be honestly called read-only, and only
+one of them was obvious:
+
+  - opening the session does not write. `slack._load_tokens` decrypts stored
+    tokens and never refreshes, because Slack bot tokens (`xoxb-…`) do not
+    expire. See the 2026-08-05 sweep/`open_session` incident for the providers
+    where this is NOT true (Jira, Confluence and HubSpot all write on open);
+  - reading a channel does not JOIN it. `slack_oauth.fetch_conversation_history`
+    takes `auto_join`, and the `slack_channel_history` tool passes True —
+    correctly, because there the user named the channel. This path passes
+    **False** (`_read_one`). `conversations.join` adds the bot to a channel and
+    Slack posts a join notice into the customer's workspace; a question that
+    named no channel and no source must not produce one. An unjoined channel is
+    reported as not-read with `/invite @Sprntly` copy instead.
+
+The lesson from the first incident applied to the second: a path described as
+read-only in prose is worth nothing until each call it makes has been followed.
 """
 from __future__ import annotations
 
@@ -425,7 +437,9 @@ def _row_config(row: dict) -> dict:
         return {}
 
 
-def configured_channels(company_id: str) -> tuple[list[VocChannel], bool]:
+def configured_channels(
+    company_id: str, team_id: str = ""
+) -> tuple[list[VocChannel], bool]:
     """`(channels, explicit)` — the company's saved VoC channel selection.
 
     MERGED ACROSS EVERY ACTIVE SLACK ROW, not read from one. Slack is the one
@@ -444,6 +458,17 @@ def configured_channels(company_id: str) -> tuple[list[VocChannel], bool]:
     the Settings picker states that with nothing ticked, every channel the bot
     was invited to is read, and `slack_sync.select_sync_channels` implements
     exactly that. `read()` mirrors it.
+
+    `team_id` SCOPES THE MERGE TO ONE SLACK WORKSPACE, and it is not optional
+    correctness. The channels come from every row, but the TOKEN that reads them
+    comes from one (`slack._load_session_tokens`). Two members who connected
+    different workspaces would otherwise have workspace A's channel ids read
+    with workspace B's token: Slack answers `channel_not_found`, and this module
+    faithfully reports a perfectly healthy channel as unreadable and tells the
+    user to `/invite @Sprntly` into a channel the bot is already in. A row is
+    excluded ONLY when both team ids are known and differ — an unrecorded team
+    on either side means no filtering is possible, and dropping channels on a
+    comparison that cannot be made would lose real ones.
 
     Deliberately does NOT read `config.channel_id` / `config.channel_name`.
     Those are the user's brief-DELIVERY target (`POST /connectors/slack/config`
@@ -468,6 +493,12 @@ def configured_channels(company_id: str) -> tuple[list[VocChannel], bool]:
         if not row or row.get("status") != "active":
             continue
         config = _row_config(row)
+        row_team = ""
+        team = config.get("team")
+        if isinstance(team, dict):
+            row_team = str(team.get("id") or "").strip()
+        if team_id and row_team and row_team != team_id:
+            continue
         ids = config.get(CONFIG_SYNC_CHANNEL_IDS) or []
         if not isinstance(ids, (list, tuple)):
             continue
@@ -734,7 +765,17 @@ def _read_one(handle, channel: VocChannel, days: int) -> ChannelRead:
 
     result = ChannelRead(channel=channel)
     ref = f"#{channel.name}" if channel.name else channel.id
-    history = slack_lookup.read_channel_history(handle, channel.id, days)
+    # auto_join=False IS THE LOAD-BEARING ARGUMENT ON THIS LINE.
+    # `conversations.join` adds the Sprntly bot to a channel and Slack posts a
+    # join notice into the customer's workspace — an outward-facing WRITE. This
+    # path runs on an implicit question ("what are our customers saying?") that
+    # named no channel and no source, so it must never cause one. A channel the
+    # bot is not in is reported as not-read with copy telling the user to
+    # `/invite @Sprntly`, which is the same repair without us performing it on
+    # their behalf. Do not "fix" a not_in_channel here by flipping this.
+    history = slack_lookup.read_channel_history(
+        handle, channel.id, days, auto_join=False
+    )
     if history.status == slack_lookup.HISTORY_UNREADABLE:
         result.status = STATUS_UNREADABLE
         result.detail = history.detail
@@ -755,16 +796,34 @@ def _read_one(handle, channel: VocChannel, days: int) -> ChannelRead:
 def _apply_caps(reads: list[ChannelRead]) -> None:
     """Per-channel truncation with an honest marker, then a total ceiling that
     DROPS whole low-priority channels rather than cutting one mid-message — a
-    half-rendered channel reads as a complete one."""
+    half-rendered channel reads as a complete one.
+
+    THE FIRST CHANNEL IS ALWAYS KEPT, truncated to whatever budget exists.
+    Without that floor a single channel larger than `TOTAL_CHARS` drops every
+    channel behind it too, `render()` sees nothing usable and returns "", and
+    the whole aggregate disappears from the answer with nothing said about it —
+    the exact silent-absence failure this module exists to prevent, arrived at
+    through the length path instead of the read path. `PER_CHANNEL_CHARS` is
+    well under `TOTAL_CHARS` today so this cannot fire in production; the floor
+    is here so the invariant does not depend on two constants staying in a
+    relationship nothing enforces (a test asserts that relationship too).
+    """
     from app.connector_lookup.base import cap_text
 
     budget = TOTAL_CHARS
+    kept_any = False
     for read in reads:
         if not read.usable:
             continue
         read.text = cap_text(read.text, limit=PER_CHANNEL_CHARS)
         if len(read.text) <= budget:
             budget -= len(read.text)
+            kept_any = True
+            continue
+        if not kept_any and budget > 0:
+            read.text = cap_text(read.text, limit=budget)
+            budget = 0
+            kept_any = True
             continue
         read.status = STATUS_DROPPED
         read.text = ""
@@ -823,7 +882,9 @@ def read(
         handle = session.handle
 
     try:
-        selected, explicit = configured_channels(company_id)
+        selected, explicit = configured_channels(
+            company_id, getattr(handle, "team_id", "") or ""
+        )
         result.selection = (
             SELECTION_CONFIGURED if explicit else SELECTION_MEMBERSHIP
         )
