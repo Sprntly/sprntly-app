@@ -33,12 +33,20 @@ export function OpenArtifactChips({
   if (!candidates.length) return null
 
   return (
-    <div className={styles.strip} data-testid="open-artifact-chips" role="list">
+    // `role="group"`, not `role="list"`. These are buttons, and putting
+    // `role="listitem"` on a <button> REPLACES its button role — a screen
+    // reader then announces "list item", with no indication the thing is
+    // pressable, on the only control that answers the question above it.
+    <div
+      className={styles.strip}
+      data-testid="open-artifact-chips"
+      role="group"
+      aria-label="Choose which one to open"
+    >
       {candidates.map((c) => (
         <button
           key={`${c.type}-${c.id}`}
           type="button"
-          role="listitem"
           className={styles.chip}
           disabled={disabled}
           data-testid="open-artifact-chip"

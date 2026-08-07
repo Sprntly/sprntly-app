@@ -892,6 +892,12 @@ export type OpenArtifactCandidate = {
   prd_id: number | null
   brief_id: number | null
   insight_index: number | null
+  /** Whether `insight_index` names a REAL brief finding rather than the storage
+   *  sentinel a chat/ideation/uploaded PRD carries (always `0`). Only pass the
+   *  pair to the panel as `meta` when this is true — the panel's Evidence tab
+   *  loads by (briefId, insightIndex), so a sentinel would render the brief's
+   *  first finding underneath an unrelated document. */
+  brief_anchored: boolean
   week_label: string | null
 }
 
@@ -900,8 +906,13 @@ export type OpenArtifactCandidate = {
  *  generating a new document — see backend/app/artifact_open.py), `ambiguous`
  *  must ask, `resolved` opens directly. */
 export type OpenArtifactResult = {
-  status: "resolved" | "ambiguous" | "not_found"
-  artifact_type: OpenArtifactKind
+  /** `unsupported_type` = the user named a real artifact kind this panel cannot
+   *  show (a prototype, a report). It is NOT coerced into a PRD — say where the
+   *  thing actually lives instead. */
+  status: "resolved" | "ambiguous" | "not_found" | "unsupported_type"
+  /** What the user NAMED — may be a kind outside OpenArtifactKind when the
+   *  status is `unsupported_type`. */
+  artifact_type: OpenArtifactKind | string
   query: string
   artifact: OpenArtifactCandidate | null
   candidates: OpenArtifactCandidate[]

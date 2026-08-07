@@ -42,6 +42,7 @@ today's behavior (the message goes to the ask agent), never a broken send.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from app.graph.gateway import llm_call
@@ -79,10 +80,63 @@ INTENTS = (
     "open_artifact",
 )
 
-# Artifact kinds `open_artifact` may name. Mirrors app.artifact_open's
-# OPENABLE_TYPES — the model must not be able to ask for a panel that doesn't
-# exist (a prototype opens on its own route, not the chat panel).
-OPEN_ARTIFACT_TYPES = ("prd", "evidence")
+# Artifact kinds an open request may NAME. Wider than what the chat panel can
+# actually show (app.artifact_open.OPENABLE_TYPES = prd, evidence) on purpose:
+# a user who says "open the dark mode prototype" named a prototype, and the
+# honest answer is "prototypes open from the Artifacts tab", not a silently
+# substituted PRD. The resolver reports `unsupported_type` for the extras;
+# nothing here coerces one kind into another.
+NAMEABLE_ARTIFACT_TYPES = ("prd", "evidence", "prototype", "report", "tickets")
+
+# ── Deterministic OPEN-vs-GENERATE backstop ──────────────────────────────────
+# The prompt below carries the real rule, and the labeled evals that prove it
+# need a live model — which means they cannot gate CI. This regex pair is the
+# part that CAN: a narrow, high-precision detector for the one direction that
+# actually hurts (the user asked to SEE a document and got a new one written).
+#
+# Deliberately narrow, because its job is to be right rather than complete:
+#   - the message must OPEN with a retrieval verb (after at most a short
+#     conversational lead-in), so a verb buried in a subordinate clause
+#     ("draft the email once you've opened the PRD") never triggers it;
+#   - and it must contain NO authoring verb anywhere, so a compound request
+#     ("pull up the billing PRD and then write one for checkout") is left
+#     entirely to the model.
+# Everything it declines falls through to the model's verdict unchanged, so a
+# false negative costs nothing and a false positive is what we spent the
+# narrowness on avoiding.
+_OPEN_LEAD = (
+    r"(?:(?:hey|hi|ok|okay|so|also|and|please|can|could|would|you|"
+    r"quick(?:ly)?)\b[\s,:;–—-]*)*"
+)
+_OPEN_VERBS = (
+    r"(?:open|re-?open|pull\s+up|bring\s+up|show(?:\s+me)?|find|locate|"
+    r"take\s+me\s+to|go\s+to|jump\s+to|switch\s+to|load|display|view|"
+    r"let\s+me\s+see|where\s+(?:is|are|'?s))"
+)
+_OPEN_REQUEST_RE = re.compile(rf"^\s*{_OPEN_LEAD}{_OPEN_VERBS}\b", re.I)
+# Mirrors the authoring vocabulary in web/app/lib/prd-commands.ts (PRD_VERB_SRC)
+# and skill_router's PRD rule, so a message cannot read as "authoring" on one
+# side of the wire and "retrieval" on the other.
+_AUTHORING_VERB_RE = re.compile(
+    r"\b(?:generate|create|write|draft|make|build|prepare|produce|compose|"
+    r"develop|author|spec\s+(?:this|that|it)\s+out|put\s+together|"
+    r"come\s+up\s+with|spin\s+up|whip\s+up|redo|rewrite)\b",
+    re.I,
+)
+
+
+def looks_like_open_request(message: str) -> bool:
+    """True when `message` is UNAMBIGUOUSLY a request to see an existing thing.
+
+    Pure and deterministic — the CI-runnable half of the open-vs-generate
+    guarantee. Used only to veto a `generate_prd` verdict (see
+    `resolve_chat_intent`); it never promotes anything on its own, so its
+    failure mode is "the model decides", not "the wrong thing happens".
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    return bool(_OPEN_REQUEST_RE.search(text)) and not _AUTHORING_VERB_RE.search(text)
 
 # Intents that act ON an existing PRD. edit_prd with no resolvable target is
 # meaningless and downgrades to `answer`; tickets/prototype keep their intent
@@ -111,9 +165,11 @@ _SCHEMA: dict = {
         },
         "artifact_type": {
             "type": ["string", "null"],
-            "enum": [*OPEN_ARTIFACT_TYPES, None],
+            "enum": [*NAMEABLE_ARTIFACT_TYPES, None],
             "description": (
-                "open_artifact only: which existing artifact to open. "
+                "open_artifact only: which existing artifact the user named. "
+                "Report what they asked for even if it is not a prd or "
+                "evidence — naming it is how they get told where it lives. "
                 "Otherwise null."
             ),
         },
@@ -174,8 +230,12 @@ brought up beside the chat: "open the PRD for compliance reporting", "pull up \
 the checkout abandonment PRD", "show me the PRD about onboarding", "bring up \
 the evidence for the export request", "can you open that spec again". Nothing \
 is written, generated or changed — an existing document is put on screen. \
-artifact_type: "prd" for a PRD / spec / requirements doc, "evidence" for the \
-research/evidence write-up behind a finding. artifact_query: the SUBJECT the \
+artifact_type: what the user NAMED — "prd" for a PRD / spec / requirements \
+doc, "evidence" for the research write-up behind a finding, and equally \
+"prototype", "report" or "tickets" when that is what they asked for. Name it \
+honestly even though only PRDs and evidence open in this panel: the others \
+get told where they live, and substituting a PRD for the prototype someone \
+asked for is worse than saying where to find it. artifact_query: the SUBJECT the \
 user named it by, with the document noun and the opening verb stripped — \
 "open the PRD for compliance reporting" → "compliance reporting", "pull up \
 the checkout abandonment PRD" → "checkout abandonment". Resolve a deictic \
@@ -339,7 +399,7 @@ def resolve_chat_intent(
             "task": _clean(out.get("task")),
             "instruction": _clean(out.get("instruction")),
             "artifact_type": (
-                artifact_type if artifact_type in OPEN_ARTIFACT_TYPES else None
+                artifact_type if artifact_type in NAMEABLE_ARTIFACT_TYPES else None
             ),
             "artifact_query": _clean(out.get("artifact_query")),
             "reason": _clean(out.get("reason")) or "",
@@ -353,6 +413,33 @@ def resolve_chat_intent(
             # An edit with no instruction can't be applied; the ask path at
             # least answers the message.
             envelope.update(intent="answer", source="no_instruction")
+        # ── The deterministic backstop ────────────────────────────────────────
+        # A message that is unambiguously "show me an existing thing" must never
+        # come back as a generation, whatever the model said. This is the only
+        # place the guarantee holds without a live model, so it is the only part
+        # of it that CI can gate (the labeled evals below need an API key).
+        #
+        # It vetoes in ONE direction and lands on two safe outcomes: an open
+        # (worst case: "I couldn't find that", which opens nothing) or an answer.
+        # It never turns an `answer` into an action, and it never manufactures a
+        # generation.
+        if envelope["intent"] == "generate_prd" and looks_like_open_request(message):
+            logger.info(
+                "chat intent: vetoing generate_prd for an open-shaped message "
+                "(%r) — routing to open_artifact",
+                message[:120],
+            )
+            envelope.update(
+                intent="open_artifact",
+                source="open_verb_veto",
+                # The model's synthesized `task` is the closest thing to the
+                # subject it identified; keep whatever it already gave for the
+                # open, then fall back to it. `task` is dropped either way —
+                # nothing downstream may read it as a generation brief.
+                artifact_query=envelope["artifact_query"] or envelope["task"],
+                artifact_type=envelope["artifact_type"] or "prd",
+                task=None,
+            )
         if envelope["intent"] == "open_artifact":
             # An open with no subject names nothing to look for. It degrades to
             # `answer` — NEVER to generate_prd: "open a PRD" answered with a
@@ -361,8 +448,12 @@ def resolve_chat_intent(
             if not envelope["artifact_query"]:
                 envelope.update(intent="answer", source="no_artifact_query")
             elif not envelope["artifact_type"]:
-                # PRDs are what people ask to open; an unset/unknown kind
-                # resolves there rather than abandoning a valid request.
+                # Nothing was NAMED (a bare "open that doc") — PRDs are what
+                # people ask for, so resolve there rather than abandon a valid
+                # request. A kind the user DID name is left exactly as they said
+                # it, even when this panel can't show it: app.artifact_open
+                # answers with `unsupported_type` and the client says where it
+                # actually lives.
                 envelope["artifact_type"] = "prd"
         return envelope
     except Exception:  # noqa: BLE001 — dispatch must never break the send

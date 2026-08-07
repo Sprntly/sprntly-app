@@ -138,6 +138,15 @@ type ThreadTurn = {
   timedOut?: boolean
 }
 
+/** Artifact kinds a user can NAME in an open request that this panel does not
+ *  render. Each one opens somewhere — just not here — so the reply names the
+ *  thing they asked for rather than quietly handing back a PRD of that name. */
+const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
+  prototype: "A prototype",
+  report: "A report",
+  tickets: "Tickets",
+}
+
 type BriefMeta = { briefId: number; insightIndex: number }
 
 type ChatTab = {
@@ -492,6 +501,25 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
         ? "Importing your document as a PRD — it'll open in the panel on the right when ready."
         : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready."
   return { answer: `${lead} ${locator}`, key_points: [], citations: [], confidence: 1, unanswered: "" }
+}
+
+/** An open that resolved to a real document the panel then refused to show —
+ *  a PRD mid-regeneration is the live case (`loadPrdById` returns "PRD isn't
+ *  ready yet").
+ *
+ *  This settles the deferred ack as ORDINARY PROSE rather than routing through
+ *  failDeferredAck's error state, because it is neither a failure nor a
+ *  generation: the shared error card says "That answer didn't come through.
+ *  Nothing was saved." — three claims that are all false about an open that
+ *  simply found the document busy. */
+function openFailureReply(detail: string): AskResponse {
+  const reason = detail.trim().replace(/[.\s]+$/, "")
+  return {
+    answer: reason
+      ? `I couldn't open that PRD — ${reason.charAt(0).toLowerCase()}${reason.slice(1)}. Try again in a moment.`
+      : "I couldn't open that PRD just now. Try again in a moment.",
+    key_points: [], citations: [], confidence: 1, unanswered: "",
+  } as AskResponse
 }
 
 // Attached-file chips. Rendered by BOTH composers — attachments live in shared
@@ -1873,14 +1901,21 @@ export function ChatScreen() {
    *  happened instead. No-op once the ack or the questions have already landed. */
   const failDeferredAck = useCallback((tabId: string, seedTurnId: string | undefined, message: string) => {
     if (!seedTurnId || !deferredAckRef.current.has(tabId)) return
-    const turnId = deferredAckRef.current.get(tabId)!.turnId
+    const deferred = deferredAckRef.current.get(tabId)!
+    const turnId = deferred.turnId
     deferredAckRef.current.delete(tabId)
     const detail = message.trim().slice(0, 200)
+    // The verb has to match what was actually attempted. An OPEN that fails
+    // ("PRD isn't ready yet" from loadPrdById) reported as "I couldn't start
+    // that PRD" describes a generation the user never asked for — the same
+    // class of false statement the deferral exists to prevent.
+    const verb = deferred.req.source.kind === "load" ? "open" : "start"
+    const lead = `I couldn't ${verb} that PRD`
     setTabs((prev) => prev.map((t) => t.id === tabId
       ? {
           ...t,
           thread: t.thread.map((tn) => tn.id === seedTurnId
-            ? { ...tn, error: detail ? `I couldn't start that PRD — ${detail}` : "I couldn't start that PRD." }
+            ? { ...tn, error: detail ? `${lead} — ${detail}` : `${lead}.` }
             : tn),
         }
       : t))
@@ -1943,7 +1978,18 @@ export function ChatScreen() {
     // until the clarify gate says which response the user is actually getting
     // (see deferredAckRef). Its reply-less turn shows the thinking indicator for
     // that window and is filled in by settleCommandAck.
-    const deferAck = source.kind === "generateTask"
+    //
+    // The in-chat OPEN command ("open the PRD for X" — a `load` carrying a seed
+    // query) defers for the same reason, one step earlier in the same lesson:
+    // "Opening that PRD in the panel on the right" is a claim about something
+    // that has not happened yet. A resolved candidate is only an ID, and
+    // loadPrdById still says no to a PRD mid-regeneration — which left that
+    // sentence in the thread, and in the persisted conversation, next to a
+    // panel that never opened. Now the ack is written only once the document is
+    // actually on screen (settleCommandAck below), and a refusal writes what
+    // really happened (failDeferredAck).
+    const deferAck =
+      source.kind === "generateTask" || (source.kind === "load" && !!req.seedQuery)
     const seedTurn: ThreadTurn | null = req.seedQuery
       ? {
           id: `seed-${Date.now()}`,
@@ -2226,12 +2272,27 @@ export function ChatScreen() {
           ) {
             postSummaryRef.current?.(tabId, "prd", result.prd.prd_id)
           }
+          // The OPEN command's deferred ack, settled the moment the claim it
+          // makes became true: the document is loaded and the panel is showing
+          // it. Anything earlier is a promise, and this one had a real way of
+          // going unkept (a PRD mid-regeneration refuses to load).
+          if (deferAck && source.kind === "load" && seedTurn) {
+            settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
+          }
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-          failDeferredAck(tabId, seedTurn?.id, result.message)
+          if (deferAck && source.kind === "load" && seedTurn) {
+            // An OPEN that found the document busy is a refusal we can explain,
+            // not a failed generation — so it settles as prose. The error card
+            // the other kinds get would claim the answer didn't come through
+            // and that nothing was saved, neither of which happened here.
+            settleCommandAck(tabId, seedTurn.id, openFailureReply(result.message))
+          } else {
+            failDeferredAck(tabId, seedTurn?.id, result.message)
+          }
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
@@ -3079,7 +3140,11 @@ export function ChatScreen() {
     // wrote a promise the agent then didn't keep, sitting in the thread (and in
     // the conversation history) above the questions it contradicted. Register
     // the turn instead; settleCommandAck writes whichever reply actually wins.
-    if (req.source.kind === "generateTask") {
+    //
+    // "open the PRD for X" (a `load` with a seed query) defers on the same
+    // rule: "Opening that PRD in the panel on the right" is only true once the
+    // load succeeds, and a PRD being regenerated refuses to load.
+    if (req.source.kind === "generateTask" || req.source.kind === "load") {
       deferredAckRef.current.set(tabId, { turnId, req })
       return
     }
@@ -3643,10 +3708,18 @@ export function ChatScreen() {
     (candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
       if (candidate.type === "evidence") {
         if (candidate.brief_id == null || candidate.insight_index == null) return false
+        // The SAME binding guard the PRD branch uses. Pinning the active tab
+        // unconditionally let an evidence open hijack a tab already holding a
+        // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
+        // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
+        // the panel renders B's evidence beside A's document and the tab is
+        // flagged evidence-only while holding a prd id. `reusableActiveTab`
+        // declines exactly that tab, and the open gets a chat of its own.
+        const inTab = reusableActiveTab()
         const req: LocalPrdTabRequest = {
           title: candidate.title || "Evidence",
           ...(seedQuery ? { seedQuery } : {}),
-          ...(activeTabIdRef.current ? { inTabId: activeTabIdRef.current } : {}),
+          ...(inTab ? { inTabId: inTab.id } : {}),
           source: {
             kind: "evidence",
             meta: { briefId: candidate.brief_id, insightIndex: candidate.insight_index },
@@ -3678,7 +3751,26 @@ export function ChatScreen() {
         title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
         ...(seedQuery ? { seedQuery } : {}),
         ...(inTab ? { inTabId: inTab.id } : {}),
-        source: { kind: "load", prdId, meta: null },
+        source: {
+          kind: "load",
+          prdId,
+          // The finding this PRD came from, so the panel's Evidence tab has
+          // something to load (it reads `content.prdMeta` and fetches by
+          // (briefId, insightIndex) — with null meta that tab is simply dead,
+          // while the SAME document opened from Artifacts worked).
+          //
+          // Only when the backend says the pair is real: a chat / ideation /
+          // uploaded PRD carries insight_index 0 as a storage sentinel, and
+          // passing that would load the brief's first finding under a document
+          // that has nothing to do with it. Those PRDs genuinely have no
+          // insight, so null is the correct answer for them, not a limitation.
+          meta:
+            candidate.brief_anchored &&
+            candidate.brief_id != null &&
+            candidate.insight_index != null
+              ? { briefId: candidate.brief_id, insightIndex: candidate.insight_index }
+              : null,
+        },
       }
       const tabId = openPrdInTab(req)
       seedCommandTurn(req, tabId)
@@ -3737,10 +3829,23 @@ export function ChatScreen() {
     [openTab, pushPendingConversation, finalizeConversationTurn],
   )
 
-  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so. */
+  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so — and a
+   *  kind this panel can't show says where it DOES live. */
   const openArtifactFlow = useCallback(
     (seedQuery: string, open: OpenArtifactResult) => {
       const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+      if (open.status === "unsupported_type") {
+        // They named a real thing we simply don't render here. Substituting the
+        // PRD of the same name would hand over the wrong document with nothing
+        // to signal the swap, so name what they asked for and point at where it
+        // opens.
+        postOpenArtifactReply(
+          seedQuery,
+          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
+          [],
+        )
+        return
+      }
       if (open.status === "resolved" && open.artifact) {
         if (openArtifactInPanel(open.artifact, seedQuery)) return
         // A match we cannot actually open (no usable id) is a NOT-FOUND from

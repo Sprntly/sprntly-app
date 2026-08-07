@@ -22,9 +22,17 @@ already spent one call, and — more importantly — an open that silently picks
 the wrong document is worse than one that asks. The three outcomes ARE the
 contract, and the client is required to honour all three:
 
-    resolved    exactly one best match          → open it
-    ambiguous   several equally good matches    → ask, with real chips
-    not_found   nothing cleared the bar         → say so, open NOTHING
+    resolved          exactly one best match       → open it
+    ambiguous         several equally good matches → ask, with real chips
+    not_found         nothing cleared the bar      → say so, open NOTHING
+    unsupported_type  a kind this panel can't show → say where it DOES live
+
+`unsupported_type` exists because the alternative is worse than useless: a user
+who asks for "the dark mode prototype" and is handed the dark mode PRD has been
+given the wrong document with no indication that a substitution happened. Naming
+what they asked for and pointing at the Artifacts tab is the only honest answer,
+and it follows the same principle as the ambiguous case — an open that silently
+picks the wrong document is worse than one that asks.
 
 `not_found` deliberately does not degrade into "generate one instead". Opening
 and generating are different verbs on the user's side and different pipelines
@@ -148,6 +156,12 @@ def _candidate(item: dict) -> dict:
     `brief_id`/`insight_index` for the Evidence panel (which is scoped by the
     insight, not by an evidence row id — see ChatScreen's `kind: "evidence"`
     source). Everything else on the row is listing chrome.
+
+    `brief_anchored` travels with them because the pair alone is ambiguous: a
+    chat or uploaded PRD carries `insight_index = 0` as a storage sentinel, and
+    a client that fed that pair to the panel's Evidence tab would load the
+    brief's FIRST finding under an unrelated document. False means "these
+    coordinates identify the row, not a finding — don't resolve them".
     """
     open_ids = item.get("open") or {}
     return {
@@ -158,6 +172,7 @@ def _candidate(item: dict) -> dict:
         "prd_id": open_ids.get("prd_id"),
         "brief_id": open_ids.get("brief_id"),
         "insight_index": open_ids.get("insight_index"),
+        "brief_anchored": bool(item.get("brief_anchored")),
         "week_label": (item.get("source") or {}).get("week_label"),
     }
 
@@ -205,7 +220,7 @@ def resolve_open_artifact(
     renders as "I couldn't find that" — the same thing the user sees when the
     phrase genuinely matches nothing, and strictly better than failing a send.
     """
-    kind = artifact_type if artifact_type in OPENABLE_TYPES else "prd"
+    kind = artifact_type or "prd"
     out: dict = {
         "status": "not_found",
         "artifact_type": kind,
@@ -213,13 +228,27 @@ def resolve_open_artifact(
         "artifact": None,
         "candidates": [],
     }
+    # A kind we have no panel for is reported AS ITSELF. Coercing it to "prd"
+    # would open the PRD for whatever they named and call it done — the silent
+    # wrong-document failure this module exists to avoid.
+    if kind not in OPENABLE_TYPES:
+        out["status"] = "unsupported_type"
+        return out
     if not (query or "").strip() or not dataset:
         return out
 
     try:
         from app.db.artifacts import list_document_artifacts
 
-        items = list_document_artifacts(dataset=dataset)
+        # `openable_only` drops failed/invalidated rows BEFORE the regeneration
+        # family collapses to its newest row. Without it, one deploy restart —
+        # which flips every in-flight PRD to `invalidated` (db/prds.py's
+        # invalidate_orphan_generating_prds) — makes the whole family
+        # unreachable from chat, because the newest row is the dead one and the
+        # ready generation behind it never surfaces. That restart is a
+        # documented recurring event, not a hypothetical, and the resulting
+        # "I couldn't find it" points at an Artifacts tab where it IS listed.
+        items = list_document_artifacts(dataset=dataset, openable_only=True)
     except Exception:  # noqa: BLE001 — an open must never break the send
         logger.exception("artifact open lookup failed; reporting not_found")
         return out

@@ -258,6 +258,79 @@ def test_open_artifact_never_reaches_another_tenants_documents(
     assert body["open"]["status"] == "not_found"
 
 
+def test_open_artifact_survives_a_restart_invalidated_newest_generation(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """End-to-end shape of the restart case: the family's newest row is dead,
+    the one behind it is fine, and the open must land on the live one rather
+    than report `not_found` about a document the Artifacts tab is showing."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    brief_id = db.save_brief(
+        dataset="acme", week_label="Week of stub",
+        payload={"summary_headline": "s", "insights": [{"title": "I0"}],
+                 "_schema_version": 1},
+        schema_version=1,
+    )
+
+    def _prd(title, status):
+        pid = db.start_prd(
+            brief_id=brief_id, insight_index=0, title=title,
+            template_version=1, variant="v3", source="brief",
+        )
+        if status == "ready":
+            db.complete_prd(pid, title=title, md="<html><body>Doc</body></html>")
+        else:
+            require_client().table("prds").update({"status": status}).eq(
+                "id", pid
+            ).execute()
+        return pid
+
+    ready = _prd("Compliance Reporting", "ready")
+    _prd("Compliance Reporting", "invalidated")  # newer, killed by a restart
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["prd_id"] == ready
+
+
+def test_open_artifact_reports_an_unopenable_kind_instead_of_substituting(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """A dark mode PRD exists; the user asked for the dark mode PROTOTYPE.
+    Handing back the PRD would be the wrong document with no sign of a swap."""
+    t = tenant_client.make(slug="acme")
+    _seed_prd(isolated_settings["db"], title="Dark Mode")
+    _open_envelope(monkeypatch, "dark mode", artifact_type="prototype")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the dark mode prototype"},
+    ).json()
+    assert body["open"]["status"] == "unsupported_type"
+    assert body["open"]["artifact_type"] == "prototype"
+    assert body["open"]["artifact"] is None
+
+
+def test_open_artifact_marks_a_chat_prd_as_not_brief_anchored(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """A chat PRD's insight_index 0 is a sentinel; the client must be told so it
+    doesn't point the panel's Evidence tab at the brief's first finding."""
+    t = tenant_client.make(slug="acme")
+    _seed_prd(isolated_settings["db"], title="Compliance Reporting",
+              theme_id="chat:seed")
+    _open_envelope(monkeypatch, "compliance reporting")
+
+    body = t.client.post(
+        "/v1/chat/intent", json={"message": "open the PRD for compliance reporting"},
+    ).json()
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["brief_anchored"] is False
+
+
 def test_a_generate_envelope_carries_no_lookup(
     tenant_client, isolated_settings, monkeypatch
 ):

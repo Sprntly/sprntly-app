@@ -123,15 +123,35 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { NavigationProvider } from "../../../../context/NavigationContext"
-import { ContentProvider } from "../../../../context/ContentContext"
+import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
+
+/** Surfaces the shared panel state the DOM cannot show. `prdMeta` is what the
+ *  panel's Evidence tab loads from (ContentPanel fetches by briefId +
+ *  insightIndex), so "did the open carry the finding through?" is only
+ *  answerable here. */
+function ContentProbe() {
+  const { content } = useContent()
+  return React.createElement(
+    "div",
+    { "data-testid": "content-probe", "data-prd-meta": JSON.stringify(content.prdMeta ?? null) },
+  )
+}
+
+const prdMetaFromProbe = (): { briefId: number; insightIndex: number } | null =>
+  JSON.parse(screen.getByTestId("content-probe").getAttribute("data-prd-meta") || "null")
 
 function renderChat() {
   return render(
     React.createElement(
       NavigationProvider,
       null,
-      React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+      React.createElement(
+        ContentProvider,
+        null,
+        React.createElement(ChatScreen),
+        React.createElement(ContentProbe),
+      ),
     ),
   )
 }
@@ -146,21 +166,54 @@ async function typeAndSend(text: string) {
 
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
 
-function candidate(id: number, title: string, week_label: string | null = null) {
+function candidate(
+  id: number,
+  title: string,
+  week_label: string | null = null,
+  extra: Partial<{ brief_anchored: boolean; brief_id: number; insight_index: number }> = {},
+) {
   return {
     type: "prd" as const, id, title, status: "ready",
-    prd_id: id, brief_id: 7, insight_index: 0, week_label,
+    prd_id: id, brief_id: 7, insight_index: 0,
+    // Default false: the seeded documents here are chat PRDs, whose
+    // insight_index 0 is a storage sentinel rather than a real finding.
+    brief_anchored: false,
+    week_label,
+    ...extra,
+  }
+}
+
+function evidenceCandidate(id: number, title: string, insightIndex: number) {
+  return {
+    type: "evidence" as const, id, title, status: "ready",
+    prd_id: null, brief_id: 7, insight_index: insightIndex,
+    brief_anchored: true, week_label: null,
   }
 }
 
 /** The envelope for an open request, with the backend's lookup attached. */
-function openEnvelope(open: Record<string, unknown>) {
+function openEnvelope(open: Record<string, unknown>, artifactType = "prd") {
   return {
     intent: "open_artifact", confidence: 0.95, task: null, instruction: null,
-    artifact_type: "prd", artifact_query: "compliance reporting",
+    artifact_type: artifactType, artifact_query: "compliance reporting",
     reason: "opening verb", source: "llm", prd_id: null, prd_title: null,
-    open: { artifact_type: "prd", query: "compliance reporting", ...open },
+    open: { artifact_type: artifactType, query: "compliance reporting", ...open },
   }
+}
+
+/** The `resolved` envelope for PRD 2216, the document most tests here open. */
+const resolved2216 = (extra = {}) =>
+  openEnvelope({
+    status: "resolved",
+    artifact: candidate(2216, "Compliance Reporting", null, extra),
+    candidates: [candidate(2216, "Compliance Reporting", null, extra)],
+  })
+
+/** An `answer` envelope, for the ordinary send that sets a conversation up. */
+const ANSWER_ENVELOPE = {
+  intent: "answer", confidence: 0.9, task: null, instruction: null,
+  artifact_type: null, artifact_query: null, reason: "q", source: "llm",
+  prd_id: null, prd_title: null,
 }
 
 const PRD_2216 = { prd_id: 2216, title: "Compliance Reporting", metaLine: "", sections: [] }
@@ -270,6 +323,57 @@ describe("ChatScreen — open_artifact opens the panel", () => {
     expect(tabBar().getAllByTitle("Close tab")).toHaveLength(2)
   })
 
+  it("carries the finding through, so the panel's Evidence tab has something to load", async () => {
+    // A brief-anchored PRD: `insight_index` names a real finding, and the
+    // panel's Evidence tab resolves exactly that pair. Passing null meta here
+    // is what made the tab dead from chat while the SAME document opened from
+    // Artifacts worked.
+    resolveIntent.mockResolvedValue(
+      resolved2216({ brief_anchored: true, brief_id: 7, insight_index: 3 }),
+    )
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(2216))
+    await waitFor(() =>
+      expect(prdMetaFromProbe()).toEqual({ briefId: 7, insightIndex: 3 }),
+    )
+  })
+
+  it("does NOT carry a sentinel insight_index through for a chat PRD", async () => {
+    // A chat / ideation / uploaded PRD is stored at insight_index 0 as a pure
+    // sentinel. Passing it would make the Evidence tab load the brief's FIRST
+    // finding underneath a document that has nothing to do with it — worse
+    // than the empty tab, because it looks like an answer.
+    resolveIntent.mockResolvedValue(
+      resolved2216({ brief_anchored: false, brief_id: 7, insight_index: 0 }),
+    )
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(2216))
+    expect(prdMetaFromProbe()).toBeNull()
+  })
+
+  it("names an artifact kind this panel cannot show instead of opening a PRD", async () => {
+    // "Open the dark mode prototype" with a dark mode PRD sitting right there:
+    // substituting it would hand over the wrong document silently.
+    resolveIntent.mockResolvedValue(
+      openEnvelope(
+        { status: "unsupported_type", artifact: null, candidates: [] },
+        "prototype",
+      ),
+    )
+    renderChat()
+    await typeAndSend("open the dark mode prototype")
+
+    await waitFor(() =>
+      expect(screen.getByText(/A prototype doesn't open in this panel/i)).toBeTruthy(),
+    )
+    expect(loadPrdById).not.toHaveBeenCalled()
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
   it("no match opens NOTHING and says so — it never offers to generate one instead", async () => {
     resolveIntent.mockResolvedValue(openEnvelope({
       status: "not_found", artifact: null, candidates: [],
@@ -284,6 +388,102 @@ describe("ChatScreen — open_artifact opens the panel", () => {
     expect(generateFromTask).not.toHaveBeenCalled()
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(screen.queryByTestId("open-artifact-chips")).toBeNull()
+  })
+})
+
+describe("ChatScreen — the open acknowledgment is not a promise", () => {
+  it("withholds 'Opening that PRD' until the document has actually loaded", async () => {
+    let settle: (v: unknown) => void = () => {}
+    loadPrdById.mockReturnValue(new Promise((res) => { settle = res }))
+    resolveIntent.mockResolvedValue(resolved2216())
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(2216))
+    // In flight: the claim has not come true yet, so it is not on screen —
+    // and, just as importantly, not in the persisted conversation.
+    expect(screen.queryByText(/Opening that PRD in the panel on the right/i)).toBeNull()
+
+    await act(async () => { settle({ ok: true, prd: PRD_2216 }) })
+    await waitFor(() =>
+      expect(screen.getByText(/Opening that PRD in the panel on the right/i)).toBeTruthy(),
+    )
+  })
+
+  it("says what really happened when the document refuses to load", async () => {
+    // A PRD mid-regeneration: resolvable (it has an id) but not showable.
+    // The old flow left "Opening that PRD…" in the thread beside a panel that
+    // never opened.
+    loadPrdById.mockResolvedValue({ ok: false, message: "PRD isn't ready yet" })
+    resolveIntent.mockResolvedValue(resolved2216())
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+
+    await waitFor(() =>
+      expect(screen.getByText(/I couldn't open that PRD/i)).toBeTruthy(),
+    )
+    expect(screen.queryByText(/Opening that PRD in the panel on the right/i)).toBeNull()
+    // "start" would describe a generation the user never asked for.
+    expect(screen.queryByText(/I couldn't start that PRD/i)).toBeNull()
+  })
+})
+
+describe("ChatScreen — an evidence open respects the tab binding", () => {
+  const EVIDENCE_ENVELOPE = openEnvelope(
+    {
+      status: "resolved",
+      artifact: evidenceCandidate(31, "Bulk Export Demand", 3),
+      candidates: [evidenceCandidate(31, "Bulk Export Demand", 3)],
+    },
+    "evidence",
+  )
+
+  it("does not hijack a tab that is already holding a PRD", async () => {
+    // The reported hazard: openPrdInTab's evidence branch writes
+    // `evidenceOnly` + insight B's detail onto whatever tab it is given. Given
+    // the tab holding PRD 2216, the panel would render B's evidence beside A's
+    // document, and the tab would be flagged evidence-only while still
+    // carrying a prd id. `reusableActiveTab` declines exactly that tab.
+    resolveIntent
+      .mockResolvedValueOnce(ANSWER_ENVELOPE)
+      .mockResolvedValueOnce(resolved2216())
+      .mockResolvedValue(EVIDENCE_ENVELOPE)
+    renderChat()
+    await typeAndSend("how is compliance tracked today?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    await typeAndSend("open the PRD for compliance reporting")
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(2216))
+    const tabsBefore = tabBar().getAllByTitle("Close tab").length
+
+    await typeAndSend("pull up the evidence for bulk export demand")
+
+    // The evidence got a chat of its own rather than being written over the
+    // PRD's tab.
+    await waitFor(() =>
+      expect(tabBar().getAllByTitle("Close tab")).toHaveLength(tabsBefore + 1),
+    )
+    // And nothing re-loaded or regenerated the PRD on the way.
+    expect(loadPrdById).toHaveBeenCalledTimes(1)
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("opens into the current chat when that chat is not bound to anything", async () => {
+    // The other half: the guard must not push every evidence open into a new
+    // tab. A plain conversation is a legitimate host.
+    resolveIntent
+      .mockResolvedValueOnce(ANSWER_ENVELOPE)
+      .mockResolvedValue(EVIDENCE_ENVELOPE)
+    renderChat()
+    await typeAndSend("what did customers say about exports?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    const tabsBefore = tabBar().getAllByTitle("Close tab").length
+
+    await typeAndSend("pull up the evidence for bulk export demand")
+
+    await waitFor(() =>
+      expect(screen.getByText(/Opening that evidence in the panel on the right/i)).toBeTruthy(),
+    )
+    expect(tabBar().getAllByTitle("Close tab")).toHaveLength(tabsBefore)
   })
 })
 
@@ -307,6 +507,22 @@ describe("ChatScreen — disambiguation chips are actions, not messages", () => 
     expect(screen.getByText(/more than one PRD matching/i)).toBeTruthy()
     // Asking is not opening.
     expect(loadPrdById).not.toHaveBeenCalled()
+  })
+
+  it("each chip is announced as a BUTTON, not a list item", async () => {
+    // `role="listitem"` on a <button> REPLACES the button role, so a screen
+    // reader announces "list item" with no hint that the only control
+    // answering the question above it can be pressed.
+    resolveIntent.mockResolvedValue(AMBIGUOUS)
+    renderChat()
+    await typeAndSend("open the PRD for compliance reporting")
+    await waitFor(() => expect(screen.getByTestId("open-artifact-chips")).toBeTruthy())
+
+    for (const chip of screen.getAllByTestId("open-artifact-chip")) {
+      expect(chip.tagName).toBe("BUTTON")
+      expect(chip.getAttribute("role")).toBeNull()
+    }
+    expect(screen.getAllByRole("button", { name: /Compliance Reporting/ })).toHaveLength(2)
   })
 
   it("a chip click OPENS its artifact and posts NO chat message", async () => {

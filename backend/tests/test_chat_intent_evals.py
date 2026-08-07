@@ -509,15 +509,147 @@ def test_open_artifact_without_a_subject_downgrades_to_answer_not_generate(
     assert env["source"] == "no_artifact_query"
 
 
-def test_open_artifact_defaults_an_unknown_kind_to_prd(monkeypatch):
-    """A kind we have no panel for must not abandon an otherwise valid open."""
+def test_a_named_but_unopenable_kind_is_kept_never_coerced_to_prd(monkeypatch):
+    """"Open the dark mode prototype" must not quietly become the dark mode PRD.
+
+    The kind the user NAMED survives all the way to the resolver, which answers
+    `unsupported_type` and lets the client say where prototypes actually live.
+    Coercing here would hand over a different document with nothing to signal
+    the substitution — the silent-wrong-document failure this whole action is
+    built to avoid."""
     _patch_llm(monkeypatch, {
         "intent": "open_artifact", "confidence": 0.9, "artifact_type": "prototype",
         "artifact_query": "dark mode", "reason": "open",
     })
     env = ci.resolve_chat_intent("ent-1", "open the dark mode prototype", [])
     assert env["intent"] == "open_artifact"
+    assert env["artifact_type"] == "prototype"
+
+
+def test_an_unnamed_kind_still_defaults_to_prd(monkeypatch):
+    """Nothing NAMED is different from something named-but-unsupported: a bare
+    "open that doc" has no kind to preserve, and PRDs are what people mean."""
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.9, "artifact_type": None,
+        "artifact_query": "dark mode", "reason": "open",
+    })
+    env = ci.resolve_chat_intent("ent-1", "open the dark mode doc", [])
     assert env["artifact_type"] == "prd"
+
+
+def test_a_kind_outside_the_schema_is_dropped_then_defaulted(monkeypatch):
+    """Junk from a malformed response is not a kind the user named."""
+    _patch_llm(monkeypatch, {
+        "intent": "open_artifact", "confidence": 0.9, "artifact_type": "spaceship",
+        "artifact_query": "dark mode", "reason": "open",
+    })
+    env = ci.resolve_chat_intent("ent-1", "open the dark mode thing", [])
+    assert env["artifact_type"] == "prd"
+
+
+# ── The deterministic open-vs-generate backstop (runs in CI, no API key) ─────
+# The labeled EVALS above are the real proof the prompt works, and they need a
+# live model — so they cannot gate a merge. These can: the one direction that
+# actually costs the user something is checked here without a model at all.
+
+@pytest.mark.parametrize("message", [
+    "open the PRD for compliance reporting",
+    "Open the PRD for compliance reporting",
+    "pull up the checkout abandonment PRD",
+    "show me the PRD about onboarding",
+    "bring up the bulk export spec",
+    "can you open the billing PRD",
+    "please pull up that requirements doc",
+    "hey, show me the dark mode PRD",
+    "find the PRD for magic-link sign-in",
+    "take me to the onboarding PRD",
+    "where is the PRD for checkout?",
+])
+def test_open_shaped_messages_are_detected_deterministically(message):
+    assert ci.looks_like_open_request(message), message
+
+
+@pytest.mark.parametrize("message", [
+    # Authoring — the whole point is that these are untouched.
+    "write a PRD for compliance reporting",
+    "generate a PRD for checkout abandonment",
+    "draft a PRD for onboarding",
+    "create a requirements doc for billing",
+    "put together a PRD for magic-link sign-in",
+    "spec this out",
+    # An opening verb that does NOT open the message.
+    "draft the email once you've opened the PRD",
+    "we should write this up after you show the data",
+    # Compound: an opening verb AND an authoring verb — too ambiguous for a
+    # deterministic rule, so it is left entirely to the model.
+    "pull up the billing PRD and then write one for checkout",
+    # Ordinary conversation.
+    "why are enterprise users asking for this?",
+    "",
+    "   ",
+])
+def test_non_open_messages_are_left_to_the_model(message):
+    assert not ci.looks_like_open_request(message), message
+
+
+def test_a_generate_verdict_on_an_open_shaped_message_is_vetoed(monkeypatch):
+    """THE regression gate for the headline safety property.
+
+    If the model ever answers "open the PRD for X" with generate_prd, the user
+    must not get a new document written. The veto lands on open_artifact, whose
+    worst case is "I couldn't find that" — which opens nothing."""
+    _patch_llm(monkeypatch, {
+        "intent": "generate_prd", "confidence": 0.97,
+        "task": "compliance reporting", "reason": "misread as authoring",
+    })
+    env = ci.resolve_chat_intent(
+        "ent-1", "open the PRD for compliance reporting", []
+    )
+    assert env["intent"] == "open_artifact"
+    assert env["source"] == "open_verb_veto"
+    assert env["artifact_query"] == "compliance reporting"
+    # The generation brief is dropped — nothing downstream may read it.
+    assert env["task"] is None
+
+
+def test_the_veto_never_fires_on_a_real_authoring_request(monkeypatch):
+    """The other direction: widening the veto until it eats genuine commands
+    would be a worse bug than the one it prevents."""
+    _patch_llm(monkeypatch, {
+        "intent": "generate_prd", "confidence": 0.95,
+        "task": "compliance reporting", "reason": "authoring verb",
+    })
+    for message in (
+        "write a PRD for compliance reporting",
+        "generate a PRD for checkout abandonment",
+        "draft a PRD for onboarding",
+        "okay, draft it up",
+    ):
+        env = ci.resolve_chat_intent("ent-1", message, [])
+        assert env["intent"] == "generate_prd", message
+        assert env["source"] == "llm", message
+
+
+def test_the_veto_only_touches_generate_prd(monkeypatch):
+    """It vetoes in ONE direction. An `answer` verdict on an open-shaped
+    message stays an answer — the backstop may never promote anything."""
+    _patch_llm(monkeypatch, {
+        "intent": "answer", "confidence": 0.9, "reason": "question",
+    })
+    env = ci.resolve_chat_intent("ent-1", "show me what you can do", [])
+    assert env["intent"] == "answer"
+
+
+def test_a_vetoed_message_with_no_subject_lands_on_answer(monkeypatch):
+    """With nothing to look for, the veto's own downgrade rule takes over —
+    and it too refuses to generate."""
+    _patch_llm(monkeypatch, {
+        "intent": "generate_prd", "confidence": 0.95, "task": None,
+        "reason": "no topic",
+    })
+    env = ci.resolve_chat_intent("ent-1", "open it", [])
+    assert env["intent"] == "answer"
+    assert env["source"] == "no_artifact_query"
 
 
 def test_low_confidence_open_downgrades_to_answer(monkeypatch):

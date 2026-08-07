@@ -18,13 +18,14 @@ import app.artifact_open as ao
 
 
 def _prd(id_, title, *, status="ready", created_at="2026-08-01", brief_id=7,
-         insight_index=0, week_label="Week of Aug 1"):
+         insight_index=0, week_label="Week of Aug 1", brief_anchored=True):
     return {
         "type": "prd",
         "id": id_,
         "title": title,
         "status": status,
         "created_at": created_at,
+        "brief_anchored": brief_anchored,
         "source": {"brief_id": brief_id, "week_label": week_label,
                    "insight_index": insight_index},
         "open": {"brief_id": brief_id, "insight_index": insight_index,
@@ -39,6 +40,7 @@ def _evidence(id_, title, *, brief_id=7, insight_index=2):
         "title": title,
         "status": "ready",
         "created_at": "2026-08-01",
+        "brief_anchored": True,
         "source": {"brief_id": brief_id, "week_label": None,
                    "insight_index": insight_index},
         "open": {"brief_id": brief_id, "insight_index": insight_index,
@@ -49,8 +51,8 @@ def _evidence(id_, title, *, brief_id=7, insight_index=2):
 def _patch_index(monkeypatch, items):
     seen: dict = {}
 
-    def _list(*, dataset):
-        seen.update(dataset=dataset)
+    def _list(*, dataset, openable_only=False):
+        seen.update(dataset=dataset, openable_only=openable_only)
         return list(items)
 
     import app.db.artifacts as db_artifacts
@@ -233,15 +235,56 @@ def test_lookup_failure_degrades_to_not_found(monkeypatch):
     assert out["status"] == "not_found"
 
 
-def test_unknown_artifact_type_falls_back_to_prd(monkeypatch):
-    _patch_index(monkeypatch, [_prd(1, "Dark Mode"), _evidence(2, "Dark Mode")])
+def test_a_kind_this_panel_cannot_show_says_so_instead_of_substituting(monkeypatch):
+    """"Open the dark mode prototype" with a dark mode PRD sitting right there
+    is the trap: returning that PRD looks like success and is the wrong
+    document. The kind is reported back unchanged so the client can say where
+    prototypes actually open."""
+    seen = _patch_index(monkeypatch, [_prd(1, "Dark Mode"), _evidence(2, "Dark Mode")])
     out = ao.resolve_open_artifact(
         artifact_type="prototype", query="dark mode",
         dataset="acme",
     )
-    assert out["artifact_type"] == "prd"
-    assert out["status"] == "resolved"
-    assert out["artifact"]["id"] == 1
+    assert out["status"] == "unsupported_type"
+    assert out["artifact_type"] == "prototype"
+    assert out["artifact"] is None
+    assert out["candidates"] == []
+    assert not seen, "an unopenable kind must not even hit the index"
+
+
+def test_the_lookup_asks_for_openable_rows_only(monkeypatch):
+    """`openable_only` is what makes the status filter run BEFORE the
+    regeneration family collapses — see db.artifacts.list_document_artifacts."""
+    seen = _patch_index(monkeypatch, [_prd(1, "Dark Mode")])
+    ao.resolve_open_artifact(
+        artifact_type="prd", query="dark mode", dataset="acme",
+    )
+    assert seen["openable_only"] is True
+
+
+def test_brief_anchoring_travels_with_the_candidate(monkeypatch):
+    """A chat/uploaded PRD's insight_index is a storage SENTINEL, not insight 0.
+
+    The client uses this flag to decide whether to hand the pair to the panel's
+    Evidence tab — which resolves (briefId, insightIndex) into a document — so
+    losing it would render the brief's first finding under an unrelated PRD."""
+    _patch_index(monkeypatch, [
+        _prd(1, "Dark Mode", brief_anchored=False, insight_index=0),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="dark mode", dataset="acme",
+    )
+    assert out["artifact"]["brief_anchored"] is False
+    assert out["artifact"]["insight_index"] == 0
+
+    _patch_index(monkeypatch, [
+        _prd(2, "Bulk Export", brief_anchored=True, insight_index=3),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="bulk export", dataset="acme",
+    )
+    assert out["artifact"]["brief_anchored"] is True
+    assert out["artifact"]["insight_index"] == 3
 
 
 def test_the_index_is_read_for_the_caller_scope_only(monkeypatch):
@@ -250,4 +293,4 @@ def test_the_index_is_read_for_the_caller_scope_only(monkeypatch):
         artifact_type="prd", query="dark mode",
         dataset="acme--design",
     )
-    assert seen == {"dataset": "acme--design"}
+    assert seen == {"dataset": "acme--design", "openable_only": True}

@@ -71,6 +71,22 @@ def _prd_family_key(row: dict) -> tuple:
     return (row["brief_id"], "insight", row.get("insight_index"))
 
 
+def prd_is_brief_anchored(row: dict) -> bool:
+    """True when this PRD's `insight_index` names a REAL brief insight.
+
+    Chat, ideation and uploaded PRDs anchor to a brief with `insight_index = 0`
+    as a pure STORAGE SENTINEL (see `_prd_family_key`) — that 0 is not insight
+    zero, it is "no insight". Anything that resolves the pair (brief_id,
+    insight_index) into content — the panel's Evidence tab loads by exactly
+    that pair — has to know the difference, or a chat PRD silently shows the
+    evidence belonging to the brief's first finding.
+
+    The distinction is derived here, in the one module that already owns what a
+    PRD family is, so callers never re-derive it from `theme_id` themselves.
+    """
+    return _prd_family_key(row)[1] == "insight"
+
+
 def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
     """prd_id → title for the ids given (empty dict for an empty list).
 
@@ -85,8 +101,14 @@ def _prd_titles(c, prd_ids: list[int]) -> dict[int, str]:
     return {r["id"]: r.get("title") for r in rows}
 
 
+# Statuses that are not a document anyone can open. `invalidated` is the one
+# that matters operationally: a backend restart flips every in-flight PRD to it
+# (invalidate_orphan_generating_prds), so it lands on real rows regularly.
+_UNOPENABLE_PRD_STATUSES = frozenset({"failed", "invalidated"})
+
+
 @retry_on_disconnect
-def list_document_artifacts(*, dataset: str) -> list[dict]:
+def list_document_artifacts(*, dataset: str, openable_only: bool = False) -> list[dict]:
     """The PRD + evidence half of the artifact list, on its own.
 
     Split out of `list_artifacts_for_company` (which calls it) rather than
@@ -98,6 +120,15 @@ def list_document_artifacts(*, dataset: str) -> list[dict]:
     chat send path: prototypes, reports and ticket sets are not openable in the
     chat's right-hand panel, so querying them there would be three round trips
     spent on rows that can never be the answer.
+
+    `openable_only` drops failed/invalidated PRD rows BEFORE the regeneration
+    family collapses to its newest row, so a family whose newest attempt died
+    falls back to the newest attempt that DIDN'T. Order matters and is the whole
+    point of the flag: collapsing first and filtering after makes the whole
+    family invisible the moment one restart invalidates its head, even though a
+    perfectly readable generation sits right behind it. The default is False
+    because the Artifacts LISTING deliberately shows those rows (a failed PRD is
+    something the user should see); only an OPEN needs them gone.
 
     `dataset` scopes both types via `briefs.dataset` and must already be
     tenant-gated by the caller. Rows are normalized identically to the unified
@@ -142,6 +173,10 @@ def list_document_artifacts(*, dataset: str) -> list[dict]:
     # family is per-source — see _prd_family_key.
     latest_by_key: dict[tuple, dict] = {}
     for r in prd_rows:
+        # BEFORE the collapse, never after — see the `openable_only` note in
+        # the docstring.
+        if openable_only and (r.get("status") or "") in _UNOPENABLE_PRD_STATUSES:
+            continue
         key = _prd_family_key(r)
         cur = latest_by_key.get(key)
         if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
@@ -154,6 +189,10 @@ def list_document_artifacts(*, dataset: str) -> list[dict]:
             "title": r.get("title") or "Untitled PRD",
             "status": r.get("status") or "",
             "created_at": r.get("generated_at"),
+            # Whether `insight_index` names a real finding or is the storage
+            # sentinel — see prd_is_brief_anchored. Consumers that turn the
+            # (brief, insight) pair back into content must check it.
+            "brief_anchored": prd_is_brief_anchored(r),
             "source": {
                 "brief_id": bid,
                 "week_label": week_label_by_brief.get(bid),
@@ -176,6 +215,10 @@ def list_document_artifacts(*, dataset: str) -> list[dict]:
         or []
     )
     for r in ev_rows:
+        # Evidence has no regeneration family, so order doesn't matter here —
+        # but a failed document is no more openable than a failed PRD.
+        if openable_only and (r.get("status") or "") in _UNOPENABLE_PRD_STATUSES:
+            continue
         bid = r["brief_id"]
         items.append({
             "type": "evidence",
@@ -183,6 +226,8 @@ def list_document_artifacts(*, dataset: str) -> list[dict]:
             "title": r.get("title") or "Untitled evidence",
             "status": r.get("status") or "",
             "created_at": r.get("generated_at"),
+            # Evidence has no sentinel form — it only ever exists FOR a finding.
+            "brief_anchored": True,
             "source": {
                 "brief_id": bid,
                 "week_label": week_label_by_brief.get(bid),
