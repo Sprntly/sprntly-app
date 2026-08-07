@@ -1671,6 +1671,43 @@ def _no_background_template_compile(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_referent_adjudication(request, monkeypatch):
+    """Keep document RESOLUTION from firing a real model call.
+
+    `document_referent.adjudicate` runs on the ask path whenever a question
+    carries a document cue and a candidate clears the content-term floor — and
+    it goes through `graph.gateway.llm_call`, which holds its own `call_json`
+    reference bound at import time and so is NOT reached by `fake_llm`
+    (see `_no_background_template_compile` above for the same hazard).
+    Several existing ask tests ask cue-bearing questions in passing; without
+    this guard each of them would attempt a real Anthropic request and sit on
+    a network timeout before failing open.
+
+    Returning None is the resolver's own no-referent answer, so a guarded test
+    sees exactly the grounding it saw before resolution existed — the guard
+    cannot mask a resolution bug by inventing a resolution.
+
+    Opt out with `@pytest.mark.real_referent_adjudication`;
+    `test_document_referent.py`'s own suite stubs `adjudicate` with a
+    controllable fake instead, which overrides this for the tests that need to
+    steer the verdict."""
+    if request.node.get_closest_marker("real_referent_adjudication"):
+        yield
+        return
+    import importlib
+
+    try:
+        mod = importlib.import_module("app.document_referent")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        mod, "adjudicate", lambda **kw: None, raising=False
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_iterate_limiter():
     """Per-test isolation for the Design Agent rate limiters.
 
