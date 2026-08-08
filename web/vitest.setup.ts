@@ -40,9 +40,11 @@ if (
 // Guarded on `document`: the setup file also runs for the `node`-environment
 // tests (vitest.config sets environment: "node"; DOM tests opt in with a
 // `@vitest-environment jsdom` docblock), and @testing-library/dom wants a DOM.
+let domCleanup: (() => void) | null = null
 if (typeof document !== "undefined") {
   const { configure } = await import("@testing-library/dom")
   configure({ asyncUtilTimeout: 5000 })
+  domCleanup = (await import("@testing-library/react")).cleanup
 }
 
 // Chat tabs are now SESSION-scoped (sessionStorage, not localStorage — so a
@@ -61,4 +63,34 @@ afterEach(() => {
       /* storage may be unavailable in some environments; not fatal */
     }
   }
+})
+
+// UNMOUNT whatever the test rendered. React Testing Library normally registers
+// this itself, but ONLY when it can see a global `afterEach` — and vitest.config
+// does not set `globals: true`, so every file here imports its hooks from
+// "vitest" and RTL's auto-cleanup never armed. 177 files call `cleanup()` by
+// hand; 30 do not, and nothing told them to.
+//
+// A component left mounted past its test keeps its timers. GenerateModal arms a
+// 300ms `setTimeout` on open that calls `setSourceCheckPast300(true)`
+// (GenerateModal.tsx) — it clears that timer on unmount, correctly, but an
+// unmount that never happens clears nothing. When the file's remaining tests run
+// shorter than the timer, it fires after vitest has torn the environment down
+// and React reaches for a `window` that is gone:
+//
+//   ReferenceError: window is not defined
+//     at dispatchSetState (react-dom) ← Timeout._onTimeout ← GenerateModal.tsx
+//
+// That failed PR #1118 (run 31228763455) with 369 files and 4392 tests PASSED
+// and zero failures — the whole run reported red on one post-teardown error. A
+// re-run of the same commit was green. That is the worst shape a CI failure can
+// take: it lands on unrelated branches, it is invisible in the test report, and
+// it teaches people that red means "hit re-run" rather than "read this".
+//
+// Doing it here rather than in the 30 files is deliberate. This restores the
+// behaviour RTL ships by default and the other 177 files already assert by
+// hand, so it is a floor, not a new rule to remember. `cleanup()` is idempotent
+// — files that call it themselves are unaffected.
+afterEach(() => {
+  domCleanup?.()
 })
