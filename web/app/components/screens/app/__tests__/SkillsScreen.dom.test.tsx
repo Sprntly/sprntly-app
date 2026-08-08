@@ -99,7 +99,7 @@ const CUSTOM_SKILL = {
   name: "Estimation helper",
   description:
     'Scores features by reach × confidence. Use when the user says "estimate".',
-  uploader_name: "Fortune Tede",
+  uploader_name: "Dana Whitfield",
   created_at: "2026-07-28T18:00:00+00:00",
   has_file: true,
   name_conflict: false,
@@ -191,7 +191,7 @@ describe("SkillsScreen", () => {
     await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
 
     expect(screen.getByRole("heading", { name: "Custom skills" })).toBeTruthy()
-    expect(screen.getByText("Fortune Tede")).toBeTruthy()
+    expect(screen.getByText("Dana Whitfield")).toBeTruthy()
     // Custom cards hand off to chat exactly like built-ins. Anchored regex:
     // the delete affordance is also a button whose name CONTAINS the skill
     // name ("Delete Estimation helper") — the card's name starts with it.
@@ -603,7 +603,7 @@ describe("SkillsScreen", () => {
     // Modal closes, toast fires, and the new skill is in the library.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     expect(showToastMock).toHaveBeenCalled()
-    expect(screen.getByText("Fortune Tede")).toBeTruthy()
+    expect(screen.getByText("Dana Whitfield")).toBeTruthy()
   })
 
   it("adds every skill a multi-skill archive created, and counts them in the toast", async () => {

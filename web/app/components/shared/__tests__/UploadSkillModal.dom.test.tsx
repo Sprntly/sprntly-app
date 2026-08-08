@@ -473,13 +473,13 @@ describe("UploadSkillModal", () => {
         {
           id: "s1", slug: "sprint-planner", trigger: "/sprint-planner",
           name: "Sprint Planner", description: "Plans a sprint.",
-          uploader_name: "Fortune Tede", created_at: null, has_file: true,
+          uploader_name: "Dana Whitfield", created_at: null, has_file: true,
           name_conflict: false, replaced: false,
         },
         {
           id: "s2", slug: "pricing-review-2", trigger: "/pricing-review-2",
           name: "Pricing Review", description: "Reviews pricing.",
-          uploader_name: "Fortune Tede", created_at: null, has_file: true,
+          uploader_name: "Dana Whitfield", created_at: null, has_file: true,
           name_conflict: true, replaced: true,
         },
       ],
@@ -681,7 +681,7 @@ describe("UploadSkillModal", () => {
           {
             id: "g1", slug: "sprint-planner", trigger: "/sprint-planner",
             name: "Sprint Planner", description: "Plans a sprint.",
-            uploader_name: "Fortune Tede", created_at: null, has_file: true,
+            uploader_name: "Dana Whitfield", created_at: null, has_file: true,
             name_conflict: false, replaced: false,
           },
         ],

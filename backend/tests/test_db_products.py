@@ -476,7 +476,7 @@ async def test_fallback_logs_host_only(env, monkeypatch, caplog):
         env.supabase,
         _TEST_COMPANY_ID,
         pid="p-onboarding",
-        website="https://plotline.studio/brand/guidelines?ref=secret",
+        website="https://tyrell.example/brand/guidelines?ref=secret",
         is_primary=True,
     )
     prd_id = _seed_prd(env.db)
@@ -493,7 +493,7 @@ async def test_fallback_logs_host_only(env, monkeypatch, caplog):
     ]
     assert len(fallback_lines) == 1
     line = fallback_lines[0]
-    assert "plotline.studio" in line          # host only
+    assert "tyrell.example" in line          # host only
     assert _TEST_COMPANY_ID in line           # company identifier
     assert f"prd_id={prd_id}" in line         # prd identifier
     assert "/brand/guidelines" not in line    # no path

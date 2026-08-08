@@ -467,7 +467,7 @@ def test_injected_entries_folder_expands_recursively_via_injected_service(
 
 
 def _folder_meta(
-    name: str = "Xometry",
+    name: str = "Contoso",
     modified: str = "2026-05-20T12:00:00.000Z",
     folder_id: str = "folder0001",
 ) -> dict:
@@ -895,7 +895,7 @@ def test_a_folder_that_expands_to_nothing_is_skipped_with_the_honest_message(
     try:
         result = sync_google_drive(
             company_id=company_id,
-            files=[{"id": "folder0001", "name": "Xometry"}],
+            files=[{"id": "folder0001", "name": "Contoso"}],
         )
     finally:
         for p in patches:
@@ -931,7 +931,7 @@ def test_a_folder_object_is_never_downloaded(drive_connected, kg_kickoff):
     try:
         sync_google_drive(
             company_id=company_id,
-            files=[{"id": "folder0001", "name": "Xometry"}],
+            files=[{"id": "folder0001", "name": "Contoso"}],
         )
     finally:
         for p in patches:
@@ -973,7 +973,7 @@ def test_folder_contents_stores_subtree_shape_not_flat_list(
     try:
         sync_google_drive(
             company_id=company_id,
-            files=[{"id": root_id, "name": "Xometry"}],
+            files=[{"id": root_id, "name": "Contoso"}],
         )
     finally:
         for p in patches:
@@ -1010,7 +1010,7 @@ def test_folder_marks_are_replaced_not_merged(drive_connected, kg_kickoff):
     try:
         sync_google_drive(
             company_id=company_id,
-            files=[{"id": "folder0001", "name": "Xometry"}],
+            files=[{"id": "folder0001", "name": "Contoso"}],
         )
     finally:
         for p in patches:

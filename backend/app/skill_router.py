@@ -1169,7 +1169,7 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
     listed page was Atlassian's stock product-requirements template, and that
     template's body says "Add Jira work item links or other relevant project
     links here". The quoted word made the next turn a tracker thread, so "tell
-    me more about ChoisBits Decision Making" — `more` matches _TRACKER_DETAIL —
+    me more about Cyberdyne Decision Making" — `more` matches _TRACKER_DETAIL —
     was answered "no tracker is connected, connect Jira or ClickUp" about a
     Confluence page the assistant had just read. The user had to type "so check
     confluence" to get back to the thread they were already in.

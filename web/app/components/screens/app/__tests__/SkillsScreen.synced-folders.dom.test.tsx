@@ -87,7 +87,7 @@ const OWN_SKILL = {
   trigger: "/estimation-helper",
   name: "Estimation helper",
   description: "Scores features.",
-  uploader_name: "Fortune Tede",
+  uploader_name: "Dana Whitfield",
   synced: false,
 }
 

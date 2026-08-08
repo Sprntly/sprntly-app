@@ -92,9 +92,9 @@ _DOCS = [
      "Brief for the Samsung Health pilot running on Sprntly, with the August "
      "go-live plan.", ["samsung", "pilot", "go-live"],
      "2026-07-30T09:00:00+00:00"),
-    ("Xometry_Onboarding_Plan.docx",
-     "Onboarding plan for Xometry on Sprntly, covering data import and "
-     "workspace setup.", ["xometry", "onboarding"],
+    ("Contoso_Onboarding_Plan.docx",
+     "Onboarding plan for Contoso on Sprntly, covering data import and "
+     "workspace setup.", ["contoso", "onboarding"],
      "2026-07-29T09:00:00+00:00"),
     ("Knowledge_Graph_Spec.docx",
      "Specification for the Sprntly knowledge graph: entities, signals and "
