@@ -97,8 +97,9 @@ function conversationsApiKeys(src: string): string[] | null {
       continue
     }
     if (inner !== 0) continue
-    // A SPREAD at the top level of the literal (see below) is checked before
-    // the property-position test, because a spread is not in property position.
+    // Checked BEFORE the property-position test below, because a spread is not
+    // in property position.
+    //
     // A SPREAD at the top level of the literal (`...actual.conversationsApi`)
     // means the real key set is not knowable from source, so report "unknown"
     // rather than guessing.
@@ -198,8 +199,18 @@ function relativeImports(file: string, src: string): string[] {
   return out
 }
 
-/** Every app module that transitively imports chatPersistence, plus itself. */
+/** Every app module that transitively imports chatPersistence, plus itself.
+ *
+ * MEMOISED. It walks every source file in `app/` and builds a full import
+ * graph; three tests need it, and recomputing it three times is pure waste in a
+ * file whose entire justification is being cheap. (Widening the guard's scope
+ * added the third caller, so this keeps the fix from costing more than it
+ * saves.)
+ */
+let _reachingCache: Set<string> | null = null
+
 function modulesReachingChatPersistence(): Set<string> {
+  if (_reachingCache) return _reachingCache
   const files = sourceFiles(APP_ROOT)
   const imports = new Map<string, string[]>()
   for (const f of files) imports.set(f, relativeImports(f, fs.readFileSync(f, "utf8")))
@@ -216,6 +227,7 @@ function modulesReachingChatPersistence(): Set<string> {
       }
     }
   }
+  _reachingCache = reaching
   return reaching
 }
 
