@@ -25,6 +25,13 @@ from app.db.client import require_client
 from tests._company_helpers import seed_company
 
 
+_SA_ENV_RELOAD_MODULES = (
+    "app.config",
+    "app.connectors.tokens",
+    "app.connectors.google_service_account",
+)
+
+
 @pytest.fixture
 def sa_env(isolated_settings, monkeypatch):
     """A service_account-mode environment: bootstrap credential configured,
@@ -39,16 +46,24 @@ def sa_env(isolated_settings, monkeypatch):
         "GCP_SA_BOOTSTRAP_KEY_JSON",
         json.dumps({"type": "service_account", "project_id": "test-project"}),
     )
-    for name in (
-        "app.config",
-        "app.connectors.tokens",
-        "app.connectors.google_service_account",
-    ):
+    for name in _SA_ENV_RELOAD_MODULES:
         if name in sys.modules:
             importlib.reload(sys.modules[name])
         else:
             importlib.import_module(name)
     yield
+    # `monkeypatch.setenv` above only reverts the environment VARIABLE at
+    # fixture teardown, not the `app.config.settings` singleton the reload
+    # populated from it — that singleton would otherwise stay pinned to
+    # service_account mode for every later test in this pytest worker that
+    # reads `app.config.settings` without reloading it itself. Reload back
+    # to the oauth default here, before `monkeypatch`'s own teardown runs,
+    # so the singleton never leaks past this fixture.
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "oauth")
+    monkeypatch.setenv("GCP_SA_BOOTSTRAP_PROJECT", "")
+    monkeypatch.setenv("GCP_SA_BOOTSTRAP_KEY_JSON", "")
+    for name in _SA_ENV_RELOAD_MODULES:
+        importlib.reload(sys.modules[name])
 
 
 def _fake_iam(key_side_effect=None) -> MagicMock:

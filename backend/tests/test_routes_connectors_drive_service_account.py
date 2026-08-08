@@ -38,16 +38,34 @@ def _reload_for(monkeypatch, *, mode: str, project: str = "", key_json: str = ""
             importlib.reload(sys.modules[name])
 
 
-@pytest.fixture
-def oauth_mode_env(isolated_settings, monkeypatch):
-    """The default posture: SA mode off, nothing configured. Every commit of
-    this feature must be safe to merge and deploy while still landing here."""
+def _reload_env(monkeypatch, *, mode: str, project: str = "", key_json: str = ""):
+    """Set env + reload, yield, then reload back to the oauth default.
+
+    `monkeypatch.setenv` only reverts the environment VARIABLE at fixture
+    teardown — it never re-runs the `importlib.reload` these tests use to
+    make the `app.config.settings` singleton pick the value up. Without an
+    explicit reload-back, the singleton stays pinned to whatever mode the
+    last test here selected, leaking into every later test in the same
+    pytest worker that reads `app.config.settings` without reloading it
+    itself (e.g. `app.kg_ingest.auto_sync._run_drive_sync`). Restoring here,
+    before `monkeypatch`'s own teardown reverts the env vars, closes that
+    leak regardless of what the next test does.
+    """
+    _reload_for(monkeypatch, mode=mode, project=project, key_json=key_json)
+    yield
     _reload_for(monkeypatch, mode="oauth")
 
 
 @pytest.fixture
+def oauth_mode_env(isolated_settings, monkeypatch):
+    """The default posture: SA mode off, nothing configured. Every commit of
+    this feature must be safe to merge and deploy while still landing here."""
+    yield from _reload_env(monkeypatch, mode="oauth")
+
+
+@pytest.fixture
 def sa_mode_env(isolated_settings, monkeypatch):
-    _reload_for(
+    yield from _reload_env(
         monkeypatch,
         mode="service_account",
         project="test-project",
@@ -59,7 +77,7 @@ def sa_mode_env(isolated_settings, monkeypatch):
 def sa_mode_unconfigured_env(isolated_settings, monkeypatch):
     """service_account is REQUESTED but the bootstrap credential is missing —
     a distinct, reportable state from "oauth mode"."""
-    _reload_for(monkeypatch, mode="service_account")
+    yield from _reload_env(monkeypatch, mode="service_account")
 
 
 # ─────────────────────── mode toggle ───────────────────────
