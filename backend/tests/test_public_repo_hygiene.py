@@ -10,8 +10,9 @@ HOW IT WORKS. `fixtures/customer_name_denylist.txt` holds SHA-256 hashes of
 normalised real names, never the names themselves — a plaintext list in a
 public repo would re-publish exactly what we are removing. The checker walks
 every tracked text file, forms candidate word-phrases, normalises them the same
-way, and hashes. Word-count and length are stored beside each hash so the hot
-loop skips phrases that cannot match without hashing them.
+way, and hashes. Each hash is stored with its normalised LENGTH, so the hot loop
+discards phrases of the wrong length without hashing them at all; the stored
+word count only bounds how many adjacent words are ever worth joining.
 
 WHAT IT CANNOT DO. It only sees the working tree. Every one of these strings is
 still in git history, and no test can change that — see the note in
@@ -31,7 +32,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DENYLIST = Path(__file__).parent / "fixtures" / "customer_name_denylist.txt"
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
-_NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 # Paths that still contain a denylisted name and are NOT fixed by this change.
 #
@@ -99,10 +99,6 @@ KNOWN_UNFIXED = frozenset(Path(p) for p in (
     "web/app/lib/useActiveCompany.ts",
     "web/app/lib/useBriefHydration.ts",
 ))
-
-
-def _normalise(text: str) -> str:
-    return _NON_ALNUM.sub("", text.lower())
 
 
 def _load_denylist() -> tuple[dict[int, set[str]], int]:
