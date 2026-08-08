@@ -3887,6 +3887,37 @@ def slack_save_sync_channels(
                 "slack un-sync: purge failed for company=%s", company.company_id
             )
 
+        # Drop the deselected channels from the document catalog too.
+        #
+        # `register_slack_catalog` upserts a row per synced channel and nothing
+        # ever removed one, so a deselected channel stayed catalogued forever:
+        # still listed to the model as a document this workspace has, still
+        # rankable, and — since document resolution shipped — still eligible to
+        # be ASSERTED as the subject of a question. The body fetch then fails
+        # and the user is told the contents could not be loaded, which reads as
+        # a transient problem when the channel is simply not connected any
+        # more. Measured on the shared database 2026-08-07: one such row
+        # (#cerebro-agent-escalations, last synced three days before its
+        # siblings) against six tenants.
+        #
+        # Keyed on `removed_ids`, NOT on `purge_names` beside it, and that is
+        # the more reliable half of this cleanup rather than an accident: the
+        # corpus purge needs a stored channel NAME and logs a warning when one
+        # is missing, whereas the id is what the user's own deselection
+        # produced and is always present. So a channel whose name was never
+        # stored still leaves the catalog cleanly.
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents(
+                company.company_id, document_catalog.PROVIDER_SLACK, removed_ids
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "slack un-sync: catalog deregistration failed for company=%s",
+                company.company_id,
+            )
+
     return {
         "ok": True,
         "config": config,
