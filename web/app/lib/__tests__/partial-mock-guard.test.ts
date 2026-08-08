@@ -40,6 +40,137 @@ import { describe, expect, it } from "vitest"
 const APP_ROOT = path.resolve(__dirname, "..", "..")
 const CHAT_PERSISTENCE = path.join(APP_ROOT, "lib", "chatPersistence.ts")
 
+/**
+ * `src` with every STRING LITERAL and COMMENT replaced by spaces of the same
+ * length — newlines kept, so every index still lines up with the original.
+ *
+ * Both parsers below walk characters counting brackets and looking backwards
+ * for punctuation, and neither knew that a quote or a `//` changes what the
+ * characters mean. Two ways that bit:
+ *
+ *   - a comment immediately above a key made the previous non-whitespace
+ *     character a `/` rather than a `,`, so the property-position test dropped
+ *     the key and the guard reported a method MISSING that is plainly present.
+ *     `ChatScreen.prd-tab.dom.test.tsx` already carries a comment inside its
+ *     `conversationsApi` literal; it is harmless only because it sits above
+ *     `byPrd`, which is not a required method. Move it one line up and CI
+ *     red-Xes a correct file.
+ *   - a `)` inside a string literal closed `libApiMockBody`'s paren count
+ *     early, truncating the factory — which usually means the
+ *     `conversationsApi` literal falls outside the slice and the file is
+ *     silently skipped.
+ *
+ * Blanking in place rather than deleting is what keeps this a two-line change
+ * at each call site: the existing index arithmetic is untouched, callers scan
+ * the blanked copy and slice from the original.
+ *
+ * KNOWN BLIND SPOT: regex literals are not tracked, because telling `/` as
+ * division from `/` as a regex needs real parsing. A regex holding an
+ * unbalanced bracket or a lone quote inside a `vi.mock` factory would still
+ * confuse the scan. Not seen in this repo, and it fails toward silence (a
+ * skipped file), which is this check's stated acceptable direction.
+ */
+function blankNoise(src: string): string {
+  const out = src.split("")
+  const blank = (i: number) => {
+    if (src[i] !== "\n") out[i] = " "
+  }
+  // Open template literals. A `${` inside one returns us to code, so the depth
+  // of braces opened since then decides which `}` closes the substitution.
+  const templates: { braceDepth: number }[] = []
+  let inTemplate = false
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]
+    const next = src[i + 1]
+
+    if (inTemplate) {
+      if (ch === "\\") {
+        blank(i)
+        blank(i + 1)
+        i += 2
+        continue
+      }
+      if (ch === "`") {
+        blank(i)
+        i++
+        templates.pop()
+        inTemplate = false
+        continue
+      }
+      if (ch === "$" && next === "{") {
+        blank(i)
+        blank(i + 1)
+        i += 2
+        inTemplate = false // back to code until the substitution closes
+        continue
+      }
+      blank(i)
+      i++
+      continue
+    }
+
+    if (ch === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") {
+        blank(i)
+        i++
+      }
+      continue
+    }
+    if (ch === "/" && next === "*") {
+      blank(i)
+      blank(i + 1)
+      i += 2
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
+        blank(i)
+        i++
+      }
+      blank(i)
+      blank(i + 1)
+      i += 2
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      blank(i)
+      i++
+      while (i < src.length && src[i] !== ch && src[i] !== "\n") {
+        if (src[i] === "\\") {
+          blank(i)
+          i++
+        }
+        blank(i)
+        i++
+      }
+      blank(i) // the closing quote (or the newline of an unterminated string)
+      i++
+      continue
+    }
+    if (ch === "`") {
+      blank(i)
+      i++
+      templates.push({ braceDepth: 0 })
+      inTemplate = true
+      continue
+    }
+    // Plain code. Track braces only to know which `}` ends a `${…}`.
+    const top = templates[templates.length - 1]
+    if (top) {
+      if (ch === "{") top.braceDepth++
+      else if (ch === "}") {
+        if (top.braceDepth === 0) {
+          blank(i)
+          i++
+          inTemplate = true
+          continue
+        }
+        top.braceDepth--
+      }
+    }
+    i++
+  }
+  return out.join("")
+}
+
 /** Every method `chatPersistence` calls on the api it resolves dynamically. */
 function requiredApiMethods(): string[] {
   const src = fs.readFileSync(CHAT_PERSISTENCE, "utf8")
@@ -71,18 +202,27 @@ function testFiles(dir: string, out: string[] = []): string[] {
  * only acceptable direction for this parser to be wrong is silence.
  */
 function conversationsApiKeys(src: string): string[] | null {
+  // Scan the BLANKED copy throughout. The marker itself is safe to run on it —
+  // it matches an identifier, a colon and a brace, none of which blanking
+  // touches — and doing so means a commented-out `conversationsApi: {` no
+  // longer anchors the parse. Key names come back intact for the same reason:
+  // only strings and comments are blanked, never identifiers.
+  const scan = blankNoise(src)
   const marker = /\bconversationsApi\s*:\s*\{/g
-  const found = marker.exec(src)
+  const found = marker.exec(scan)
   if (!found) return null
   let depth = 1
   let i = found.index + found[0].length
   const start = i
-  while (i < src.length && depth > 0) {
-    if (src[i] === "{") depth++
-    else if (src[i] === "}") depth--
+  while (i < scan.length && depth > 0) {
+    if (scan[i] === "{") depth++
+    else if (scan[i] === "}") depth--
     i++
   }
-  const body = src.slice(start, i - 1)
+  // Never closed — the literal is malformed, or the scan lost its place. Report
+  // "unknown" rather than parsing a truncated body into a confident key list.
+  if (depth > 0) return null
+  const body = scan.slice(start, i - 1)
 
   const keys: string[] = []
   let inner = 0
@@ -241,27 +381,42 @@ function modulesReachingChatPersistence(): Set<string> {
  * check off for a file.
  */
 function libApiMockBody(src: string): string | null {
+  // This marker MUST run on the original: it matches the quoted module path,
+  // and blanking would erase exactly the characters it looks for. So the match
+  // is found in `src` and only the bracket walk uses the blanked copy — whose
+  // indices line up, since blanking preserves length.
+  const scan = blankNoise(src)
   const marker = /vi\.mock\(\s*["'][^"']*\blib\/api["']/g
-  const found = marker.exec(src)
+  let found = marker.exec(src)
+  // …with the one cost of matching on the original: a commented-out or
+  // stringified `vi.mock("…lib/api"` matches too. The blanked copy is the
+  // arbiter — if those characters were blanked, this is not real code.
+  while (found && scan[found.index] === " ") found = marker.exec(src)
   if (!found) return null
-  let i = src.indexOf("(", found.index)
+  let i = scan.indexOf("(", found.index)
+  if (i === -1) return null
   let depth = 0
   const start = i
-  while (i < src.length) {
-    const ch = src[i]
+  while (i < scan.length) {
+    const ch = scan[i]
     if (ch === "(") depth++
     else if (ch === ")") {
       depth--
+      // Slice the ORIGINAL, so callers still receive real source text.
       if (depth === 0) return src.slice(start, i + 1)
     }
     i++
   }
-  return src.slice(start)
+  // Unbalanced to end-of-file. Previously this returned everything from the
+  // marker on — a body that is wrong in an unknown direction. Skip instead.
+  return null
 }
 
 /** Does THIS factory rebuild the module from the real one (`{ ...actual }`)? */
 function spreadsTheRealModule(factoryBody: string): boolean {
-  return /importOriginal|importActual/.test(factoryBody)
+  // Blanked, so the word appearing in a comment ("we could use importOriginal
+  // here") does not exempt a factory that does no such thing.
+  return /importOriginal|importActual/.test(blankNoise(factoryBody))
 }
 
 describe("partial mocks of dynamically-imported modules", () => {
@@ -309,6 +464,99 @@ describe("partial mocks of dynamically-imported modules", () => {
       },
     }`
     expect(conversationsApiKeys(shorthand)).toEqual(["create", "addTurn"])
+  })
+
+  it("a COMMENT above a key does not drop that key", () => {
+    // The false RED this fix exists for. The property-position test walks back
+    // to the previous non-whitespace character and wants a comma; with a
+    // comment in between it finds `/` (or the last letter of the comment) and
+    // skips the key — so the guard reports a method missing that is sitting
+    // right there in the file, naming a line the author can see is correct.
+    //
+    // Live-adjacent, not theoretical: ChatScreen.prd-tab.dom.test.tsx already
+    // has a comment inside its conversationsApi literal. It is harmless only
+    // because it precedes `byPrd`, which is not a required method — move it one
+    // line up and CI red-Xes a correct file.
+    const withComments = `{
+      conversationsApi: {
+        create: vi.fn().mockResolvedValue({ id: 1 }),
+        // The thread-resume probe reads this on every chat open.
+        addTurn: vi.fn().mockResolvedValue({}),
+        /* block form, same problem */
+        byPrd: vi.fn().mockResolvedValue({ conversation: null }),
+      },
+    }`
+    expect(conversationsApiKeys(withComments)).toEqual(["create", "addTurn", "byPrd"])
+  })
+
+  it("a comment that MENTIONS a method does not invent that key", () => {
+    // The other direction, and the one that would matter more: blanking must
+    // erase the comment's contents, not merely stop it from hiding real keys.
+    // A file whose comment says `create:` while the mock omits it is still
+    // missing `create`.
+    const mentionsOnly = `{
+      conversationsApi: {
+        // create: vi.fn() — deliberately omitted, see #1109
+        addTurn: vi.fn(),
+      },
+    }`
+    expect(conversationsApiKeys(mentionsOnly)).toEqual(["addTurn"])
+  })
+
+  it("unmatched brackets inside a STRING do not end the factory early", () => {
+    // libApiMockBody counted parens without knowing what a string is, so bare
+    // `)` characters in a message closed the call early and truncated the body
+    // — and once the `conversationsApi` literal falls outside that slice the
+    // file is skipped entirely. Silent, and therefore worse than loud.
+    //
+    // The threshold, measured against the old parser rather than assumed: ONE
+    // stray `)` shifts the count but still cuts after the literal, so the file
+    // survives by luck. TWO is where it starts losing the literal — hence the
+    // shape below. Anything less would be a test that passes either way.
+    const src = `
+      vi.mock("../../lib/api", () => ({
+        askApi: { ask: vi.fn().mockRejectedValue(new Error("bad :) worse :)")) },
+        conversationsApi: {
+          create: vi.fn().mockResolvedValue({ id: 1 }),
+          addTurn: vi.fn(),
+        },
+      }))
+    `
+    const factory = libApiMockBody(src)
+    expect(factory).not.toBeNull()
+    expect(factory).toContain("conversationsApi")
+    expect(conversationsApiKeys(factory!)).toEqual(["create", "addTurn"])
+  })
+
+  it("a `//` inside a STRING is not the start of a comment", () => {
+    // Guards the FIX, not the old defect — this one passes either way, and is
+    // here on purpose. Stripping comments is the obvious way to close the bug
+    // above and the obvious way to introduce a worse one: a naive strip eats a
+    // URL's line, and a naive `/*` strip eats the rest of the factory.
+    const src = `
+      vi.mock("../../lib/api", () => ({
+        API_URL: "https://api.example.com/v1",
+        conversationsApi: {
+          create: vi.fn(),
+          addTurn: vi.fn(),
+        },
+      }))
+    `
+    const factory = libApiMockBody(src)
+    expect(factory).not.toBeNull()
+    expect(conversationsApiKeys(factory!)).toEqual(["create", "addTurn"])
+  })
+
+  // Also a guard on the fix rather than the old defect: template literals are
+  // the third quoting form, and skipping them would reintroduce the same class.
+  it("a brace inside a TEMPLATE literal does not end the literal early", () => {
+    const src = `{
+      conversationsApi: {
+        create: vi.fn().mockResolvedValue({ id: 1 }),
+        addTurn: vi.fn().mockImplementation((id) => \`turn } for \${id}\`),
+      },
+    }`
+    expect(conversationsApiKeys(src)).toEqual(["create", "addTurn"])
   })
 
   it("treats a spread mock as unknown rather than guessing", () => {
