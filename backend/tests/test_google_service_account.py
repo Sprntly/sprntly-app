@@ -10,6 +10,7 @@ the OAuth route uses.
 import base64
 import importlib
 import json
+import re
 import sys
 
 import pytest
@@ -329,6 +330,194 @@ def test_sync_service_account_feeds_the_same_ingest_loop_as_oauth(sa_env):
     assert captured["dataset"] == "acme"
     assert captured["service"] is fake_service
     assert captured["entries"] == entries
+
+
+# ─────────────────── sync_service_account: real end-to-end ───────────────────
+#
+# The tests above prove PARITY by mocking sync_google_drive with a **kwargs
+# fake — exactly the pattern that hid the TypeError this ticket fixes (the
+# fake happily accepts service=/entries= even when the real function's
+# signature didn't declare them yet). The tests below do NOT mock
+# sync_google_drive: they stub only the Drive HTTP boundary (a fake service's
+# files().get()/files().list()) and the download boundary, and let
+# sync_service_account call straight through to the real, installed
+# sync_google_drive.
+
+
+class _Exec:
+    """Stands in for the `.execute()`-returning object every googleapiclient
+    request method returns."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def execute(self):
+        return self._value
+
+
+class _FakeDriveHttpBoundary:
+    """A minimal Drive v3 Resource stand-in, stubbed only at the two calls
+    that actually hit the network (files().get, files().list) — real
+    `get_file_metadata` / `expand_folder` / `_list_folder_children` logic in
+    google_drive_sync runs against this unchanged, same as
+    `_drive_service_with_children` in test_google_drive_sync.py."""
+
+    def __init__(self, metadata_by_id: dict, children_by_folder: dict | None = None):
+        self._metadata_by_id = metadata_by_id
+        self._children_by_folder = children_by_folder or {}
+
+    def files(self):
+        return self
+
+    def get(self, fileId, **_kwargs):
+        return _Exec(dict(self._metadata_by_id[fileId]))
+
+    def list(self, q: str = "", **_kwargs):
+        m = re.match(r"'([^']+)' in parents", q)
+        fid = m.group(1) if m else ""
+        return _Exec({"files": self._children_by_folder.get(fid, []),
+                      "nextPageToken": None})
+
+
+def test_sync_service_account_runs_through_the_real_sync_google_drive(sa_env, monkeypatch):
+    """LOAD-BEARING: sync_service_account must reach the REAL
+    google_drive_sync.sync_google_drive with no TypeError.
+
+    sync_google_drive is NOT mocked anywhere in this test — only
+    `enumerate_shared`, the injected Drive service's two HTTP-boundary calls,
+    and the file-download boundary are stubbed — so this exercises the
+    ACTUAL installed `(*, company_id, dataset, files, kg_inline, service,
+    entries)` keyword signature. Against the pre-fix signature (no
+    `service`/`entries` params) this call raises
+    ``TypeError: sync_google_drive() got an unexpected keyword argument
+    'service'`` — this test fails red on that code, proving it isn't a test
+    that a **kwargs fake would also pass."""
+    kg_calls: list[list] = []
+    monkeypatch.setattr(
+        "app.kg_ingest.drive_extract.kickoff_drive_extract",
+        lambda company_id, docs: (kg_calls.append(list(docs)), True)[1],
+    )
+
+    company_id = seed_company()
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
+        token_encrypted="",
+        scopes=google_service_account.SA_DRIVE_SCOPE,
+        config_json="{}",
+    )
+    db.insert_dataset(slug="acme", display_name="Acme")
+
+    file_id = "sashared01"
+    fake_service = _FakeDriveHttpBoundary(
+        metadata_by_id={
+            file_id: {
+                "id": file_id,
+                "name": "shared.txt",
+                "mimeType": "text/plain",
+                "modifiedTime": "2026-05-20T12:00:00.000Z",
+                "size": "5",
+            },
+        },
+    )
+    entries = [{"id": file_id, "name": "shared.txt"}]
+
+    with (
+        patch.object(
+            google_service_account,
+            "google_drive_service_for_company",
+            return_value=fake_service,
+        ) as get_service,
+        patch.object(
+            google_service_account, "enumerate_shared", return_value=entries
+        ),
+        patch.object(
+            google_drive_sync, "download_file_content",
+            return_value=("shared.txt", b"hello from the SA share"),
+        ),
+    ):
+        result = google_service_account.sync_service_account(company_id, dataset="acme")
+
+    get_service.assert_called_once_with(company_id)
+    assert result.errors == []
+    assert len(result.synced) == 1
+    assert result.synced[0]["filename"] == "shared.txt"
+    assert result.kg_queued == ["shared"]
+    assert len(kg_calls) == 1
+    assert kg_calls[0][0].file_id == file_id
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = json.loads(row["config_json"])
+    assert cfg["dataset"] == "acme"
+    assert cfg["sa_shared_roots"] == entries
+
+
+def test_sync_service_account_expands_a_shared_folder_recursively_real_path(
+    sa_env, monkeypatch
+):
+    """AC1: a folder entry from `enumerate_shared` (a shared FOLDER, not a
+    file) is recursively expanded via the real `expand_folder`, using the
+    INJECTED service — so an SA-shared folder ingests its whole subtree, not
+    just the folder object. sync_google_drive is real here too."""
+    monkeypatch.setattr(
+        "app.kg_ingest.drive_extract.kickoff_drive_extract",
+        lambda company_id, docs: True,
+    )
+
+    company_id = seed_company()
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
+        token_encrypted="",
+        scopes=google_service_account.SA_DRIVE_SCOPE,
+        config_json="{}",
+    )
+    db.insert_dataset(slug="acme", display_name="Acme")
+
+    root_id, child_id = "sarootfolder", "sachildfile1"
+    fake_service = _FakeDriveHttpBoundary(
+        metadata_by_id={
+            root_id: {
+                "id": root_id,
+                "name": "SA Shared Folder",
+                "mimeType": google_drive_sync.GOOGLE_FOLDER,
+                "modifiedTime": "2026-05-20T12:00:00.000Z",
+            },
+        },
+        children_by_folder={
+            root_id: [{
+                "id": child_id, "name": "descendant.txt",
+                "mimeType": "text/plain",
+                "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+            }],
+        },
+    )
+    entries = [{"id": root_id, "name": "SA Shared Folder"}]
+
+    with (
+        patch.object(
+            google_service_account,
+            "google_drive_service_for_company",
+            return_value=fake_service,
+        ),
+        patch.object(
+            google_service_account, "enumerate_shared", return_value=entries
+        ),
+        patch.object(
+            google_drive_sync, "download_file_content",
+            return_value=("descendant.txt", b"from the subtree"),
+        ),
+    ):
+        result = google_service_account.sync_service_account(company_id, dataset="acme")
+
+    assert result.errors == []
+    assert len(result.synced) == 1
+    assert result.synced[0]["filename"] == "descendant.txt"
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = json.loads(row["config_json"])
+    contents = cfg["folder_contents"][root_id]
+    assert {n["id"] for n in contents} == {child_id}
 
 
 def test_sync_service_account_persists_shared_roots_for_the_tree_ui(sa_env):

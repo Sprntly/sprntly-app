@@ -333,6 +333,136 @@ def test_sync_stores_picked_files_passed_in(drive_connected):
     assert cfg["files"] == [{"id": "newfile01", "name": "spec.txt"}]
 
 
+# ─── Injected service + entries (service-account mode's own path) ───────────
+#
+# service_account mode injects an already-authenticated Drive client
+# (`service`) and its own enumerated item set (`entries`) instead of letting
+# sync_google_drive resolve OAuth credentials off the connection row and
+# read config["files"]. Both default to None, and the pre-existing tests
+# above (which never pass either) are the byte-identical-default coverage.
+
+
+def test_default_params_still_build_drive_service_and_use_config_files(
+    drive_connected, kg_kickoff
+):
+    """AC2, mutation-proof: with service=None, entries=None (the default —
+    every call site above this ticket), build_drive_service IS called and
+    config["files"] IS the item source, unchanged by the new parameters."""
+    company_id = drive_connected
+    file_meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    with (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()) as mock_build,
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              return_value=file_meta) as mock_get_meta,
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("notes.txt", b"hello from drive")),
+    ):
+        result = sync_google_drive(company_id=company_id)
+
+    mock_build.assert_called_once()
+    # The item resolved is config["files"]'s file0001aa (the drive_connected
+    # fixture's picked file) — not anything injected.
+    mock_get_meta.assert_called_once()
+    assert mock_get_meta.call_args.args[1] == "file0001aa"
+    assert len(result.synced) == 1
+    assert result.synced[0]["filename"] == "notes.txt"
+
+
+def test_injected_service_is_used_and_build_drive_service_is_skipped(
+    drive_connected, kg_kickoff
+):
+    """AC1/AC2: when `service` is injected, sync_google_drive uses it as-is
+    and NEVER calls build_drive_service — proven with a REAL call into
+    sync_google_drive (not a mock of sync_google_drive itself)."""
+    company_id = drive_connected
+    file_id = "injfile01"
+    fake_service = MagicMock()
+    fake_service.files.return_value.get.return_value.execute.return_value = {
+        "id": file_id,
+        "name": "shared.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "5",
+    }
+
+    with (
+        patch("app.connectors.google_drive_sync.build_drive_service") as mock_build,
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("shared.txt", b"hi from the injected service")),
+    ):
+        result = sync_google_drive(
+            company_id=company_id,
+            service=fake_service,
+            entries=[{"id": file_id, "name": "shared.txt"}],
+        )
+
+    mock_build.assert_not_called()
+    assert result.errors == []
+    assert len(result.synced) == 1
+    assert result.synced[0]["filename"] == "shared.txt"
+    # The metadata call landed on the INJECTED service, not any other client.
+    fake_service.files.return_value.get.assert_called()
+
+    # config["files"] (the fixture's file0001aa pick) is untouched — entries
+    # replaced the item set for this call without overwriting stored config.
+    import json as _json
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    assert cfg["files"] == [{"id": "file0001aa", "name": "notes.txt"}]
+
+
+def test_injected_entries_folder_expands_recursively_via_injected_service(
+    drive_connected, kg_kickoff
+):
+    """AC1: a folder entry passed via `entries` (what SA's enumerate_shared
+    returns for a shared folder) is recursively expanded via the real
+    `expand_folder`, using the INJECTED service — the same recursion the
+    picked-folder OAuth path uses — so the whole subtree ingests, not just
+    the folder object."""
+    company_id = drive_connected
+    root_id, child_id = "safolder01", "sadescfile1"
+    children = {
+        root_id: [{
+            "id": child_id, "name": "descendant.txt", "mimeType": "text/plain",
+            "modifiedTime": "2026-05-20T12:00:00.000Z", "size": "5",
+        }],
+    }
+    fake_service = _drive_service_with_children(children)
+    fake_service.files.return_value.get.return_value.execute.return_value = (
+        _folder_meta(name="SA Shared Folder", folder_id=root_id)
+    )
+
+    with (
+        patch("app.connectors.google_drive_sync.build_drive_service") as mock_build,
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("descendant.txt", b"from the SA subtree")),
+    ):
+        result = sync_google_drive(
+            company_id=company_id,
+            service=fake_service,
+            entries=[{"id": root_id, "name": "SA Shared Folder"}],
+        )
+
+    mock_build.assert_not_called()
+    assert result.errors == []
+    assert len(result.synced) == 1
+    assert result.synced[0]["filename"] == "descendant.txt"
+
+    import json as _json
+
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    contents = _json.loads(row["config_json"])["folder_contents"][root_id]
+    assert {n["id"] for n in contents} == {child_id}
+
+
 # ─── Fail-loud: a picked item that can't be ingested is never a silent skip ──
 
 

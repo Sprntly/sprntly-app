@@ -380,12 +380,27 @@ def sync_google_drive(
     dataset: str | None = None,
     files: list[dict] | None = None,
     kg_inline: bool = False,
+    service: Resource | None = None,
+    entries: list[dict] | None = None,
 ) -> SyncResult:
     """Download + ingest the explicitly-picked Drive files stored in the
     connection config (``config["files"]``). Pass ``files`` to overwrite the
     stored picked-file list first (used by the save-picked-files endpoint);
     otherwise the existing config is used. An empty picked-file list is a
     graceful no-op — not an error.
+
+    ``service`` and ``entries`` let a caller inject an already-authenticated
+    Drive client and its own enumerated item set into this SAME walk /
+    download / ingest / KG path, instead of resolving OAuth credentials off
+    the connection row and reading ``config["files"]`` — this is how
+    service-account mode (``google_service_account.sync_service_account``)
+    reuses this function unchanged. When ``service`` is given it is used
+    as-is and ``build_drive_service`` is never called. When ``entries`` is
+    given it replaces the stored picked-file list as the item set to
+    resolve — each entry may be a file or a FOLDER, and a folder entry is
+    recursively expanded via ``expand_folder`` exactly like a picked folder
+    is. Both default to ``None``, in which case behaviour is byte-identical
+    to the original OAuth-only path.
 
     Two freshness ledgers per file: ``file_mtime`` (corpus copy) and
     ``kg_file_mtime`` (KG extraction). A file changed against either gets
@@ -416,7 +431,11 @@ def sync_google_drive(
         row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER) or row
         config = load_config(row)
 
-    picked = normalize_picked_files(config.get("files"))
+    picked = (
+        normalize_picked_files(entries)
+        if entries is not None
+        else normalize_picked_files(config.get("files"))
+    )
     result = SyncResult(dataset=slug)
 
     # No picked files yet (fresh connect, or the Picker hasn't run) — no-op.
@@ -448,14 +467,15 @@ def sync_google_drive(
 
     kg_docs: list[DriveDoc] = []
 
-    try:
-        service = build_drive_service(row)
-    except HttpError as e:
-        msg = f"Drive API error: {e}"
-        db.update_connection_sync(
-            company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg
-        )
-        raise SyncConfigError(msg) from e
+    if service is None:
+        try:
+            service = build_drive_service(row)
+        except HttpError as e:
+            msg = f"Drive API error: {e}"
+            db.update_connection_sync(
+                company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg
+            )
+            raise SyncConfigError(msg) from e
 
     # ── Resolve the picked entries to FILES ──────────────────────────────────
     #
