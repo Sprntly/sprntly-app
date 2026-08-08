@@ -105,18 +105,26 @@ def _normalise(text: str) -> str:
     return _NON_ALNUM.sub("", text.lower())
 
 
-def _load_denylist() -> tuple[dict[tuple[int, int], set[str]], int]:
-    """{(word_count, length): {hash, ...}}, plus the largest word count."""
-    buckets: dict[tuple[int, int], set[str]] = {}
+def _load_denylist() -> tuple[dict[int, set[str]], int]:
+    """{normalised_length: {hash, ...}}, plus how many words to join at most.
+
+    Buckets are keyed on LENGTH ALONE, never on the stored word count. Because
+    normalisation strips spaces, 'Vandelay Industries' and 'vandelayindustries'
+    are the same 18-character string, so a two-word denylist entry must still be
+    caught when someone writes it as one token. Keying on word count would put
+    those two spellings in different buckets and silently miss the second — the
+    stored count only tells the scanner how many adjacent words are ever worth
+    joining.
+    """
+    buckets: dict[int, set[str]] = {}
     max_words = 0
     for line in DENYLIST.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         wc_s, len_s, digest = line.split(":")
-        wc, length = int(wc_s), int(len_s)
-        buckets.setdefault((wc, length), set()).add(digest)
-        max_words = max(max_words, wc)
+        buckets.setdefault(int(len_s), set()).add(digest)
+        max_words = max(max_words, int(wc_s))
     return buckets, max_words
 
 
@@ -141,9 +149,9 @@ def _hits_in(text: str, buckets, max_words) -> set[str]:
             if end > n:
                 break
             total += lengths[end - 1]
-            bucket = buckets.get((count, total))
+            bucket = buckets.get(total)
             if not bucket:
-                continue  # no denylisted name has this shape - never hashed
+                continue  # no denylisted name has this length - never hashed
             phrase = "".join(tokens[start:end])
             if hashlib.sha256(phrase.encode()).hexdigest() in bucket:
                 found.add(phrase)
@@ -171,12 +179,17 @@ def test_denylist_is_hashed_not_plaintext():
 def test_the_guard_fires_on_a_known_bad_string(denylist):
     """A guard is not trusted until it has been shown to fail on known-bad input.
 
-    'Mayer Brown' is one of the names this scrub removed. All three spellings
-    must be caught, since the normalisation is what makes the guard robust to
-    someone writing the name a different way.
+    'Canarycorp Sentinel' is a CANARY: a fictional name that is on the denylist
+    for no reason other than to be caught here. Using a real removed name would
+    mean this guard permanently kept one of the very strings it exists to
+    delete. All spellings must be caught — the normalisation is what makes the
+    guard robust to someone writing a name a different way.
     """
     buckets, max_words = denylist
-    for spelling in ("Mayer Brown", "mayerbrown", "Mayer-Brown", "MAYER  BROWN"):
+    for spelling in (
+        "Canarycorp Sentinel", "canarycorpsentinel",
+        "Canarycorp-Sentinel", "CANARYCORP  SENTINEL",
+    ):
         assert _hits_in(f"# measured on {spelling} last week", buckets, max_words), (
             f"guard failed to catch {spelling!r}"
         )
@@ -194,10 +207,25 @@ def test_the_guard_is_quiet_on_synthetic_names(denylist):
 
 def test_no_real_customer_name_in_the_tracked_repo(denylist):
     buckets, max_words = denylist
+    files = _tracked_text_files()
+
+    # Fail LOUD rather than pass silently when the scan has no input. Without
+    # this the test is green in any checkout where `git grep` returns nothing —
+    # no git, a sparse checkout, a wrong REPO_ROOT — which is the worst outcome
+    # for a guard: it converts "nobody checked" into "someone checked, it's
+    # fine". 500 is far below the ~1,960 tracked text files today and far above
+    # anything a broken invocation would produce.
+    assert len(files) > 500, (
+        f"only {len(files)} tracked text files found under {REPO_ROOT} — the "
+        "scan has no real input, so a pass here would be meaningless"
+    )
+
     offenders: dict[str, set[str]] = {}
-    for rel in _tracked_text_files():
+    for rel in files:
         if rel == Path("backend/tests/test_public_repo_hygiene.py"):
-            continue  # this file names 'Mayer Brown' to prove the guard fires
+            # Skipped only because it spells the CANARY out to prove the guard
+            # fires. No real customer name lives here, so nothing is hidden.
+            continue
         if rel in KNOWN_UNFIXED:
             continue
         try:
