@@ -84,7 +84,15 @@ vi.mock("next/navigation", () => ({
 }))
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
-  useWorkspace: () => ({ loading: false, profile: null, workspace: null, refresh: async () => {} }),
+  // Envelope dispatch is DEFAULT ON, so a null/flagless workspace no longer
+  // means "flag off" — this suite locks the LEGACY regex ladder, so it asks for
+  // the kill switch by name.
+  useWorkspace: () => ({
+    loading: false,
+    profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
 }))
 vi.mock("../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn() }),
@@ -120,10 +128,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -278,9 +286,9 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
     await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
 
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "admins only" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(screen.getByTestId("clarify-questions-resolved")).toBeTruthy())
@@ -309,9 +317,9 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
     await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
 
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "admins only" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
@@ -372,15 +380,15 @@ describe("ChatScreen — the clarify gate's failure windows", () => {
     // would queue its user turn ahead of the deferred assistant write and
     // invert the persisted user→assistant pairing (and a second PRD command
     // would cross-wire deferredAckRef).
-    const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "also generate a PRD for exports" } }) })
-    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
     await act(async () => { fireEvent.click(sendBtn) })
 
     expect(runAskGeneration).not.toHaveBeenCalled()
     expect(generateFromTask).not.toHaveBeenCalled()
     // The message is handed back, not eaten.
-    expect((document.querySelector(".bc-composer-input") as HTMLTextAreaElement).value)
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value)
       .toBe("also generate a PRD for exports")
 
     // Gate settles → the held message can go through normally.

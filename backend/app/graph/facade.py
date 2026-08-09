@@ -15,9 +15,31 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.db.client import require_client
-from app.graph.types import Entity, Relationship, Signal, Source
+from app.db.companies import display_name_for_company_id
+from app.graph.types import (
+    COMPANY_ENTITY_TYPE,
+    Entity,
+    Relationship,
+    Signal,
+    Source,
+    compute_evidence_eligible,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Every kg_signal column EXCEPT `embedding`. The vector(1536) column is ~30KB
+#: of JSON per row and no consumer of active_signals reads Signal.embedding —
+#: it was pure wire cost on every ask.
+_SIGNAL_COLS = (
+    "id, enterprise_id, source_id, source_type, kind, content, properties, "
+    "valid_at, transaction_at, stale_after, confidence, weight, provenance, "
+    "created_at, skill_id, origin, channel, evidence_eligible"
+)
+
+#: PostgREST caps an unlimited select at ~1000 rows anyway. Making the bound
+#: EXPLICIT — and pairing it with an ORDER BY — turns "an arbitrary page" into
+#: "the newest 1000", which is what every caller already assumed it had.
+_ACTIVE_SIGNALS_LIMIT = 1000
 
 
 class TenantViolationError(PermissionError):
@@ -92,6 +114,67 @@ class GraphFacade:
         self._tbl("kg_entity").insert(row).execute()
         return entity
 
+    def ensure_company_entity(
+        self, enterprise_id: str, label: Optional[str] = None, *,
+        relabel: bool = False,
+    ) -> str:
+        """Find-or-create the tenant's single root `company` entity — the KG's
+        tenant-scoped anchor node. Every enterprise gets exactly one; other
+        entities/signals that belong to this tenant wire to it (SCOPED_TO /
+        INFORMS) instead of floating disconnected.
+
+        Unlike theme/segment/competitor entities, there's no embedding
+        dedupe concern here — a plain existence check by type is enough
+        since there is only ever one per tenant. `label` is only used the
+        first time (entity creation) UNLESS `relabel=True` — by default, a
+        later call with a different label does NOT rename an already-existing
+        company entity. When no label is supplied, falls back to
+        `companies.display_name` for this enterprise (the human-readable name
+        every real tenant already has), and only as a last resort — no
+        `companies` row, or `display_name` itself unset — to the raw
+        `enterprise_id`, so this is always safe to call with just an
+        enterprise_id.
+
+        `relabel=True` (opt-in, e.g. `business_context_projection` after a
+        successful refresh) additionally updates an ALREADY-EXISTING entity's
+        canonical_label when a truthy `label` differs from its current one —
+        the fix for a company root that got created via a non-business-context
+        path first (e.g. roadmap upload) and would otherwise stay stuck with
+        its fallback label forever. Scoped narrowly: only fires when a real
+        label is actually supplied and different; a `None`/empty label or an
+        unchanged one is a no-op, so idempotent re-runs never write. This does
+        NOT touch the separate, deliberately-deferred backfill of SCOPED_TO/
+        INFORMS wiring for entities that predate that wiring.
+
+        A shared primitive rather than a private helper on one caller,
+        because more than one write path needs "find or create this
+        tenant's company root" — today `business_context_projection`, and
+        any later reconciliation pass over existing tenants needs the exact
+        same find-or-create semantics."""
+        existing = self.query_entities(enterprise_id, type=COMPANY_ENTITY_TYPE)
+        if existing:
+            entity = existing[0]
+            if relabel and label and label != entity.canonical_label:
+                (
+                    self._tbl("kg_entity")
+                    .update({
+                        "canonical_label": label,
+                        "updated_at": _iso(datetime.now(timezone.utc)),
+                    })
+                    .eq("enterprise_id", enterprise_id)
+                    .eq("id", entity.id)
+                    .execute()
+                )
+            return entity.id
+        if label is None:
+            label = display_name_for_company_id(enterprise_id) or enterprise_id
+        ent = Entity(
+            enterprise_id=enterprise_id, type=COMPANY_ENTITY_TYPE,
+            canonical_label=label,
+        )
+        self.create_entity(enterprise_id, ent)
+        return ent.id
+
     def write_signal(self, enterprise_id: str, signal: Signal) -> Signal:
         self._assert_tenant(enterprise_id, signal.enterprise_id)
         row = {
@@ -109,6 +192,10 @@ class GraphFacade:
             "confidence": signal.confidence,
             "weight": signal.weight,
             "provenance": signal.provenance,
+            "skill_id": signal.skill_id,
+            "origin": signal.origin,
+            "channel": signal.channel,
+            "evidence_eligible": signal.evidence_eligible,
         }
         self._tbl("kg_signal").insert(row).execute()
         return signal
@@ -254,6 +341,23 @@ class GraphFacade:
             q = q.eq("source_type", source_type)
         return [self._row_to_source(r) for r in (q.execute().data or [])]
 
+    def get_source(self, enterprise_id: str, source_id: str) -> Optional[Source]:
+        """ONE `kg_source` row by id, tenant-scoped — or None.
+
+        Sibling of get_entity/get_signal, and the read half of create_source.
+        Exists because source ids are DETERMINISTIC (uuid5 over a stable
+        per-file key), so a caller that knows the file can address its
+        provenance row directly instead of listing every source the tenant has
+        just to find one — a listing that grows with the connected corpus and
+        would run on every ask."""
+        r = (
+            self._tbl("kg_source").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", source_id)
+            .execute()
+        )
+        return self._row_to_source(r.data[0]) if r.data else None
+
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (
             self._tbl("kg_entity").select("*")
@@ -379,16 +483,36 @@ class GraphFacade:
         enterprise_id: str,
         source_types: Optional[list[str]] = None,
         since: Optional[datetime] = None,
+        *,
+        limit: int = _ACTIVE_SIGNALS_LIMIT,
     ) -> list[Signal]:
         """Non-stale signals (stale_after IS NULL OR stale_after > now()).
         Filtered in Python so it works against both real Supabase and the
-        in-memory fake (which doesn't support OR / gt). Per-enterprise
-        volumes are bounded (§20 NFR), so this is fine."""
+        in-memory fake (which doesn't support OR / gt).
+
+        Fetched newest-transaction-first and capped at `limit` (default
+        1000). PostgREST caps an unlimited select at ~1000 rows anyway;
+        without an explicit ORDER BY, *which* 1000 was arbitrary. The old
+        unordered full-select scan could silently return a page holding
+        none of a tenant's newest signals once it passed that cap, so
+        chat's "8 most recent" became 8 recent-within-an-arbitrary-page —
+        the newest connector data became permanently invisible with no
+        error. `embedding` is dropped from the select: no consumer of
+        active_signals reads Signal.embedding, and the vector(1536) column
+        was pure wire cost on every ask."""
         rows = (
-            self._tbl("kg_signal").select("*")
+            self._tbl("kg_signal").select(_SIGNAL_COLS)
             .eq("enterprise_id", enterprise_id)
+            .order("transaction_at", desc=True)
+            .limit(limit)
             .execute().data or []
         )
+        if len(rows) == limit:
+            logger.info(
+                "active_signals hit the fetch limit (enterprise_id=%s, limit=%d); "
+                "some non-stale signals older than the returned page may be omitted",
+                enterprise_id, limit,
+            )
         now = datetime.now(timezone.utc)
         kept: list[Signal] = []
         for r in rows:
@@ -402,6 +526,24 @@ class GraphFacade:
                 continue
             kept.append(self._row_to_signal(r))
         return kept
+
+    def recent_signals_by_skill(
+        self, enterprise_id: str, skill_id: str, limit: int = 25
+    ) -> list[Signal]:
+        """The most recent signals a given vendored extraction skill
+        produced for this enterprise, newest-transaction-first — the
+        sampling primitive for `app.graph.evals`'s structural eval harness.
+        Read-only and bounded by `limit`; never used on a live
+        request/ingestion path. Tenant-scoped like every other facade read."""
+        rows = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .eq("skill_id", skill_id)
+            .order("transaction_at", desc=True)
+            .limit(limit)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
 
     def has_signals_since(self, enterprise_id: str, iso_ts: str) -> bool:
         """True if any `kg_signal` for this enterprise has `created_at > iso_ts`.
@@ -528,6 +670,19 @@ class GraphFacade:
         sig.confidence = float(r.get("confidence") or 1.0)
         sig.weight = float(r.get("weight") or 1.0)
         sig.provenance = r.get("provenance") or {}
+        # Typed-field promotion: the DB column wins when present;
+        # a pre-migration row (column null) falls back to the informal
+        # provenance dict key, mirroring Signal.__post_init__ — this
+        # reconstruction path bypasses __init__/__post_init__ entirely
+        # (Signal.__new__), so the same fallback has to be repeated here.
+        sig.skill_id = r.get("skill_id") if r.get("skill_id") is not None else sig.provenance.get("skill_id")
+        sig.origin = r.get("origin") if r.get("origin") is not None else sig.provenance.get("origin")
+        sig.channel = r.get("channel") if r.get("channel") is not None else sig.provenance.get("channel")
+        raw_eligible = r.get("evidence_eligible")
+        sig.evidence_eligible = (
+            bool(raw_eligible) if raw_eligible is not None
+            else compute_evidence_eligible(sig.source_type, sig.origin)
+        )
         return sig
 
     def _row_to_relationship(self, r: dict) -> Relationship:

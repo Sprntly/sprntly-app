@@ -116,10 +116,10 @@ function renderChat() {
 }
 
 async function typeAndSend(text: string) {
-  const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+  const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   expect(textarea).toBeTruthy()
   await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
-  const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+  const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
@@ -176,8 +176,10 @@ describe("ChatScreen — the send renders before the dispatch decision", () => {
     const pending = document.querySelector('[data-testid="pending-send"]')
     expect(pending).toBeTruthy()
     expect(within(pending as HTMLElement).getByText("why are enterprise users asking for this?")).toBeTruthy()
-    // …and something is visibly working, so the wait reads as progress.
-    expect((pending as HTMLElement).querySelector(".assistant-thinking")).toBeTruthy()
+    // …and, once past the 400ms rung-0 gate, something is visibly working so the
+    // wait reads as progress. (Below 400ms nothing renders on purpose — a
+    // spinner that appears and vanishes inside half a second reads as a glitch.)
+    await waitFor(() => expect((pending as HTMLElement).querySelector(".cw")).toBeTruthy())
     // The dispatch really is still pending (not a resolved-fast false positive).
     expect(runAskGeneration).not.toHaveBeenCalled()
 
@@ -194,7 +196,7 @@ describe("ChatScreen — the send renders before the dispatch decision", () => {
     // old bug was the first half happening without the second.
     expect(document.querySelector('[data-testid="pending-send"]')).toBeTruthy()
     const composer = document.querySelector(
-      ".chat-home-composer-input, .bc-composer-input",
+      ".cx-input",
     ) as HTMLTextAreaElement
     expect(composer.value).toBe("")
   })
@@ -245,7 +247,7 @@ describe("ChatScreen — the send renders before the dispatch decision", () => {
     renderChat()
     await typeAndSend("why are enterprise users asking for this?")
 
-    const dock = document.querySelector(".bc-composer") as HTMLElement
+    const dock = document.querySelector(".cx") as HTMLElement
     if (dock) {
       const send = within(dock).queryByLabelText("Send")
       if (send) await act(async () => { fireEvent.click(send) })

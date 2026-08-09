@@ -8,7 +8,7 @@
  *   - Pre-connect API-key — paste-the-key form (Fireflies)
  *   - Connected           — "✓ Connected as alice@x.com" + provider-
  *                            specific config slot (Drive folder picker,
- *                            Slack channel picker) + Done button
+ *                            Slack sync-channel picker) + Done button
  *
  * Plus a "complete or restart" prompt that appears when the user
  * re-opens the modal after starting an OAuth flow without finishing
@@ -35,8 +35,8 @@ import { openOauthTab } from "../../lib/connectorsOauth"
 import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
-import { SlackChannelPicker } from "./SlackChannelPicker"
 import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
+import { ZoomConfigSlot } from "./ZoomConfigSlot"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -46,6 +46,58 @@ import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
  */
 const APIKEY_PAGE_URL: Record<string, string> = {
   fireflies: "https://app.fireflies.ai/integrations/custom/fireflies",
+}
+
+/**
+ * Provider-specific things a person needs to know BEFORE the OAuth tab opens,
+ * keyed by connector id. Rendered under the generic blurb.
+ *
+ * These exist to move a failure earlier. Zoom's three are each a dead end
+ * discovered on the provider's own consent screen otherwise: authorizing as a
+ * non-admin silently narrows the connection to one person's calls, a Free or
+ * Basic Zoom account has no cloud recordings at all, and an account that
+ * requires app pre-approval refuses before Sprntly is ever reached. Saying so
+ * here costs three lines; not saying it costs a support thread.
+ *
+ * Google Meet's are the same idea and one step further, because its coverage is
+ * genuinely NARROWER than the connector sitting next to it on the same shelf.
+ * Somebody who has connected Zoom will reasonably assume Meet works the same
+ * way, and it does not: Google exposes only the meetings the connected account
+ * ORGANIZED, and only for 30 days. A customer holding the wrong model reads a
+ * correct, complete sync as a broken one — so the limits are stated here,
+ * before consent, rather than discovered as an apparently-missing meeting.
+ *
+ * A line may be a plain string or `{ text, href, linkText }` when it needs to
+ * send the reader somewhere (Google will not transcribe a call retroactively,
+ * so the setting has to be found and switched on BEFORE a meeting — a pointer
+ * to the exact help page is worth more than the sentence alone).
+ */
+type PrereqLine = string | { text: string; href: string; linkText: string }
+
+const CONNECT_PREREQS: Record<string, PrereqLine[]> = {
+  zoom: [
+    "Zoom connects once for your whole company. You'll need to authorize as a Zoom account admin.",
+    "Cloud recording is a paid Zoom feature — Free and Basic accounts have no cloud recordings for Sprntly to read.",
+    "If your Zoom account requires apps to be pre-approved, ask a Zoom admin to approve Sprntly on the Zoom Marketplace first.",
+  ],
+  google_meet: [
+    "Sprntly only sees meetings the connected account organized — not every meeting they attended, and not other people's meetings. Each teammate whose meetings you want in Sprntly connects their own Google account.",
+    "Requires Google Workspace Business Standard or higher. Business Starter and personal Gmail accounts can't record or transcribe meetings at all.",
+    {
+      text: "Turn on audio transcripts in Google Meet before a meeting starts — Google won't transcribe a call after the fact.",
+      href: "https://support.google.com/meet/answer/12849897",
+      linkText: "How to turn on transcripts",
+    },
+  ],
+}
+
+/** What Sprntly will actually read once connected — the reassurance half,
+ *  shown under the prerequisites. */
+const CONNECT_SCOPE_NOTE: Record<string, string> = {
+  zoom:
+    "Sprntly reads the transcript and details of each cloud recording — never the video or audio. The first sync covers the last 3 months, then refreshes every 6 hours.",
+  google_meet:
+    "Sprntly reads the transcript text and details of each meeting — never the recording video or audio. Only the last 30 days are available: Google deletes Meet records after 30 days, so there's no older history to import.",
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -302,6 +354,36 @@ export function ConnectorConnectModalView({
                 connection. Finish there, then come back to this tab — your
                 onboarding stays right where it is.
               </p>
+              {CONNECT_PREREQS[item.id] ? (
+                <div className="conn-modal-blurb">
+                  <strong>Before you connect</strong>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {CONNECT_PREREQS[item.id].map((line) =>
+                      typeof line === "string" ? (
+                        <li key={line}>{line}</li>
+                      ) : (
+                        <li key={line.text}>
+                          {line.text}{" "}
+                          {/* Opens in a new tab so the reader does not lose the
+                              half-finished connect flow behind them. */}
+                          <a
+                            href={line.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {line.linkText}
+                          </a>
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                </div>
+              ) : null}
+              {CONNECT_SCOPE_NOTE[item.id] ? (
+                <p className="conn-modal-blurb">
+                  {CONNECT_SCOPE_NOTE[item.id]}
+                </p>
+              ) : null}
               {oauthError ? (
                 <p className="conn-modal-error" role="alert">
                   {oauthError}
@@ -613,30 +695,23 @@ export function ConnectorConnectModal({
         <GoogleDrivePicker
           dataset={activeCompany}
           savedFiles={connection.config?.files}
+          folderContents={connection.config?.folder_contents}
           onSaved={onConnected}
         />
       )
     } else if (providerId === "slack") {
-      // Both Slack roles get configured right at connect time: where the
-      // brief gets DELIVERED (channel/DM target — per-user, so hidden on
-      // the company's shared connection), and which channels the corpus
-      // sync PULLS from (company-wide, the customer-voice side).
+      // SYNC ONLY (2026-08-04) — mirrors ConfigureConnectorDrawer. Straight
+      // after connect is exactly when the pull-channel selection matters, and
+      // it is the only thing this surface asks: which channels the corpus sync
+      // reads. Where the Top Insights brief gets DELIVERED used to be stacked
+      // above it here; that is a per-user notification preference and now
+      // lives solely in Settings → Comms & Brief, so a PM finishing OAuth is
+      // asked one question instead of two unrelated ones.
       slot = (
-        <>
-          {connection.config?.company_connection ? null : (
-            <SlackChannelPicker
-              savedChannelId={connection.config?.channel_id as string | undefined}
-              savedChannelName={
-                connection.config?.channel_name as string | undefined
-              }
-              onSaved={onConnected}
-            />
-          )}
-          <SlackSyncChannelsPicker
-            savedChannelIds={connection.config?.sync_channel_ids}
-            onSaved={onConnected}
-          />
-        </>
+        <SlackSyncChannelsPicker
+          savedChannelIds={connection.config?.sync_channel_ids}
+          onSaved={onConnected}
+        />
       )
     } else if (providerId === "confluence") {
       // Straight after connect is exactly when the space selection matters:
@@ -648,6 +723,12 @@ export function ConnectorConnectModal({
           onSaved={onConnected}
         />
       )
+    } else if (providerId === "zoom") {
+      // The SAME slot the Configure drawer mounts. Straight after connect is
+      // exactly when the host selection matters — with nothing chosen the
+      // puller reads every licensed host, so this is the user's chance to
+      // narrow it before the 3-month backfill runs.
+      slot = <ZoomConfigSlot connection={connection} onSaved={onConnected} />
     } else if (providerId === "github") {
       // Same picker the settings Configure drawer mounts — lets the
       // user manage which repos the agent can read right inside the

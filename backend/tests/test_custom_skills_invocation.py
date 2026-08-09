@@ -115,33 +115,41 @@ def test_custom_lookup_db_failure_fails_open_to_builtins(monkeypatch):
     builtin_id = list_skills()[0]
     assert resolver.custom_skill_spec("co-1", builtin_id) is None
     assert resolver.has_custom_skill("co-1", "my-estimator") is False
-    # Built-ins still resolve and stay routable; NON_ROUTABLE ids stay blocked.
+    # Built-ins still RESOLVE — the pipelines that bind them by name are
+    # unaffected by a custom-skills outage, which is the point of this test.
     assert resolver.resolve_skill(builtin_id, company_id="co-1").id == builtin_id
-    assert qa._routable(builtin_id, "co-1") is True
-    assert qa._routable(next(iter(qa.NON_ROUTABLE)), "co-1") is False
+    # They are just no longer routable from CHAT. `_routable` narrowed to "is
+    # this a custom skill for this company", so every vendored id answers False
+    # — not only the handful that used to be on the NON_ROUTABLE opt-out list.
+    assert qa._routable(builtin_id, "co-1") is False
 
 
 # ─── qa_agent routing ────────────────────────────────────────────────────────
 
 
-def test_routable_builtin_unchanged(custom_in_db):
-    builtin_id = list_skills()[0]
-    assert qa._routable(builtin_id) is True
-    # NON_ROUTABLE built-ins stay non-routable even with company context.
-    for blocked in qa.NON_ROUTABLE:
-        assert qa._routable(blocked, "co-1") is False
+def test_no_builtin_is_routable_from_chat(custom_in_db):
+    """Was `test_routable_builtin_unchanged`, asserting the inverse.
+
+    The built-in half of `_routable` is gone: a chat turn cannot be sent to a
+    vendored `SKILL.md` method by naming it. Stated over the WHOLE vendored
+    library rather than the old NON_ROUTABLE subset, because the guarantee is
+    now unconditional — and because `resolve_skill` is built-in-first, so a True
+    here would promise a company's upload and deliver the built-in's method."""
+    for builtin_id in list_skills():
+        assert qa._routable(builtin_id) is False
+        assert qa._routable(builtin_id, "co-1") is False
 
 
 def test_routable_custom_needs_company(custom_in_db):
     assert qa._routable("my-estimator", "co-1") is True
     assert qa._routable("my-estimator", "co-other") is False
-    assert qa._routable("my-estimator") is False  # no company → built-ins only
+    assert qa._routable("my-estimator") is False  # no company → nothing routable
 
 
-def test_nonroutable_builtin_id_stays_blocked_for_a_shadowing_row(monkeypatch):
+def test_builtin_id_stays_blocked_for_a_shadowing_row(monkeypatch):
     # A vendored id answers for the BUILT-IN and nothing else, so a legacy row
-    # sitting on a NON_ROUTABLE id cannot make that id invocable.
-    blocked = next(iter(qa.NON_ROUTABLE))
+    # sitting on one cannot make that id invocable from chat.
+    blocked = list_skills()[0]
     row = dict(CUSTOM_ROW, slug=blocked)
 
     def fake_get(company_id: str, slug: str):

@@ -13,7 +13,7 @@ model and let the skill decide.
 
 The output contract mirrors the skill's *canonical ticket*: a five-section
 structured description (What / Why now / User story / Scope / Out of scope),
-the trace spine (`Part A §5 R# → Part B EARS → tests`), inherited acceptance
+the trace spine (`PRD requirement id → Part B EARS → tests`), inherited acceptance
 criteria carrying inline `[failure]`/`[edge]` tags, child issues (subtasks),
 blocked-by/blocks dependencies, the stakes-gate route, and ticket-type
 (build / decision / spike) so decision tickets and spikes render distinctly.
@@ -35,6 +35,11 @@ from typing import Any, Callable, Optional
 
 from app.db.prds import get_prd_rendered
 from app.graph.gateway import llm_call
+from app.stories.layout import (
+    layout_prompt_hint,
+    resolve_layout,
+    resolve_ticket_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +122,29 @@ _SCHEMA: dict[str, Any] = {
                             "where relevant."
                         ),
                     },
+                    # Extra sections this company's own ticket format asks for.
+                    # Empty unless a format is active — the keys and what goes
+                    # in them are carried in the prompt by layout_prompt_hint.
+                    "custom_sections": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Extra description sections this company's ticket "
+                            "format asks for, keyed exactly as the prompt names "
+                            "them. Omit a key entirely rather than inventing "
+                            "content for it. Empty when no format is active."
+                        ),
+                    },
                     # ── Provenance / trace spine ──
                     "prd_section": {
                         "type": "string",
                         "description": (
-                            "Provenance anchor, e.g. 'Part A §5 R3'. Empty when "
-                            "generated from prose without a §5 table."
+                            "Provenance anchor into the PRD's requirements "
+                            "section, whatever that section is called: cite the "
+                            "requirement by the id the PRD ITSELF gives it (e.g. "
+                            "'R3', 'FR-12', 'Story 4'), qualified by the "
+                            "section's own heading when it has one. Empty when "
+                            "the PRD numbers nothing."
                         ),
                     },
                     "ears_ids": {
@@ -133,7 +155,10 @@ _SCHEMA: dict[str, Any] = {
                     "signals": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Signal/Source citations from Part A §5.",
+                        "description": (
+                            "Signal/Source citations carried by the PRD's "
+                            "requirements section."
+                        ),
                     },
                     # ── Acceptance ──
                     "acceptance_criteria": {
@@ -186,9 +211,10 @@ _SCHEMA: dict[str, Any] = {
                     "activity": {
                         "type": "string",
                         "description": (
-                            "The Part A §4 user activity this ticket serves "
-                            "(story-map backbone column). Empty when the sizing "
-                            "gate says tickets-only."
+                            "The user activity this ticket serves, taken from "
+                            "wherever the PRD describes users and their "
+                            "activities (story-map backbone column). Empty when "
+                            "the sizing gate says tickets-only."
                         ),
                     },
                     "release": {
@@ -211,7 +237,10 @@ _SCHEMA: dict[str, Any] = {
                     "priority": {
                         "type": "string",
                         "enum": ["urgent", "high", "normal", "low"],
-                        "description": "Priority from the Part A §5 Priority column.",
+                        "description": (
+                            "Priority as the PRD's requirements section states "
+                            "it, if it states one at all."
+                        ),
                     },
                     "route": {
                         "type": "string",
@@ -232,12 +261,15 @@ _SCHEMA: dict[str, Any] = {
 _SYSTEM = (
     "You are the Ticket agent. Apply the bound skill (the METHOD above) to turn "
     "the given PRD (or insight) into the skill's CANONICAL tickets — one or more "
-    "per Part A §5 requirement row.\n"
+    "per requirement in the PRD's requirements section — whatever that "
+    "section is called, and whatever shape it takes (a table, a bulleted "
+    "list, or user stories).\n"
     "For each BUILD ticket, populate the five-section description (what, "
     "why_now, user_story, scope, out_of_scope), the trace spine (prd_section "
-    "like 'Part A §5 R3', ears_ids, signals), child issues (subtasks; prefix "
-    "parallel-safe ones with '[P]'), dependencies (blocked_by / blocks by "
-    "title), priority (from the §5 Priority column), and the stakes-gate route.\n"
+    "— cite each requirement by the id the PRD itself gives it; ears_ids; "
+    "signals), child issues (subtasks; prefix parallel-safe ones with "
+    "'[P]'), dependencies (blocked_by / blocks by title), priority (as the "
+    "PRD states it, if it does), and the stakes-gate route.\n"
     "ACCEPTANCE CRITERIA: when a machine-readable Part B is provided, INHERIT "
     "them verbatim from its spec-first tests and set ac_inherited=true; render "
     "failure branches prefixed '[failure]' and edge cases '[edge]'. With prose "
@@ -252,7 +284,8 @@ _SYSTEM = (
     "no rollout section) — Release 1 is always the walking skeleton (the "
     "minimal end-to-end path) — and stamp every ticket's `release` with its "
     "phase label ('Release 1 — walking skeleton', 'Release 2 — <short scope "
-    "name>', …) and `activity` with the Part A §4 user activity it serves. "
+    "name>', …) and `activity` with the user activity it serves, as the PRD "
+    "describes its users. "
     "Phase labels name scope only — never invent dates, audiences, or exit "
     "criteria. If a machine-readable Part B provides a release plan, use its "
     "phases verbatim instead of synthesizing. When the gate says tickets-only, "
@@ -280,8 +313,9 @@ _PLAN_SCHEMA: dict[str, Any] = {
         "stubs": {
             "type": "array",
             "description": (
-                "The COMPLETE set of BUILD tickets for this PRD — one or more per "
-                "Part A §5 requirement row. Exhaustive: every §5 row is covered."
+                "The COMPLETE set of BUILD tickets for this PRD — one or more "
+                "per requirement in the PRD's requirements section, whatever it "
+                "is called. Exhaustive: every requirement is covered."
             ),
             "items": {
                 "type": "object",
@@ -296,7 +330,10 @@ _PLAN_SCHEMA: dict[str, Any] = {
                     },
                     "prd_section": {
                         "type": "string",
-                        "description": "Provenance anchor, e.g. 'Part A §5 R3' (empty if none).",
+                        "description": (
+                            "Provenance anchor: the requirement's own id as the "
+                            "PRD gives it (empty if the PRD numbers nothing)."
+                        ),
                     },
                     "ears_ids": {
                         "type": "array",
@@ -306,9 +343,9 @@ _PLAN_SCHEMA: dict[str, Any] = {
                     "activity": {
                         "type": "string",
                         "description": (
-                            "Part A §4 user activity this ticket serves (story-"
-                            "map backbone). Empty when the sizing gate says "
-                            "tickets-only."
+                            "The user activity this ticket serves, as the PRD "
+                            "describes its users (story-map backbone). Empty "
+                            "when the sizing gate says tickets-only."
                         ),
                     },
                     "release": {
@@ -330,11 +367,13 @@ _PLAN_SCHEMA: dict[str, Any] = {
 _PLAN_SYSTEM = (
     "You are the Ticket planner. Apply the bound skill (the METHOD above) to "
     "decompose the given PRD (or insight) into the COMPLETE list of BUILD "
-    "tickets — one or more per Part A §5 requirement row. Output ONLY a "
+    "tickets — one or more per requirement in the PRD's requirements section, "
+    "whatever that section is called. Output ONLY a "
     "lightweight STUB for each: title, one-line summary, the provenance anchor "
-    "(prd_section like 'Part A §5 R3'), and any Part B EARS ids it traces to. "
+    "(prd_section — the requirement's own id as the PRD gives it), and any "
+    "Part B EARS ids it traces to. "
     "Do NOT write descriptions, acceptance criteria, scope, or subtasks yet — "
-    "that happens in a later step. Be EXHAUSTIVE: every §5 requirement must be "
+    "that happens in a later step. Be EXHAUSTIVE: every requirement must be "
     "covered by at least one stub, and titles must be unique. Every ticket is a "
     "BUILD ticket.\n"
     "STORY-MAP PLACEMENT (decided HERE, where the whole set is visible): run "
@@ -343,7 +382,8 @@ _PLAN_SYSTEM = (
     "PRD carries no rollout section) — Release 1 is always the walking "
     "skeleton — and stamp every stub's `release` with its phase label "
     "('Release 1 — walking skeleton', 'Release 2 — <short scope name>', …) "
-    "and `activity` with the Part A §4 user activity it serves. Phase labels "
+    "and `activity` with the user activity it serves, as the PRD describes "
+    "its users. Phase labels "
     "name scope only — never invent dates, audiences, or exit criteria. If "
     "Part B provides a release plan, use its phases verbatim. When the gate "
     "says tickets-only, leave both empty on every stub. Return only the stubs."
@@ -438,6 +478,17 @@ class Story:
     # Story-map placement (empty for a flat/unsized set)
     activity: str = ""
     release: str = ""
+    # The company's own ticket format, when one is active: an ordered
+    # [{label, source}] governing which description sections render, in what
+    # order, under what labels. None = Sprntly's default layout, which is what
+    # every pre-existing ticket and every company without a format uses.
+    # Carried ON THE STORY rather than resolved at render time on purpose: a
+    # ticket pushed last month must keep round-tripping under the labels it was
+    # actually written with, even after the company changes its format.
+    description_layout: Optional[list[dict[str, Any]]] = None
+    # Extra sections the format asked for, keyed by the layout's
+    # `custom:<key>`. Empty under the default layout.
+    custom_sections: dict[str, str] = field(default_factory=dict)
     # Decision-ticket fields
     decision: Optional[str] = None
     owner: Optional[str] = None
@@ -479,26 +530,44 @@ class Story:
             return None
         return _PRIORITY_TO_JIRA.get(self.priority.lower())
 
+    def section_value(self, entry) -> Any:
+        """The content behind one layout entry: a str, a list (scope), or "".
+
+        The one special case is `user_story`, which falls back to the legacy
+        `body` — a ticket generated before the structured fields existed, or one
+        whose description override replaced them, still has its story there."""
+        if entry.is_custom:
+            return (self.custom_sections or {}).get(entry.custom_key) or ""
+        if entry.source == "user_story":
+            return (self.user_story or self.body or "").strip()
+        if entry.source == "scope":
+            return self.scope or []
+        return getattr(self, entry.source, "") or ""
+
     def to_description(self, *, include_subtasks: bool = True) -> str:
-        """Render the ticket as a tracker task description (markdown). Uses the
-        five-section body when present, falling back to the legacy story body.
-        Used by the push step. `include_subtasks=False` drops the Child issues
-        section — the Jira push uses it when the children are created as REAL
-        sub-tasks (listing them twice would read as duplication)."""
+        """Render the ticket as a tracker task description (markdown). Used by
+        the push step. `include_subtasks=False` drops the Child issues section —
+        the Jira push uses it when the children are created as REAL sub-tasks
+        (listing them twice would read as duplication).
+
+        LAYOUT-DRIVEN, and byte-identical to the previous release under the
+        default layout: `DEFAULT_LAYOUT` encodes exactly the five sections this
+        used to hard-code, in the same order, with the same bold labels, and
+        empty sections are still skipped. That equality is the regression test
+        (`test_user_stories.py`), because this string is what lands in Jira and
+        what `sync.normalize_imported_description` has to recognise on the way
+        back — the two are mirrors of one list, derived, never written twice."""
         parts: list[str] = []
-        if self.what:
-            parts += ["**What**", self.what, ""]
-        if self.why_now:
-            parts += ["**Why now**", self.why_now, ""]
-        story_line = self.user_story or self.body
-        if story_line:
-            parts += ["**User story**", story_line.strip(), ""]
-        if self.scope:
-            parts += ["**Scope**"]
-            parts += [f"- {s}" for s in self.scope]
+        for entry in resolve_layout(self.description_layout):
+            value = self.section_value(entry)
+            if not value:
+                continue
+            parts += [f"**{entry.push_label}**"]
+            if isinstance(value, list):
+                parts += [f"- {s}" for s in value]
+            else:
+                parts += [str(value).strip()]
             parts += [""]
-        if self.out_of_scope:
-            parts += ["**Out of scope**", self.out_of_scope, ""]
         if not parts:  # nothing structured — fall back to the raw body
             parts = [self.body.strip(), ""]
         if self.acceptance_criteria:
@@ -539,6 +608,12 @@ class Story:
             "data_gaps": list(self.data_gaps),
             "activity": self.activity,
             "release": self.release,
+            **(
+                {"description_layout": self.description_layout}
+                if self.description_layout else {}
+            ),
+            **({"custom_sections": dict(self.custom_sections)}
+               if self.custom_sections else {}),
             "priority": self.priority,
             "route": self.route,
             "decision": self.decision,
@@ -576,6 +651,14 @@ class Story:
             data_gaps=_clean_str_list(d.get("data_gaps")),
             activity=str(d.get("activity") or "").strip(),
             release=str(d.get("release") or "").strip(),
+            description_layout=(
+                d.get("description_layout")
+                if isinstance(d.get("description_layout"), list) else None
+            ),
+            custom_sections={
+                str(k): str(v or "")
+                for k, v in (d.get("custom_sections") or {}).items()
+            } if isinstance(d.get("custom_sections"), dict) else {},
             decision=(d.get("decision") or None),
             owner=(d.get("owner") or None),
             decide_by=(d.get("decide_by") or None),
@@ -995,16 +1078,111 @@ def generate_from_input(
     planned stub roster (both fanout only). Never persists — callers own
     persistence.
     """
+    # The company's own ticket format, resolved ONCE here so both strategies
+    # get it and a run finishes in the layout it started in. (None, None) — the
+    # default layout — for every company without an active ticket format, which
+    # leaves the prompt and every rendered description byte-identical.
+    layout, _template_id = resolve_ticket_layout(enterprise_id)
+    hint = layout_prompt_hint(layout)
+    if hint:
+        prd_input = "\n\n".join([prd_input, hint])
+
     if strategy == "fanout":
-        return _generate_fanout(
+        stories = _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
             batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
             on_batch=on_batch, on_plan=on_plan,
         )
-    return _generate_single(
-        enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
-        stats_out=stats_out,
+    else:
+        stories = _generate_single(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            stats_out=stats_out,
+        )
+    if layout:
+        # Stamped on the STORY, so this ticket keeps rendering and
+        # round-tripping under the labels it was written with even after the
+        # company changes its format.
+        for s in stories:
+            s.description_layout = layout
+    return stories
+
+
+# ── Naming a standalone ticket set ───────────────────────────────────────────
+
+TITLE_PROMPT_VERSION = "ticket-set-title-v1"
+
+_TITLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "description": (
+                "A short, specific name for this batch of tickets — what the "
+                "work IS, in 3-7 words. Title case, no trailing period, no "
+                "'Tickets for' prefix."
+            ),
+        }
+    },
+    "required": ["title"],
+}
+
+_TITLE_SYSTEM = (
+    "Name a batch of engineering tickets so a product manager can pick it out "
+    "of a list of artifacts weeks later. Use the CONCRETE subject of the work "
+    "(the feature, surface or defect), never a generic label like 'Tickets' or "
+    "'Engineering Work'. 3-7 words, Title Case, no trailing period. Do not "
+    "prefix with 'Tickets for' — the surface already says these are tickets."
+)
+
+# A set title is a short label, so the whole naming leg is bounded tight: it
+# runs AFTER the tickets are in hand, and it must never be the reason a
+# finished generation is lost.
+_TITLE_MAX_TOKENS = 200
+
+
+def name_ticket_set(
+    enterprise_id: str, *, source_text: str, stories: list[Story]
+) -> str:
+    """A human title for a standalone ticket set.
+
+    One gateway call (never the Anthropic SDK directly — see
+    app/graph/gateway.py), logged under agent="user_stories" with its own
+    purpose so the naming leg is separable from generation in the decision log.
+
+    Falls back to the FIRST TICKET'S TITLE rather than a generic string: an
+    artifacts library where every standalone set reads "Tickets" cannot be
+    navigated, and the first ticket is at least about the right subject.
+    """
+    fallback = next(
+        (s.title.strip() for s in stories if s.title and s.title.strip()),
+        "Tickets from this conversation",
     )
+    roster = "\n".join(f"- {s.title}" for s in stories[:20] if s.title)
+    try:
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="user_stories",
+            purpose="ticket_set_title",
+            prompt_version=TITLE_PROMPT_VERSION,
+            system=_TITLE_SYSTEM,
+            input=(
+                f"## What was asked for\n{(source_text or '').strip()[:2000]}\n\n"
+                f"## The tickets that were written\n{roster}"
+            ),
+            json_schema=_TITLE_SCHEMA,
+            temperature=0,
+            max_tokens=_TITLE_MAX_TOKENS,
+        )
+        title = str(((result.output or {}) if result else {}).get("title") or "").strip()
+    except Exception:  # noqa: BLE001 — a naming failure never loses the tickets
+        logger.exception("ticket-set title generation failed (using fallback)")
+        return fallback
+    # Guard the two ways the model can still hand back something unusable: an
+    # empty string, or an essay. Truncating beats rejecting — a long-but-right
+    # title still identifies the set.
+    if not title:
+        return fallback
+    return title[:120]
 
 
 def generate_user_stories(
@@ -1012,6 +1190,7 @@ def generate_user_stories(
     *,
     prd_id: Optional[int] = None,
     insight: Optional[str] = None,
+    ticket_set_id: Optional[int] = None,
     model: Optional[str] = None,
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -1025,6 +1204,10 @@ def generate_user_stories(
     Exactly one of `prd_id` / `insight` must be given. The call is bound to the
     ticket skill and logged (agent="user_stories"). Returns a list of
     `Story`; this NEVER writes to a tracker — that's app.stories.push.
+
+    `ticket_set_id` (insight path only) is a pre-created `ticket_sets` row to
+    persist the finished batch into, named by `name_ticket_set`. The row already
+    exists — the route creates it at kick-off — so this only ever completes it.
 
     `strategy` selects the generation path: "single" (baseline, one big call) or
     "fanout" (decompose then enrich batches in parallel). Output contract is
@@ -1099,6 +1282,33 @@ def generate_user_stories(
             "ticket generation returned 0 tickets for prd_id=%s — not caching so "
             "the next open retries", prd_id,
         )
+
+    # Persist a STANDALONE set (the insight path). Same never-break-generation
+    # posture as the PRD branch above: the stories are returned either way.
+    #
+    # Unlike the PRD branch this does NOT skip an empty result. `prd_tickets` is
+    # a content-hash cache whose empty row wedges the tab forever, so there the
+    # skip is what lets the next open retry. A `ticket_sets` row is the artifact
+    # itself with no next open to retry, so an empty run is recorded as such and
+    # the panel offers the user the retry instead. The naming leg is skipped for
+    # an empty set — there is nothing to name.
+    if ticket_set_id is not None:
+        try:
+            from app.db.ticket_sets import finish_set
+
+            title = (
+                name_ticket_set(
+                    enterprise_id, source_text=insight or "", stories=stories
+                )
+                if stories
+                else ""
+            )
+            finish_set(
+                ticket_set_id, title=title, stories=[s.to_dict() for s in stories]
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("persisting ticket_set %s failed (continuing)",
+                             ticket_set_id)
 
     # Record the semantic decision (what was produced) alongside the gateway's
     # own llm_call telemetry row. Never let an audit-write break generation.

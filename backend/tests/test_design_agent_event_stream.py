@@ -214,6 +214,44 @@ async def test_close_clears_registry_entry():
     assert pid not in event_stream._subscribers
 
 
+# ─── Publishes between subscribe and close are never lost ─────────────────────
+#
+# event_stream.py's own pub/sub logic is unchanged by the premature-stream-close
+# fix — the bug was never here. `close()` has always popped the registry entry
+# (by design: it is the terminal), and `publish_step` has always no-op'd against
+# a missing entry (by design: "a publish to a prototype with no subscribers is a
+# no-op"). The defect was `runner._finish` calling `close()` PREMATURELY —
+# 15-22s before the prototype was actually ready — which made every LATER
+# publish_step call (routes/design_agent.py's FINISHING_STEP / VITE_PHASE_STEP,
+# already wired) a guaranteed no-op purely because the registry entry it needed
+# was already gone. This test documents the invariant the fix now relies on: as
+# long as close() has NOT yet been called, publishes made after a subscriber
+# registers keep landing, no matter how many arrive first — the registry entry
+# survives until something explicitly closes it.
+
+
+async def test_publishes_before_close_all_reach_the_subscriber():
+    """Multiple publish_step calls made while a subscriber is live, followed by
+    a LATE close(), all land — the registry entry is never popped early."""
+    received: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(23):
+            received.append(ev)
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+
+    for i in range(4):
+        event_stream.publish_step(23, {"kind": "step", "n": i})
+    event_stream.close(23, kind="done")
+
+    await task
+
+    assert [ev.get("n") for ev in received[:4]] == [0, 1, 2, 3]
+    assert received[-1] == {"kind": "done"}
+
+
 # ─── queue-full: drops oldest, keeps newest ───────────────────────────────────
 
 

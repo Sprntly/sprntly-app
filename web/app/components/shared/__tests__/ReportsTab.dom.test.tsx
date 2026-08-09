@@ -176,7 +176,16 @@ describe("ReportsTab — arriving on one specific report", () => {
   it("honours a focus with no thread behind it — a standalone report", async () => {
     // Opened from Artifacts: no conversation, so no list to check against. The
     // document itself is the whole tab.
-    contentMock.initial = { conversationId: null, reportFocusId: 9, threadReportsStatus: "idle" }
+    //
+    // Said with a FLAG now, not inferred from the null conversation id —
+    // ArtifactsScreen sets `reportFocusStandalone` on this one path. The
+    // behaviour under test is unchanged; what changed is that a null
+    // conversation id no longer means "standalone" by itself (see the test
+    // below for why that mattered).
+    contentMock.initial = {
+      conversationId: null, reportFocusId: 9, reportFocusStandalone: true,
+      threadReportsStatus: "idle",
+    }
     reportGet.mockResolvedValue(doc(9, "VoC · Q2"))
 
     await renderTab([])
@@ -186,6 +195,24 @@ describe("ReportsTab — arriving on one specific report", () => {
       expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
     )
     expect(screen.queryByTestId("reports-back")).toBeNull()
+  })
+
+  it("ignores a focus on a NEW chat that merely has no conversation yet", async () => {
+    // The worse half of the reported bug. A brand-new chat tab has a null
+    // conversation id too — a tab gains one only when its first ask persists —
+    // so a pointer left over from the thread before it used to read as
+    // "standalone, trust it", and the PREVIOUS thread's whole document rendered
+    // inside the empty new chat. Without the standalone flag, a null
+    // conversation is a thread that cannot vouch for anything.
+    contentMock.initial = { conversationId: null, reportFocusId: 9, threadReportsStatus: "idle" }
+    reportGet.mockResolvedValue(doc(9, "VoC · Q2"))
+
+    await renderTab([])
+
+    expect(reportGet).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("reports-detail")).toBeNull()
+    expect(document.querySelector("iframe")).toBeNull()
+    expect(screen.getByTestId("reports-list")).toBeTruthy()
   })
 })
 
@@ -225,5 +252,49 @@ describe("ReportsTab — nothing to show", () => {
     })
 
     await waitFor(() => expect(screen.getByTestId("reports-detail-error")).toBeTruthy())
+  })
+
+  it("says a selected report is unavailable instead of 'REPORT REPORT'", async () => {
+    // A selection that resolves to neither a document nor a list row rendered a
+    // titled, empty frame under an eyebrow reading "REPORT REPORT" — the
+    // uppercased `${reportKindLabel(null)} report`, where reportKindLabel(null)
+    // is itself "Report". Every render branch below it was false, so the body
+    // was blank.
+    contentMock.initial = {
+      conversationId: null, reportFocusId: 9, reportFocusStandalone: true,
+      threadReportsStatus: "idle",
+    }
+    reportGet.mockResolvedValue(null)
+
+    await renderTab([])
+
+    await waitFor(() => expect(screen.getByTestId("reports-detail-empty")).toBeTruthy())
+    const detail = screen.getByTestId("reports-detail")
+    expect(detail.textContent).toContain("This report isn't available")
+    expect(detail.textContent).not.toContain("Report report")
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+
+  it("does not flash the empty state on the way into a report", async () => {
+    // The detail's loading flag is set from an EFFECT, so it is still false on
+    // the first render after a selection. An empty state derived from "no doc and
+    // not loading" alone would therefore blink "This report isn't available"
+    // before every single open — which is why it waits on the fetch settling for
+    // this exact selection instead.
+    let release: (v: unknown) => void = () => {}
+    reportGet.mockReturnValue(new Promise<unknown>((res) => { release = res }))
+    contentMock.initial = { conversationId: 77, reportFocusId: 9, threadReportsStatus: "ready" }
+
+    await renderTab([ROWS[0]])
+
+    // Mid-flight: the skeleton, never the terminal empty state.
+    expect(screen.queryByTestId("reports-detail-empty")).toBeNull()
+    expect(screen.getByTestId("reports-loading")).toBeTruthy()
+
+    await act(async () => { release(doc(9, "VoC · Q2")) })
+    await waitFor(() =>
+      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+    )
+    expect(screen.queryByTestId("reports-detail-empty")).toBeNull()
   })
 })

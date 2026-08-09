@@ -175,7 +175,19 @@ CREATE TABLE prds (
     -- 20260731090000: originating-chat-question linkage (mirrors reports'
     -- question/ask_id) — NULL on every path except the chat-task command.
     question         TEXT,
-    ask_id           INTEGER
+    ask_id           INTEGER,
+    -- Mirrors 20260802120000_prds_public_id.sql. Real Postgres backfills +
+    -- defaults this via gen_random_uuid(), which sqlite has no equivalent
+    -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
+    -- stamp a real uuid4 explicitly via an UPDATE after seeding.
+    public_id        TEXT,
+    -- Which uploaded FORMAT produced this PRD (mirrors
+    -- 20260806160000_prds_artifact_template.sql). NULL = Sprntly's built-in
+    -- format, which is every pre-existing row and every PRD from a company that
+    -- never uploads one. Deliberately NOT a foreign key in either engine: a
+    -- format is deletable, and an FK would either erase this PRD's provenance
+    -- when the library is tidied or make the format undeletable.
+    artifact_template_id TEXT
 );
 
 CREATE TABLE evidences (
@@ -279,6 +291,11 @@ CREATE TABLE ask_jobs (
     pinned_skill    TEXT,
     -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
     prd_id          INTEGER,
+    -- The skill the router picked, written the moment it resolves rather than
+    -- at completion, so the waiting surface can name the running skill (mirrors
+    -- 20260802120000_ask_jobs_routed_skill.sql). NULL = no skill was routed.
+    routed_skill        TEXT,
+    routed_skill_action TEXT,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -409,6 +426,13 @@ CREATE TABLE companies (
     -- Fernet-encrypted per-company Claude key (mirrors
     -- 20260711120000_company_llm_api_key.sql). Read by app.llm_keys.
     llm_api_key_encrypted TEXT,
+    -- The OpenAI counterpart, plus which of the two the company actually runs
+    -- on (mirrors 20260807120000_company_openai_key_and_provider.sql). Both
+    -- keys may be set at once; llm_provider decides which is live. Defaults to
+    -- 'anthropic' so an untouched row behaves exactly as it did before OpenAI
+    -- was an option.
+    openai_api_key_encrypted TEXT,
+    llm_provider        TEXT NOT NULL DEFAULT 'anthropic',
     -- Platform-key fallback flag + onboarding-completion marker. Read by
     -- app.llm_keys to decide whether a keyless company may use the platform key
     -- (mirrors 20260712120000_company_use_platform_key.sql +
@@ -446,6 +470,13 @@ CREATE TABLE companies (
     business_context_summary TEXT,
     business_context_accepted_at TEXT,
     metric_definitions  TEXT NOT NULL DEFAULT '[]',
+    -- Async business-context refresh state, singleton per tenant (mirrors
+    -- 20260802140000_business_context_refresh_status.sql). status defaults
+    -- 'idle' (never NULL) — see that migration for why.
+    business_context_refresh_status TEXT NOT NULL DEFAULT 'idle',
+    business_context_refresh_error TEXT,
+    business_context_refresh_started_at TEXT,
+    business_context_refresh_heartbeat_at TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -735,6 +766,10 @@ CREATE TABLE kg_signal (
     confidence     REAL NOT NULL DEFAULT 1.0,
     weight         REAL NOT NULL DEFAULT 1.0,
     provenance     TEXT NOT NULL DEFAULT '{}',
+    skill_id       TEXT,
+    origin         TEXT,
+    channel        TEXT,
+    evidence_eligible INTEGER,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -935,15 +970,46 @@ CREATE TABLE prd_tickets (
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
--- Per-PRD tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql).
--- One row per (company, prd): the ClickUp list / Jira project the PRD's
--- tickets sync with, the last sync outcome, and the pulled per-ticket
--- tracker statuses (jsonb → TEXT here).
+-- Standalone ticket sets (mirrors 20260806120000_ticket_sets.sql): tickets
+-- generated from a chat with NO PRD behind them. Same `stories` JSON payload
+-- shape as prd_tickets; its tickets are keyed `set-{id}-{story_id}` so they
+-- share ticket_edits / ticket_comments / ticket_attachments with PRD tickets
+-- while staying in a disjoint key namespace.
+CREATE TABLE ticket_sets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    title           TEXT NOT NULL DEFAULT '',
+    source_text     TEXT NOT NULL DEFAULT '',
+    stories         TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'generating',
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX ticket_sets_company_idx ON ticket_sets (company_id, id DESC);
+CREATE INDEX ticket_sets_conversation_idx ON ticket_sets (conversation_id);
+
+-- Per-artifact tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql
+-- + 20260806120000_ticket_sets.sql). One row per (company, PRD) OR
+-- (company, ticket set): the ClickUp list / Jira project that artifact's
+-- tickets sync with, the last sync outcome, and the pulled per-ticket tracker
+-- statuses (jsonb → TEXT here).
+--
+-- prd_id is NULLABLE here exactly as the migration leaves it, and
+-- ticket_set_id is its mutually-exclusive counterpart. Both UNIQUE constraints
+-- are non-partial and rely on SQLite treating NULLs as distinct — the same
+-- property Postgres has — so a set row (prd_id NULL) never collides with the
+-- PRD constraint and vice versa. The fake client translates upsert
+-- on_conflict= into a real SQLite ON CONFLICT target, so both indexes have to
+-- exist for upsert_sync_config to resolve on either owner.
 CREATE TABLE prd_ticket_sync (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id       TEXT NOT NULL,
     workspace_id     TEXT,
-    prd_id           INTEGER NOT NULL,
+    prd_id           INTEGER,
+    ticket_set_id    INTEGER,
     provider         TEXT NOT NULL,
     destination_id   TEXT NOT NULL,
     destination_name TEXT,
@@ -955,7 +1021,8 @@ CREATE TABLE prd_ticket_sync (
     statuses         TEXT NOT NULL DEFAULT '{}',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id, prd_id)
+    UNIQUE (company_id, prd_id),
+    UNIQUE (company_id, ticket_set_id)
 );
 
 -- Idempotent Jira push mapping (mirrors 20260708120000_jira_issue_map.sql).
@@ -1087,6 +1154,56 @@ CREATE TABLE document_source_file (
 CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
 CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
 
+-- Document catalog (mirrors 20260803120000_document_catalog.sql, SQLite-ized).
+-- One row per document-shaped item from ANY source, carrying an extractive
+-- summary + topics + a summary embedding, so a document can be found by what
+-- it is about. Both constraints that carry meaning are mirrored faithfully:
+-- the unique triple the registration upsert conflicts on, and the check that
+-- makes an ownerless session-scoped row unrepresentable.
+--
+-- NOT mirrored (no SQLite equivalent, and nothing under test needs them):
+-- `search_tsv` (a generated tsvector maintained by Postgres) and the
+-- ivfflat/GIN indexes. `embedding` and `topics` are JSON-encoded TEXT via the
+-- fake's _JSONB_COLUMNS map. `document_find_candidates` is a Postgres
+-- function; its tenancy filter is exercised against real Postgres, not here
+-- (the fake's rpc() returns whatever a test registers).
+CREATE TABLE document_catalog (
+    -- Postgres fills this with gen_random_uuid(); the registration upsert
+    -- deliberately never sends an `id` (sending one would rewrite the PK on
+    -- every re-registration), so the mirror needs its own uuid4 default.
+    id              TEXT PRIMARY KEY DEFAULT (
+                        lower(hex(randomblob(4))) || '-'
+                        || lower(hex(randomblob(2))) || '-4'
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || substr('89ab', abs(random()) % 4 + 1, 1)
+                        || substr(lower(hex(randomblob(2))), 2) || '-'
+                        || lower(hex(randomblob(6)))
+                    ),
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    user_id         TEXT,
+    provider        TEXT NOT NULL,
+    external_id     TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    source_name     TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    doc_date        TEXT,
+    content_hash    TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    topics          TEXT NOT NULL DEFAULT '[]',
+    summary_model   TEXT,
+    summary_version TEXT,
+    embedding       TEXT,
+    body_text       TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider, external_id),
+    CONSTRAINT document_catalog_session_needs_owner
+        CHECK (conversation_id IS NULL OR user_id IS NOT NULL)
+);
+CREATE INDEX document_catalog_company_idx ON document_catalog (company_id);
+
 -- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
 -- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
 -- share one library; workspace_id records the uploading workspace only):
@@ -1109,9 +1226,79 @@ CREATE TABLE custom_skills (
     uploader_id   TEXT NOT NULL,
     uploader_name TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which synced folder produced this skill (20260807170000_skill_sources.sql).
+    -- NULL for every hand-uploaded skill; non-NULL makes the skill read-only in
+    -- the UI and at the PATCH route, because the repo owns its text.
+    source_id     TEXT,
     UNIQUE (company_id, slug)
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+CREATE INDEX custom_skills_source_id_idx ON custom_skills (source_id);
+
+-- Synced skill folders (mirrors 20260807170000_skill_sources.sql, SQLite-ized).
+-- One row per (company, repo, ref, path) folder a company keeps synced: the
+-- 30-minute sweep re-runs GitHub discovery over it and re-imports every .md it
+-- finds. `ref` empty means the repo's default branch, `path` empty the repo
+-- root. `last_commit_sha` is the sweep's short-circuit — unchanged head means
+-- no work. No company/workspace FKs, matching custom_skills above.
+CREATE TABLE skill_sources (
+    id              TEXT PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    installation_id INTEGER NOT NULL,
+    repo            TEXT NOT NULL,
+    ref             TEXT NOT NULL DEFAULT '',
+    path            TEXT NOT NULL DEFAULT '',
+    last_commit_sha TEXT NOT NULL DEFAULT '',
+    last_synced_at  TEXT,
+    last_error      TEXT NOT NULL DEFAULT '',
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, repo, ref, path)
+);
+CREATE INDEX skill_sources_company_id_idx ON skill_sources (company_id);
+
+-- Artifact format templates (mirrors 20260805120000_artifact_templates.sql,
+-- SQLite-ized). COMPANY-scoped uploaded PRD / ticket / engineering-spec FORMS
+-- (all workspaces in a company share one library and one active format per
+-- type; workspace_id records the uploading workspace only and is never a query
+-- filter). section_map / compile_notes are JSON-encoded TEXT, matching the real
+-- column type. No company/workspace FKs, matching the workspaces-table note:
+-- route tests fabricate tenant ids that have no parent rows.
+--
+-- `is_active INTEGER` + the PARTIAL unique index below are the load-bearing
+-- part of this mirror: they are what makes activate_template's
+-- deactivate-siblings-then-activate order testable, because the other order
+-- trips the constraint here exactly as it does in Postgres.
+CREATE TABLE artifact_templates (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL,
+    workspace_id   TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL
+                     CHECK (artifact_type IN ('prd', 'tickets', 'impl_spec')),
+    name           TEXT NOT NULL,
+    source_md      TEXT NOT NULL,
+    source_chars   INTEGER NOT NULL DEFAULT 0,
+    compiled       TEXT NOT NULL DEFAULT '',
+    section_map    TEXT NOT NULL DEFAULT '{}',
+    compile_status TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (compile_status IN
+                            ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
+    compile_notes  TEXT NOT NULL DEFAULT '[]',
+    content_hash   TEXT NOT NULL DEFAULT '',
+    is_active      INTEGER NOT NULL DEFAULT 0,
+    uploader_id    TEXT NOT NULL,
+    uploader_name  TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX artifact_templates_company_id_idx ON artifact_templates (company_id);
+CREATE INDEX artifact_templates_company_type_idx
+    ON artifact_templates (company_id, artifact_type);
+CREATE UNIQUE INDEX artifact_templates_active_uniq
+    ON artifact_templates (company_id, artifact_type) WHERE is_active = 1;
 
 -- Captured HTML report documents (mirrors 20260730120000_reports.sql,
 -- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
@@ -1265,6 +1452,34 @@ CREATE TABLE llm_usage_events (
     created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
+
+-- Artifact share-grant primitive (mirrors
+-- 20260801130000_artifact_share_links.sql, SQLite-ized: bigint identity /
+-- timestamptz are INTEGER / TEXT here). owner_company_id / owner_workspace_id
+-- are plain TEXT with no FK, matching the workspaces-table note above — route
+-- tests fabricate tenant ids that have no parent rows.
+CREATE TABLE artifact_shares (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    token              TEXT NOT NULL UNIQUE,
+    artifact_type      TEXT NOT NULL DEFAULT 'prd',
+    artifact_id        INTEGER NOT NULL,
+    owner_company_id   TEXT NOT NULL,
+    owner_workspace_id TEXT NOT NULL,
+    created_by_user_id TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at         TEXT
+);
+CREATE INDEX artifact_shares_artifact_idx ON artifact_shares (artifact_type, artifact_id);
+
+CREATE TABLE artifact_share_joins (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    share_id            INTEGER NOT NULL REFERENCES artifact_shares (id),
+    joined_user_id      TEXT NOT NULL,
+    joined_company_id   TEXT NOT NULL,
+    joined_workspace_id TEXT NOT NULL,
+    joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (share_id, joined_user_id)
+);
 """
 
 
@@ -1380,6 +1595,19 @@ def _no_background_connector_sync(request, monkeypatch):
         # extraction against the mid-reset in-memory DB.
         monkeypatch.setattr(auto_sync, "kickoff_roadmap_ingest", _noop_seed,
                             raising=False)
+        # And for Slack's corpus kickoff, now that the OAuth callback fires it
+        # on connect (not just the 6-hourly scheduler): its thread runs
+        # sync_slack against the LIVE slack.com API and stamps the connection
+        # row, so every test that drives /v1/connectors/slack/callback would
+        # otherwise inherit exactly the two hazards above.
+        monkeypatch.setattr(auto_sync, "kickoff_slack_corpus_sync", _noop_sync,
+                            raising=False)
+        # And for the call-index refresh, fired by POST /v1/connectors/fireflies
+        # /apikey and by the scheduler cycle: its thread hits api.fireflies.ai
+        # for real and upserts call_index / call_index_sync through the same
+        # mid-reset DB — the identical pair of hazards.
+        monkeypatch.setattr(auto_sync, "kickoff_call_index_sync", _noop_sync,
+                            raising=False)
     except Exception:
         pass
     try:
@@ -1396,6 +1624,86 @@ def _no_background_connector_sync(request, monkeypatch):
         monkeypatch.setattr(scheduler_mod, "kickoff_sync", _noop_sync, raising=False)
     except Exception:
         pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_template_compile(request, monkeypatch):
+    """Keep POST/PATCH /v1/artifact-templates from starting a real format check.
+
+    `schedule_compile` (app.artifact_templates.compile_prd) claims the row and
+    runs the compile on a background thread — and that compile goes through
+    `graph.gateway.llm_call`, which holds its OWN `call_json` reference bound at
+    import time. The `fake_llm` fixture patches `app.llm.call_json`, which does
+    NOT reach the gateway's binding, so an unguarded upload in any route test
+    would fire a REAL Anthropic request from a daemon thread, against the
+    mid-reset in-memory DB — the same pair of hazards
+    `_no_background_connector_sync` above exists for.
+
+    Returning False (not True) is what keeps the route's contract intact under
+    the patch: `_with_compile_started` reads False as "a check is already in
+    flight", leaves the row alone, and the response still describes the row the
+    write produced.
+
+    Opt out with `@pytest.mark.real_template_compile` — the compile suite does,
+    and drives the gateway with its own stub."""
+    if request.node.get_closest_marker("real_template_compile"):
+        yield
+        return
+    import importlib
+
+    def _noop_schedule(company_id, template_id):  # noqa: ARG001
+        return False
+
+    # Patched on BOTH modules: routes/artifact_templates.py does
+    # `from ...compile_prd import schedule_compile`, so its binding is fixed at
+    # import and patching only the source module cannot reach it.
+    for mod_name in ("app.artifact_templates.compile_prd",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_compile"):
+            monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
+                                raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_referent_adjudication(request, monkeypatch):
+    """Keep document RESOLUTION from firing a real model call.
+
+    `document_referent.adjudicate` runs on the ask path whenever a question
+    carries a document cue and a candidate clears the content-term floor — and
+    it goes through `graph.gateway.llm_call`, which holds its own `call_json`
+    reference bound at import time and so is NOT reached by `fake_llm`
+    (see `_no_background_template_compile` above for the same hazard).
+    Several existing ask tests ask cue-bearing questions in passing; without
+    this guard each of them would attempt a real Anthropic request and sit on
+    a network timeout before failing open.
+
+    Returning None is the resolver's own no-referent answer, so a guarded test
+    sees exactly the grounding it saw before resolution existed — the guard
+    cannot mask a resolution bug by inventing a resolution.
+
+    Opt out with `@pytest.mark.real_referent_adjudication`;
+    `test_document_referent.py`'s own suite stubs `adjudicate` with a
+    controllable fake instead, which overrides this for the tests that need to
+    steer the verdict."""
+    if request.node.get_closest_marker("real_referent_adjudication"):
+        yield
+        return
+    import importlib
+
+    try:
+        mod = importlib.import_module("app.document_referent")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        mod, "adjudicate", lambda **kw: None, raising=False
+    )
     yield
 
 
@@ -1492,6 +1800,111 @@ def _no_real_browser_in_preview_capture(monkeypatch):
         except Exception:
             pass
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_llm_usage_background_writer():
+    """Disable `app.db.llm_usage`'s process-wide background flusher thread
+    before ANY test in this worker/process runs.
+
+    `_ensure_writer()` lazily spawns a daemon thread (`llm-usage-writer`) the
+    FIRST time any code path calls `record_usage()` (e.g. any `install_metering`-
+    wrapped LLM client). That thread runs `while True` for the rest of the
+    process, flushing whatever's buffered via `require_client()` on its own
+    5-second cadence — resolved dynamically, so it keeps firing long after
+    whichever test originally started it, into WHATEVER test's fake DB happens
+    to be current at that moment. `test_llm_usage_metering.py` already opts
+    itself out locally (`disable_background_writer()` + `reset_for_tests()`),
+    but that only helps once THAT file happens to run — under `-n auto`, most
+    worker processes never execute it at all, so the writer stays live and
+    contends `_fake_supabase._LOCK` at unpredictable points for their entire
+    session. Confirmed via instrumentation: this thread is the direct cause of
+    an intermittent class of unrelated test failures (ticket-sync tests
+    observing a mid-flight state their own setup never produced) that only
+    reproduces under parallel execution. Disabling it session-wide, once, up
+    front removes the hazard outright — buffered rows are just queued
+    (harmless; this ledger is explicitly fail-open/analytics-only, see
+    `app/db/llm_usage.py`'s module docstring) until a test explicitly calls
+    `flush()`, exactly as that module already documents."""
+    from app.db import llm_usage
+
+    llm_usage.disable_background_writer()
+
+
+@pytest.fixture(autouse=True)
+async def _drain_orphaned_executor_work():
+    """STRUCTURAL fix for cross-test contamination via orphaned
+    `asyncio.to_thread`/`loop.run_in_executor` background work — the actual
+    root cause behind an intermittent class of failures in the ticket-sync /
+    fake-tracker test family (test_ticket_sync.py, test_ticket_lifecycle.py,
+    test_tracker_native_sync.py and any other test sharing that fixture
+    machinery) that reproduced even after the targeted per-test fixes below
+    (see git history on this fixture's neighbors) and got WORSE, not better,
+    on GitHub's 2-vCPU runners — a slower run gives an orphaned thread more
+    real wall-clock time to land badly.
+
+    `asyncio.run()` is safe: its cleanup calls `shutdown_default_executor()`,
+    which BLOCKS until every `to_thread` call has actually finished (verified
+    directly — a fire-and-forget `asyncio.create_task(...)` whose coroutine is
+    suspended inside `to_thread` when the outer coroutine returns still keeps
+    `asyncio.run()` from returning until that executor thread is done,
+    because cancelling the asyncio-level future does NOT interrupt an
+    already-dispatched executor thread).
+
+    pytest-asyncio's own per-test event loop teardown does NOT do this — it
+    calls `loop.close()` directly (see `pytest_asyncio/plugin.py`), with no
+    executor drain. Confirmed directly: with that teardown, an orphaned
+    `to_thread` call keeps running for its FULL duration strictly AFTER
+    "the test" has already returned and the next one has started — meaning
+    ANY test (not just the couple already found and stubbed) that exercises a
+    route/function scheduling `asyncio.create_task(...)` fire-and-forget work
+    (PRD/impl-spec pre-warm, ticket-generation warm, connector sync kicks,
+    etc.) without itself explicitly draining that work is a potential source,
+    regardless of which specific test files happen to intersect with the
+    ticket-sync fixture family. This fixture makes every pytest-asyncio-
+    managed test wait the same way `asyncio.run()` already does, closing the
+    hole at its source rather than in each downstream victim.
+
+    Async (not sync) so pytest-asyncio hands it a REAL running loop to await
+    on for its teardown — `asyncio_mode = auto` still wraps this correctly
+    for sync test functions too (verified). A test with no orphaned work
+    pays ~nothing (shutdown_default_executor() on an idle executor returns
+    immediately)."""
+    yield
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.shutdown_default_executor()
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_daemon_threads():
+    """Guard against a fire-and-forget daemon thread (`kick_prd_sync_from_key`,
+    `kick_comment_push`, `kick_comment_delete`, `app.kg_ingest.auto_sync`'s
+    kickoffs, and anything else following that pattern) outliving its own
+    test and racing a LATER test's freshly-reset fake DB / class-level fixture
+    state.
+
+    These kicks resolve their targets (`_Tracker`, `supabase_client()`, etc.)
+    by NAME at call time, not at thread-spawn time — so a thread still mid-
+    flight when the next test's `isolated_settings`/`fake_tracker` fixtures
+    reset that state runs against the NEW test's fake DB using the OLD test's
+    captured ids, corrupting a completely unrelated test (this is the
+    documented "intermittent, order-dependent" hazard `_no_background_
+    connector_sync` calls out; a handful of tests intentionally exercise a
+    real kick thread and only wait on an observable side effect, not a
+    `join()`). Snapshot the live threads before the test, then after, join
+    anything NEW with a bounded grace period — a legitimate daemon thread has
+    already done its (in-memory, fast) work by the time the test's own
+    assertions pass, so this is a no-op in the common case and only matters
+    when a thread is still mid-unwind."""
+    import threading
+
+    before = set(threading.enumerate())
+    yield
+    for t in threading.enumerate():
+        if t not in before and t is not threading.current_thread() and t.daemon:
+            t.join(timeout=5)
 
 
 @pytest.fixture

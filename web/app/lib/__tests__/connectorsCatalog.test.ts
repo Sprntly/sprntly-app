@@ -14,12 +14,18 @@ import {
 const EXPECTED_CATEGORIES = [
   "Analytics",
   "Voice of Customer & Support",
+  // Research sits beside Voice (2026-08-02): both carry what users told us —
+  // Voice unsolicited, Research deliberately gathered.
+  "Research",
   "Customer Relationship (CRM)",
   "Project Management",
   "Monitoring & Reliability",
   "Design",
   "Codebase",
-  "Communications",
+  // No "Communications" (removed 2026-08-04) — Slack moved to a single card on
+  // the Voice shelf and MS Teams, the only other row, was a coming-soon
+  // delivery target that never rendered. Brief delivery is configured in
+  // Settings → Comms & Brief, which is untouched.
   // "Company documentation" merges the user's own uploaded documents with the
   // external doc tools (Notion, Google Docs) — see the `docs` category.
   "Company documentation",
@@ -27,19 +33,28 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 10 categories, in v6 order (Uploaded documents merged into Company documentation; revenue appended)", () => {
+  it("has exactly the 10 categories, in v6 order (Communications removed; Research added; Uploaded documents merged into Company documentation; revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 43 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
+  it("has no Communications category and no MS Teams row anywhere", () => {
+    expect(CONNECTOR_CATALOG.find((c) => c.key === "comms")).toBeUndefined()
+    expect(
+      CONNECTOR_CATALOG.find((c) => c.title === "Communications"),
+    ).toBeUndefined()
+    const ids = CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id))
+    expect(ids).not.toContain("msteams")
+  })
+
+  it("totals 44 connector rows — one row per connector, nothing dual-placed", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(43)
-    // 42 distinct connectors — the extra row is dual-typed Slack's second
-    // placement, not a second connector.
+    expect(total).toBe(44)
+    // Rows === distinct connectors: Slack's second (Communications) placement
+    // is gone, so no id appears on two shelves.
     const distinct = new Set(
       CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
     )
-    expect(distinct.size).toBe(42)
+    expect(distinct.size).toBe(44)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -118,24 +133,40 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
-    // Slack is dual-typed (communication + customer-voice) so its card sits
-    // on this shelf too — same item, same connection as in Communications.
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Zoom, Google Meet, Slack", () => {
+    // Slack's one and only card since 2026-08-04 — it is on this shelf because
+    // what a PM connects it FOR is the customer signal in its channels.
+    // Google Meet sits next to Zoom: both are meetings sources, and putting
+    // them side by side is deliberate even though Meet's coverage is narrower
+    // (the connect modal is where that difference is spelled out).
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong", "Slack",
+      "Fireflies", "Gong", "Zoom", "Google Meet", "Slack",
     ])
   })
 
-  it("Slack appears in both Voice and Communications as the SAME item (multi-type dual placement)", () => {
-    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
-    const comms = CONNECTOR_CATALOG.find((c) => c.key === "comms")!
-    const voiceSlack = voice.items.find((i) => i.id === "slack")
-    const commsSlack = comms.items.find((i) => i.id === "slack")
-    // One shared object — the two shelves can never drift apart.
-    expect(voiceSlack).toBeDefined()
-    expect(voiceSlack).toBe(commsSlack)
-    expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
+  it("Slack keeps BOTH types but renders exactly one card, under Voice", () => {
+    // The types mirror backend/app/connectors/catalog.py and drive feature
+    // lookups (connectorsWithType); shelving is a separate question and the
+    // answer is now "Voice, once". Regression guard for the dual-listing.
+    const shelves = CONNECTOR_CATALOG.filter((c) =>
+      c.items.some((i) => i.id === "slack"),
+    )
+    expect(shelves.map((c) => c.key)).toEqual(["voice"])
+    const slack = shelves[0].items.find((i) => i.id === "slack")!
+    expect(slack.types).toEqual(["communication", "customer-voice"])
+    expect(slack.oauth).toBe(true)
+  })
+
+  it("Research: Marvin (coming soon) — the shelf's live feature is its upload strip", () => {
+    expect(items("Research")).toEqual(["Marvin"])
+    const research = CONNECTOR_CATALOG.find((c) => c.key === "research")!
+    expect(research.items[0].types).toEqual(["research"])
+    // Not wired yet, so the card renders "Coming soon"…
+    expect(isConnectableConnector(research.items[0])).toBe(false)
+    // …which is exactly why the category must not opt out of manual upload.
+    expect(research.allowsManualUpload).not.toBe(false)
+    expect(research.keepWhenEmpty).toBe(true)
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -162,9 +193,6 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(items("Design")).toEqual(["Figma", "Framer"])
   })
 
-  it("Communications: Slack, MS Teams", () => {
-    expect(items("Communications")).toEqual(["Slack", "MS Teams"])
-  })
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
@@ -175,7 +203,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       [
         "asana", "clickup", "confluence", "figma", "github", "google_drive",
-        "hubspot", "jira", "slack", "sprinklr",
+        "google_meet", "hubspot", "jira", "slack", "sprinklr", "zoom",
       ].sort(),
     )
   })
@@ -207,12 +235,14 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "fireflies",
         "github",
         "google_drive",
+        "google_meet",
         "hubspot",
         "jira",
         "slack",
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -248,17 +278,18 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Analytics",
       "Voice of Customer & Support",
+      // Research has no wired connector at all, but survives on keepWhenEmpty
+      // because its upload strip is the feature — see the test below.
+      "Research",
       "Customer Relationship (CRM)",
       "Project Management",
       "Design",
       "Codebase",
-      "Communications",
       "Company documentation",
     ])
   })
 
   it("shows only the 13 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
-    // Set-dedup: Slack's card renders on two shelves but is one connector.
     const ids = [...new Set(
       connectableCatalog()
         .flatMap((c) => c.items)
@@ -273,12 +304,14 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "fireflies",
         "github",
         "google_drive",
+        "google_meet",
         "hubspot",
         "jira",
         "slack",
         "sprinklr",
         "superset",
         "uploads",
+        "zoom",
       ].sort(),
     )
   })
@@ -290,17 +323,38 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
     expect(byTitle("Analytics")).toEqual(["superset"])
-    // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
+    // Slack (OAuth-wired, dual-typed) is visible here and ONLY here.
     expect(byTitle("Voice of Customer & Support")).toEqual([
-      "sprinklr", "fireflies", "slack",
+      "sprinklr", "fireflies", "zoom", "google_meet", "slack",
     ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Codebase")).toEqual(["github"])
-    expect(byTitle("Communications")).toEqual(["slack"])
+    expect(titles).not.toContain("Communications")
     // Merged category keeps only its WIRED rows (Notion isn't wired yet):
     // Uploaded documents (upload) + Google Docs (google_drive OAuth).
     expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive", "confluence"])
+  })
+
+  it("keeps a keepWhenEmpty category (Research) with zero items instead of dropping it", () => {
+    const research = connectableCatalog().find((c) => c.key === "research")
+    // Present, empty, and still carrying the upload strip metadata — the whole
+    // point of the flag: coming-soon Marvin is hidden, the dropzone survives.
+    expect(research).toBeTruthy()
+    expect(research!.items).toEqual([])
+    expect(research!.uploadAccept).toBeTruthy()
+    expect(research!.allowsManualUpload).not.toBe(false)
+    // The flag is narrow: Monitoring is equally unwired and still gets dropped.
+    expect(
+      connectableCatalog().find((c) => c.key === "monitoring"),
+    ).toBeUndefined()
+  })
+
+  it("shows Marvin on the Research shelf once it has a live connection", () => {
+    const research = connectableCatalog(new Set(["marvin"])).find(
+      (c) => c.key === "research",
+    )!
+    expect(research.items.map((i) => i.id)).toEqual(["marvin"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {
@@ -321,6 +375,58 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const before = CONNECTOR_CATALOG.flatMap((c) => c.items).length
     connectableCatalog()
     expect(CONNECTOR_CATALOG.flatMap((c) => c.items).length).toBe(before)
+  })
+})
+
+describe("Zoom", () => {
+  it("sits on the Voice shelf, OAuth-wired and typed as meetings", () => {
+    // The type is what makes it evidence-bearing (it mirrors catalog.py), so a
+    // drift here silently changes whether Zoom alone can drive a brief.
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const zoom = voice.items.find((i) => i.id === "zoom")!
+    expect(zoom).toBeTruthy()
+    expect(zoom.name).toBe("Zoom")
+    expect(zoom.oauth).toBe(true)
+    expect(zoom.types).toEqual(["meetings"])
+  })
+
+  it("bundles its mark locally rather than hotlinking the provider", () => {
+    const zoom = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "zoom",
+    )!
+    expect(zoom.logoSvg).toBe("/connectors/zoom.svg")
+    expect(zoom.logoSvg?.startsWith("http")).toBe(false)
+  })
+})
+
+describe("Google Meet", () => {
+  it("sits on the Voice shelf, OAuth-wired and typed as meetings", () => {
+    // The type is what makes it evidence-bearing (it mirrors catalog.py), so a
+    // drift here silently changes whether Meet alone can drive a brief.
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const meet = voice.items.find((i) => i.id === "google_meet")!
+    expect(meet).toBeTruthy()
+    expect(meet.name).toBe("Google Meet")
+    expect(meet.oauth).toBe(true)
+    expect(meet.types).toEqual(["meetings"])
+  })
+
+  it("is a distinct connector from Google Drive, not a second Drive row", () => {
+    // They share a Cloud project and an OAuth client on the backend, which is
+    // exactly why the CATALOG must keep them apart: one id, one connection row,
+    // one card each. A collision here would make disconnecting one appear to
+    // disconnect the other.
+    const ids = CONNECTOR_CATALOG.flatMap((c) => c.items).map((i) => i.id)
+    expect(ids.filter((id) => id === "google_meet")).toHaveLength(1)
+    expect(ids).toContain("google_drive")
+  })
+
+  it("bundles its mark locally rather than hotlinking the provider", () => {
+    const meet = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "google_meet",
+    )!
+    expect(meet.logoSvg).toBe("/connectors/google_meet.svg")
+    expect(meet.logoSvg?.startsWith("http")).toBe(false)
   })
 })
 

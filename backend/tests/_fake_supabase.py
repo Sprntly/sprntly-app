@@ -102,10 +102,15 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks", "custom_fields"},
     "prd_tickets":       {"stories"},
+    # Standalone ticket sets carry the same `stories` payload shape as
+    # prd_tickets — the whole point of the second home.
+    "ticket_sets":       {"stories"},
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
     "conversation_turns":  {"attachments"},
+    # text[] + vector(1536) — JSON-encoded in the mirror.
+    "document_catalog":    {"topics", "embedding"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
     "pipeline_runs":          {"stages"},   # per-stage results JSONB
@@ -121,6 +126,8 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "workspaces":           {"is_default"},
     "products":             {"is_primary"},
     "ideation_items":       {"shortlisted"},
+    "kg_signal":            {"evidence_eligible"},
+    "artifact_templates":   {"is_active"},
 }
 
 

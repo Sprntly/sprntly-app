@@ -1,22 +1,38 @@
 "use client"
 
-// Skills · the PM-skill gallery.
+// Skills · the company's own skill library.
 //
-// Top-level surface listing every skill the chat can route to (GET
-// /v1/ask/skills — the routable manifest computed from backend/skills/).
+// Top-level surface listing the CUSTOM skills this company uploaded (PRD 1854
+// — .md/.zip files, company-scoped so every workspace shares one library).
 // Clicking a card hands off to the chat via setPendingOndemandDraft with the
 // skill's `/trigger ` pre-filled, so the user lands in a focused thread ready
 // to type their specifics; the backend's slash fast-path (qa_agent) then pins
-// that skill with confidence 1.0 on send.
+// that skill with confidence 1.0 on send. That fast-path is now CUSTOM-ONLY,
+// which is exactly what this screen lists.
 //
-// Two listings render here: the built-in catalog (grouped by the backend
-// catalog's category) and the company's CUSTOM skills (PRD 1854 — uploaded
-// .md/.zip files, company-scoped so every workspace shares one library).
-// "Create or upload skill" opens the upload modal (UploadSkillModal → POST
-// /v1/skills); a created skill appears in the "Custom skills" section
-// immediately, byline = uploader. Built-in cards keep the Sprntly byline.
-// The two fetches fail independently: a custom-skills error never blanks the
-// built-in catalog — it shows an inline notice instead.
+// The vendored BUILT-IN catalog used to render here as a second, grouped
+// listing off GET /v1/ask/skills. It is gone: the library is down to nine
+// method docs, each bound by name from the one pipeline that needs it, and a
+// chat turn can invoke none of them — so every card was a trigger that would
+// have done nothing. "Create or upload skill" opens the upload modal
+// (UploadSkillModal → POST /v1/skills); a created skill appears here
+// immediately, byline = uploader.
+//
+// ONE upload can create SEVERAL cards: a .zip with a folder per SKILL.md
+// imports as one skill per folder, so the 201 comes back as a list and every
+// skill in it is merged under the same replaced-vs-new rule (mergeUploadedSkills).
+// The modal stays open on that result — the per-skill triggers and the folders
+// it couldn't import are more than a toast can carry — and the toast here just
+// counts what happened. Importing from a connected GitHub repo lands in exactly
+// the same place: the same per-skill payloads, the same merge, the same panel.
+//
+// Each card carries a hover-revealed pencil and trash pair. The pencil opens
+// EditSkillModal, which fetches the skill's method text (GET /v1/skills/{id} —
+// the list is metadata-only) and PATCHes name/description/method back. Two
+// outcomes of a save need handling here rather than in the modal: a rename
+// re-derives the trigger, so the response's `slug`/`trigger` replace the
+// card's, and a rename onto another of the company's skill names DELETES that
+// skill server-side, so `replaced_skill_id` takes its card out of the grid.
 //
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
@@ -24,50 +40,55 @@
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import {
-  IconChartLine,
-  IconCompass,
-  IconFileText,
-  IconListCheck,
+  IconAlertTriangle,
+  IconBrandGithub,
+  IconLoader2,
+  IconPencil,
   IconPlus,
-  IconRocket,
-  IconSearch,
-  IconSparkles,
-  IconSpeakerphone,
+  IconRefresh,
   IconTrash,
   IconUser,
   IconWand,
 } from "@tabler/icons-react"
 import { AppLayout } from "./AppLayout"
-import { UploadSkillModal } from "../../shared/UploadSkillModal"
+import { UploadSkillModal, countLine } from "../../shared/UploadSkillModal"
+import { EditSkillModal } from "../../shared/EditSkillModal"
 import { useNavigation } from "../../../context/NavigationContext"
 import {
-  askApi,
+  isMultiSkillUpload,
   skillsApi,
+  type CustomSkillDetail,
   type CustomSkillInfo,
-  type SkillInfo,
+  type SyncedFolder,
 } from "../../../lib/api"
 
-// Backend category → display order, tagline, and icon. Categories are owned by
-// the backend catalog (app/skills/catalog.py); this map only decorates them.
-// A category the backend adds later still renders (appended, wand icon) — it
-// just won't have a tagline until listed here.
-const CATEGORY_DISPLAY: {
-  id: string
-  tagline: string
-  icon: React.ComponentType<{ size?: number | string }>
-}[] = [
-  { id: "Discovery & Research", tagline: "figuring out what's worth building", icon: IconSearch },
-  { id: "Strategy & Vision", tagline: "deciding where to play and how to win", icon: IconCompass },
-  { id: "Documentation & Specification", tagline: "writing it down so it ships right", icon: IconFileText },
-  { id: "Prioritization & Decision", tagline: "choosing the next bet with a clear head", icon: IconListCheck },
-  { id: "Metrics, Experimentation & Growth", tagline: "measuring what matters and growing it", icon: IconChartLine },
-  { id: "Delivery & Operations", tagline: "shipping it and keeping it running", icon: IconRocket },
-  { id: "Stakeholder & Communication", tagline: "keeping everyone aligned and informed", icon: IconSpeakerphone },
-]
+/** "3 minutes ago" for a sync timestamp, "Never" before the first one.
+ *
+ *  Deliberately coarse: the panel answers "is this folder actually being
+ *  watched", and a to-the-second time invites reading it as a countdown to the
+ *  next sweep, which it isn't. Pure → testable without a clock fixture. */
+export function syncedAgo(iso: string | null, now: number = Date.now()): string {
+  if (!iso) return "Never synced"
+  const then = Date.parse(iso)
+  if (Number.isNaN(then)) return "Never synced"
+  const mins = Math.floor((now - then) / 60000)
+  if (mins < 1) return "Synced just now"
+  if (mins < 60) return `Synced ${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `Synced ${hours}h ago`
+  return `Synced ${Math.floor(hours / 24)}d ago`
+}
 
-/** First sentence of a skill's frontmatter description, minus the router
- *  guidance tail ("Use when the user says …"). The catalog descriptions are
- *  written for the LLM router, so cards show just the lead. Pure → testable. */
+/** One synced folder as a label: "acme/methods · skills · main". The branch is
+ *  omitted when the folder follows the repo default, because printing a
+ *  resolved name would claim a pin the row doesn't have. */
+export function folderLabel(f: Pick<SyncedFolder, "repo" | "path" | "ref">): string {
+  return [f.repo, f.path, f.ref].filter(Boolean).join(" · ")
+}
+
+/** First sentence of a skill's description, minus the routing-guidance tail
+ *  ("Use when the user says …"). Descriptions are written for the classifier,
+ *  so cards show just the lead. Pure → testable. */
 export function skillBlurb(description: string, label: string): string {
   const d = (description || "").trim()
   if (!d) return `Run the ${label} workflow`
@@ -77,40 +98,31 @@ export function skillBlurb(description: string, label: string): string {
   return (sentence ? sentence[0] : head).trim().replace(/[.!?]+$/, "")
 }
 
-export type SkillGroup = {
-  category: string
-  tagline: string
-  icon: React.ComponentType<{ size?: number | string }>
-  skills: SkillInfo[]
-}
-
-/** Group skills by backend category in CATEGORY_DISPLAY order; categories the
- *  map doesn't know yet are appended alphabetically rather than dropped. */
-export function groupSkills(skills: SkillInfo[]): SkillGroup[] {
-  const byCategory = new Map<string, SkillInfo[]>()
-  for (const s of skills) {
-    const key = s.category || "Other"
-    const list = byCategory.get(key)
-    if (list) list.push(s)
-    else byCategory.set(key, [s])
+/** Fold the skills one upload created into the library on screen.
+ *
+ *  The same rule a single upload has always used, applied N times: a skill
+ *  whose id is already listed REPLACED that row (same id, same trigger, new
+ *  content) and swaps in place, because prepending would render one id twice;
+ *  anything else is new and goes to the front. Prepending in arrival order
+ *  leaves the last-created skill first, which is the newest-first order the
+ *  list endpoint returns on the next load — so the grid does not reshuffle
+ *  when the user refreshes. Pure → testable without the API. */
+export function mergeUploadedSkills(
+  prev: CustomSkillInfo[],
+  created: CustomSkillInfo[],
+): CustomSkillInfo[] {
+  let next = prev
+  for (const skill of created) {
+    next = next.some((s) => s.id === skill.id)
+      ? next.map((s) => (s.id === skill.id ? skill : s))
+      : [skill, ...next]
   }
-  const groups: SkillGroup[] = []
-  for (const c of CATEGORY_DISPLAY) {
-    const list = byCategory.get(c.id)
-    if (!list) continue
-    byCategory.delete(c.id)
-    groups.push({ category: c.id, tagline: c.tagline, icon: c.icon, skills: list })
-  }
-  for (const [category, list] of [...byCategory.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    groups.push({ category, tagline: "", icon: IconWand, skills: list })
-  }
-  return groups
+  return next
 }
 
 /** Pure presentational view — all state arrives as props, so it renders
  *  identically in a static-markup test (no API, no effects). */
 export function SkillsView({
-  groups,
   customSkills,
   customError,
   loading,
@@ -123,11 +135,16 @@ export function SkillsView({
   deletingId,
   onDeleteRequest,
   onDeleteConfirm,
+  onEditRequest,
+  syncedFolders,
+  syncingFolderId,
+  stoppingFolderId,
+  onSyncFolder,
+  onStopSyncingFolder,
 }: {
-  groups: SkillGroup[]
   /** The company's uploaded skills (already search-filtered by the caller). */
   customSkills: CustomSkillInfo[]
-  /** Non-blocking: custom-skills fetch failed but built-ins still render. */
+  /** Inline notice when the fetch failed after a list was already on screen. */
   customError: string | null
   loading: boolean
   error: string | null
@@ -143,6 +160,19 @@ export function SkillsView({
   onDeleteRequest: (id: string | null) => void
   /** Actually delete — reachable only through the armed confirm. */
   onDeleteConfirm: (id: string) => void
+  /** Open the edit modal for a skill. Non-destructive on its own — the modal
+   *  loads the method text and owns every confirm from there. */
+  onEditRequest: (id: string) => void
+  /** GitHub folders this company keeps synced. ACTIVE ones only — a stopped
+   *  folder has already handed its skills back and has nothing left to manage,
+   *  so listing it would be a row whose every control is a no-op. */
+  syncedFolders: SyncedFolder[]
+  /** Folder id whose forced re-read is in flight. */
+  syncingFolderId: string | null
+  /** Folder id whose stop-syncing is in flight. */
+  stoppingFolderId: string | null
+  onSyncFolder: (id: string) => void
+  onStopSyncingFolder: (id: string) => void
 }) {
   return (
     <div className="skl-wrap">
@@ -203,8 +233,9 @@ export function SkillsView({
             </div>
             <div className="skl-grid">
               {customSkills.map((s) => (
-                // Wrapper div: the card is itself a <button>, so the delete
-                // affordance must be a sibling — nested buttons are invalid.
+                // Wrapper div: the card is itself a <button>, so the edit and
+                // delete affordances must be siblings — nested buttons are
+                // invalid.
                 <div key={s.id} className="skl-card-wrap">
                   <button
                     type="button"
@@ -251,16 +282,44 @@ export function SkillsView({
                         Cancel
                       </button>
                     </span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="skl-card-del"
-                      aria-label={`Delete ${s.name}`}
-                      title="Delete this skill"
-                      onClick={() => onDeleteRequest(s.id)}
+                  ) : s.synced ? (
+                    // A synced skill's text belongs to the repo: the sweep
+                    // re-imports it every half hour, so an edit here would be
+                    // reverted and a delete would come back. Both are refused
+                    // server-side (409) — showing the buttons and then failing
+                    // would be the worse version of the same rule. The badge
+                    // says where the skill actually lives instead.
+                    <span
+                      className="skl-card-actions skl-card-synced"
+                      title="Synced from GitHub — edit it in the repository, or stop syncing its folder below"
                     >
-                      <IconTrash size={13} />
-                    </button>
+                      <IconBrandGithub size={12} aria-hidden />
+                      Synced
+                    </span>
+                  ) : (
+                    // Edit and delete are one hover-revealed pair; the pencil
+                    // sits left of the trash so the destructive one stays in
+                    // the corner it has always been in.
+                    <span className="skl-card-actions">
+                      <button
+                        type="button"
+                        className="skl-card-act"
+                        aria-label={`Edit ${s.name}`}
+                        title="Edit this skill"
+                        onClick={() => onEditRequest(s.id)}
+                      >
+                        <IconPencil size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        className="skl-card-act skl-card-del"
+                        aria-label={`Delete ${s.name}`}
+                        title="Delete this skill"
+                        onClick={() => onDeleteRequest(s.id)}
+                      >
+                        <IconTrash size={13} />
+                      </button>
+                    </span>
                   )}
                 </div>
               ))}
@@ -270,47 +329,84 @@ export function SkillsView({
 
         {loading ? (
           <p className="skl-placeholder">Loading skills…</p>
-        ) : groups.length === 0 && customSkills.length === 0 ? (
+        ) : customSkills.length === 0 ? (
           <p className="skl-placeholder">
             {query.trim()
               ? `No skills match “${query.trim()}”.`
-              : "No skills available."}
+              : "No skills yet — upload one to get started."}
           </p>
-        ) : (
-          groups.map((g, i) => (
-            <section key={g.category} className="skl-group" aria-label={g.category}>
-              <div className="skl-group-head">
-                <h2 className="skl-group-title">
-                  {i + 1} · {g.category}
-                </h2>
-                {g.tagline && <span className="skl-group-tag">{g.tagline}</span>}
-              </div>
-              <div className="skl-grid">
-                {g.skills.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className="skl-card"
-                    onClick={() => onInvoke(s)}
-                    title={`${s.trigger} — start a thread with this skill`}
-                  >
-                    <span className="skl-card-icon">
-                      <g.icon size={16} />
+        ) : null}
+
+        {/* Synced folders. Deliberately BELOW the library and not filtered by
+            the search box: this is the settings half of the screen, and a
+            folder is not a skill you would search for by name. It exists so
+            syncing is not a one-way door — you can see what is being watched,
+            when it last ran, why it failed, and stop it. */}
+        {syncedFolders.length > 0 ? (
+          <section className="skl-sec skl-synced" aria-labelledby="skl-synced-h">
+            <h2 className="skl-sec-h" id="skl-synced-h">
+              <IconBrandGithub size={13} aria-hidden /> Synced folders
+            </h2>
+            <p className="skl-sec-sub">
+              Every Markdown file in these folders is imported as a skill, and
+              re-checked every 30 minutes. Their skills are edited in GitHub.
+            </p>
+            <ul className="skl-synced-list">
+              {syncedFolders.map((f) => {
+                const syncing = syncingFolderId === f.id
+                const stopping = stoppingFolderId === f.id
+                return (
+                  <li key={f.id} className="skl-synced-item">
+                    <span className="skl-synced-main">
+                      <code className="skl-synced-label">{folderLabel(f)}</code>
+                      {/* An error replaces the timestamp rather than sitting
+                          beside it: "synced 4m ago" next to a failure reads as
+                          though the sync worked, which is the one thing this
+                          row must never imply. */}
+                      {f.last_error ? (
+                        <span className="skl-synced-err">
+                          <IconAlertTriangle size={11} aria-hidden />
+                          {f.last_error}
+                        </span>
+                      ) : (
+                        <span className="skl-synced-when muted">
+                          {syncedAgo(f.last_synced_at)}
+                          {f.last_commit_sha ? ` · ${f.last_commit_sha}` : ""}
+                        </span>
+                      )}
                     </span>
-                    <span className="skl-card-t">{s.label}</span>
-                    <span className="skl-card-d">{skillBlurb(s.description, s.label)}</span>
-                    <span className="skl-card-foot">
-                      <span className="skl-by">
-                        <IconSparkles size={11} />
-                        Sprntly
-                      </span>
+                    <span className="skl-synced-acts">
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={syncing || stopping}
+                        aria-busy={syncing || undefined}
+                        onClick={() => onSyncFolder(f.id)}
+                      >
+                        {syncing ? (
+                          <IconLoader2 size={12} className="icon-spin" aria-hidden />
+                        ) : (
+                          <IconRefresh size={12} aria-hidden />
+                        )}
+                        {syncing ? "Syncing…" : "Sync now"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={syncing || stopping}
+                        aria-busy={stopping || undefined}
+                        onClick={() => onStopSyncingFolder(f.id)}
+                        title="Stop syncing this folder. Its skills stay and become editable here."
+                      >
+                        {stopping ? "Stopping…" : "Stop syncing"}
+                      </button>
                     </span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ))
-        )}
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        ) : null}
       </div>
     </div>
   )
@@ -319,14 +415,24 @@ export function SkillsView({
 function SkillsScreenContent() {
   const { goTo, setPendingOndemandDraft, showToast } = useNavigation()
   const searchParams = useSearchParams()
-  const [skills, setSkills] = useState<SkillInfo[]>([])
   const [customSkills, setCustomSkills] = useState<CustomSkillInfo[]>([])
   const [customError, setCustomError] = useState<string | null>(null)
   const [deletePendingId, setDeletePendingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
+  // Edit modal: the id opens it immediately (so the dialog is on screen while
+  // the method text loads), the detail arrives from GET /v1/skills/{id}.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editSkill, setEditSkill] = useState<CustomSkillDetail | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Synced GitHub folders. Only the ACTIVE ones are kept — a stopped folder has
+  // released its skills and has nothing left to manage.
+  const [syncedFolders, setSyncedFolders] = useState<SyncedFolder[]>([])
+  const [syncingFolderId, setSyncingFolderId] = useState<string | null>(null)
+  const [stoppingFolderId, setStoppingFolderId] = useState<string | null>(null)
   // `?q=` seeds the filter so the global search palette can deep-link a
   // specific skill (`/skills?q=<label>`); after mount the input owns it.
   const qParam = searchParams.get("q")
@@ -339,62 +445,55 @@ function SkillsScreenContent() {
     if (qParam != null) setQuery(qParam)
   }, [qParam])
 
+  // ONE fetch now. The built-in catalog this screen used to list alongside the
+  // uploads is gone — those skills are bound by name from their own pipelines
+  // and a chat turn cannot invoke any of them, so every card would have been a
+  // trigger that does nothing. `error` / `loading` stay: they now describe this
+  // fetch, and `customError` remains for the case where it fails after a
+  // successful first load.
   useEffect(() => {
     let cancelled = false
-    // Independent fetches: a custom-skills failure must not blank the built-in
-    // catalog (and vice versa) — each surfaces its own inline error.
-    askApi
-      .skills()
-      .then((r) => {
-        if (cancelled) return
-        setSkills(r.skills)
-        setError(null)
-      })
-      .catch((e) => {
-        if (cancelled) return
-        setError(e instanceof Error ? e.message : "Could not load skills")
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
     skillsApi
       .list()
       .then((r) => {
         if (cancelled) return
         setCustomSkills(r.skills)
         setCustomError(null)
+        setError(null)
       })
       .catch((e) => {
         if (cancelled) return
-        setCustomError(e instanceof Error ? e.message : "Could not load custom skills")
+        const message = e instanceof Error ? e.message : "Could not load custom skills"
+        setCustomError(message)
+        setError(message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
       })
     return () => {
       cancelled = true
     }
   }, [])
 
-  // Search filters BEFORE grouping, so empty categories drop out and the
-  // section numbering re-flows over what's visible. Matching runs over the
-  // full router description (not just the card blurb) — searching "RACI"
-  // should surface stakeholder-map even though its blurb doesn't say it.
-  const groups = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    // Every built-in card stays, including one whose name a custom skill
-    // shares: an upload no longer replaces a built-in, so both still run —
-    // under different triggers, which is what the two cards show.
-    const visible = !q
-      ? skills
-      : skills.filter(
-          (s) =>
-            s.label.toLowerCase().includes(q) ||
-            s.trigger.toLowerCase().includes(q) ||
-            s.description.toLowerCase().includes(q) ||
-            s.category.toLowerCase().includes(q),
-        )
-    return groupSkills(visible)
-  }, [skills, query])
+  // Synced folders, fetched alongside the library. Failing SILENTLY is the
+  // right call here and only here: the panel is a management aid, and a company
+  // with no synced folders is the common case, so an error banner about a
+  // section that would have been empty anyway is pure noise. A folder that is
+  // syncing but unreachable still shows its own `last_error` once this loads.
+  useEffect(() => {
+    let cancelled = false
+    void skillsApi
+      .listSources()
+      .then((r) => {
+        if (!cancelled) setSyncedFolders((r.sources || []).filter((s) => s.active))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-  // Custom skills join the same search — name, trigger, or description.
+  // Custom skills search — name, trigger, or description.
   const visibleCustom = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return customSkills
@@ -439,11 +538,206 @@ function SkillsScreenContent() {
     }
   }
 
+  // Open the edit modal for a skill. The library list is metadata-only, so the
+  // method text has to be fetched before the form can pre-fill — the dialog
+  // opens straight away and shows its own loading state rather than leaving the
+  // pencil looking dead while the request is in flight.
+  function onEditRequest(id: string) {
+    setEditingId(id)
+    setEditSkill(null)
+    setEditError(null)
+    setEditLoading(true)
+    skillsApi
+      .get(id)
+      .then((detail) => {
+        setEditSkill(detail)
+      })
+      .catch((e) => {
+        setEditError(
+          e instanceof Error ? e.message : "Could not load this skill.",
+        )
+      })
+      .finally(() => {
+        setEditLoading(false)
+      })
+  }
+
+  function closeEdit() {
+    setEditingId(null)
+    setEditSkill(null)
+    setEditError(null)
+    setEditLoading(false)
+  }
+
+  // Save an edit. The server answers with the edited skill (its `slug` and
+  // `trigger` are authoritative — a rename re-derives them) plus, when the new
+  // name was already one of the company's, the id of the skill it replaced.
+  // That row is gone server-side, so its card has to leave the grid with it.
+  async function onEditSave(
+    id: string,
+    patch: { name: string; description: string; method: string },
+  ) {
+    const updated = await skillsApi.update(id, patch)
+    setCustomSkills((prev) =>
+      prev
+        .filter((s) => s.id !== updated.replaced_skill_id)
+        .map((s) => (s.id === updated.id ? { ...s, ...updated } : s)),
+    )
+    showToast(
+      "Skill updated",
+      updated.replaced_skill_id != null
+        // A replacing rename always ends with two skills sharing one name, so
+        // naming the removed one would just repeat the new one back.
+        ? `${updated.name} is saved and replaced your other skill of the same name — invoke it with ${updated.trigger} in chat.`
+        : `${updated.name} is saved — invoke it with ${updated.trigger} in chat.`,
+    )
+  }
+
+  // Import skills straight out of a connected repo. The server re-runs its own
+  // discovery and imports only what it finds there, so `paths` is a filter, not
+  // a fetch list; the answer is the same per-skill payload an upload returns,
+  // which means the same merge and the same counting toast.
+  async function onImportGithub(req: {
+    repo: string
+    ref?: string
+    path?: string
+    paths: string[]
+    sync?: boolean
+  }) {
+    const result = await skillsApi.importGithub(req)
+    setCustomSkills((prev) => mergeUploadedSkills(prev, result.imported))
+    const updated = result.imported.filter((s) => s.replaced === true).length
+    const skipped = result.skipped.length
+    showToast(
+      "Skills imported",
+      countLine(result.imported.length - updated, updated) +
+        // A synced import is a standing arrangement, not a one-off, so the
+        // toast says so — this is the last moment the user is looking at the
+        // consequence they just agreed to.
+        (result.synced
+          ? ` ${req.path} stays synced — new Markdown files there become skills automatically.`
+          : "") +
+        (skipped > 0
+          ? ` ${skipped} ${skipped === 1 ? "skill" : "skills"} couldn’t be imported — see the details in the dialog.`
+          : ""),
+    )
+    // A folder registered by THIS import has to appear in the panel without a
+    // reload, and re-importing an already-synced folder must not list it twice.
+    if (result.synced) {
+      void skillsApi
+        .listSources()
+        .then((r) => setSyncedFolders((r.sources || []).filter((s) => s.active)))
+        .catch(() => {})
+    }
+    // Reshaped to the upload result the modal already reports, so one panel
+    // covers both routes into the library.
+    return { skills: result.imported, skipped: result.skipped }
+  }
+
+  // Force one folder to be re-read now. The server syncs with force=true, so it
+  // re-imports even when the commit hasn't moved — that is the whole point of a
+  // manual button. It answers 200 even when the sync itself failed, carrying
+  // the reason, so a GitHub outage reports as a toast rather than a throw.
+  async function onSyncFolder(id: string) {
+    setSyncingFolderId(id)
+    try {
+      const result = await skillsApi.syncSource(id)
+      setSyncedFolders((prev) =>
+        prev.map((f) => (f.id === id ? result.source : f)),
+      )
+      if (result.error) {
+        showToast("Couldn't sync that folder", result.error)
+      } else {
+        const changed = result.imported + result.replaced
+        // The library only changes when the folder did, so a no-op says so
+        // rather than claiming an import that didn't happen.
+        showToast(
+          "Folder synced",
+          changed === 0
+            ? "Everything in that folder is already in your library."
+            : `${changed} ${changed === 1 ? "skill" : "skills"} imported from that folder.`,
+        )
+        const refreshed = await skillsApi.list().catch(() => null)
+        if (refreshed) setCustomSkills(refreshed.skills)
+      }
+    } catch (e) {
+      showToast(
+        "Couldn't sync that folder",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setSyncingFolderId(null)
+    }
+  }
+
+  // Stop syncing a folder. Its skills STAY — the server clears their link to
+  // the folder, which also makes them editable again, so the library list has
+  // to be re-read for the cards to lose their read-only state.
+  async function onStopSyncingFolder(id: string) {
+    const folder = syncedFolders.find((f) => f.id === id)
+    setStoppingFolderId(id)
+    try {
+      const result = await skillsApi.stopSyncingSource(id)
+      setSyncedFolders((prev) => prev.filter((f) => f.id !== id))
+      showToast(
+        "Stopped syncing",
+        `${folder ? folderLabel(folder) : "That folder"} won't be checked again. ` +
+          `${result.released} ${result.released === 1 ? "skill" : "skills"} stayed in your library and can be edited here now.`,
+      )
+      const refreshed = await skillsApi.list().catch(() => null)
+      if (refreshed) setCustomSkills(refreshed.skills)
+    } catch (e) {
+      showToast(
+        "Couldn't stop syncing",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setStoppingFolderId(null)
+    }
+  }
+
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
+  //
+  // A name this company already used REPLACES that skill server-side (same
+  // row, same id, same trigger), so the response has to swap the existing card
+  // in place — prepending would render the same id twice. `replaced` comes
+  // back on the 201; the id check is the belt-and-braces version for a list
+  // that predates the field.
   async function onUpload(file: File, name: string, description: string) {
-    const created = await skillsApi.upload(file, name, description)
-    setCustomSkills((prev) => [created, ...prev])
+    const uploaded = await skillsApi.upload(file, name, description)
+    // A .zip holding a folder per SKILL.md imports as several skills at once.
+    // Every one of them lands in the grid under the same replaced-vs-new rule
+    // a single upload uses, and the result object goes back to the modal,
+    // which reports the per-skill triggers and anything it couldn't import.
+    if (isMultiSkillUpload(uploaded)) {
+      setCustomSkills((prev) => mergeUploadedSkills(prev, uploaded.skills))
+      const updated = uploaded.skills.filter((s) => s.replaced === true).length
+      const skipped = uploaded.skipped.length
+      showToast(
+        "Skills imported",
+        countLine(uploaded.skills.length - updated, updated) +
+          (skipped > 0
+            ? ` ${skipped} ${skipped === 1 ? "folder" : "folders"} couldn’t be imported — see the details in the dialog.`
+            : ""),
+      )
+      return uploaded
+    }
+    const created = uploaded
+    const wasReplaced =
+      created.replaced === true || customSkills.some((s) => s.id === created.id)
+    setCustomSkills((prev) =>
+      prev.some((s) => s.id === created.id)
+        ? prev.map((s) => (s.id === created.id ? created : s))
+        : [created, ...prev],
+    )
+    if (wasReplaced) {
+      showToast(
+        "Skill updated",
+        `${created.name} now uses the file you just uploaded — it is still invoked with ${created.trigger} in chat.`,
+      )
+      return
+    }
     showToast(
       "Skill uploaded",
       created.name_conflict
@@ -457,7 +751,6 @@ function SkillsScreenContent() {
     // main-column chrome strip would just duplicate "Skills" above it.
     <AppLayout mainClassName="main--skills" hideChromeStrip>
       <SkillsView
-        groups={groups}
         customSkills={visibleCustom}
         customError={customError}
         loading={loading}
@@ -470,13 +763,39 @@ function SkillsScreenContent() {
         deletingId={deletingId}
         onDeleteRequest={setDeletePendingId}
         onDeleteConfirm={onDeleteConfirm}
+        onEditRequest={onEditRequest}
+        syncedFolders={syncedFolders}
+        syncingFolderId={syncingFolderId}
+        stoppingFolderId={stoppingFolderId}
+        onSyncFolder={(id) => void onSyncFolder(id)}
+        onStopSyncingFolder={(id) => void onStopSyncingFolder(id)}
+      />
+      <EditSkillModal
+        open={editingId != null}
+        skill={editSkill}
+        loading={editLoading}
+        loadError={editError}
+        // The skill being edited is excluded: renaming it to its own name is
+        // not a replacement, and passing it would warn about replacing itself.
+        // Off the full library, not the search-filtered view — a collision with
+        // a skill the query happens to hide is still a collision.
+        others={customSkills.filter((s) => s.id !== editingId)}
+        onSave={(patch) => onEditSave(editingId as string, patch)}
+        onClose={closeEdit}
       />
       <UploadSkillModal
         open={uploadOpen}
         onUpload={onUpload}
         onClose={() => setUploadOpen(false)}
-        builtinSlugs={skills.map((s) => s.id)}
+        // No `builtinSlugs`: this screen no longer fetches the vendored
+        // catalog, so it has nothing honest to pass. That only costs the
+        // "…is also the name of a built-in" trigger preview. The other notice
+        // (a name this company already used, which the server replaces in
+        // place) is driven by `customSkills` below and is unaffected, and the
+        // server's 201 remains authoritative about the trigger assigned.
         customSkills={customSkills}
+        onDiscoverGithub={(repo, opts) => skillsApi.discoverGithub(repo, opts)}
+        onImportGithub={onImportGithub}
       />
     </AppLayout>
   )

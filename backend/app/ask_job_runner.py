@@ -14,10 +14,14 @@ holds a strong ref via routes/ask.py's `_inflight_tasks`).
 import asyncio
 import logging
 
-from app import qa_agent
+from app import ask_runner, qa_agent
 from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
-from app.db.asks import ORPHAN_ASK_JOB_HEARTBEAT_SECONDS, touch_ask_job
+from app.db.asks import (
+    ORPHAN_ASK_JOB_HEARTBEAT_SECONDS,
+    set_ask_job_route,
+    touch_ask_job,
+)
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
 from app.report_capture import capture_report
@@ -78,6 +82,7 @@ def _run_sync(
     prd_id: int | None,
     loop: asyncio.AbstractEventLoop,
     conversation_id: int | None = None,
+    user_id: str | None = None,
     workspace_id: str | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
@@ -89,19 +94,79 @@ def _run_sync(
     extractor = AnswerFieldExtractor(
         token_stream.delta_sink(loop, ask_channel(ask_id))
     )
-    payload = qa_agent.answer(
-        enterprise_id=enterprise_id,
-        question=question,
-        dataset=dataset,
-        history=history,
-        pinned_skill=pinned_skill,
-        prd_id=prd_id,
-        # Cooperative cancellation: the user's Stop flips the job row to
-        # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
-        # steps and raises AskCancelled to abort before the expensive answer call.
-        is_cancelled=lambda: is_ask_cancelled(ask_id),
-        on_delta=extractor,
+    # `qa_agent.answer()` has no conversation_id/user_id parameter — and
+    # keeping it that way is the point (see app.ask_runner.set_active_conversation
+    # for the full rationale: threading either through answer() ->
+    # _answer_single_shot -> its document_grounding call would be four edits
+    # inside qa_agent.py, the file this fix stays out of). Both ride a
+    # request-scoped ContextVar pair instead, set here immediately before the
+    # call and ALWAYS cleared in the finally below — even when answer() raises.
+    #
+    # The question embedding rides the same route, for the same reason. Topical
+    # document selection fuses a lexical and a semantic channel; the semantic
+    # one needs a vector, and the only call site that had one was
+    # `compose_ask_answer`. The skill-routed path reaches document grounding
+    # through `qa_agent._answer_single_shot`, which calls it positionally, so
+    # that path ran with no semantic channel at all and its ranking fell back
+    # to whatever the lexical channel could separate — which, for a catalog
+    # whose documents share the workspace's own name, is nothing. Ranking was
+    # then decided by recency and still reported as a topic match.
+    #
+    # Computed HERE, once, before `answer()` picks a path, so both paths get
+    # the same vector and the ask pays for exactly one embedding:
+    # `compose_ask_answer` reuses this instead of computing its own.
+    #
+    # Computed BEFORE either setter, deliberately: this is the only step here
+    # that does real work (an HTTP call), and nothing between a `set_` and the
+    # `try` is covered by the `finally`. This worker runs on a pooled thread,
+    # and a ContextVar left set outlives the request into whatever ask reuses
+    # that thread next — a stale conversation id would then scope another
+    # user's document lookup. `_question_embedding` swallows its own failures
+    # and returns `(None, True)` rather than raising, so today that window is
+    # already closed; ordering it this way is what keeps it closed if that
+    # ever stops being true.
+    embedding, embedding_degraded = ask_runner._question_embedding(
+        enterprise_id, question
     )
+    context_token = ask_runner.set_active_conversation(conversation_id, user_id)
+    embedding_token = ask_runner.set_active_question_embedding(
+        embedding, embedding_degraded
+    )
+    # The prior turns, by the same route and for the same reason: document
+    # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
+    # is without them, and the skill-routed path reaches document grounding
+    # through `qa_agent._answer_single_shot`, which calls it positionally.
+    # `history` is already loaded and already this function's parameter —
+    # `routes.ask._load_history` fetched it, ownership-checked, before the job
+    # started — so this publishes what is in hand rather than reading again.
+    history_token = ask_runner.set_active_history(history)
+    try:
+        payload = qa_agent.answer(
+            enterprise_id=enterprise_id,
+            question=question,
+            dataset=dataset,
+            history=history,
+            pinned_skill=pinned_skill,
+            prd_id=prd_id,
+            # Cooperative cancellation: the user's Stop flips the job row to
+            # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
+            # steps and raises AskCancelled to abort before the expensive answer call.
+            is_cancelled=lambda: is_ask_cancelled(ask_id),
+            on_delta=extractor,
+            # The routed skill goes onto the job row the INSTANT the router resolves
+            # — seconds into a run that can last minutes — so GET /v1/ask/{id} can
+            # name the running skill while the job is still `generating`. Two
+            # different transports on purpose: the skill is durable state the poll
+            # must still find after a reload, whereas a phase is an ephemeral "which
+            # leg is live right now" that only means anything to a client currently
+            # attached to the stream.
+            on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
+            on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
+        )
+    finally:
+        ask_runner.reset_active_conversation(context_token)
+        ask_runner.reset_active_question_embedding(embedding_token)
+        ask_runner.reset_active_history(history_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask
@@ -148,6 +213,7 @@ async def run_ask_job(
     pinned_skill: str | None = None,
     prd_id: int | None = None,
     conversation_id: int | None = None,
+    user_id: str | None = None,
     workspace_id: str | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
@@ -171,6 +237,7 @@ async def run_ask_job(
             prd_id,
             loop,
             conversation_id,
+            user_id,
             workspace_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)

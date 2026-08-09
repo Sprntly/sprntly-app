@@ -27,8 +27,9 @@ vi.mock("next/navigation", () => ({
 }))
 
 const showToast = vi.fn()
+const goTo = vi.fn()
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ showToast }),
+  useNavigation: () => ({ showToast, goTo }),
 }))
 
 const refresh = vi.fn(async () => {})
@@ -86,6 +87,7 @@ beforeEach(() => {
   getProto.mockReset()
   push.mockClear()
   showToast.mockClear()
+  goTo.mockClear()
   updateWorkspace.mockClear()
   refresh.mockClear()
 })
@@ -390,6 +392,12 @@ describe("useGeneratePrototype — handleGenDone timedOut branch (non-notify-mod
       latest.generateModalProps.onGenStart()
       latest.generateModalProps.onKickoff(501)
     })
+    // onKickoff itself now ALSO dispatches da:generating (kickoff-time
+    // visibility) — cleared here so the assertion below stays scoped to what
+    // this test actually pins: the TIMEOUT branch's own dispatch fires
+    // exactly once, not duplicated within itself. The kickoff-time dispatch
+    // has its own dedicated coverage.
+    generatingEvents.length = 0
 
     await act(async () => {
       latest.generateModalProps.onGenDone({
@@ -528,7 +536,14 @@ describe("useGeneratePrototype — handleGenDone timedOut branch (non-notify-mod
 })
 
 describe("useGeneratePrototype — notify-when-ready", () => {
-  it("default path dispatches exactly one da:generating event and no da:notify-generation", async () => {
+  // Regression pin: on unfixed code this fallback (used by every host that
+  // does not supply its own onNotifyWhenReady override — i.e. every surface
+  // except PrototypeRoute, which has its own equivalent handler) neither
+  // dispatched da:notify-generation nor navigated, so the shell's
+  // useGenerationNotify never resumed polling once the user actually left
+  // the surface, and the user visibly stayed put instead of landing on Top
+  // Insights. Mirrors PrototypeRoute's own handleNotifyWhenReady contract.
+  it("test_handle_notify_when_ready_default_dispatches_notify_generation_and_navigates_to_brief — fallback dispatches da:generating + da:notify-generation with prdId and navigates to Top Insights", async () => {
     const generatingEvents: CustomEvent[] = []
     const notifyGenerationEvents: CustomEvent[] = []
     const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
@@ -551,6 +566,11 @@ describe("useGeneratePrototype — notify-when-ready", () => {
       latest.generateModalProps.onGenStart()
       latest.generateModalProps.onKickoff(42)
     })
+    // onKickoff itself now ALSO dispatches da:generating (kickoff-time
+    // visibility) — cleared here so the assertion below stays scoped to what
+    // this test actually pins: the NOTIFY branch's own dispatch fires exactly
+    // once. The kickoff-time dispatch has its own dedicated coverage.
+    generatingEvents.length = 0
 
     await act(async () => {
       latest.loadingScreenProps.onNotifyWhenReady()
@@ -558,18 +578,57 @@ describe("useGeneratePrototype — notify-when-ready", () => {
 
     expect(generatingEvents.length).toBe(1)
     expect(generatingEvents[0].detail).toEqual({ prototypeId: 42 })
-    expect(notifyGenerationEvents.length).toBe(0)
+
+    expect(notifyGenerationEvents.length).toBe(1)
+    expect(notifyGenerationEvents[0].detail).toEqual({ prototypeId: 42, prdId: 14 })
+
     expect(showToast).toHaveBeenCalledWith(
       "Prototype is processing",
       "We'll let you know when it's ready.",
     )
     expect(latest.loadingScreenProps.open).toBe(false)
+    expect(goTo).toHaveBeenCalledWith("brief")
 
     window.removeEventListener("da:generating", onGenerating)
     window.removeEventListener("da:notify-generation", onNotifyGeneration)
   })
 
-  it("an onNotifyWhenReady override replaces the default side effects", async () => {
+  it("test_handle_notify_when_ready_default_no_proto_id_skips_events_but_still_navigates — no in-flight prototype id yet: no da:generating/da:notify-generation dispatch, but the overlay still closes and still navigates", async () => {
+    const generatingEvents: CustomEvent[] = []
+    const notifyGenerationEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    const onNotifyGeneration = (e: Event) => notifyGenerationEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+    window.addEventListener("da:notify-generation", onNotifyGeneration)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={45}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      // Deliberately no onKickoff — genProtoId stays null.
+    })
+
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+
+    expect(generatingEvents.length).toBe(0)
+    expect(notifyGenerationEvents.length).toBe(0)
+    expect(goTo).toHaveBeenCalledWith("brief")
+
+    window.removeEventListener("da:generating", onGenerating)
+    window.removeEventListener("da:notify-generation", onNotifyGeneration)
+  })
+
+  it("an onNotifyWhenReady override replaces the default side effects entirely — PrototypeRoute's own handler is unaffected by this fallback's navigation", async () => {
     const onNotifyWhenReady = vi.fn()
     let latest!: UseGeneratePrototypeResult
     render(
@@ -582,6 +641,11 @@ describe("useGeneratePrototype — notify-when-ready", () => {
     await act(async () => {})
 
     await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(50)
+    })
+
+    await act(async () => {
       latest.loadingScreenProps.onNotifyWhenReady()
     })
 
@@ -590,6 +654,10 @@ describe("useGeneratePrototype — notify-when-ready", () => {
       "Prototype is processing",
       "We'll let you know when it's ready.",
     )
+    // The hook's own default side effects (goTo/push) never fire — the
+    // override fully owns navigation, matching PrototypeRoute's contract.
+    expect(goTo).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
   })
 })
 
@@ -761,6 +829,211 @@ describe("useGeneratePrototype — notify-mode completion (handleGenDone)", () =
     )
     expect(doneEvents.length).toBe(0)
     window.removeEventListener("da:generating-done", onDone)
+  })
+})
+
+describe("useGeneratePrototype — da:generating dispatched at kickoff", () => {
+  it("test_kickoff_dispatches_da_generating_with_the_new_prototype_id: a generation is observable app-wide from the moment kickoff resolves, not only once the client poll times out or the user backgrounds it", async () => {
+    const generatingEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={200}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+    })
+    // Nothing dispatched yet — onGenStart alone does not know a prototype_id.
+    expect(generatingEvents.length).toBe(0)
+
+    await act(async () => {
+      latest.generateModalProps.onKickoff(900)
+    })
+
+    expect(generatingEvents.length).toBe(1)
+    expect(generatingEvents[0].detail).toEqual({ prototypeId: 900 })
+    window.removeEventListener("da:generating", onGenerating)
+  })
+
+  it("test_kickoff_dispatch_flips_a_listening_hosts_own_cta_to_generating: a host opted into the cross-surface signal sees its OWN cta flip the instant its OWN kickoff resolves", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={201}
+        options={{ skipExistenceCheck: true, listenForCrossSurfaceGenerating: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+    expect(latest.cta).toBe("generate")
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(901)
+    })
+
+    expect(latest.cta).toBe("generating")
+    expect(latest.ctaLabel).toBe("Generating Prototype")
+  })
+})
+
+describe("useGeneratePrototype — kickoff-failure guard timer deleted", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("test_overlay_survives_the_old_1500ms_guard_window_while_kickoff_is_still_unresolved: manual path — the modal deliberately stays open during kickoff, so a slow-but-succeeding kickoff must not be mistaken for a failure", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={202}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    // Manual path: openGenerateModal() first, mirroring GenerateModal's own
+    // manual-submit flow, which keeps the modal open through kickoff.
+    await act(async () => {
+      latest.openGenerateModal()
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    // Advance well past the old 1,500ms guard window. No onKickoff, no
+    // onGenDone — the kickoff POST is simply slow, not failed.
+    await act(async () => {
+      vi.advanceTimersByTime(5000)
+    })
+
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    // The kickoff eventually succeeds — the overlay's own lifecycle is
+    // unaffected by the time that passed.
+    await act(async () => {
+      latest.generateModalProps.onKickoff(902)
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: readyRow(902) })
+    })
+    expect(push).toHaveBeenCalledWith(prototypePath(202))
+  })
+
+  it("test_control_fast_kickoff_still_behaves_exactly_as_before: a fast-resolving kickoff (well inside the old 1,500ms window) is unaffected by the guard's removal", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={203}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(903)
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: readyRow(903) })
+    })
+    // MIN_VISIBLE_MS (2500ms) still applies — advance past it to let the
+    // deferred hideLoading() fire.
+    await act(async () => {
+      vi.advanceTimersByTime(2600)
+    })
+
+    expect(latest.loadingScreenProps.open).toBe(false)
+    expect(push).toHaveBeenCalledWith(prototypePath(203))
+  })
+})
+
+describe("useGeneratePrototype — a kickoff-time rejection surfaces an error, not a silent dismissal", () => {
+  it("test_kickoff_rejection_shows_failure_toast_and_dismisses_overlay: a failure fed to onGenDone BEFORE any onKickoff ever fired (mirroring a kickoff-time rejection, which never produces a prototype_id) still shows the curated failure toast and dismisses the overlay in the same act", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={204}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      // Deliberately no onKickoff — the kickoff itself failed before a
+      // prototype_id ever existed.
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "network error" })
+    })
+
+    expect(latest.loadingScreenProps.open).toBe(false)
+    expect(showToast).toHaveBeenCalledWith(
+      "Generation failed",
+      reasonCopy("network error"),
+      undefined,
+      { persist: true },
+    )
+  })
+})
+
+describe("useGeneratePrototype — dismissing the overlay never cancels the job (AC5 guard against over-correction)", () => {
+  it("test_cancel_dismisses_overlay_but_the_jobs_later_completion_still_surfaces: Cancel hides the overlay immediately, but the SAME mounted GenerateModal's onGenDone firing later (the job finished in the background) still reports it — dismissal is a VIEW action, not a job action", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={205}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(905)
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onCancel()
+    })
+    expect(latest.loadingScreenProps.open).toBe(false)
+
+    // The job was NOT told to stop — it keeps running, and its own onGenDone
+    // still fires once it resolves. If Cancel had over-corrected into
+    // cancelling the job, nothing meaningful would happen here.
+    const proto = readyRow(905)
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: proto })
+    })
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Prototype ready",
+      "Your prototype finished generating.",
+      "Open",
+      expect.objectContaining({ persist: true }),
+    )
   })
 })
 

@@ -18,6 +18,23 @@ def _save_brief(db_mod, dataset, insights):
     )
 
 
+def _stub_prd_warm(monkeypatch) -> None:
+    """POST /v1/prd/generate schedules `generate_prd_and_warm` as a fire-and-
+    forget `asyncio.create_task` — this route's tests only care about the
+    'prd_created' finding-state side effect recorded BEFORE that task is
+    scheduled, not PRD generation itself. Left unstubbed, that task's Part A/
+    Part B work (`_generate_human_prd` / `ensure_impl_spec`) runs real
+    `asyncio.to_thread` calls against the shared in-memory fake DB on
+    uncontrolled timing (see `tests/_fake_supabase.py`'s module docstring —
+    this is the exact hazard it names)."""
+    from app.routes import prd as prd_routes
+
+    async def _noop_warm(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", _noop_warm)
+
+
 def _finding_rows(db, company_id):
     return (
         db.table("brief_finding_state").select("*")
@@ -28,8 +45,9 @@ def _finding_rows(db, company_id):
 # ── PRD generation records 'prd_created' ─────────────────────────────────────
 
 def test_prd_generate_records_prd_created_for_insight_theme(
-    tenant_client, isolated_settings, fake_llm
+    tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
+    _stub_prd_warm(monkeypatch)
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _save_brief(db_mod, "acme", [
@@ -49,10 +67,11 @@ def test_prd_generate_records_prd_created_for_insight_theme(
 
 
 def test_prd_generate_without_theme_id_does_not_break(
-    tenant_client, isolated_settings, fake_llm
+    tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
     """A legacy brief insight with no theme_id still generates a PRD (best-effort
     action recording is a no-op)."""
+    _stub_prd_warm(monkeypatch)
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _save_brief(db_mod, "acme", [{"title": "Insight A"}])

@@ -129,19 +129,48 @@ def _get_valid_access_token(company_id: str) -> tuple[str, dict[str, Any]]:
         raise HTTPException(500, "HubSpot token has no access_token")
 
     # Check if token needs refresh (v3: 30 min, v1: ~6h)
-    obtained_at = token_json.get("obtained_at", 0)
-    expires_in = token_json.get("expires_in", 1800)
-    # Refresh 2 minutes early to avoid race
-    if time.time() > obtained_at + expires_in - 120:
-        logger.info("HubSpot token expired, refreshing...")
-        token_json = refresh_access_token(token_json)
-        # Persist refreshed token
-        try:
-            encrypted = encrypt_token_json(json.dumps(token_json))
-            db.update_connection_tokens(company_id, HUBSPOT_PROVIDER, encrypted)
-        except Exception:
-            logger.warning("Failed to persist refreshed HubSpot token", exc_info=True)
-        access_token = token_json["access_token"]
+    def _is_stale(payload: dict) -> bool:
+        # Refresh 2 minutes early. That head start reduces the chance of racing
+        # EXPIRY; it does nothing about two callers racing EACH OTHER, which is
+        # what the lock below is for.
+        return time.time() > payload.get("obtained_at", 0) + payload.get(
+            "expires_in", 1800
+        ) - 120
+
+    if _is_stale(token_json):
+        from app.connectors.token_refresh import serialised_refresh
+
+        # Serialise, then RE-READ inside the lock. HubSpot rotates refresh
+        # tokens, so two concurrent callers reading one stale row present the
+        # same token, and the LAST write wins — which can store a credential
+        # HubSpot has already retired. The re-read means the loser finds a fresh
+        # row and skips the POST entirely.
+        with serialised_refresh(company_id, HUBSPOT_PROVIDER):
+            fresh_row = db.get_connection(company_id, HUBSPOT_PROVIDER)
+            if fresh_row:
+                try:
+                    current = json.loads(
+                        decrypt_token_json(fresh_row["token_json_encrypted"])
+                    )
+                except (TokenEncryptionError, json.JSONDecodeError):
+                    current = None
+                if current and not _is_stale(current):
+                    logger.debug("HubSpot token refreshed by another caller")
+                    return current.get("access_token", access_token), current
+                if current:
+                    token_json = current
+
+            logger.info("HubSpot token expired, refreshing...")
+            token_json = refresh_access_token(token_json)
+            # Persist refreshed token
+            try:
+                encrypted = encrypt_token_json(json.dumps(token_json))
+                db.update_connection_tokens(company_id, HUBSPOT_PROVIDER, encrypted)
+            except Exception:
+                logger.warning(
+                    "Failed to persist refreshed HubSpot token", exc_info=True
+                )
+            access_token = token_json["access_token"]
 
     return access_token, token_json
 

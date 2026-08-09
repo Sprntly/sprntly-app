@@ -57,11 +57,90 @@ RESERVED_ENTITY_TYPES: frozenset[str] = frozenset({
     "hypothesis", "decision", "outcome", "artifact",
 })
 
+# The tenant-scoped root anchor entity type — every enterprise gets exactly
+# one `company` entity, and every segment/competitor/constraint (and, longer
+# term, other tenant-scoped node) wires to it via SCOPED_TO/INFORMS rather
+# than floating disconnected from the tenant it belongs to. Not one of the
+# RESERVED_ENTITY_TYPES above — those carry the §2 ledger's extra required
+# properties; a company node carries none, it is just an emergent-style type
+# (like "segment"/"competitor"/"theme") that happens to be a singleton per
+# tenant. `GraphFacade.ensure_company_entity` is the one place that creates
+# it, so callers never construct this type by hand.
+COMPANY_ENTITY_TYPE = "company"
+
 # Signal source_type enum (must match the DB CHECK constraint in the migration).
 SIGNAL_SOURCE_TYPES: frozenset[str] = frozenset({
     "analytics", "project_mgmt", "communication", "customer_voice", "revenue",
     "verbal_claim", "pm_manual", "agent_inferred", "outcome_measured",
 })
+
+# Source types that represent REAL connected-source evidence (a connector sync
+# or a corpus document run through the extractor), as opposed to onboarding /
+# business-context / agent-inference SEEDED metadata. The canonical home for
+# this vocabulary — `synthesis.convergence` imports it from here rather than
+# defining its own copy, so the extractor (which needs it to compute
+# `Signal.evidence_eligible` below) and the brief-sufficiency gate can never
+# drift apart. Moved here from `synthesis.convergence`; the name and values
+# are unchanged, so `convergence.CONNECTED_SOURCE_TYPES` still resolves via
+# convergence's re-export.
+CONNECTED_SOURCE_TYPES: frozenset[str] = frozenset({
+    "analytics", "project_mgmt", "communication", "customer_voice", "revenue",
+    "outcome_measured",
+})
+
+# Provenance origins whose signals are NEVER evidence, whatever source_type
+# they carry — today just `web_research` (facts scraped off the public web
+# about the company's own footprint, app/company_research.py). See
+# `synthesis.convergence` for the full rationale; moved here for the same
+# reason as CONNECTED_SOURCE_TYPES above.
+NON_EVIDENCE_ORIGINS: frozenset[str] = frozenset({"web_research"})
+
+
+def compute_evidence_eligible(source_type: str, origin: Optional[str]) -> bool:
+    """The policy `Signal.evidence_eligible` encodes: real connected-source
+    evidence (source_type in CONNECTED_SOURCE_TYPES) that didn't arrive via a
+    non-evidence origin (e.g. scraped web research). Shared by `Signal`
+    construction (new signals) and `GraphFacade._row_to_signal` (reconstructing
+    older rows whose typed column is still null) so both paths agree."""
+    return source_type in CONNECTED_SOURCE_TYPES and origin not in NON_EVIDENCE_ORIGINS
+
+
+# ── Ingestion triage taxonomy ────────────────────────────────────────────────
+# Bounded, explicit, owned category list for the haiku triage pass that runs
+# ahead of extraction on ingestion paths (app.graph.triage). Starting point:
+# David's "max ~50 categories" idea from the discovery call, narrowed to what
+# the classifier actually needs to distinguish for relevance-filtering and
+# (future) category-based skill routing — comfortably under that ceiling.
+# Versioned so a taxonomy revision is traceable in the decision-log audit
+# trail (app.graph.triage.PROMPT_VERSION embeds this string): bump the
+# version on any change to the category SET or their meaning; never mutate a
+# shipped version's semantics in place, so content already classified under
+# an old version stays interpretable.
+#
+# NOTE: pending Apurva/David sign-off — this is a reasoned starting draft,
+# not yet confirmed with the team.
+TRIAGE_TAXONOMY_VERSION = "triage-categories-v1"
+
+TRIAGE_CATEGORIES: dict[str, str] = {
+    "business_context": "Company/market background — business model, ICP, pricing, org structure",
+    "product_prd": "Product requirements docs, specs, feature definitions",
+    "roadmap": "Roadmap or forward-looking plan content — bets, timelines, sequencing",
+    "escalation": "Urgent customer or exec escalations demanding a response",
+    "customer_feedback": "Direct customer voice — requests, complaints, praise, verbatims",
+    "support_ticket": "Support/service desk tickets and their resolutions",
+    "sales_deal": "CRM/deal/pipeline content — blockers, competitive losses, close notes",
+    "competitor_intel": "Competitor moves, positioning, or comparative analysis",
+    "engineering_activity": "PRs, commits, technical delivery activity",
+    "metric_report": "Analytics, dashboards, metrics, usage/funnel data",
+    "meeting_notes": "Meeting summaries or transcripts",
+    "research_report": "Market/user research findings not tied to a specific competitor",
+    "decision_record": "A recorded decision and its rationale",
+    "incident_report": "Outages, incidents, reliability events",
+    "marketing_content": "Campaigns, external positioning/comms, marketing copy",
+    "internal_admin": "Internal HR/administrative/ops content with no product signal",
+    "legal_compliance": "Legal, contract, or compliance paperwork with no product signal",
+    "other": "Doesn't fit the categories above but may still carry product signal",
+}
 
 # Per-source-type staleness window (#1, locked 2026-05-28 — reuses the
 # KG_Engineering_Spec §3.2.1 table). None ⇒ never expires.
@@ -118,7 +197,17 @@ class Entity:
 @dataclass
 class Signal:
     """Atomic evidence. `stale_after` is auto-computed from `source_type`
-    if not supplied — outcome_measured stays None (never expires)."""
+    if not supplied — outcome_measured stays None (never expires).
+
+    `skill_id`/`origin`/`channel`/`evidence_eligible` are typed promotions of
+    what used to be informal `provenance` dict keys (`provenance["skill_id"]`
+    is stamped by extract_document's skill routing; `origin`/`channel`
+    predate that). Every pre-existing row/caller still only sets the dict —
+    `__post_init__` below
+    falls back to the dict value for any typed field left unset, so old data
+    and old call sites keep working unchanged during the transition. New
+    callers (extract_document) set both, belt-and-braces, so the dict stays
+    the read path nothing has to migrate off of."""
     enterprise_id: str
     source_type: str
     kind: str
@@ -133,6 +222,10 @@ class Signal:
     confidence: float = 1.0
     weight: float = 1.0
     provenance: dict = field(default_factory=dict)
+    skill_id: Optional[str] = None
+    origin: Optional[str] = None
+    channel: Optional[str] = None
+    evidence_eligible: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.source_type not in SIGNAL_SOURCE_TYPES:
@@ -144,6 +237,18 @@ class Signal:
             window = SOURCE_STALE_WINDOW_DAYS.get(self.source_type)
             if window is not None:
                 self.stale_after = self.valid_at + timedelta(days=window)
+        # Transition-safety fallback (see class docstring): an explicit typed
+        # kwarg always wins; otherwise fall back to the informal provenance
+        # dict key so old rows and old call sites resolve identically to
+        # before this promotion.
+        if self.skill_id is None:
+            self.skill_id = self.provenance.get("skill_id")
+        if self.origin is None:
+            self.origin = self.provenance.get("origin")
+        if self.channel is None:
+            self.channel = self.provenance.get("channel")
+        if self.evidence_eligible is None:
+            self.evidence_eligible = compute_evidence_eligible(self.source_type, self.origin)
 
 
 @dataclass

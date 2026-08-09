@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse, ReportSummary } from "../lib/api"
+import type { AskResponse, GeneratedStory, ReportSummary, TicketStub } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -265,6 +265,11 @@ export type ConnectorType =
   | "code"
   | "monitoring"
   | "design"
+  // User research — interview/usability repositories (Marvin) and the research
+  // artifacts a team uploads by hand. Distinct from "customer-voice" (inbound,
+  // unsolicited) and "meetings" (sales/CSM calls): research is deliberately
+  // gathered evidence about users. Mirrors backend catalog.py RESEARCH.
+  | "research"
 
 export interface ConnectorItemRow {
   id: string
@@ -335,13 +340,27 @@ export interface ConnectorCategoryRow {
    * categories that explicitly set `false` hide the strip.
    *
    * Turned off for categories whose data should only ever arrive through the
-   * real integration (Communications, Codebase, Project Management): a hand-
-   * uploaded Slack/GitHub/Jira export has no sync, no permissions model, and
-   * no incremental updates, so it produces stale, misleading sources.
+   * real integration (Codebase, Project Management): a hand-uploaded
+   * GitHub/Jira export has no sync, no permissions model, and no incremental
+   * updates, so it produces stale, misleading sources. Company documentation
+   * also opts out, for a different reason: it takes uploads through its own
+   * named-source picker rather than the generic per-category strip.
    * The backend upload path is untouched — flip this back to `true` (or drop
    * the field) to restore the dropzone.
    */
   allowsManualUpload?: boolean
+  /**
+   * Keep this category visible in `connectableCatalog()` even when none of its
+   * connectors is wired yet. Defaults to FALSE: normally an all-"Coming soon"
+   * category is dropped so we never show a shelf the user can't act on.
+   *
+   * Set only for Research, where the manual upload strip — not the connector
+   * grid — is the feature: Marvin is still coming-soon, so without this the
+   * whole shelf (and the only way to hand us research) would vanish from
+   * Settings AND the onboarding wizard. A category setting this must therefore
+   * allow manual upload; a shelf with neither connectors nor uploads is empty.
+   */
+  keepWhenEmpty?: boolean
 }
 
 export interface DetailQuoteRow {
@@ -586,6 +605,14 @@ export interface PrdContent {
 export interface PrdState extends PrdContent {
   /** DB id of the loaded PRD (`PrdRecord.id`). Always present once a PRD is loaded. */
   prd_id: number
+  /** Opaque, unguessable external identifier (`PrdRecord.public_id`) —
+   *  what `useArtifactUrlSync` reflects onto the `?prd=` URL instead of the
+   *  sequential `prd_id`, so a copied/bookmarked link never discloses a
+   *  blind-enumerable id. Optional: absent on any PrdState built before this
+   *  field existed (none currently — every load path sets it — kept
+   *  optional so a future load path that forgets it fails soft, not a type
+   *  error blocking an unrelated build). */
+  public_id?: string
   /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
   figma_file_key?: string | null
   /** Part B — the implementation-spec markdown (`PrdRecord.llm_part`). Rendered
@@ -694,10 +721,32 @@ export interface AppContentState {
    *  once — selecting the report and clearing this — so the user lands on what
    *  they clicked instead of a list they must search. */
   reportFocusId: number | null
+  /** True when `reportFocusId` points at a report that has NO thread behind it —
+   *  the Artifacts row for a report whose chat was deleted, which reads in the
+   *  panel without a list under it.
+   *
+   *  Stated rather than inferred from `conversationId == null`, because a
+   *  brand-new chat tab also has a null conversation id (a tab has none until its
+   *  first ask persists). Reading that null as "standalone" is what used to
+   *  render the PREVIOUS thread's document inside an empty new chat. */
+  reportFocusStandalone: boolean
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */
   threadReports: ReportSummary[]
+  /** The conversation `threadReports` was fetched FOR.
+   *
+   *  The list lives in shared content but the panel is global, so "which thread
+   *  do these rows describe" cannot be inferred from the fact that they exist.
+   *  React flushes ChatScreen's (child) effects before AppShell's (parent) ones,
+   *  so on the commit where the active tab changes, the list is still the
+   *  PREVIOUS thread's — which is how a brand-new chat came to auto-open the
+   *  panel on another thread's report.
+   *
+   *  Every reader compares this against `conversationId` and treats a mismatch as
+   *  "this thread's list hasn't landed yet", never as "this thread has none".
+   *  Null = no thread in scope. */
+  threadReportsConversationId: number | null
   /** Lifecycle of `threadReports`, because an empty list means different things:
    *   idle    — no thread in scope (nothing was ever asked for)
    *   loading — in flight; empty is "not yet", not "none"
@@ -710,6 +759,14 @@ export interface AppContentState {
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
   connectedConnectorIds: string[]
+  /** Whether `connectedConnectorIds` has actually been answered by the backend
+   *  yet. It starts `[]`, which is indistinguishable from "this workspace has
+   *  no connectors" — and the Top Insights surface turns that into a dead-end
+   *  "connect a source" page. Surfaces that branch on the connector list must
+   *  wait for this flag instead of reading the default. Set (to `true`) by
+   *  AppShell on both success and failure of the connectors fetch, and reset to
+   *  `false` on a workspace switch. */
+  connectorsHydrated: boolean
   /** The workspace's Top Insights filter (companies.notification_settings.
    *  brief_insight_types), loaded once by AppShell. The Top Insights tab shows
    *  the findings whose types intersect it; empty/absent = surface everything
@@ -721,7 +778,74 @@ export interface AppContentState {
   sidebarConvCount: number | null
   /** Override default AI chips per screen id; empty array = no chips */
   aiScreenChips: Partial<Record<string, string[]>>
+  /** A guest session's pre-fetched ticket set (GuestArtifactViewer populates
+   *  this directly from the artifact-share content endpoint) — the Tickets
+   *  tab renders these instead of calling storiesApi when useGuestSession()
+   *  is non-null. `null`/absent for every non-guest render. */
+  guestTickets?: GeneratedStory[] | null
+  /** The STANDALONE ticket set on screen — tickets generated from a chat with
+   *  no PRD behind them (`ticket_sets`, backend commit 0edeea35).
+   *
+   *  Owned end to end by `lib/runTicketSetGeneration.ts`: it creates this slice
+   *  at kick-off, republishes it as fan-out batches land, and writes the
+   *  terminal value. The Tickets tab READS it and never polls — that is what
+   *  makes a second, cost-incurring generation of the same set structurally
+   *  impossible (the same guard the guest-tickets branch relies on).
+   *
+   *  Non-null here also means "the Tickets tab is showing a set, not a PRD's
+   *  tickets": `prdInScopeFor` returns null for the tickets tab while it is
+   *  set, so no PRD-acting control (Share, PDF, the prototype CTA) is left
+   *  armed on a document that did not produce what is on screen. */
+  ticketSet?: {
+    /** `ticket_sets.id` — the tracker-sync scope (`set-{id}-{story_id}` keys). */
+    id: number
+    /** The set's LLM-derived name. May be `""` before the naming leg lands or
+     *  when it never ran; the panel renders its own fallback line rather than
+     *  collapsing the header. */
+    title: string
+    stories: GeneratedStory[]
+    /** The chat this set was born in, or null when it was born outside one.
+     *  NOT a "was the thread deleted" signal — see `ticketSetStandalone`. */
+    conversationId: number | null
+    /** `generating` | `ready` | `failed`, straight off the row. */
+    status: string
+    /** The request the set was generated from (`ticket_sets.source_text`) —
+     *  what the in-panel "Try again" re-runs. */
+    sourceText?: string
+    /** Fan-out plan roster, while generating: planned-but-not-yet-written
+     *  tickets, rendered as skeleton rows. Cleared on the terminal write. */
+    stubs?: TicketStub[]
+    /** Fan-out batch counter while generating, for the streaming banner. */
+    progress?: { done: number; total: number } | null
+    /** Why the run ended badly, as a CLASSIFIED KIND — never the raw backend
+     *  message. The panel maps the kind to its own copy, so a stack trace or a
+     *  provider error string can never reach the screen. */
+    error?: TicketSetFailureKind | null
+  } | null
+  /** True from kick-off until the run reaches a terminal state. Distinct from
+   *  `ticketSet.status`: the slice may not exist at all yet (the create call is
+   *  still in flight), and the panel still owes the user a working state. */
+  ticketSetGenerating?: boolean
+  /** True when the ticket set on screen has NO chat behind it — the Artifacts
+   *  row for a set whose thread was deleted.
+   *
+   *  Stated rather than inferred from `ticketSet.conversationId == null`, for
+   *  exactly the reason documented on `reportFocusStandalone` above: a
+   *  brand-new chat tab also has a null conversation id, and reading that null
+   *  as "standalone" is a bug this codebase has already shipped once. */
+  ticketSetStandalone?: boolean
 }
+
+/** How a standalone ticket-set run ended badly. A KIND, not a message: the
+ *  panel owns the words, so nothing a backend or a fetch failure produced is
+ *  ever printed to the user.
+ *
+ *   timeout  — the poll budget ran out with the run still going
+ *   network  — the browser lost the backend mid-poll
+ *   notfound — the set is gone (404); no existence/access language either way
+ *   failed   — the run itself reported failure
+ */
+export type TicketSetFailureKind = "timeout" | "network" | "notfound" | "failed"
 
 export function isBriefEmpty(b: BriefState): boolean {
   return (

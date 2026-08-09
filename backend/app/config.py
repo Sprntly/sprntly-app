@@ -9,7 +9,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
-    openai_api_key: str = ""  # embeddings (text-embedding-3-small)
+    # Two jobs, one key. Embeddings (text-embedding-3-small) have always run on
+    # it, and it is now ALSO the platform fallback for companies whose
+    # llm_provider is 'openai' but which have not supplied a key of their own —
+    # the mirror of what anthropic_api_key does for Claude workspaces.
+    openai_api_key: str = ""
+    # Override for an OpenAI-compatible gateway (Azure OpenAI, a proxy, a
+    # self-hosted relay). Unset means api.openai.com. Applies only to the chat
+    # client in app/openai_client.py; embeddings keep their own hardcoded URL.
+    openai_base_url: str = ""
     # Design Agent uses a dedicated key for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
@@ -32,11 +40,17 @@ class Settings(BaseSettings):
     design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
     # Process-wide cap on concurrent in-flight Anthropic streams; calls beyond
-    # this QUEUE instead of piling on. The default is conservative for a small
-    # box; raise it (env LLM_MAX_CONCURRENCY) on hosts with RAM headroom —
-    # measured: 6 concurrent streams used ~80 MB on the 3.8 GB prod box. Values
-    # <= 0 fall back to the default (never 0, which would deadlock).
-    llm_max_concurrency: int = 3
+    # this QUEUE instead of piling on. Raised from 3 to 6 once a real caller
+    # (competitive_intel's per-competitor capture fan-out) started dispatching
+    # several of its own calls concurrently — measured: 6 concurrent streams
+    # used ~80 MB on the 3.8 GB prod box, so 6 is not a new, untested number.
+    # This gate is shared by EVERY interactive LLM call in the app. Raise
+    # further (env LLM_MAX_CONCURRENCY) on hosts with more RAM headroom. Values
+    # <= 0 fall back to the default (never 0, which would deadlock). MUST stay
+    # in sync with app.llm._DEFAULT_MAX_CONCURRENCY, which this value shadows
+    # whenever the env var is unset (this field's own default always wins over
+    # that module constant — see app.llm._resolve_max_concurrency).
+    llm_max_concurrency: int = 6
     # How many of those slots BACKGROUND (warm / pre-generation) calls may hold
     # at once. Bounds warm parallelism while leaving (capacity - bg_cap) slots
     # interactive callers can always reach, so a user's click is never queued
@@ -163,6 +177,28 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
+    #
+    # Sharing was the original design (one Cloud project, one client, a second
+    # redirect URI), and it works when both connectors live in the same Google
+    # account. They need not: an operator can run Drive against one Workspace
+    # and Meet against another, which is exactly how this was first deployed.
+    # A shared client cannot express that — the client belongs to one project
+    # in one account — so Meet carries its own triple and FALLS BACK TO
+    # NOTHING. An unset Meet client makes `google_meet_configured()` False and
+    # the connector renders as not-configured, which is a legible state; a
+    # silent fallback to Drive's client would instead authorize against the
+    # wrong Google project and fail deep inside the consent flow with a
+    # redirect_uri_mismatch nobody can trace back to here.
+    #
+    # The SCOPES are deliberately NOT shared either: google_oauth.DRIVE_SCOPES
+    # must never grow a Meet scope. Scopes bake into a token at consent and a
+    # refresh carries the old set forward, so widening the constant would leave
+    # every stored Drive token claiming a capability it does not have — silent
+    # 403s on a connection that reports healthy. See google_meet.MEET_SCOPES.
+    google_meet_client_id: str = ""
+    google_meet_client_secret: str = ""
+    google_meet_oauth_redirect_uri: str = ""
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 
@@ -201,6 +237,18 @@ class Settings(BaseSettings):
     confluence_client_id: str = ""
     confluence_client_secret: str = ""
     confluence_oauth_redirect_uri: str = ""
+
+    # Zoom connector (OAuth 2.0 authorization-code flow; ~1h access tokens and
+    # 90-day refresh tokens that ROTATE on every refresh). A General,
+    # ADMIN-MANAGED app in the Zoom Marketplace — a user-managed app cannot be
+    # granted the `:admin` scopes at all, and Server-to-Server apps cannot hold
+    # the granular cloud_recording scopes either. The scopes are admin-level
+    # (`…:admin`), so the person who clicks Connect must be a Zoom account
+    # owner/admin: the connection is org-wide, reading every host's cloud
+    # recordings, not just the connector's own.
+    zoom_client_id: str = ""
+    zoom_client_secret: str = ""
+    zoom_oauth_redirect_uri: str = ""
 
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
@@ -313,6 +361,54 @@ class Settings(BaseSettings):
     # empty => unrouted connectors are log-only.
     connector_health_alert_email: str = ""
 
+    # Cross-connector chat sweep (app/connector_lookup/sweep.py). A GLOBAL kill
+    # switch, separate from the per-company `chat_cross_connector_sweep` feature
+    # flag: the flag is the product control (one company opts out in the staff
+    # panel), this is the operational one. The sweep adds a bounded round of I/O
+    # to the default chat answer, so if it ever costs more latency than it earns
+    # we need an off switch that does not require a DB write per company.
+    # Setting it false disables the sweep for EVERY company regardless of flags.
+    chat_cross_connector_sweep: bool = True
+
+    # Per-provider rollout switches for the sweep legs added in #1113
+    # (app/connector_lookup/asana.py, .../google_meet.py). DEFAULT OFF, which is
+    # the whole point of them.
+    #
+    # WHY THESE EXIST when the sweep already has a kill switch above: a sweep
+    # leg is not only a read. `connector_lookup/sweep_persist.py` writes what a
+    # leg read into the tenant's KNOWLEDGE GRAPH, and merging to main deploys to
+    # staging, and STAGING WRITES LAND ON THE PROD SUPABASE. So merging these
+    # two brand-new adapters unflagged would start writing prod tenants' graphs
+    # from code that has never run against real data — an irreversible data
+    # action taken as a side effect of a merge.
+    #
+    # A bad graph write is worse than a bad migration, and our safety apparatus
+    # is pointed at the migration: that one gets a gate, a file, a version row
+    # and a repair path, and it fails loudly. This one happens at runtime, on
+    # the scheduler's terms, with no artifact recording what was written, and it
+    # fails silently and STAYS — a poisoned signal with a connected source_type
+    # counts toward `has_sufficient_evidence` and can surface in a customer's
+    # weekly brief as though it were something a real person said on a call.
+    #
+    # Global rather than per-company on purpose: this is a rollout switch for
+    # unproven code, not a product capability anyone opts into. Flip to true
+    # per provider once the leg has been watched against real data.
+    chat_sweep_asana: bool = False
+    chat_sweep_google_meet: bool = False
+
+    # Live read of the configured Slack customer-feedback channels
+    # (app/connector_lookup/slack_voc.py), which the voice-of-customer pass runs
+    # for every feedback-shaped question. Same operational-kill-switch shape and
+    # same reasoning as `chat_cross_connector_sweep` above: it adds a bounded,
+    # parallel round of I/O to a path that is already the slowest in chat, so it
+    # needs an off switch that is not a DB write per company.
+    #
+    # Checked inside `slack_voc.read` itself — the CHOKE POINT, not the call
+    # sites — so a future caller cannot bypass it. The sweep learned that the
+    # hard way (2026-08-05): it had two entry points and its flag only gated
+    # one, so "disabled" left half the feature running.
+    slack_voc_channels: bool = True
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
@@ -355,6 +451,14 @@ class Settings(BaseSettings):
     # tracker API rate limits ever bite.
     ticket_sync_enabled: bool = True
     ticket_sync_interval_minutes: int = 15
+    # Synced GitHub skill folders: how often the sweep re-reads each registered
+    # folder and imports the markdown it now holds (app/skills/github_sync.py).
+    # 30 min by default — a method someone just committed should be usable in
+    # the same sitting. An unchanged folder costs one GitHub request per tick,
+    # so this is safe to leave fine-grained; raise it via
+    # SKILL_SYNC_INTERVAL_MINUTES if an installation's REST budget ever bites
+    # (the Design Agent's codebase map spends from the same 5,000/hour pocket).
+    skill_sync_interval_minutes: int = 30
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
 
     # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────
@@ -376,6 +480,16 @@ class Settings(BaseSettings):
     # Per-company overrides in companies.notification_settings["drip"] win over
     # this (see app/drip_email.py:resolve_cadence).
     drip_cadence_days: str = ""
+    # Upper bound on a step's send window, in days: a step is only sent while
+    # day_offset <= age_days <= day_offset + grace. Past that it is recorded
+    # as "skipped" and never fires. Without this, a member older than the whole
+    # ladder receives every unsent step at once. Empty → DEFAULT_GRACE_DAYS in
+    # app/drip_email.py. Per-company overrides in
+    # companies.notification_settings["drip"]["grace_days"] win over this
+    # (see app/drip_email.py:resolve_grace_days). Kept a str (not an int) so an
+    # unparseable value falls back to the default instead of failing boot on an
+    # email path.
+    drip_grace_days: str = ""
     # How often the drip job runs. Hourly+ is fine: a step fires the first
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
@@ -415,6 +529,18 @@ class Settings(BaseSettings):
     # From: header for invite reminder emails. Empty → brief_email_from (the
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
+
+    # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
+    # check of recent extraction output per skill_id against the expected
+    # shape each vendored connector-extraction skill declares in its own
+    # references/expected-signal-shape.md. Read-only + sampled by design —
+    # never runs on a live ingestion or request path. Runs unconditionally on
+    # its own cadence.
+    extraction_eval_interval_hours: int = 24
+    # How many of an enterprise+skill's most recent signals one eval pass
+    # samples.
+    extraction_eval_sample_size: int = 25
+
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
@@ -439,6 +565,16 @@ class Settings(BaseSettings):
     # (mint + validate both refuse) when this is empty — never serve with an
     # unsigned/forgeable grant.
     design_agent_token_secret: str = ""
+
+    # Artifact share-grant token secret. A DISTINCT secret from jwt_secret AND
+    # from design_agent_token_secret — never reuse either. Provisioned now
+    # (harmless, currently unused) so a future revocation/rotation ticket that
+    # wants HMAC-signed short-lived view grants (mirroring da_view_grant) has
+    # the secret already reviewed. The share primitive itself is DB-row-token-
+    # backed (an opaque uuid4 looked up by exact match, like
+    # prototypes.share_token) — a bare DB-token lookup needs no secret, so
+    # nothing in this ticket signs or verifies an HMAC with this value.
+    artifact_share_token_secret: str = ""
 
     # Bundle-proxy public origin (Decision 2 — same-origin serving). The prototype
     # bundle is served from the APP origin (e.g. https://app.sprntly.ai) via an

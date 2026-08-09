@@ -12,8 +12,13 @@ must confirm (routes/jira_write.py applies it).
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.connector_lookup.base import LookupSession
 from app.connectors import jira_fetch
+
+if TYPE_CHECKING:
+    from app.kg_ingest.types import RawRecord
 
 DISPLAY_NAME = "Jira"
 
@@ -239,6 +244,81 @@ def make_dispatch(session: jira_fetch.JiraSession, proposal: dict | None = None)
     return dispatch
 
 
+#: `2000`, matching `kg_ingest.pullers.jira.pull`'s own description slice
+#: exactly (see the comment in `_issue_to_record`). Kept as a named constant
+#: rather than a bare literal so the coupling to the puller's cap is visible at
+#: the call site, not just in a docstring.
+_PULLER_DESCRIPTION_CHARS = 2000
+
+
+def _issue_to_record(issue: dict) -> "RawRecord":
+    """One full issue (`jira_fetch.get_issue`'s shape) → the SAME `RawRecord`
+    `kg_ingest.pullers.jira.pull` would build for it — same provider/kind, same
+    `properties` KEYS IN THE SAME ORDER, same external_id, same timestamp
+    fallback. AC4's byte-identity is a property of `RawRecord.render()`
+    (kg_ingest/types.py), so matching that shape field-for-field is the whole
+    job here.
+
+    Reachable only from `dispatch_records`'s single-hit branch: that is the one
+    case where the sweep already has the FULL issue in hand (see below), rather
+    than the lean fields `jira_fetch.search` returns for a multi-hit result. The
+    description is capped to `_PULLER_DESCRIPTION_CHARS` — `get_issue` itself
+    caps it at `jira_fetch._DESC_CHARS` (4000), so this re-slices an
+    already-fetched string down to the puller's narrower 2000-char cap; it is
+    not a second fetch, and slicing a string to N chars twice (4000 then 2000)
+    is identical to slicing it to 2000 once.
+    """
+    from app.kg_ingest.types import RawRecord
+
+    return RawRecord(
+        provider="jira",
+        kind="issue",
+        external_id=str(issue.get("key") or ""),
+        title=issue.get("summary", "") or "",
+        text=(issue.get("description") or "")[:_PULLER_DESCRIPTION_CHARS],
+        properties={
+            "status": issue.get("status"),
+            "priority": issue.get("priority"),
+            "type": issue.get("type"),
+            "project": issue.get("project"),
+            "labels": issue.get("labels") or [],
+            "assignee": issue.get("assignee"),
+        },
+        timestamp=issue.get("updated") or issue.get("created"),
+    )
+
+
+def dispatch_records(session: jira_fetch.JiraSession, name: str, inp: dict):
+    """`(text, records)` for `jira_search`, or `None` for any other tool.
+
+    AC4 in one sentence: `jira_search` ALREADY special-cases exactly one hit by
+    fetching it in full (`make_dispatch`, above — a search that resolves to one
+    issue is answered with the whole issue, not a one-line summary) and that is
+    the ONLY case where the sweep has enough in hand to build a byte-identical
+    `RawRecord` without a new HTTP call. Zero or multiple hits get `records =
+    None`: `jira_fetch.search`'s lean hit shape (key/summary/type/status/
+    priority/assignee/updated/url — no description, no project, no labels) is
+    genuinely leaner than the puller's full-issue fetch, and closing that gap
+    would mean a `get_issue` call per hit — the new HTTP call this ticket
+    explicitly says not to add. See the AC4 test for the exact hit count this
+    covers.
+    """
+    if name != "jira_search":
+        return None
+    inp = inp if isinstance(inp, dict) else {}
+    hits = jira_fetch.search(
+        session,
+        text=inp.get("text"),
+        project=inp.get("project"),
+        status=inp.get("status"),
+    )
+    if len(hits) == 1 and hits[0].get("key"):
+        issue = jira_fetch.get_issue(session, hits[0]["key"])
+        if issue is not None:
+            return jira_fetch.render_issue(issue), [_issue_to_record(issue)]
+    return jira_fetch.render_search(hits), None
+
+
 class JiraProvider:
     """LookupProvider over app/connectors/jira_fetch.py."""
 
@@ -270,6 +350,11 @@ class JiraProvider:
         return make_dispatch(session.handle, session.extras[PENDING_CHANGE_KEY])(
             name, inp
         )
+
+    def dispatch_records(self, session: LookupSession, name: str, inp: dict):
+        """See the module-level `dispatch_records` — this only unwraps the
+        session handle, mirroring `dispatch` above."""
+        return dispatch_records(session.handle, name, inp)
 
     def system_block(self) -> str:
         return SYSTEM

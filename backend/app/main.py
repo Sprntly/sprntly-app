@@ -44,6 +44,8 @@ from app.prompts import (
 from app.routes import (
     admin,
     agent_chat,
+    artifact_share,
+    artifact_templates as artifact_templates_routes,
     artifacts,
     ask,
     brief,
@@ -75,6 +77,7 @@ from app.routes import (
     stories,
     synthesis,
     team,
+    ticket_sets,
     tickets,
     transcripts,
     usage as usage_routes,
@@ -84,6 +87,7 @@ from app.routes import (
     internal,
     pipeline,
     prd,
+    prd_access,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -204,6 +208,24 @@ async def lifespan(app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
         logger.exception("Orphan company-research sweep failed at startup")
+    # Same for business-context refreshes (companies.business_context_refresh_
+    # status): a restart mid-refresh leaves the row 'generating' forever, which
+    # would wedge the "Save Company Shape" trigger's start-guard so the company
+    # could never refresh again until this sweep or the scheduler's 5m heal
+    # catches it. Age-gated on the heartbeat column, not raw age — see
+    # app/db/business_context_refresh.py for why (the exact ask_jobs incident
+    # this ticket is designed around: an age-only check can reap a
+    # healthy-but-slow refresh out from under itself).
+    try:
+        bc_refresh_orphans = db.fail_orphan_business_context_refreshes()
+        if bc_refresh_orphans:
+            logger.info(
+                "Failed %d orphan business-context refresh(es) stuck in "
+                "generating (restart interrupt)",
+                bc_refresh_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan business-context refresh sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
@@ -373,6 +395,10 @@ app.include_router(chat.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)
+# Standalone ticket sets (chat-born tickets with no PRD). Registered before
+# tickets.router only for readability — the prefixes (/v1/ticket-sets vs
+# /v1/tickets) are disjoint, so order carries no routing consequence here.
+app.include_router(ticket_sets.router)
 app.include_router(jira_write.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
@@ -401,6 +427,10 @@ app.include_router(onboarding.router)
 app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(custom_skills_routes.router)
+# Beside custom skills, its structural twin: a skill is the METHOD a document is
+# reasoned with, an artifact template is the FORM it is written in. Both are
+# company-scoped libraries of untrusted customer-uploaded text.
+app.include_router(artifact_templates_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(workspaces_routes.router)
@@ -413,6 +443,8 @@ app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
 app.include_router(internal_mcp.data_router)
+app.include_router(artifact_share.router)
+app.include_router(prd_access.router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)

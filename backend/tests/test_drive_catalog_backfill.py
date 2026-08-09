@@ -1,0 +1,441 @@
+"""Google Drive's missing half of the document catalog.
+
+THE MEASUREMENT THIS SUITE EXISTS FOR, taken against the shared database on
+2026-08-07: `document_catalog` held 27 `confluence` rows across two tenants and
+exactly ONE `google_drive` row — for a file that had been edited in Drive the
+previous day. Every Drive file synced before the catalog shipped on 2026-08-03
+was, and stays, invisible to it.
+
+The cause is an asymmetry nobody wrote down. Confluence's puller re-reads every
+page, so registration rides its next sync and the connector backfilled itself.
+`drive_extract` only ever iterates files whose `modifiedTime` moved, and the
+`register_document` call lives inside that loop — so a Drive file is
+catalogued only when a human happens to edit it. `backfill_document_catalog.py`
+asserted in its own docstring that BOTH connectors were "covered by their next
+sync", which was true of one of them.
+
+This matters far beyond tidiness: document resolution, topical selection and
+the existence contract all read the catalog and nothing else. A Drive file
+absent from it cannot be ranked, cannot be resolved, and — worst — is a file
+the model will state the workspace does not have.
+
+The suite covers the backfill that closes it (`document_sources
+.backfill_drive_catalog`), and the one property that decides whether it is
+safe to run: a file whose body cannot be located is NOT registered, because an
+Index entry with nothing behind it is worse than an absent one.
+"""
+from __future__ import annotations
+
+import pytest
+
+_CID = "co-drive-bf"
+
+
+@pytest.fixture
+def stub_enrichment(monkeypatch):
+    """Real registration, stubbed summariser + embeddings, with a call
+    counter — the counter is what proves idempotence costs nothing."""
+    from app import document_catalog
+
+    calls = []
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: calls.append(k) or type("R", (), {"output": {
+            "summary": "Enterprise billing moves from seats to usage in Q1.",
+            "topics": ["billing", "usage-based pricing"],
+        }})(),
+    )
+    monkeypatch.setattr(
+        document_catalog, "embed_texts", lambda texts, **k: [[0.1] * 1536]
+    )
+    return calls
+
+
+def _seed_company(db, company_id=_CID):
+    if not db.table("companies").select("id").eq("id", company_id).execute().data:
+        db.table("companies").insert(
+            {"id": company_id, "slug": f"s-{company_id}", "display_name": "C"}
+        ).execute()
+
+
+def _seed_synced_drive_file(
+    db, *, file_id, label="Billing model 2026", slug="acme",
+    name="billing_model_2026.md", text="Enterprise billing moves to usage in Q1.",
+    with_location=True,
+):
+    """A Drive file as it exists AFTER a sync that predates the catalog: the
+    converted markdown on disk and the `kg_source` provenance row, and no
+    `document_catalog` row at all.
+
+    `with_location=False` reproduces the older shape where the markdown's
+    location was never recorded — the body is unreachable, and that is the
+    case the backfill must decline rather than guess at."""
+    from app import document_bodies
+    from app.datasets import dataset_path
+
+    _seed_company(db)
+    target = dataset_path(slug) / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    config = {
+        "file_id": file_id,
+        "modified": "2026-07-30T09:00:00+00:00",
+        "mime": "application/vnd.google-apps.document",
+        "link": f"https://docs.google.com/document/d/{file_id}/edit",
+    }
+    if with_location:
+        config.update({"md_dataset": slug, "md_file": name})
+    db.table("kg_source").insert({
+        "id": document_bodies.drive_source_id(_CID, file_id),
+        "enterprise_id": _CID,
+        "source_type": "google_drive",
+        "label": label,
+        "config": config,
+        "status": "active",
+    }).execute()
+    return file_id
+
+
+# ═══════════ The gap itself, asserted before the fix is asserted ═══════════
+
+
+def test_a_synced_drive_file_is_absent_from_the_catalog_until_backfilled(
+    isolated_settings
+):
+    """The production condition, reproduced: a Drive file fully synced — its
+    markdown written, its provenance row present, its text readable — and no
+    catalog row anywhere. This is what one row against twenty-seven looks like
+    from inside a single tenant."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    assert document_catalog.fetch_document(
+        _CID, document_catalog.PROVIDER_GOOGLE_DRIVE, "drive-a"
+    ) is None
+    assert document_catalog.list_documents(_CID) == []
+
+
+def test_backfill_registers_a_synced_drive_file(isolated_settings, stub_enrichment):
+    """And after the backfill it is a first-class catalog document: title,
+    source, url, date and a summary, reachable by the same
+    `fetch_document` every reader uses."""
+    from app import document_catalog
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    counts = backfill_drive_catalog(_CID)
+
+    assert counts["registered"] == 1
+    doc = document_catalog.fetch_document(
+        _CID, document_catalog.PROVIDER_GOOGLE_DRIVE, "drive-a"
+    )
+    assert doc is not None
+    assert doc.title == "Billing model 2026"
+    assert doc.source_name == "Google Drive"
+    assert doc.summary
+    assert doc.url == "https://docs.google.com/document/d/drive-a/edit"
+
+
+def test_backfilled_drive_file_is_then_selectable_and_quotable(
+    isolated_settings, stub_enrichment
+):
+    """The whole point, end to end. Before the backfill the workspace's
+    document index does not contain this file at all — so an answer that
+    denied its existence would be behaving exactly as designed. After it, the
+    file is in the Index with its summary, and the body it points at is the
+    markdown the sync wrote."""
+    from app import ask_runner
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    before, before_manifest = ask_runner.document_grounding(
+        _CID, "how is enterprise billing changing?"
+    )
+    assert "Billing model 2026" not in before
+    assert before_manifest == []
+
+    backfill_drive_catalog(_CID)
+
+    after, after_manifest = ask_runner.document_grounding(
+        _CID, "how is enterprise billing changing?"
+    )
+    assert "Billing model 2026" in after
+    assert any(m["file_id"] == "google_drive:drive-a" for m in after_manifest)
+
+
+# ═════════════════════ Safety: what it declines to do ══════════════════════
+
+
+def test_a_file_with_no_locatable_body_is_not_registered(
+    isolated_settings, stub_enrichment
+):
+    """The decision this backfill exists to get right. A Drive file whose
+    markdown location was never recorded has no readable body, and
+    registering it anyway would put a title in the Index that resolution can
+    pick as a referent and grounding can never quote.
+
+    Counted as `no_body`, apart from `errors`: for an older tenant this is the
+    expected outcome, not a fault, and folding it into an error count would
+    hide how much of that tenant's Drive is genuinely reachable."""
+    from app import document_catalog
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-lost", with_location=False)
+
+    counts = backfill_drive_catalog(_CID)
+
+    assert counts == {"registered": 0, "skipped": 0, "no_body": 1, "errors": 0}
+    assert document_catalog.fetch_document(
+        _CID, document_catalog.PROVIDER_GOOGLE_DRIVE, "drive-lost"
+    ) is None
+
+
+def test_dry_run_writes_nothing_and_counts_the_same_work(
+    isolated_settings, stub_enrichment
+):
+    """`apply=False` runs the identical decision path — same hash check, same
+    body check — and stops before the write. Counting through the real
+    function rather than a parallel estimator is what stops a dry run and an
+    apply disagreeing about what would happen."""
+    from app import document_catalog
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    planned = backfill_drive_catalog(_CID, apply=False)
+
+    assert planned["registered"] == 1
+    assert document_catalog.fetch_document(
+        _CID, document_catalog.PROVIDER_GOOGLE_DRIVE, "drive-a"
+    ) is None
+    assert stub_enrichment == [], "a dry run must not pay for a summary"
+
+    applied = backfill_drive_catalog(_CID, apply=True)
+    assert applied["registered"] == planned["registered"]
+
+
+def test_backfill_is_idempotent_by_content_hash(isolated_settings, stub_enrichment):
+    """A second run finds every hash unchanged, registers nothing and pays for
+    no summaries. Idempotence by hash rather than by a "backfilled" flag is
+    what makes it safe to re-run after a partial failure."""
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    first = backfill_drive_catalog(_CID)
+    summaries_after_first = len(stub_enrichment)
+    second = backfill_drive_catalog(_CID)
+
+    assert first["registered"] == 1
+    assert second == {"registered": 0, "skipped": 1, "no_body": 0, "errors": 0}
+    assert len(stub_enrichment) == summaries_after_first
+
+
+def test_one_broken_file_does_not_strand_the_rest(isolated_settings, stub_enrichment):
+    """Per-file isolation. A tenant's Drive is backfilled as far as it can be,
+    and the unreachable file is reported rather than taking the run down —
+    the alternative is that one stale provenance row keeps a whole tenant
+    uncatalogued."""
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-lost", with_location=False)
+    _seed_synced_drive_file(
+        db, file_id="drive-ok", label="Pricing model 2026",
+        name="pricing_model_2026.md", text="Pricing moves to usage.",
+    )
+
+    counts = backfill_drive_catalog(_CID)
+
+    assert counts["registered"] == 1
+    assert counts["no_body"] == 1
+    assert counts["errors"] == 0
+
+
+def test_backfill_never_calls_google(isolated_settings, stub_enrichment, monkeypatch):
+    """Bodies come from the corpus markdown the sync already wrote. No Drive
+    API, no OAuth, no token-refresh race, no quota — which is what makes this
+    runnable against a live tenant without coordinating with the connector."""
+    from app import document_bodies
+    from app.document_sources import backfill_drive_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_synced_drive_file(db, file_id="drive-a")
+
+    reads = []
+    real_resolve = document_bodies.resolve_drive_body
+
+    def _spy(company_id, file_id):
+        reads.append(file_id)
+        return real_resolve(company_id, file_id)
+
+    monkeypatch.setattr(document_bodies, "resolve_drive_body", _spy)
+    for forbidden in ("open_session", "fetch_file", "list_files"):
+        monkeypatch.setattr(
+            "app.connectors.google_drive_sync." + forbidden,
+            lambda *a, **k: pytest.fail(
+                f"backfill called google_drive_sync.{forbidden}"
+            ),
+            raising=False,
+        )
+
+    backfill_drive_catalog(_CID)
+
+    assert reads == ["drive-a"]
+
+
+# ═════════════ Degrading honestly on a tenant with no Drive rows ════════════
+
+
+def test_zero_drive_rows_yields_no_referent_and_no_failure_language(
+    isolated_settings, monkeypatch
+):
+    """The state EVERY tenant but one is in today, asserted as a behaviour.
+
+    A tenant with Confluence catalogued and Drive not must answer Drive
+    questions with silence about Drive, not with anything that reads like a
+    lookup that failed. "We could not find that in your Drive" would be a
+    false statement dressed as a diagnosis — nothing was ever searched,
+    because nothing was ever registered.
+
+    Adjudication is replaced with a fake that accepts whatever it is given,
+    and — this is the part the first version of this test got wrong — the
+    candidate RPC is stubbed to return the Confluence row, so the shortlist is
+    genuinely NON-EMPTY and the adjudicator is genuinely REACHED. Without that
+    stub the shortlist was empty before guard 3 ever ran, and the test passed
+    for a reason its own docstring denied: it was proving "an empty shortlist
+    resolves nothing", not "a tenant with no Drive rows resolves no Drive
+    document".
+
+    So the fake is now offered a real, plausible candidate and says yes to it —
+    and the assertion is that what comes back is still not a Drive referent,
+    and that nothing in the block reports anything about Drive at all."""
+    from app import ask_runner, document_referent
+    from tests._fake_supabase import FakeSupabaseClient
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    db.table("document_catalog").insert({
+        "company_id": _CID, "provider": "confluence",
+        "external_id": "page-1", "title": "Release notes",
+        "source_name": "SD", "content_hash": "h1",
+        "summary": "Ship dates for the August release.",
+        "topics": ["release notes"], "doc_date": "2026-08-02T10:00:00+00:00",
+    }).execute()
+    FakeSupabaseClient.rpc_returns["document_find_candidates"] = [{
+        "id": "cat-page-1", "provider": "confluence", "external_id": "page-1",
+        "title": "Release notes", "source_name": "SD",
+        "summary": "Ship dates for the August release.",
+        "topics": ["release notes"], "url": None,
+        "doc_date": "2026-08-02T10:00:00+00:00",
+        "conversation_id": None, "score": 0.04,
+    }]
+    consulted: list[list] = []
+
+    def _yes(**kw):
+        consulted.append(kw["candidates"])
+        return kw["candidates"][0].get("external_id") if kw["candidates"] else None
+
+    monkeypatch.setattr(document_referent, "adjudicate", _yes)
+    monkeypatch.setattr(
+        document_referent, "eligible_candidates",
+        lambda question, candidates: candidates[:5],
+    )
+    # Let the Confluence body fetch SUCCEED. Unstubbed it raises, and the
+    # honesty contract then (correctly) writes "its contents could not be
+    # loaded" into the block — true of Confluence, and nothing to do with
+    # Drive. Leaving it failing would make this test trip over an unrelated
+    # correct behaviour instead of isolating the property it is named for.
+    from app.connectors import confluence_fetch
+
+    monkeypatch.setattr(confluence_fetch, "open_session", lambda eid: object())
+    monkeypatch.setattr(
+        confluence_fetch, "get_page",
+        lambda session, page_id: {"id": page_id, "text": "August ships on the 14th."},
+    )
+    try:
+        block, manifest = ask_runner.document_grounding(
+            _CID, "what does the billing doc say about usage?"
+        )
+    finally:
+        FakeSupabaseClient.rpc_returns.pop("document_find_candidates", None)
+
+    # The precondition the first version of this test silently lacked.
+    assert consulted and consulted[0], (
+        "the adjudicator was never offered a candidate — this test would pass "
+        "against an empty shortlist and prove nothing about Drive"
+    )
+
+    # The claim is specifically that no GOOGLE DRIVE document is resolved —
+    # not that nothing resolves. The forced-yes fake does pick the Confluence
+    # page, which is the correct shape of behaviour for a tenant whose only
+    # catalogued document is that page; asserting "no referent at all" here
+    # would be asserting the fake's leniency rather than the Drive property.
+    referents = [
+        m for m in manifest
+        if m.get("match") in (document_referent.MATCH_CARRIED,
+                              document_referent.MATCH_RESOLVED)
+    ]
+    assert not [m for m in referents if m["file_id"].startswith("google_drive:")], (
+        "a Drive document was resolved on a tenant with zero Drive catalog rows"
+    )
+    # Drive is not mentioned AT ALL — not as a source, not as a failure, not
+    # as an absence. Nothing was searched, so there is nothing truthful to
+    # say, and "we could not find that in your Drive" would be a false
+    # statement wearing the costume of a diagnosis.
+    lowered = block.lower()
+    for forbidden in ("google drive", "gdrive", "does not exist",
+                      "no such document", "not in any connected source"):
+        assert forbidden not in lowered, (
+            f"a tenant with no Drive rows emitted {forbidden!r} — nothing was "
+            f"searched, so nothing may be reported about Drive"
+        )
+
+
+def test_decision_log_separates_no_drive_rows_from_no_drive_match(
+    isolated_settings, monkeypatch
+):
+    """`catalog_size` and `topical_outcome` are whole-catalog, so a tenant with
+    27 Confluence rows and zero Drive rows reports `ranked` and looks healthy
+    while Drive is structurally unreachable. Those two states need opposite
+    fixes — run the backfill, versus look at ranking — so the record has to
+    tell them apart. Counts per provider, no titles."""
+    from app import ask_runner
+
+    db = isolated_settings["supabase"]
+    _seed_company(db)
+    for i in range(3):
+        db.table("document_catalog").insert({
+            "company_id": _CID, "provider": "confluence",
+            "external_id": f"page-{i}", "title": f"Page {i}",
+            "source_name": "SD", "content_hash": f"h{i}",
+            "summary": "s", "topics": [],
+            "doc_date": "2026-08-02T10:00:00+00:00",
+        }).execute()
+
+    logged = []
+    from app.graph import decision_log
+
+    monkeypatch.setattr(
+        decision_log, "log_agent_decision",
+        lambda **kw: logged.append(kw),
+    )
+
+    ask_runner.document_grounding(_CID, "what shipped recently")
+
+    row = next(r for r in logged if r["decision_type"] == "document_selection")
+    by_provider = row["factors"]["catalog_by_provider"]
+    assert by_provider == {"confluence": 3}
+    assert "google_drive" not in by_provider, (
+        "absence of the key is what says 'this tenant has no Drive documents "
+        "catalogued' — distinct from a zero-match against rows that exist"
+    )

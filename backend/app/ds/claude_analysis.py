@@ -662,7 +662,18 @@ def _loop(
     from app.llm import _create_with_retries
 
     messages: list[dict] = [{"role": "user", "content": _user_content(question, history, file_ids)}]
-    system = [{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    # The date rides in a SEPARATE, uncached block. Appending it to the cached
+    # prefix would change those bytes every day and throw away the prompt-cache
+    # hit on every DS run; as its own trailing block the cached prefix stays
+    # byte-identical. Without it the engine cannot resolve "last week" and will
+    # answer from whatever period the uploaded data happens to cover — which is
+    # exactly how a question asked in August was answered with January data.
+    from app.prompts import today_line
+
+    system = [
+        {"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": today_line()},
+    ]
 
     while True:
         if report.turns >= _MAX_TURNS:

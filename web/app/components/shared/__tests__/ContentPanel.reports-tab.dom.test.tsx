@@ -73,6 +73,11 @@ async function renderPanel(opts: {
   status?: "idle" | "loading" | "ready" | "error"
   /** A PRD in scope puts the Evidence → PRD → Tickets pipeline in scope too. */
   prd?: unknown
+  /** Which conversation the rows were FETCHED for. Defaults to the thread the
+   *  panel is showing — the normal case, once useThreadReportsSync has answered
+   *  for it. Pass a different id to stage the commit where the chat has already
+   *  switched threads and the shared list has not caught up. */
+  listFor?: number | null
 }) {
   navMock.tab = opts.tab ?? "prd"
   contentMock.value = {
@@ -84,8 +89,10 @@ async function renderPanel(opts: {
     detail: null,
     conversationId: 77,
     reportFocusId: null,
+    reportFocusStandalone: false,
     threadReports: opts.reports ?? [],
     threadReportsStatus: opts.status ?? "ready",
+    threadReportsConversationId: opts.listFor === undefined ? 77 : opts.listFor,
     // Read by TicketsTab, which renders when the panel is parked on Tickets.
     connectedConnectorIds: [],
   }
@@ -155,6 +162,28 @@ describe("ContentPanel — the Reports tab", () => {
     await renderPanel({ tab: "reports", reports: [ROW], prd: PRD })
 
     expect(tabLabels()).toEqual(["Evidence", "PRD", "Tickets", "Reports"])
+  })
+
+  it("shows no tab for a list fetched for a DIFFERENT thread", async () => {
+    // The list is fetched by AppShell (the parent of the chat screen), so on the
+    // commit where the chat switches threads it still holds the previous one's
+    // rows. Advertising a Reports tab off those rows put another thread's
+    // documents one click away from this one.
+    await renderPanel({ reports: [ROW], listFor: 4242 })
+    expect(reportsTab()).toBeNull()
+  })
+
+  it("does not list another thread's reports in the body", async () => {
+    // …and if the panel is parked ON the Reports tab through that window, it
+    // reads as still loading rather than listing rows that belong elsewhere.
+    // "No reports in this chat" would be just as wrong: nobody has answered for
+    // this chat yet.
+    await renderPanel({ tab: "reports", reports: [ROW], listFor: 4242 })
+
+    expect(document.querySelectorAll("[data-report-id]").length).toBe(0)
+    expect(document.body.textContent).not.toContain("VoC · Q2")
+    expect(document.body.textContent).not.toContain("No reports in this chat")
+    expect(screen.getByTestId("reports-loading")).toBeTruthy()
   })
 
   it("renders the thread's reports in the body, headed 'Reports'", async () => {

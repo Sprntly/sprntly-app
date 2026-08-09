@@ -34,7 +34,74 @@ def _record_message(caplog) -> str:
 def test_module_exports_canonical_primitive():
     assert "claude-sonnet-4-6" in MODEL_PRICING
     assert "claude-opus-4-7" in MODEL_PRICING  # AD2 escape hatch
+    assert "claude-haiku-4-5" in MODEL_PRICING  # ROUTER_MODEL
     assert issubclass(UnknownModelError, KeyError)
+
+
+# ─── Haiku pricing (router spend) ───────────────────────────────────────────
+
+
+def test_haiku_row_matches_published_rates():
+    """Anthropic's pricing page (2026-08): $1/MTok in, $5/MTok out, $0.10/MTok
+    cache hits. Cache WRITE is the 5-minute tier (1.25x base input) because
+    `app/llm.py::_build_base_kwargs` only ever sends `{"type": "ephemeral"}`
+    with no `ttl` — the 1h tier this dict's key name implies is never requested.
+    See the naming-mismatch note above MODEL_PRICING."""
+    p = MODEL_PRICING["claude-haiku-4-5"]
+    assert p["input"] == pytest.approx(1.0 / 1_000_000)
+    assert p["output"] == pytest.approx(5.0 / 1_000_000)
+    assert p["cache_read"] == pytest.approx(0.1 / 1_000_000)
+    assert p["cache_write_1h"] == pytest.approx(1.25 / 1_000_000)
+    # 0.1x and 1.25x of base input — the published multipliers.
+    assert p["cache_read"] == pytest.approx(p["input"] * 0.1)
+    assert p["cache_write_1h"] == pytest.approx(p["input"] * 1.25)
+
+
+def test_haiku_usage_costs_more_than_zero():
+    """`RunUsage.est_cost_usd` prices a haiku run instead of raising."""
+    usage = RunUsage(
+        cache_creation_input_tokens=1_000,
+        cache_read_input_tokens=10_000,
+        input_tokens=2_000,
+        output_tokens=500,
+    )
+    cost = usage.est_cost_usd("claude-haiku-4-5")
+    expected = (
+        1_000 * 1.25 / 1_000_000
+        + 10_000 * 0.1 / 1_000_000
+        + 2_000 * 1.0 / 1_000_000
+        + 500 * 5.0 / 1_000_000
+    )
+    assert cost == pytest.approx(expected)
+    assert cost > 0
+
+
+def test_gateway_est_cost_prices_the_router_instead_of_failing_open():
+    """The defect this row fixes. `gateway._est_cost` does
+    `MODEL_PRICING.get(model)` and returns 0.0 on a miss — it fails OPEN, unlike
+    `est_cost_usd` which raises UnknownModelError. With no haiku row, every
+    `qa-router` entry in `agent_decision_log` recorded cost_usd=0.0, so router
+    spend looked free rather than unmeasured."""
+    from app.graph.gateway import _est_cost
+
+    meta = {
+        "model": "claude-haiku-4-5",
+        "input_tokens": 2_000,
+        "output_tokens": 500,
+        "cache_read_input_tokens": 10_000,
+        "cache_creation_input_tokens": 1_000,
+    }
+    assert _est_cost(meta) > 0
+    assert _est_cost(meta) == pytest.approx(
+        RunUsage(
+            cache_creation_input_tokens=1_000,
+            cache_read_input_tokens=10_000,
+            input_tokens=2_000,
+            output_tokens=500,
+        ).est_cost_usd("claude-haiku-4-5")
+    )
+    # An unpriced model still fails open in the gateway (unchanged behaviour).
+    assert _est_cost({"model": "claude-not-a-model", "input_tokens": 10}) == 0.0
 
 
 # ─── RunUsage.add ───────────────────────────────────────────────────────────

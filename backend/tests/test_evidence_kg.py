@@ -290,7 +290,10 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
 
     def fake_llm(**kw):
         captured.update(kw)
-        return _llm_result("# Evidence\nGrounded in HubSpot + Fireflies.")
+        return _llm_result(
+            '<div class="wrap"><h1>Evidence</h1>'
+            "<p>Grounded in HubSpot + Fireflies.</p></div>"
+        )
 
     monkeypatch.setattr(evidence_kg, "llm_call", fake_llm)
     insight = {"title": "SSO gap blocks $1.4M in deals",
@@ -310,7 +313,7 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
 
     # The model's body is preserved; the canonical stylesheet is injected around
     # it (Phase 2 — model emits empty <style>, server splices assets/evidence.css).
-    assert "# Evidence" in md
+    assert "<h1>Evidence</h1>" in md
     assert "--problem:#dd4b32" in md
     # kg_refs = signal ids + hypothesis id + theme id.
     assert set(meta["kg_refs"]) == {s.id for s in signals} | {hyp.id, theme.id}
@@ -331,18 +334,22 @@ def test_build_binds_evidence_brief_skill(facade, isolated_settings, monkeypatch
 
     def fake_llm(**kw):
         captured.update(kw)
-        return _llm_result(":::hero\n{}\n:::\n")
+        return _llm_result('<div class="wrap"><h1>Bound</h1></div>')
 
     monkeypatch.setattr(evidence_kg, "llm_call", fake_llm)
     insight = {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}
     evidence_kg.build_evidence_kg(facade, "ent-A", insight)
 
     assert captured["skill"] == "evidence-brief"
-    # The skill is real + installed + non-routable (bound by name, not chat).
-    from app.skills.catalog import NON_ROUTABLE
+    # The skill is real + installed + unreachable from chat (bound by name
+    # here, never routed). It used to be listed in NON_ROUTABLE — a per-skill
+    # opt-out of a router menu that offered every OTHER built-in. With the
+    # built-in menu gone the guarantee is stronger and needs no allow-list:
+    # NO vendored id is invocable from a chat turn.
+    import app.qa_agent as qa
     from app.skills.loader import get_skill
 
-    assert "evidence-brief" in NON_ROUTABLE
+    assert qa._invocable("evidence-brief", "co-1") is False
     assert get_skill("evidence-brief").method.strip()  # SKILL.md present
 
 
@@ -384,7 +391,7 @@ def test_build_decision_log_carries_kg_refs(facade, isolated_settings,
     _seed_template(isolated_settings["data_dir"])
     theme, hyp, signals = _seed_theme_hypothesis(facade)
     monkeypatch.setattr(evidence_kg, "llm_call",
-                        lambda **kw: _llm_result("# doc"))
+                        lambda **kw: _llm_result('<div class="wrap">doc</div>'))
     insight = {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}
     evidence_kg.build_evidence_kg(facade, "ent-A", insight)
 
@@ -424,14 +431,14 @@ def test_run_sync_kg_completes_with_doc(isolated_settings, monkeypatch):
                                         title="t", template_version=2,
                                         variant="v2")
     monkeypatch.setattr(evidence_kg, "llm_call",
-                        lambda **kw: _llm_result("# KG evidence body"))
+                        lambda **kw: _llm_result('<div class="wrap">KG evidence body</div>'))
 
     evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
     # Body preserved; canonical stylesheet injected around it (Phase 2).
-    assert "# KG evidence body" in row["payload_md"]
+    assert '<div class="wrap">KG evidence body</div>' in row["payload_md"]
     assert "--problem:#dd4b32" in row["payload_md"]
     assert row["title"] == "SSO gap blocks $1.4M in deals"
 
@@ -779,3 +786,90 @@ def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
     # canonical evidence stylesheet so the stored doc is self-contained.
     assert "--problem:#dd4b32" in row["payload_md"]
     assert row["payload_md"].count("<style>") == 1
+
+
+def _golden_brief() -> str:
+    from pathlib import Path
+
+    return (
+        Path(__file__).resolve().parent / "fixtures" / "evidence" / "golden_brief.html"
+    ).read_text(encoding="utf-8")
+
+
+def test_stored_payload_is_what_every_downstream_consumer_reads(
+    isolated_settings, monkeypatch
+):
+    """CONSUMER: `multi_agent_orchestrator` (:170) and anything else that reads
+    the row rather than rendering it.
+
+    The orchestrator pulls `payload_md` straight off the row and hands it to the
+    QA, technical-design and risk agents as context — a pure pass-through with
+    no parsing, so what it gets is exactly what the runner stored. Pin the whole
+    chain end to end (model output → normalise → row) against the golden brief,
+    so a change to either half of the LLM/skill split shows up here.
+    """
+    from app import evidence_kg
+
+    _seed_template(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], slug="acme", company_id="ent-A")
+    facade = __import__("app.graph", fromlist=["GraphFacade"]).GraphFacade()
+    theme, _hyp, _sigs = _seed_theme_hypothesis(facade)
+    brief_id = _seed_brief(db_mod, dataset="acme", insights=[
+        {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}])
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
+    )
+    # A chattier model — the exact deviation the content-to-the-LLM move makes
+    # more likely, and the one that renders blank rather than merely ugly.
+    monkeypatch.setattr(
+        evidence_kg, "llm_call",
+        lambda **kw: _llm_result("Here's the brief:\n\n" + _golden_brief()),
+    )
+
+    evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
+
+    row = db_mod.get_evidence(evidence_id)
+    payload = row["payload_md"]
+    assert row["status"] == "ready"
+    assert row["variant"] == "v3"           # what MCP derives content_format from
+    assert payload.startswith("<meta")      # what looksLikeHtmlBrief needs
+    assert "Here's the brief" not in payload
+    assert '<div class="wrap"' in payload
+    assert "--problem:#dd4b32" in payload   # canonical stylesheet injected
+    assert payload.count("<style>") == 1
+    # The prose the downstream agents reason over survived the normalisation.
+    assert "Four HubSpot opportunities worth $1.4M" in payload
+
+
+def test_a_prose_only_generation_fails_the_row_instead_of_storing_it(
+    isolated_settings, monkeypatch
+):
+    """No HTML at all is a failed generation, not a brief. Storing it would
+    render an empty page with nothing logged; failing puts the row in the state
+    the UI already handles with an explicit retry (routes/evidence.py
+    find_latest_failed_evidence)."""
+    from app import evidence_kg
+
+    _seed_template(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], slug="acme", company_id="ent-A")
+    facade = __import__("app.graph", fromlist=["GraphFacade"]).GraphFacade()
+    theme, _hyp, _sigs = _seed_theme_hypothesis(facade)
+    brief_id = _seed_brief(db_mod, dataset="acme", insights=[
+        {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}])
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
+    )
+    monkeypatch.setattr(
+        evidence_kg, "llm_call",
+        lambda **kw: _llm_result("# Evidence\n\nThe signals converge on SSO."),
+    )
+
+    asyncio.run(evidence_kg.generate_evidence_kg(evidence_id, brief_id, 0))
+
+    row = db_mod.get_evidence(evidence_id)
+    assert row["status"] == "failed"
+    assert "EvidenceHtmlError" in (row.get("error") or "")

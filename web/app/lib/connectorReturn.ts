@@ -31,6 +31,46 @@ export type ConnectorConnectedMessage = {
   provider: string
 }
 
+/**
+ * OAuth failure code → the sentence the user actually reads.
+ *
+ * The return page used to print the raw `error` query param
+ * ("Connection failed: unauthorized_client") — a provider's internal
+ * vocabulary rendered at a person. Worse, it was the SAME message for failures
+ * with completely different remedies: a Zoom admin has to approve the app,
+ * versus the user simply clicked Decline, versus something broke.
+ *
+ * The backend now emits stable Sprntly codes rather than provider strings (see
+ * routes/connectors.py::zoom_callback), and this is the map that turns them
+ * into copy. An unknown code falls through to a generic sentence — a code we
+ * do not recognise must NEVER be printed, because the whole point is that
+ * provider strings never reach a screen.
+ */
+const OAUTH_ERROR_COPY: Record<string, string> = {
+  zoom_app_not_approved:
+    "Zoom hasn't approved Sprntly yet. Your Zoom account requires apps to be pre-approved. Ask a Zoom account admin to approve Sprntly on the Zoom Marketplace, then connect again.",
+  zoom_consent_declined:
+    "You declined the Zoom connection. Nothing was connected.",
+  zoom_oauth_failed:
+    "Connecting Zoom didn't finish. Close this tab and try again.",
+}
+
+/**
+ * Human copy for an OAuth failure. `provider` is used only for the generic
+ * fallback sentence — pass the connector's display label when you have one.
+ */
+export function oauthErrorMessage(
+  code: string | null | undefined,
+  provider?: string | null,
+): string {
+  const mapped = code ? OAUTH_ERROR_COPY[code] : undefined
+  if (mapped) return mapped
+  const name = (provider || "").trim()
+  return name
+    ? `Connecting ${name} didn't finish. Close this tab and try again.`
+    : "That connection didn't finish. Close this tab and try again."
+}
+
 /** Only relative, single-leading-slash paths are honoured (open-redirect
  *  guard mirrors the backend's `_is_safe_return_to`). Anything else → null. */
 export function sanitizeReturnTo(value: string | null | undefined): string | null {

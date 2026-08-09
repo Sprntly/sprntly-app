@@ -147,7 +147,11 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
 // connector, BriefChat short-circuits to the "connect a source" page instead
 // (BriefChat.no-connector.dom.test.tsx owns that path), so these seed an
 // evidence connector to reach the greeting under test.
-const WITH_SOURCE = { connectedConnectorIds: ["superset"] }
+// `connectorsHydrated` marks the connectors fetch as having actually answered;
+// without it the surface correctly holds its loading placeholder instead of
+// judging an empty brief against an unknown connector list
+// (BriefChat.initial-load.dom.test.tsx owns that window).
+const WITH_SOURCE = { connectedConnectorIds: ["superset"], connectorsHydrated: true }
 
 // Harness: renders BriefChat plus a hidden button per state we want to set, so
 // each test can flip `content` (briefHydration + briefV2) imperatively.

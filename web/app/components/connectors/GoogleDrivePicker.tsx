@@ -13,7 +13,7 @@
  */
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError,
   apiErrorMessage,
@@ -37,9 +37,16 @@ interface GooglePicker {
     setCallback: (
       cb: (data: PickerResponse) => void,
     ) => GooglePicker["PickerBuilder"]["prototype"]
+    setAppId: (id: string) => GooglePicker["PickerBuilder"]["prototype"]
     build: () => { setVisible: (v: boolean) => void }
   }
-  DocsView: new (viewId?: unknown) => { setMode: (m: unknown) => unknown }
+  // Chainable in the real API; typed as a self-returning builder so folder
+  // options can be applied in sequence.
+  DocsView: new (viewId?: unknown) => {
+    setMode: (m: unknown) => GooglePicker["DocsView"]["prototype"]
+    setIncludeFolders: (v: boolean) => GooglePicker["DocsView"]["prototype"]
+    setSelectFolderEnabled: (v: boolean) => GooglePicker["DocsView"]["prototype"]
+  }
   ViewId: { DOCS: unknown }
   DocsViewMode: { LIST: unknown }
   Feature: { MULTISELECT_ENABLED: unknown }
@@ -117,6 +124,18 @@ export type GoogleDrivePickerViewProps = {
   /** Inline error from token fetch or save, or null. */
   error: string | null
   onAddFiles: () => void
+  /** Drop one file from the connected set, by Drive file id. */
+  onRemoveFile: (id: string) => void
+  /** The file id currently being removed, or null. Tracked separately from
+   * `busy` so a delete reports itself on the row the user clicked and nowhere
+   * else — one shared flag made the Add button announce "Opening…" during a
+   * delete, which is a different action on a different control. */
+  removingId: string | null
+  /** folder id -> the files that folder expanded to on the last sync. An entry
+   * present here IS a folder; absent means a plain file. Written by the sync,
+   * because only Drive knows what is inside a folder and only the sync has
+   * looked. */
+  folderContents?: Record<string, GoogleDrivePickedFile[]>
 }
 
 export function GoogleDrivePickerView({
@@ -125,6 +144,9 @@ export function GoogleDrivePickerView({
   busy,
   error,
   onAddFiles,
+  onRemoveFile,
+  removingId,
+  folderContents,
 }: GoogleDrivePickerViewProps) {
   if (!configured) {
     return (
@@ -141,13 +163,65 @@ export function GoogleDrivePickerView({
     <div className="conn-drive-setup">
       {savedFiles.length > 0 ? (
         <div className="conn-drive-saved">
-          <span className="conn-drive-selected-label">Synced files</span>
+          <span className="conn-drive-selected-label">Selected files</span>
           <ul className="conn-drive-file-list">
-            {savedFiles.map((f) => (
+            {savedFiles.map((f) => {
+              // Only the sync can tell a folder from a file, so presence of a
+              // contents entry is the signal. `undefined` = a plain file;
+              // an empty array = a folder that expanded to nothing readable,
+              // which is a different (and reportable) state.
+              const contents = folderContents?.[f.id]
+              const isFolder = contents !== undefined
+              return (
               <li key={f.id} className="conn-drive-file">
-                {f.name ?? f.id}
+                {isFolder ? (
+                  <details className="conn-drive-folder">
+                    <summary className="conn-drive-file-name">
+                      <span aria-hidden="true">📁 </span>
+                      {f.name ?? f.id}{" "}
+                      <span className="conn-drive-folder-count">
+                        {contents.length === 0
+                          ? "— no readable files"
+                          : `— ${contents.length} file${contents.length === 1 ? "" : "s"}`}
+                      </span>
+                    </summary>
+                    {contents.length > 0 ? (
+                      <ul className="conn-drive-folder-children">
+                        {contents.map((c) => (
+                          <li key={c.id}>{c.name ?? c.id}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="conn-drive-folder-empty">
+                        Google grants Sprntly access to the items you pick, not
+                        to what is inside them — so a folder comes through
+                        empty. Open this folder in the picker and select the
+                        files themselves (you can select several at once).
+                      </p>
+                    )}
+                  </details>
+                ) : (
+                  <span className="conn-drive-file-name">{f.name ?? f.id}</span>
+                )}
+                <button
+                  type="button"
+                  className="conn-drive-file-remove"
+                  // Labelled by NAME, not "this file": a screen reader hears
+                  // these as a list and needs to tell them apart.
+                  aria-label={
+                    removingId === f.id
+                      ? `Removing ${f.name ?? f.id}`
+                      : `Remove ${f.name ?? f.id}`
+                  }
+                  title={removingId === f.id ? "Removing…" : "Remove"}
+                  disabled={busy || removingId !== null}
+                  onClick={() => onRemoveFile(f.id)}
+                >
+                  {removingId === f.id ? "…" : "×"}
+                </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
         </div>
       ) : (
@@ -166,7 +240,10 @@ export function GoogleDrivePickerView({
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          disabled={busy}
+          // Disabled during a remove — both actions POST the whole list, so
+          // letting them overlap races one save against the other — but the
+          // LABEL never changes for someone else's action.
+          disabled={busy || removingId !== null}
           onClick={onAddFiles}
         >
           {busy ? "Opening…" : "Add Drive files"}
@@ -176,21 +253,68 @@ export function GoogleDrivePickerView({
   )
 }
 
+/**
+ * Union of the already-saved files and the newly picked ones, keyed by id.
+ *
+ * The save endpoint REPLACES the stored list (see
+ * `connectorsApi.saveGoogleDriveFiles`) and the Picker hands back only what was
+ * chosen in THIS session. Posting that raw meant every trip through "Add Drive
+ * files" silently discarded every file added before it — the button said Add
+ * and did Replace, and with no remove control nothing put them back.
+ *
+ * Merged here rather than server-side so the endpoint keeps replace semantics,
+ * which is exactly what the remove control needs: "add" is a property of that
+ * button, not of the route.
+ *
+ * Existing order holds and new files append. Re-picking a file already saved
+ * refreshes its name — it may have been renamed in Drive since — but never
+ * duplicates the row.
+ */
+export function mergePickedFiles(
+  existing: GoogleDrivePickedFile[],
+  picked: GoogleDrivePickedFile[],
+): GoogleDrivePickedFile[] {
+  const byId = new Map<string, GoogleDrivePickedFile>()
+  for (const f of existing) byId.set(f.id, f)
+  for (const f of picked) {
+    const prev = byId.get(f.id)
+    byId.set(f.id, { id: f.id, name: f.name ?? prev?.name })
+  }
+  return [...byId.values()]
+}
+
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
 type Props = {
   dataset: string
   savedFiles?: GoogleDrivePickedFile[]
+  /** folder id -> files it expanded to, straight off the connection config. */
+  folderContents?: Record<string, GoogleDrivePickedFile[]>
   /** Fired after a successful save so the parent can reload connections. */
   onSaved?: () => void
 }
 
-export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Props) {
+export function GoogleDrivePicker({
+  dataset: _dataset,
+  savedFiles,
+  folderContents,
+  onSaved,
+}: Props) {
   const [busy, setBusy] = useState(false)
+  const [removingId, setRemovingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_API_KEY
   const configured = Boolean(apiKey)
+
+  // The Picker's callback fires long after the builder was constructed — the
+  // user is browsing Drive in between — so the saved list is read through a ref
+  // rather than whatever the closure captured at build time. A captured value
+  // would merge against a stale list and drop files added earlier in the visit.
+  const savedFilesRef = useRef<GoogleDrivePickedFile[]>(savedFiles ?? [])
+  useEffect(() => {
+    savedFilesRef.current = savedFiles ?? []
+  }, [savedFiles])
 
   const handleAddFiles = useCallback(async () => {
     if (!apiKey) return
@@ -203,11 +327,23 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
       const picker = window.google?.picker
       if (!picker) throw new Error("Google Picker failed to initialize")
 
-      const view = new picker.DocsView(picker.ViewId.DOCS).setMode(
-        picker.DocsViewMode.LIST,
-      )
+      const view = new picker.DocsView(picker.ViewId.DOCS)
+        .setMode(picker.DocsViewMode.LIST)
+        // Folders are shown so people can BROWSE INTO them and pick the files
+        // inside — the natural way to connect "everything in this folder".
+        .setIncludeFolders(true)
+        // …but deliberately NOT selectable. Verified against a live Drive on
+        // 2026-08-03: under drive.file the Picker grants the folder OBJECT and
+        // nothing beneath it. Listing a granted folder returns zero children
+        // rather than an error, so a picked folder cannot be detected as
+        // broken — it just silently contributes no documents. Letting someone
+        // select one would mean discovering that only later, from an empty
+        // list. Selecting the files themselves grants each of them properly,
+        // and multiselect makes that one trip. Folder-as-a-source needs
+        // drive.readonly, which is a scope decision, not a code one.
+        .setSelectFolderEnabled(false)
 
-      const built = new picker.PickerBuilder()
+      const builder = new picker.PickerBuilder()
         .setDeveloperKey(apiKey)
         .setOAuthToken(token.access_token)
         .addView(view)
@@ -224,7 +360,11 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
             setBusy(true)
             setError(null)
             try {
-              await connectorsApi.saveGoogleDriveFiles({ files })
+              const res = await connectorsApi.saveGoogleDriveFiles({
+                files: mergePickedFiles(savedFilesRef.current, files),
+              })
+              const failure = syncFailureMessage(res.errors)
+              if (failure) setError(failure)
               onSaved?.()
             } catch (e) {
               setError(toMessage(e))
@@ -233,7 +373,18 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
             }
           })()
         })
-        .build()
+
+      // Under the drive.file scope, the Picker must be told which Cloud
+      // project (app) to bind a picked file to — otherwise the file is
+      // picked but never granted to this app, and the backend's later read
+      // fails with "File not found". Skip the call entirely when app_id is
+      // absent/empty rather than passing "" — Google may read an empty
+      // string as a malformed app id rather than as unset.
+      if (token.app_id) {
+        builder.setAppId(token.app_id)
+      }
+
+      const built = builder.build()
 
       built.setVisible(true)
     } catch (e) {
@@ -243,6 +394,36 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
     }
   }, [apiKey, onSaved])
 
+  /**
+   * Disconnect one file. The endpoint replaces the stored list, so "remove" is
+   * a save of everything except this id — the same call the Picker makes.
+   *
+   * The file stops being read, stops re-syncing and leaves the connected set.
+   * Content already ingested into the corpus is NOT purged: `google_drive_sync`
+   * keys `file_mtime`/`kg_file_mtime` by Drive file id and never records which
+   * corpus document that id produced, so there is nothing to look the document
+   * up by. Deleting the wrong document is far worse than leaving one, so this
+   * does the half it can do correctly.
+   */
+  const handleRemoveFile = useCallback(
+    async (id: string) => {
+      const remaining = savedFilesRef.current.filter((f) => f.id !== id)
+      // `removingId`, not `busy`: this is the delete's own progress, and it
+      // belongs to the row that was clicked.
+      setRemovingId(id)
+      setError(null)
+      try {
+        await connectorsApi.saveGoogleDriveFiles({ files: remaining })
+        onSaved?.()
+      } catch (e) {
+        setError(toMessage(e))
+      } finally {
+        setRemovingId(null)
+      }
+    },
+    [onSaved],
+  )
+
   return (
     <GoogleDrivePickerView
       savedFiles={savedFiles ?? []}
@@ -250,6 +431,9 @@ export function GoogleDrivePicker({ dataset: _dataset, savedFiles, onSaved }: Pr
       busy={busy}
       error={error}
       onAddFiles={() => void handleAddFiles()}
+      onRemoveFile={(id) => void handleRemoveFile(id)}
+      removingId={removingId}
+      folderContents={folderContents}
     />
   )
 }
@@ -258,4 +442,16 @@ function toMessage(e: unknown): string {
   if (e instanceof ApiError) return apiErrorMessage(e.status, e.body)
   if (e instanceof Error) return e.message
   return String(e)
+}
+
+/** One-line summary of per-file sync failures returned in a 200 body. */
+export function syncFailureMessage(
+  errors: { name: string; error: string }[] | undefined,
+): string | null {
+  const list = (errors ?? []).filter(
+    (e) => e && typeof e.error === "string" && e.error.length > 0,
+  )
+  if (list.length === 0) return null
+  const first = `${list[0].name}: ${list[0].error}`
+  return list.length === 1 ? first : `${first} (+${list.length - 1} more)`
 }

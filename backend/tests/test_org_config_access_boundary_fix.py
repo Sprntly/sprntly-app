@@ -199,20 +199,36 @@ def test_business_context_refresh_403_when_viewer(isolated_settings, monkeypatch
 
 
 def test_business_context_refresh_runs_for_admin(isolated_settings, monkeypatch):
-    """Admin passes the gate; stub the agent so we assert reachability, not network."""
+    """Admin passes the gate; stub the agent so we assert reachability, not
+    network. The route itself no longer imports run_business_context (it now
+    delegates to app.business_context_refresh_runner.run_business_context_refresh_job,
+    which is run inline-and-awaited under pytest — see
+    routes/business_context.py's `_run_inline_for_tests` seam) — so the stub
+    is applied where the runner actually calls it, mirroring
+    tests/test_business_context_refresh.py's pattern. GraphFacade is stubbed
+    too so building it doesn't require real Supabase-backed config."""
     ctx = company_client(monkeypatch)
     _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="admin")
 
-    import app.routes.business_context as routes
+    import app.business_context_refresh_runner as runner
 
     monkeypatch.setattr(
-        routes,
+        runner,
         "run_business_context",
         lambda facade, company_id: {"version": 1, "fields_filled": []},
     )
+    monkeypatch.setattr(runner, "GraphFacade", lambda *a, **k: object())
+
     r = ctx.client.post("/v1/company/business-context/refresh")
     assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
+    body = r.json()
+    assert body["ok"] is True
+    # Inline-for-tests path awaits the job to completion before responding,
+    # so by the time we get a response the stubbed agent has already "run"
+    # and the row is marked done — not the fire-and-forget "generating"
+    # status production returns.
+    assert body["status"] == "done", body
+    assert body["error"] is None
 
 
 # ─────────────────────── READS stay open to members ───────────────────────

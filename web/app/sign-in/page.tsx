@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
+import { Suspense, useEffect, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { useAuth } from "../lib/auth"
 import {
   authLockoutRemainingMs,
@@ -11,26 +11,102 @@ import {
   validateWorkEmail,
 } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
+import { artifactShareApi } from "../lib/artifactShareApi"
+import { presetActiveWorkspace } from "../context/WorkspaceContext"
+import { getSupabase } from "../lib/supabase/client"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignInView } from "../components/auth/SignInView"
 
 export default function SignInPage() {
+  return (
+    <Suspense
+      fallback={
+        <AuthShell tag="Sign in">
+          <div className="auth-sub">Loading…</div>
+        </AuthShell>
+      }
+    >
+      <SignInForm />
+    </Suspense>
+  )
+}
+
+function SignInForm() {
   const auth = useAuth()
   const router = useRouter()
+  const searchParams = useSearchParams()
+  // An existing account signing in via a shared-artifact link carries the
+  // token on the URL, not in user_metadata — postLoginPath()'s own pending-
+  // share resolution only fires for a token set at SIGN-UP time (a fresh
+  // signup, per the artifact-share flow's other entry point), so it never
+  // sees this one. Resolving it here is the sibling case for a RETURNING
+  // user: same outcome-to-path mapping, applied on top of whatever
+  // postLoginPath() would otherwise return.
+  const shareToken = searchParams.get("share")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forgotMode, setForgotMode] = useState(false)
-  const [forgotSent, setForgotSent] = useState(false)
   const [lockoutMs, setLockoutMs] = useState(0)
+
+  // Best-effort: an invalid/expired token, or any resolve failure, falls
+  // through to the caller's own default path — never strands the user on a
+  // blank screen, and never re-derives the deny reason differently from the
+  // server's own resolve() outcome.
+  // `userId` is passed IN rather than read off `auth` here. On the submit
+  // path this function runs immediately after signInWithPassword resolves,
+  // while the enclosing render's `auth` is still the ANONYMOUS one it closed
+  // over — an `auth.kind === "authed"` test there is false, so the workspace
+  // preset silently never happened unless the auth effect happened to
+  // re-render first. That race decided whether a multi-workspace member
+  // landed on their PRD or on a 404. Callers now supply the id explicitly.
+  async function withShareResolved(
+    defaultPath: string,
+    userId: string | null,
+  ): Promise<string> {
+    if (!shareToken) return defaultPath
+    try {
+      const outcome = await artifactShareApi.resolve(shareToken)
+      if (outcome.outcome === "member") {
+        // A colleague signing in to open a teammate's link. Drop the
+        // `share=` param: keeping it routes them through ArtifactShareGate
+        // into the READ-ONLY guest viewer, which is exactly the bug — they
+        // are a full member and the PRD (and its tickets) must be editable.
+        if (userId) {
+          // Same reason ArtifactShareGate does this: open in the workspace
+          // the artifact lives in, not whichever one they last used.
+          presetActiveWorkspace(userId, outcome.owner_workspace_id)
+        }
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}`
+      }
+      if (outcome.outcome === "guest_view") {
+        // public_id (never artifact_id, the raw sequential id) — see the
+        // prds.public_id migration's own comment.
+        const prdParam = outcome.public_id ?? String(outcome.artifact_id)
+        return `/?prd=${encodeURIComponent(prdParam)}&share=${shareToken}`
+      }
+      if (outcome.outcome === "blocked") {
+        return `/not-authorized?share=${shareToken}&reason=${outcome.reason}`
+      }
+    } catch {
+      /* resolve failed — fall through to defaultPath */
+    }
+    return defaultPath
+  }
 
   useEffect(() => {
     if (auth.kind === "authed") {
-      void auth.postLoginPath().then((path) => router.replace(path))
+      const userId = auth.user.id
+      void auth
+        .postLoginPath()
+        .then((path) => withShareResolved(path, userId))
+        .then((path) => router.replace(path))
     }
-  }, [auth, router])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth, router, shareToken])
 
   useEffect(() => {
     setLockoutMs(authLockoutRemainingMs())
@@ -51,7 +127,18 @@ export default function SignInPage() {
     try {
       await auth.signInWithPassword(email, password)
       clearSignInAttempts()
-      router.replace(await auth.postLoginPath())
+      const defaultPath = await auth.postLoginPath()
+      // Read the id from the freshly-established session rather than from
+      // `auth`, which is still this render's anonymous snapshot — see
+      // withShareResolved's own note. Best-effort: a failure here costs the
+      // workspace preset, never the sign-in.
+      let userId: string | null = null
+      try {
+        userId = (await getSupabase().auth.getUser()).data.user?.id ?? null
+      } catch {
+        /* preset is an optimisation, not a gate */
+      }
+      router.replace(await withShareResolved(defaultPath, userId))
       // Stay in the submitting state — the button keeps its loading label
       // until navigation unmounts this page.
     } catch (e) {
@@ -76,12 +163,11 @@ export default function SignInPage() {
     setSubmitting(true)
     try {
       await auth.resetPassword(email)
-      setForgotSent(true)
     } catch {
-      setForgotSent(true)
-    } finally {
-      setSubmitting(false)
+      // Swallow either way — never reveal whether the address is registered.
     }
+    // The recovery email carries a 6-digit code; /reset-password collects it.
+    router.push(`/reset-password?email=${encodeURIComponent(email)}`)
   }
 
   async function onGoogle() {
@@ -109,28 +195,6 @@ export default function SignInPage() {
       <AuthShell tag="Sign in">
         <div className="auth-h">Sign-in <em>not configured.</em></div>
         <div className="auth-sub">Set Supabase env vars in web/.env.local</div>
-      </AuthShell>
-    )
-  }
-
-  if (forgotSent) {
-    return (
-      <AuthShell tag="Reset password">
-        <div className="auth-h">Check your <em>email.</em></div>
-        <div className="auth-sub">
-          If an account exists for <strong>{email}</strong>, you&apos;ll receive a reset link
-          shortly.
-        </div>
-        <button
-          type="button"
-          className="btn btn-brand btn-block"
-          onClick={() => {
-            setForgotMode(false)
-            setForgotSent(false)
-          }}
-        >
-          Back to sign in
-        </button>
       </AuthShell>
     )
   }

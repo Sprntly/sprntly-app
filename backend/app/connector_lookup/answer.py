@@ -37,6 +37,23 @@ MAX_ITERS = 6
 MAX_TOKENS = 4000
 SKILL_SOURCE = "connector-lookup"
 
+#: Extra loop iterations granted per provider beyond the first. Six iterations
+#: is ample for one source (search, read, done) and thin for three: the model
+#: spends one turn reaching each source before it can follow up on any of them,
+#: so a flat bound quietly converts breadth into shallower coverage — it looks
+#: like the model chose not to dig, when it simply ran out of turns.
+#:
+#: Coverage itself no longer comes out of this budget (the priming sweep in
+#: registry.answer_for_hints reaches the overflow sources in parallel, outside
+#: the loop), so +2 per extra provider buys a search AND a read for each
+#: toolset the loop actually holds, rather than paying for coverage twice.
+ITERS_PER_EXTRA_PROVIDER = 2
+
+#: Hard ceiling regardless of provider count. At MAX_TOOL_PROVIDERS=3 the
+#: formula yields 10, so this binds only if that cap is ever raised — it is the
+#: backstop that stops a future cap change silently buying an expensive loop.
+MAX_ITERS_CEILING = 10
+
 #: Wall-clock budget for the whole lookup, across every tool call. The iteration
 #: bound alone doesn't bound time (6 slow calls × 15s each is a minute and a
 #: half of a user staring at a spinner), so once the budget is spent the tools
@@ -161,6 +178,18 @@ def not_connected_message(
     )
 
 
+def kg_module():
+    """The knowledge-graph toolset, imported lazily.
+
+    Same reason the registry defers its adapter imports: this module is imported
+    on every intercepted question, and the KG package pulls in the graph facade
+    and embeddings. Also the seam tests patch.
+    """
+    from app.connector_lookup import knowledge_graph
+
+    return knowledge_graph
+
+
 def _unavailable_display_names(
     missing: list[LookupProvider], extra: list[str] | None
 ) -> list[str]:
@@ -177,6 +206,8 @@ def _unavailable_display_names(
 def _build_system(
     connected: list[tuple[LookupProvider, LookupSession]],
     unavailable: list[str] | None = None,
+    knowledge_graph: bool = False,
+    primed: bool = False,
 ) -> str:
     """Framework rules + each connected adapter's own block + any honest mode
     notes the session recorded (e.g. Slack's search-vs-channel-read mode), plus
@@ -200,6 +231,26 @@ def _build_system(
             "explicitly in your answer; do not let an answer from the other "
             "source(s) imply you covered this one."
         )
+    if primed:
+        parts.append(
+            "\n## Already gathered for you\n"
+            "The user's turn begins with a LIVE CROSS-SOURCE SWEEP: sources the "
+            "question named that you have NO tool for here, already searched for "
+            "you in parallel just before this loop started. Treat it as real, "
+            "current data and cite it by source exactly as you would a tool "
+            "result — those sources ARE covered, so never say you did not check "
+            "them.\n"
+            "Two limits it states about itself and you must respect: it is a "
+            "KEYWORD probe, so a source listed as returning nothing means "
+            "'nothing matching those words', never 'it did not happen'; and any "
+            "source it names as uncovered really was not read. You cannot drill "
+            "further into a swept source — if the answer needs more from one, "
+            "say so and invite the user to ask about that source directly."
+        )
+    if knowledge_graph:
+        from app.connector_lookup import knowledge_graph as kg
+
+        parts.append(f"\n## Sprntly knowledge graph\n{kg.SYSTEM}")
     if len(connected) > 1:
         parts.append(
             "\nSeveral sources are connected. Prefer the one the question names; "
@@ -208,7 +259,13 @@ def _build_system(
     return "\n".join(parts)
 
 
-def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadline: float):
+def _make_dispatch(
+    connected: list[tuple[LookupProvider, LookupSession]],
+    deadline: float,
+    *,
+    enterprise_id: str | None = None,
+    knowledge_graph: bool = False,
+):
     """One (name, input) -> str dispatcher over every connected adapter.
 
     Framework guarantees applied on top of whatever the adapter does:
@@ -216,6 +273,11 @@ def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadli
     per-result char cap with an honest truncation marker, the wall-clock budget,
     and a readable error string instead of an exception (run_tool_loop guards
     too; this keeps the message ours).
+
+    The knowledge-graph tool is dispatched here too when enabled. It is not a
+    provider — no session, no OAuth — so it sits beside the owner map rather than
+    inside it, and it is deliberately subject to the SAME wall-clock deadline: a
+    slow KG read late in a loop must not be what makes the user wait.
     """
     owner: dict[str, tuple[LookupProvider, LookupSession]] = {}
     for provider, session in connected:
@@ -224,6 +286,16 @@ def _make_dispatch(connected: list[tuple[LookupProvider, LookupSession]], deadli
 
     def dispatch(name: str, inp: dict) -> str:
         inp = inp if isinstance(inp, dict) else {}
+        if knowledge_graph and name == kg_module().TOOL_NAME:
+            if time.monotonic() > deadline:
+                return (
+                    "(lookup time budget reached — no more fetches. Answer from "
+                    "what you already read, and say it may be incomplete.)"
+                )
+            return cap_text(
+                kg_module().dispatch(enterprise_id or "", name, inp),
+                limit=DEFAULT_RESULT_CHARS,
+            )
         pair = owner.get(name)
         if pair is None:
             return f"(unknown tool {name})"
@@ -260,6 +332,9 @@ def answer(
     exception_text: str | None = None,
     system_text: str | None = None,
     unavailable_names: list[str] | None = None,
+    include_knowledge_graph: bool = False,
+    primed_context: str = "",
+    budget_penalty_s: float = 0.0,
     run_loop=None,
     log=None,
 ) -> dict:
@@ -281,6 +356,28 @@ def answer(
     answer says what it did not cover, instead of quietly answering from half the
     sources and sounding complete.
 
+    `primed_context` is a cross-source digest ALREADY GATHERED before the loop
+    started — the parallel keyword sweep registry.answer_for_hints runs over the
+    named sources that did not fit `MAX_TOOL_PROVIDERS`. It rides the user turn
+    beside the question so the model opens the loop already holding every named
+    source's headline results, and spends its iterations drilling rather than
+    reaching. An adapter passing verbatim `system_text` (Jira) never receives it,
+    for the same reason it never receives the KG tool: its prompt predates the
+    concept and would not tell the model what the block is.
+
+    `budget_penalty_s` shortens the wall clock by however long the caller already
+    spent gathering `primed_context`. Breadth therefore costs the user nothing in
+    worst-case latency — a wide lookup and a narrow one share one ceiling instead
+    of stacking two.
+
+    `include_knowledge_graph` adds Sprntly's own extracted knowledge as a further
+    tool (connector_lookup/knowledge_graph.py). OFF by default, and deliberately
+    so: a question that NAMES a source is asking about that source, and the
+    adapters that pass their own `system_text` (Jira) would otherwise be handed a
+    tool their prompt never mentions. The document-intent path turns it on,
+    because a question that names no source at all has no way to say which of the
+    two readers it meant.
+
     Never raises — a chat answer degrades, it does not error.
     """
     loop = run_loop or _default_run_loop
@@ -297,22 +394,56 @@ def answer(
         )
 
     meta: dict = {}
-    deadline = time.monotonic() + WALL_CLOCK_BUDGET_S
+    # Whatever the caller already spent priming comes OUT of this budget, not on
+    # top of it, so a wide lookup's ceiling equals a narrow one's. Floored well
+    # above zero: a penalty larger than the budget must still leave the loop
+    # enough time to answer from what priming already found.
+    # The floor is `min(budget, 15)`, not a flat 15: it guarantees a penalty can
+    # never starve the loop below 15s, while never GRANTING more than the
+    # configured budget. A flat floor would silently override a deliberately
+    # tiny WALL_CLOCK_BUDGET_S — which is exactly how the existing
+    # expired-deadline test drives this code.
+    deadline = time.monotonic() + max(
+        WALL_CLOCK_BUDGET_S - max(budget_penalty_s, 0.0),
+        min(WALL_CLOCK_BUDGET_S, 15.0),
+    )
     tools: list[dict] = []
     for provider, _session in connected:
         tools.extend(provider.tools())
+    # An adapter passing verbatim `system_text` (Jira) has a prompt that predates
+    # this tool and never mentions it, so it does not get it — offering a tool the
+    # system block does not describe is how a loop wastes an iteration.
+    kg_on = include_knowledge_graph and not system_text
+    if kg_on:
+        tools.extend(kg_module().TOOLS)
+    # Same rule as the KG tool and for the same reason: a verbatim system prompt
+    # cannot explain a block it was written before.
+    primed = primed_context if (primed_context and not system_text) else ""
+    max_iters = min(
+        MAX_ITERS + ITERS_PER_EXTRA_PROVIDER * max(len(connected) - 1, 0),
+        MAX_ITERS_CEILING,
+    )
     try:
         text = loop(
             system=system_text or _build_system(
                 connected,
                 unavailable=_unavailable_display_names(missing, unavailable_names),
+                knowledge_graph=kg_on,
+                primed=bool(primed),
             ),
-            user=_render_history(history) + f"Question: {question}",
+            user=(
+                _render_history(history)
+                + (f"{primed}\n\n---\n\n" if primed else "")
+                + f"Question: {question}"
+            ),
             tools=tools,
-            dispatch=_make_dispatch(connected, deadline),
+            dispatch=_make_dispatch(
+                connected, deadline,
+                enterprise_id=enterprise_id, knowledge_graph=kg_on,
+            ),
             model=ANSWER_MODEL,
             max_tokens=MAX_TOKENS,
-            max_iters=MAX_ITERS,
+            max_iters=max_iters,
             meta_out=meta,
         )
     except Exception:  # noqa: BLE001 — never break the chat

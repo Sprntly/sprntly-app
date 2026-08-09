@@ -1111,3 +1111,206 @@ def test_expire_signals_is_tenant_scoped(isolated_settings):
     assert facade.expire_signals("co-e1", [mine.id]) == 1
     assert facade.active_signals("co-e1") == []
     assert facade.expire_signals("co-e1", []) == 0
+
+
+# ── 13. company-root wiring ─────────────────────────────────────────────────
+
+def _company_informs_edges(facade: GraphFacade, company_id: str):
+    """{signal_id: Relationship} over every INFORMS edge from a signal to this
+    tenant's `company` root."""
+    [company] = facade.query_entities(company_id, type="company")
+    return {
+        e.source_id: e
+        for e in facade.edges_to(company_id, company.id, type="INFORMS")
+        if e.source_kind == "signal"
+    }
+
+
+def test_ingest_wires_signals_to_company_root(isolated_settings):
+    """A roadmap upload gets a `company` root entity (find-or-create) and every
+    resulting signal gets an INFORMS edge to it — same edge semantics as
+    `business_context_projection`."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root")
+    _store_roadmap("co-root", _roadmap_text("A", "B"), workspace_id="ws-1")
+    facade = GraphFacade()
+
+    with _Extraction():
+        out = rm.ingest_roadmap("co-root", "ws-1", facade=facade)
+
+    assert out["company_wired"] == 2
+    company = facade.query_entities("co-root", type="company")
+    assert len(company) == 1
+
+    sigs = _roadmap_signals(facade, "co-root")
+    edges = _company_informs_edges(facade, "co-root")
+    assert set(edges) == {s.id for s in sigs.values()}
+    for e in edges.values():
+        assert e.target_id == company[0].id
+        assert e.target_kind == "entity"
+        assert e.source_kind == "signal"
+
+
+def test_replace_does_not_leave_stale_company_root_edges(isolated_settings):
+    """Re-uploading a changed roadmap (the expire/replace path) must not leave
+    an INFORMS edge pointing at superseded content AS IF still current: the
+    edge from a dropped bet's signal persists (bitemporal history, not a
+    delete), but the signal it targets resolves as retired — the same
+    transitive-retirement pattern every other signal-sourced edge in this KG
+    relies on (evidence_kg / retrieval / convergence all resolve the edge's
+    source signal and check `signal_is_retired` before trusting it)."""
+    from app.graph.types import signal_is_retired
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root2")
+    facade = GraphFacade()
+
+    _store_roadmap("co-root2", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        v1 = rm.ingest_roadmap("co-root2", "ws-1", facade=facade)
+    assert v1["company_wired"] == 2
+    a_id = _roadmap_signals(facade, "co-root2")[_BETS["A"][0]].id
+    b_id = _roadmap_signals(facade, "co-root2")[_BETS["B"][0]].id
+
+    _store_roadmap("co-root2", _roadmap_text("B", "C"), workspace_id="ws-1", version=2)
+    with _Extraction():
+        v2 = rm.ingest_roadmap("co-root2", "ws-1", facade=facade)
+    assert v2["expired"] == 1        # A dropped
+    assert v2["company_wired"] == 1  # only C is a NEW edge; B's edge already existed
+
+    edges = _company_informs_edges(facade, "co-root2")
+    # A's edge still exists (history preserved)...
+    assert a_id in edges
+    # ...but resolving through it lands on a RETIRED signal.
+    a_sig = facade.get_signal("co-root2", a_id)
+    assert signal_is_retired(a_sig.properties) is True
+    # B (carried over) and C (new) both have live, current edges.
+    b_sig = facade.get_signal("co-root2", b_id)
+    c_id = _roadmap_signals(facade, "co-root2")[_BETS["C"][0]].id
+    assert signal_is_retired(b_sig.properties) is False
+    assert b_id in edges and c_id in edges
+    c_sig = facade.get_signal("co-root2", c_id)
+    assert signal_is_retired(c_sig.properties) is False
+    # The "live company-root picture" (edge -> non-retired signal) reflects
+    # exactly the new version, not the old one.
+    live_via_root = {
+        sid for sid, e in edges.items()
+        if not signal_is_retired(facade.get_signal("co-root2", sid).properties)
+    }
+    assert live_via_root == {b_id, c_id}
+
+
+def test_company_root_wiring_is_idempotent_across_reruns(isolated_settings):
+    """A bet carried over verbatim (duplicate-skipped, same content-keyed id)
+    must not accumulate a second INFORMS edge to the company root on a later
+    version bump — it already has one from when it was first wired."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root3")
+    facade = GraphFacade()
+
+    _store_roadmap("co-root3", _roadmap_text("A", "B"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-root3", "ws-1", facade=facade)
+    b_id = _roadmap_signals(facade, "co-root3")[_BETS["B"][0]].id
+    company = facade.query_entities("co-root3", type="company")[0]
+    assert len(facade.edges_from("co-root3", b_id, type="INFORMS")) == 1
+
+    # v2 keeps B, adds C. B is duplicate-skipped by the extractor.
+    _store_roadmap("co-root3", _roadmap_text("B", "C"), workspace_id="ws-1", version=2)
+    with _Extraction():
+        v2 = rm.ingest_roadmap("co-root3", "ws-1", facade=facade)
+
+    assert v2["duplicates"] == 1
+    assert v2["company_wired"] == 1  # only C, not B again
+    b_edges = facade.edges_from("co-root3", b_id, type="INFORMS")
+    assert len(b_edges) == 1 and b_edges[0].target_id == company.id
+
+
+def test_company_root_created_once_across_roadmap_reruns(isolated_settings):
+    """A second ingest run (a real content change, not the ledger no-op) must
+    not create a second `company` entity — find-or-create, same as every other
+    caller of `ensure_company_entity`."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root4")
+    facade = GraphFacade()
+
+    _store_roadmap("co-root4", _roadmap_text("A"), workspace_id="ws-1", version=1)
+    with _Extraction():
+        rm.ingest_roadmap("co-root4", "ws-1", facade=facade)
+    _store_roadmap("co-root4", _roadmap_text("A", "D"), workspace_id="ws-1", version=2)
+    with _Extraction():
+        rm.ingest_roadmap("co-root4", "ws-1", facade=facade)
+
+    assert len(facade.query_entities("co-root4", type="company")) == 1
+
+
+def test_theme_entities_are_not_wired_to_company_root(isolated_settings):
+    """Theme entities are a cross-source concept the shared extractor creates
+    for every ingestion path (connectors, uploads, roadmap alike) — this
+    ticket wires roadmap-derived SIGNALS only, not the generic theme nodes,
+    to avoid changing the extractor's behavior for every other caller."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root5")
+    _store_roadmap("co-root5", _roadmap_text("A"), workspace_id="ws-1")
+    facade = GraphFacade()
+    with _Extraction():
+        rm.ingest_roadmap("co-root5", "ws-1", facade=facade)
+
+    themes = facade.query_entities("co-root5", type="theme")
+    assert themes, "the fixture roadmap should have produced at least one theme"
+    for theme in themes:
+        assert facade.edges_from("co-root5", theme.id, type="SCOPED_TO") == []
+
+
+def test_roadmap_ingest_still_does_not_trigger_triage(isolated_settings):
+    """Regression guard: company-root wiring must not change roadmap's
+    deliberate triage-pass exclusion (a documented, sound gap — not something
+    this ticket touches)."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-root6")
+    _store_roadmap("co-root6", _roadmap_text("A"), workspace_id="ws-1")
+    facade = GraphFacade()
+
+    real_extract_document = rm.extract_document
+    calls: list[dict] = []
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real_extract_document(*args, **kwargs)
+
+    with _Extraction():
+        with patch.object(rm, "extract_document", side_effect=spy):
+            rm.ingest_roadmap("co-root6", "ws-1", facade=facade)
+
+    assert calls, "extract_document was not called"
+    for kwargs in calls:
+        assert kwargs.get("triage", False) is False
+
+
+def test_roadmap_ingest_routes_through_the_roadmap_extraction_skill(
+        isolated_settings):
+    """The dedicated method (one signal per initiative, normalized
+    initiative_status/target_period, kind never deal_blocker) only applies
+    if the call site actually passes it — regression guard for the wiring."""
+    db = isolated_settings["supabase"]
+    _seed_company(db, "co-skill")
+    _store_roadmap("co-skill", _roadmap_text("A"), workspace_id="ws-1")
+    facade = GraphFacade()
+
+    real_extract_document = rm.extract_document
+    calls: list[dict] = []
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real_extract_document(*args, **kwargs)
+
+    with _Extraction():
+        with patch.object(rm, "extract_document", side_effect=spy):
+            rm.ingest_roadmap("co-skill", "ws-1", facade=facade)
+
+    assert calls, "extract_document was not called"
+    for kwargs in calls:
+        assert kwargs.get("skill_id") == "roadmap-extraction"
+
+    [signal] = _roadmap_signals(facade, "co-skill").values()
+    assert signal.skill_id == "roadmap-extraction"

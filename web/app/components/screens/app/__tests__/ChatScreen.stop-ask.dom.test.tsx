@@ -148,13 +148,13 @@ describe("ChatScreen — Stop an in-flight ask", () => {
     renderScreen()
     await screen.findByText("first question")
 
-    const composer = () => document.querySelector(".bc-composer") as HTMLElement
+    const composer = () => document.querySelector(".cx") as HTMLElement
     // Before sending: Send is present, no Stop.
     expect(within(composer()).queryByLabelText("Send")).toBeTruthy()
     expect(within(composer()).queryByLabelText("Stop generating")).toBeNull()
 
     // Send a question — the mocked ask parks in flight (never auto-resolves).
-    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "a slow question to stop" } })
     })
@@ -185,11 +185,14 @@ describe("ChatScreen — Stop an in-flight ask", () => {
       expect(within(composer()).queryByLabelText("Send")).toBeTruthy()
       expect(within(composer()).queryByLabelText("Stop generating")).toBeNull()
     })
-    // 4) The in-flight turn shows the muted stopped note (not an error bubble).
+    // 4) The in-flight turn shows the muted stopped note (not an error bubble)…
     await waitFor(() => {
-      expect(document.querySelector(".bc-stopped")?.textContent).toMatch(/stopped this response/i)
+      expect(document.querySelector(".cw-stopped")?.textContent).toMatch(/stopped this response/i)
     })
     expect(document.querySelector(".bc-error")).toBeNull()
+    // …and a way back. A stopped turn used to be a dead end: the question was
+    // still on screen with no affordance to re-run it.
+    expect(screen.getByRole("button", { name: "Ask again" })).toBeTruthy()
 
     // Cleanly settle the parked ask promise so no unhandled rejection lingers.
     resolveAsk?.({ answer: "late", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" })

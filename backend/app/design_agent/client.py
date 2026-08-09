@@ -1,10 +1,17 @@
-"""Anthropic client factory for the Design Agent module.
+"""LLM client factory for the Design Agent module.
 
 Per AD16, all Design Agent LLM calls go through this factory so the
 DESIGN_AGENT_ANTHROPIC_API_KEY environment variable can attribute spend +
 support per-key rate-limit/rotation at handoff. Fallback to the shared
 ANTHROPIC_API_KEY is allowed (local dev only) and emits a one-shot startup
 warning the first time it's used.
+
+That dedicated key is an ANTHROPIC platform key, so it applies only when the
+acting company runs on Anthropic. A company on OpenAI gets an
+`OpenAIMessagesClient` here — its own key when it has one, `OPENAI_API_KEY`
+otherwise — and the design-agent key is simply not part of that path. The rest
+of the module (agent_loop, the tool dispatch, the vite build) is unchanged:
+both clients present the same `messages` surface.
 """
 from __future__ import annotations
 
@@ -17,6 +24,8 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.llm_metering import install_metering
+from app.llm_providers import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from app.openai_client import OpenAIMessagesClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +46,18 @@ def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     prototype generation/iteration lands in `llm_usage_events` on the same
     footing as every other surface. `key_mode` records whose key is billed."""
     client = Anthropic(api_key=api_key, max_retries=0)
-    return install_metering(client, key_mode)
+    return install_metering(client, key_mode, provider=PROVIDER_ANTHROPIC)
+
+
+@lru_cache(maxsize=16)
+def _openai_client_for_key(
+    api_key: str, key_mode: str = "platform"
+) -> OpenAIMessagesClient:
+    """The OpenAI counterpart of `_client_for_key`, cached and metered the same
+    way. No explicit timeout, for the same reason: the design agent's tool loops
+    are long and the per-request default is what the Anthropic path uses too."""
+    client = OpenAIMessagesClient(api_key=api_key)
+    return install_metering(client, key_mode, provider=PROVIDER_OPENAI)
 
 
 def _platform_key() -> str | None:
@@ -61,28 +81,37 @@ def _platform_key() -> str | None:
     return None
 
 
-def get_design_agent_client() -> Anthropic:
-    """Return a cached Anthropic client for Design Agent calls.
+def get_design_agent_client() -> Anthropic | OpenAIMessagesClient:
+    """Return a cached client for Design Agent calls, for the acting company's
+    provider.
 
-    Routes through app.llm_keys.resolve_llm_api_key: when the acting company has
-    its own Claude key, ALL Design Agent calls use THAT key (overriding both
-    DESIGN_AGENT_ANTHROPIC_API_KEY and ANTHROPIC_API_KEY); when a bound company
-    has no key and platform fallback isn't allowed, it raises. Raises
+    Routes through app.llm_keys.resolve_llm_client_config: when the acting
+    company has its own key, ALL Design Agent calls use THAT key (on Anthropic
+    it overrides both DESIGN_AGENT_ANTHROPIC_API_KEY and ANTHROPIC_API_KEY);
+    otherwise the platform key for whichever provider the company chose. Raises
     HTTPException(500) at request time when no key is available at all.
     """
-    from app.llm_keys import resolve_llm_api_key_with_mode
+    from app.llm_keys import resolve_llm_client_config
 
-    key, key_mode = resolve_llm_api_key_with_mode(_platform_key())
+    provider, key, key_mode = resolve_llm_client_config(
+        anthropic_platform_key=_platform_key(),
+        openai_platform_key=(settings.openai_api_key or "").strip() or None,
+    )
     if not key:
         raise HTTPException(
             status_code=500,
             detail=(
-                "Design Agent is not configured: set "
+                "Design Agent is not configured: set OPENAI_API_KEY in the "
+                "backend env, or add a workspace OpenAI key in Settings → Admin."
+                if provider == PROVIDER_OPENAI
+                else "Design Agent is not configured: set "
                 "DESIGN_AGENT_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY as "
                 "fallback) in the backend env, or add a workspace Claude key "
                 "in Settings → Admin."
             ),
         )
+    if provider == PROVIDER_OPENAI:
+        return _openai_client_for_key(key, key_mode)
     return _client_for_key(key, key_mode)
 
 
@@ -92,3 +121,4 @@ def reset_design_agent_client() -> None:
     with _lock:
         _fallback_warned = False
     _client_for_key.cache_clear()
+    _openai_client_for_key.cache_clear()

@@ -39,6 +39,28 @@ function storeActiveWorkspace(userId: string, id: string | null) {
   }
 }
 
+/**
+ * Choose which workspace this provider will pick up on its NEXT initial load,
+ * from outside the provider tree.
+ *
+ * ArtifactShareGate is the caller: it resolves a share/bare link, finds the
+ * visitor is a real member, and hands them to the app via a full page load
+ * (mirroring JoinConfirmModal's post-join reload). That load re-runs
+ * WorkspaceProvider from scratch, so the only way to say "open in the
+ * workspace the artifact actually lives in" is to seed the same stored key
+ * the provider reads — otherwise a member of several workspaces lands in
+ * whichever one they used last and the PRD 404s.
+ *
+ * Deliberately writes the SAME key `storeActiveWorkspace` owns rather than a
+ * parallel hand-off channel. A no-op when either argument is empty; the
+ * provider validates the id against the caller's real workspace list on load
+ * and falls back to the default, so a stale value can never grant anything.
+ */
+export function presetActiveWorkspace(userId: string, workspaceId: string | null) {
+  if (!userId || !workspaceId) return
+  storeActiveWorkspace(userId, workspaceId)
+}
+
 type WorkspaceCtx = {
   /**
    * True only on the FIRST authed load (no profile/workspace fetched yet).

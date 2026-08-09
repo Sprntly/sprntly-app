@@ -42,7 +42,12 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
+from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
+from app.call_index import CALL_PROVIDERS as CALL_INDEX_PROVIDERS
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,9 @@ def _refresh_all_company_connectors() -> None:
             )
             continue
         slack_kicked = False
+        # One call-index kick per company per cycle, however many call sources
+        # it has connected — see the branch below.
+        call_index_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
@@ -150,6 +158,30 @@ def _refresh_all_company_connectors() -> None:
                         company_id,
                     )
                 continue
+            # A CALL SOURCE (fireflies or zoom): refresh the CALL INDEX
+            # alongside the KG pull below. They fill different things —
+            # kickoff_sync writes distilled summaries into the graph, this
+            # writes the per-call metadata chat answers listings from — and
+            # only the index can answer "which calls last week" without a
+            # 168-second corpus pass.
+            #
+            # Not `continue`: both providers ARE in PULLERS, so they must still
+            # fall through to the KG kickoff below.
+            #
+            # Kicked at most ONCE per company per cycle, whichever call sources
+            # it has. `sync_all_sources` walks every connected one in a single
+            # pass, so a company running both Fireflies AND Zoom gets both
+            # indexed by one kickoff — while two kickoffs would race two threads
+            # of the same name onto the same company and do the work twice.
+            if provider in CALL_INDEX_PROVIDERS and not call_index_kicked:
+                call_index_kicked = True
+                try:
+                    kickoff_call_index_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: call-index kickoff raised for %s",
+                        company_id,
+                    )
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).
@@ -524,18 +556,23 @@ async def _run_scheduled_cycle() -> None:
 
 
 async def _run_ticket_sync_cycle() -> None:
-    """Two-way ticket sync tick: for every PRD whose tickets were pushed to a
-    tracker (prd_ticket_sync rows with auto_sync=true), push local edits (web +
-    MCP, merged from ticket_edits) and pull tracker status back.
+    """Two-way ticket sync tick: for every ARTIFACT whose tickets were pushed to
+    a tracker (prd_ticket_sync rows with auto_sync=true — PRDs and standalone
+    ticket sets alike), push local edits (web + MCP, merged from ticket_edits)
+    and pull tracker status back.
 
-    Per-row isolated: one PRD failing (disconnected tracker, deleted list,
+    Per-row isolated: one artifact failing (disconnected tracker, deleted list,
     rate limit) records last_error on its row and the loop moves on. Rows with
     a recent in-flight sync (an ad-hoc button run) are skipped, not doubled.
     The blocking tracker HTTP work runs off the event loop, one row at a time —
     deliberately serial so a big tenant can't burst-hammer tracker APIs; the
-    interval (TICKET_SYNC_INTERVAL_MINUTES) is the rate-limit relief valve."""
-    from app.db.ticket_sync import list_auto_sync_configs
-    from app.stories.sync import run_prd_sync, sync_in_flight
+    interval (TICKET_SYNC_INTERVAL_MINUTES) is the rate-limit relief valve.
+
+    The row says which artifact it belongs to (`scope_of_config`); a row naming
+    neither owner is skipped rather than guessed at, so malformed data can never
+    send one artifact's edits into another's tracker project."""
+    from app.db.ticket_sync import list_auto_sync_configs, scope_of_config
+    from app.stories.sync import run_ticket_sync, sync_in_flight
 
     try:
         configs = list_auto_sync_configs() or []
@@ -544,20 +581,22 @@ async def _run_ticket_sync_cycle() -> None:
         return
 
     for cfg in configs:
-        company_id, prd_id = cfg.get("company_id"), cfg.get("prd_id")
-        if not company_id or prd_id is None:
+        company_id = cfg.get("company_id")
+        scope = scope_of_config(cfg)
+        if not company_id or scope is None:
             continue
         if sync_in_flight(cfg):
             continue
         try:
-            result = await asyncio.to_thread(run_prd_sync, company_id, prd_id)
+            result = await asyncio.to_thread(run_ticket_sync, company_id, scope)
             logger.info(
-                "ticket sync: prd=%s provider=%s → pushed=%s errors=%s",
-                prd_id, cfg.get("provider"),
+                "ticket sync: %s=%s provider=%s → pushed=%s errors=%s",
+                scope.kind, scope.id, cfg.get("provider"),
                 result.get("pushed"), result.get("push_errors"),
             )
         except Exception as exc:  # noqa: BLE001 — per-row isolation
-            logger.warning("ticket sync failed for prd %s: %s", prd_id, exc)
+            logger.warning("ticket sync failed for %s %s: %s",
+                           scope.kind, scope.id, exc)
 
 
 def _run_orphan_ask_job_sweep() -> None:
@@ -568,7 +607,11 @@ def _run_orphan_ask_job_sweep() -> None:
     task silently — same shared-Supabase age-gating rationale, see
     db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
     abandoned the same way (a stale 'running' row there also wedges the
-    double-trigger guard, so healing it is what lets a retry through)."""
+    double-trigger guard, so healing it is what lets a retry through), and
+    business-context refreshes abandoned in 'generating' (companies.
+    business_context_refresh_status) the same way — a stale row there would
+    otherwise wedge the "Save Company Shape" trigger's start-guard until this
+    sweep or a restart heals it."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -597,6 +640,18 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned company-research run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan company-research sweep failed")
+    try:
+        from app.db.business_context_refresh import (
+            fail_orphan_business_context_refreshes,
+        )
+
+        n = fail_orphan_business_context_refreshes()
+        if n:
+            logger.info(
+                "Failed %d abandoned business-context refresh(es) stuck in "
+                "generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan business-context refresh sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -612,6 +667,51 @@ def _run_jira_personal_data_report() -> None:
         jira_personal_data.run_report_cycle()
     except Exception:  # noqa: BLE001 — compliance job must never crash the scheduler
         logger.exception("jira personal-data report cycle failed")
+
+
+def _run_extraction_eval_cycle() -> None:
+    """Extraction evals (app/graph/evals.py): sample recent extraction
+    output per skill_id, across every company, and check it against the
+    expected shape its producing skill declares. Read-only, sampled, and
+    off the request/ingestion path by construction — this job is the only
+    caller of `run_scheduled_eval_cycle` in this codebase. Fully isolated —
+    a failure here never affects other jobs; per-(company, skill) failures
+    are already isolated inside `run_scheduled_eval_cycle` itself."""
+    try:
+        from app.config import settings
+        from app.graph.evals import run_scheduled_eval_cycle
+
+        totals = run_scheduled_eval_cycle(
+            sample_size=settings.extraction_eval_sample_size
+        )
+        logger.info(
+            "extraction-eval cycle done: companies=%s skills=%s sampled=%s "
+            "findings=%s",
+            totals.get("companies"), totals.get("skills"),
+            totals.get("sampled"), totals.get("findings"),
+        )
+    except Exception:  # noqa: BLE001 — eval job must never crash the scheduler
+        logger.exception("extraction-eval cycle failed")
+
+
+async def _run_skill_source_sync_cycle() -> None:
+    """Re-read every company's synced GitHub skill folders.
+
+    The half of the skills feature that runs without a user: a folder someone
+    registered at import time is re-discovered here, so a skill added to that
+    folder in the repo lands in the library within the interval instead of
+    waiting for someone to reopen the import picker.
+
+    Cheap when idle — `sync_source` short-circuits on an unchanged head SHA, so
+    a quiet folder costs one GitHub request. Fully isolated: per-source failures
+    are swallowed and recorded on the source row inside `sync_all_sources`, and
+    this wrapper is the backstop for anything that escapes it."""
+    try:
+        from app.skills.github_sync import sync_all_sources
+
+        await sync_all_sources()
+    except Exception:  # noqa: BLE001 — sync job must never crash the scheduler
+        logger.exception("skill-source sync cycle failed")
 
 
 def start_scheduler() -> None:
@@ -661,6 +761,19 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(hours=interval_hours),
         id="refresh_connectors",
         name=f"Refresh connector data (every {interval_hours}h)",
+        replace_existing=True,
+    )
+    # Synced skill folders: re-read every registered GitHub folder so a skill
+    # added to one shows up in the library on its own. Half-hourly by default —
+    # much finer than the connector refresh because a method someone just
+    # committed is something they expect to use in the same sitting, and the
+    # unchanged-SHA short-circuit makes an idle tick nearly free.
+    skill_sync_minutes = getattr(settings, "skill_sync_interval_minutes", 30) or 30
+    _scheduler.add_job(
+        _run_skill_source_sync_cycle,
+        trigger=IntervalTrigger(minutes=skill_sync_minutes),
+        id="skill_source_sync",
+        name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
         replace_existing=True,
     )
     # Third job: onboarding drip / nudge emails (v0 checklist 2.1). Opt-in via
@@ -756,6 +869,19 @@ def start_scheduler() -> None:
             name=f"Ticket tracker two-way sync (every {ts_mins}m)",
             replace_existing=True,
         )
+
+    # Extraction evals: sampled structural check of recent extraction output
+    # against each vendored connector-extraction skill's declared shape
+    # contract. Read-only + sampled, own cadence decoupled from the connector
+    # refresh interval above.
+    eval_hours = getattr(settings, "extraction_eval_interval_hours", 24) or 24
+    _scheduler.add_job(
+        _run_extraction_eval_cycle,
+        trigger=IntervalTrigger(hours=eval_hours),
+        id="extraction_eval",
+        name=f"Extraction evals — sampled shape check (every {eval_hours}h)",
+        replace_existing=True,
+    )
 
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and

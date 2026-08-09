@@ -9,9 +9,52 @@ import {
   CONNECTOR_STORAGE_KEY,
   broadcastConnected,
   handleConnectorReturn,
+  oauthErrorMessage,
   sanitizeReturnTo,
   writeStorageSignal,
 } from "../connectorReturn"
+
+describe("oauthErrorMessage", () => {
+  it("tells an approval problem apart from a decline", () => {
+    // Three failures, three remedies. One catch-all would tell a user who
+    // clicked Decline to go and interrupt a Zoom admin.
+    const notApproved = oauthErrorMessage("zoom_app_not_approved")
+    expect(notApproved).toContain("Zoom hasn't approved Sprntly yet")
+    expect(notApproved).toContain("Zoom Marketplace")
+
+    const declined = oauthErrorMessage("zoom_consent_declined")
+    expect(declined).toBe(
+      "You declined the Zoom connection. Nothing was connected.",
+    )
+    expect(declined).not.toContain("admin")
+
+    expect(oauthErrorMessage("zoom_oauth_failed")).toBe(
+      "Connecting Zoom didn't finish. Close this tab and try again.",
+    )
+  })
+
+  it("never prints an unrecognised code", () => {
+    // The entire point of the backend sending a stable Sprntly code is that a
+    // provider's own vocabulary — "unauthorized_client", "invalid_grant" —
+    // never reaches a screen.
+    const msg = oauthErrorMessage("unauthorized_client", "Zoom")
+    expect(msg).toBe(
+      "Connecting Zoom didn't finish. Close this tab and try again.",
+    )
+    expect(msg).not.toContain("unauthorized_client")
+
+    const noProvider = oauthErrorMessage("some_new_code_we_dont_know")
+    expect(noProvider).toBe(
+      "That connection didn't finish. Close this tab and try again.",
+    )
+    expect(noProvider).not.toContain("some_new_code")
+  })
+
+  it("handles a missing code", () => {
+    expect(oauthErrorMessage(null, "Zoom")).toContain("Connecting Zoom")
+    expect(oauthErrorMessage(undefined)).toContain("didn't finish")
+  })
+})
 
 afterEach(() => {
   vi.restoreAllMocks()

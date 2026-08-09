@@ -518,3 +518,110 @@ def test_chat_task_prd_grounds_on_topic_retrieval(isolated_settings, facade, mon
            if r["decision_type"] == "generate_prd"]
     assert gen[0]["factors"]["grounding"] == "kg_topic"
     assert gen[0]["kg_refs"] != []
+
+
+# ─────────── decision chain: Hypothesis -PROMOTED_TO-> Decision -RESULTED_IN-> Artifact ───────────
+# Trigger: "Generate PRD" (this flow) resolving a real hypothesis via the KG
+# trail; the PRD reaching status='ready' (this same call) is the second
+# trigger, so both fire together from `prd_runner._finalize_part_a`.
+
+
+def test_generate_prd_writes_decision_and_artifact_from_hypothesis(
+    isolated_settings, facade, monkeypatch,
+):
+    """The tier-1 KG-trail path (a real resolved hypothesis) creates a
+    `decision` Entity + PROMOTED_TO edge from the hypothesis, and an
+    `artifact` Entity + RESULTED_IN edge from the decision — right type,
+    right properties, right edge source_kind/target_kind."""
+    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    promo = facade.edges_from(COMPANY_ID, hyp.id, type="PROMOTED_TO")
+    assert len(promo) == 1
+    assert promo[0].source_kind == "entity" and promo[0].source_id == hyp.id
+    assert promo[0].target_kind == "entity"
+    decision = facade.get_entity(COMPANY_ID, promo[0].target_id)
+    assert decision is not None
+    assert decision.type == "decision"
+    assert decision.properties["hypothesis_id"] == hyp.id
+    assert decision.properties["prd_id"] == prd_id
+
+    resulted = facade.edges_from(COMPANY_ID, decision.id, type="RESULTED_IN")
+    assert len(resulted) == 1
+    assert resulted[0].source_kind == "entity" and resulted[0].source_id == decision.id
+    assert resulted[0].target_kind == "entity"
+    artifact = facade.get_entity(COMPANY_ID, resulted[0].target_id)
+    assert artifact is not None
+    assert artifact.type == "artifact"
+    assert artifact.properties["decision_id"] == decision.id
+    assert artifact.properties["prd_id"] == prd_id
+
+
+def test_generate_prd_topic_retrieval_path_does_not_write_decision_chain(
+    isolated_settings, facade, monkeypatch,
+):
+    """Tier-2 topic-retrieval grounding (no resolved hypothesis in the trail)
+    must NOT write a decision/artifact pair — the trigger is specifically a
+    PRD generated from a resolved hypothesis via
+    `graph.retrieval.resolve_insight_hypothesis`."""
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], company_id=COMPANY_ID, slug=SLUG)
+    _seed_corpus(isolated_settings["data_dir"], SLUG)
+    _seed_trail(
+        facade, COMPANY_ID, theme_label="Bulk onboarding", insight_title="unrelated",
+        signal_specs=[
+            ("customer_voice", "complaint", "KG_SIGNAL_MARK CSV import demand", {}),
+        ])
+    brief_id = _seed_brief(db_mod, SLUG, insights=[])
+    prd_id = _start_prd(db_mod, brief_id)
+
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    prd_runner._run_sync(
+        prd_id, brief_id, 0,
+        insight_override={"title": "Bulk team onboarding feature",
+                          "summary": "Requested by the user in chat: bulk onboarding"},
+    )
+
+    sup = isolated_settings["supabase"]
+    assert sup.table("kg_entity").select("id").eq("enterprise_id", COMPANY_ID) \
+        .eq("type", "decision").execute().data == []
+    assert sup.table("kg_entity").select("id").eq("enterprise_id", COMPANY_ID) \
+        .eq("type", "artifact").execute().data == []
+
+
+def test_generate_prd_corpus_fallback_does_not_write_decision_chain(
+    isolated_settings, monkeypatch,
+):
+    """Tier-3 corpus fallback (no company / no KG backing at all) must not
+    write a decision/artifact pair either."""
+    db_mod = isolated_settings["db"]
+    _seed_corpus(isolated_settings["data_dir"], SLUG)
+    brief_id = _seed_brief(db_mod, SLUG, insights=[{"title": "x", "theme_id": "t1"}])
+    prd_id = _start_prd(db_mod, brief_id)
+
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    prd_runner._run_sync(prd_id, brief_id, 0)  # must not raise (no company at all)
+
+    # No company row exists for this slug, so nothing could have been written
+    # under any enterprise_id for this test — the PRD still completed (status
+    # ready) via the corpus fallback.
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def test_generate_prd_decision_chain_write_failure_does_not_fail_prd(
+    isolated_settings, facade, monkeypatch,
+):
+    """A decision-chain write failure is best-effort — it must never turn a
+    successfully generated PRD into a failed one."""
+    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+
+    def _boom(*a, **k):
+        raise RuntimeError("KG write down")
+
+    monkeypatch.setattr(prd_runner, "promote_hypothesis_to_decision", _boom)
+    prd_runner._run_sync(prd_id, brief_id, 0)  # must not raise
+
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+    assert facade.edges_from(COMPANY_ID, hyp.id, type="PROMOTED_TO") == []

@@ -55,6 +55,7 @@ import { GenerateLoadingState } from "./GenerateLoadingState"
 import { GenerationCancelButton } from "./GenerationCancelButton"
 import locateErrorStyles from "./GenerateModalLocateError.module.css"
 import type { LocatePhaseState } from "./GenerationLoadingScreen"
+import { ScreenshotStrip } from "./ScreenshotStrip"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
@@ -472,31 +473,30 @@ export function GenerateModal({
   const steerImageInputRef = useRef<HTMLInputElement | null>(null)
 
   // Screenshot-as-context (the fourth design source). Per-run only — nothing
-  // here is ever written to DesignSourcePreference.
-  //   - screenshotKey: staged storage key from POST /uploads/screenshot; null
-  //     until an upload has SUCCEEDED. This is the Generate gate in screenshot
-  //     mode (and a fresh pick nulls it immediately, so the gate holds while a
-  //     replacement uploads).
-  //   - screenshotPreview: the downscaled data URL shown as the thumbnail.
-  //   - screenshotName: the picked filename, for the inline label.
-  //   - screenshotUploading: in-flight flag (disables the picker).
-  //   - screenshotError: client-side reject or server 4xx message (verbatim).
-  const [screenshotKey, setScreenshotKey] = useState<string | null>(null)
-  const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null)
-  const [screenshotName, setScreenshotName] = useState<string | null>(null)
+  // here is ever written to DesignSourcePreference. Holds every attached
+  // screenshot in upload order (also the prompt order sent to the backend) as
+  // a sequential strip of up to 10 slots (Option B) — an ordered array
+  // replaces the old single-key/-preview/-name triple that could only ever
+  // hold one file.
+  //   - screenshots: ordered {key, preview, name}[]. The Generate gate in
+  //     screenshot mode is screenshots.length === 0.
+  //   - screenshotUploading/screenshotError stay singular: only one upload is
+  //     ever in flight at a time (the strip's "+" control is disabled/hidden
+  //     while uploading), so there is never a need for a per-slot array.
+  const [screenshots, setScreenshots] = useState<
+    { key: string; preview: string; name: string }[]
+  >([])
   const [screenshotUploading, setScreenshotUploading] = useState(false)
   const [screenshotError, setScreenshotError] = useState<string | null>(null)
   // Hidden file input for the screenshot-source picker.
   const screenshotInputRef = useRef<HTMLInputElement | null>(null)
 
-  // Closing the modal discards any staged screenshot: the key is per-run
-  // context, not a preference — the next open starts clean. (The now-orphaned
-  // server-side upload is the parked-cleanup class; nothing to do here.)
+  // Closing the modal discards every staged screenshot: the array is per-run
+  // context, not a preference — the next open starts clean. (Any now-orphaned
+  // server-side uploads are the parked-cleanup class; nothing to do here.)
   useEffect(() => {
     if (!open) {
-      setScreenshotKey(null)
-      setScreenshotPreview(null)
-      setScreenshotName(null)
+      setScreenshots([])
       setScreenshotUploading(false)
       setScreenshotError(null)
     }
@@ -513,6 +513,25 @@ export function GenerateModal({
   // AUTO-SKIP fire the loading flow AT MOST ONCE per open; only the explicit Retry
   // button may re-run locate after a failure. Reset when the modal re-opens.
   const autoSkipFiredRef = useRef(false)
+
+  // Bounded wait for the saved-preference decision (the render guard below).
+  // `return null` alone has no floor — if the decisive fetch never settles,
+  // nothing ever replaces it. These two timers give the wait a shape: past
+  // 300ms without a decision, a compact "checking" row replaces the blank
+  // body (a slow decision must not read as silence); past 5s, stop waiting
+  // and let the user proceed via the config form rather than hang on a fetch
+  // that may never resolve. Both reset on close/reopen (below).
+  const [sourceCheckPast300, setSourceCheckPast300] = useState(false)
+  const [sourceCheckPast5s, setSourceCheckPast5s] = useState(false)
+  // Set once the 5s bound is hit while the saved-preference decision is still
+  // outstanding (see the "enter undetermined" effect below). Distinct from the
+  // per-render guard logic: this is PERSISTED state so the notice / unverified
+  // connector badges stay visible across re-renders (e.g. the user switching
+  // source pills) until the underlying fetch actually resolves, not just for
+  // the one render that first crossed the 5s bound.
+  const [sourceUndetermined, setSourceUndetermined] = useState<
+    "repos" | "connections" | null
+  >(null)
 
   // Holds the function that re-runs the most recent locate from scratch (the
   // POST), so the explicit error phase's Retry button can re-fire it. Set when
@@ -542,8 +561,46 @@ export function GenerateModal({
       // Re-arm the auto-skip one-shot so a fresh open evaluates the saved
       // preference again (a closed-then-reopened modal is a new flow).
       autoSkipFiredRef.current = false
+      // The modal stays mounted across a close (this is a `return null`, not
+      // an unmount — see the render guard below), so `flowPhase` would
+      // otherwise carry over whatever phase THIS run last left it in. A host
+      // that reopens with its own click-routing NOT gated on this hook's cta
+      // state (e.g. skipExistenceCheck hosts calling openGenerateModal()
+      // directly) can reopen while a prior run is still resolving in the
+      // background; without this reset that reopen renders a frozen "Generating
+      // your prototype…" (or whatever phase) from the PREVIOUS run — a stale
+      // render, not a live one, and (for a completed prior run) not even
+      // accurate. Reset to "config" so every open starts from a known-clean
+      // state; the auto-skip effect above re-evaluates the saved preference
+      // fresh if one applies.
+      setFlowPhase("config")
+      // A closed-then-reopened modal is a new decision too — drop any
+      // undetermined-fallback state from the prior open so a fresh open
+      // re-runs the bounded wait rather than inheriting a stale notice.
+      setSourceUndetermined(null)
+      repoSelAutoSeededRef.current = false
     } else {
       pollAbortedRef.current = false
+    }
+  }, [open])
+
+  // Bounded-wait timers for the saved-preference decision (see the render
+  // guard below). Reset on every open so a fresh open gets its own 300ms /
+  // 5s window; cleared on close/unmount so a stale timer can never fire a
+  // setState after the modal has moved on.
+  useEffect(() => {
+    if (!open) {
+      setSourceCheckPast300(false)
+      setSourceCheckPast5s(false)
+      return
+    }
+    setSourceCheckPast300(false)
+    setSourceCheckPast5s(false)
+    const t300 = setTimeout(() => setSourceCheckPast300(true), 300)
+    const t5s = setTimeout(() => setSourceCheckPast5s(true), 5000)
+    return () => {
+      clearTimeout(t300)
+      clearTimeout(t5s)
     }
   }, [open])
 
@@ -651,6 +708,12 @@ export function GenerateModal({
   )
   const [reposError, setReposError] = useState(false)
   const [repoSel, setRepoSel] = useState(_testInitRepoSel ?? "")
+  // True only while repoSel holds a value THIS component seeded from
+  // savedPreference (the undetermined-fallback below), not a value the user
+  // picked themselves. Lets the late-arrival reconciliation effect tell "the
+  // seed turned out to be stale" apart from "the user already chose this repo
+  // on purpose" — only the former should be cleared automatically.
+  const repoSelAutoSeededRef = useRef(false)
 
   useEffect(() => {
     if (!open) return
@@ -709,6 +772,87 @@ export function GenerateModal({
   }, [open, githubActive])
 
   const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
+
+  // The saved-preference decision never arrived within the bound (see the
+  // render guard below): stop waiting and let the user proceed. Fires AT MOST
+  // ONCE per open, exactly when the 5s bound is crossed while the decision is
+  // still outstanding — a decision that resolves before 5s never reaches this
+  // effect at all (the `if` below is false on every render where it does).
+  //
+  // Latches the SAME `autoSkipFiredRef` the auto-skip effect checks, rather
+  // than adding a second ref — once this fires, the user is looking at the
+  // config form and owns it: a later settle of connections/repos must not
+  // pull the rug and auto-skip out from under them (AC9/AC10), and it also
+  // means the render guard's suppression block never re-applies for the rest
+  // of this open (matches the auto-skip's own one-shot semantics exactly).
+  useEffect(() => {
+    if (!open) return
+    if (!savedPreference) return
+    if (flowPhase !== "config") return
+    if (autoSkipFiredRef.current) return
+    if (!sourceCheckPast5s) return
+
+    const src = savedPreference.design_source
+    const connectionsUnknown = connections === null
+    const reposUnknown = src === "github" && githubActive && repos === null
+    if (!connectionsUnknown && !reposUnknown) return // resolved just in time
+
+    autoSkipFiredRef.current = true
+    setSourceUndetermined(connectionsUnknown ? "connections" : "repos")
+    // Pre-select the saved source so the fallback form doesn't ALSO force the
+    // user to re-answer "which source" — they already told us once.
+    setDesignSource(src)
+    // Seed the repo select (AC7) ONLY for the specific "we know github is
+    // connected, we just couldn't refresh the repo list" case. When the
+    // connector state itself is unknown (connectionsUnknown), githubActive is
+    // definitionally false — we cannot safely claim codebase mode without
+    // knowing the connection is real, so this case falls through to the
+    // ordinary "connect or switch source" treatment instead of a seeded repo.
+    if (src === "github" && !connectionsUnknown && savedPreference.github_repo) {
+      setRepoSel(savedPreference.github_repo)
+      repoSelAutoSeededRef.current = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, savedPreference, flowPhase, sourceCheckPast5s, connections, repos, githubActive])
+
+  // Late-arrival reconciliation (AC9), repo-list half: once `repos` resolves
+  // AFTER a seed from the effect above, absorb it in place rather than
+  // leaving the seeded single-option select stale.
+  //   - saved repo still present → nothing to do, the selection already
+  //     matches; the full list simply replaces the seeded one-option list on
+  //     the next render (driven by `repos` itself, not this effect).
+  //   - saved repo NOT present → the seed turned out to be wrong; clear it so
+  //     the existing unhealthy-preference UI (empty select, Generate
+  //     disabled) takes over. Never invents a new state for this — see AC9.
+  // Guarded on the ref so a user's own manual pick (which clears the ref on
+  // change, below) is never touched by a later repos update.
+  useEffect(() => {
+    if (!repoSelAutoSeededRef.current) return
+    if (repos === null) return
+    repoSelAutoSeededRef.current = false
+    if (!repos.some((r) => r.full_name === repoSel)) {
+      setRepoSel("")
+    }
+  }, [repos, repoSel])
+
+  // The "repos" reason no longer applies once the list resolves, regardless
+  // of whether a seed was in play (a saved preference with no repo set never
+  // seeds, but still stops being "undetermined for repos" once the fetch
+  // settles). Split from the effect above so this holds even on that edge.
+  useEffect(() => {
+    if (repos === null) return
+    setSourceUndetermined((prev) => (prev === "repos" ? null : prev))
+  }, [repos])
+
+  // Late-arrival reconciliation, connector-state half: once `connections`
+  // resolves, the "we don't know what's connected" reason no longer applies —
+  // drop the notice/unverified badges for THAT reason. (If the reason was
+  // "repos", this is a no-op; the repos effect above owns that half.) Never
+  // re-arms the auto-skip — `autoSkipFiredRef` stays latched regardless.
+  useEffect(() => {
+    if (connections === null) return
+    setSourceUndetermined((prev) => (prev === "connections" ? null : prev))
+  }, [connections])
 
   // Auto-generate effect: fires when open=true and connector data is loaded.
   // When the saved preference's source is healthy, fires generation immediately
@@ -812,6 +956,13 @@ export function GenerateModal({
         onKickoff,
         onGenerated: (result) => onGenDone?.(result),
         prdTitle,
+        // This is the auto-skip path: `onClose()` above already fired BEFORE
+        // kickoff even starts, so a kickoff failure here has no "modal still
+        // open" signal to lean on — the overlay (driven entirely by
+        // onGenStart/onGenDone, independent of this modal's own open state)
+        // is the only thing a failure can reach. Route it through the same
+        // terminal-outcome handling a post-kickoff failure already gets.
+        onKickoffFailed: (message) => onGenDone?.({ ok: false, message }),
       }).catch(() => { onGenDone?.() })
     }, 0)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -840,6 +991,45 @@ export function GenerateModal({
 
   if (!open) return null
 
+  // The bounded "deciding, visibly" state (300ms–5s into an undecided saved
+  // preference — see the render guard below). Full modal chrome, no body
+  // content but the compact heartbeat row, no footer (nothing to submit yet).
+  // Reuses GenerateLoadingState's own heartbeat/dot animation via its
+  // `variant="inline"` — one implementation backs both this row and the
+  // full-height locating/generating screen, styled here through
+  // design-agent.css's `.da-source-check` family rather than the component's
+  // own CSS module, so it composes with the modal's existing tokens.
+  function renderSourceCheckShell() {
+    return (
+      <div
+        className="modal-overlay open"
+        id="modal-generate"
+        onClick={(e) => e.target === e.currentTarget && onClose()}
+      >
+        <div className="modal design-agent-surface">
+          <div className="modal-head">
+            <h3 className="modal-title">Generate prototype</h3>
+            <button
+              type="button"
+              className="modal-close"
+              style={{ position: "absolute", top: 18, right: 18 }}
+              onClick={onClose}
+              aria-label="Close"
+            >
+              <IconClose size={18} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <GenerateLoadingState
+              variant="inline"
+              label="Checking your saved source…"
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // Suppress the config form whenever a saved preference is healthy (the
   // auto-skip effect is about to fire) or while connector data hasn't loaded
   // yet (so the form never flashes for a frame before the effect acts).
@@ -861,6 +1051,18 @@ export function GenerateModal({
   // renders so the user can pick a different source. The effect's own
   // autoSkipFiredRef latch (set ~line 500) guarantees this does not re-arm an
   // auto-skip storm — only the explicit Retry button re-runs locate.
+  //
+  // `return null` here has no floor: if the decisive fetch never settles,
+  // nothing ever replaces it (the original defect). It is bounded instead:
+  // under 300ms, still `return null` (identical to today — a fast decision
+  // never flashes anything, which is the entire reason `return null` was
+  // chosen). Past 300ms without a decision, fall through to a compact
+  // "checking" row so a slow decision reads as progress, not silence. Past
+  // 5s, the "enter undetermined" effect above latches autoSkipFiredRef and
+  // sets `sourceUndetermined`, and THIS render just falls through to the
+  // ordinary config-form render below (the effect runs a beat after this
+  // render commits, on the very first render that crosses 5s — harmless,
+  // since the form's own health-check fallback covers that one frame too).
   if (savedPreference && flowPhase === "config" && !autoSkipFiredRef.current) {
     const src = savedPreference.design_source
 
@@ -891,7 +1093,14 @@ export function GenerateModal({
         githubActive &&
         !!savedPreference.github_repo &&
         !!repos?.find((r) => r.full_name === savedPreference.github_repo)
-      if (dataStillLoading || githubHealthy) return null
+      if (dataStillLoading) {
+        if (!sourceCheckPast300) return null
+        if (!sourceCheckPast5s) return renderSourceCheckShell()
+        // else: past the bound and still undetermined — fall through to the
+        // config form below (see the long comment above this block).
+      } else if (githubHealthy) {
+        return null
+      }
     } else {
       const dataStillLoading = connections === null
 
@@ -903,10 +1112,26 @@ export function GenerateModal({
       // avoid a form flash; once loaded, suppress only if the saved source is
       // healthy (the effect will close + generate). An unhealthy saved pref
       // falls through and the form renders as a fallback.
-      const pendingAutoSkip = dataStillLoading || prefHealthy
-      if (pendingAutoSkip) return null
+      if (dataStillLoading) {
+        if (!sourceCheckPast300) return null
+        if (!sourceCheckPast5s) return renderSourceCheckShell()
+      } else if (prefHealthy) {
+        return null
+      }
     }
   }
+
+  // Guards Generate for the one compound edge the fallback above deliberately
+  // does not seed: a saved GITHUB preference whose connector state itself is
+  // unknown (connectionsUnknown, not just repos). `codebaseMode` is false in
+  // that case (githubActive can't be true without connections), so the
+  // ordinary `codebaseMode && !repoSel` gate would NOT block Generate — but
+  // firing would send a github-sourced request with no repo and no locate
+  // call. Block it explicitly rather than guess at a connection we could not
+  // confirm; the source pills (always live) are the way out.
+  const githubSourceUnverified =
+    sourceUndetermined === "connections" &&
+    savedPreference?.design_source === "github"
 
   // Figma + GitHub row state (connected vs not + account label) from the shared
   // row helper applied to each provider's live connection.
@@ -978,10 +1203,14 @@ export function GenerateModal({
       manualFont: "",
       githubRepo: codebaseGenerate ? effectiveRepo : "",
       designSource: effectiveSource,
-      // The staged upload key rides ONLY the screenshot source; every other
-      // source omits the field entirely (buildGenerateParams drops a null —
-      // wire back-compat, byte-identical to today).
-      screenshotKey: effectiveSource === "screenshot" ? screenshotKey : null,
+      // The staged upload keys ride ONLY the screenshot source, in upload
+      // (= prompt) order; every other source omits the field entirely
+      // (buildGenerateParams drops an empty/null array — wire back-compat,
+      // byte-identical to today).
+      screenshotKeys:
+        effectiveSource === "screenshot"
+          ? screenshots.map((s) => s.key)
+          : null,
     })
     // Fire the recreate wiring when EITHER a route or a stable id was chosen —
     // a non-route host (the app shell, an in-page section) has an empty route,
@@ -1031,8 +1260,10 @@ export function GenerateModal({
       // driven by onGenStart/onGenDone) provides all generation feedback for this
       // path, so the success toasts are redundant: notifyOnReady=false suppresses
       // the "Prototype ready" success toast, notifyOnKickoff=false suppresses the
-      // "Design Agent generating" kickoff toast. Failure surfacing is unchanged —
-      // runGenerateFlow still toasts "Generation failed" / "Generate failed".
+      // "Design Agent generating" kickoff toast. A post-kickoff failure still
+      // toasts "Generation failed" via onGenerated below; a kickoff-time failure
+      // now toasts through the SAME path via onKickoffFailed, not the raw
+      // "Generate failed" fallback.
       notifyOnReady: false,
       notifyOnKickoff: false,
       onKickoff,
@@ -1040,16 +1271,20 @@ export function GenerateModal({
       // failed/timeout) — that's the dismissal signal for the loading overlay.
       // Separate from the toasts above: suppressing the toasts does not touch
       // this callback. The flow's own 6-min timeout bounds it, so the overlay can
-      // never hang forever. If the kickoff itself throws, onGenerated never fires;
-      // the catch in runGenerateFlow toasts "Generate failed" but won't dismiss —
-      // covered below by a kickoff-failure fallback. The terminal RESULT is
-      // threaded through to onGenDone so ApproveModal can reveal the full-screen
-      // canvas on success and skip it on failure.
+      // never hang forever. The terminal RESULT is threaded through to onGenDone
+      // so ApproveModal can reveal the full-screen canvas on success and skip it
+      // on failure.
       onGenerated: (result) => onGenDone?.(result),
       prdTitle,
+      // If the kickoff itself throws (before onGenerated could ever fire), feed
+      // the failure into the SAME terminal-outcome handling a post-kickoff
+      // failure gets — the overlay dismisses with a real "Generation failed"
+      // toast instead of hanging on a guess-timer or a swallowed error.
+      onKickoffFailed: (message) => onGenDone?.({ ok: false, message }),
     }).catch(() => {
       // Defensive — if the whole flow rejects (shouldn't, runGenerateFlow
-      // swallows kickoff errors), still dismiss the overlay.
+      // swallows kickoff errors even with onKickoffFailed wired), still
+      // dismiss the overlay.
       onGenDone?.()
     })
   }
@@ -1121,11 +1356,11 @@ export function GenerateModal({
 
   // Screenshot-as-context picker. Validates client-side (same bounds as the
   // steer flow), downscales via the SAME seam (`_testDownscale` under jsdom),
-  // uploads the DOWNSCALED bytes via POST /uploads/screenshot, and holds the
-  // returned key for the generate body. Re-picking replaces the pending key
-  // client-side; any failure returns the picker to a re-pickable, pre-upload
-  // state — a server 4xx (413 oversize / 422 type) surfaces its user-readable
-  // message verbatim.
+  // uploads the DOWNSCALED bytes via POST /uploads/screenshot, and APPENDS the
+  // returned key to the strip on success — a fresh pick never replaces an
+  // existing entry (Option B: the "+" control always fills the NEXT slot,
+  // never the current one). A failed pick (client-side reject or server 4xx)
+  // leaves the strip untouched and surfaces the message inline verbatim.
   async function handleScreenshotSelected(file: File) {
     setScreenshotError(null)
     if (
@@ -1142,22 +1377,18 @@ export function GenerateModal({
       setScreenshotError("That screenshot is over 5 MB — attach a smaller one.")
       return
     }
-    // A fresh pick invalidates any previously staged key IMMEDIATELY, so the
-    // Generate gate holds while the replacement uploads (the orphaned prior
-    // upload is the server-side parked-cleanup class — nothing to do here).
-    setScreenshotKey(null)
     setScreenshotUploading(true)
     try {
       const dataUrl = await (_testDownscale ?? downscaleImageToDataUrl)(file)
-      setScreenshotPreview(dataUrl)
-      setScreenshotName(file.name)
       const res = await designAgentApi.uploadScreenshot(dataUrlToBlob(dataUrl))
-      setScreenshotKey(res.screenshot_key)
+      setScreenshots((prev) => [
+        ...prev,
+        { key: res.screenshot_key, preview: dataUrl, name: file.name },
+      ])
     } catch (err) {
-      // Reset to the pre-upload state (re-pickable) on ANY failure.
-      setScreenshotKey(null)
-      setScreenshotPreview(null)
-      setScreenshotName(null)
+      // On failure, NOTHING is appended — the strip is unchanged, and the
+      // picker stays immediately re-pickable (matches today's pre-upload
+      // re-pickable-state contract).
       setScreenshotError(
         err instanceof ApiError
           ? err.message
@@ -1166,6 +1397,14 @@ export function GenerateModal({
     } finally {
       setScreenshotUploading(false)
     }
+  }
+
+  // Removes exactly one entry (by index) from the strip. Drops it from the
+  // array only — no storage-delete call fires (a removed screenshot is
+  // dropped from the request only, per spec). Every subsequent tile's
+  // displayed number / aria-label re-derives from its new array position.
+  function handleRemoveScreenshot(index: number) {
+    setScreenshots((prev) => prev.filter((_, i) => i !== index))
   }
 
   function handleLocateResult(
@@ -1411,8 +1650,32 @@ export function GenerateModal({
     void runLocateResolve(opts, token)
   }
 
+  // The undetermined-fallback notice's Retry (AC8 §8.10): re-runs ONLY the
+  // specific check that stalled — the repos fetch, or the connections fetch —
+  // by calling the same endpoints the original effects use. Deliberately does
+  // NOT touch flowPhase or autoSkipFiredRef: the user is already looking at
+  // the config form and owns it, so a successful retry should upgrade the
+  // surface in place (via the late-arrival reconciliation effects above), not
+  // hand control back to the auto-skip machinery.
+  function retrySourceCheck() {
+    if (sourceUndetermined === "connections") {
+      void withAuthRetry(() => connectorsApi.list())
+        .then((r) => setConnections(r.connections))
+        .catch(() => {})
+    } else if (sourceUndetermined === "repos") {
+      setReposError(false)
+      void withAuthRetry(() => connectorsApi.listAccessibleGithubRepos())
+        .then((r) => setRepos(r.repositories))
+        .catch(() => {})
+    }
+  }
+
   const handleGenerate = () => {
     if (submitting || prdId == null) return
+    // Defense-in-depth: the footer button is already disabled for this case
+    // (see `githubSourceUnverified`), but guard the handler too rather than
+    // rely solely on the disabled attribute.
+    if (githubSourceUnverified) return
 
     if (codebaseMode) {
       // Codebase mode: enter the shared loading flow (loading UI immediate,
@@ -1420,6 +1683,27 @@ export function GenerateModal({
       enterLoadingFlow({ repo: repoSel })
       return
     }
+
+    // Flow-level guard for the non-codebase (figma/website/screenshot) path,
+    // reusing the SAME one-shot latch the auto-generate effect checks
+    // (autoSkipFiredRef — see :515 and the effect below) rather than adding a
+    // second ref. A manual submission here commits this open to ONE flow the
+    // same way a saved-preference auto-skip does: onSavePreference below is
+    // async (a save-then-refresh round trip), and once it resolves the parent
+    // hands down a NEW savedPreference object identity, which is in the
+    // auto-generate effect's dep array — without this latch the effect would
+    // re-run, find the preference newly "healthy" (the source and key/url this
+    // click itself just saved), and fire a SECOND generate through the
+    // unguarded branch below. Setting the ref (not state) also closes a
+    // synchronous double-invoke — refs are visible to the very next call
+    // without waiting on a re-render, matching how locateInFlightRef protects
+    // enterLoadingFlow above. Codebase mode does not need this: it already
+    // gets equivalent protection from enterLoadingFlow's own
+    // locateInFlightRef + phase gate, and (unlike this branch) a github locate
+    // failure legitimately returns the user to this same config form to retry
+    // manually — checking the latch there would wrongly block that retry.
+    if (autoSkipFiredRef.current) return
+    autoSkipFiredRef.current = true
 
     // Non-codebase path — runs as before, chosenScreenRoute is null.
     // Screenshot is per-run context, never a durable preference (locked
@@ -1770,6 +2054,59 @@ export function GenerateModal({
               never shows a stale, interactive form behind a running flow. */}
           {flowPhase === "config" && (
           <>
+          {/* The undetermined-fallback notice (AC1/AC3/AC7): the saved-preference
+              decision never arrived within the 5s bound (see the render guard
+              above). Info-toned, not warn/danger — nothing failed and nothing
+              about the user's setup is wrong; we simply couldn't confirm
+              something and are carrying on. Retry re-runs the specific check
+              that stalled; it does not touch flowPhase or autoSkipFiredRef. */}
+          {sourceUndetermined && (
+            <div
+              className="da-source-undetermined"
+              role="status"
+              aria-live="polite"
+              data-testid="saved-source-undetermined"
+            >
+              <span className="da-source-undetermined-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.75" />
+                  <path
+                    d="M12 11v5M12 8h.01"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p
+                className="da-source-undetermined-text"
+                data-testid="saved-source-undetermined-text"
+              >
+                {sourceUndetermined === "repos" ? (
+                  <>
+                    <b>We couldn&apos;t refresh your repository list.</b>{" "}
+                    Carrying on with{" "}
+                    <code>{savedPreference?.github_repo}</code>, the repo you
+                    generated from last time.
+                  </>
+                ) : (
+                  <>
+                    <b>We couldn&apos;t check your connections.</b> Your saved
+                    source is selected — carry on, or pick another below.
+                  </>
+                )}
+              </p>
+              <button
+                type="button"
+                className="src-connect-btn ghost da-source-undetermined-action"
+                data-testid="saved-source-undetermined-retry"
+                onClick={retrySourceCheck}
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {/* Platform label + pills on one row (gen-inline-field): label left,
               pills inline right. */}
           <div className="field gen-inline-field">
@@ -1813,7 +2150,11 @@ export function GenerateModal({
               <div className="src-row-compact">
                 <span className="src-bullet" aria-hidden="true" />
                 <span className="src-name">Figma</span>
-                {figmaActive ? (
+                {sourceUndetermined === "connections" ? (
+                  <span className="src-unverified" data-testid="src-unverified">
+                    Couldn&apos;t check
+                  </span>
+                ) : figmaActive ? (
                   <>
                     <span className="src-connected">
                       Connected
@@ -1863,7 +2204,11 @@ export function GenerateModal({
               <div className="src-row-compact">
                 <span className="src-bullet" aria-hidden="true" />
                 <span className="src-name">Codebase</span>
-                {githubActive ? (
+                {sourceUndetermined === "connections" ? (
+                  <span className="src-unverified" data-testid="src-unverified">
+                    Couldn&apos;t check
+                  </span>
+                ) : githubActive ? (
                   <>
                     <span className="src-connected">
                       Connected
@@ -1877,17 +2222,36 @@ export function GenerateModal({
             )}
 
             {/* GitHub repo selector — shown only when Codebase is the chosen
-                source and GitHub is connected. */}
+                source and GitHub is connected. While the repo list itself is
+                the undetermined thing (repos===null, sourceUndetermined ===
+                "repos"), offer the single saved repo as the only option
+                instead of the ordinary "Loading repos…" placeholder (AC7) —
+                that placeholder disables the select and leaves repoSel empty,
+                which keeps Generate disabled below: a prettier dead end with
+                the same outcome `return null` had. */}
             {designSource === "github" && githubActive && (
               <select
                 className="input src-select-inline"
                 value={repoSel}
-                onChange={(e) => setRepoSel(e.target.value)}
-                disabled={!repos || repos.length === 0}
+                onChange={(e) => {
+                  repoSelAutoSeededRef.current = false
+                  setRepoSel(e.target.value)
+                }}
+                disabled={
+                  repos === null
+                    ? sourceUndetermined !== "repos"
+                    : repos.length === 0
+                }
                 aria-label="Select a repo"
               >
                 {repos === null ? (
-                  <option value="">Loading repos…</option>
+                  sourceUndetermined === "repos" && savedPreference?.github_repo ? (
+                    <option value={savedPreference.github_repo}>
+                      {savedPreference.github_repo}
+                    </option>
+                  ) : (
+                    <option value="">Loading repos…</option>
+                  )
                 ) : repos.length === 0 ? (
                   <option value="">
                     {reposError
@@ -1916,10 +2280,10 @@ export function GenerateModal({
             )}
 
             {/* Screenshot source — per-run upload; no connector, always
-                selectable. The hidden input + visible button mirror the
-                image-as-steer control's vocabulary; the picked file is
-                client-downscaled and uploaded on choice, and Generate stays
-                disabled until the upload has succeeded. */}
+                selectable. Up to 10 screenshots fill a fixed-height
+                horizontal strip one at a time via the SAME hidden input the
+                single-screenshot flow it replaced already owned; Generate
+                stays disabled until at least one upload has succeeded. */}
             {designSource === "screenshot" && (
               <>
                 <input
@@ -1935,75 +2299,13 @@ export function GenerateModal({
                     e.target.value = ""
                   }}
                 />
-                <div className="src-row-compact">
-                  <span className="src-bullet" aria-hidden="true" />
-                  <span className="src-name">Screenshot</span>
-                  <button
-                    type="button"
-                    className="btn locate-image-attach"
-                    data-testid="screenshot-pick"
-                    disabled={screenshotUploading}
-                    onClick={() => screenshotInputRef.current?.click()}
-                  >
-                    <IconImage size={16} />
-                    {screenshotPreview ? "Replace image" : "Choose image"}
-                  </button>
-                  {screenshotUploading && (
-                    <span
-                      className="da-generate-hint"
-                      data-testid="screenshot-uploading"
-                    >
-                      Uploading…
-                    </span>
-                  )}
-                </div>
-                {screenshotPreview && (
-                  // The downscaled data URL doubles as the preview thumbnail —
-                  // in-memory only, exactly the bytes that were uploaded.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={screenshotPreview}
-                    alt={
-                      screenshotName
-                        ? `Screenshot preview — ${screenshotName}`
-                        : "Screenshot preview"
-                    }
-                    data-testid="screenshot-preview"
-                    style={{
-                      display: "block",
-                      maxWidth: "100%",
-                      maxHeight: 140,
-                      marginTop: 8,
-                      borderRadius: 6,
-                      border: "1px solid var(--border, rgba(128,128,128,.35))",
-                    }}
-                  />
-                )}
-                {screenshotPreview && screenshotName && !screenshotUploading && (
-                  <span
-                    className="da-generate-hint da-generate-hint--ok"
-                    data-testid="screenshot-ready-hint"
-                  >
-                    {screenshotKey ? `✓ ${screenshotName}` : screenshotName}
-                  </span>
-                )}
-                {screenshotError && (
-                  <p
-                    className="locate-image-error"
-                    data-testid="screenshot-error"
-                    role="alert"
-                  >
-                    {screenshotError}
-                  </p>
-                )}
-                {!screenshotPreview &&
-                  !screenshotError &&
-                  !screenshotUploading && (
-                    <p className="src-fallback-line">
-                      Upload a screenshot of a design you like — we&apos;ll
-                      match its look.
-                    </p>
-                  )}
+                <ScreenshotStrip
+                  screenshots={screenshots}
+                  onAdd={() => screenshotInputRef.current?.click()}
+                  onRemove={handleRemoveScreenshot}
+                  uploading={screenshotUploading}
+                  error={screenshotError}
+                />
               </>
             )}
           </div>
@@ -2135,9 +2437,13 @@ export function GenerateModal({
         <div className="modal-foot">
           <span
             style={{ fontSize: 11.5, color: "var(--muted)" }}
-            data-testid={codebaseMode && !repoSel ? "codebase-no-repo-helper" : undefined}
+            data-testid={
+              (codebaseMode && !repoSel) || githubSourceUnverified
+                ? "codebase-no-repo-helper"
+                : undefined
+            }
           >
-            {codebaseMode && !repoSel
+            {(codebaseMode && !repoSel) || githubSourceUnverified
               ? "Connect Figma or a codebase to generate"
               : "Generation is asynchronous — get notified when it’s ready."}
           </span>
@@ -2159,10 +2465,15 @@ export function GenerateModal({
                 submitting ||
                 prdId == null ||
                 (codebaseMode && !repoSel) ||
-                // Screenshot mode gates on a SUCCEEDED upload: the staged key
-                // is nulled on pick and set only when the upload resolves, so
-                // this also covers the in-flight window.
-                (designSource === "screenshot" && !screenshotKey)
+                // The one compound edge the fallback doesn't seed (see
+                // `githubSourceUnverified` above): a saved github source whose
+                // connector state we could not confirm. Blocked rather than
+                // guessed at.
+                githubSourceUnverified ||
+                // Screenshot mode gates on at least one SUCCEEDED upload —
+                // the generalisation of the old "exactly one" gate to
+                // "at-least-one" now that the strip holds an array.
+                (designSource === "screenshot" && screenshots.length === 0)
               }
             >
               {submitting ? "Generating…" : "Generate →"}

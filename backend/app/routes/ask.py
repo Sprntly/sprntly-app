@@ -130,7 +130,20 @@ def _load_history(
     first. Chats are per-user: the conversation must belong to the CALLER, not
     just their company — otherwise a teammate's conversation_id would replay
     that teammate's private turns into the model context. Best-effort: no id,
-    foreign/unowned conversation, or any read error → []."""
+    foreign/unowned conversation, or any read error → [].
+
+    Each turn's OWN attachments (`conversation_turns.attachments` — extracted
+    text persisted at upload time, see `routes/conversations.py:TurnAttachment`)
+    are folded onto that SAME turn's `content` before it is returned. Without
+    this, an attachment's text rides the FIRST turn only via the question
+    string the composer built client-side — by the third turn, the per-turn
+    clamp (`app.prompt_history.clamp_turn_text`, applied unmodified at
+    `qa_agent._render_history`) has erased every trace of it, and the model
+    denies the document exists. Folding happens HERE, not in
+    `_render_history`: the point of this split is that a turn with no
+    attachments still returns exactly `{role, content}` — byte-identical to
+    today — with nothing downstream needing to know attachments exist at
+    all."""
     if not conversation_id:
         return []
     try:
@@ -150,12 +163,25 @@ def _load_history(
             return []
         turns = (
             c.table("conversation_turns")
-            .select("role,content")
+            .select("role,content,attachments")
             .eq("conversation_id", conversation_id)
             .order("created_at")
             .execute()
         )
-        return turns.data or []
+        out: list[dict] = []
+        for row in turns.data or []:
+            content = row.get("content") or ""
+            for attachment in row.get("attachments") or []:
+                body = attachment.get("content") or ""
+                if not body:
+                    # A document imported straight to a PRD persists a
+                    # name-only chip (content == "") — the file BECAME the
+                    # PRD, not this turn's context; nothing to fold in.
+                    continue
+                name = attachment.get("name") or "attachment"
+                content += f"\n\n[Attached: {name}]\n{body}"
+            out.append({"role": row.get("role", "user"), "content": content})
+        return out
     except Exception:  # noqa: BLE001 — history must never break the answer
         return []
 
@@ -223,6 +249,13 @@ async def ask(
     if body.prd_id is not None:
         require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
 
+    # History loads BEFORE the cache resolution (not after, as it did before
+    # this fix) so eligibility can be derived from it: a thread that already
+    # holds an assistant turn must not be served a cache hit that never read
+    # that thread. Moving it up costs one extra DB read on a cache hit; it
+    # already ran on every miss.
+    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
     # cached answer onto an immediately-`ready` ask job (rather than returning it
@@ -231,9 +264,16 @@ async def ask(
     # user-visible result is identical (same payload, same synthetic delay).
     # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
     # so it would serve a context-free answer for a question about the open PRD.
+    # SKIPPED for a mid-thread ask, for the same reason: a thread that already
+    # holds an assistant turn has context a cache hit never read. A FIRST-TURN
+    # ask deliberately stays eligible even though `conversation_id` is already
+    # set on that request — the client awaits conversation creation before
+    # asking, so `conversation_id` is non-null on turn one too, and a first-turn
+    # ask has no thread yet to be blind to (that's what the starter chips send).
+    mid_thread = any(turn.get("role") == "assistant" for turn in history)
     cached_payload = (
         await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
-        if body.prd_id is None
+        if (body.prd_id is None and not mid_thread)
         else None
     )
     if cached_payload is not None:
@@ -250,7 +290,7 @@ async def ask(
     # 2) Cache miss → persist a generating job and kick the SAME qa_agent
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
-    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+    # `history` was already loaded above (before cache resolution).
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
@@ -276,6 +316,13 @@ async def ask(
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
+            # The caller's own identity, for the SAME ownership check
+            # `_load_history` above already ran — document_grounding
+            # (app.ask_runner) re-derives it independently rather than
+            # trusting body.conversation_id, since that raw value is
+            # otherwise passed through unconditionally regardless of
+            # ownership (see app.ask_runner.set_active_conversation).
+            user_id=company.user_id,
             workspace_id=company.workspace_id,
         )
         row = get_ask_job(ask_id)
@@ -292,6 +339,8 @@ async def ask(
             prd_id=body.prd_id,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
+            # The caller's own identity — see above.
+            user_id=company.user_id,
             workspace_id=company.workspace_id,
         )
     )
@@ -301,9 +350,19 @@ async def ask(
 
 
 @router.get("/skills")
-def get_skills():
-    """Return the list of available skills for the chat composer UI."""
-    return {"skills": list_available_skills()}
+def get_skills(company: CompanyContext = Depends(require_company)):
+    """The skills the chat composer may offer — the company's OWN uploads.
+
+    COMPANY-SCOPED as of the bare-chat change, which is why this gained an auth
+    dependency it never had. It used to serve a process-global list of vendored
+    built-ins, so no tenant was involved; it now serves one customer's uploaded
+    library, so serving it unauthenticated would hand any caller another
+    company's skill names and descriptions.
+
+    See `skill_router.list_available_skills` for why built-ins are no longer
+    offered here at all.
+    """
+    return {"skills": list_available_skills(company.company_id)}
 
 
 # Same ceiling as PRD import — a slide deck or spec is comfortably under this.
@@ -377,11 +436,12 @@ def get_ask(
 ):
     """Status + result for an Ask job.
 
-    Returns `{status, answer, key_points, citations, confidence, unanswered, error}`.
-    Once `status == 'ready'` the answer/key_points/citations/etc. fields carry
-    the SAME citation-stripped shape the old synchronous POST returned, so
-    downstream rendering is unchanged. 404 if the job doesn't belong to the
-    caller's company (no cross-tenant existence disclosure)."""
+    Returns `{status, answer, key_points, citations, confidence, unanswered,
+    error, routed_skill, routed_skill_action}`. Once `status == 'ready'` the
+    answer/key_points/citations/etc. fields carry the SAME citation-stripped
+    shape the old synchronous POST returned, so downstream rendering is
+    unchanged. 404 if the job doesn't belong to the caller's company (no
+    cross-tenant existence disclosure)."""
     row = get_ask_job(ask_id)
     if not row or row.get("company_id") != company.company_id:
         raise HTTPException(404, "Ask not found")
@@ -390,13 +450,29 @@ def get_ask(
     return {
         "status": status,
         "error": row.get("error"),
+        # The skill the router picked, readable from `generating` onwards — the
+        # rest of this body is empty until the job is ready, so this is the only
+        # thing a waiting client can learn about what is actually running.
+        # Both stay null when the router selected nothing (a direct answer, an
+        # out-of-scope refusal, or one of qa_agent's pre-routing interceptors):
+        # null means "no skill", never "unknown skill", and the client is
+        # expected to show nothing rather than fall back to a guess.
+        "routed_skill": row.get("routed_skill"),
+        "routed_skill_action": row.get("routed_skill_action"),
         "answer": payload.get("answer", ""),
         "key_points": payload.get("key_points", []),
         "citations": payload.get("citations", []),
         "confidence": payload.get("confidence", 0),
         "unanswered": payload.get("unanswered", ""),
+        # Server-derived document manifest (existence-vs-retrieval contract) —
+        # defaulted explicitly so a warm/cached row from before this ticket
+        # (no "documents" key) still returns [] rather than dropping the key.
+        "documents": payload.get("documents", []),
         # Pass through any extra fields the qa_agent attaches (e.g. confirm-gate
-        # metadata, routed skill) so the contract stays a superset of the old body.
+        # metadata, the payload's own `_skill`) so the contract stays a superset
+        # of the old body. The two routed_skill* keys are excluded so the job
+        # row's columns stay authoritative for them at every status — a stored
+        # payload can never shadow the value the client already saw mid-run.
         **{
             k: v
             for k, v in payload.items()
@@ -407,6 +483,9 @@ def get_ask(
                 "citations",
                 "confidence",
                 "unanswered",
+                "routed_skill",
+                "routed_skill_action",
+                "documents",
             }
         },
     }

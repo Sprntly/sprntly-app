@@ -544,30 +544,13 @@ def post_to_target(
     )
 
 
-def fetch_conversation_history(
-    access_token: str,
-    *,
-    channel: str,
-    limit: int = 100,
-    oldest: str | None = None,
-    latest: str | None = None,
-    cursor: str | None = None,
-) -> dict[str, Any]:
-    """Read messages from a channel/DM via conversations.history.
+def _conversation_history_once(
+    access_token: str, params: dict[str, str]
+) -> tuple[bool, dict[str, Any], int]:
+    """One conversations.history GET → `(ok, parsed_body, http_status)`.
 
-    Works with either token: the bot token (xoxb) for channels/DMs the bot
-    is in, or the user token (xoxp) to read the authorizing user's own
-    conversations. `oldest`/`latest` are Slack ts bounds; `cursor` paginates.
-
-    Returns the trimmed shape {messages: [...], has_more, next_cursor}.
-    Raises HTTPException(400) on Slack-side rejection."""
-    params: dict[str, str] = {"channel": channel, "limit": str(limit)}
-    if oldest:
-        params["oldest"] = oldest
-    if latest:
-        params["latest"] = latest
-    if cursor:
-        params["cursor"] = cursor
+    Split out for the same reason as `_post_message_once`: the auto-join retry
+    needs to run the identical request twice without duplicating the parsing."""
     resp = requests.get(
         SLACK_CONVERSATIONS_HISTORY_URL,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -579,10 +562,56 @@ def fetch_conversation_history(
         parsed = resp.json() or {}
     except ValueError:
         parsed = {}
-    if not resp.ok or not parsed.get("ok"):
+    return (resp.ok and bool(parsed.get("ok")), parsed, resp.status_code)
+
+
+def fetch_conversation_history(
+    access_token: str,
+    *,
+    channel: str,
+    limit: int = 100,
+    oldest: str | None = None,
+    latest: str | None = None,
+    cursor: str | None = None,
+    auto_join: bool = False,
+) -> dict[str, Any]:
+    """Read messages from a channel/DM via conversations.history.
+
+    Works with either token: the bot token (xoxb) for channels/DMs the bot
+    is in, or the user token (xoxp) to read the authorizing user's own
+    conversations. `oldest`/`latest` are Slack ts bounds; `cursor` paginates.
+    `channel` must be a conversation ID — the reference is explicit that a
+    name is not accepted, and Slack answers a name with `channel_not_found`.
+
+    `auto_join` mirrors `post_message(..., auto_join=True)` and fixes the same
+    failure one method along: the bot was never invited to the channel, so
+    Slack rejects the read with `not_in_channel`. When set, we self-join the
+    public channel via conversations.join (`channels:join`, idempotent) and
+    retry once. Pass it only with a BOT token — conversations.join needs
+    `channels:join` on a bot token, which is what the install grants. Private
+    channels can't be self-joined, so the retry still fails and the caller gets
+    the rejection to turn into an actionable "invite the bot".
+
+    Returns the trimmed shape {messages: [...], has_more, next_cursor}.
+    Raises HTTPException(400) on Slack-side rejection."""
+    params: dict[str, str] = {"channel": channel, "limit": str(limit)}
+    if oldest:
+        params["oldest"] = oldest
+    if latest:
+        params["latest"] = latest
+    if cursor:
+        params["cursor"] = cursor
+
+    ok, parsed, status = _conversation_history_once(access_token, params)
+    if not ok and auto_join and parsed.get("error") == "not_in_channel":
+        # Bot isn't a member — self-join the public channel and read again.
+        if join_channel(access_token, channel):
+            ok, parsed, status = _conversation_history_once(access_token, params)
+
+    if not ok:
         logger.warning(
             "Slack conversations.history failed: http=%s ok=%s err=%s",
-            resp.status_code,
+            status,
             parsed.get("ok"),
             parsed.get("error"),
         )
@@ -599,12 +628,28 @@ def fetch_conversation_history(
     }
 
 
+#: search.messages ordering, straight from the reference
+#: (https://docs.slack.dev/reference/methods/search.messages): `sort` is
+#: `score` (relevance) or `timestamp` (date), defaulting to `score`; `sort_dir`
+#: is `asc` or `desc`, defaulting to `desc`. Named here because the default is
+#: the load-bearing surprise — a caller that omits `sort` gets the top-SCORING
+#: matches of all time, never the newest, and an answer built on them will
+#: happily describe them as "the latest".
+SEARCH_SORT_RELEVANCE = "score"
+SEARCH_SORT_NEWEST = "timestamp"
+_SEARCH_SORTS = (SEARCH_SORT_RELEVANCE, SEARCH_SORT_NEWEST)
+_SEARCH_SORT_DIRS = ("asc", "desc")
+
+
 def search_messages(
     user_access_token: str,
     *,
     query: str,
     count: int = 20,
     page: int = 1,
+    sort: str = SEARCH_SORT_RELEVANCE,
+    sort_dir: str = "desc",
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Search the authorizing user's own content via search.messages.
 
@@ -612,13 +657,31 @@ def search_messages(
     available to bot tokens. Reads as the user, so results span everything
     that user can see (their DMs, private channels, etc.).
 
+    `sort`/`sort_dir` are passed straight through to Slack. The default stays
+    Slack's own (`score`, `desc`) so keyword searches are unaffected; a caller
+    that wants the NEWEST matches must ask for `timestamp` explicitly — Slack
+    will never volunteer date order. Both are clamped to the documented value
+    sets, because Slack rejects anything else outright and a typo'd sort would
+    turn a working search into a 400.
+
     Returns the trimmed shape {matches: [...], total}. Raises
     HTTPException(400) on Slack-side rejection."""
+    sort = sort if sort in _SEARCH_SORTS else SEARCH_SORT_RELEVANCE
+    sort_dir = sort_dir if sort_dir in _SEARCH_SORT_DIRS else "desc"
     resp = requests.get(
         SLACK_SEARCH_MESSAGES_URL,
         headers={"Authorization": f"Bearer {user_access_token}"},
-        params={"query": query, "count": str(count), "page": str(page)},
-        timeout=15,
+        params={
+            "query": query,
+            "count": str(count),
+            "page": str(page),
+            "sort": sort,
+            "sort_dir": sort_dir,
+        },
+        # Additive with an inert default: every pre-existing caller keeps the
+        # 15s bound. The cross-connector sweep clamps it to what is left of its
+        # own budget — see connector_lookup/slack.py's SCAN_BUDGET_S.
+        timeout=timeout or 15,
     )
     parsed: dict[str, Any] = {}
     try:
@@ -731,6 +794,93 @@ def join_channel(bot_access_token: str, channel_id: str) -> bool:
     if not resp.ok or not parsed.get("ok"):
         logger.info(
             "Slack conversations.join did not join %s: http=%s err=%s",
+            channel_id,
+            resp.status_code,
+            parsed.get("error"),
+        )
+        return False
+    return True
+
+
+# The bot scopes `conversations.leave` actually needs, read from
+# https://docs.slack.dev/reference/methods/conversations.leave on 2026-08-03:
+# `channels:manage` (public channels — `channels:write` is its legacy alias),
+# `groups:write` (private), `im:write`/`mpim:write` (DMs).
+#
+# NONE of the channel ones are in `settings.slack_bot_scopes` today, which
+# requests `channels:join` (join, NOT leave — the two are separate scopes:
+# https://docs.slack.dev/reference/scopes/channels.manage lists the eight
+# methods channels:manage covers and conversations.join is not among them).
+# So on every install issued before this constant existed, `leave_channel`
+# below gets `missing_scope` back and returns False. That is a deliberately
+# soft failure: unchecking still saves, still purges the synced data, and
+# only the "bot walks out of the channel" half is skipped until an operator
+# adds the scope to the Slack app and each workspace re-authorizes (adding a
+# scope does NOT upgrade tokens already issued).
+LEAVE_CHANNEL_PUBLIC_SCOPE = "channels:manage"
+LEAVE_CHANNEL_PRIVATE_SCOPE = "groups:write"
+LEAVE_CHANNEL_SCOPES = (
+    LEAVE_CHANNEL_PUBLIC_SCOPE,
+    "channels:write",  # legacy alias Slack still honors on older installs
+    LEAVE_CHANNEL_PRIVATE_SCOPE,
+)
+
+SLACK_CONVERSATIONS_LEAVE_URL = "https://slack.com/api/conversations.leave"
+
+
+def has_leave_channel_scope(scopes: str | None) -> bool:
+    """True when the stored install granted a scope that lets the bot leave a
+    channel. Mirrors `has_file_upload_scope` — the connection row records the
+    granted scope string at install time, so this answers "will the leave even
+    be attempted usefully?" without spending a Slack round-trip.
+
+    Advisory only: the leave is attempted regardless (a stored scope string can
+    lag a re-authorization in either direction), and Slack remains the
+    authority. Callers use this to decide what to TELL the operator."""
+    granted = {s.strip() for s in (scopes or "").split(",") if s.strip()}
+    return any(s in granted for s in LEAVE_CHANNEL_SCOPES)
+
+
+def leave_channel(bot_access_token: str, channel_id: str) -> bool:
+    """Have the bot leave a channel via conversations.leave — the exact
+    reverse of `join_channel`, called when an admin unticks a channel in the
+    pull-channel picker.
+
+    Idempotent by Slack's own definition: leaving a conversation the bot was
+    never in is NOT an error, it comes back as `ok:false` with
+    `not_in_channel:true`, which this treats as success because the end state
+    the caller wanted (bot not in that channel) already holds.
+
+    Returns False (never raises) on any real rejection, so a failed leave can
+    never take down the selection save that triggered it. The two rejections
+    worth naming: `missing_scope`, which is what today's installs return
+    because `settings.slack_bot_scopes` requests `channels:join` but not
+    `channels:manage`/`groups:write` (see LEAVE_CHANNEL_SCOPES above), and
+    `last_member`, which Slack returns when the bot is the only member left."""
+    resp = requests.post(
+        SLACK_CONVERSATIONS_LEAVE_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"channel": channel_id},
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if resp.ok and parsed.get("not_in_channel"):
+        # Already out — the desired end state, not a failure.
+        logger.info(
+            "Slack conversations.leave: bot was not in %s (already left)",
+            channel_id,
+        )
+        return True
+    if not resp.ok or not parsed.get("ok"):
+        logger.info(
+            "Slack conversations.leave did not leave %s: http=%s err=%s",
             channel_id,
             resp.status_code,
             parsed.get("error"),

@@ -57,15 +57,22 @@ const EMPTY: AppContentState = {
   evidencePartialHtml: null,
   conversationId: null,
   reportFocusId: null,
+  reportFocusStandalone: false,
   threadReports: [],
   threadReportsStatus: "idle",
+  threadReportsConversationId: null,
   teamMembers: [],
   teamPending: [],
   connectorCategories: [],
   connectedConnectorIds: [],
+  connectorsHydrated: false,
   sidebarBriefCount: null,
   sidebarConvCount: null,
   aiScreenChips: {},
+  guestTickets: null,
+  ticketSet: null,
+  ticketSetGenerating: false,
+  ticketSetStandalone: false,
 }
 
 type ContentContextValue = {

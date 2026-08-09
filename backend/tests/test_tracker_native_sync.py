@@ -11,6 +11,7 @@ import pytest
 
 from app.auth import CompanyContext
 from app.stories.generate import Story
+from app.stories.scope import prd_scope
 from tests.test_ticket_sync import (
     CID,
     FakeTracker,
@@ -19,6 +20,10 @@ from tests.test_ticket_sync import (
     _sync_cfg,
     fake_tracker,  # noqa: F401 — fixture reuse
 )
+
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID/FakeTracker
+# fixture family, pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
 
 
 def _ctx(cid: str = CID) -> CompanyContext:
@@ -32,11 +37,45 @@ def quiet_kicks(monkeypatch):
     the shared fake-SQLite connection make those tests flaky. Order this
     AFTER isolated_settings in the test signature (module reload)."""
     monkeypatch.setattr(
-        "app.stories.sync.kick_prd_sync_from_key", lambda *a, **k: False,
+        "app.stories.sync.kick_sync_from_key", lambda *a, **k: False,
     )
     monkeypatch.setattr(
         "app.stories.sync.kick_comment_push", lambda *a, **k: False,
     )
+
+
+@pytest.fixture()
+def _joined_kick_threads(monkeypatch):
+    """For the two tests that exercise a REAL instant-push daemon thread
+    (`kick_sync_from_key` / `kick_comment_push`, unlike every other test
+    here which routes through `quiet_kicks`): guarantee the thread is fully
+    finished before this test — and its `fake_tracker`/`isolated_settings`
+    fixtures — tear down.
+
+    Each test's own poll only proves the thread reached its LAST observable
+    side effect (a DB write); it does not `join()` the OS thread. Under
+    parallel test execution the daemon thread can still be mid-unwind when
+    this test returns, and since `_Tracker`/`run_prd_sync` are looked up by
+    NAME inside the thread's closure at call time (not captured at spawn
+    time), a thread that's still alive when the NEXT test's `fake_tracker`
+    fixture resets `FakeTracker.instances`/`meta_seed`/etc. can construct an
+    extra tracker instance or write to the fake DB mid-reset — corrupting a
+    completely unrelated, later test. Wrapping `threading.Thread` here and
+    joining every instance the test spawned removes that window outright."""
+    import threading
+
+    real_thread = threading.Thread
+    started: list[threading.Thread] = []
+
+    class _TrackedThread(real_thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", _TrackedThread)
+    yield started
+    for t in started:
+        t.join(timeout=5)
 
 
 #: A customized Jira-style destination: renamed workflow, real priority
@@ -122,7 +161,7 @@ def test_meta_status_imports_verbatim_with_category(isolated_settings, fake_trac
         .eq("company_id", CID).eq("ticket_key", f"prd-7-{tid}").execute().data[0]
     )
     assert edit["status"] == "Building"  # verbatim, not "In progress"
-    entry = get_sync_config(CID, 7)["statuses"][tid]
+    entry = get_sync_config(CID, prd_scope(7))["statuses"][tid]
     assert entry["status_category"] == "in_progress"
 
 
@@ -248,7 +287,7 @@ def test_custom_field_remote_change_imports_and_merges(isolated_settings, fake_t
         "customfield_2": "local note",                     # survived the merge
     }
     # Snapshot reflects the pull.
-    entry = get_sync_config(CID, 7)["statuses"][tid]
+    entry = get_sync_config(CID, prd_scope(7))["statuses"][tid]
     assert entry["custom_fields"]["customfield_1"] == {"id": "o2", "name": "Growth"}
 
 
@@ -282,7 +321,7 @@ def test_custom_field_local_edit_pushes_out(isolated_settings, fake_tracker):  #
     ]
     # The stored snapshot reflects the pushed value — the next pass must not
     # read our own write back as a remote change.
-    entry = get_sync_config(CID, 7)["statuses"][tid]
+    entry = get_sync_config(CID, prd_scope(7))["statuses"][tid]
     assert entry["custom_fields"]["customfield_1"] == {"id": "o2", "name": "Growth"}
 
 
@@ -370,7 +409,7 @@ def test_custom_field_first_pass_only_baselines(isolated_settings, fake_tracker)
         .eq("company_id", CID).eq("ticket_key", f"prd-7-{tid}").execute().data
     )
     assert not rows or not rows[0]["custom_fields"]
-    entry = get_sync_config(CID, 7)["statuses"][tid]
+    entry = get_sync_config(CID, prd_scope(7))["statuses"][tid]
     assert entry["custom_fields"]["customfield_2"] == "remote note"
 
 
@@ -472,7 +511,7 @@ def _bind_with_meta(prd_id: int = 42) -> None:
     from app.db.ticket_sync import upsert_sync_config
     from app.db.tracker_meta import save_meta
 
-    upsert_sync_config(CID, prd_id, provider="jira", destination_id="KAN")
+    upsert_sync_config(CID, prd_scope(prd_id), provider="jira", destination_id="KAN")
     save_meta(CID, "jira", "KAN", META)
 
 
@@ -807,7 +846,9 @@ def test_sync_pass_pushes_post_binding_comments_only(isolated_settings, fake_tra
     assert fake_tracker.instances[1].comments == []
 
 
-def test_kick_comment_push_pushes_and_marks(isolated_settings, monkeypatch, fake_tracker):  # noqa: F811
+def test_kick_comment_push_pushes_and_marks(
+    isolated_settings, monkeypatch, fake_tracker, _joined_kick_threads,  # noqa: F811
+):
     import time
 
     from app.db.client import require_client
@@ -822,7 +863,7 @@ def test_kick_comment_push_pushes_and_marks(isolated_settings, monkeypatch, fake
     cid_row = _comment_row(key, "hello", "2027-01-01T00:00:00+00:00")
     assert sync_mod.kick_comment_push(CID, key, cid_row, "Ada", "hello") is False
 
-    upsert_sync_config(CID, 42, provider="clickup", destination_id="901")
+    upsert_sync_config(CID, prd_scope(42), provider="clickup", destination_id="901")
     fake_tracker.seed = {tid: _remote()}
     assert sync_mod.kick_comment_push(CID, key, cid_row, "Ada", "hello") is True
     # The push runs on a daemon thread — wait for the mark to land.
@@ -866,27 +907,60 @@ def test_comment_routes_kick_instant_push(isolated_settings, monkeypatch):
 # ── Instant push (edit → tracker immediately, no scheduler wait) ─────────────
 
 
-def test_kick_prd_sync_from_key(isolated_settings, monkeypatch):
+def test_kick_sync_from_key(isolated_settings, monkeypatch, _joined_kick_threads):
     import threading
 
     from app.db.ticket_sync import get_sync_config, upsert_sync_config
     from app.stories import sync as sync_mod
 
-    # Malformed key / unbound PRD → no-op.
-    assert sync_mod.kick_prd_sync_from_key(CID, "not-a-key") is False
-    assert sync_mod.kick_prd_sync_from_key(CID, "prd-99-x") is False
+    # Malformed key / unbound artifact → no-op.
+    assert sync_mod.kick_sync_from_key(CID, "not-a-key") is False
+    assert sync_mod.kick_sync_from_key(CID, "prd-99-x") is False
 
-    ran = threading.Event()
+    ran: list[object] = []
+    fired = threading.Event()
     monkeypatch.setattr(
-        sync_mod, "run_prd_sync", lambda cid, pid: ran.set(),
+        sync_mod, "run_ticket_sync",
+        lambda cid, scope: (ran.append(scope), fired.set()),
     )
-    upsert_sync_config(CID, 42, provider="jira", destination_id="KAN")
-    assert sync_mod.kick_prd_sync_from_key(CID, "prd-42-abc") is True
-    assert ran.wait(2), "the background pass never ran"
+    upsert_sync_config(CID, prd_scope(42), provider="jira", destination_id="KAN")
+    assert sync_mod.kick_sync_from_key(CID, "prd-42-abc") is True
+    assert fired.wait(2), "the background pass never ran"
+    assert ran == [prd_scope(42)]
     # The kick marked the row syncing BEFORE spawning, so an immediate second
     # save is single-flighted rather than stampeding the tracker API.
-    assert get_sync_config(CID, 42)["sync_status"] == "syncing"
-    assert sync_mod.kick_prd_sync_from_key(CID, "prd-42-abc") is False
+    assert get_sync_config(CID, prd_scope(42))["sync_status"] == "syncing"
+    assert sync_mod.kick_sync_from_key(CID, "prd-42-abc") is False
+
+
+def test_kick_sync_from_key_routes_a_set_key_to_its_own_set(
+    isolated_settings, monkeypatch, _joined_kick_threads
+):
+    """A `set-*` key kicks the SET's sync pass, not a PRD with the same number.
+
+    PRD ids and set ids are independent sequences, so `set-42-…` and
+    `prd-42-…` routinely coexist. Parsing the number without the prefix would
+    push a standalone set's edits into a completely unrelated PRD's tracker
+    project — the reason the key namespaces are disjoint in the first place."""
+    import threading
+
+    from app.db.ticket_sync import upsert_sync_config
+    from app.stories import sync as sync_mod
+    from app.stories.scope import set_scope
+
+    ran: list[object] = []
+    fired = threading.Event()
+    monkeypatch.setattr(
+        sync_mod, "run_ticket_sync",
+        lambda cid, scope: (ran.append(scope), fired.set()),
+    )
+    # Both artifacts numbered 42, bound to DIFFERENT destinations.
+    upsert_sync_config(CID, prd_scope(42), provider="jira", destination_id="PRD-PROJ")
+    upsert_sync_config(CID, set_scope(42), provider="jira", destination_id="SET-PROJ")
+
+    assert sync_mod.kick_sync_from_key(CID, "set-42-abc") is True
+    assert fired.wait(2), "the background pass never ran"
+    assert ran == [set_scope(42)]
 
 
 def test_saves_kick_an_instant_sync(isolated_settings, monkeypatch):
@@ -897,7 +971,7 @@ def test_saves_kick_an_instant_sync(isolated_settings, monkeypatch):
 
     kicked: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        "app.stories.sync.kick_prd_sync_from_key",
+        "app.stories.sync.kick_sync_from_key",
         lambda cid, key: kicked.append((cid, key)) or True,
     )
     _bind_with_meta()

@@ -11,7 +11,18 @@ process. The hash is recorded by the gateway in `prompt_version` so every
 decision is traceable to the exact method version behind it.
 
 Skills are STATIC bindings — agents name the skill they use directly in code.
-There is no dynamic routing here.
+There is no dynamic routing here, and as of the bare-chat change there is none
+anywhere: the library is NINE skills, each bound by name from the one pipeline
+that needs it (prd-author + implementation-spec from the PRD runner,
+evidence-brief from evidence_kg, user-stories from the ticket generator,
+top-insights from the synthesis agent, and the four connector-extraction
+contracts from kg_ingest). A chat turn selects none of them.
+
+`get_skill` still RAISES `UnknownSkillError` on a missing directory, and that is
+deliberate — those nine bindings are load-bearing and a silent empty method
+would be worse than a stack trace. The tolerance for ids that are no longer
+vendored lives one layer up, in `graph.gateway._build_method_prefix`, where it
+can be scoped to callers that only pass `skill=` for attribution.
 """
 from __future__ import annotations
 
@@ -60,12 +71,69 @@ class SkillSpec:
     has_scripts: bool = False
 
 
+def _join_block(raw: list[str], *, folded: bool) -> str:
+    """Join the raw lines of a YAML block scalar into its value.
+
+    The block's own indentation is measured from its least-indented non-empty
+    line and stripped, so nesting *inside* a literal block survives. Leading and
+    trailing blank lines are dropped.
+
+    Literal (`|`) keeps every newline. Folded (`>`) applies the YAML folding
+    rule: consecutive non-empty lines join with a single space, and a blank line
+    becomes a paragraph break — which is what makes `description: >` read back as
+    one flowing sentence instead of a ragged column of fragments.
+    """
+    indents = [len(ln) - len(ln.lstrip()) for ln in raw if ln.strip()]
+    base = min(indents) if indents else 0
+    lines = [ln[base:].rstrip() if ln.strip() else "" for ln in raw]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    if not folded:
+        return "\n".join(lines)
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for ln in lines:
+        if ln:
+            current.append(ln)
+        elif current:
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n".join(paragraphs)
+
+
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """Extract simple `key: value` pairs from a leading `---`…`---` block.
 
-    Deliberately minimal (no YAML dep): handles the flat, single-line
-    `name:`/`description:` frontmatter the PM skills use. Returns {} when there
-    is no frontmatter block.
+    Deliberately minimal (still no YAML dep): handles the flat, single-line
+    `name:`/`description:` frontmatter the PM skills use, plus YAML BLOCK
+    SCALARS — `key: >` (folded) and `key: |` (literal) — whose value lives on the
+    following indented lines rather than after the colon.
+
+    Block scalars are not a nicety here. A plain `partition(":")` on the line
+    `description: >` captured the single character ">" as the entire
+    description. That was found via the (since-deleted) chat router menu, which
+    listed `prd-author` as the literal line `- prd-author: >` — zero semantic
+    signal. The router menu is gone, but the trap is NOT: five of the nine
+    skills we still vendor use a block scalar, including all four
+    KG-extraction skills, whose descriptions `app.graph.evals` reads. A skill
+    author has no reason to know `>` is unsupported, which is why this is fixed
+    in the parser rather than by reflowing the files.
+
+    Fixed here rather than by rewriting the five SKILL.md files on purpose:
+    editing a SKILL.md changes its `content_hash`, which is the `prompt_version`
+    suffix the decision log uses to pin which method version produced an answer —
+    so a cosmetic reflow would invalidate prd-author's recorded method version
+    across the whole audit spine. Fixing the parser also disarms the trap for the
+    next skill author, who has no reason to know `>` is unsupported.
+
+    Chomping and explicit-indent indicators (`>-`, `|+`, `>2`) are accepted and
+    ignored: no vendored skill uses one, and whether a block keeps its trailing
+    newline is meaningless for a one-line summary. Returns {} when there is no
+    frontmatter block.
     """
     if not text.startswith("---"):
         return {}
@@ -73,10 +141,29 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     if end == -1:
         return {}
     out: dict[str, str] = {}
-    for line in text[3:end].splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            out[k.strip()] = v.strip()
+    lines = text[3:end].splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        v = v.strip()
+        # `>` / `|` alone (bar chomping/indent indicators) opens a block scalar:
+        # the value is the indented run of lines that follows, up to the next
+        # line that starts back at column 0 (the next key).
+        if v[:1] in (">", "|") and not v[1:].strip("+-0123456789"):
+            block: list[str] = []
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt.strip() and not nxt[:1].isspace():
+                    break
+                block.append(nxt)
+                i += 1
+            out[k.strip()] = _join_block(block, folded=v[0] == ">")
+        else:
+            out[k.strip()] = v
     return out
 
 

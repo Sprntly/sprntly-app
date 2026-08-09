@@ -659,3 +659,178 @@ def test_route_generate_requires_company(isolated_settings, monkeypatch):
     r = ctx.client.post("/v1/stories/generate", json={"insight": "x"},
                         headers={"Authorization": ""})
     assert r.status_code in (401, 403)
+
+
+# ── ticket description layout (the company's own ticket format) ──────────────
+#
+# The template governs the DESCRIPTION LAYOUT, not the field set: it may
+# rename, reorder and add sections, but not remove the notion of a user story.
+
+_CUSTOM_LAYOUT = [
+    {"label": "Summary", "source": "what"},
+    {"label": "Acceptance owner", "source": "custom:acceptance_owner"},
+    {"label": "The ask", "source": "user_story"},
+    {"label": "Covers", "source": "scope"},
+]
+
+
+def _story(**kw):
+    from app.stories.generate import Story
+
+    base = dict(
+        title="Ship it", body="As a user, I want X, so that Y.",
+        what="Build the thing", why_now="Churn is up 12%",
+        user_story="As a user, I want X, so that Y.",
+        scope=["cover A", "cover B"], out_of_scope="Not the mobile app",
+        acceptance_criteria=["Given A When B Then C"],
+    )
+    base.update(kw)
+    return Story(**base)
+
+
+def test_default_layout_description_is_byte_identical_to_the_legacy_render():
+    """THE regression guard for this milestone.
+
+    `to_description` is now layout-driven, and this is the exact string that
+    lands in Jira/ClickUp/Asana and that the import normaliser has to recognise
+    on the way back. Under the default layout it must be byte-for-byte what the
+    previous release produced — the five sections, that order, those bold
+    labels, empty sections skipped, the same tail."""
+    s = _story(subtasks=["child one"], prd_section="R3", route="agent-ready")
+    expected = (
+        "**What**\n"
+        "Build the thing\n"
+        "\n"
+        "**Why now**\n"
+        "Churn is up 12%\n"
+        "\n"
+        "**User story**\n"
+        "As a user, I want X, so that Y.\n"
+        "\n"
+        "**Scope**\n"
+        "- cover A\n"
+        "- cover B\n"
+        "\n"
+        "**Out of scope**\n"
+        "Not the mobile app\n"
+        "\n"
+        "**Acceptance criteria**\n"
+        "- Given A When B Then C\n"
+        "\n"
+        "**Child issues**\n"
+        "- child one\n"
+        "\n"
+        "_Provenance: R3_\n"
+        "_Route: agent-ready_"
+    )
+    assert s.to_description() == expected
+
+
+def test_default_layout_still_skips_empty_sections():
+    s = _story(why_now="", out_of_scope="", scope=[], acceptance_criteria=[])
+    out = s.to_description()
+    assert "**Why now**" not in out
+    assert "**Out of scope**" not in out
+    assert "**Scope**" not in out
+    assert out.startswith("**What**")
+
+
+def test_a_custom_layout_renames_reorders_and_adds_sections():
+    s = _story(
+        description_layout=_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    out = s.to_description()
+    # Their labels, their order.
+    assert out.index("**Summary**") < out.index("**Acceptance owner**")
+    assert out.index("**Acceptance owner**") < out.index("**The ask**")
+    assert out.index("**The ask**") < out.index("**Covers**")
+    assert "QA lead" in out
+    # A section the layout doesn't place simply isn't rendered.
+    assert "**Out of scope**" not in out
+    assert "**Why now**" not in out
+    # The house labels are gone — this is their format, not ours.
+    assert "**What**" not in out
+
+
+def test_a_layout_may_not_drop_the_user_story():
+    from app.stories.layout import normalize_layout
+
+    out = normalize_layout([
+        {"label": "Summary", "source": "what"},
+        {"label": "Covers", "source": "scope"},
+    ])
+    assert [e["source"] for e in out][-1] == "user_story"
+
+
+def test_an_unknown_source_is_dropped_at_the_boundary():
+    """Same posture as the PRD compiler's SECTION_FORMS: a source we don't know
+    must never be stored, or `to_description` renders a section with nothing
+    behind it on every ticket the company pushes."""
+    from app.stories.layout import normalize_layout
+
+    out = normalize_layout([
+        {"label": "Summary", "source": "what"},
+        {"label": "Mystery", "source": "whatever_the_model_said"},
+        {"label": "The ask", "source": "user_story"},
+    ])
+    assert [e["source"] for e in out] == ["what", "user_story"]
+
+
+def test_a_layout_with_nothing_usable_is_refused():
+    import pytest as _pytest
+
+    from app.stories.layout import TicketLayoutError, normalize_layout
+
+    with _pytest.raises(TicketLayoutError):
+        normalize_layout([{"label": "", "source": "nope"}])
+
+
+def test_compiling_a_ticket_format_maps_headings_to_sources():
+    from app.stories.layout import compile_ticket_layout
+
+    layout = compile_ticket_layout(
+        "# Acme ticket\n"
+        "## Summary\n"
+        "## Why now\n"
+        "**Acceptance owner**\n"
+        "## User story\n"
+        "## Out of scope\n"
+    )
+    by_source = {e["source"]: e["label"] for e in layout}
+    assert by_source["what"] == "Summary"
+    assert by_source["why_now"] == "Why now"
+    assert by_source["user_story"] == "User story"
+    assert by_source["out_of_scope"] == "Out of scope"
+    assert by_source["custom:acceptance_owner"] == "Acceptance owner"
+
+
+def test_the_custom_section_hint_names_only_the_custom_keys():
+    # The canonical five are already in the schema; repeating them would be
+    # prompt weight for no information.
+    from app.stories.layout import layout_prompt_hint
+
+    hint = layout_prompt_hint(_CUSTOM_LAYOUT)
+    assert "acceptance_owner" in hint
+    assert "what" not in hint.split("\n", 1)[1]
+    assert layout_prompt_hint(None) == ""
+
+
+def test_the_layout_round_trips_through_the_stored_dict():
+    from app.stories.generate import Story
+
+    s = _story(
+        description_layout=_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    back = Story.from_dict(s.to_dict())
+    assert back.description_layout == _CUSTOM_LAYOUT
+    assert back.custom_sections == {"acceptance_owner": "QA lead"}
+    assert back.to_description() == s.to_description()
+
+
+def test_a_default_layout_story_stores_no_layout_keys():
+    # Byte-identical storage for every company without a ticket format.
+    d = _story().to_dict()
+    assert "description_layout" not in d
+    assert "custom_sections" not in d

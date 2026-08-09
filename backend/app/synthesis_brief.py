@@ -135,8 +135,13 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     successful extract, so a failed doc retries on the next run. Missing corpus
     is not fatal — a company might be connector-only.
     """
+    # Lazy import — matches the lazy-import style this module already uses
+    # for connector-path imports (see _seed_from_connectors below), so no
+    # module-load cycle is created between synthesis_brief and connectors.
+    from app.connectors.slack_sync import SLACK_CORPUS_DOC_STEM
+
     totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0,
-              "unreadable": 0}
+              "unreadable": 0, "kg_excluded": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
@@ -170,6 +175,12 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
         if is_unparsed_stub(doc.text):
             totals["unreadable"] += 1
             continue
+        # Slack reaches the KG per-channel via kg_ingest.slack_extract, which
+        # carries channel-level provenance this wholesale doc cannot. The file
+        # itself stays — the corpus loader still feeds it to briefs and Ask.
+        if doc.name == SLACK_CORPUS_DOC_STEM:
+            totals["kg_excluded"] += 1
+            continue
         sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
         if sha in existing:
             totals["unchanged"] += 1
@@ -187,11 +198,18 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
                     origin="connector", source_hint=hint,
                     source_type_default=source_type,
                     provenance_extra={"channel": "upload", "category": category},
+                    # Haiku relevance + category triage ahead of every corpus
+                    # doc. This is separate from `category` above
+                    # (the user-picked upload category / evidence bucket) —
+                    # triage's own classification lands as
+                    # provenance["triage_category"].
+                    triage=True,
                 )
             else:
                 r = extract_document(
                     facade, company_id, doc_name=doc.name, text=doc.text,
                     origin="upload",
+                    triage=True,
                 )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]

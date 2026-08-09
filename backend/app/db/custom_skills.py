@@ -81,13 +81,18 @@ def insert_custom_skill(
     storage_key: str | None,
     uploader_id: str,
     uploader_name: str,
+    source_id: str | None = None,
 ) -> dict:
     """Create the skill row; returns the decoded row.
 
     Raises DuplicateSkillSlug when the (company_id, slug) unique constraint
     trips — the route surfaces it as a 409. The id/created_at are generated
     client-side (uuid4 / microsecond ISO) so the SQLite test fake behaves
-    identically to Postgres."""
+    identically to Postgres.
+
+    `source_id` marks the skill as belonging to a synced GitHub folder, which
+    makes it read-only everywhere a user could edit it. It defaults to None so
+    every hand-upload path stays exactly what it was."""
     c = require_client()
     row = {
         "id": str(uuid.uuid4()),
@@ -104,6 +109,7 @@ def insert_custom_skill(
         "uploader_id": uploader_id,
         "uploader_name": uploader_name,
         "created_at": _now_iso(),
+        "source_id": source_id,
     }
     try:
         resp = c.table("custom_skills").insert(row).execute()
@@ -116,7 +122,7 @@ def insert_custom_skill(
 
 # List view omits the bulky content columns — the library UI needs metadata
 # only. get_custom_skill returns everything (invocation needs `method`).
-_LIST_COLUMNS = "id, slug, name, description, content_hash, storage_key, uploader_id, uploader_name, created_at"
+_LIST_COLUMNS = "id, slug, name, description, content_hash, storage_key, uploader_id, uploader_name, created_at, source_id"
 
 
 def list_custom_skills(company_id: str) -> list[dict]:
@@ -159,6 +165,132 @@ def get_custom_skill_by_id(company_id: str, skill_id: str) -> dict | None:
         .execute()
     )
     return _decode(resp.data[0]) if resp.data else None
+
+
+def update_custom_skill(
+    *,
+    company_id: str,
+    skill_id: str,
+    workspace_id: str,
+    name: str,
+    description: str,
+    method: str,
+    modules: dict[str, str],
+    references: dict[str, str],
+    content_hash: str,
+    storage_key: str | None,
+    uploader_id: str,
+    uploader_name: str,
+    slug: str | None = None,
+    source_id: str | None = None,
+) -> dict | None:
+    """Replace one company-owned skill's content and metadata in place; returns
+    the decoded row, or None when the id is missing or belongs to another
+    company (indistinguishable, like the by-id lookup).
+
+    This is the re-upload path: a company uploading a skill under a name it has
+    already used updates that row instead of getting a second entry. `created_at`
+    is deliberately NOT in the patch — the library's newest-first order should
+    not reshuffle because someone refreshed a skill's text. `workspace_id` and
+    the uploader fields ARE refreshed: the row describes the version it now
+    holds, so it records who last uploaded it and from where.
+
+    `slug` DEFAULTS TO None meaning "leave the trigger alone", and the re-upload
+    path relies on that: `/estimation-helper` has to keep working across a new
+    version, and the router has to keep offering the same id. Only the in-place
+    EDIT path passes a slug, and only when the edit renamed the skill — a new
+    name derives a new trigger through the same deconfliction the upload uses.
+    Passing one re-opens the (company_id, slug) unique constraint, so that call
+    can raise DuplicateSkillSlug; the no-slug call still cannot trip it.
+
+    `source_id` behaves the same way — None means "leave it alone", so the edit
+    path never disturbs it and a sync can adopt a skill the company had uploaded
+    by hand under the same name. There is deliberately no way to CLEAR it here:
+    a skill stops being synced when its source row goes away, and the column's
+    `on delete set null` is what does that.
+
+    Both the existence check and the update are company-filtered, so a racing
+    caller can never write a foreign row."""
+    row = get_custom_skill_by_id(company_id, skill_id)
+    if row is None:
+        return None
+    patch = {
+        "workspace_id": workspace_id,
+        "name": name,
+        "description": description,
+        "method": method,
+        "modules": json.dumps(modules or {}),
+        "refs": json.dumps(references or {}),
+        "content_hash": content_hash,
+        "storage_key": storage_key,
+        "uploader_id": uploader_id,
+        "uploader_name": uploader_name,
+    }
+    if slug is not None:
+        patch["slug"] = slug
+    if source_id is not None:
+        patch["source_id"] = source_id
+    c = require_client()
+    try:
+        resp = (
+            c.table("custom_skills")
+            .update(patch)
+            .eq("company_id", company_id)
+            .eq("id", skill_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — narrow to unique-violation below
+        # Only reachable on a slug-changing edit: another row in this company
+        # took the trigger between the caller's library read and this write.
+        if slug is not None and _is_unique_violation(exc):
+            raise DuplicateSkillSlug(slug) from exc
+        raise
+    # PostgREST returns the updated representation; fall back to the row we
+    # already read merged with the patch rather than reporting a failed update
+    # (the caller reads None as "the row is gone" and would then create a
+    # second entry under the same name — exactly what this path prevents).
+    return _decode(resp.data[0] if resp.data else {**row, **patch})
+
+
+def detach_skills_from_source(company_id: str, source_id: str) -> int:
+    """Clear `source_id` on every skill a synced folder produced; returns how
+    many rows were touched.
+
+    This is what "stop syncing" actually does to the library. Leaving the link
+    in place would keep the skills read-only forever — the PATCH and DELETE
+    guards key on `source_id` alone, deliberately, so that they cost no extra
+    read on the hot path. Clearing it here means one write at the moment someone
+    stops syncing, instead of a source lookup on every edit of every skill.
+
+    The skills themselves are untouched otherwise: same id, same trigger, same
+    text. They simply become ordinary uploaded skills that the company now owns.
+    Re-enabling the folder re-adopts them through the normal name-matched
+    replace in `store_skill`, so nothing is stranded by this.
+    """
+    c = require_client()
+    # Counted from a SELECT before the update, not from the update's returned
+    # representation: PostgREST returns the updated rows but the SQLite test
+    # fake answers an empty list, and a caller that reports "0 skills released"
+    # after releasing four would be lying in the one message that tells the user
+    # their skills survived.
+    found = (
+        c.table("custom_skills")
+        .select("id")
+        .eq("company_id", company_id)
+        .eq("source_id", source_id)
+        .execute()
+    )
+    count = len(found.data or [])
+    if not count:
+        return 0
+    (
+        c.table("custom_skills")
+        .update({"source_id": None})
+        .eq("company_id", company_id)
+        .eq("source_id", source_id)
+        .execute()
+    )
+    return count
 
 
 def delete_custom_skill(company_id: str, skill_id: str) -> dict | None:

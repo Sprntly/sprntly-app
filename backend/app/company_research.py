@@ -267,6 +267,24 @@ def _digest(records: list[dict], stage: str) -> str:
     return text[:_SUMMARY_CAP]
 
 
+def _capture_spec_reference() -> str:
+    """The skill's `references/capture-spec.md`, or '' when it isn't vendored.
+
+    Same reasoning as `public_feedback._capture_spec_reference`: this stage is a
+    `call_with_web_search` that bypasses the gateway, so it reads the skill off
+    disk itself, and `get_skill` RAISES on a missing directory. The staged sweep
+    and its KG population do not depend on the reference — `_CAPTURE_SYSTEM`
+    carries the record contract — so a missing file degrades capture quality
+    rather than failing the run.
+    """
+    from app.skills.loader import UnknownSkillError, get_skill
+
+    try:
+        return get_skill(CR_SKILL).references.get("capture-spec.md", "")
+    except UnknownSkillError:
+        return ""
+
+
 def _capture_stage(
     enterprise_id: str,
     *,
@@ -283,11 +301,8 @@ def _capture_stage(
     stage: nothing was extracted yet, so the run fails cleanly) or recoverable
     (a later stage: earlier stages' signals are already in the KG and kept).
     """
-    from app.skills.loader import get_skill
-
-    spec = get_skill(CR_SKILL)
     system = _CAPTURE_SYSTEM
-    capture_spec = spec.references.get("capture-spec.md", "")
+    capture_spec = _capture_spec_reference()
     if capture_spec:
         system += f"\n\n### REFERENCE: capture-spec.md\n{capture_spec}"
 

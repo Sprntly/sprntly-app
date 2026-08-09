@@ -7,18 +7,17 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import {
   artifactsApi,
-  askApi,
   prdApi,
   evidenceApi,
   type ArtifactItem,
-  type ReportKindOption,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
+import { evidenceOpenScopePatch } from "../../../lib/panelPrdScope"
+import { loadTicketSet } from "../../../lib/runTicketSetGeneration"
 import { prototypePath } from "../../../lib/routes"
 import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-import { NewReportMenu } from "./NewReportMenu"
 
 // ── Artifacts ──
 //
@@ -27,31 +26,39 @@ import { NewReportMenu } from "./NewReportMenu"
 // History holds only chats and Artifacts is the browsable library of durable
 // outputs (PRDs, prototypes, evidence).
 
-type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report"
+type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report" | "ticket_set"
 
+// "Tickets", not "Non-PRD tickets": a PRD's tickets are not in this library at
+// all (they belong to the PRD row, which is), so the qualifier would send
+// people hunting for a chip that does not exist.
 const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "report", label: "Reports" },
   { id: "prd", label: "PRDs" },
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
+  { id: "ticket_set", label: "Tickets" },
 ]
 
-// Poll cadence for a panel-started report run. These skills read every source, so
-// a run is minutes long — a slow poll keeps the wait honest without hammering.
-const REPORT_POLL_MS = 4000
+// The "+ New report" picker is GONE, not hidden. It was already dark behind
+// `SHOW_NEW_REPORT_BUTTON = false` — reports are asked for in chat, where the
+// answer and the document live together — and the fixed report FORMATS it
+// picked between (Voice of Customer / Competitor Analysis / Public Feedback,
+// server-listed by the deleted `GET /v1/reports/kinds`) no longer exist. There
+// is nothing left for a picker to pick, so nothing user-facing changed here.
+// Browsing and opening captured reports is untouched: the "Reports" filter, the
+// REPORT badge, and `reportKindLabel` all still work on rows already in the
+// library.
 
-// "+ New report" is hidden: reports are asked for in chat, where the answer and
-// the document live together, and they're read in that thread's Reports tab.
-// The generation path below (NewReportMenu + generateReport) is left intact and
-// tested, so bringing the button back is this one flag.
-const SHOW_NEW_REPORT_BUTTON = false
-
+// The four hexes below predate the design tokens and are left as they are —
+// changing them is a visual-consistency pass of its own, not this feature's.
+// The new entry uses the tokens, which is what a new badge should do.
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
-  prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
-  prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
-  evidence:  { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
-  report:    { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
+  prd:        { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
+  prototype:  { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
+  evidence:   { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
+  report:     { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
+  ticket_set: { label: "TICKETS",   bg: "var(--info-soft)", color: "var(--info)" },
 }
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
@@ -105,12 +112,42 @@ function artifactSourceLine(a: ArtifactItem): string {
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
+  if (a.type === "ticket_set") {
+    // The COUNT leads, because it is the affordance: "how much work is in
+    // here" is the only thing that distinguishes one set from another at a
+    // glance. It is a sub-line number rather than a chip of its own — the row
+    // already carries one badge and a second would compete with it.
+    //
+    // A set still being written says so instead of claiming a count it
+    // doesn't have yet (the row is also not clickable — see `isBuilding`),
+    // the same treatment a building prototype gets.
+    const parts = [
+      a.status === "generating"
+        ? "Writing tickets"
+        : `${a.ticket_count} ticket${a.ticket_count === 1 ? "" : "s"}`,
+    ]
+    // Same rule as the report row above: a deleted chat leaves the id but no
+    // title, and the row omits the clause rather than inventing a label.
+    if (a.source.conversation_title) parts.push(`from ${a.source.conversation_title}`)
+    if (rel) parts.push(rel)
+    return parts.join(" · ")
+  }
   // prd | evidence
   const week = a.source.week_label || "brief"
   const parts = [`from Brief ${week}`]
   if (a.status) parts.push(a.status)
   if (rel) parts.push(rel)
   return parts.join(" · ")
+}
+
+/** The bold title line for a row. Only ticket sets can legitimately arrive
+ *  without one (`ticket_sets.title` is empty until the naming leg runs, and on
+ *  rows that predate it) — an empty string would render a blank line where the
+ *  name goes, so they fall back to the SAME words the panel's header uses, not
+ *  a per-surface invention. */
+function artifactTitle(a: ArtifactItem): string {
+  if (a.type === "ticket_set") return a.title.trim() || "Tickets from this conversation"
+  return a.title
 }
 
 function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
@@ -147,6 +184,17 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
           <rect x="6" y="11" width="3.4" height="6" rx="1" />
           <rect x="11.4" y="7" width="3.4" height="10" rx="1" />
           <rect x="16.8" y="13" width="3.4" height="4" rx="1" />
+        </svg>
+      </div>
+    )
+  }
+  if (type === "ticket_set") {
+    // A ticket stub: the perforated stub line is what reads as "tickets" at
+    // 16px, where a document glyph would just read as another PRD.
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3" y="6" width="18" height="12" rx="2" /><path d="M9 6v12" />
         </svg>
       </div>
     )
@@ -238,7 +286,6 @@ export function ArtifactsView({
   filter,
   loading,
   activeKey = null,
-  generatingKind = null,
   onFilterChange,
   onOpen,
 }: {
@@ -248,17 +295,10 @@ export function ArtifactsView({
   /** `${type}-${id}` of the artifact whose panel is currently open — that row
    *  renders in its selected (green) state. Null = nothing selected. */
   activeKey?: string | null
-  /** Label of a report being generated from this panel, or null. A report row
-   *  only exists once the run completes, so this pending row is what makes a
-   *  multi-minute run visible — the prototype shimmer's role, held client-side
-   *  because there is no server row to poll yet. */
-  generatingKind?: string | null
   onFilterChange: (f: ArtifactFilter) => void
   onOpen: (a: ArtifactItem) => void
 }) {
   const filtered = filter === "all" ? items : items.filter((a) => a.type === filter)
-  // The pending row belongs to the report filters only.
-  const showPending = generatingKind != null && (filter === "all" || filter === "report")
 
   return (
     <div>
@@ -302,37 +342,8 @@ export function ArtifactsView({
         </div>
       )}
 
-      {/* Pending report run — the artifact does not exist server-side until the
-          run completes, so this row is the only sign the work is happening. */}
-      {showPending && (
-        <div
-          data-testid="report-pending-row"
-          style={{
-            display: "flex", alignItems: "center", gap: 14,
-            padding: "14px 10px", borderRadius: 10, cursor: "default",
-          }}
-        >
-          <div style={{
-            width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
-            background: ARTIFACT_BADGE.report.bg,
-            animation: "chats-pulse 1.4s ease-in-out infinite",
-          }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)", marginBottom: 4,
-            }}>
-              {generatingKind} report
-            </div>
-            <div style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
-              Generating · this can take a few minutes
-            </div>
-          </div>
-          <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
-        </div>
-      )}
-
       {/* Empty state */}
-      {!loading && !showPending && filtered.length === 0 && (
+      {!loading && filtered.length === 0 && (
         <EmptyPane
           title="No artifacts yet"
           hint="Upload a PRD, generate a PRD, prototype, or evidence from a brief finding, or ask for a report in chat."
@@ -342,9 +353,11 @@ export function ArtifactsView({
 
       {/* List */}
       {!loading && filtered.map((a) => {
-        // A generating prototype is a placeholder, not yet openable: no nav, no
-        // hover affordance, default cursor. Every other row stays clickable.
-        const isBuilding = a.type === "prototype" && a.status === "generating"
+        // A generating prototype — or a ticket set still being written — is a
+        // placeholder, not yet openable: no nav, no hover affordance, default
+        // cursor. Every other row stays clickable.
+        const isBuilding =
+          (a.type === "prototype" || a.type === "ticket_set") && a.status === "generating"
         const clickable = !isBuilding
         // The row whose panel is open renders selected: green tint + ring so
         // it's obvious which item the side panel belongs to.
@@ -381,7 +394,7 @@ export function ArtifactsView({
               fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
               marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
             }}>
-              {a.title}
+              {artifactTitle(a)}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={{
@@ -406,7 +419,9 @@ export function ArtifactsView({
 // ── Screen ──
 
 export function ArtifactsScreen() {
-  const { openContentPanel, openPrdTab, openReportTab, showToast, contentPanelTab } = useNavigation()
+  const {
+    openContentPanel, openPrdTab, openReportTab, openTicketSetTab, showToast, contentPanelTab,
+  } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
   const router = useRouter()
@@ -422,10 +437,6 @@ export function ArtifactsScreen() {
   useEffect(() => {
     if (contentPanelTab == null) setActiveArtifactKey(null)
   }, [contentPanelTab])
-
-  // "New report" run in flight — the label of the kind being generated, or null.
-  // Drives the pending row so a multi-minute run is visible rather than silent.
-  const [generatingKind, setGeneratingKind] = useState<string | null>(null)
 
   // Upload-a-PRD state (the Import flow).
   const [importing, setImporting] = useState(false)
@@ -457,12 +468,32 @@ export function ArtifactsScreen() {
   //               the standalone drawer.
   //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
   //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
+  //  - ticket_set → the chat it was generated in + the panel's Tickets tab on
+  //               the set (openTicketSetTab); a set whose chat is gone falls
+  //               back to the same panel with no thread under it
   //
   // For evidence, the panel opens IMMEDIATELY in its loading state
   // (evidenceGenerating drives the rail's spinner) and the record fetch fills
   // it in — the click never sits silent while the network round-trip runs.
   const openArtifact = useCallback(async (a: ArtifactItem) => {
     try {
+      // Opening anything that ISN'T a report retires the standalone-report
+      // pointer. It is the panel's reason to keep showing a Reports tab, so left
+      // set it followed the reader onto the next artifact — a Reports tab over an
+      // evidence document, still pointing at the report they had finished with.
+      if (a.type !== "report") {
+        setContent({ reportFocusId: null, reportFocusStandalone: false })
+      }
+      // The same rule for the ticket set on screen, and for the same reason.
+      // `content.ticketSet` is not a pointer the panel checks — it is what the
+      // Tickets tab RENDERS, and it also decides whether that tab appears at
+      // all (ContentPanel's hidden gate). Left set, opening a PRD next would
+      // show the previous chat's set on that PRD's Tickets tab.
+      if (a.type !== "ticket_set") {
+        setContent({
+          ticketSet: null, ticketSetGenerating: false, ticketSetStandalone: false,
+        })
+      }
       if (a.type === "prd") {
         // ChatScreen consumes the request: spawns the chat tab, loads the PRD
         // by id (with its own loading state), and slides the panel open.
@@ -478,7 +509,11 @@ export function ArtifactsScreen() {
       }
       if (a.type === "evidence") {
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ evidence: null, evidenceGenerating: true })
+        // Retires whatever PRD was cached from a previous artifact — this
+        // fetch cannot attribute the evidence document to it, so no
+        // PRD-acting control (Share, header, prototype CTA) may stay armed
+        // on it. See lib/panelPrdScope.ts.
+        setContent({ evidence: null, evidenceGenerating: true, ...evidenceOpenScopePatch() })
         openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
@@ -522,8 +557,50 @@ export function ArtifactsScreen() {
         // panel opens immediately and the tab fetches the document by id, so the
         // click is never silent while it comes over the wire.
         setActiveArtifactKey(`${a.type}-${a.id}`)
-        setContent({ conversationId: null, reportFocusId: a.open.report_id })
+        // `reportFocusStandalone` is what tells the Reports tab to trust this
+        // pointer despite there being no conversation to check it against. It used
+        // to infer that from `conversationId == null` — but a brand-new chat tab
+        // also has a null conversation id, so a stale pointer read as standalone
+        // and opened the previous thread's document inside an empty chat.
+        setContent({
+          conversationId: null,
+          reportFocusId: a.open.report_id,
+          reportFocusStandalone: true,
+        })
         openContentPanel("reports")
+        return
+      }
+      if (a.type === "ticket_set") {
+        // Structurally the report branch above, one artifact over: a set's home
+        // is the chat that produced it, so opening one opens THAT THREAD with
+        // the panel's Tickets tab on the set. Same null-title rule too — a
+        // `conversation_id` whose title didn't resolve means the chat is gone,
+        // and there is no thread left to open.
+        if (a.source.conversation_id != null && a.source.conversation_title) {
+          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+            dbId: a.source.conversation_id,
+            title: a.source.conversation_title,
+            fallbackTurns: [],
+            prdId: null,
+          }))
+          openTicketSetTab({
+            conversationId: a.source.conversation_id,
+            ticketSetId: a.open.ticket_set_id,
+          })
+          return
+        }
+        // A set with no chat behind it reads in the SAME panel, on the same
+        // Tickets tab, just without a thread under it. `ticketSetStandalone` is
+        // STATED rather than inferred from a null conversation id, for the
+        // reason spelled out on `reportFocusStandalone`: a brand-new chat tab
+        // has a null id too, and inferring from it is a bug this codebase has
+        // already shipped once.
+        setActiveArtifactKey(`${a.type}-${a.id}`)
+        setContent({ ticketSetStandalone: true })
+        openContentPanel("tickets")
+        // The loader owns the slice (and the scope patch, and the 404 → a
+        // classified kind); the panel only ever reads it.
+        void loadTicketSet(a.open.ticket_set_id, setContent)
         return
       }
       // prototype — open the in-tab canvas for its parent PRD.
@@ -534,43 +611,7 @@ export function ArtifactsScreen() {
       setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, openPrdTab, openReportTab, router, showToast])
-
-  // Generate a report straight from this panel. The run goes through the ORDINARY
-  // ask pipeline with the skill pinned, so the result is identical to asking for
-  // the same report in chat and it lands in the library via the same capture path
-  // (app/report_capture.py) — no parallel generation route to keep in step.
-  //
-  // The report has no chat or PRD to attach to, which is a normal state: the row
-  // simply reads as its kind with no "from" line.
-  const generateReport = useCallback(async (kind: ReportKindOption) => {
-    if (!activeCompany || generatingKind) return
-    setGeneratingKind(kind.label)
-    try {
-      const { ask_id } = await askApi.start(kind.prompt, activeCompany, {
-        pinned_skill: kind.skill,
-      })
-      // These runs are minutes long (the skills read every source), so poll
-      // rather than hold a request open.
-      for (;;) {
-        await new Promise((r) => setTimeout(r, REPORT_POLL_MS))
-        const job = await askApi.get(ask_id)
-        if (job.status === "generating") continue
-        if (job.status === "ready") {
-          showToast("Report ready", `Your ${kind.label} report is in Artifacts.`)
-          refreshArtifacts()
-        } else {
-          // cancelled / error — say so rather than leaving a row that never lands.
-          showToast("Report failed", "The report couldn't be generated. Please try again.")
-        }
-        return
-      }
-    } catch {
-      showToast("Report failed", "The report couldn't be started. Please try again.")
-    } finally {
-      setGeneratingKind(null)
-    }
-  }, [activeCompany, generatingKind, refreshArtifacts, showToast])
+  }, [setContent, openContentPanel, openPrdTab, openReportTab, openTicketSetTab, router, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning
@@ -601,14 +642,6 @@ export function ArtifactsScreen() {
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
         {/* Upload a PRD → parsed + converted into our format server-side. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
-          {/* Start a report without composing a prompt in chat. */}
-          {SHOW_NEW_REPORT_BUTTON && (
-            <NewReportMenu
-              disabled={!activeCompany}
-              generating={generatingKind != null}
-              onGenerate={(kind) => void generateReport(kind)}
-            />
-          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -657,7 +690,6 @@ export function ArtifactsScreen() {
           filter={artifactFilter}
           loading={artifactsLoading}
           activeKey={activeArtifactKey}
-          generatingKind={generatingKind}
           onFilterChange={setArtifactFilter}
           onOpen={openArtifact}
         />
