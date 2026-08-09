@@ -2,7 +2,7 @@
 
   GET    /v1/conversations               -> list the CALLER'S conversations
   POST   /v1/conversations               -> create a new conversation (stamped with the caller)
-  PATCH  /v1/conversations/{id}          -> update title/reply/pinned
+  PATCH  /v1/conversations/{id}          -> update title/reply/pinned/prd_id
   DELETE /v1/conversations/{id}          -> delete a conversation
 
 Chats are PER-USER: every row is stamped with the creating member's user_id
@@ -19,9 +19,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from app import attachments_storage
 from app.auth import (
     CompanyContext,
     WorkspaceContext,
@@ -29,6 +30,7 @@ from app.auth import (
     require_workspace,
 )
 from app.db.client import require_client, utc_now
+from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ class ConversationUpdate(BaseModel):
     query: str | None = None
     reply: str | None = None
     pinned: bool | None = None
+    # Back-patched once known: command flows (import a doc / "generate a PRD for
+    # X") create the conversation from the seed turn BEFORE the async generate
+    # returns the prd_id, so it's first stored as null. Setting it here lets a
+    # reopened-from-history chat rebind to its PRD (by-prd lookup + panel reopen).
+    prd_id: int | None = None
 
 
 def _get_owned_conversation(
@@ -117,6 +124,66 @@ def create_conversation(
     return resp.data[0] if resp.data else {}
 
 
+# ── Attachment files (the ORIGINAL uploaded document, not just extracted text) ──
+# Declared BEFORE the /{conversation_id} routes: the file is staged on SEND, before
+# its turn (and often its conversation) exists, so these are workspace-scoped, not
+# conversation-scoped. Storing the raw file lets a reopened chat render the real
+# document — PDF/image inline, everything downloadable — via a short-lived signed
+# URL (routes/attachments_storage), the same Bearer-authed-endpoint→public-URL
+# pattern the OAuth start + bundle share use.
+
+
+@router.post(
+    "/attachments",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Stage an uploaded chat file; return its storage key + sniffed metadata.
+
+    Empty → 400, oversize → 413, unsupported extension → 422 (mirrors the
+    screenshot/PRD-import upload guards)."""
+    ext = attachments_storage.ext_of(file.filename or "")
+    if not attachments_storage.is_supported_ext(ext):
+        raise HTTPException(422, "Unsupported file type.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > attachments_storage.MAX_ATTACHMENT_BYTES:
+        raise HTTPException(413, "File too large (max 25 MB).")
+    key = await attachments_storage.stage_attachment(
+        workspace_id=company.workspace_id, data=data, ext=ext
+    )
+    return {
+        "key": key,
+        "name": file.filename or f"file.{ext}",
+        "mime": attachments_storage.media_type_for_key(key),
+        "size": len(data),
+    }
+
+
+@router.get("/attachments/sign")
+def sign_attachment(
+    key: str,
+    name: str = "",
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Mint fresh signed (view + download) URLs for a stored attachment key.
+
+    The key embeds the workspace prefix; a key outside the caller's workspace is
+    refused (404 — never leak that it exists). Re-signed on every viewer open so a
+    permanent chat always resolves a live URL after the short TTL elapses."""
+    try:
+        urls = attachments_storage.attachment_urls(
+            workspace_id=company.workspace_id, key=key, filename=name,
+        )
+    except ValueError:
+        raise HTTPException(404, "Attachment not found")
+    return {**urls, "mime": attachments_storage.media_type_for_key(key)}
+
+
 @router.get("/by-prd/{prd_id}")
 def get_conversation_by_prd(
     prd_id: int,
@@ -134,6 +201,39 @@ def get_conversation_by_prd(
         .select("*")
         .eq("company_id", company.company_id)
         .eq("prd_id", prd_id)
+        .eq("user_id", company.user_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    conversation = conv.data[0] if conv.data else None
+    if conversation is None:
+        return {"conversation": None, "turns": []}
+    turns = (
+        c.table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", conversation["id"])
+        .order("created_at")
+        .execute()
+    )
+    return {"conversation": conversation, "turns": turns.data or []}
+
+
+@router.get("/by-evidence/{evidence_id}")
+def get_conversation_by_evidence(
+    evidence_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the CALLER'S most recent conversation for an Evidence doc (plus
+    its turns) — the Evidence mirror of GET /by-prd/{prd_id}. Same per-user
+    scoping and same "empty (not 404) when the caller has no saved conversation
+    for it yet" contract; see get_conversation_by_prd for the full rationale."""
+    c = require_client()
+    conv = (
+        c.table("conversations")
+        .select("*")
+        .eq("company_id", company.company_id)
+        .eq("evidence_id", evidence_id)
         .eq("user_id", company.user_id)
         .order("updated_at", desc=True)
         .limit(1)
@@ -173,6 +273,8 @@ def update_conversation(
         patch["reply"] = body.reply
     if body.pinned is not None:
         patch["pinned"] = body.pinned
+    if body.prd_id is not None:
+        patch["prd_id"] = body.prd_id
     resp = (
         c.table("conversations")
         .update(patch)
@@ -203,9 +305,32 @@ def delete_conversation(
 # ── Turns (messages within a conversation) ──
 
 
+class TurnAttachment(BaseModel):
+    """Extracted text of a file the user attached to this turn. Persisted so a
+    reloaded thread (and the chat→PRD flow) can still see documents attached
+    earlier in the conversation — content caps mirror the ask path's clamps.
+
+    `content` may be EMPTY: a document imported straight to a PRD (the "generate a
+    PRD" command over a file) has no in-chat extracted text — the file BECOMES the
+    PRD — but its name is still persisted as a name-only chip so the reopened
+    thread shows what the user attached beside their command. Empty-content
+    attachments are skipped by the chat→PRD grounding (frontend conversationPrdDocs).
+
+    `key`/`mime` point at the ORIGINAL file stashed in storage (POST
+    /v1/conversations/attachments) so a reopened chat can render the real document
+    (PDF/image inline, everything downloadable) — not just the extracted text.
+    Null on legacy turns and on text pasted without an upload."""
+    name: str = Field(..., min_length=1, max_length=300)
+    content: str = Field(..., max_length=60_000)
+    key: str | None = Field(default=None, max_length=400)
+    mime: str | None = Field(default=None, max_length=200)
+    size: int | None = Field(default=None, ge=0)
+
+
 class TurnIn(BaseModel):
     role: str = "user"  # "user" or "assistant"
     content: str = Field(..., min_length=1)
+    attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
 
 
 @router.get("/{conversation_id}/turns")
@@ -227,6 +352,57 @@ def list_turns(
     return {"turns": resp.data or []}
 
 
+def _catalog_turn_attachments(
+    turn: dict[str, Any], body: TurnIn, company: CompanyContext
+) -> None:
+    """Register this turn's attachments in the document catalog, session-scoped.
+
+    Chat attachments are PRIVATE to their conversation, so each row carries
+    `conversation_id` + `user_id` (both from the verified CompanyContext, never
+    from the request body) and is only readable back by that same triple.
+
+    `external_id` is the synthetic `turn:{turn_id}:attachment:{index}` id the
+    ask path's document manifest already uses, so the catalog and the manifest
+    name the same document the same way.
+
+    `body_text` stays NULL: the extracted text is already on the turn row and
+    reaches the model through folded history. A document's text is never
+    stored twice.
+
+    Never raises. A turn that saves today must still save if cataloguing
+    fails — this runs after the turn is already persisted, and its failure is
+    logged and dropped."""
+    turn_id = turn.get("id")
+    if not turn_id or not body.attachments:
+        return
+    try:
+        from app import document_catalog
+    except Exception:  # noqa: BLE001 — never break a turn save on an import
+        logger.warning("document catalog unavailable; turn not catalogued",
+                       exc_info=True)
+        return
+    for index, attachment in enumerate(body.attachments):
+        content = attachment.content or ""
+        try:
+            document_catalog.register_document(
+                company.company_id,
+                provider=document_catalog.PROVIDER_CHAT_ATTACHMENT,
+                external_id=f"turn:{turn_id}:attachment:{index}",
+                title=attachment.name,
+                content_hash=document_catalog.content_hash_for(content),
+                doc_date=turn.get("created_at"),
+                conversation_id=turn.get("conversation_id"),
+                user_id=company.user_id,
+                get_text=lambda text=content: text,
+                background=True,
+            )
+        except Exception:  # noqa: BLE001 — cataloguing must never fail a turn save
+            logger.warning(
+                "document catalog registration failed for turn %s attachment %s",
+                turn_id, index, exc_info=True,
+            )
+
+
 @router.post("/{conversation_id}/turns")
 def add_turn(
     conversation_id: int,
@@ -237,11 +413,18 @@ def add_turn(
     c = require_client()
     if _get_owned_conversation(c, conversation_id, company) is None:
         raise HTTPException(404, "Conversation not found")
-    resp = c.table("conversation_turns").insert({
+    row: dict[str, Any] = {
         "conversation_id": conversation_id,
         "role": body.role,
         "content": body.content,
-    }).execute()
+    }
+    if body.attachments:
+        # exclude_none keeps the stored shape minimal — a text-only attachment
+        # stays {name, content}; key/mime/size appear only when a file was stored.
+        row["attachments"] = [a.model_dump(exclude_none=True) for a in body.attachments]
+    resp = c.table("conversation_turns").insert(row).execute()
+    turn = resp.data[0] if resp.data else {}
+    _catalog_turn_attachments(turn, body, company)
     # Update conversation preview + timestamp. Only overwrite preview on user
     # turns — assistant turns should NOT blank out the last user message shown
     # in the chat-history list (ChatsScreen).

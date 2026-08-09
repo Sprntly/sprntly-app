@@ -6,13 +6,13 @@ import {
   ApiKey,
   CompanyStep,
   Connectors,
-  DecisionsStep,
+  ImportContextStep,
   InviteStep,
   MetricsStep,
+  PersonalizeStep,
   ProductStep,
   ReviewStep,
-  Strategy,
-  TeamStep,
+  WorkspaceStep,
 } from "../../../components/screens/onboarding"
 import {
   ONBOARDING_STEP_SLUGS,
@@ -21,24 +21,39 @@ import {
 
 /**
  * The ordered onboarding step list — the single source of truth pairing each
- * semantic slug with its screen component, in flow order (v6 screenshot spec
- * 2026-07-17):
+ * semantic slug with its screen component, in flow order (2026-07-21
+ * screenshot spec):
  *
- *   1. company     → CompanyStep   (name*; website/mission/strategy, portfolio +
- *                                   planning cycle behind "Add more")
- *   2. product     → ProductStep   (name* + surfaces*; monetization/users/
- *                                   competitors optional)
- *   3. metrics     → MetricsStep   (pick up to 5 metrics* + framework*)
- *   4. api-key     → ApiKey        (own Claude/Anthropic key — OPTIONAL,
- *                                   skippable; also in Settings → Admin)
- *   5. connectors  → Connectors    (connect your tools — ≥1 live required)
- *   6. team        → TeamStep      (team name* + scope of work*)
- *   7. strategy    → Strategy      (team strategy + roadmap — upload or type)
- *   8. decisions   → DecisionsStep (decision process + extras — upload or type)
- *   9. invite      → InviteStep    (email + job role + permission, CSV)
- *  10. review      → ReviewStep    (accept the AI business context → hands off
- *                                   to /onboarding/define-metrics, which
- *                                   completes onboarding)
+ *   1. company        → CompanyStep       (name*; website/strategy, mission +
+ *                                        portfolio + planning cycle behind
+ *                                        "Add more". Creates the company row.)
+ *   2. import-context → ImportContextStep (bring your existing AI-assistant
+ *                                        context in — copy the prompt, which
+ *                                        arrives with the name and website
+ *                                        from step 1 already written into it,
+ *                                        run it in any assistant, upload the
+ *                                        .md it returns. OPTIONAL: skipping
+ *                                        means typing the later steps by hand)
+ *   3. connectors     → Connectors        (connect your tools — all optional)
+ *   4. api-key        → ApiKey            (own Claude/Anthropic key — OPTIONAL,
+ *                                        skippable; also in Settings → Admin)
+ *
+ *   Steps 3-4 sit here BY DESIGN: they are the two the context import cannot
+ *   prefill, so they cover its background extraction. Everything below opens
+ *   with the extracted fields already in place.
+ *
+ *   5. product        → ProductStep       (name* + surfaces*; monetization/
+ *                                        users/competitors optional)
+ *   6. workspace      → WorkspaceStep     (name* + scope*; strategy/roadmap;
+ *                                        sizing + extras behind "Add more")
+ *   7. metrics        → MetricsStep       (pick up to 5 metrics* + framework*)
+ *   8. invite         → InviteStep        (email + job role + permission, bulk
+ *                                        paste, CSV)
+ *   9. review         → ReviewStep        (accept the AI business context)
+ *  10. personalize    → PersonalizeStep   (what to surface + brief delivery;
+ *                                        hands off to /onboarding/define-metrics
+ *                                        when analytics is connected, otherwise
+ *                                        completes onboarding itself)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both).
@@ -48,15 +63,15 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   Component: React.ComponentType
 }> = [
   { slug: "company", Component: CompanyStep },
-  { slug: "product", Component: ProductStep },
-  { slug: "metrics", Component: MetricsStep },
-  { slug: "api-key", Component: ApiKey },
+  { slug: "import-context", Component: ImportContextStep },
   { slug: "connectors", Component: Connectors },
-  { slug: "team", Component: TeamStep },
-  { slug: "strategy", Component: Strategy },
-  { slug: "decisions", Component: DecisionsStep },
+  { slug: "api-key", Component: ApiKey },
+  { slug: "product", Component: ProductStep },
+  { slug: "workspace", Component: WorkspaceStep },
+  { slug: "metrics", Component: MetricsStep },
   { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },
+  { slug: "personalize", Component: PersonalizeStep },
 ]
 
 // Dev-time guard: the route map and the slug source of truth must agree in

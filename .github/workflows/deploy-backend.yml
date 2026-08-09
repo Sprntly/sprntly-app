@@ -113,6 +113,26 @@ jobs:
             fi
             cd backend
             ./.venv/bin/pip install -q -r requirements.txt
+            # Install prototype-runtime's npm deps (vite, @vitejs/plugin-react,
+            # @babel/parser, @babel/generator, etc.) so storage.py's vite_build()
+            # (npx vite build, via a symlinked node_modules — see
+            # _symlink_node_modules's own docstring) and autofixer.py's
+            # NODE_PATH-based @babel/parser resolution can find them. This is a
+            # deterministic install from the committed lockfile — same `npm ci`
+            # already used for this exact package in prototype-runtime.yml's CI
+            # job and for web/ in deploy-app.yml — so it runs UNCONDITIONALLY on
+            # every deploy, like the pip install line above it, NOT existence-
+            # gated like the Chromium block below: that block guards an
+            # expensive one-time OS-level binary download, whereas skipping a
+            # future dependency-version bump here would silently reproduce this
+            # exact incident. node_modules is gitignored (both .gitignore:36 and
+            # prototype-runtime/.gitignore), so the git reset --hard above does
+            # NOT wipe an existing install — steady-state `npm ci` runs
+            # incrementally against npm's local cache (~15s measured locally
+            # today), not a full reinstall every deploy.
+            cd ~/$CLONE_DIR/prototype-runtime
+            npm ci --no-audit --no-fund
+            cd ~/$CLONE_DIR/backend
             # Provision Playwright's headless Chromium + its OS libraries for the
             # design-agent "Website" design-source extractor. Idempotent + guarded
             # on the browser binary so it only runs on first provision / after a

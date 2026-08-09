@@ -174,7 +174,7 @@ describe("PRD opens as a new chat tab — composer command path", () => {
     // BriefChat) drives the generation and opens the panel.
     await waitFor(() => expect(openPrdTab).toHaveBeenCalledTimes(1))
     expect(openPrdTab).toHaveBeenCalledWith({
-      title: "PRD · Weekly brief",
+      title: "PRD · Top Insights",
       source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
     })
 
@@ -194,8 +194,15 @@ describe("PRD panel renders an in-progress (generating) state in the rail", () =
   it("PrdPanelContent shows a 'Generating PRD…' spinner when content.prdGenerating is true and no prd yet", () => {
     content = { ...EMPTY_CONTENT, prdGenerating: true }
     render(<PrdPanelContent />)
-    expect(screen.getByTestId("prd-generating")).toBeTruthy()
+    const wip = screen.getByTestId("prd-generating")
     expect(screen.getByText(/Generating PRD/i)).toBeTruthy()
+
+    // Not a bare spinner: the shared working state carries a live phase line, a
+    // moving bar, and prose-shaped placeholders, so a 1-2 min draft doesn't
+    // read as a stalled panel.
+    expect(screen.getByText(/Framing the problem and who it's for/i)).toBeTruthy()
+    expect(wip.querySelectorAll(".gwip-skel--doc").length).toBeGreaterThan(0)
+    expect(wip.querySelector(".gwip-bar-pill")).toBeTruthy()
   })
 
   it("PrdPanelContent does NOT show the generating spinner once the PRD is present", () => {

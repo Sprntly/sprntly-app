@@ -917,6 +917,40 @@ describe("viewer src + remount key — follows the live build path", () => {
     expect(viewerSrc(null, 0)).toBeNull()
     expect(viewerSrc(null, 7)).toBeNull()
   })
+
+  it("test_post_generation_result_reads_reload_signal_not_reload_key — bundleGrantReloadKey (fed by useViewGrant's renamed reloadSignal) still threads into the composite viewer key exactly as the pre-rename reloadKey did", () => {
+    // The container now passes the hook's renamed `reloadSignal` field (formerly
+    // a differently-named field on the same shape) into this unchanged
+    // `bundleGrantReloadKey` prop — a value change here still
+    // forces a fresh remount key, proving the rename didn't silently sever the
+    // threading contract this view already relies on.
+    const htmlBefore = renderView({ bundleUrl: OLD, bundleGrantReloadKey: 0 })
+    const htmlAfter = renderView({ bundleUrl: OLD, bundleGrantReloadKey: 1 })
+    expect(htmlBefore).not.toBe(htmlAfter)
+  })
+
+  it("test_viewer_src_busts_cache_on_grant_reload_signal_alone — a checkpoint-driven grant reload signal alone busts the cache, not just bundleReloadNonce", () => {
+    // AC9: the composite cache-bust value (bundleReloadNonce + bundleGrantReloadKey)
+    // must change whenever EITHER source changes — a checkpoint-advance reload
+    // (bundleGrantReloadKey, sourced from useViewGrant's own reloadSignal) alone,
+    // with the caller's manual-refresh nonce (bundleReloadNonce) held constant,
+    // still produces a fresh `?v=` value on the inline iframe src.
+    const htmlBefore = renderView({
+      bundleUrl: OLD,
+      bundleReloadNonce: 0,
+      bundleGrantReloadKey: 0,
+    })
+    const htmlAfter = renderView({
+      bundleUrl: OLD,
+      bundleReloadNonce: 0,
+      bundleGrantReloadKey: 1,
+    })
+    const srcBefore = inlineIframeSrc(htmlBefore)
+    const srcAfter = inlineIframeSrc(htmlAfter)
+    expect(srcBefore).toBe(OLD) // nonce 0 → clean, unbusted (matches viewerSrc's own contract)
+    expect(srcAfter).toBe(`${OLD}?v=1`)
+    expect(srcAfter).not.toBe(srcBefore)
+  })
 })
 
 describe("pin-comment create stays wrapped in the auth-retry (preservation)", () => {
@@ -1014,7 +1048,12 @@ describe("Mark-and-comment pin flow — view layer", () => {
     // withAuthRetry wrapping is the signed-in container's onCreate seam.
     expect(HOOK_SRC).toContain("async function handlePinSubmit")
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const body = HOOK_SRC.slice(start, start + 1200)
+    // Window widened 1200→1600: the requireName-gate branch (public surface,
+    // name-required abort) grew a visible-error setPins call + comment, pushing
+    // the create-payload fields later in the function body. The window is pure
+    // text-capture plumbing, not a business invariant — widened to keep
+    // capturing the SAME unchanged assertions below.
+    const body = HOOK_SRC.slice(start, start + 1600)
     // anchor_id is the unchanged synthetic pin marker — back-compat with the list keying
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
     // the submit calls the injected create-fn (per-surface transport)
@@ -1028,7 +1067,9 @@ describe("Mark-and-comment pin flow — view layer", () => {
     // durable position fields alongside the unchanged synthetic anchor_id and
     // body. Pin position is persisted so every viewer sees the same pin location.
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const fnBody = HOOK_SRC.slice(start, start + 1400)
+    // Window widened 1400→1600 — see the comment on the sibling test above
+    // (same requireName-branch growth, same pure text-capture rationale).
+    const fnBody = HOOK_SRC.slice(start, start + 1600)
     // anchor_id (synthetic pin marker) and body are still present — back-compat.
     expect(fnBody).toContain("anchor_id:")
     expect(fnBody).toContain("body:")
@@ -1087,7 +1128,9 @@ describe("PostGenerationResult container — pin-anchor threading through the le
     // End of the thread: the fields captured at click time are sent on create.
     // C2b: handlePinSubmit lives in the shared usePinMarking hook now.
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const body = HOOK_SRC.slice(start, start + 1400)
+    // Window widened 1400→1600 — see the comment on the earlier sibling test
+    // (same requireName-branch growth, same pure text-capture rationale).
+    const body = HOOK_SRC.slice(start, start + 1600)
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
     expect(body).toContain("pin_x_pct:")
     expect(body).toContain("pin_y_pct:")

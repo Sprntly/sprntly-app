@@ -8,17 +8,19 @@ import {
 } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { useCompany } from "../../context/CompanyContext"
+import { useGuestSession } from "../../context/GuestSessionContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
-import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { PRD_GEN } from "./generationPhases"
+import { multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
-import { IconTicket } from "@tabler/icons-react"
+import { IconFileText, IconTicket } from "@tabler/icons-react"
 import {
   IconGrid,
   IconLinkInsert,
@@ -97,7 +99,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
 } = {}) {
   const { showToast, openContentPanel } = useNavigation()
   const { content, setContent } = useContent()
-  const { activeCompany } = useCompany()
+  const guestSession = useGuestSession()
   const prd = content.prd
 
   // Jump to the Evidence tab from the HTML PRD's injected "View more evidence"
@@ -110,6 +112,14 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   // "Create tickets" ↔ "View tickets" label (cache-read only, no generation).
   const [hasTickets, setHasTickets] = useState(false)
   useEffect(() => {
+    // A guest session's tickets are pre-fetched by GuestArtifactViewer into
+    // content.guestTickets — this must never authed-fetch storiesApi.getForPrd
+    // for a guest (same class of bug as ContentPanel's guarded effects: it's
+    // authed-gated and would 403/404 for an unentitled viewer).
+    if (guestSession) {
+      setHasTickets((content.guestTickets?.length ?? 0) > 0)
+      return
+    }
     const prdId = prd?.prd_id
     if (prdId == null) { setHasTickets(false); return }
     let cancelled = false
@@ -121,9 +131,24 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       } catch { /* default to "Create tickets" */ }
     })()
     return () => { cancelled = true }
-  }, [prd?.prd_id])
+  }, [prd?.prd_id, guestSession, content.guestTickets])
 
-  const [prdLoading, setPrdLoading] = useState(false)
+  // NO "load the workspace's latest PRD" fallback lives here any more.
+  //
+  // It used to fire whenever the panel had no PRD and nothing was generating,
+  // fetching prdApi.latest(company) to spare the old standalone PRD screen an
+  // empty pane on refresh. That screen is gone — this component is only ever the
+  // right rail now, and every caller that opens the PRD tab already supplies
+  // either a loaded PRD or `prdGenerating: true`.
+  //
+  // What it actually did was surface an UNRELATED document. Ask the chat to
+  // "generate a PRD for <x>", get the clarify-first questions back, and the rail
+  // sat empty and not-generating for exactly as long as it took to answer —
+  // whereupon this effect filled it with whatever PRD happened to be newest in
+  // the workspace. The user read that as the answer to their request. The same
+  // trap was armed after a failed generation, a stopped one, and on some tab
+  // switches. A specific PRD is always reachable by id (loadPrdById / the tab's
+  // prdId), so "most recent thing in the workspace" was never the right answer.
 
   // Parsed QA test-scenario sections to render under the PRD. Empty until a
   // ready qa-scenarios doc is fetched and parsed; a failed/absent/not-ready
@@ -131,22 +156,6 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   // briefId/insightIndex (carried on PrdState), so EVERY load path triggers it —
   // including the brief card's "View PRD" (loadPrdById), not just latest/openGen.
   const [qaSections, setQaSections] = useState<PrdSection[]>([])
-
-  useEffect(() => {
-    // Skip the "load latest PRD" fetch while a generation is actively in flight —
-    // the in-progress flow will populate `content.prd` itself, and we don't want
-    // to race it with a stale latest record.
-    if (prd || !activeCompany || content.prdGenerating) return
-    let cancelled = false
-    setPrdLoading(true)
-    prdApi.latest(activeCompany).then((record) => {
-      if (cancelled || !record.payload_md) return
-      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part, briefId: record.brief_id, insightIndex: record.insight_index, source: record.source } })
-    }).catch((e) => {
-      if (e instanceof ApiError && e.status === 404) return
-    }).finally(() => { if (!cancelled) setPrdLoading(false) })
-    return () => { cancelled = true }
-  }, [prd, activeCompany, content.prdGenerating, setContent])
 
   // After the PRD's brief reference is known, ALSO fetch the QA test-scenarios
   // doc for the same brief_id + insight_index. Render its parsed sections only
@@ -189,7 +198,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   const openGeneration = useCallback(async (genId: number) => {
     try {
       const rec = await prdApi.get(genId)
-      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index, source: rec.source } })
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, public_id: rec.public_id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index, source: rec.source } })
       setShowVersions(false)
     } catch {
       showToast("Couldn't open version", "Failed to load that generation.")
@@ -264,8 +273,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
 
       <div className="prd-frame">
         {/* The markdown editor toolbar (execCommand) doesn't apply to the v3
-            HTML page — it's edited natively inside the iframe — so hide it. */}
-        {!isHtmlPrd && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
+            HTML page — it's edited natively inside the iframe — so hide it.
+            Also hidden in guest mode: a read-only viewer has no edit control
+            (AC15). */}
+        {!isHtmlPrd && !guestSession && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
         {prd && isHtmlPrd ? (
           <>
             {/* Key on the HTML so a scoped edit (e.g. answering a "User input
@@ -280,6 +291,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               title={prd.title}
               onStatus={setSaveStatus}
               onViewMoreEvidence={evidenceTabAvailable ? handleViewMoreEvidence : undefined}
+              // The v3 HTML PRD's contenteditable + autosave-on-input loop is a
+              // real write path independent of this panel's own Save/toolbar
+              // guards — PrdHtmlView itself must refuse to persist for a guest.
+              readOnly={!!guestSession}
             />
             {qaSections.length > 0 && (
               <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
@@ -293,11 +308,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
             <PrdSummaryStrip prd={prd} />
             <div
               className="prd-body"
-              contentEditable
+              contentEditable={!guestSession}
               spellCheck={false}
               suppressContentEditableWarning
               ref={bodyRef}
-              onInput={handleInput}
+              onInput={guestSession ? undefined : handleInput}
             >
               <div className="prd-meta">{prd.metaLine}</div>
               <h1 className="prd-title">{prd.title}</h1>
@@ -315,9 +330,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane spinner. The finished PRD (poll result) replaces this.
           <div className="prd-body" style={{ minHeight: 280 }}>
-            <div data-testid="prd-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
-              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
-            </div>
+            <GeneratingBanner
+              testId="prd-streaming"
+              title="Writing the PRD…"
+              sub="Rendering it below as it's written — the finished draft replaces this."
+            />
             <StreamingHtmlPreview
               html={stripLeadingFence(stripHtmlCodeFence(content.prdPartialHtml))}
               title="PRD draft (generating)"
@@ -327,15 +344,14 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
             {content.prdGenerating ? (
-              <div data-testid="prd-generating" style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
-                <span className="prd-loader" aria-hidden /> Generating PRD…
-              </div>
-            ) : prdLoading ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
-                <span className="prd-loader" aria-hidden /> Loading PRD…
-              </div>
+              <GeneratingPane
+                {...PRD_GEN}
+                testId="prd-generating"
+                icon={<IconFileText size={19} />}
+                title="Generating PRD…"
+              />
             ) : (
-              <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Weekly Brief by selecting an insight and clicking Generate PRD." placeholders={0} />
+              <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Top Insights by selecting an insight and clicking Generate PRD." placeholders={0} />
             )}
           </div>
         )}
@@ -400,6 +416,10 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           and the prototype CTA. */}
       {prd && (
         <div className="prd-bottom-bar prd-footer-bar">
+          {/* Autosave/version-history are edit affordances — withheld entirely
+              in guest mode (AC15), not merely disabled, since neither reflects
+              anything meaningful for a document a guest can't edit. */}
+          {!guestSession && (
           <button
             type="button"
             className="btn btn-ghost btn-sm"
@@ -409,6 +429,8 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           >
             {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Save now" : "✓ Autosaved"}
           </button>
+          )}
+          {!guestSession && (
           <button
             type="button"
             className="btn btn-ghost btn-sm"
@@ -430,6 +452,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               <path d="M5 7L1 3h8z" />
             </svg>
           </button>
+          )}
 
           {/* Next pipeline step from the PRD is TICKETS. Reads "Create tickets"
               until the PRD has been broken into stories, then "View tickets";

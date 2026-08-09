@@ -161,6 +161,218 @@ describe("useIterateRun — transient-401 resilience", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// A second submit while a first call's run is still in flight. `runIterate`'s
+// in-flight guard used to be a bare `if (!prompt || inFlightRef.current) return`
+// — it fired BEFORE the user's message was ever appended, so a second submit
+// left no trace anywhere: no second POST, no thread entry, and the caller
+// (composer / comment Apply / pin Apply) still behaved as if it had succeeded.
+// The fix rejects visibly and resolves the rejected call's own promise to
+// `false`, so every caller can tell the difference between "started" and
+// "rejected" instead of assuming success.
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — a second submit while one is already in flight", () => {
+  it("test_second_submit_while_in_flight_is_silently_dropped_today: the second call posts nothing, appends no user entry for its own prompt, and resolves false — not undefined", async () => {
+    // The first run's poll never reaches a terminal state on its own within
+    // this test's assertions — it stays "in flight" for as long as we need.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+    const iterate = vi
+      .fn<
+        (
+          id: number,
+          body: { prompt: string; applied_comment_id?: number | null; mode?: "plan" | "execute" },
+        ) => Promise<IterateResponse>
+      >()
+      .mockResolvedValue({
+        prototype_id: PROTOTYPE_ID,
+        status: "generating",
+        queue_position: 0,
+      })
+    const onComplete = vi.fn()
+    const api = { iterate, get, dismissQuestion: vi.fn() } as unknown as Pick<
+      typeof designAgentApi,
+      "iterate" | "get" | "dismissQuestion"
+    >
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let firstRun!: Promise<boolean>
+    let secondResolved: boolean | undefined
+    await act(async () => {
+      // Calling runIterate runs synchronously up to its first `await` (which
+      // sets `inFlightRef.current = true` before yielding), so the SECOND
+      // call, issued right after with no intervening await, deterministically
+      // observes the guard as already tripped — no timing race in this test.
+      firstRun = result.current.runIterate("first change")
+      secondResolved = await result.current.runIterate("second change")
+    })
+
+    // (a) the mock call count stays at 1 — the second submit never posted.
+    expect(iterate).toHaveBeenCalledTimes(1)
+    // (b) no `kind: "user"` entry exists for the rejected prompt's text.
+    expect(
+      result.current.activity.some(
+        (e) => e.kind === "user" && e.text === "second change",
+      ),
+    ).toBe(false)
+    // (c) THIS is what makes the test itself red-before/green-after: (a) and
+    // (b) are already true on today's unfixed code (the bare `return` already
+    // prevents the second POST and never appends anything), but the unfixed
+    // guard resolves the second call to `undefined` — only the fixed, explicit
+    // `return false` makes this assertion pass.
+    expect(secondResolved).toBe(false)
+
+    // Let the still-in-flight first run wind down so it doesn't leak state
+    // into a later test.
+    await act(async () => {
+      await vi.runAllTimersAsync()
+      await firstRun
+    })
+  })
+
+  it("test_second_submit_while_in_flight_appends_a_visible_rejection_entry: exactly one new error entry with the exact rejection text is appended", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let firstRun!: Promise<boolean>
+    await act(async () => {
+      firstRun = result.current.runIterate("first change")
+      await result.current.runIterate("second change")
+    })
+
+    const rejectionEntries = result.current.activity.filter(
+      (e) =>
+        e.kind === "error" &&
+        e.text ===
+          "Still applying the previous change — wait for it to finish, then try again.",
+    )
+    expect(rejectionEntries).toHaveLength(1)
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+      await firstRun
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runIterate's return-value contract: `false` before a run starts (empty
+// prompt or busy-rejected), `true` on every path after a run has started
+// (clarifying pause, hard failure/timeout, full completion).
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — runIterate's return-value contract", () => {
+  it("test_run_iterate_resolves_false_on_empty_prompt: a blank prompt resolves false and appends nothing", async () => {
+    const get = vi.fn<(id: number) => Promise<PrototypeRecord>>()
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let resolved: boolean | undefined
+    await act(async () => {
+      resolved = await result.current.runIterate("   ")
+    })
+
+    expect(resolved).toBe(false)
+    expect(result.current.activity).toHaveLength(0)
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  it("test_run_iterate_resolves_true_on_successful_completion: a full happy-path run resolves true", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValueOnce(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let resolved: boolean | undefined
+    await act(async () => {
+      const run = result.current.runIterate("tweak the spacing")
+      await vi.runAllTimersAsync()
+      resolved = await run
+    })
+
+    expect(resolved).toBe(true)
+  })
+
+  it("test_run_iterate_resolves_true_on_clarifying_question_pause: a paused run still resolves true (it started)", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValueOnce(
+        proto("generating", { question: "Which header variant?" }),
+      )
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let resolved: boolean | undefined
+    await act(async () => {
+      const run = result.current.runIterate("update the header")
+      await vi.runAllTimersAsync()
+      resolved = await run
+    })
+
+    expect(resolved).toBe(true)
+  })
+
+  it("test_run_iterate_resolves_true_on_hard_failure: a run that reaches status:'failed' still resolves true — it started, then failed", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue({
+        id: PROTOTYPE_ID,
+        status: "failed",
+        bundle_url: null,
+        error: "build blew up",
+        pending_question: null,
+      })
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let resolved: boolean | undefined
+    await act(async () => {
+      const run = result.current.runIterate("break it")
+      await vi.runAllTimersAsync()
+      resolved = await run
+    })
+
+    expect(resolved).toBe(true)
+    expect(result.current.error).not.toBeNull()
+  })
+})
+
 // Does the activity stream carry the terminal "Change applied" line?
 function hasChangeApplied(activity: { kind: string; text?: string }[]) {
   return activity.some((e) => e.kind === "done" && e.text === "Change applied")
@@ -980,8 +1192,79 @@ describe("useIterateRun — iterate keeps status 'ready'; done summary + fresh b
     })
 
     expect(hasChangeApplied(result.current.activity)).toBe(false)
-    expect(result.current.error).toBe("build blew up")
+    expect(result.current.error).toBe("Couldn't apply the change. Try again.")
     expect(onComplete).not.toHaveBeenCalled()
     expect(result.current.running).toBe(false)
+  })
+
+  it("test_iterate_run_surfaces_curated_copy_for_provider_billing_not_raw_debug_string: a PROVIDER_BILLING failure never leaks the raw agent-loop debug string", async () => {
+    // The exact raw string from the live incident that motivated this fix.
+    const RAW_BILLING_ERROR =
+      "iterate agent_loop ended with status=error iters=1 | error_message=The prototype service is temporarily unavailable. | error_class=PROVIDER_BILLING"
+
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline
+      .mockResolvedValue({
+        id: PROTOTYPE_ID,
+        status: "failed",
+        bundle_url: OLD_BUNDLE,
+        error: RAW_BILLING_ERROR,
+        pending_question: null,
+      })
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("apply the comment")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const CURATED = `Something went wrong on our end — we've been notified. (Ref: ${PROTOTYPE_ID})`
+    expect(result.current.error).toBe(CURATED)
+    expect(result.current.error).not.toContain("error_class")
+    expect(result.current.error).not.toContain("agent_loop")
+    expect(result.current.error).not.toContain("PROVIDER_BILLING")
+
+    const errorTurns = result.current.activity.filter((e) => e.kind === "error")
+    expect(errorTurns).toHaveLength(1)
+    expect(errorTurns[0].kind === "error" && errorTurns[0].text).toBe(CURATED)
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
+  it("test_iterate_run_timeout_path_is_unaffected_by_the_copy_mapping: the client-side MAX_MS timeout still surfaces its own clean string, untouched by the new copy mapping", async () => {
+    // Never resolves to a terminal status — the poll keeps returning
+    // 'generating' until the run hits MAX_MS and the client-side timeout
+    // throw fires. That throw is NOT routed through iterateFailureCopy (see
+    // useIterateRun.ts:355) and must keep surfacing exactly its own string.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    let resolved: boolean | undefined
+    await act(async () => {
+      const run = result.current.runIterate("make it pop")
+      await vi.runAllTimersAsync()
+      resolved = await run
+    })
+
+    expect(result.current.error).toBe("Iteration timed out")
+    expect(onComplete).not.toHaveBeenCalled()
+    // The run STARTED (it timed out after starting, not rejected before
+    // starting) — same catch-block return as the hard-failure path.
+    expect(resolved).toBe(true)
   })
 })

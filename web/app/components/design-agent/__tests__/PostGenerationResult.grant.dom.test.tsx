@@ -13,7 +13,7 @@
 //      container's center stage (container→view→leaf wiring intact).
 //   3. defaultFullscreen + a granted bundle renders the fullscreen overlay.
 import * as React from "react"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -119,6 +119,138 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
       expect(container.querySelector('[data-testid="da-grant-error"]')).not.toBeNull()
     })
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
+  })
+
+  it("test_post_generation_result_refresh_preview_recovers_the_viewer_after_grant_error", async () => {
+    viewGrant.mockRejectedValueOnce(new Error("401"))
+    const onRefreshBundle = vi.fn()
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+        onRefreshBundle,
+      }),
+    )
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="da-grant-error"]')).not.toBeNull()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    viewGrant.mockResolvedValue(undefined)
+    fireEvent.click(screen.getByTestId("da-refresh-preview"))
+
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="da-grant-error"]')).toBeNull()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+  })
+
+  it("test_post_generation_result_refresh_preview_healthy_path_unchanged", async () => {
+    const onRefreshBundle = vi.fn()
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+        onRefreshBundle,
+      }),
+    )
+    await waitFor(() => {
+      expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+    })
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTestId("da-refresh-preview"))
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onRefreshBundle).toHaveBeenCalledTimes(1)
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Proves the container actually THREADS current_checkpoint_id into the hook
+// call, not just that the hook accepts a third parameter in isolation.
+describe("PostGenerationResult — checkpoint id threads into useViewGrant (DOM)", () => {
+  it("test_post_generation_result_threads_checkpoint_id_into_use_view_grant", async () => {
+    const { rerender } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 1 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(1))
+
+    // Same bundle_url, only current_checkpoint_id advances — a second mint
+    // must fire.
+    rerender(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 2 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+  })
+
+  // THE end-to-end sequencing proof: drives a real checkpoint advance through
+  // the REAL, unstubbed PostGenerationResult + useViewGrant composition (only
+  // designAgentApi.viewGrant is mocked) and asserts the iframe does NOT reload
+  // while the checkpoint-advance mint is still pending, then DOES reload
+  // exactly once after it resolves. Neither useViewGrant.test.tsx (hook in
+  // isolation, no container) nor PostGenerationResult.test.tsx (node-env,
+  // renderToStaticMarkup, can't drive the async effect) can prove this
+  // sequencing invariant through the real wiring — this is the one seam that
+  // can. FAIL-WITHOUT-FIX: on today's unfixed hook, the grant's reload signal
+  // never bumps on a checkpoint-only change (no checkpoint→reload wiring at all),
+  // so the "remounts to a NEW iframe node" assertion below never becomes true
+  // and this test times out red.
+  it("test_post_generation_result_defers_iframe_reload_until_checkpoint_advance_mint_resolves", async () => {
+    const { container, rerender } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 1 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+    })
+    const iframeBeforeAdvance = container.querySelector("iframe.da-prototype-iframe")
+
+    // Hold the checkpoint-advance mint pending so the pre-resolve state is
+    // observable (same pending-promise idiom as the file's first test above).
+    let resolveMint: (() => void) | null = null
+    viewGrant.mockImplementation(
+      () => new Promise<void>((res) => { resolveMint = () => res() }),
+    )
+
+    rerender(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 2 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+
+    // The triggering mint is confirmed IN FLIGHT (viewGrant already called a
+    // second time for checkpoint 2) but NOT YET resolved — the iframe must
+    // still be the SAME DOM node as before the advance: no remount/reload has
+    // happened.
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBe(iframeBeforeAdvance)
+
+    // Resolve the checkpoint-advance mint.
+    resolveMint?.()
+
+    // Exactly one fresh reload happens, and only AFTER the mint resolves: the
+    // container remounts a NEW iframe DOM node.
+    await waitFor(() => {
+      const iframeAfterAdvance = container.querySelector("iframe.da-prototype-iframe")
+      expect(iframeAfterAdvance).not.toBeNull()
+      expect(iframeAfterAdvance).not.toBe(iframeBeforeAdvance)
+    })
+
+    // Settles: no further remount happens after the one triggered by this advance.
+    const iframeAfterAdvance = container.querySelector("iframe.da-prototype-iframe")
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBe(iframeAfterAdvance)
   })
 })
 

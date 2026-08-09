@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.stories.generate import Story
+
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID literal,
+# pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
 
 CID = "11111111-2222-3333-4444-555555555555"
 PROJ = "PROJ_GID"
@@ -77,7 +83,7 @@ def test_list_projects_spans_all_workspaces():
     list_projects unions projects across every visible workspace."""
     from app.connectors import asana_oauth
 
-    def _get(_tok, path, params=None):
+    def _get(_tok, path, params=None, **kw):
         if path == "/workspaces":
             return [{"gid": "ws1"}, {"gid": "ws2"}]
         assert path == "/projects"
@@ -90,6 +96,72 @@ def test_list_projects_spans_all_workspaces():
         {"gid": "p1", "name": "Alpha"},
         {"gid": "p2", "name": "Beta"},
     ]
+
+
+def test_list_project_tasks_returns_the_page(monkeypatch):
+    from app.connectors import asana_oauth
+
+    captured = {}
+
+    def _get(_tok, path, params=None, **kw):
+        captured["path"] = path
+        captured["params"] = params
+        return [{"gid": "t1", "name": "Fix login bug"}]
+
+    monkeypatch.setattr(asana_oauth, "_get", _get)
+    tasks = asana_oauth.list_project_tasks("tok", PROJ, limit=50)
+    assert tasks == [{"gid": "t1", "name": "Fix login bug"}]
+    assert captured["path"] == f"/projects/{PROJ}/tasks"
+    assert captured["params"]["limit"] == 50
+    assert captured["params"]["opt_fields"] == asana_oauth._TASK_OPT_FIELDS
+
+
+def test_list_project_tasks_caps_the_request_limit_at_100(monkeypatch):
+    """Asana's own per-request cap — defends the helper even if a future
+    caller passes something larger."""
+    from app.connectors import asana_oauth
+
+    captured = {}
+    monkeypatch.setattr(asana_oauth, "_get",
+                        lambda _t, _p, params=None: captured.update(params) or [])
+    asana_oauth.list_project_tasks("tok", PROJ, limit=500)
+    assert captured["limit"] == 100
+
+
+def test_list_project_tasks_raises_auth_expired_on_401():
+    """Unlike get_task's per-task isolation, a project-task LISTING failure is
+    not swallowed here — auth_oauth._get/_raise_for's normal contract holds,
+    and the kg_ingest puller is the layer that decides per-project isolation
+    vs propagating a reconnect signal (see test_ingest_pullers.py)."""
+    from app.connectors import asana_oauth
+
+    resp = MagicMock(status_code=401, ok=False, text="unauthorized")
+    with patch("app.connectors.asana_oauth.requests.get", return_value=resp):
+        with pytest.raises(asana_oauth.AsanaAuthExpiredError):
+            asana_oauth.list_project_tasks("tok", PROJ, limit=50)
+
+
+def test_asana_auth_expired_error_carries_no_status_code():
+    """REAL FINDING (not fixed by this change — out of its declared scope):
+    unlike MeetAuthExpiredError (which carries `status_code = 401` ON PURPOSE,
+    per its own docstring, exactly so kg_ingest.auto_sync._run_sync's
+    `getattr(exc, "status_code", None) in (401, 403)` dispatch recognizes it),
+    AsanaAuthExpiredError is a bare RuntimeError subclass with no such
+    attribute — the same pre-existing gap as JiraAuthExpiredError and
+    ClickUpAuthExpiredError. So although this puller raises
+    AsanaAuthExpiredError correctly on a 401/403 (see the tests above),
+    auto_sync._run_sync's getattr check does NOT recognize it: `status` comes
+    back None, the WARNING/reconnect-prompt branch is skipped, and the
+    exception instead falls into the generic branch that logs a full ERROR
+    traceback and stamps `last_sync_error` with the raw exception string
+    rather than the friendly "asana authorization expired — reconnect
+    required" message. Fixing this needs a change to AsanaAuthExpiredError (or
+    to auto_sync's dispatch) that is outside this puller-only ticket's stated
+    scope — flagging for a follow-up rather than silently widening either."""
+    from app.connectors.asana_oauth import AsanaAuthExpiredError
+
+    exc = AsanaAuthExpiredError("Asana rejected the stored token")
+    assert getattr(exc, "status_code", None) is None
 
 
 # ── Custom fields: metadata, read normalization, write encoding ──────────────
@@ -379,10 +451,10 @@ def test_push_creates_then_updates_by_mapping():
     savemap2.assert_not_called()
 
 
-# ── Child issues → real native Asana subtasks (add-only, idempotent) ─────────
+# ── Child issues → real native Asana subtasks (full reconcile) ───────────────
 
 
-def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
+def test_sync_asana_subtasks_creates_each_missing_child_stripping_marker():
     """Every non-blank child becomes a real subtask; the '[P]' parallel marker
     is stripped and blank entries are skipped."""
     from app.stories import push as push_mod
@@ -395,8 +467,9 @@ def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
 
     with patch.object(push_mod, "get_asana_task_gid", return_value=None), \
          patch.object(push_mod, "save_asana_task_gid") as save, \
+         patch.object(push_mod, "list_asana_subtask_gids", return_value={}), \
          patch("app.connectors.asana_oauth.create_subtask", side_effect=_create):
-        push_mod.push_asana_subtasks(
+        push_mod.sync_asana_subtasks(
             CID, PROJ, "PARENT", "tid",
             ["Design API", "[P] Write tests", "   "], access_token="tok",
         )
@@ -404,19 +477,69 @@ def test_push_asana_subtasks_creates_each_missing_child_stripping_marker():
     assert save.call_count == 2
 
 
-def test_push_asana_subtasks_skips_already_created():
+def test_sync_asana_subtasks_skips_already_created():
     """A subtask already mapped (created on a prior pass) is not re-created —
-    add-only idempotency by content hash (mirrors the Jira sub-task push)."""
+    idempotency by content hash (mirrors the Jira sub-task sync)."""
     from app.stories import push as push_mod
 
+    sub_id = push_mod._sub_id("tid", "Design API")
     with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
          patch.object(push_mod, "save_asana_task_gid") as save, \
-         patch("app.connectors.asana_oauth.create_subtask") as create:
-        push_mod.push_asana_subtasks(
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={sub_id: "EXISTS"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.create_subtask") as create, \
+         patch("app.connectors.asana_oauth.delete_task") as delete:
+        push_mod.sync_asana_subtasks(
             CID, PROJ, "PARENT", "tid", ["Design API"], access_token="tok",
         )
     create.assert_not_called()
     save.assert_not_called()
+    delete.assert_not_called()
+    unmap.assert_not_called()
+
+
+def test_sync_asana_subtasks_deletes_a_child_removed_in_sprntly():
+    """A child issue removed in Sprntly is deleted in Asana and unmapped —
+    it used to be left behind, because the push was add-only."""
+    from app.stories import push as push_mod
+
+    stale = push_mod._sub_id("tid", "Design API")
+    keep = push_mod._sub_id("tid", "Write tests")
+    with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
+         patch.object(push_mod, "save_asana_task_gid"), \
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={stale: "S1", keep: "S2"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.create_subtask"), \
+         patch("app.connectors.asana_oauth.delete_task",
+               return_value=True) as delete:
+        push_mod.sync_asana_subtasks(
+            CID, PROJ, "PARENT", "tid", ["Write tests"], access_token="tok",
+        )
+    delete.assert_called_once_with("tok", "S1")
+    unmap.assert_called_once_with(CID, PROJ, stale)
+
+
+def test_sync_asana_subtasks_completes_when_delete_is_forbidden():
+    """No delete rights → mark the subtask complete, Asana's close, and treat
+    that as the removal having landed."""
+    from app.connectors.tracker_errors import TrackerDeleteForbiddenError
+    from app.stories import push as push_mod
+
+    stale = push_mod._sub_id("tid", "Design API")
+    with patch.object(push_mod, "get_asana_task_gid", return_value="EXISTS"), \
+         patch.object(push_mod, "list_asana_subtask_gids",
+                      return_value={stale: "S1"}), \
+         patch.object(push_mod, "delete_asana_task_gid") as unmap, \
+         patch("app.connectors.asana_oauth.delete_task",
+               side_effect=TrackerDeleteForbiddenError("nope")), \
+         patch("app.connectors.asana_oauth.update_task") as update:
+        push_mod.sync_asana_subtasks(
+            CID, PROJ, "PARENT", "tid", [], access_token="tok",
+        )
+    update.assert_called_once_with("tok", "S1", completed=True)
+    unmap.assert_called_once_with(CID, PROJ, stale)
 
 
 def test_push_story_with_subtasks_creates_native_subtasks_and_keeps_them_out_of_notes():

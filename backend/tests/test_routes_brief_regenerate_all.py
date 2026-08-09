@@ -26,7 +26,8 @@ def test_regenerate_all_requires_dataset(tenant_client):
 
 def test_regenerate_all_starts_pipeline_for_owned_dataset(tenant_client):
     t = tenant_client.make(slug="acme")
-    with patch.object(brief_routes, "_full_pipeline_bg", new_callable=AsyncMock) as bg:
+    with patch.object(brief_routes, "_full_pipeline_bg", new_callable=AsyncMock) as bg, \
+         patch.object(brief_routes, "has_brief_data_source", return_value=True):
         r = t.client.post("/v1/brief/regenerate-all?dataset=acme")
     assert r.status_code == 200
     assert r.json() == {"started": True, "dataset": "acme"}

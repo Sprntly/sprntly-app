@@ -29,9 +29,11 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
+import { ConfluenceSpacesPicker } from "./ConfluenceSpacesPicker"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
-import { SlackChannelPicker } from "./SlackChannelPicker"
+import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
+import { ZoomConfigSlot } from "./ZoomConfigSlot"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
 
@@ -363,7 +365,18 @@ function lookupItem(providerId: string): ConnectorItemRow | null {
   return null
 }
 
-async function callDisconnect(providerId: string): Promise<void> {
+/**
+ * Route a disconnect to the provider's own endpoint.
+ *
+ * Exported ONLY so a test can hold it. This switch is the single place a newly
+ * shipped connector silently breaks: everything else about a connector is
+ * data-driven off CONNECTOR_CATALOG, so a new row renders, connects, probes and
+ * syncs without touching this file — and then Disconnect throws "not
+ * implemented" at the one moment a user is trying to revoke access to their own
+ * data. A catalog row with no branch here is a bug, and the test next door is
+ * what says so.
+ */
+export async function callDisconnect(providerId: string): Promise<void> {
   if (providerId === "google_drive") {
     await connectorsApi.disconnectGoogleDrive()
   } else if (providerId === "figma") {
@@ -372,6 +385,12 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectGithub()
   } else if (providerId === "jira") {
     await connectorsApi.disconnectJira()
+  } else if (providerId === "confluence") {
+    await connectorsApi.disconnectConfluence()
+  } else if (providerId === "zoom") {
+    await connectorsApi.disconnectZoom()
+  } else if (providerId === "google_meet") {
+    await connectorsApi.disconnectGoogleMeet()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
@@ -386,6 +405,10 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectAsana()
   } else if (providerId === "superset") {
     await connectorsApi.disconnectSuperset()
+  } else if (providerId === "uploads") {
+    // Drops the connection row only — the uploaded documents are kept, same
+    // as every other connector leaves its ingested data in place.
+    await connectorsApi.disconnectUploads()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -474,6 +497,7 @@ export function ConfigureConnectorDrawer({
       <GoogleDrivePicker
         dataset={activeCompany}
         savedFiles={connection?.config?.files}
+        folderContents={connection?.config?.folder_contents}
         onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
@@ -485,14 +509,22 @@ export function ConfigureConnectorDrawer({
       />
     )
   } else if (providerId === "slack") {
+    // SYNC ONLY (2026-08-04). This drawer used to stack two unrelated
+    // questions: where the Top Insights brief gets DELIVERED (a per-user
+    // notification preference) on top of which channels the corpus sync PULLS
+    // from (a company-wide data-source setting). Delivery has its own home in
+    // Settings → Comms & Brief, and asking for it here made Slack look like
+    // two connectors — so the drawer now answers exactly one question, the one
+    // a connector shelf is for: what do we read?
+    //
+    // Nothing per-user is left in this slot, so the old
+    // `company_connection` branch (which hid the delivery picker for members
+    // viewing the workspace's shared install) went with it — channel selection
+    // and sync are company-wide and render the same for everyone.
     slot = (
       <>
-        <SlackChannelPicker
-          savedTargetType={
-            connection?.config?.target_type as "channel" | "dm" | undefined
-          }
-          savedChannelId={connection?.config?.channel_id as string | undefined}
-          savedChannelName={connection?.config?.channel_name as string | undefined}
+        <SlackSyncChannelsPicker
+          savedChannelIds={connection?.config?.sync_channel_ids}
           onSaved={onDisconnected /* reuse the reload callback */}
         />
         <SlackSyncButton
@@ -500,6 +532,23 @@ export function ConfigureConnectorDrawer({
           onSynced={onDisconnected /* reuse the reload callback */}
         />
       </>
+    )
+  } else if (providerId === "confluence") {
+    slot = (
+      <ConfluenceSpacesPicker
+        savedSpaceIds={connection?.config?.sync_space_ids}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "zoom") {
+    // The SAME component the post-connect modal mounts — the sync summary and
+    // the reconnect prompt have to say the same thing in both places, and two
+    // copies would drift the moment one of them was edited.
+    slot = (
+      <ZoomConfigSlot
+        connection={connection}
+        onSaved={onDisconnected /* reuse the reload callback */}
+      />
     )
   } else if (providerId === "github") {
     slot = <GithubInstallsSlot onChanged={onDisconnected} />

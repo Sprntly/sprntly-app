@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 from app.config import settings
 from app.db.prototype_comments import list_comments, mark_comments_orphaned
+from app.db.prototype_screenshots import resolve_screenshot_keys
 from app.db.prototype_pending_iterations import (
     dequeue_next,
     mark_iteration_done,
@@ -80,6 +81,7 @@ from app.design_agent.tools import (
     normalize_choices,
     tool_definitions_for_mode,
 )
+from app.llm import MAX_ATTEMPTS, _attempt_delay, _is_retryable
 from app.llm_telemetry import (
     MODEL_PRICING,
     RunUsage,
@@ -878,6 +880,23 @@ async def agent_loop(
     single-inference-site decision (routing lives in the route layer).
     """
     client = get_design_agent_client()
+    # Whether a COMPLETE run's terminal `done` is deferred to the route rather
+    # than emitted here. True for "scaffold" (generate) and "execute"
+    # (iterate) — the two modes whose complete run is followed by real staging
+    # (vite build, checkpoint, bundle upload) before the prototype is openable;
+    # see `_finish`'s comment for the full rationale. Plan mode and a manual
+    # edit ("manual") are NOT deferred — nothing stages after a plan run, and
+    # manual-edit's terminal timing is intentionally left unchanged (out of scope).
+    # A build-repair re-entry (`repair_build_run`) also passes mode="scaffold",
+    # so a repair pass that itself completes is ALSO deferred — a beneficial
+    # side effect: today a repair pass ending in status="complete" already
+    # closes the outer stream mid-repair (the same defect class, one level
+    # deeper); deferring it here means the repair loop's own completions no
+    # longer emit a premature terminal either. Its non-complete exits still
+    # close immediately via the (unmoved) error branch below, same as before.
+    # Computed once, before the loop, from the same `mode` the tool registry
+    # partition already uses (never reassigned mid-run — AD10).
+    _defer_done_terminal = mode in ("scaffold", "execute")
     # AD17 + AD10: the registry is partitioned PER MODE and computed ONCE here,
     # before the loop — never reassigned inside it (a mid-run tool change would
     # invalidate the prompt cache, agent-build-research.md §3.4). PLAN mode gets
@@ -941,27 +960,64 @@ async def agent_loop(
             _last_step: list[str] = [""]  # mutable container for dedup
 
             def _stream() -> object:
-                with client.messages.stream(
-                    model=active_model,
-                    max_tokens=max_tokens,
-                    system=system_blocks,
-                    tools=tools_payload,
-                    messages=messages,
-                ) as stream:
-                    for event in stream:
-                        etype = type(event).__name__
-                        if etype == "RawContentBlockStartEvent":
-                            block = getattr(event, "content_block", None)
-                            if block and getattr(block, "type", None) == "tool_use":
-                                label = progress_label or friendly_step(getattr(block, "name", ""), None)
-                                if label != _last_step[0]:
-                                    _last_step[0] = label
-                                    loop.call_soon_threadsafe(
-                                        publish_step,
-                                        ctx.prototype_id,
-                                        {"kind": "step", "text": label, "state": "active"},
-                                    )
-                    return stream.get_final_message()
+                # Bounded, observable retry-with-backoff around this module's ONE
+                # LLM call site. Reuses app.llm's exact classification + backoff
+                # primitives (_is_retryable / _attempt_delay / MAX_ATTEMPTS) so this
+                # gets the SAME retry budget every other call site in the repo has —
+                # NOT a new, invented policy. Mirrors _create_with_retries's own
+                # shape (llm.py:212-284): retryable + not-last-attempt -> log,
+                # publish a calming step, sleep, retry; not-retryable OR last
+                # attempt -> raise immediately (no sleep, no publish) so the
+                # existing outer `except Exception` classification below is
+                # reached exactly as it is today.
+                for attempt in range(MAX_ATTEMPTS):
+                    try:
+                        with client.messages.stream(
+                            model=active_model,
+                            max_tokens=max_tokens,
+                            system=system_blocks,
+                            tools=tools_payload,
+                            messages=messages,
+                        ) as stream:
+                            for event in stream:
+                                etype = type(event).__name__
+                                if etype == "RawContentBlockStartEvent":
+                                    block = getattr(event, "content_block", None)
+                                    if block and getattr(block, "type", None) == "tool_use":
+                                        label = progress_label or friendly_step(getattr(block, "name", ""), None)
+                                        if label != _last_step[0]:
+                                            _last_step[0] = label
+                                            loop.call_soon_threadsafe(
+                                                publish_step,
+                                                ctx.prototype_id,
+                                                {"kind": "step", "text": label, "state": "active"},
+                                            )
+                            return stream.get_final_message()
+                    except Exception as exc:  # noqa: BLE001 — classified below
+                        if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
+                            raise
+                        delay = _attempt_delay(attempt)
+                        logger.warning(
+                            "design_agent.llm_call.transient_failure prototype_id=%s "
+                            "attempt=%d/%d retrying_in=%.1fs error=%s",
+                            ctx.prototype_id, attempt + 1, MAX_ATTEMPTS, delay, exc,
+                        )
+                        # A retried attempt restarts THIS iteration's stream from
+                        # scratch, so re-arm the tool-step dedup — otherwise a tool
+                        # call that legitimately repeats on the retried attempt
+                        # would be silently suppressed as "already emitted."
+                        _last_step[0] = ""
+                        loop.call_soon_threadsafe(
+                            publish_step,
+                            ctx.prototype_id,
+                            {
+                                "kind": "step",
+                                "text": "Reconnecting to the model — retrying automatically",
+                                "state": "active",
+                            },
+                        )
+                        time.sleep(delay)
+                raise AssertionError("unreachable")  # pragma: no cover
 
             resp = await asyncio.to_thread(_stream)
             usage.add(resp.usage)
@@ -972,7 +1028,7 @@ async def agent_loop(
             # nudge above — count vs spend are separate convergence signals. The
             # trailing message here is still the user turn (the assistant turn is
             # appended below), so the nudge lands alternation-safe.
-            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD):
+            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD, iters):
                 _append_text_block(messages[-1], _wrap_up_nudge(0))  # hard-stop wording
                 cost_guard_nudged = True
                 logger.info(
@@ -1000,17 +1056,25 @@ async def agent_loop(
             # last_assistant_content above), exactly as the max_iters exit does.
             # Placed AFTER the assignment so the salvaged content is this turn's,
             # not the prior iteration's (or the initial [] on iteration 1).
-            if should_abort(usage, MODEL, HARD_CAP_USD):
+            if should_abort(usage, MODEL, HARD_CAP_USD, iters):
                 logger.warning(
                     "cost_guard.aborted prototype_id=%s mode=%s reason=hard_cap_projection "
                     "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",
                     ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
                     HARD_CAP_USD, SOFT_CAP_USD, iters,
                 )
-                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
+                # MUST fire BEFORE _finish (below) — _finish's own _sse_close pops
+                # and clears every subscriber queue for this prototype_id
+                # (event_stream.py's close()); a publish_step issued AFTER _finish
+                # returns would silently no-op (no subscribers left to reach).
+                publish_step(
+                    ctx.prototype_id,
+                    {"kind": "step", "text": "Generation stopped early to control cost", "state": "active"},
+                )
+                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop == "end_turn":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop == "max_tokens":
                 if max_tokens_retried:
@@ -1028,7 +1092,7 @@ async def agent_loop(
                         max_tokens = ESCALATION_MAX_TOKENS
                         messages.pop()
                         continue
-                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id, model_escalated=True)
+                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id, model_escalated=True, defer_done_terminal=_defer_done_terminal)
                 max_tokens *= 2
                 max_tokens_retried = True
                 # The truncated assistant turn was appended above. When the cap
@@ -1046,10 +1110,10 @@ async def agent_loop(
                 continue
 
             if stop == "refusal":
-                return _finish(usage, "refused", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "refused", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             if stop != "tool_use":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
@@ -1113,7 +1177,7 @@ async def agent_loop(
             )
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
             # Emit a per-tool step event BEFORE dispatch so the frontend
             # activity stream shows what the agent is about to do at tool
@@ -1196,7 +1260,7 @@ async def agent_loop(
         # Exited because iters == max_iters. Salvage the last assistant turn as
         # final_content (was discarded as []) — a build that ran out of turns
         # mid-flow is usually near-complete and worth staging, not throwing away.
-        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
+        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
 
     except Exception as exc:
         from app.design_agent.provider_errors import (
@@ -1205,13 +1269,24 @@ async def agent_loop(
             safe_error_message,
         )
 
-        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
-        cls = classify_provider_error(exc)
         # Record ONLY the safe class + a fixed generic message on the result —
         # both fields are client-visible downstream (they flow into the failed
         # prototype row / job record). The raw text goes to the log ONLY.
+        cls = classify_provider_error(exc)
+        error_message = safe_error_message(cls)
+        # Reuses the SAME curated, class-specific copy the eventual polled
+        # GenerationErrorBanner/reasonCopy() will show — single source of
+        # truth, not a second message table — but surfaces it on the LIVE
+        # activity stream immediately, before _finish's _sse_close pops every
+        # subscriber for this prototype_id (see the abort branch above for
+        # why the ordering is load-bearing).
+        publish_step(
+            ctx.prototype_id,
+            {"kind": "step", "text": error_message, "state": "active"},
+        )
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated, defer_done_terminal=_defer_done_terminal)
         result.error_class = cls.value
-        result.error_message = safe_error_message(cls)
+        result.error_message = error_message
         logger.warning(
             "design_agent.run.failed prototype_id=%s error_class=%s raw=%s",
             ctx.prototype_id, cls.value, str(exc),
@@ -1309,21 +1384,43 @@ def _finish(
     final_content: list,
     prototype_id: int | None = None,
     model_escalated: bool = False,
+    defer_done_terminal: bool = False,
 ) -> RunResult:
     # Flush the SSE terminal event to all active subscribers so every open
     # /events stream ends cleanly. Covers every exit path (complete / max_iters /
     # aborted / error) in one place. awaiting_clarification is a pause, not a
     # terminal — the stream stays open while the user composes an answer.
+    #
+    # defer_done_terminal (the success path ONLY — see below): True whenever the
+    # caller passed mode="scaffold" (generate) or mode="execute" (iterate) into
+    # `agent_loop`, which derives it once, before the loop runs, and threads it
+    # into every `_finish` call (see agent_loop's own comment). For those, a
+    # complete run is followed by real staging work (vite build, checkpoint,
+    # bundle upload, complete_prototype) before the prototype is actually
+    # openable — closing here would tell the client the run is done 15-22s
+    # before it is. The ROUTE (routes/design_agent.py: _stage_complete_run /
+    # _stage_iterate_run) owns emitting `done` itself, after its own
+    # `complete_prototype` / `advance_current_checkpoint` call succeeds, and an
+    # `error` terminal on any staging failure. Plan-mode iterate and manual edit
+    # stage nothing after a complete run (in this ticket's scope) and keep the
+    # immediate close, unchanged.
+    #
+    # The error branch below is NOT gated by this flag and must never move: a
+    # non-complete exit (max_iters / aborted / refused / error) is a genuine
+    # terminal the moment it happens, regardless of whether staging was ever
+    # going to run.
     if prototype_id is not None and status != "awaiting_clarification":
         if status == "complete":
-            # done sentinel carries the agent's own 1-2 sentence change summary
-            # (last text block of THIS run's final_content) when present. Only the
-            # complete/done path surfaces text; error sentinels stay shape-stable.
-            _sse_close(
-                prototype_id,
-                kind="done",
-                summary=_final_text_summary(final_content),
-            )
+            if not defer_done_terminal:
+                # done sentinel carries the agent's own 1-2 sentence change
+                # summary (last text block of THIS run's final_content) when
+                # present. Only the complete/done path surfaces text; error
+                # sentinels stay shape-stable.
+                _sse_close(
+                    prototype_id,
+                    kind="done",
+                    summary=_final_text_summary(final_content),
+                )
         else:
             _sse_close(prototype_id, kind="error")
     duration_ms = int((time.perf_counter() - start) * 1000)
@@ -1359,8 +1456,13 @@ async def generate_prototype(
     bind propagates across every `await` and `asyncio.to_thread` in the impl
     (see app.llm_keys). `workspace_id` is the company id."""
     from app.llm_keys import company_llm_key
+    from app.usage_context import Feature, usage_scope
 
-    with company_llm_key(workspace_id):
+    # The same bind carries the usage-metering attribution: every
+    # `get_design_agent_client` call inside is metered as design_agent/generate.
+    with company_llm_key(workspace_id), usage_scope(
+        feature=Feature.DESIGN_AGENT, operation="generate"
+    ):
         return await _generate_prototype_impl(
             prototype_id,
             workspace_id,
@@ -1857,8 +1959,13 @@ async def iterate_prototype(
     # Bind the company's own Claude key (when configured) for the edit loop, same
     # as the scaffold path (generate_prototype). `workspace_id` is the company id.
     from app.llm_keys import company_llm_key
+    from app.usage_context import Feature, usage_scope
 
-    with company_llm_key(workspace_id):
+    # `mode` distinguishes the edit paths (iterate / manual edit) — carry it as
+    # the usage operation so the dashboard can separate them from generations.
+    with company_llm_key(workspace_id), usage_scope(
+        feature=Feature.DESIGN_AGENT, operation=str(mode or "iterate")
+    ):
         result = await agent_loop(
             system_blocks=effective_system_blocks,
             user_message=user_message,
@@ -2003,8 +2110,8 @@ async def estimate_iterate_cost(
     nothing (the iterate route is only hit on Continue).
 
     Counts the CACHEABLE prefix (iterate system prompt + the current bundle source +
-    the open comment threads, plus a flat `_SCREENSHOT_EST_INPUT_TOKENS` when the
-    prototype carries a reference screenshot — the image rides that prefix) and
+    the open comment threads, plus `_SCREENSHOT_EST_INPUT_TOKENS` per attached
+    reference screenshot — the images ride that prefix) and
     the VOLATILE suffix (the user's iterate prompt),
     converts chars→tokens via the chars/4 heuristic (`_CHARS_PER_TOKEN`), then prices
     via `llm_telemetry.MODEL_PRICING[MODEL]` — the SAME constants `RunUsage.est_cost_usd`
@@ -2042,11 +2149,17 @@ async def estimate_iterate_cost(
     cacheable_chars = len(DESIGN_AGENT_ITERATE_SYSTEM) + _chars(source) + _chars_comments(open_comments)
     volatile_chars = len(prompt)
     cached_input_tokens = cacheable_chars // _CHARS_PER_TOKEN
-    if proto and proto.get("screenshot_key"):
-        # The stored reference screenshot re-enters every iterate turn inside
-        # the cacheable prefix; count it as a flat vision-input constant (see
-        # _SCREENSHOT_EST_INPUT_TOKENS — the image is never decoded here).
-        cached_input_tokens += _SCREENSHOT_EST_INPUT_TOKENS
+    # The stored reference screenshot(s) re-enter every iterate turn inside the
+    # cacheable prefix; count each as a flat vision-input constant (see
+    # _SCREENSHOT_EST_INPUT_TOKENS — the images are never decoded here).
+    # join-table-first, legacy-column-fallback-second (resolve_screenshot_keys)
+    # so a pre-ticket prototype (single legacy screenshot_key, zero join-table
+    # rows) estimates identically to a post-ticket single-screenshot row.
+    screenshot_keys = resolve_screenshot_keys(
+        prototype_id=prototype_id, workspace_id=workspace_id,
+        legacy_screenshot_key=(proto or {}).get("screenshot_key"),
+    )
+    cached_input_tokens += _SCREENSHOT_EST_INPUT_TOKENS * len(screenshot_keys)
     new_input_tokens = volatile_chars // _CHARS_PER_TOKEN
 
     p = MODEL_PRICING[MODEL]

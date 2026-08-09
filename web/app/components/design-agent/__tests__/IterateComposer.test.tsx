@@ -1,21 +1,28 @@
-// P3-14 — IterateComposer tests. Node-env vitest (no DOM, no testing-library),
-// so — following the repo's renderToStaticMarkup convention — pure views are
-// SSR-rendered for markup assertions. For the load-bearing AD14 cost-gate
-// invariant (AC3) and the B4 handoff we DRIVE THE REAL CONTAINER HANDLERS (not
-// the extracted free helpers) against spies on the REAL designAgentApi methods,
-// so the gate is genuinely locked: a future edit that moved an `iterate` call
-// into Submit would make `onSubmit` call iterate and fail these tests.
+// @vitest-environment jsdom
 //
-// Driving the container in node-env: the components read the classic JSX factory
-// from `globalThis.React`, so `driveContainer` wraps that `createElement` to
-// capture the props the container passes to its View (including the live
-// `onSubmit`/`onContinue`/`onCancel` = the container's handleSubmit/handleContinue/
-// handleCancel closures), renders the container with renderToStaticMarkup, then
-// restores. useState setters fired by those handlers post-render are no-ops in the
-// server renderer (verified), so the handlers' API calls run while their setState
-// calls harmlessly no-op — exactly what we assert against.
+// P3-14 — IterateComposer tests. Most of this file predates jsdom in this
+// suite and stays on the renderToStaticMarkup + driveContainer SSR convention
+// documented below (pure markup assertions, and driving container handlers
+// against spies where a real re-render isn't needed to observe the outcome).
+// A jsdom environment is a strict superset for those tests — nothing here
+// changes their behaviour. The rejected-vs-accepted Submit tests further down
+// (test_composer_submit_*) DO need a real mounted re-render (to prove the
+// rendered textarea's value across an awaited async boundary, which the SSR
+// one-shot render cannot observe — see its own comment), so those use
+// @testing-library/react's `render`/`fireEvent`/`act` instead.
+//
+// Driving the container in the SSR tests: the components read the classic JSX
+// factory from `globalThis.React`, so `driveContainer` wraps that
+// `createElement` to capture the props the container passes to its View
+// (including the live `onSubmit`/`onContinue`/`onCancel` = the container's
+// handleSubmit/handleContinue/handleCancel closures), renders the container
+// with renderToStaticMarkup, then restores. useState setters fired by those
+// handlers post-render are no-ops in the server renderer (verified), so the
+// handlers' API calls run while their setState calls harmlessly no-op —
+// exactly what those tests assert against.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
+import { render, screen, fireEvent, act, cleanup } from "@testing-library/react"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -42,6 +49,10 @@ import type {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  // Only the two `render(...)`-mounted tests below need this; a no-op for
+  // every other (SSR-only) test in this file since they never mount via
+  // @testing-library/react.
+  cleanup()
 })
 
 const UNDER_CAP: IterateCostEstimate = {
@@ -598,6 +609,71 @@ describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate ga
     expect(iter).not.toHaveBeenCalled()
   })
 
+  // The next two tests need a REAL mounted re-render (not the SSR/driveContainer
+  // trick used above) — the whole point is to prove state ACROSS an awaited
+  // async boundary (Submit now awaits `runIterateExternal` before clearing
+  // anything), which a one-shot server render cannot observe (its state
+  // setters are no-ops post-render, as the file header explains). These mount
+  // the REAL `IterateComposer` container via @testing-library/react.
+  it("Submit WITH skipCostConfirm + an external runner that REJECTS (a run is already in flight) leaves the rendered prompt and applied comment id unchanged (test_composer_submit_rejected_leaves_prompt_and_applied_comment_id_unchanged)", async () => {
+    const onClearApply = vi.fn()
+    const runIterateExternal = vi.fn().mockResolvedValue(false)
+
+    render(
+      React.createElement(IterateComposer, {
+        prototypeId: 7,
+        applyTarget: comment({ id: 5, body: "make it blue" }),
+        skipCostConfirm: true,
+        runIterateExternal,
+        onClearApply,
+      }),
+    )
+
+    const textarea = screen.getByTestId("iterate-composer-input") as HTMLTextAreaElement
+    expect(textarea.value).toBe("make it blue")
+
+    await act(async () => {
+      fireEvent.submit(screen.getByTestId("iterate-composer-form"))
+      // Let handleSubmit's `await runIterateExternal(...)` settle.
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(runIterateExternal).toHaveBeenCalledWith("make it blue", 5)
+    // Rejected → the composer must NOT treat it as accepted.
+    expect(onClearApply).not.toHaveBeenCalled()
+    expect(textarea.value).toBe("make it blue")
+  })
+
+  it("Submit WITH skipCostConfirm + an external runner that ACCEPTS clears the rendered prompt and calls onClearApply exactly once (test_composer_submit_accepted_clears_prompt_and_calls_on_clear_apply)", async () => {
+    const onClearApply = vi.fn()
+    const runIterateExternal = vi.fn().mockResolvedValue(true)
+
+    render(
+      React.createElement(IterateComposer, {
+        prototypeId: 7,
+        applyTarget: comment({ id: 5, body: "make it blue" }),
+        skipCostConfirm: true,
+        runIterateExternal,
+        onClearApply,
+      }),
+    )
+
+    const textarea = screen.getByTestId("iterate-composer-input") as HTMLTextAreaElement
+    expect(textarea.value).toBe("make it blue")
+
+    await act(async () => {
+      fireEvent.submit(screen.getByTestId("iterate-composer-form"))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(runIterateExternal).toHaveBeenCalledWith("make it blue", 5)
+    // Accepted (unchanged regression guard) → clears + notifies exactly once.
+    expect(onClearApply).toHaveBeenCalledTimes(1)
+    expect(textarea.value).toBe("")
+  })
+
   it("Submit WITHOUT skipCostConfirm still opens the estimate gate (test_submit_without_skip_cost_confirm_opens_estimate_modal)", async () => {
     const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
     const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
@@ -700,5 +776,46 @@ describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate ga
         .filter((l) => l.includes("UX-EXPLORE") && l.includes("skipCostConfirm"))
       expect(offending).toEqual([])
     }
+  })
+})
+
+// ---- branding: internal persona name never reaches the placeholder ---------
+
+describe("branding — placeholder says Sprntly, not the internal persona name", () => {
+  it("test_reprompt_placeholder_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: false,
+      mode: "reprompt",
+      showModal: false,
+    })
+    expect(html).toContain("Describe a change for Sprntly to make…")
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_apply_placeholder_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: false,
+      mode: "apply",
+      showModal: false,
+    })
+    expect(html).toContain("Edit this task for Sprntly…")
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_iterate_composer_source_has_no_design_agent_string_outside_locked_spec_quote", () => {
+    const src = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
+      "utf8",
+    )
+    // The single deliberately-untouched line is a direct quotation of the
+    // locked spec's own wording (not this file's author's own prose) — strip
+    // it before asserting the rest of the source is clean.
+    const remainder = src
+      .split("\n")
+      .filter((l) => !l.includes('Per spec the pre-fill is "a task handed to the Design Agent"'))
+      .join("\n")
+    expect(remainder).not.toContain("Design Agent")
   })
 })

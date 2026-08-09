@@ -19,7 +19,7 @@ import { ONBOARDING_STEP_SLUGS, ROLE_OPTIONS } from "../../../lib/onboarding/typ
  * the numbered flow begins: their Supabase profile may land with an empty
  * first/last name (email/password users provide the full about-you at
  * sign-up and skip straight to the first numbered step). Mirrors the email
- * flow's about-you fields: name, role, and priorities. Every account is a
+ * flow's about-you fields: name and role. Every account is a
  * company account since v6 — account_type is always written as "company".
  *
  * On submit it persists the profile via updateUserProfile (which derives
@@ -61,7 +61,6 @@ export function YourName() {
   const [lastName, setLastName] = useState(initial.last)
   const [role, setRole] = useState("")
   const [roleOther, setRoleOther] = useState("")
-  const [priorities, setPriorities] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -81,7 +80,6 @@ export function YourName() {
         first_name: firstName,
         last_name: lastName,
         role: resolvedRole,
-        priorities: priorities.trim() || null,
         account_type: "company",
       })
       await refresh()
@@ -176,22 +174,6 @@ export function YourName() {
                   maxLength={50}
                 />
               )}
-            </div>
-
-            <div className="field full" data-field="priorities">
-              <div className="field-l">
-                Your priorities{" "}
-                <span className="opt">— what you&apos;re focused on right now</span>
-              </div>
-              <textarea
-                className="inp"
-                rows={3}
-                value={priorities}
-                onChange={(e) => setPriorities(e.target.value)}
-                maxLength={500}
-                placeholder="e.g. grow MAU, recover the redesign dip, ship the calorie deficit before Watch 9…"
-                aria-label="Your priorities"
-              />
             </div>
           </div>
 

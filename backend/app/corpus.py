@@ -33,6 +33,28 @@ class Corpus:
 
 
 def load_corpus(dataset: str = "asurion") -> Corpus:
+    # Defence in depth. This is a slug→directory reader with no ownership
+    # check by design (callers own the tenant boundary — see
+    # deps/ownership.require_owned_dataset), but it is also the widest
+    # `data_path / <client-string>` join in the codebase, so a non-slug-shaped
+    # argument must never reach it: `../../x` would read a directory outside
+    # DATA_DIR and hand its contents to an LLM prompt. Refusing here is a
+    # backstop, not the guard — the connector sync routes reject the same
+    # shapes with a 422 before we get this far.
+    #
+    # An empty corpus (not an exception) is the failure mode on purpose: every
+    # caller already handles "no corpus directory" that way, so a malformed
+    # slug degrades to the KG-only answer path instead of 500ing a brief.
+    from app.datasets import InvalidSlug, validate_slug  # lazy — keeps db/ingest off this module's import
+
+    try:
+        dataset = validate_slug(dataset)
+    except InvalidSlug:
+        logger.warning(
+            "Refusing to load a corpus for non-slug-shaped dataset %r", dataset
+        )
+        return Corpus(dataset=dataset, docs=())
+
     base = settings.data_path / dataset
     if not base.exists():
         # No static corpus for this tenant — they rely on the knowledge graph.

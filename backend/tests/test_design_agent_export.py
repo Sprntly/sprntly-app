@@ -364,6 +364,14 @@ CREATE TABLE prototype_comments (
     resolved_at  TEXT,
     user_id        TEXT
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -380,15 +388,17 @@ def env(isolated_settings, monkeypatch):
 
     import app.db.prds as prds_mod
     import app.db.prototype_comments as comments_mod
+    import app.db.prototype_screenshots as screenshots_mod
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)
     importlib.reload(comments_mod)
-    importlib.reload(export)  # re-bind get_prd / get_prototype / list_resolved_comments
+    importlib.reload(screenshots_mod)
+    importlib.reload(export)  # re-bind get_prd / get_prototype / list_resolved_comments / resolve_screenshot_keys
     import app.design_agent.storage as storage_mod
 
     return SimpleNamespace(
         prds=prds_mod, proto=proto_mod, comments=comments_mod,
-        export=export, storage=storage_mod,
+        screenshots=screenshots_mod, export=export, storage=storage_mod,
     )
 
 
@@ -625,25 +635,37 @@ def test_assemble_omits_design_source_when_figma_key_absent():
 
 
 def test_design_source_screenshot_line():
-    """screenshot_key set (no figma) → Design Source section with exactly the
-    provenance sentence; no Figma line."""
-    out = _assemble(
-        prototype=_prototype(screenshot_key="uploads/ws-1/0f3a9d2e.png")
-    )
+    """screenshot_count=1 (no figma) → Design Source section with exactly the
+    provenance sentence; no Figma line. The count is now the ONLY
+    screenshot-related input `_assemble` ever sees — the raw key is never
+    threaded through it (see the `render_export_markdown`-level leak test)."""
+    out = _assemble(prototype=_prototype(), screenshot_count=1)
     assert "## Design Source" in out
     ds = out.split("## Design Source", 1)[1]
     assert "Generated from an uploaded screenshot reference." in ds
     assert "Figma" not in ds
 
 
+def test_design_source_plural_sentence_for_multiple_screenshots():
+    """AC17 — screenshot_count > 1 renders the pluralized sentence naming N."""
+    out = _assemble(prototype=_prototype(), screenshot_count=3)
+    ds = out.split("## Design Source", 1)[1]
+    assert "Generated from 3 uploaded screenshot references." in ds
+
+
+def test_render_design_source_omits_section_for_zero_screenshots_and_no_figma():
+    """Edge case (regression-pin): screenshot_count=0 and no figma key ->
+    the existing "" no-section contract holds."""
+    out = _assemble(prototype=_prototype(figma_file_key=None), screenshot_count=0)
+    assert "## Design Source" not in out
+
+
 def test_design_source_both_sources_figma_first():
     """figma + screenshot both set → ONE Design Source section carrying both
     lines, Figma first."""
     out = _assemble(
-        prototype=_prototype(
-            figma_file_key="abc123XYZ",
-            screenshot_key="uploads/ws-1/0f3a9d2e.png",
-        )
+        prototype=_prototype(figma_file_key="abc123XYZ"),
+        screenshot_count=1,
     )
     assert out.count("## Design Source") == 1
     ds = out.split("## Design Source", 1)[1]
@@ -652,17 +674,19 @@ def test_design_source_both_sources_figma_first():
     assert i_figma < i_shot
 
 
-def test_export_never_leaks_screenshot_key():
-    """The storage key embeds the workspace id and a storage-internal path;
-    the export gets pasted into third-party coding agents. Neither the key
-    value nor any `uploads/` path fragment may appear in the output."""
-    key = "uploads/ws-secret-tenant/9b1c4e77-aaaa-bbbb-cccc-000011112222.png"
+def test_render_design_source_never_leaks_storage_key():
+    """AC17/AC20 — `_assemble`/`_render_design_source` never receive a raw key
+    at all post-ticket (only the pre-resolved int count), so no rendered
+    output substring can match `uploads/` or any workspace id. This is a
+    necessarily WEAKER guarantee than the pre-ticket version — see
+    `test_render_export_markdown_never_leaks_screenshot_storage_key` below for
+    the true end-to-end replacement that exercises the actual DB-reading
+    layer."""
     out = _assemble(
-        prototype=_prototype(figma_file_key="abc123XYZ", screenshot_key=key)
+        prototype=_prototype(figma_file_key="abc123XYZ"), screenshot_count=1,
     )
-    assert key not in out
-    assert "ws-secret-tenant" not in out
     assert "uploads/" not in out
+    assert "ws-secret-tenant" not in out
 
 
 def test_export_byte_identical_without_sources():
@@ -787,6 +811,30 @@ async def test_render_design_source_from_seeded_figma_key(env, monkeypatch):
     assert "## Design Source" in out
     assert "`figkey789`" in out
     assert "figma.com" not in out
+
+
+async def test_render_export_markdown_never_leaks_screenshot_storage_key(env, monkeypatch):
+    """NEW, replaces the deleted `test_export_never_leaks_screenshot_key` — that
+    pure-function test's premise no longer applies once `_assemble` only ever
+    receives a resolved int (see the pure-boundary tests above). This
+    integration-level test exercises the actual DB-reading layer
+    (`render_export_markdown`, which resolves `screenshot_count` via
+    `resolve_screenshot_keys`) with a real `prototype_screenshots` row seeded
+    via `insert_screenshots`, carrying a workspace-id-bearing key — asserting
+    neither the key nor the workspace id appear anywhere in the rendered
+    markdown, closing the gap the pure-function test can no longer cover by
+    construction. AC17/AC20."""
+    _patch_source(env, monkeypatch, {})
+    key = "uploads/ws-secret-tenant/9b1c4e77-aaaa-bbbb-cccc-000011112222.png"
+    pid, cid, _ = _seed(env, workspace_id="ws-secret-tenant")
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id="ws-secret-tenant", storage_keys=[key],
+    )
+    out = await env.export.render_export_markdown(pid, cid, workspace_id="ws-secret-tenant")
+    assert "Generated from an uploaded screenshot reference." in out
+    assert key not in out
+    assert "ws-secret-tenant" not in out
+    assert "uploads/" not in out
 
 
 async def test_render_resolved_feedback_is_deterministic(env, monkeypatch):

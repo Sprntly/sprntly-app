@@ -148,16 +148,16 @@ def test_discipline_length_within_bounds():
 # ─── AC6: version bumped ─────────────────────────────────────────────────────
 
 def test_template_version_bumped_to_5():
-    """DESIGN_AGENT_TEMPLATE_VERSION is an int, now 9 (bumped when the
-    mobile-capability platform directives landed)."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 9
+    """DESIGN_AGENT_TEMPLATE_VERSION is an int, now 10 (bumped when the
+    external-entry-point placeholder directive landed)."""
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 10
     assert isinstance(DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
 def test_scaffold_sync_green_at_new_version():
-    """The version-coupled scaffold-sync contract: version is an int equal to 9
-    (bumped to 9 when the mobile-capability platform directives landed)."""
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+    """The version-coupled scaffold-sync contract: version is an int equal to 10
+    (bumped to 10 when the external-entry-point placeholder directive landed)."""
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 10
 
 
 # ─── AC7: existing system prompts unchanged (append-only) ────────────────────
@@ -249,16 +249,16 @@ def test_shell_task_block_lists_nav_labels_when_provided():
     label in order so the model reproduces the real icon-rail."""
     sources = _make_sources()
     nav = [
-        NavItem(label="Weekly brief", order=0),
+        NavItem(label="Top Insights", order=0),
         NavItem(label="All chats", order=1),
         NavItem(label="Backlog Projects", order=2),
     ]
     block = render_shell_task_block(sources, nav_items=nav)
     assert "REAL NAV ITEMS" in block
-    for label in ("Weekly brief", "All chats", "Backlog Projects"):
+    for label in ("Top Insights", "All chats", "Backlog Projects"):
         assert label in block
     # order preserved
-    assert block.index("Weekly brief") < block.index("All chats") < block.index(
+    assert block.index("Top Insights") < block.index("All chats") < block.index(
         "Backlog Projects"
     )
 
@@ -282,7 +282,7 @@ def test_shell_task_block_instructs_dependency_free_rebuild():
     the real shell can't be reproduced verbatim in the scaffold."""
     sources = _make_sources()
     nav = [
-        NavItem(label="Weekly brief", order=0),
+        NavItem(label="Top Insights", order=0),
         NavItem(label="All chats", order=1),
     ]
     block = render_shell_task_block(sources, nav_items=nav)
@@ -293,7 +293,7 @@ def test_shell_task_block_instructs_dependency_free_rebuild():
     assert "lucide-react" in block
     assert "shadcn" in block
     # Real labels still present alongside the rebuild instruction.
-    assert "Weekly brief" in block
+    assert "Top Insights" in block
     assert "All chats" in block
     # The rebuild instruction is present even with no nav items.
     bare = render_shell_task_block(sources)

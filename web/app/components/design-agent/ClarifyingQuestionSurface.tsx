@@ -140,7 +140,7 @@ export function ClarifyingQuestionSurfaceView({
       className="clarifying-question-surface"
       data-testid="clarifying-question-surface"
       role="region"
-      aria-label="The Design Agent has a question"
+      aria-label="Sprntly has a question"
     >
       <p
         className="clarifying-question-text"
@@ -188,7 +188,7 @@ export function ClarifyingQuestionSurfaceView({
             className="clarifying-question-input"
             data-testid="clarifying-question-input"
             value={answer}
-            placeholder="Answer the Design Agent…"
+            placeholder="Answer Sprntly…"
             onChange={(e) => onAnswerChange?.(e.target.value)}
           />
           <div className="clarifying-question-actions">

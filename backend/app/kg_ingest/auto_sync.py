@@ -58,10 +58,19 @@ def _maybe_refresh_token(
     not configured) logs a WARNING and returns the input unchanged, so the
     caller's sync surfaces the usual 401 → "reconnect required".
 
-    Jira (Atlassian) is handled alongside github: its access tokens expire ~1h
-    and its refresh tokens ROTATE, so — like github — we persist the whole new
-    payload on every refresh."""
-    if provider not in ("github", "jira"):
+    Jira, Confluence (Atlassian) and Zoom are handled alongside github: their
+    access tokens expire ~1h and their refresh tokens ROTATE, so — like github —
+    we persist the whole new payload on every refresh. Confluence and Zoom
+    additionally require company_id to survive the rewrite, because that is the
+    credential their pullers are handed (see
+    confluence_oauth.token_payload_to_store).
+
+    Google Meet is here for a DIFFERENT reason. Its refresh tokens do not
+    rotate, so nothing is stranded by a throwaway refresh — but Google's refresh
+    response omits `refresh_token` ENTIRELY, so persisting it verbatim blanks
+    the stored one and the connection dies at the following cycle. It carries
+    the same company_id obligation as Confluence and Zoom."""
+    if provider not in ("github", "jira", "confluence", "zoom", "google_meet"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -71,7 +80,42 @@ def _maybe_refresh_token(
     try:
         from app.connectors.tokens import encrypt_token_json
 
-        if provider == "jira":
+        if provider == "confluence":
+            from app.connectors import confluence_oauth
+
+            new_json_str = confluence_oauth.token_payload_to_store(
+                confluence_oauth.refresh_access_token(refresh_token),
+                # Dropping this here breaks the NEXT sync, not this refresh:
+                # token_for("confluence", ...) reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "zoom":
+            from app.connectors import zoom_oauth
+
+            new_json_str = zoom_oauth.token_payload_to_store(
+                zoom_oauth.refresh_access_token(refresh_token),
+                # Same trap as confluence above: dropping this here breaks the
+                # NEXT sync, not this refresh, because token_for("zoom", ...)
+                # reads exactly this field.
+                company_id=company_id,
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "google_meet":
+            from app.connectors import google_meet
+
+            new_json_str = google_meet.token_payload_to_store(
+                google_meet.refresh_access_token(refresh_token),
+                # Same trap as confluence/zoom above: dropping this here breaks
+                # the NEXT sync, not this refresh, because
+                # token_for("google_meet", ...) reads exactly this field.
+                company_id=company_id,
+                # And this one is not optional on Google: the refresh response
+                # has no refresh_token at all, so without the carry-forward the
+                # stored credential is replaced by nothing.
+                keep_refresh_token=refresh_token,
+            )
+        elif provider == "jira":
             from app.connectors import jira_oauth
 
             new_json_str = jira_oauth.token_payload_to_store(
@@ -161,15 +205,77 @@ def _run_sync(company_id: str, provider: str) -> None:
                            company_id, provider, exc_info=True)
 
 
+def _run_drive_sync(company_id: str) -> None:
+    """Blocking Google Drive sync body — runs inside the daemon thread.
+    Fully isolated: sync_google_drive stamps its own per-file errors; genuine
+    failures raised before stamping are caught and stamped here best-effort.
+
+    A connected-but-unconfigured row (no dataset, or nothing picked yet) is a
+    quiet no-op, NOT an error: pre-KG-ingest the scheduler never touched Drive
+    rows, and stamping "dataset is required" on them every cycle would surface
+    a scary Settings error for a state the user never acted on."""
+    try:
+        import json as _json
+
+        from app.connectors.google_drive_sync import sync_google_drive
+
+        row = db.get_connection(company_id, "google_drive")
+        if not row:
+            return
+        try:
+            config = _json.loads(row.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+        if not (config.get("dataset") and config.get("files")):
+            logger.info(
+                "auto-sync: google_drive for %s has no dataset/picked files "
+                "yet — skipping", company_id,
+            )
+            return
+
+        result = sync_google_drive(company_id=company_id)
+        logger.info(
+            "auto-sync done: %s/google_drive synced=%s kg_queued=%s",
+            company_id, len(result.synced), len(result.kg_queued),
+        )
+    except Exception as e:  # noqa: BLE001 — fully isolated
+        logger.warning("auto-sync: google_drive sync failed for %s: %s",
+                       company_id, e)
+        try:
+            db.update_connection_sync(
+                company_id, "google_drive", last_sync_at=utc_now(),
+                last_sync_error=str(e)[:500],
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("auto-sync: could not stamp error for %s/google_drive",
+                           company_id, exc_info=True)
+
+
 def kickoff_sync(company_id: str, provider: str) -> bool:
     """Fire-and-forget: start a background ingest for a just-connected provider.
 
     Returns True if a sync thread was started, False if the provider has no
     ingest puller (nothing to sync). Never blocks; never raises into the
     caller's connect flow."""
+    if provider == "google_drive":
+        # Drive has no token puller — its records come from the connection's
+        # picked-file config. Run the full corpus+KG sync in the background
+        # (downloads changed files, refreshes the corpus copy, and hands
+        # changed docs to kg_ingest.drive_extract as connector-origin signals).
+        try:
+            t = threading.Thread(
+                target=_run_drive_sync, args=(company_id,),
+                name="auto-sync-google-drive", daemon=True,
+            )
+            t.start()
+            return True
+        except Exception:  # noqa: BLE001 — never let a thread-spawn failure break connect
+            logger.exception("auto-sync: failed to start thread for %s/google_drive",
+                             company_id)
+            return False
     if provider not in PULLERS:
-        # Providers like figma / slack / google-drive have their own corpus
-        # sync paths, not a kg_ingest puller — kick a corpus seed instead (see
+        # Providers like figma / slack have their own corpus sync paths, not a
+        # kg_ingest puller — kick a corpus seed instead (see
         # kickoff_corpus_seed, wired into those providers' sync-to-corpus routes).
         return False
     try:
@@ -234,6 +340,61 @@ def _run_corpus_seed(company_id: str, slug: str) -> None:
             logger.exception("corpus-seed failed for %s (slug=%s)", company_id, slug)
 
 
+def _run_slack_corpus_sync(company_id: str) -> None:
+    """Blocking Slack corpus sync + KG seed — runs inside the daemon thread.
+
+    Company-level: one sync per company per refresh cycle, using the
+    company's Slack sync connection and its shared pull-channel selection
+    (see connectors/slack_company.py). Fully isolated — any failure is
+    logged, never raised."""
+    from app.connectors.slack_sync import sync_slack
+    from app.db.companies import slug_for_company_id
+
+    try:
+        slug = slug_for_company_id(company_id)
+        if not slug:
+            logger.warning(
+                "slack-refresh: no dataset slug for company=%s — skipping",
+                company_id,
+            )
+            return
+        result = sync_slack(slug, company_id=company_id)
+        logger.info(
+            "slack-refresh done: %s (slug=%s) channels=%s messages=%s errors=%s",
+            company_id, slug, result.channels_count, result.messages_count,
+            len(result.errors),
+        )
+        # The corpus file landed — extract it into the KG now instead of
+        # waiting for the next brief's seed (same path as the manual sync
+        # route's _seed_corpus_after_sync).
+        _run_corpus_seed(company_id, slug)
+    except Exception:  # noqa: BLE001 — fully isolated
+        logger.exception("slack-refresh failed for %s", company_id)
+
+
+def kickoff_slack_corpus_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh the company's Slack corpus + KG.
+
+    Called by the scheduled connector refresh for every company with an
+    active Slack connection. Returns False (nothing started) when the
+    company has no usable Slack sync connection. Never blocks; never
+    raises into the scheduler loop."""
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    try:
+        if not resolve_company_slack_row(company_id):
+            return False
+        t = threading.Thread(
+            target=_run_slack_corpus_sync, args=(company_id,),
+            name="slack-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break the cycle
+        logger.exception("slack-refresh: failed to start thread for %s", company_id)
+        return False
+
+
 def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
     """Fire-and-forget: extract newly-arrived corpus docs into the KG.
 
@@ -251,4 +412,125 @@ def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
     except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
         logger.exception("corpus-seed: failed to start thread for %s (slug=%s)",
                          company_id, slug)
+        return False
+
+
+# ── Roadmap → KG on upload ──────────────────────────────────────────────────
+# The workspace roadmap has its own one-per-workspace, replace-semantics ingest
+# (kg_ingest.roadmap) rather than riding the corpus path — it's a priorities
+# anchor, not corpus evidence. Same shape as kickoff_corpus_seed above: a daemon
+# thread so the onboarding strategy step's upload response never waits on an
+# extraction, per-company lock so a burst of replaces serializes, and total error
+# isolation because synthesis_brief.seed_incremental re-runs it on the next brief
+# anyway (it doubles as the retry + grandfather path).
+
+def _roadmap_ingest_lock(company_id: str) -> "threading.RLock":
+    """The per-company roadmap-ingest lock.
+
+    Owned by kg_ingest.roadmap so EVERY entry point serializes on the same
+    object — this kickoff AND synthesis_brief's seed leg, which calls
+    ingest_roadmap directly. A lock private to this module would leave the seed
+    leg racing the upload. Reentrant, so holding it here and re-acquiring inside
+    ingest_roadmap is safe."""
+    from app.kg_ingest.roadmap import ingest_lock
+
+    return ingest_lock(company_id)
+
+
+def _run_roadmap_ingest(company_id: str, workspace_id: str | None) -> None:
+    """Blocking roadmap extraction — runs inside the daemon thread.
+
+    Fully isolated: any failure is logged, never raised. Serialized per company
+    so two quick replaces don't race each other's expiry pass; the queued run
+    reads whatever roadmap_doc holds at that point, and the content-hash ledger
+    makes a redundant run free."""
+    from app.kg_ingest.roadmap import ingest_roadmap
+
+    with _roadmap_ingest_lock(company_id):
+        try:
+            result = ingest_roadmap(company_id, workspace_id,
+                                    facade=GraphFacade())
+            logger.info("roadmap-ingest done: %s (ws=%s) %s",
+                        company_id, workspace_id, result)
+        except Exception:  # noqa: BLE001 — fully isolated
+            logger.exception("roadmap-ingest failed for %s (ws=%s)",
+                             company_id, workspace_id)
+
+
+def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
+    """Fire-and-forget: extract a just-uploaded roadmap into the KG.
+
+    Called right after POST /v1/company/roadmap-doc stores the file so the
+    company's stated bets reach the graph in seconds instead of waiting for the
+    next brief. Never blocks the upload response; never raises into the request
+    flow. A dropped kickoff self-heals — seed_incremental ingests the same
+    roadmap on the next brief generation."""
+    try:
+        t = threading.Thread(
+            target=_run_roadmap_ingest, args=(company_id, workspace_id),
+            name="roadmap-ingest", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
+        logger.exception("roadmap-ingest: failed to start thread for %s (ws=%s)",
+                         company_id, workspace_id)
+        return False
+
+
+# ── Call index refresh ──────────────────────────────────────────────────────
+#
+# The call index (app/call_index.py) holds cheap metadata for every call in a
+# connected transcript source, so a listing question is a DB read instead of a
+# 168-second corpus pass. It is only worth anything if it is POPULATED, and an
+# index nobody fills fails in the quietest possible way: every interception in
+# qa_agent returns None, the question degrades to the old expensive path, and
+# nothing anywhere reports a problem.
+#
+# So it gets the same two triggers every other connector has — the moment it
+# connects, and every scheduler cycle thereafter — plus a third the others do
+# not need: `call_index.ensure_fresh` tops it up inline on the read path when a
+# call may have landed since the last cycle. This is the same gap Fortune's
+# d30ca7ee closed for Slack ("sync the moment it's connected, not six hours
+# later"), with the read-path top-up added because a 6-hour-old call list is
+# not merely incomplete — `answer_listing` states a COUNT, so it is WRONG.
+
+def _run_call_index_sync(company_id: str) -> None:
+    """Blocking call-index refresh — runs inside the daemon thread. Fully
+    isolated: `call_index.sync_all_sources` already stamps each provider's own
+    failure on `call_index_sync` (which is what makes the failure visible to
+    the read path), so this only has to keep it out of the caller's flow.
+
+    Every connected source, in one pass. Kicking per provider instead would
+    race two threads of the same name onto the same company and duplicate the
+    work for a tenant that has both."""
+    from app import call_index
+
+    try:
+        written = call_index.sync_all_sources(company_id)
+        if written is None:
+            logger.info("call-index: no transcript source for %s — nothing to do",
+                        company_id)
+            return
+        logger.info("call-index refresh done: %s calls=%s", company_id, written)
+    except Exception:  # noqa: BLE001 — fully isolated; already stamped
+        logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
+
+
+def kickoff_call_index_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh this company's call index.
+
+    Called from the Fireflies connect route and from the scheduled connector
+    refresh. Returns False when nothing was started. Never blocks; never raises
+    into the caller's flow."""
+    try:
+        t = threading.Thread(
+            target=_run_call_index_sync, args=(company_id,),
+            name="call-index-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break connect
+        logger.exception("call-index: failed to start refresh thread for %s",
+                         company_id)
         return False

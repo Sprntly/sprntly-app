@@ -53,6 +53,8 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "You",
     items: [
       { id: "profile", label: "Profile", available: true },
+      // Comms & Brief also owns the workspace-level Top Insights filter (which
+      // insight types the brief surfaces) alongside delivery cadence.
       { id: "comms-brief", label: "Comms & Brief", available: true },
       // Multi-workspace (2026-07): manage the real workspaces rows.
       { id: "workspaces", label: "Workspaces", available: true },

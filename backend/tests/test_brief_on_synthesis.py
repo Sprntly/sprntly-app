@@ -1,4 +1,4 @@
-"""Tests for the weekly brief on KG synthesis — the only engine.
+"""Tests for the Top Insights brief on KG synthesis — the only engine.
 
 Covers the synthesis write path (/generate, /regenerate), the seed-if-empty
 trigger, the scheduler synthesis cycle with per-company error isolation, and
@@ -118,8 +118,10 @@ def test_regenerate_synthesis_path_starts_synthesis_bg(app_client, isolated_sett
     async def _fake_bg(dataset):
         seen.append(dataset)
 
-    # /regenerate always routes to the synthesis bg runner.
-    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg):
+    # /regenerate always routes to the synthesis bg runner. (Data-source gate
+    # satisfied explicitly — the empty fixture company has no connections.)
+    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg), \
+         patch.object(brief_routes, "has_brief_data_source", return_value=True):
         r = app_client.post("/v1/brief/regenerate?dataset=acme")
 
     assert r.status_code == 200
@@ -258,9 +260,109 @@ def test_seed_corpus_reextracts_when_content_changes(isolated_settings):
     assert out["docs"] == 1
 
 
+def test_seed_extracts_category_docs_as_connector_data(isolated_settings):
+    """A doc uploaded into an evidence-bearing connector category (voice/
+    analytics/revenue/crm/monitoring) extracts with that category's source
+    hint, deterministic default source_type, and origin="connector" +
+    channel="upload"; an uncategorized doc keeps the plain-upload path."""
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    class _Corpus:
+        docs = [_Doc("q3_calls", "transcript text"),
+                _Doc("strategy", "plain doc text")]
+
+    calls: list[dict] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb.datasets, "md_file_categories",
+                      return_value={"q3_calls.md": "voice"}), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: calls.append(k) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    assert out["docs"] == 2
+    by_doc = {c["doc_name"]: c for c in calls}
+    voice = by_doc["q3_calls"]
+    assert voice["origin"] == "connector"
+    assert voice["source_type_default"] == "customer_voice"
+    assert "customer_voice" in voice["source_hint"]
+    assert voice["provenance_extra"] == {"channel": "upload", "category": "voice"}
+    plain = by_doc["strategy"]
+    assert plain["origin"] == "upload"
+    assert "source_hint" not in plain and "source_type_default" not in plain
+
+
+def test_mark_corpus_doc_ingested_makes_seed_skip(isolated_settings):
+    """A doc ledger-marked by the Drive sync (whose content reaches the KG
+    via its own connector-origin extraction) is skipped by the corpus seed —
+    no duplicate origin="upload" extraction of the same bytes."""
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    drive_doc = _Doc("roadmap", "synced from google drive")
+
+    class _Corpus:
+        docs = [drive_doc]
+
+    sb.mark_corpus_doc_ingested(facade, "co-1", drive_doc.name, drive_doc.text)
+
+    extracted: list[str] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    assert extracted == []
+    assert out["unchanged"] == 1
+    srcs = facade.list_sources("co-1", source_type="corpus_doc")
+    assert srcs and srcs[0].config.get("via") == "google_drive"
+
+
+def test_seed_from_connectors_pulls_google_drive_inline(isolated_settings):
+    """The first-time (empty-KG) connector seed runs Drive's sync with
+    kg_inline=True so signals land before synthesis reads the graph."""
+    import app.connectors.google_drive_sync as gds
+    from app import db as app_db
+
+    calls = {}
+
+    def fake_drive_sync(*, company_id, kg_inline=False):
+        calls["company_id"] = company_id
+        calls["kg_inline"] = kg_inline
+
+        class R:
+            kg_signals = 7
+
+        return R()
+
+    conns = [{"provider": "google_drive", "token_json_encrypted": "enc"}]
+    with patch.object(app_db, "list_connections", return_value=conns), \
+         patch.object(gds, "sync_google_drive", fake_drive_sync):
+        totals = sb._seed_from_connectors(object(), "co-1")
+
+    assert calls == {"company_id": "co-1", "kg_inline": True}
+    assert totals["providers"] == 1
+    assert totals["signals"] == 7
+
+
 def test_generate_brief_for_seeds_then_runs_synthesis(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
     with patch.object(sb, "seed_incremental", return_value={"corpus": {}}) as seed, \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis", return_value={"summary_headline": "ok"}) as run:
         out = sb.generate_brief_for("acme")
     assert out["summary_headline"] == "ok"
@@ -279,6 +381,7 @@ def test_generate_brief_for_no_prior_brief_always_synthesizes(isolated_settings)
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
     with patch.object(sb, "get_current_brief", return_value=None), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis",
                       return_value={"summary_headline": "fresh"}) as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since") as has:
@@ -296,6 +399,7 @@ def test_generate_brief_for_unchanged_kg_skips_synthesis(isolated_settings):
              "summary_headline": "existing"}
     with patch.object(sb, "get_current_brief", return_value=prior), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis") as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since",
                return_value=False) as has:
@@ -314,6 +418,7 @@ def test_generate_brief_for_new_signals_runs_synthesis(isolated_settings):
              "summary_headline": "stale"}
     with patch.object(sb, "get_current_brief", return_value=prior), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {"docs": 1}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis",
                       return_value={"summary_headline": "regenerated"}) as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since",
@@ -418,7 +523,7 @@ def test_resolve_company_resolves_nondefault_workspace_dataset_slug(isolated_set
     the `datasets` table, not `companies` — resolve_company must still map it to
     the parent company via the datasets→workspaces binding.
 
-    Regression: the weekly brief tick fans out per workspace and passed each
+    Regression: the Top Insights brief tick fans out per workspace and passed each
     workspace's dataset slug to generate_brief_for → resolve_company, which only
     consulted the companies table and raised 'No company for slug ...' for every
     non-default workspace, so those workspaces never got a brief.
@@ -636,6 +741,10 @@ def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monke
 def test_dataset_generate_routes_to_synthesis_bg(app_client, isolated_settings, monkeypatch):
     db = isolated_settings["db"]
     db.insert_dataset(slug="acme", display_name="Acme")
+    # Satisfy the data-source gate — this test is about bg-runner routing only.
+    monkeypatch.setattr(db, "list_connections", lambda _cid: [
+        {"provider": "hubspot", "status": "active"},
+    ])
 
     seen: list[str] = []
 
@@ -711,3 +820,47 @@ def test_warm_synthesis_drilldowns_noop_without_brief(isolated_settings):
          patch.object(brief_runner, "_warm_drilldowns") as warm:
         brief_runner.warm_synthesis_drilldowns("acme")
     warm.assert_not_called()
+
+
+def test_seed_skips_unreadable_stub_docs_without_recording_them(isolated_settings):
+    """A placeholder for a file we could not read is not content.
+
+    Two costs it used to incur: it consumed a MAX_SEED_DOCS slot and a full
+    LLM call to mine signals out of its own apology text, and it was then
+    recorded as permanently ingested — so if a parser for that file type
+    shipped later, the file was never retried. It must be skipped AND left
+    unrecorded.
+    """
+    from app.graph.facade import GraphFacade
+    from app.ingest import convert
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    # A real stub, produced by the converter rather than hand-written.
+    stub = convert("legacy.doc", b"\xd0\xcf\x11\xe0binary payload")
+
+    class _Corpus:
+        docs = [_Doc("legacy", stub), _Doc("interview", "customers want SSO")]
+
+    extracted: list[str] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    # Only the readable doc costs an extraction.
+    assert extracted == ["interview"]
+    assert out["unreadable"] == 1
+    assert out["docs"] == 1
+    # And the stub is NOT recorded as ingested, so a future parser can retry it.
+    labels = {
+        s.label for s in facade.list_sources("co-1", source_type="corpus_doc")
+    }
+    assert "legacy" not in labels
+    assert "interview" in labels

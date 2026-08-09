@@ -7,7 +7,16 @@ import { throttlePartial } from "./runPrdGeneration"
 import type { DetailState, PrdContent } from "../types/content"
 
 export type EvidenceGenResult =
-  | { ok: true; evidence: PrdContent }
+  | {
+      ok: true
+      evidence: PrdContent
+      /** The evidences row id — what the artifact chat-summary endpoint keys on. */
+      evidenceId: number
+      /** True when the read-first path returned an ALREADY-ready doc (one GET,
+       *  nothing generated). Callers that react to a fresh generation (the chat
+       *  summary) must skip when set — a reopen is not a build. */
+      existing?: true
+    }
   | { ok: false; message: string }
 
 /** Optional live-preview callback: the accumulating evidence HTML as it streams. */
@@ -94,7 +103,11 @@ async function _pollEvidenceLoop(
   if (doc.status !== "ready") {
     return { ok: false, message: "Timed out waiting for evidence" }
   }
-  return { ok: true, evidence: markdownToEvidenceState(doc.payload_md) }
+  return {
+    ok: true,
+    evidence: { ...markdownToEvidenceState(doc.payload_md), question: doc.question },
+    evidenceId,
+  }
 }
 
 /** Polls until the Evidence Page is ready, then parses the markdown with
@@ -116,8 +129,18 @@ export async function runEvidenceGeneration(
   }
   const force = opts?.force ?? false
   if (!force) {
-    const existing = await loadEvidenceByInsight(meta.briefId, meta.insightIndex)
-    if (existing) return { ok: true, evidence: existing }
+    // Inlined (rather than loadEvidenceByInsight) because the caller-facing
+    // result needs the row id + the `existing` marker, and the read-only
+    // sibling deliberately returns only parsed content.
+    const rec = await evidenceApi.byInsight(meta.briefId, meta.insightIndex)
+    if (rec && rec.status === "ready" && rec.payload_md) {
+      return {
+        ok: true,
+        evidence: { ...markdownToEvidenceState(rec.payload_md), question: rec.question },
+        evidenceId: rec.id,
+        existing: true,
+      }
+    }
   }
   const start = await evidenceApi.generate(meta.briefId, meta.insightIndex, force)
   // A prior run failed and the backend won't silently re-run it — surface the
@@ -157,5 +180,5 @@ export async function loadEvidenceByInsight(
 ): Promise<PrdContent | null> {
   const rec = await evidenceApi.byInsight(briefId, insightIndex)
   if (!rec || rec.status !== "ready" || !rec.payload_md) return null
-  return markdownToEvidenceState(rec.payload_md)
+  return { ...markdownToEvidenceState(rec.payload_md), question: rec.question }
 }

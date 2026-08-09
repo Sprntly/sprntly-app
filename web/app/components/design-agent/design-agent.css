@@ -902,6 +902,77 @@
 /* short instructions textarea */
 .design-agent-surface.modal .textarea-compact { min-height: 48px; }
 
+/* ── Saved-source recovery: bounded deciding state + undetermined fallback ─
+ * The saved-preference render guard used to `return null` with no floor — a
+ * repo-list or connector fetch that never settled left the modal permanently
+ * blank. These three blocks give the wait a shape: a compact "checking" row
+ * past 300ms, and an info-toned "we couldn't confirm, carrying on" row once
+ * the 5s bound is crossed still undetermined. Token-only, no new colors.
+ */
+.design-agent-surface.modal .da-source-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 2px;
+  color: var(--ink-2);
+}
+.design-agent-surface.modal .da-source-check-beat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.design-agent-surface.modal .da-source-check-label {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.design-agent-surface.modal .da-source-undetermined {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 2px 0 14px;
+  padding: 10px 12px;
+  background: var(--info-soft);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface.modal .da-source-undetermined-icon {
+  flex-shrink: 0;
+  color: var(--info);
+  margin-top: 1px;
+  display: block;
+}
+.design-agent-surface.modal .da-source-undetermined-text {
+  flex: 1 1 260px;
+  min-width: 0;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.design-agent-surface.modal .da-source-undetermined-text b {
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface.modal .da-source-undetermined-text code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+}
+.design-agent-surface.modal .da-source-undetermined-action {
+  flex-shrink: 0;
+}
+/* Connector status we could not verify — distinct from "Connected" and from
+ * "Not connected" (asserting either would be a guess). Matches .src-connected
+ * on color: --muted on --surface fails AA (3.2:1); the wording differentiates
+ * the status, not the color, so nothing is lost by sharing --ink-2. */
+.design-agent-surface.modal .src-unverified {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
 /* ── Device frame (UX-2/P6-12) ────────────────────────────────────────────
  * APPENDED below P6-11's seed (which owns `.da-prototype-viewer` /
  * `.da-prototype-chrome` / `.da-prototype-iframe` + the three `.proto-dot`
@@ -1205,14 +1276,28 @@
   display: flex;
   flex-direction: column;
 }
-/* Glitch A: neutral surface cover over the iframe until it paints. Sits inside
-   the position:relative `.proto-stage`, above the iframe; removed on the first
-   `load`. Surface-colored — never black, never the "Applying changes…" copy. */
+/* Glitch A (reskinned): matches .da-bundle-loading's scrim + spinner + label
+   treatment exactly, so the "blank rectangle" reload gap now reads the same as
+   the already-shipped 404-race cover instead of a flat dead surface. Sits
+   inside the position:relative `.proto-stage`, above the iframe; removed once
+   the load+readiness handshake in PrototypeViewer.tsx resolves (see that
+   file's handleLoad for why clearing now waits on more than the raw `load`
+   event). Reuses the SAME .da-spinner / da-bundle-loading-spinner /
+   da-bundle-loading-label rules below — do not fork a second spinner/label
+   style for this. */
 .design-agent-surface .da-viewer-placeholder {
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(3px);
+  color: var(--muted);
+  font-size: 13px;
 }
 
 
@@ -1501,6 +1586,25 @@
   font-size: 12px;
   line-height: 1.45;
   color: var(--danger);
+}
+
+/* External-entry-point recovery — the flow's entry point genuinely lives
+ * outside this codebase (see GateResult.external_surface). Accent-tinted card,
+ * echoing the attached-screenshot chip's treatment, so it reads as its own
+ * recovery option rather than plain body text. Sits above the picker /
+ * steer row on the no-real-candidate variant. */
+.design-agent-surface.modal .locate-external-surface {
+  margin: 4px 0 0;
+  padding: 12px 13px;
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+  border-radius: var(--radius);
+}
+.design-agent-surface.modal .locate-external-surface .locate-hint {
+  margin: 0 0 10px;
+}
+.design-agent-surface.modal .locate-external-surface .locate-hint:last-child {
+  margin-bottom: 0;
 }
 
 /* "Generate from the PRD anyway" — de-emphasized fallback rendered as a text
@@ -2289,17 +2393,6 @@
 .design-agent-surface.proto-gen-overlay .proto-gen-notify-copy { font-size: 12px; color: var(--ink-3); text-align: center; line-height: 1.45; }
 .design-agent-surface.proto-gen-overlay .proto-gen-notify-btn.btn-primary { width: 100%; padding: 12px 16px; font-size: 13.5px; font-weight: 600; }
 .design-agent-surface.proto-gen-overlay .proto-gen-notify-cancel-row { display: flex; justify-content: center; }
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed {
-  width: 100%; display: flex; flex-direction: column; gap: 8px; text-align: center;
-  background: var(--accent-muted); border: 1px solid var(--accent-2); border-radius: var(--radius); padding: 14px 16px;
-}
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed-title { font-size: 12.5px; font-weight: 600; color: var(--accent-ink); }
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed-sub { font-size: 11.5px; color: var(--ink-2); line-height: 1.4; }
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-back-link {
-  align-self: center; display: inline-flex; align-items: center; gap: 6px;
-  background: var(--surface-2); border-color: var(--line-strong); color: var(--ink); font-weight: 600;
-}
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-back-link:hover { background: var(--surface-3); border-color: var(--ink-3); }
 /* === notify-when-ready promotion (end) ================================ */
 
 /* =============================================================================
@@ -2995,13 +3088,14 @@
    icon + text sit inline within the body row. */
 .design-agent-surface .da-activity-done-body {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  font-weight: 600;
-  color: var(--accent-ink);
+  font-weight: 400;
+  color: var(--ink-2);
 }
 .design-agent-surface .da-activity-done-icon {
   flex-shrink: 0;
+  margin-top: 1px;
   width: 16px;
   height: 16px;
   display: inline-flex;
@@ -3011,6 +3105,9 @@
   color: var(--accent);
   border-radius: 50%;
   font-size: 10px;
+}
+.design-agent-surface .da-activity-terminal--done .da-activity-agent-label {
+  margin: 0 0 6px;
 }
 .design-agent-surface .da-activity-error {
   font-size: 12px;
@@ -3125,6 +3222,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+/* done: the label and the response body are two stacked block children (not
+   a single icon+text row like skipped/error), so override the shared
+   flex-row into a column stack — full-width label above the response,
+   never squeezed into a side column. `stretch` (not the inherited `center`)
+   keeps both children spanning the full available width. */
+.design-agent-surface .da-activity-terminal--done {
+  flex-direction: column;
+  align-items: stretch;
 }
 /* skipped: neutral/grey ✕ in a circle + muted text. */
 .design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-icon {
@@ -3697,9 +3803,11 @@
    seen. Absolute fill of the position:relative .da-stage. Restyled to the
    Focus scrim, a soft translucent scrim + a larger centered ring
    spinner stacked above the label, off the EXISTING `bundleNotReady` flip — no
-   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`; the
-   `da-bundle-fade` keyframe is a one-shot reveal that fires on mount (cleared
-   by itself), NOT a new state machine. Token-only (no new palette). */
+   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`. No
+   fade-in: a mount-time opacity ramp would technically paint the raw error
+   body underneath at near-zero opacity for its opening frames, contradicting
+   this rule's own coverage guarantee above — the cover renders at full
+   strength the instant it mounts. Token-only (no new palette). */
 .design-agent-surface .da-bundle-loading {
   position: absolute;
   inset: 0;
@@ -3715,9 +3823,6 @@
   color: var(--muted);
   font-size: 13px;
   z-index: 5;
-  /* One-shot mount reveal — fires once when the overlay appears off the
-     existing notReady flip, then self-clears. No JS timer/poll backs it. */
-  animation: da-bundle-fade 0.25s ease;
 }
 /* Larger centered ring spinner — reuses the shared `da-spin` animation via the
    .da-spinner base (do NOT fork a new spinner). The bare <span> gets its ring
@@ -3733,7 +3838,6 @@
 .design-agent-surface .da-bundle-loading-label {
   letter-spacing: 0.01em;
 }
-@keyframes da-bundle-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
  * Styles the screen-disambiguation picker shown before a generation run when

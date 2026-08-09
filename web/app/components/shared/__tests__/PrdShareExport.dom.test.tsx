@@ -85,6 +85,9 @@ vi.mock("../../../lib/api", async () => {
       ...actual.evidenceApi,
       byInsight: (briefId: number, insightIndex: number) => evidenceByInsight(briefId, insightIndex),
     },
+    documentsApi: {
+      downloadPdf: (html: string, filename: string) => downloadPdf(html, filename),
+    },
   }
 })
 
@@ -92,23 +95,42 @@ vi.mock("../../../lib/api", async () => {
 const saveAs = vi.fn()
 vi.mock("file-saver", () => ({ saveAs }))
 
-// printCombined builds + prints the combined Evidence + PRD doc. Spy on it so we
-// can assert the combined path (the real build is covered in combinedExport.test.ts).
-const printCombined = vi.fn()
-vi.mock("../../../lib/combinedExport", () => ({
-  printCombined: (...args: unknown[]) => printCombined(...args),
+// The HTML PRD / Evidence PDF is rendered SERVER-side (same renderer as a
+// report download), so the seam to assert is the API call. combinedExport is
+// deliberately NOT mocked: letting the real builder run means these tests prove
+// the actual combined document is what reaches the server.
+const downloadPdf = vi.fn(async (_html: string, filename: string) => ({
+  blob: new Blob(["pdf"], { type: "application/pdf" }),
+  filename: `${filename}.pdf`,
+}))
+const saveBlob = vi.fn()
+vi.mock("../../../lib/saveBlob", () => ({
+  saveBlob: (...args: unknown[]) => saveBlob(...args),
 }))
 
 const pdfOutput = vi.fn((_type?: string) => new Blob(["pdf"], { type: "application/pdf" }))
+/** Text drawn on the fake document, so the export's own content and the
+ *  watermark stamped over it are both observable. */
+const pdfText = vi.fn((_t: string) => {})
 vi.mock("jspdf", () => {
   class FakeDoc {
     internal = { pageSize: { getWidth: () => 595, getHeight: () => 842 } }
     setFont() {}
     setFontSize() {}
     splitTextToSize(t: string) { return [t] }
-    text() {}
+    text(t: string) { pdfText(t) }
     addPage() {}
     output(type?: string) { return pdfOutput(type) }
+    // Surface used by the Sprntly watermark (lib/watermark.ts).
+    getNumberOfPages() { return 1 }
+    setPage() {}
+    GState(o: { opacity: number }) { return o }
+    setGState() {}
+    saveGraphicsState() {}
+    restoreGraphicsState() {}
+    setTextColor() {}
+    setCharSpace() {}
+    getTextWidth(t: string) { return t.length * 46.5 }
   }
   return { jsPDF: FakeDoc }
 })
@@ -212,6 +234,8 @@ describe("ContentPanel header Share dropdown", () => {
     await waitFor(() => expect(saveAs).toHaveBeenCalled())
     const [, filename] = saveAs.mock.calls[0]
     expect(filename).toBe("handoff-threshold-prd.pdf")
+    // The downloaded PDF carries the Sprntly mark (lib/watermark.ts).
+    expect(pdfText.mock.calls.map(([t]) => t)).toContain("SPRNTLY")
   })
 
 })
@@ -235,17 +259,24 @@ describe("ContentPanel Share — combined Evidence + PRD", () => {
     expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
   })
 
-  it("Download PDF prints ONE combined doc from both briefs", async () => {
+  it("Download PDF sends ONE combined doc to the server renderer", async () => {
     content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
-    // The combined print path is taken with the evidence + PRD; the actual HTML
-    // build + CSS scoping is asserted in combinedExport.test.ts.
-    await waitFor(() => expect(printCombined).toHaveBeenCalledWith(HTML_EVIDENCE, HTML_PRD))
+    await waitFor(() => expect(downloadPdf).toHaveBeenCalled())
+    const [html, filename] = downloadPdf.mock.calls[0]
+    // One document carrying BOTH briefs, each scoped so their global CSS cannot
+    // collide (the scoping itself is asserted in combinedExport.test.ts).
+    expect(html).toContain("prd body")
+    expect(html).toContain("evidence body")
+    expect(html).toContain("ex-pagebreak")
+    expect(filename).toBe("handoff-threshold-prd-evidence-prd")
+    // No browser print dialog: the file comes back from the server and is saved.
+    await waitFor(() => expect(saveBlob).toHaveBeenCalled())
   })
 
-  it("fetches evidence on demand (PRD tab) and still prints one combined doc", async () => {
+  it("fetches evidence on demand (PRD tab) and still sends one combined doc", async () => {
     // Evidence is NOT in context (user never opened the Evidence tab), but the
     // PRD carries its insight, so the handler reads the evidence and combines.
     const HTML_PRD_WITH_INSIGHT = { ...HTML_PRD, briefId: 3, insightIndex: 1 }
@@ -260,18 +291,22 @@ describe("ContentPanel Share — combined Evidence + PRD", () => {
     expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
     fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
     await waitFor(() => expect(evidenceByInsight).toHaveBeenCalledWith(3, 1))
-    await waitFor(() => expect(printCombined).toHaveBeenCalled())
+    await waitFor(() => expect(downloadPdf).toHaveBeenCalled())
+    expect(downloadPdf.mock.calls[0][0]).toContain("evidence body")
   })
 
-  it("falls back to the single-PRD export when there is no evidence", async () => {
+  it("sends the PRD alone when there is no evidence", async () => {
     content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: null }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     // No insight to read from → single-PRD label, and the combined path is skipped.
     expect(within(screen.getByRole("menu")).getByText(/Export as \.pdf/i)).toBeTruthy()
     fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
-    await waitFor(() => expect(saveAs).not.toHaveBeenCalled())
-    expect(printCombined).not.toHaveBeenCalled()
+    await waitFor(() => expect(downloadPdf).toHaveBeenCalled())
+    const [html, filename] = downloadPdf.mock.calls[0]
+    expect(html).toBe(HTML_PRD.html)
+    expect(html).not.toContain("evidence body")
+    expect(filename).toBe("handoff-threshold-prd")
   })
 })
 

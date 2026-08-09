@@ -68,9 +68,81 @@ def _prune_jobs() -> None:
         _jobs.pop(jid, None)
 
 
+# ── Standalone ticket sets: terminal state ───────────────────────────────────
+#
+# A `ticket_sets` row is created 'generating' at kick-off and MUST reach a
+# terminal state, because unlike the PRD path there is nothing that re-kicks it:
+# a set is a one-shot artifact, so a row left 'generating' is a panel that spins
+# forever over a run that finished. These two helpers are the guarantee.
+
+
+def _settle_ticket_set(company_id: str, set_id: int, stories: list) -> None:
+    """Ensure a set that finished generating is no longer 'generating'.
+
+    Normally a no-op: app.stories.generate already wrote the row (with its
+    LLM-derived title) inside the worker. This only fires when that write was
+    skipped or swallowed — including the ZERO-TICKET run, which is a real
+    terminal outcome for a set and lands as `ready` with an empty array so the
+    panel can offer "no tickets came back — try again" instead of spinning.
+
+    That is a DELIBERATE divergence from the PRD path's never-cache-empty rule.
+    There, `prd_tickets` is a CACHE keyed by content hash and an empty row wedges
+    the tab on "0 tickets" forever, so the write is skipped and the next open
+    retries. Here the row IS the artifact, there is no next open that retries,
+    and "the run produced nothing" is information the user needs.
+    """
+    from app.db.ticket_sets import finish_set, get_set
+
+    try:
+        row = get_set(company_id, set_id)
+        if row is None or row.get("status") != "generating":
+            return
+        payload = [s.to_dict() for s in stories]
+        finish_set(
+            set_id,
+            title=(row.get("title") or "").strip() or _fallback_set_title(row, payload),
+            stories=payload,
+        )
+    except Exception:  # noqa: BLE001 — never turn a completed run into a 500
+        logger.exception("settling ticket set %s failed (continuing)", set_id)
+
+
+def _fallback_set_title(row: dict, stories: list[dict]) -> str:
+    """A title for a set the naming leg never got to name.
+
+    Prefers the first ticket's title over a generic string: a library where
+    every standalone set reads "Tickets" is a library you cannot navigate.
+    """
+    for s in stories:
+        t = str((s or {}).get("title") or "").strip()
+        if t:
+            return t
+    src = str(row.get("source_text") or "").strip()
+    return (src[:80] + "…") if len(src) > 80 else (src or "Tickets from this conversation")
+
+
+def _mark_ticket_set_failed(set_id: int | None, error: str) -> None:
+    """Flip a set to `failed` after a generation error. Best-effort: the job
+    store already carries the error for the poll, so a failure here costs the
+    reopen path its accuracy but never the response."""
+    if set_id is None:
+        return
+    try:
+        from app.db.ticket_sets import fail_set
+
+        fail_set(set_id, error)
+    except Exception:  # noqa: BLE001
+        logger.exception("marking ticket set %s failed did not land", set_id)
+
+
 class GenerateIn(BaseModel):
     prd_id: int | None = Field(default=None, ge=1)
     insight: str | None = None
+    # The chat thread an INSIGHT run was started from, so the resulting ticket
+    # set can be reopened from that thread and shown as "from <chat title>" in
+    # the artifacts library. Optional and ignored on the prd_id path: a set can
+    # legitimately be born outside any conversation.
+    conversation_id: int | None = Field(default=None, ge=1)
 
 
 class StoryIn(BaseModel):
@@ -131,9 +203,27 @@ async def generate(
     request. Poll GET /v1/stories/jobs/{job_id} until status is "ready" (carries
     `stories`) or "failed" (carries `error`). Generation never writes to ClickUp
     — call /v1/stories/push separately once the user has reviewed.
+
+    The INSIGHT path additionally creates a `ticket_sets` row up front and
+    returns its `ticket_set_id`, so tickets generated from a chat with no PRD
+    behind them are a durable artifact rather than a wall of markdown in a chat
+    bubble. The row is created here, at kick-off, and flipped to ready/failed by
+    the background job — the client never posts stories back, which is what
+    makes a double-poll or a StrictMode double-effect unable to produce two sets.
     """
     if (body.prd_id is None) == (body.insight is None):
         raise HTTPException(400, "provide exactly one of prd_id or insight")
+
+    # A conversation_id is client-supplied and ids are sequential, so prove the
+    # thread is this company's before stamping a set with it. 404, never 403 —
+    # a foreign tenant must not learn whether the id exists.
+    if body.conversation_id is not None:
+        from app.db.conversations import conversation_belongs_to_company
+
+        if not conversation_belongs_to_company(
+            body.conversation_id, company.company_id
+        ):
+            raise HTTPException(404, "Conversation not found")
 
     # Idempotent while in-flight: breaking a PRD into tickets is a multi-minute
     # call, and the Tickets tab re-kicks generation whenever it remounts (a tab
@@ -143,9 +233,15 @@ async def generate(
     # wasteful one. Keyed by (company, prd_id|insight) since that's what the run
     # is over. Once a job is ready/failed it's persisted (PRD) or terminal, so we
     # only dedupe against still-"generating" jobs.
+    #
+    # NOTE for the insight path: `insight` is an LLM-composed task string, so two
+    # phrasings of the same request do NOT dedupe here and would produce two
+    # sets. That is deliberate at this layer (a second ask genuinely IS a second
+    # set — see the product decision) and the accidental-double-send case is held
+    # by the chat's own in-flight latch, not by this check.
     existing = next(
         (
-            j["id"]
+            j
             for j in _jobs.values()
             if j["status"] == "generating"
             and j["company_id"] == company.company_id
@@ -155,18 +251,26 @@ async def generate(
         None,
     )
     if existing is not None:
-        return {"job_id": existing, "status": "generating"}
+        out = {"job_id": existing["id"], "status": "generating"}
+        # Hand back the SAME set the running job will fill, so a re-attaching
+        # client opens the panel on it instead of waiting for a set id that
+        # will never arrive.
+        if existing.get("ticket_set_id") is not None:
+            out["ticket_set_id"] = existing["ticket_set_id"]
+        return out
 
-    # Pre-warm the Implementation Spec (Part B) in the background so tickets can
-    # INHERIT acceptance criteria from it. New PRDs are already warmed at
-    # creation (a cache hit here); this covers PRDs that predate that — their
-    # spec generates in the background now so the NEXT regenerate inherits, while
-    # THIS ticket run stays a single fast call over the already-rendered PRD
-    # (never blocked on Part B, never regenerating the PRD).
-    if body.prd_id is not None:
-        warm = asyncio.create_task(warm_impl_spec(body.prd_id))
-        _inflight_tasks.add(warm)
-        warm.add_done_callback(_inflight_tasks.discard)
+    # Create the set row BEFORE scheduling (and after the dedupe check, so a
+    # re-attach never leaves an orphan `generating` row nothing will finish).
+    ticket_set_id: int | None = None
+    if body.insight is not None:
+        from app.db.ticket_sets import create_set
+
+        ticket_set_id = create_set(
+            company.company_id,
+            workspace_id=getattr(company, "workspace_id", None),
+            conversation_id=body.conversation_id,
+            source_text=body.insight,
+        )
 
     job_id = next(_job_ids)
     _jobs[job_id] = {
@@ -174,8 +278,10 @@ async def generate(
         "company_id": company.company_id,
         "prd_id": body.prd_id,
         "insight": body.insight,
+        "ticket_set_id": ticket_set_id,
         "status": "generating",
         "stories": None,
+        "stubs": None,  # planned ticket roster (fan-out), for skeleton rows
         "progress": None,  # {"done": n, "total": m} once fan-out batches land
         "error": None,
     }
@@ -202,38 +308,92 @@ async def generate(
 
         loop.call_soon_threadsafe(_apply)
 
+    def _on_plan(stubs: list[dict], total: int) -> None:
+        # The plan completes ~20-35s in — long before the first enrich batch
+        # (which on a single-wave run is the very END). Publish the roster so
+        # the poll can render skeleton tickets immediately. Keep only display
+        # fields; a stub is untrusted model output.
+        snapshot = [
+            {
+                "title": str(s.get("title") or "").strip(),
+                "summary": str(s.get("summary") or "").strip(),
+                "prd_section": str(s.get("prd_section") or "").strip(),
+            }
+            for s in stubs
+            if isinstance(s, dict) and str(s.get("title") or "").strip()
+        ]
+
+        def _apply() -> None:
+            job = _jobs.get(job_id)
+            if job is not None and job["status"] == "generating":
+                job["stubs"] = snapshot
+                job["progress"] = {"done": 0, "total": total}
+
+        loop.call_soon_threadsafe(_apply)
+
     async def _run() -> None:
         try:
             stories = await asyncio.to_thread(
                 generate_user_stories,
                 company.company_id, prd_id=body.prd_id, insight=body.insight,
+                ticket_set_id=ticket_set_id,
                 strategy=strategy,
                 batch_size=settings.ticket_gen_batch_size,
                 max_parallel=settings.ticket_gen_max_parallel,
                 first_batch_size=settings.ticket_gen_first_batch_size,
                 prime_stagger_s=settings.ticket_gen_prime_stagger_seconds,
                 on_batch=_on_batch,
+                on_plan=_on_plan,
             )
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"] = "ready"
                 job["stories"] = [s.to_dict() for s in stories]
+                job["stubs"] = None
                 job["progress"] = None
+            # Backstop the set's terminal state. generate_user_stories owns the
+            # normal write (it has the stories and the title leg), but that
+            # write is deliberately exception-swallowing so a persistence
+            # hiccup never loses a completed generation. Without this, such a
+            # hiccup would leave the row 'generating' forever and the panel
+            # spinning on a run that finished minutes ago — the one outcome the
+            # reopen path must never produce.
+            if ticket_set_id is not None:
+                await asyncio.to_thread(
+                    _settle_ticket_set, company.company_id, ticket_set_id, stories
+                )
+            # Pre-warm the Implementation Spec (Part B) AFTER the run so the
+            # NEXT regenerate can INHERIT acceptance criteria from it. This used
+            # to fire alongside the kick, but the warm (a ~3-4 min, 10K+ token
+            # generation) competed with this very run's enrich shards for the
+            # process-wide LLM gate — observed on prod as a 93.6s wait for a
+            # concurrency slot. THIS run never needed it (it generates over the
+            # already-rendered PRD), so deferring costs nothing and frees the
+            # gate while the user is actually watching.
+            if body.prd_id is not None:
+                warm = asyncio.create_task(warm_impl_spec(body.prd_id))
+                _inflight_tasks.add(warm)
+                warm.add_done_callback(_inflight_tasks.discard)
         except PRDNotFoundError as exc:
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"], job["error"] = "failed", str(exc)
+            _mark_ticket_set_failed(ticket_set_id, str(exc))
         except Exception as exc:  # noqa: BLE001 — surface, never hang the poll
             logger.exception("story generation failed job_id=%s", job_id)
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"], job["error"] = "failed", f"{type(exc).__name__}: {exc}"
+            _mark_ticket_set_failed(ticket_set_id, f"{type(exc).__name__}: {exc}")
 
     task = asyncio.create_task(_run())
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
 
-    return {"job_id": job_id, "status": "generating"}
+    out: dict = {"job_id": job_id, "status": "generating"}
+    if ticket_set_id is not None:
+        out["ticket_set_id"] = ticket_set_id
+    return out
 
 
 @router.get("/jobs/{job_id}")
@@ -254,8 +414,12 @@ def get_job(
     elif job["status"] == "generating":
         # Stream partial results: fan-out publishes tickets batch-by-batch, so a
         # poll mid-run can render what's landed already instead of an empty spin.
+        # The planned stub roster comes first (~20-35s in) so the client can put
+        # up skeleton rows for the whole set before any full ticket exists.
         if job.get("stories"):
             out["stories"] = job["stories"]
+        if job.get("stubs"):
+            out["stubs"] = job["stubs"]
         if job.get("progress"):
             out["progress"] = job["progress"]
     return out
@@ -288,9 +452,42 @@ def tickets_for_prd(
     return {
         "status": row.get("status") or "ready",
         "fresh": fresh,
-        "stories": row.get("stories") or [],
+        "stories": _apply_lifecycle(company.company_id, prd_id,
+                                    row.get("stories") or []),
         "generated_at": row.get("generated_at"),
     }
+
+
+def _apply_lifecycle(
+    company_id: str, prd_id: int, stories: list[dict]
+) -> list[dict]:
+    """Drop DELETED tickets from a rendered set and tag EXCLUDED ones.
+
+    Deleted tickets stay in `prd_tickets.stories` — that array is regenerated
+    wholesale from the PRD, so the deletion is recorded on ticket_edits and
+    applied on the way out instead. Excluded ones are still shown (the user
+    chose to keep them in Sprntly), carrying `lifecycle` so the UI can mark
+    them as not going to the tracker.
+    """
+    from app.db.ticket_lifecycle import DELETED, lifecycle_by_key
+    from app.stories.sync import ticket_key_for
+
+    try:
+        states = lifecycle_by_key(company_id, prd_id)
+    except Exception:  # noqa: BLE001 — a lookup failure must not blank the tab
+        logger.warning("lifecycle lookup failed for prd %s", prd_id)
+        return stories
+    if not states:
+        return stories
+    out: list[dict] = []
+    for s in stories:
+        if not isinstance(s, dict):
+            continue
+        state = states.get(ticket_key_for(prd_id, s))
+        if state == DELETED:
+            continue
+        out.append({**s, "lifecycle": state} if state else s)
+    return out
 
 
 @router.post("/lists")
@@ -431,23 +628,11 @@ class SyncTriggerIn(BaseModel):
 
 
 def _public_sync_state(cfg: dict | None) -> dict:
-    """The sync row as the web/MCP read it. A 'syncing' older than the stale
-    window reports as idle so a crashed run never wedges the button."""
-    from app.stories.sync import sync_in_flight
+    """The sync row as the web/MCP read it. Shared with the ticket-set sync
+    route (app/stories/sync_control.py) so both surfaces return one shape."""
+    from app.stories.sync_control import public_sync_state
 
-    if cfg is None:
-        return {"configured": False}
-    return {
-        "configured": True,
-        "provider": cfg.get("provider"),
-        "destination_id": cfg.get("destination_id"),
-        "destination_name": cfg.get("destination_name"),
-        "auto_sync": bool(cfg.get("auto_sync")),
-        "sync_status": "syncing" if sync_in_flight(cfg) else "idle",
-        "last_synced_at": cfg.get("last_synced_at"),
-        "last_error": cfg.get("last_error"),
-        "statuses": cfg.get("statuses") or {},
-    }
+    return public_sync_state(cfg)
 
 
 @router.get("/sync/{prd_id}")
@@ -459,8 +644,9 @@ def sync_state(
     when it last completed, and the pulled per-ticket tracker statuses.
     `configured: false` means the tickets were never pushed anywhere."""
     from app.db.ticket_sync import get_sync_config
+    from app.stories.scope import prd_scope
 
-    return _public_sync_state(get_sync_config(company.company_id, prd_id))
+    return _public_sync_state(get_sync_config(company.company_id, prd_scope(prd_id)))
 
 
 @router.get("/sync/{prd_id}/tracker-meta")
@@ -481,9 +667,10 @@ def tracker_meta(
     from app import db
     from app.db.ticket_sync import get_sync_config
     from app.db.tracker_meta import get_newest_cached_meta, get_or_fetch_meta
+    from app.stories.scope import prd_scope
     from app.stories.sync import ticket_sync_providers
 
-    cfg = get_sync_config(company.company_id, prd_id)
+    cfg = get_sync_config(company.company_id, prd_scope(prd_id))
     if cfg is not None:
         meta = get_or_fetch_meta(
             company.company_id, cfg["provider"], cfg["destination_id"],
@@ -532,72 +719,24 @@ async def trigger_sync(
     existing PRD to a different tool/destination. With no body fields the
     already-configured destination re-syncs. 404 when nothing is configured
     and no destination was given. Poll GET /sync/{prd_id} for completion.
+
+    The body of this is shared with the standalone-ticket-set sync route — see
+    app/stories/sync_control.trigger_scope_sync. Both surfaces must bind,
+    warm and single-flight identically; two copies would drift, and what they
+    drive writes to customers' live trackers.
     """
-    from app.db.ticket_sync import get_sync_config, mark_syncing, upsert_sync_config
-    from app.stories.sync import (
-        run_prd_sync,
-        sync_in_flight,
-        ticket_sync_providers,
+    from app.stories.scope import prd_scope
+    from app.stories.sync_control import trigger_scope_sync
+
+    return await trigger_scope_sync(
+        company.company_id, prd_scope(prd_id),
+        provider=body.provider,
+        destination_id=body.destination_id,
+        destination_name=body.destination_name,
+        unconfigured_message=(
+            "This PRD's tickets were never pushed — pick a destination first"
+        ),
     )
-
-    if (body.provider is None) != (body.destination_id is None):
-        raise HTTPException(400, "provider and destination_id go together")
-    if body.provider is not None:
-        # Eligibility is type-driven: the provider must be a task-management
-        # connector (app/connectors/catalog.py) the sync engine implements.
-        if body.provider not in ticket_sync_providers():
-            raise HTTPException(
-                400,
-                f"{body.provider!r} is not a task-management connector tickets can sync with",
-            )
-        upsert_sync_config(
-            company.company_id, prd_id,
-            provider=body.provider,
-            destination_id=body.destination_id,
-            destination_name=body.destination_name,
-        )
-
-    cfg = get_sync_config(company.company_id, prd_id)
-    if cfg is None:
-        raise HTTPException(404, "This PRD's tickets were never pushed — pick a destination first")
-
-    # EVERY sync trigger (first bind AND the ad-hoc Sync button) refreshes
-    # the destination's vocabulary cache — statuses / priorities / custom
-    # fields / built-ins re-pulled from the tracker so tracker_meta reflects
-    # workspace changes now, not at the 6h TTL. Best-effort in the
-    # background — a metadata failure must never block the sync itself.
-    async def _warm_meta(provider: str = cfg["provider"],
-                         destination_id: str = cfg["destination_id"]) -> None:
-        from app.db.tracker_meta import get_or_fetch_meta
-        try:
-            await asyncio.to_thread(
-                get_or_fetch_meta, company.company_id, provider,
-                destination_id, refresh=True,
-            )
-        except Exception:  # noqa: BLE001 — cache warming is best-effort
-            logger.warning("tracker-meta warm failed for prd %s", prd_id)
-
-    meta_task = asyncio.create_task(_warm_meta())
-    _inflight_tasks.add(meta_task)
-    meta_task.add_done_callback(_inflight_tasks.discard)
-
-    if sync_in_flight(cfg):
-        return {"status": "syncing"}
-
-    # Mark before spawning so a GET between this response and the thread
-    # starting already reads "syncing" (no idle flash in the UI).
-    mark_syncing(company.company_id, prd_id)
-
-    async def _run() -> None:
-        try:
-            await asyncio.to_thread(run_prd_sync, company.company_id, prd_id)
-        except Exception:  # noqa: BLE001 — recorded on the row by run_prd_sync
-            logger.exception("ad-hoc ticket sync failed for prd %s", prd_id)
-
-    task = asyncio.create_task(_run())
-    _inflight_tasks.add(task)
-    task.add_done_callback(_inflight_tasks.discard)
-    return {"status": "syncing"}
 
 
 class PullStatusIn(BaseModel):

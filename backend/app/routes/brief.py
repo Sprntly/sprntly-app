@@ -1,11 +1,13 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
-from app.entitlements import require_weekly_brief_module
+from app.brief_gate import NO_DATA_SOURCE_MESSAGE, has_brief_data_source
+from app.entitlements import require_top_insights_module
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import (
     find_existing_evidence,
@@ -18,6 +20,7 @@ from app.db import nudge as nudge_db
 from app.db.companies import display_name_for_slug
 from app.db.finding_state import set_finding_action
 from app.deps.ownership import require_owned_brief, require_owned_dataset
+from app.db import pipeline_runs as pipeline_runs_db
 from app.evidence_kg import generate_evidence_kg
 from app.kg_ingest.auto_sync import kickoff_corpus_seed
 from app.prd_runner import PRD_VARIANT, generate_prd
@@ -62,7 +65,7 @@ def _with_company_name(brief: dict) -> dict:
 
 def _notify_brief_ready(dataset: str, brief: dict | None) -> None:
     """Send the short "Hey, your brief is generated." ping (Slack + email) after
-    a USER-TRIGGERED regenerate — not the full weekly brief message, which stays
+    a USER-TRIGGERED regenerate — not the full Top Insights brief message, which stays
     reserved for the scheduled delivery time. Only fires for a FRESH brief; a
     cache-returned run (`_from_cache`, KG unchanged) produced nothing new to
     announce. Best-effort: blocking HTTP, never raises."""
@@ -77,6 +80,38 @@ def _notify_brief_ready(dataset: str, brief: dict | None) -> None:
         logger.exception("brief ready ping failed for %s", dataset)
 
 
+def _start_durable_run(dataset: str, trigger: str) -> int | None:
+    """Open a pipeline_runs row for a regenerate, superseding any stale
+    'running' row for this dataset (a restart killed its owner — the in-memory
+    status died with the process, so this durable row is the only record that
+    an interruption happened). Best-effort: a DB hiccup must never block
+    generation."""
+    try:
+        superseded = pipeline_runs_db.supersede_running_runs(dataset)
+        if superseded:
+            logger.info(
+                "Marked %d stale running pipeline run(s) for %s as interrupted",
+                superseded, dataset,
+            )
+        return pipeline_runs_db.create_run(dataset, trigger=trigger)
+    except Exception:  # noqa: BLE001 — durable bookkeeping is best-effort
+        logger.exception("pipeline-run bookkeeping failed for %s", dataset)
+        return None
+
+
+def _finish_durable_run(run_id: int | None, error: str | None = None) -> None:
+    """Close the durable run row (complete, or failed with `error`)."""
+    if run_id is None:
+        return
+    try:
+        if error:
+            pipeline_runs_db.fail_run(run_id, error)
+        else:
+            pipeline_runs_db.complete_run(run_id)
+    except Exception:  # noqa: BLE001 — durable bookkeeping is best-effort
+        logger.exception("pipeline-run close failed for run %s", run_id)
+
+
 async def _synthesis_generate_bg(dataset: str) -> None:
     """Background body for /regenerate under the synthesis engine.
 
@@ -88,9 +123,11 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     _notify_brief_ready), not the full scheduled brief message.
     """
     set_status(dataset, "generating")
+    run_id = _start_durable_run(dataset, "regenerate")
     try:
         brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
         set_status(dataset, "ready")
+        _finish_durable_run(run_id)
         logger.info("Synthesis brief generated for %s", dataset)
     except EmptyKnowledgeGraphError:
         # Benign: new company with no data yet. Mark failed with a helpful
@@ -98,11 +135,13 @@ async def _synthesis_generate_bg(dataset: str) -> None:
         set_status(dataset, "failed",
                    error="No data to generate a brief from yet — upload files "
                          "or connect a data source, then regenerate.")
+        _finish_durable_run(run_id, error="KG empty after seeding")
         logger.info("Synthesis brief skipped for %s — KG empty after seeding", dataset)
         return
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
         set_status(dataset, "failed",
                    error="Brief generation failed — check server logs.")
+        _finish_durable_run(run_id, error="Brief generation failed — see server logs")
         logger.exception("Synthesis brief generation failed for %s", dataset)
         return
     # Tell the user their brief is ready (short ping, fresh briefs only).
@@ -183,6 +222,7 @@ async def _full_pipeline_bg(dataset: str) -> None:
     a failure leaves the prior cached brief/PRDs/evidence in place.
     """
     set_status(dataset, "generating")
+    run_id = _start_durable_run(dataset, "regenerate-all")
     # Step 1: digest the latest sources/connectors/uploads into the KG. This is
     # fire-and-forget (a daemon thread) and never raises; generate_brief_for below
     # re-seeds synchronously so the brief can't miss what this ingests.
@@ -201,11 +241,13 @@ async def _full_pipeline_bg(dataset: str) -> None:
         set_status(dataset, "failed",
                    error="No data to generate a brief from yet — upload files "
                          "or connect a data source, then regenerate.")
+        _finish_durable_run(run_id, error="KG empty after seeding")
         logger.info("Full-pipeline brief skipped for %s — KG empty after seeding", dataset)
         return
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
         set_status(dataset, "failed",
                    error="Brief generation failed — check server logs.")
+        _finish_durable_run(run_id, error="Brief generation failed — see server logs")
         logger.exception("Full-pipeline brief generation failed for %s", dataset)
         return
 
@@ -217,6 +259,9 @@ async def _full_pipeline_bg(dataset: str) -> None:
     # warm the drill-downs. All error-isolated so they can't undo the brief.
     await _generate_downstream_docs(dataset)
     warm_synthesis_drilldowns(dataset)
+    # The durable run covers the whole chain — close it only once the fan-out
+    # is done, so a restart during PRD/evidence warming is also recorded.
+    _finish_durable_run(run_id)
 
 
 @router.get("/current")
@@ -263,8 +308,8 @@ def status(
 @router.post("/regenerate")
 async def regenerate(
     dataset: str,
-    # On-demand brief generation → Weekly Brief module gate.
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    # On-demand brief generation → Top Insights module gate.
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
 
@@ -275,6 +320,11 @@ async def regenerate(
     Runs the KG seed-if-empty → run_synthesis path in the background.
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+    # Data-source gate: refuse up front when nothing can feed a brief (only
+    # non-evidence connectors and no uploads) — same rule as onboarding's
+    # first-brief kick, so every generation surface behaves identically.
+    if not has_brief_data_source(company.company_id, dataset):
+        raise HTTPException(409, NO_DATA_SOURCE_MESSAGE)
     _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
@@ -282,15 +332,15 @@ async def regenerate(
 @router.post("/regenerate-all")
 async def regenerate_all(
     dataset: str,
-    # The "Regenerate brief" full-pipeline button → Weekly Brief module gate.
+    # The "Regenerate brief" full-pipeline button → Top Insights module gate.
     # (Scheduled KG ingestion via connector sync is NOT affected — see
     # app.entitlements module docstring.)
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Run the FULL regeneration pipeline in the background. Returns immediately.
 
     Chains, in order: KG ingestion of the latest sources/connectors/uploads →
-    weekly-brief synthesis → PRD generation for each insight → evidence
+    top-insights synthesis → PRD generation for each insight → evidence
     generation for each insight. Used by the "Regenerate brief" button on the
     Connectors settings page, where the user has just connected a tool or
     uploaded files and wants the whole workspace rebuilt from the new data.
@@ -299,6 +349,10 @@ async def regenerate_all(
     after the brief flips to `ready`.
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+    # Data-source gate — same rule as /regenerate and onboarding's first-brief
+    # kick. The Connectors settings page surfaces the 409 detail inline.
+    if not has_brief_data_source(company.company_id, dataset):
+        raise HTTPException(409, NO_DATA_SOURCE_MESSAGE)
     _track(asyncio.create_task(_full_pipeline_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
@@ -311,6 +365,29 @@ class DismissIn(BaseModel):
     theme_id: str | None = None
     brief_id: int | None = Field(default=None, ge=1)
     insight_index: int | None = Field(default=None, ge=0)
+
+
+def _resolve_theme_id(body: "DismissIn", company: WorkspaceContext) -> str:
+    """theme_id from the request — direct, or resolved (with the tenant gate)
+    from an owned brief's payload via (brief_id, insight_index)."""
+    if body.theme_id:
+        return body.theme_id
+    if body.brief_id is None or body.insight_index is None:
+        raise HTTPException(
+            400, "Provide either theme_id or (brief_id and insight_index)"
+        )
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
+    insights = brief.get("insights") or []
+    if not (0 <= body.insight_index < len(insights)):
+        raise HTTPException(
+            400,
+            f"insight_index={body.insight_index} out of range "
+            f"(0..{len(insights) - 1})",
+        )
+    theme_id = insights[body.insight_index].get("theme_id")
+    if not theme_id:
+        raise HTTPException(400, "Insight carries no theme_id; cannot act on it")
+    return theme_id
 
 
 @router.post("/dismiss")
@@ -327,27 +404,58 @@ def dismiss(
 
     Accepts either a raw `theme_id` or a (`brief_id`, `insight_index`) pair which
     is resolved to the theme_id from the owned brief's payload."""
-    theme_id = body.theme_id
-    if not theme_id:
-        if body.brief_id is None or body.insight_index is None:
-            raise HTTPException(
-                400, "Provide either theme_id or (brief_id and insight_index)"
-            )
-        # Tenant gate + resolve insight → theme_id from the brief payload.
-        brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
-        insights = brief.get("insights") or []
-        if not (0 <= body.insight_index < len(insights)):
-            raise HTTPException(
-                400,
-                f"insight_index={body.insight_index} out of range "
-                f"(0..{len(insights) - 1})",
-            )
-        theme_id = insights[body.insight_index].get("theme_id")
-        if not theme_id:
-            raise HTTPException(400, "Insight carries no theme_id; cannot dismiss")
-
+    theme_id = _resolve_theme_id(body, company)
     set_finding_action(company.company_id, theme_id, "dismissed")
     return {"dismissed": True, "theme_id": theme_id}
+
+
+# One source-refresh interval: the synthesis pipeline's sources refresh weekly,
+# so "not now" means "come back next cycle" (skills/top-insights/SKILL.md —
+# defer suppresses for one refresh interval of the source, then the finding
+# re-enters the pool at full rank).
+DEFER_DAYS_DEFAULT = 7
+
+
+class DeferIn(DismissIn):
+    """Same finding addressing as DismissIn, plus an optional deferral window."""
+
+    days: int = Field(default=DEFER_DAYS_DEFAULT, ge=1, le=90)
+
+
+@router.post("/defer")
+def defer(
+    body: DeferIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Record that the user deferred a brief finding ("not now").
+
+    Distinct from dismiss (skills/top-insights/SKILL.md, three reader actions):
+    a deferral means *interested, wrong moment*. The finding is suppressed from
+    brief candidacy until `deferred_until`, then re-enters at full rank even if
+    nothing changed — and it never counts toward a dismissal streak or rotation
+    exhaustion. Accepts `theme_id` or a (`brief_id`, `insight_index`) pair,
+    exactly like /dismiss."""
+    theme_id = _resolve_theme_id(body, company)
+    until = datetime.now(timezone.utc) + timedelta(days=body.days)
+    set_finding_action(
+        company.company_id, theme_id, "deferred",
+        deferred_until=until.isoformat(),
+    )
+    return {"deferred": True, "theme_id": theme_id,
+            "deferred_until": until.isoformat()}
+
+
+@router.post("/restore")
+def restore(
+    body: DismissIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Undo a dismiss/defer: return the finding to the normal lifecycle
+    (action='surfaced', deferral cleared). Backs the card's Undo affordance so
+    a visibly-restored card isn't suppressed again by the ledger next run."""
+    theme_id = _resolve_theme_id(body, company)
+    set_finding_action(company.company_id, theme_id, "surfaced")
+    return {"restored": True, "theme_id": theme_id}
 
 
 @router.post("/{brief_id}/opened")
@@ -379,8 +487,8 @@ def by_id(
 @router.post("/generate")
 def generate(
     dataset: str,
-    # On-demand brief generation → Weekly Brief module gate.
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    # On-demand brief generation → Top Insights module gate.
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Synchronously generate a fresh brief and return it.
 

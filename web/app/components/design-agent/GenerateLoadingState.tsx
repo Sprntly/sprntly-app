@@ -33,13 +33,42 @@ export type GenerateLoadingStateProps = {
   /** Optional explanatory note (e.g. a lower-confidence proceed note), shown as
    *  subtext beneath the matched line. */
   note?: string | null
+  /** "block" (default): the full centred loading screen used for the
+   *  locating/generating phases — unchanged.
+   *  "inline": a compact single-row heartbeat for the bounded, pre-decision
+   *  "checking your saved source" state (GenerateModal). Reuses the SAME dot
+   *  animation as "block" (one heartbeat implementation backs both surfaces)
+   *  but is styled through the caller's own `.da-source-check` family
+   *  (design-agent.css) rather than this component's CSS module, so it
+   *  composes with the modal's tokens/spacing instead of duplicating them.
+   *  Ignores `matchedRoute` / `note` — that state never reaches this variant. */
+  variant?: "block" | "inline"
 }
 
 export function GenerateLoadingState({
   label = "Looking through your codebase…",
   matchedRoute = null,
   note = null,
+  variant = "block",
 }: GenerateLoadingStateProps) {
+  if (variant === "inline") {
+    return (
+      <div
+        className="da-source-check"
+        data-testid="saved-source-check"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="da-source-check-beat" aria-hidden="true">
+          <span className={styles.dot} />
+          <span className={styles.dot} />
+          <span className={styles.dot} />
+        </span>
+        <span className="da-source-check-label">{label}</span>
+      </div>
+    )
+  }
+
   return (
     <div
       className={styles.wrap}

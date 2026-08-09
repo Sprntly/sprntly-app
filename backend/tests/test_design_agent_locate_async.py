@@ -199,6 +199,74 @@ def test_background_task_populates_store_poll_done(client, env, monkeypatch):
     assert result["posture"] == "CLEAN"
     assert result["unmapped"] is False
     assert result["commit_sha"] == "sha-abc"
+    # Ordinary in-app match → external_surface stays None end-to-end.
+    assert result["external_surface"] is None
+
+
+# ── 2b. external_surface rides the full LocateResponse when detected ───────────
+
+
+def test_external_surface_rides_full_locate_response_on_decline(client, env, monkeypatch):
+    """A genuine no-host decline whose locate call also flagged the entry point
+    as external → the poll's LocateResponse carries external_surface end-to-end
+    (route → gate → wire), with the model's own free-text description."""
+    from app.design_agent.codebase_map.types import MapResult, ScreenNode, ShellModel
+    from app.design_agent.codebase_map.locate import (
+        ExternalEntryPointSignal,
+        LocateCandidate,
+        LocateResult,
+    )
+
+    _seed_prd()
+    _mock_installation(monkeypatch)
+
+    node = ScreenNode(route="/home", entry_component="HomeScreen", composed_components=["Header"])
+    fake_map = MapResult(
+        repo="org/repo", commit_sha="sha-abc", posture="CLEAN", nodes=[node], shell=ShellModel(),  # type: ignore[arg-type]
+    )
+    decline_candidate = LocateCandidate(
+        route="", id="", entry_component="", confidence=0,
+        rationale="No surface in this app can host the described trigger.",
+        ambiguous=False, classification="no-host-decline",
+    )
+    fake_locate = LocateResult(
+        candidates=[decline_candidate],
+        external_entry_point=ExternalEntryPointSignal(
+            detected=True,
+            surface_description="an SMS the user receives on their phone",
+            confidence=88,
+        ),
+    )
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        if func.__name__ == "build_map":
+            return fake_map
+        return fake_locate
+
+    async def _noop_bg(**_kw):
+        return None
+
+    with patch.object(env.routes, "_run_locate_bg", new=_noop_bg):
+        accepted = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+    job_id = accepted.json()["job_id"]
+    rec = env.routes._locate_jobs[job_id]
+
+    with patch("asyncio.to_thread", new=_fake_to_thread):
+        asyncio.run(env.routes._run_locate_bg(
+            job_id=job_id, workspace_id=rec["workspace_id"],
+            github_repo="org/repo", ref=None, prd_text="", installation_id=42,
+        ))
+
+    result = client.get(f"/v1/design-agent/locate/jobs/{job_id}").json()["result"]
+    assert result["decision"] == "ranked_confirm"
+    assert result["chosen"] == []
+    assert result["external_surface"] is not None
+    assert result["external_surface"]["detected"] is True
+    assert result["external_surface"]["surface_description"] == "an SMS the user receives on their phone"
+    assert result["external_surface"]["confidence"] == 88
 
 
 # ── 3. Error path: heavy work raises → poll error; telemetry preserved ─────────

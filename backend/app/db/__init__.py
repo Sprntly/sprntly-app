@@ -8,7 +8,7 @@ to work because every function is re-exported here.
 Submodule layout:
   client.py       — sqlite3 conn() context manager + utc_now timestamp
   schema.py       — CREATE TABLE DDL + idempotent ALTERs in init_db()
-  briefs.py       — weekly briefs (is_current row per dataset)
+  briefs.py       — Top Insights briefs (is_current row per dataset)
   prds.py         — PRDs (generating → ready, variant-scoped)
   evidences.py    — evidence pages (same shape, different lifecycle)
   asks.py         — ask_log (append-only) + cached_asks
@@ -79,12 +79,56 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Competitive-intelligence runs (state + captured records + rendered reports)
+from app.db.competitive_intel_runs import (
+    claim_competitive_intel_run,
+    complete_competitive_intel_run,
+    latest_competitive_intel_run,
+    save_competitive_intel_run,
+)
+
+# Public-feedback runs (captured record sets + rendered reports)
+from app.db.public_feedback_runs import (
+    latest_public_feedback_run,
+    save_public_feedback_run,
+)
+
+# Reports (captured skill-generated HTML report documents)
+from app.db.reports import (
+    find_report_by_share_token,
+    get_report,
+    list_reports_for_conversation,
+    save_report,
+    set_report_share_config,
+)
+
+# Deep company-research runs (onboarding kick + chat ask)
+from app.db.company_research_runs import (
+    company_research_run_in_flight,
+    complete_company_research_run,
+    fail_company_research_run,
+    fail_orphan_company_research_runs,
+    latest_company_research_run,
+    start_company_research_run,
+)
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,
     fail_analysis_job,
     get_analysis_job,
     start_analysis_job,
+)
+
+# Async business-context refresh status (singleton per tenant, columns on
+# companies — see app/db/business_context_refresh.py)
+from app.db.business_context_refresh import (
+    business_context_refresh_state,
+    complete_business_context_refresh,
+    fail_business_context_refresh,
+    fail_orphan_business_context_refreshes,
+    start_business_context_refresh,
+    touch_business_context_refresh,
 )
 
 # Datasets
@@ -97,11 +141,50 @@ from app.db.datasets import (
     list_datasets,
 )
 
+# Artifact format templates (company-scoped, user-uploaded PRD/ticket/spec FORMS)
+from app.db.artifact_templates import (
+    ActiveTemplateConflict,
+    activate_template,
+    deactivate_template,
+    delete_template,
+    get_active_template,
+    get_template_by_id,
+    insert_template,
+    list_templates,
+    set_compile_result,
+    update_template,
+)
+
+# Custom skills (workspace-scoped, user-uploaded — PRD 1854)
+from app.db.custom_skills import (
+    DuplicateSkillSlug,
+    delete_custom_skill,
+    detach_skills_from_source,
+    get_custom_skill,
+    get_custom_skill_by_id,
+    insert_custom_skill,
+    list_custom_skills,
+    update_custom_skill,
+)
+
+# Synced skill folders (the GitHub folders kept live — 20260807170000)
+from app.db.skill_sources import (
+    deactivate_skill_source,
+    get_skill_source,
+    get_skill_source_for_folder,
+    list_active_skill_sources,
+    list_skill_sources,
+    record_skill_source_sync,
+    upsert_skill_source,
+)
+
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
     delete_slack_connection,
+    delete_slack_connection_by_id,
     get_connection,
+    get_orphan_slack_connection,
     get_slack_connection,
     list_all_active_connections,
     list_connections,
@@ -137,9 +220,11 @@ from app.db.knowledge import (
 from app.db.pipeline_runs import (
     complete_run,
     create_run,
+    fail_orphan_running_runs,
     fail_run,
     get_latest_run,
     list_runs,
+    supersede_running_runs,
     update_run_stage,
 )
 
@@ -214,11 +299,31 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # reports (captured HTML report documents)
+    "find_report_by_share_token",
+    "get_report",
+    "list_reports_for_conversation",
+    "save_report",
+    "set_report_share_config",
+    # deep company-research runs
+    "company_research_run_in_flight",
+    "complete_company_research_run",
+    "fail_company_research_run",
+    "fail_orphan_company_research_runs",
+    "latest_company_research_run",
+    "start_company_research_run",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",
     "get_analysis_job",
     "start_analysis_job",
+    # async business-context refresh status
+    "business_context_refresh_state",
+    "complete_business_context_refresh",
+    "fail_business_context_refresh",
+    "fail_orphan_business_context_refreshes",
+    "start_business_context_refresh",
+    "touch_business_context_refresh",
     # datasets
     "dataset_exists",
     "delete_dataset",
@@ -226,6 +331,34 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # artifact format templates
+    "ActiveTemplateConflict",
+    "activate_template",
+    "deactivate_template",
+    "delete_template",
+    "get_active_template",
+    "get_template_by_id",
+    "insert_template",
+    "list_templates",
+    "set_compile_result",
+    "update_template",
+    # custom skills
+    "DuplicateSkillSlug",
+    "delete_custom_skill",
+    "detach_skills_from_source",
+    "get_custom_skill",
+    "get_custom_skill_by_id",
+    "insert_custom_skill",
+    "list_custom_skills",
+    "update_custom_skill",
+    # synced skill folders
+    "deactivate_skill_source",
+    "get_skill_source",
+    "get_skill_source_for_folder",
+    "list_active_skill_sources",
+    "list_skill_sources",
+    "record_skill_source_sync",
+    "upsert_skill_source",
     # input sources
     "delete_input_source",
     "list_input_sources",
@@ -233,7 +366,9 @@ __all__ = [
     # connections
     "delete_connection",
     "delete_slack_connection",
+    "delete_slack_connection_by_id",
     "get_connection",
+    "get_orphan_slack_connection",
     "get_slack_connection",
     "list_all_active_connections",
     "list_connections",

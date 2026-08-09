@@ -262,20 +262,33 @@ describe("IterateActivityStream — named turns (author + relative timestamp)", 
     expect(turnLabel("user", FIVE_MIN_AGO, null, NOW)).toBe("You · 5m")
   })
 
-  it("turnLabel: an agent turn is labelled 'Design Agent · {ago}'", () => {
-    expect(turnLabel("done", FIVE_MIN_AGO, "Ada", NOW)).toBe("Design Agent · 5m")
+  it("test_turn_label_agent_turn_says_sprntly_not_design_agent: an agent turn is labelled 'Sprntly · {ago}'", () => {
+    expect(turnLabel("done", FIVE_MIN_AGO, "Ada", NOW)).toBe("Sprntly · 5m")
   })
 
   it("turnLabel: omits the time suffix when createdAt is missing", () => {
     expect(turnLabel("user", undefined, "Ada", NOW)).toBe("Ada")
   })
 
-  it("test_done_turn_renders_design_agent_label: the done chip carries the 'Design Agent' label", () => {
+  it("test_done_turn_renders_sprntly_label_not_design_agent: the done chip carries the 'Sprntly' label, never 'Design Agent'", () => {
     const html = render([
       makeEvent({ kind: "done" as const, text: "Made the hero blue." }, FIVE_MIN_AGO),
     ])
     expect(html).toContain('class="da-activity-agent-label"')
-    expect(html).toContain("Design Agent")
+    expect(html).toContain("Sprntly")
+    expect(html).not.toContain("Design Agent")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Log region accessibility label (branding)
+// ---------------------------------------------------------------------------
+
+describe("IterateActivityStream — log region aria-label", () => {
+  it("test_activity_log_region_aria_label_says_sprntly: the role=\"log\" region's aria-label is 'Sprntly activity', not 'Design Agent activity'", () => {
+    const html = render([makeEvent({ kind: "user" as const, text: "x" })])
+    expect(html).toContain('aria-label="Sprntly activity"')
+    expect(html).not.toContain('aria-label="Design Agent activity"')
   })
 })
 
@@ -287,5 +300,10 @@ describe("IterateActivityStream — source marker guard", () => {
   it("the source file carries no throwaway exploration marker (test_source_carries_no_throwaway_marker)", () => {
     const source = readFileSync(ACTIVITY_STREAM_PATH, "utf8")
     expect(source).not.toContain("UX-EXPLORE")
+  })
+
+  it("test_iterate_activity_stream_source_has_no_design_agent_string: the source carries no occurrence of the internal persona name", () => {
+    const source = readFileSync(ACTIVITY_STREAM_PATH, "utf8")
+    expect(source).not.toContain("Design Agent")
   })
 })

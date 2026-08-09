@@ -38,38 +38,43 @@ logger = logging.getLogger(__name__)
 # web/app/components/shared/TicketDetail.tsx): "prd-{prd_id}-{story.id}", with
 # a title-slug fallback for legacy stories generated before ids existed. Every
 # ticket_edits / ticket_comments / ticket_attachments row the web writes is
-# keyed by that composed string, while prd_tickets.stories only stores the bare
+# keyed by that composed string, while the stories array only stores the bare
 # content-hash id. These helpers make the MCP surface speak the SAME composed
 # format so both surfaces read and write the same rows; bare keys written by
 # older MCP clients still resolve their base story (their orphaned override
 # rows stay under the bare key — accepted, no migration).
+#
+# Two owners now compose keys: PRDs ("prd-…") and standalone ticket sets
+# ("set-…"). The formats share one grammar and one parser
+# (app/stories/scope.py), so an MCP client reads and writes a chat-born ticket
+# with exactly the tools and key handling it already uses for a PRD ticket.
 
-_TICKET_KEY_RX = re.compile(r"^prd-(\d+)-(.+)$")
-
-
-def _title_slug(title: str | None) -> str:
-    """Mirror of the web's legacy slug fallback: lowercase, non-alphanumeric
-    runs → '-', strip leading/trailing '-', first 60 chars, default 'ticket'."""
-    slug = re.sub(r"[^a-z0-9]+", "-", (title or "ticket").lower()).strip("-")[:60]
-    return slug or "ticket"
-
-
-def _ticket_key_for(prd_id: int | None, story: dict) -> str:
-    """The web-format ticket key for a generated story (`ticketKeyFor` mirror)."""
-    sid = story.get("id")
-    if sid:
-        return f"prd-{prd_id}-{sid}"
-    return f"prd-{prd_id}-{_title_slug(story.get('title'))}"
+from app.stories.scope import TicketScope, prd_scope  # noqa: E402
+from app.stories.scope import split_key as _split_scope_key  # noqa: E402
+from app.stories.scope import title_slug as _title_slug  # noqa: E402
 
 
-def _parse_ticket_key(ticket_key: str) -> tuple[int | None, str]:
-    """Split a web-format key into (prd_id, story_ref). A key without the
-    prd- prefix passes through as (None, key) so legacy bare story ids keep
+def _ticket_key_for(prd_id: int, story: dict) -> str:
+    """The web-format ticket key for a PRD-generated story (`ticketKeyFor`).
+
+    `prd_id` is non-optional: every call site either reads it from
+    `prd_tickets.prd_id` (NOT NULL) or guards on it first, and the old
+    `int | None` annotation only ever promised a `prd-None-…` key nothing could
+    resolve.
+    """
+    return prd_scope(prd_id).ticket_key(story)
+
+
+def _ticket_key_for_set(set_id: int, story: dict) -> str:
+    """The web-format ticket key for a standalone set's story."""
+    return TicketScope("set", set_id).ticket_key(story)
+
+
+def _parse_ticket_key(ticket_key: str) -> tuple[TicketScope | None, str]:
+    """Split a web-format key into (scope, story_ref). A key matching neither
+    owner prefix passes through as (None, key) so legacy bare story ids keep
     resolving."""
-    m = _TICKET_KEY_RX.match(ticket_key)
-    if not m:
-        return None, ticket_key
-    return int(m.group(1)), m.group(2)
+    return _split_scope_key(ticket_key)
 
 
 def _find_story_by_slug(
@@ -138,7 +143,7 @@ def ideation(company_id: str) -> dict[str, Any]:
     from app.db.briefs import get_current_brief
 
     # Empty-when-no-brief invariant, mirrored from routes/ideation.py: the
-    # ideation pool is the by-product of a weekly brief, so no brief -> no
+    # ideation pool is the by-product of a Top Insights brief, so no brief -> no
     # ideas. Returns the same visible set the page shows (the weekly shortlist
     # + user-pinned rows), not the hidden tail.
     slug = slug_for_company_id(company_id)
@@ -272,8 +277,9 @@ def prd_evidence(prd_id: int, company_id: str) -> dict[str, Any]:
     "/tickets/{ticket_key}/data", dependencies=[Depends(_require_internal_key)]
 )
 def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
-    """Full current ticket = generated base content (from prd_tickets.stories)
-    merged with per-ticket overrides (ticket_edits) + comments + attachments.
+    """Full current ticket = generated base content (from the owning artifact's
+    stories) merged with per-ticket overrides (ticket_edits) + comments +
+    attachments.
 
     A developer needs the generated title / description / acceptance criteria /
     scope to implement the ticket; those live in the base story, so returning
@@ -281,21 +287,42 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
     empty. Overrides win where set; base-story context fields (what/why/scope/
     subtasks/labels) are always included.
 
-    `ticket_key` is the web-format key ("prd-{prd_id}-{story_id}") so the
-    override rows this route reads are the SAME rows the web app writes; the
-    embedded story id locates the generated base story. Bare legacy keys (the
-    raw story id) still resolve the base story."""
+    `ticket_key` is the web-format key ("prd-{prd_id}-{story_id}" or
+    "set-{set_id}-{story_id}") so the override rows this route reads are the
+    SAME rows the web app writes; the embedded story id locates the generated
+    base story. Bare legacy keys (the raw story id) still resolve the base
+    story, searching PRDs first and then standalone sets."""
     from app.db.client import require_client
     from app.db.prd_tickets import find_ticket_story
+    from app.db.ticket_sets import find_set_story
 
     c = require_client()
-    prd_hint, story_ref = _parse_ticket_key(ticket_key)
-    story, prd_id = find_ticket_story(company_id, story_ref)
-    if story is None and prd_hint is not None:
+    scope_hint, story_ref = _parse_ticket_key(ticket_key)
+
+    # Resolve against the artifact the key NAMES first, so a bare content-hash
+    # collision between a PRD ticket and a set ticket resolves to the one the
+    # caller actually asked for rather than whichever table is searched first.
+    story = None
+    prd_id = None
+    set_id = None
+    if scope_hint is not None and scope_hint.is_set:
+        story, set_id = find_set_story(company_id, story_ref)
+    else:
+        story, prd_id = find_ticket_story(company_id, story_ref)
+        if story is None and scope_hint is None:
+            # A bare legacy key with no PRD match: it may still name a set's
+            # ticket (an MCP client that stored the raw story id).
+            story, set_id = find_set_story(company_id, story_ref)
+    if story is None and scope_hint is not None and scope_hint.is_prd:
         # Legacy id-less story: the web key embeds a title slug, not a story id.
-        story, prd_id = _find_story_by_slug(c, company_id, prd_hint, story_ref)
-    if prd_id is None:
-        prd_id = prd_hint
+        story, prd_id = _find_story_by_slug(c, company_id, scope_hint.id, story_ref)
+    if scope_hint is not None:
+        # Fall back to what the key claimed, so tracker state still resolves for
+        # a ticket whose base story has since been regenerated away.
+        if scope_hint.is_prd and prd_id is None:
+            prd_id = scope_hint.id
+        elif scope_hint.is_set and set_id is None:
+            set_id = scope_hint.id
 
     edit_resp = (
         c.table("ticket_edits")
@@ -348,10 +375,14 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
     # Kept read-only on the MCP surface — syncs are triggered from the web /
     # scheduler; an MCP edit is picked up by the next sync pass automatically.
     tracker = None
-    if prd_id is not None:
+    owner_scope = (
+        prd_scope(prd_id) if prd_id is not None
+        else (TicketScope("set", set_id) if set_id is not None else None)
+    )
+    if owner_scope is not None:
         from app.db.ticket_sync import get_sync_config
 
-        cfg = get_sync_config(company_id, prd_id)
+        cfg = get_sync_config(company_id, owner_scope)
         if cfg:
             sid = story.get("id") or story_ref
             st = (cfg.get("statuses") or {}).get(sid) or {}
@@ -391,7 +422,13 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
     return {
         "tracker": tracker,
         "id": ticket_key,
+        # `prd_id` stays on every ticket dict, NULL for a set's — existing MCP
+        # clients read it and a missing key would break them. `ticket_set_id` is
+        # added only where it applies (the conditional-spread idiom used for
+        # `lifecycle` in list_tickets), so a PRD ticket's shape is unchanged
+        # byte for byte.
         "prd_id": prd_id,
+        **({"ticket_set_id": set_id} if set_id is not None else {}),
         "title": _merged("title"),
         # Description: an explicit edit wins; else the generated story body.
         "description": edit.get("description")
@@ -444,25 +481,29 @@ def list_tickets(
     assignee_user_id: str | None = None,
     prd_id: int | None = None,
 ) -> dict[str, Any]:
-    """Every ticket for a company, flattened across PRDs, with each ticket's
-    CURRENT status merged in (from ticket_edits) so a developer sees state at a
-    glance. Optional `status` / `ticket_type` filters (case-insensitive).
+    """Every ticket for a company, flattened across PRDs AND standalone ticket
+    sets, with each ticket's CURRENT status merged in (from ticket_edits) so a
+    developer sees state at a glance. Optional `status` / `ticket_type` filters
+    (case-insensitive).
 
     `assignee_user_id` narrows to tickets whose ticket_edits.assignee has that
     user_id — the MCP server passes the TOKEN OWNER's id so an AI client only
     sees the caller's own tickets. Assignment exists only as an edit (base
     stories carry none), so unassigned tickets never match this filter.
 
-    `prd_id` narrows to one PRD's tickets (the MCP list_prd_tickets tool).
-    The query is company-scoped BEFORE this filter, so a foreign prd_id can
-    only ever match nothing — it returns an empty list, never another
-    tenant's tickets.
+    `prd_id` narrows to one PRD's tickets (the MCP list_prd_tickets tool). It
+    EXCLUDES standalone-set tickets entirely — a set has no PRD, so "the tickets
+    for PRD 12" must not quietly grow chat-born ones. The query is
+    company-scoped BEFORE this filter, so a foreign prd_id can only ever match
+    nothing — it returns an empty list, never another tenant's tickets.
 
-    Tickets are elements of each PRD's `prd_tickets.stories` array. Each is
-    returned under its WEB-FORMAT key ("prd-{prd_id}-{story_id}", the same key
-    the web app composes and stores edits/comments under), so the status merge
-    below sees web edits and the key round-trips into every /tickets/{key}
-    route. Full per-ticket detail comes from GET /tickets/{key}/data.
+    Tickets are elements of each artifact's `stories` array. Each is returned
+    under its WEB-FORMAT key ("prd-{prd_id}-{story_id}" or
+    "set-{set_id}-{story_id}", the same keys the web app composes and stores
+    edits/comments under), so the status merge below sees web edits and the key
+    round-trips into every /tickets/{key} route. A PRD ticket's dict is
+    unchanged; a set's carries `prd_id: None` plus a `ticket_set_id`. Full
+    per-ticket detail comes from GET /tickets/{key}/data.
     """
     from app.db.client import require_client
 
@@ -475,11 +516,25 @@ def list_tickets(
         .data
         or []
     )
+    # Standalone sets are skipped entirely when narrowing to one PRD.
+    set_rows = (
+        []
+        if prd_id is not None
+        else (
+            c.table("ticket_sets")
+            .select("id, stories")
+            .eq("company_id", company_id)
+            .eq("status", "ready")
+            .execute()
+            .data
+            or []
+        )
+    )
     # One query for all this company's edits → map ticket_key → override fields,
     # so the list reflects edited status/priority/title without N round-trips.
     edits = (
         c.table("ticket_edits")
-        .select("ticket_key, status, priority, title, assignee")
+        .select("ticket_key, status, priority, title, assignee, lifecycle")
         .eq("company_id", company_id)
         .execute()
         .data
@@ -487,12 +542,20 @@ def list_tickets(
     )
     edit_by_key = {e["ticket_key"]: e for e in edits}
 
-    # One query for all this company's tracker-sync rows → per-PRD provider +
-    # per-ticket pulled tracker state, so each listed ticket can carry its
-    # tracker status/url without N lookups.
+    # One query for all this company's tracker-sync rows → per-artifact provider
+    # + per-ticket pulled tracker state, so each listed ticket can carry its
+    # tracker status/url without N lookups. Keyed separately per owner: the two
+    # id spaces overlap (PRD 3 and set 3 both exist), so one dict would
+    # cross-wire their destinations.
     from app.db.ticket_sync import list_sync_configs
 
-    sync_by_prd = {c["prd_id"]: c for c in list_sync_configs(company_id)}
+    _cfgs = list_sync_configs(company_id)
+    sync_by_prd = {
+        r["prd_id"]: r for r in _cfgs if r.get("prd_id") is not None
+    }
+    sync_by_set = {
+        r["ticket_set_id"]: r for r in _cfgs if r.get("ticket_set_id") is not None
+    }
 
     want_status = status.strip().lower() if status else None
     want_type = ticket_type.strip().lower() if ticket_type else None
@@ -506,6 +569,11 @@ def list_tickets(
                 continue
             key = _ticket_key_for(row.get("prd_id"), story)
             e = edit_by_key.get(key, {})
+            # A deleted ticket is not work anyone should be handed — it is gone
+            # from Sprntly and from the tracker. Excluded ones are still real
+            # work, just not synced, so they stay listed with the flag.
+            if e.get("lifecycle") == "deleted":
+                continue
             # Unedited status defaults to "Backlog" (as in get_ticket / the web
             # UI) so the recommended `status=Backlog` filter actually finds the
             # generated-but-unedited backlog. title/priority use is-not-None
@@ -540,6 +608,60 @@ def list_tickets(
                     "tracker_provider": sync_cfg.get("provider"),
                     "tracker_status": tracker_state.get("status"),
                     "tracker_url": tracker_state.get("url"),
+                    # "excluded" = deliberately held back from the tracker, so
+                    # a client doesn't read the missing tracker_url as a bug.
+                    # Absent for the ordinary case.
+                    **({"lifecycle": e["lifecycle"]}
+                       if e.get("lifecycle") and e["lifecycle"] != "active" else {}),
+                }
+            )
+
+    # ── Standalone sets: the same flattening, the same dict, one extra key ──
+    # Kept as a second loop rather than folded into the first with branches:
+    # the PRD ticket dict above must stay byte-identical (existing MCP clients
+    # read it), and a shared loop full of `if scope.is_set` is how that quietly
+    # stops being true.
+    for row in set_rows:
+        set_id = row.get("id")
+        for story in row.get("stories") or []:
+            if not isinstance(story, dict):
+                continue
+            key = _ticket_key_for_set(set_id, story)
+            e = edit_by_key.get(key, {})
+            if e.get("lifecycle") == "deleted":
+                continue
+            cur_status = e.get("status") or "Backlog"
+            cur_type = story.get("ticket_type")
+            if want_status and cur_status.lower() != want_status:
+                continue
+            if want_type and (cur_type or "").lower() != want_type:
+                continue
+            if assignee_user_id:
+                assignee = e.get("assignee")
+                if (
+                    not isinstance(assignee, dict)
+                    or assignee.get("user_id") != assignee_user_id
+                ):
+                    continue
+            sync_cfg = sync_by_set.get(set_id) or {}
+            tracker_state = (sync_cfg.get("statuses") or {}).get(story.get("id")) or {}
+            tickets.append(
+                {
+                    "id": key,
+                    "title": e["title"] if e.get("title") is not None else story.get("title"),
+                    "ticket_type": cur_type,
+                    "status": cur_status,
+                    "priority": e["priority"] if e.get("priority") is not None else story.get("priority"),
+                    # Explicitly None, not absent: a client that reads
+                    # `ticket["prd_id"]` must get "this has no PRD", not a
+                    # KeyError.
+                    "prd_id": None,
+                    "ticket_set_id": set_id,
+                    "tracker_provider": sync_cfg.get("provider"),
+                    "tracker_status": tracker_state.get("status"),
+                    "tracker_url": tracker_state.get("url"),
+                    **({"lifecycle": e["lifecycle"]}
+                       if e.get("lifecycle") and e["lifecycle"] != "active" else {}),
                 }
             )
     return {"tickets": tickets, "count": len(tickets)}
@@ -609,9 +731,9 @@ def save_ticket_description(
     ).execute()
     # Instant push: a bound ticket's edit lands in the tracker now (no-op
     # when unbound / a pass is already running).
-    from app.stories.sync import kick_prd_sync_from_key
+    from app.stories.sync import kick_sync_from_key
 
-    kick_prd_sync_from_key(company_id, ticket_key)
+    kick_sync_from_key(company_id, ticket_key)
     return {"ok": True}
 
 
@@ -663,9 +785,9 @@ def save_ticket_fields(
     ).execute()
     # Instant push: a bound ticket's edit lands in the tracker now (no-op
     # when unbound / a pass is already running).
-    from app.stories.sync import kick_prd_sync_from_key
+    from app.stories.sync import kick_sync_from_key
 
-    kick_prd_sync_from_key(company_id, ticket_key)
+    kick_sync_from_key(company_id, ticket_key)
     return {"ok": True}
 
 

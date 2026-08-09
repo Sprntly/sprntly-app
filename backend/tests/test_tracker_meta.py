@@ -12,6 +12,11 @@ from unittest.mock import patch
 import pytest
 
 from app.auth import CompanyContext
+from app.stories.scope import prd_scope
+
+# See test_ticket_sync.py's `pytestmark` for why — same shared CID literal,
+# pinned to one xdist worker as defense in depth.
+pytestmark = pytest.mark.xdist_group(name="ticket-sync-shared-cid")
 
 CID = "11111111-2222-3333-4444-555555555555"
 
@@ -374,7 +379,7 @@ def test_stories_tracker_meta_route_unbound_and_bound(isolated_settings):
         "configured": False, "provider": None, "destination_id": None, "meta": None,
     }
 
-    upsert_sync_config(CID, 42, provider="clickup", destination_id="901")
+    upsert_sync_config(CID, prd_scope(42), provider="clickup", destination_id="901")
     save_meta(CID, "clickup", "901", _META)
     out = routes.tracker_meta(42, company=_ctx())
     assert out["configured"] is True
@@ -467,7 +472,7 @@ def test_transitions_route_404s_when_unbound_or_unpushed(isolated_settings):
     assert getattr(ei.value, "status_code", None) == 404
 
     # Bound to Jira but this ticket was never pushed (no issue mapping).
-    upsert_sync_config(CID, 42, provider="jira", destination_id="KAN")
+    upsert_sync_config(CID, prd_scope(42), provider="jira", destination_id="KAN")
     with pytest.raises(Exception) as ei2:
         routes.ticket_transitions("prd-42-abc123", company=_ctx())
     assert getattr(ei2.value, "status_code", None) == 404
@@ -485,7 +490,7 @@ def test_transitions_route_jira_proxies_legal_transitions(isolated_settings):
     from app.db.ticket_sync import upsert_sync_config
     from app.routes import tickets as routes
 
-    upsert_sync_config(CID, 42, provider="jira", destination_id="KAN")
+    upsert_sync_config(CID, prd_scope(42), provider="jira", destination_id="KAN")
     save_jira_issue_key(CID, "KAN", "abc123", "KAN-7")
 
     live = [
@@ -511,7 +516,7 @@ def test_transitions_route_clickup_serves_full_vocabulary(isolated_settings):
     from app.db.tracker_meta import save_meta
     from app.routes import tickets as routes
 
-    upsert_sync_config(CID, 42, provider="clickup", destination_id="901")
+    upsert_sync_config(CID, prd_scope(42), provider="clickup", destination_id="901")
     save_meta(CID, "clickup", "901", {
         **_META,
         "statuses": [
@@ -557,7 +562,7 @@ def test_trigger_sync_always_refreshes_the_meta_cache(isolated_settings, monkeyp
         # Ad-hoc Sync button (no body) — must refresh the vocabulary again.
         from app.db.ticket_sync import save_sync_result
 
-        save_sync_result(CID, 7)  # settle the first run back to idle
+        save_sync_result(CID, prd_scope(7))  # settle the first run back to idle
         await routes.trigger_sync(7, routes.SyncTriggerIn(), _ctx())
         for _ in range(100):
             if len(warmed) >= 2:

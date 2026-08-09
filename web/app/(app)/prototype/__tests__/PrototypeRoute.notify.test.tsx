@@ -163,7 +163,7 @@ describe("PrototypeRoute — notify-when-ready wiring", () => {
     expect(screen.getByTestId("stub-notify")).toBeTruthy()
   })
 
-  it("fires processing toast, da:generating, da:notify-generation, and router.back on notify click", async () => {
+  it("fires processing toast, da:generating, da:notify-generation, and goTo(brief) on notify click", async () => {
     const events: CustomEvent[] = []
     const handler = (e: Event) => events.push(e as CustomEvent)
     window.addEventListener("da:generating", handler)
@@ -196,32 +196,37 @@ describe("PrototypeRoute — notify-when-ready wiring", () => {
     expect(notifyEvent?.detail?.prototypeId).toBe(IN_FLIGHT_ID)
     expect(notifyEvent?.detail?.prdId).toBe(42)
 
-    // In jsdom history.length === 1 → falls through to router.push
-    expect(routerPush).toHaveBeenCalledWith(expect.stringContaining("/prototype"))
+    expect(goTo).toHaveBeenCalledWith("brief")
   })
 
-  it("calls router.push with prototypePath when history has entries to go back (history.length > 1)", async () => {
-    // Override history.length to simulate a multi-entry history (e.g. user navigated
-    // from the brief screen to the prototype page).
-    const origDescriptor = Object.getOwnPropertyDescriptor(window.history, "length")
-    Object.defineProperty(window.history, "length", { get: () => 3, configurable: true })
+  it.each([
+    ["history.length === 1", 1],
+    ["history.length === 3", 3],
+  ])(
+    "test_prototype_route_notify_calls_go_to_brief_regardless_of_history_length — %s",
+    async (_label, historyLength) => {
+      const origDescriptor = Object.getOwnPropertyDescriptor(window.history, "length")
+      Object.defineProperty(window.history, "length", {
+        get: () => historyLength,
+        configurable: true,
+      })
 
-    await mountAndStartGeneration()
-    const notifyBtn = screen.getByTestId("stub-notify")
+      await mountAndStartGeneration()
+      const notifyBtn = screen.getByTestId("stub-notify")
 
-    await act(async () => {
-      fireEvent.click(notifyBtn)
-    })
+      await act(async () => {
+        fireEvent.click(notifyBtn)
+      })
 
-    // Restore
-    if (origDescriptor) {
-      Object.defineProperty(window.history, "length", origDescriptor)
-    }
+      if (origDescriptor) {
+        Object.defineProperty(window.history, "length", origDescriptor)
+      }
 
-    // With history.length > 1, router.back should be called
-    expect(routerBack).toHaveBeenCalledTimes(1)
-    expect(routerPush).not.toHaveBeenCalled()
-  })
+      expect(goTo).toHaveBeenCalledWith("brief")
+      expect(routerBack).not.toHaveBeenCalled()
+      expect(routerPush).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe("PrototypeRoute — notify absent outside the loading screen", () => {

@@ -1,59 +1,87 @@
-"""Phase 1 — the vendored skill catalog loads and the manifest is coherent.
+"""Phase 1 — the vendored skill library loads and is coherent.
 
-Guards the "install a skill = drop a folder" property: every folder under
-backend/skills/ loads, carries a frontmatter description, is categorized, and
-appears in the manifest with the right routability.
+`app/skills/catalog.py` is gone with the built-in chat-routing layer: category,
+routability and the router manifest were policy over a ~78-skill library, and
+the library is now a NINE-skill keep-list bound by name from the pipelines that
+need it. `humanize_label` outlived that module (it labels captured reports and
+the public share page) and lives in `app/labels.py`.
+
+What is still worth guarding here is the property that never depended on
+routing: every vendored skill loads, and every one of them carries a
+frontmatter description a reader — human or model — can actually use.
 """
 from __future__ import annotations
 
-from app.skills.catalog import (
-    NON_ROUTABLE,
-    SKILL_CATEGORY,
-    build_manifest,
-    humanize_label,
-    routable_manifest,
-)
+from app.labels import humanize_label
 from app.skills.loader import get_skill, list_skills
 
-EXPECTED_MIN_SKILLS = 56  # PM-Agent-Skills pack + repo-only public-feedback-report
+# The keep-list, stated exactly. This is a CLOSED set, not a floor: the whole
+# point of the trim is that adding a skill back is a decision, not a drop-a-
+# folder side effect. Five artifact methods bound at their own call sites
+# (prd_runner, evidence_kg / evidence_runner, stories/generate, synthesis/agent)
+# plus the four connector-extraction contracts kg_ingest binds by provider.
+KEEPERS = {
+    "prd-author",
+    "implementation-spec",
+    "evidence-brief",
+    "user-stories",
+    "top-insights",
+    "jira-extraction",
+    "hubspot-extraction",
+    "clickup-extraction",
+    "roadmap-extraction",
+}
+
+
+def test_vendored_library_is_exactly_the_keep_list():
+    assert set(list_skills()) == KEEPERS
 
 
 def test_all_installed_skills_load():
-    ids = list_skills()
-    assert len(ids) >= EXPECTED_MIN_SKILLS
-    for sid in ids:
+    for sid in sorted(KEEPERS):
         spec = get_skill(sid)  # raises UnknownSkillError if SKILL.md missing
         assert spec.method.strip(), f"{sid} has empty SKILL.md"
         assert spec.description, f"{sid} has no frontmatter description"
 
 
-def test_manifest_covers_every_installed_skill():
-    manifest_ids = {s["id"] for s in build_manifest()}
-    assert manifest_ids == set(list_skills())
+MIN_DESCRIPTION_CHARS = 60
 
 
-def test_every_skill_is_categorized():
-    missing = [s["id"] for s in build_manifest() if s["category"] == "Uncategorized"]
-    assert missing == [], f"uncategorized skills: {missing}"
-    # the category map shouldn't reference skills that aren't installed
-    stale = set(SKILL_CATEGORY) - set(list_skills())
-    assert stale == set(), f"category map references uninstalled skills: {stale}"
+def test_every_vendored_skill_has_a_usable_description():
+    """A description the frontmatter parser mangled is a silent hole.
+
+    RE-POINTED, not deleted, when the router menu went away. The trap this
+    guards is in `loader._parse_frontmatter`, not in the router: `prd-author`
+    shipped with `description: >` (a YAML block scalar), which the no-YAML-dep
+    parser once reduced to the single character ">". `test_all_installed_skills
+    _load` above asserts the description is truthy, which is exactly why that
+    went unnoticed — ">" is truthy. A LENGTH FLOOR is what actually catches it.
+
+    Still load-bearing with the router gone, because the descriptions it guards
+    still have readers. Five of the nine keepers use a block scalar, including
+    all four KG-extraction skills, whose descriptions
+    `app.graph.evals.SKILL_EXPECTED_VOCAB` is maintained against — a mangled
+    one there degrades the extraction contract Babajide made unconditional.
+
+    60 chars is comfortably below every real description and far above any
+    stray marker.
+    """
+    too_short = [
+        (sid, get_skill(sid).description)
+        for sid in sorted(KEEPERS)
+        if len(get_skill(sid).description.strip()) < MIN_DESCRIPTION_CHARS
+    ]
+    assert too_short == [], (
+        "vendored skills whose frontmatter description carries no usable text "
+        f"(likely an unparsed YAML block scalar in SKILL.md): {too_short}"
+    )
 
 
-def test_non_routable_excluded_from_routable_manifest():
-    routable_ids = {s["id"] for s in routable_manifest()}
-    for sid in NON_ROUTABLE:
-        assert sid in list_skills(), f"{sid} should still be installed"
-        assert sid not in routable_ids, f"{sid} must not be router-pickable"
-
-
-def test_has_scripts_flag_matches_disk():
-    by_id = {s["id"]: s for s in build_manifest()}
-    # The four script-bearing skills per the PM pack.
-    for sid in ("prioritize", "experiment-design", "saas-metrics-diagnosis", "prd-critique"):
-        assert by_id[sid]["has_scripts"] is True, f"{sid} should report has_scripts"
-    # A purely-markdown skill should not.
-    assert by_id["roadmap"]["has_scripts"] is False
+def test_prd_author_description_survived_the_block_scalar():
+    """The original bug, at the surface that matters."""
+    description = get_skill("prd-author").description
+    assert description.strip() != ">"
+    assert "Product Requirements Document" in description
 
 
 def test_humanize_label_uppercases_acronyms():

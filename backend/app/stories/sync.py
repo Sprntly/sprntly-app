@@ -1,6 +1,13 @@
-"""TWO-WAY ticket sync between a PRD's tickets and its tracker (ClickUp/Jira).
+"""TWO-WAY ticket sync between an artifact's tickets and its tracker.
 
-One `run_prd_sync` call is one full sync pass for one PRD. Per ticket, the
+The artifact is a `TicketScope` (app/stories/scope.py): a PRD, or a standalone
+ticket set generated from a chat with no PRD behind it. Both own tickets with
+identical downstream behaviour, so the engine takes a scope rather than a bare
+`prd_id` and everything below — the `_Tracker` adapter, push, status pull-back,
+comments, removal — is owner-agnostic. `run_prd_sync` / `run_set_sync` are the
+two named entry points; `run_ticket_sync` is the shared core.
+
+One such call is one full sync pass for one artifact. Per ticket, the
 pass reconciles BOTH directions with last-writer-wins:
 
   Sprntly → tracker   Local edits (web panel + MCP tools, stored in
@@ -14,7 +21,7 @@ pass reconciles BOTH directions with last-writer-wins:
 
 Change detection: each pass stores, per ticket, a `content_hash` of the
 tracker's title+description and the pass timestamp (`synced_at`) on the
-prd_ticket_sync row. Next pass, "remote changed" = tracker hash differs from
+sync-destination row. Next pass, "remote changed" = tracker hash differs from
 the stored one; "local changed" = the ticket_edits row is newer than
 `synced_at`. Both changed → the newer side wins (timestamps). Neither → no
 API writes at all, so the 15-minute cadence stays cheap.
@@ -24,9 +31,17 @@ path the manual push uses (checklists + dependency links included). Stories
 rehydrated here carry `pinned_id`, so an edited title/body keeps the SAME
 mapping row and updates the same tracker task instead of creating a duplicate.
 
-The sync destination (`prd_ticket_sync` row) is created by the first manual
-push from the web; the scheduler's ticket_sync job then runs this for every
-auto_sync row on an interval, and the web's sync button runs it ad-hoc.
+DELETED and EXCLUDED tickets (app.db.ticket_lifecycle) take a removal path
+instead: their tracker task is deleted — or closed, when the tracker refuses
+on permissions — its mapping dropped, and they are then invisible to the rest
+of the pass. Removals run BEFORE creates, so a ticket excluded in the same
+window it would first have been pushed is never pushed at all. Because the
+work is driven by the mapping row rather than a one-shot flag, a removal that
+fails is simply retried on the next pass.
+
+The sync destination row is created by the first manual push from the web; the
+scheduler's ticket_sync job then runs this for every auto_sync row on an
+interval, and the web's sync button runs it ad-hoc.
 """
 from __future__ import annotations
 
@@ -37,11 +52,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.connectors import asana_oauth, clickup_oauth, jira_oauth
+from app.connectors.tracker_errors import TrackerDeleteForbiddenError
 from app.db.asana_sync import delete_asana_task_gid, get_asana_task_gid
 from app.db.clickup_sync import delete_clickup_task_id, get_clickup_task_id
 from app.db.client import require_client, utc_now
 from app.db.jira_sync import delete_jira_issue_key, get_jira_issue_key
-from app.db.prd_tickets import get_tickets
+from app.db.ticket_lifecycle import is_active
 from app.db.ticket_sync import (
     STALE_SYNC_MINUTES,
     get_sync_config,
@@ -49,14 +65,24 @@ from app.db.ticket_sync import (
     save_sync_result,
 )
 from app.stories.generate import Story
+from app.stories.layout import resolve_layout
+from app.stories.scope import (  # noqa: F401 — title_slug re-exported for callers
+    TicketScope,
+    prd_scope,
+    scope_from_key,
+    set_scope,
+    split_key,
+    title_slug,
+)
 from app.stories.push import (
     _asana_creds,
     _clickup_access_token,
     _jira_creds,
-    push_asana_subtasks,
+    _reconcile_subtasks_checklist,
     push_stories_to_asana,
     push_stories_to_clickup,
     push_stories_to_jira,
+    sync_asana_subtasks,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,27 +107,24 @@ def ticket_sync_providers() -> tuple[str, ...]:
 
 
 class TicketSyncNotConfiguredError(LookupError):
-    """Raised when a PRD has no sync destination yet (never pushed)."""
+    """Raised when an artifact has no sync destination yet (never pushed)."""
 
 
 # ── Ticket keys (web/MCP parity) ─────────────────────────────────────────────
-
-
-def title_slug(title: str | None) -> str:
-    """The web's legacy ticket-key slug fallback (ticketKeyFor mirror):
-    lowercase, non-alphanumeric runs → '-', trimmed, first 60 chars."""
-    slug = re.sub(r"[^a-z0-9]+", "-", (title or "ticket").lower()).strip("-")[:60]
-    return slug or "ticket"
+#
+# `title_slug` and the key composition itself live in app/stories/scope.py so
+# the db layer can use them without importing this module. The PRD-shaped
+# helper below stays because a dozen call sites legitimately hold a bare
+# prd_id and reading `ticket_key_for(prd_id, story)` at those sites is clearer
+# than constructing a scope inline.
 
 
 def ticket_key_for(prd_id: int, story: dict[str, Any]) -> str:
     """The composed ticket key ("prd-{prd_id}-{story_id}") every ticket_edits /
     ticket_comments row is stored under — the same format the web's
-    ticketKeyFor and the MCP surface compose."""
-    sid = story.get("id")
-    if sid:
-        return f"prd-{prd_id}-{sid}"
-    return f"prd-{prd_id}-{title_slug(story.get('title'))}"
+    ticketKeyFor and the MCP surface compose. Sets use `set-{set_id}-{story_id}`
+    via `TicketScope.ticket_key`."""
+    return prd_scope(prd_id).ticket_key(story)
 
 
 # ── Local (Sprntly-side) content forms ───────────────────────────────────────
@@ -135,34 +158,48 @@ def _apply_edit(story: Story, edit: dict[str, Any]) -> Story:
 def story_editable_text(s: Story) -> str:
     """The story's description in the labeled-text form the web edits and the
     override column stores (mirror of the web's storyToEditableText). Used to
-    compare an imported tracker description against the current local one."""
+    compare an imported tracker description against the current local one.
+
+    LAYOUT-DRIVEN, and byte-identical under the default layout: DEFAULT_LAYOUT
+    carries the same five EDIT labels this used to hard-code, including the
+    `scope` → "The ticket must cover" rename. This and `to_description` are two
+    renderings of ONE list — if they ever disagree about a label, the sync sees
+    a permanent phantom diff on every ticket."""
     parts: list[str] = []
-    if s.what:
-        parts.append(f"What\n{s.what}")
-    if s.why_now:
-        parts.append(f"Why now\n{s.why_now}")
-    if s.user_story:
-        parts.append(f"User story\n{s.user_story}")
-    if s.scope:
-        parts.append("The ticket must cover\n" + "\n".join(f"- {x}" for x in s.scope))
-    if s.out_of_scope:
-        parts.append(f"Out of scope\n{s.out_of_scope}")
+    for entry in resolve_layout(s.description_layout):
+        value = s.section_value(entry)
+        # `user_story` deliberately does NOT fall back to `body` here, unlike in
+        # to_description: the trailing `or s.body` below is the freeform case,
+        # and letting the section absorb the body would double it.
+        if entry.source == "user_story":
+            value = s.user_story
+        if not value:
+            continue
+        body = (
+            "\n".join(f"- {x}" for x in value)
+            if isinstance(value, list) else str(value)
+        )
+        parts.append(f"{entry.edit_label}\n{body}")
     return "\n\n".join(parts) if parts else (s.body or "")
 
 
-def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
+def _ticket_contexts(company_id: str, scope: TicketScope) -> list[dict[str, Any]]:
     """Per-ticket sync context: the stored base story, its ticket_edits row
-    (None when untouched), and the merged Story that pushes render from."""
-    row = get_tickets(company_id, prd_id)
-    raw = [s for s in (row.get("stories") if row else None) or [] if isinstance(s, dict)]
+    (None when untouched), and the merged Story that pushes render from.
+
+    `scope.stories()` reads prd_tickets or ticket_sets as appropriate, and the
+    edits LIKE uses `scope.key_prefix` — which carries its own trailing '-', so
+    scope ('prd', 1) can never sweep up ('prd', 12)'s edit rows.
+    """
+    raw = scope.stories(company_id)
     if not raw:
         return []
 
     edits = (
         require_client().table("ticket_edits")
-        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, updated_at")
+        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, assignee, lifecycle, updated_at")
         .eq("company_id", company_id)
-        .like("ticket_key", f"prd-{prd_id}-%")
+        .like("ticket_key", f"{scope.key_prefix}%")
         .execute()
         .data
         or []
@@ -171,7 +208,7 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
 
     out: list[dict[str, Any]] = []
     for s in raw:
-        key = ticket_key_for(prd_id, s)
+        key = scope.ticket_key(s)
         edit = edit_by_key.get(key)
         story = Story.from_dict(s)  # pins the stored id
         if edit:
@@ -182,14 +219,31 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
             "merged": story,
             "key": key,
             "tid": story.stable_id(),
+            # Deleted / excluded tickets are still CARRIED here, not filtered
+            # out: the pass has to see them to remove their tracker copy (and
+            # to retry that removal if it failed last time). Filtering happens
+            # in the pass, per direction.
+            "active": is_active((edit or {}).get("lifecycle")),
         })
     return out
 
 
+def merged_stories_for_scope(company_id: str, scope: TicketScope) -> list[Story]:
+    """The artifact's stored tickets with every saved override applied — what
+    the user (or an MCP client) last saw/edited, not the generator's first
+    draft. Deleted and excluded tickets are left out: this feeds surfaces that
+    render "this artifact's tickets", and a removed one is not one of them."""
+    return [c["merged"] for c in _ticket_contexts(company_id, scope) if c["active"]]
+
+
 def merged_stories_for_prd(company_id: str, prd_id: int) -> list[Story]:
-    """The PRD's stored tickets with every saved override applied — what the
-    user (or an MCP client) last saw/edited, not the generator's first draft."""
-    return [c["merged"] for c in _ticket_contexts(company_id, prd_id)]
+    """`merged_stories_for_scope` for a PRD."""
+    return merged_stories_for_scope(company_id, prd_scope(prd_id))
+
+
+def merged_stories_for_set(company_id: str, set_id: int) -> list[Story]:
+    """`merged_stories_for_scope` for a standalone ticket set."""
+    return merged_stories_for_scope(company_id, set_scope(set_id))
 
 
 # ── Import normalization (tracker → Sprntly) ─────────────────────────────────
@@ -197,13 +251,21 @@ def merged_stories_for_prd(company_id: str, prd_id: int) -> list[Story]:
 # Section labels as the push renders them (bold markdown) → the labeled-text
 # form parseDescBlocks recognizes. "Scope" is renamed on the way out, so map
 # it back on the way in.
-_IMPORT_LABELS = {
-    "**What**": "What",
-    "**Why now**": "Why now",
-    "**User story**": "User story",
-    "**Scope**": "The ticket must cover",
-    "**Out of scope**": "Out of scope",
-}
+#
+# DERIVED from the layout, never written out again: this map has to agree with
+# whatever `to_description` just pushed, and the one way to guarantee that is
+# for both to read the same list. `import_labels_for(None)` reproduces the
+# hard-coded map this used to be, byte for byte.
+
+
+def import_labels_for(layout) -> dict[str, str]:
+    """`{"**<push label>**": "<edit label>"}` for one story's layout."""
+    return {
+        f"**{e.push_label}**": e.edit_label for e in resolve_layout(layout)
+    }
+
+
+_IMPORT_LABELS = import_labels_for(None)
 
 # Sections the push APPENDS to the description render (they live as their own
 # fields in Sprntly). On import, everything from the first of these on is cut
@@ -213,16 +275,23 @@ _GENERATED_TAIL = re.compile(
 )
 
 
-def normalize_imported_description(text: str) -> str:
+def normalize_imported_description(text: str, layout=None) -> str:
     """A tracker-side description → the labeled-text override form: cut the
     generated tail sections (AC / child issues / provenance), and turn the
-    bold section headers the push rendered back into plain labels."""
+    bold section headers the push rendered back into plain labels.
+
+    `layout` is the STORY'S OWN layout (None = the default), so a ticket written
+    under a format the company has since changed still normalises under the
+    labels it was actually pushed with. Getting this wrong is the phantom-diff
+    bug: the labels would not match, `content_hash` would differ on every pass,
+    and the sync would report every ticket as remotely changed forever."""
+    labels = import_labels_for(layout)
     lines: list[str] = []
     for line in (text or "").splitlines():
         stripped = line.strip()
         if _GENERATED_TAIL.match(stripped):
             break
-        lines.append(_IMPORT_LABELS.get(stripped, line))
+        lines.append(labels.get(stripped, line))
     return "\n".join(lines).strip()
 
 
@@ -346,6 +415,9 @@ class _Tracker:
             self.meta = get_cached_meta(company_id, provider, destination)
         except Exception:  # noqa: BLE001 — meta is an enhancement, never a gate
             self.meta = None
+        # Lazily-built email→accountId map for assignee resolution (Jira only).
+        # None = not fetched yet; one assignable-users call serves the whole pass.
+        self._assignee_map: dict[str, str] | None = None
 
     def meta_status(self, name: str | None) -> dict[str, Any] | None:
         """The meta's status entry matching `name` (case-insensitive), or None
@@ -451,10 +523,17 @@ class _Tracker:
         "builtin:points": "points",
     }
 
-    def push_custom_fields(self, ref: str, values: dict[str, Any]) -> None:
+    def push_custom_fields(
+        self, ref: str, values: dict[str, Any],
+        current: dict[str, Any] | None = None,
+    ) -> None:
         """Write normalized custom-field values out (Jira: one PUT batching
         every changed field, built-ins included; ClickUp: task PUT for
-        built-ins + one field-endpoint call per custom field)."""
+        built-ins + one field-endpoint call per custom field).
+
+        `current` is the task's values as the tracker holds them right now,
+        which ClickUp's tag reconcile needs to know what to REMOVE — its tag
+        API is add/remove per tag with no whole-list write."""
         from app.connectors.tracker_meta import encode_field_value, field_def
 
         if self.provider == "asana":
@@ -507,9 +586,17 @@ class _Tracker:
             if not fdef:
                 continue
             if fid == "builtin:tags":
-                # Add-only (ClickUp removal is a separate per-tag endpoint).
-                for tag in v or []:
-                    clickup_oauth.add_task_tag(self._token, ref, str(tag))
+                # ClickUp has no set-the-whole-list write for tags, so a list
+                # reconcile is one call per changed tag in each direction.
+                # Removal needs the tags currently ON the task, which only the
+                # remote read knows — without `current` this degrades to the
+                # old add-only behavior rather than guessing.
+                want = {str(t) for t in v or []}
+                have = {str(t) for t in (current or {}).get(fid) or []}
+                for tag in want - have:
+                    clickup_oauth.add_task_tag(self._token, ref, tag)
+                for tag in have - want:
+                    clickup_oauth.remove_task_tag(self._token, ref, tag)
             elif fid.startswith("builtin:"):
                 key = self._BUILTIN_WRITE_KEYS.get(fid)
                 key = key["clickup"] if isinstance(key, dict) else key
@@ -519,11 +606,15 @@ class _Tracker:
                         if v is not None else None
                     )
             elif v is not None:
-                # ClickUp's field endpoint sets values; clearing (None) has
-                # no uniform API — a cleared override just stops pushing.
                 clickup_oauth.set_custom_field(
                     self._token, ref, fid, encode_field_value("clickup", fdef, v)
                 )
+            else:
+                # A CLEARED override. The set endpoint has no null value, so
+                # this used to just stop pushing and the old value stayed on
+                # the task; ClickUp's remove-value endpoint is what actually
+                # expresses "unset".
+                clickup_oauth.clear_custom_field(self._token, ref, fid)
         if task_patch:
             clickup_oauth.update_task(self._token, ref, extra=task_patch)
 
@@ -551,12 +642,20 @@ class _Tracker:
             return story.clickup_priority()
         return story.jira_priority()
 
-    def push(self, ref: str, story: Story) -> None:
-        """Update the tracker task from the merged local story (content out).
+    def push(self, ref: str, story: Story, remote: dict[str, Any] | None = None) -> None:
+        """Update the tracker task from the merged local story (content out),
+        child issues included.
 
-        Jira: when the project has a sub-task type, the story's child issues
-        sync as REAL sub-tasks (missing ones created, add-only) and the
-        description drops its Child issues text section."""
+        Child issues RECONCILE — added, removed and renamed all land — so the
+        reconcile runs whether or not the story still has any. The old
+        `if story.subtasks:` guard is why removing the LAST child issue could
+        never propagate: an emptied list skipped the very call that would have
+        cleared it.
+
+        `remote` is the task state the pass already fetched; ClickUp's carries
+        the checklists the child-issue reconcile needs, so passing it saves a
+        second read.
+        """
         if self.provider == "clickup":
             clickup_oauth.update_task(
                 self._token, ref,
@@ -564,26 +663,32 @@ class _Tracker:
                 markdown_description=story.to_description(),
                 priority=self._priority_out(story),
             )
+            try:
+                _reconcile_subtasks_checklist(
+                    self._token, ref, story,
+                    checklists=(remote or {}).get("checklists"),
+                )
+            except Exception:  # noqa: BLE001 — children never fail the pass
+                logger.warning("ClickUp checklist sync failed for %s", ref)
             return
         if self.provider == "asana":
             # Asana notes are plain text (no priority/issue-type); status is a
             # section, reconciled separately in set_status. Child issues become
-            # real native subtasks (add-only), so they leave the notes body —
-            # no duplication between the subtask list and the description text.
+            # real native subtasks, so they leave the notes body — no
+            # duplication between the subtask list and the description text.
             asana_oauth.update_task(
                 self._token, ref, name=story.title,
                 notes=story.to_description(include_subtasks=False),
             )
-            if story.subtasks:
-                try:
-                    push_asana_subtasks(
-                        self.company_id, self.destination, ref, story.stable_id(),
-                        story.subtasks, access_token=self._token,
-                    )
-                except Exception:  # noqa: BLE001 — children never fail the pass
-                    logger.warning("Asana sub-task sync failed for %s", ref)
+            try:
+                sync_asana_subtasks(
+                    self.company_id, self.destination, ref, story.stable_id(),
+                    story.subtasks, access_token=self._token,
+                )
+            except Exception:  # noqa: BLE001 — children never fail the pass
+                logger.warning("Asana sub-task sync failed for %s", ref)
             return
-        from app.stories.push import jira_subtask_type, push_jira_subtasks
+        from app.stories.push import jira_subtask_type, sync_jira_subtasks
 
         subtask_type = jira_subtask_type(self.company_id, self.destination)
         jira_oauth.update_issue(
@@ -592,9 +697,9 @@ class _Tracker:
             description=story.to_description(include_subtasks=subtask_type is None),
             priority_name=self._priority_out(story),
         )
-        if subtask_type and story.subtasks:
+        if subtask_type:
             try:
-                push_jira_subtasks(
+                sync_jira_subtasks(
                     self.company_id, self.destination, ref, story.stable_id(),
                     story.subtasks,
                     access_token=self._token, cloud_id=self._cloud,
@@ -648,6 +753,58 @@ class _Tracker:
             logger.info("status push failed for %s (%s)", ref, status)
             return False
 
+    def remove_task(self, ref: str) -> bool:
+        """Delete the whole tracker task/issue for a ticket that left Sprntly
+        (deleted, or excluded from sync).
+
+        Falls back to CLOSING it when the tracker refuses on permissions —
+        Jira's "Delete Issues" is absent from a default permission scheme, and
+        a ticket the user removed still has to leave the active board. Deleting
+        a parent takes its children with it in all three trackers.
+
+        Returns whether the removal landed either way; False means keep the
+        mapping so the next pass retries.
+        """
+        try:
+            if self.provider == "clickup":
+                return clickup_oauth.delete_task(self._token, ref)
+            if self.provider == "asana":
+                return asana_oauth.delete_task(self._token, ref)
+            return jira_oauth.delete_issue(self._token, self._cloud, ref)
+        except TrackerDeleteForbiddenError:
+            return self._close_instead(ref)
+        except Exception as e:  # noqa: BLE001 — one ticket never fails a pass
+            logger.warning("ticket removal failed for %s (%s): %s",
+                           ref, self.provider, e)
+            return False
+
+    def _close_instead(self, ref: str) -> bool:
+        """Close a task the tracker would not let us delete, under the
+        destination's OWN done-status name (never a hardcoded "Done" — a
+        workspace whose column is called "Shipped" has no "Done" to move to)."""
+        try:
+            if self.provider == "asana":
+                asana_oauth.update_task(self._token, ref, completed=True)
+                logger.info("asana task %s could not be deleted — completed instead", ref)
+                return True
+            from app.stories.push import _done_status_name
+
+            done = _done_status_name(self.company_id, self.provider, self.destination)
+            if not done or not self.set_status(ref, done):
+                logger.warning(
+                    "%s task %s could not be deleted or closed — it stays on the "
+                    "board", self.provider, ref,
+                )
+                return False
+            logger.info(
+                "%s task %s could not be deleted — closed as %r instead",
+                self.provider, ref, done,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("close-instead failed for %s: %s", ref, e)
+            return False
+
     def add_comment(self, ref: str, text: str) -> str | None:
         """Post one comment on the tracker task/issue. Returns the tracker's
         comment id, or None on failure (best-effort — retried by the pass)."""
@@ -656,6 +813,93 @@ class _Tracker:
         if self.provider == "asana":
             return asana_oauth.add_task_comment(self._token, ref, text)
         return jira_oauth.add_issue_comment(self._token, self._cloud, ref, text)
+
+    def delete_comment(self, ref: str, tracker_comment_id: str) -> bool:
+        """Delete the tracker comment a Sprntly comment had been pushed as.
+
+        `ref` is only used by Jira, whose comment endpoint is nested under the
+        issue; ClickUp and Asana address a comment by its own id. A comment
+        that is already gone counts as deleted.
+
+        There is no close fallback here — a comment cannot be "closed" — so a
+        tracker that refuses the delete simply leaves it, logged. Returns
+        whether the comment is gone.
+        """
+        try:
+            if self.provider == "clickup":
+                return clickup_oauth.delete_task_comment(
+                    self._token, tracker_comment_id
+                )
+            if self.provider == "asana":
+                return asana_oauth.delete_task_comment(
+                    self._token, tracker_comment_id
+                )
+            return jira_oauth.delete_issue_comment(
+                self._token, self._cloud, ref, tracker_comment_id
+            )
+        except TrackerDeleteForbiddenError:
+            logger.info(
+                "comment %s could not be deleted in %s — the connected account "
+                "may not delete comments there", tracker_comment_id, self.provider,
+            )
+            return False
+        except Exception:  # noqa: BLE001 — a comment delete never fails a pass
+            logger.warning(
+                "comment delete failed for %s (%s)", tracker_comment_id, self.provider
+            )
+            return False
+
+    def _jira_assignee_map(self) -> dict[str, str]:
+        """Lower-cased email → Atlassian accountId for the destination project's
+        assignable users, fetched once per pass and cached. Best-effort: an
+        empty map (bad token / API down) just means no assignee resolves, never
+        an error. Jira exposes an email only for users who've made it public, so
+        some members legitimately have no entry."""
+        if self._assignee_map is None:
+            m: dict[str, str] = {}
+            try:
+                for u in jira_oauth.list_assignable_users(
+                    self._token, self._cloud, self.destination
+                ):
+                    email = (u.get("email") or "").strip().lower()
+                    acct = u.get("accountId")
+                    if email and acct:
+                        m.setdefault(email, acct)
+            except Exception:  # noqa: BLE001 — assignee resolve never blocks a pass
+                logger.warning(
+                    "assignee resolve: assignable-users lookup failed for %s",
+                    self.destination,
+                )
+            self._assignee_map = m
+        return self._assignee_map
+
+    def assignee_ref(self, assignee: dict[str, Any] | None) -> str | None:
+        """Resolve a Sprntly assignee ({email, display_name, …}) to the tracker's
+        own user id. Jira: the accountId whose public email matches the Sprntly
+        member's email (case-insensitive). None when there's no assignee, no
+        email, no match, or a non-Jira provider — assignee sync is Jira-only for
+        now (ClickUp/Asana use different assignee models)."""
+        if self.provider != "jira" or not isinstance(assignee, dict):
+            return None
+        email = (assignee.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return self._jira_assignee_map().get(email)
+
+    def set_assignee(self, ref: str, account_id: str) -> bool:
+        """Best-effort Sprntly→Jira assignee write (an Atlassian accountId from
+        assignee_ref). Jira-only; other providers are a no-op. Failure is
+        non-fatal — the next pass retries."""
+        if self.provider != "jira":
+            return False
+        try:
+            jira_oauth.update_issue(
+                self._token, self._cloud, ref, assignee_account_id=account_id
+            )
+            return True
+        except Exception:  # noqa: BLE001 — assignee push never fails the pass
+            logger.info("assignee push failed for %s (%s)", ref, account_id)
+            return False
 
     def set_issue_type(self, ref: str, issue_type: str) -> bool:
         """Best-effort Sprntly→Jira issue-type write. Jira may refuse a type
@@ -731,28 +975,30 @@ def _write_import(
 # ── Instant push (edit → tracker, no waiting for the scheduler) ─────────────
 
 
-def kick_prd_sync_from_key(company_id: str, ticket_key: str) -> bool:
-    """Fire-and-forget a sync pass for the PRD a just-saved ticket belongs to,
-    so a Sprntly-side edit (status, priority, custom fields, description, …)
+def kick_sync_from_key(company_id: str, ticket_key: str) -> bool:
+    """Fire-and-forget a sync pass for the artifact a just-saved ticket belongs
+    to, so a Sprntly-side edit (status, priority, custom fields, description, …)
     lands in the tracker IMMEDIATELY instead of at the next scheduler tick.
 
-    Safe to call after EVERY save: unbound PRDs and malformed keys are a
+    Works for `prd-*` and `set-*` keys alike — a standalone set's edits reach
+    the tracker on exactly the same latency as a PRD's.
+
+    Safe to call after EVERY save: unbound artifacts and malformed keys are a
     no-op, and a pass already in flight is skipped (single-flight — the
     running pass or the next tick picks the edit up; rapid autosaves don't
     stampede the tracker API). Runs in a daemon thread because the save
     routes are sync-def (threadpool) with no event loop to schedule on.
     Returns True when a pass was actually started."""
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+    scope = scope_from_key(ticket_key)
+    if scope is None:
         return False
-    prd_id = int(parts[1])
     try:
-        cfg = get_sync_config(company_id, prd_id)
+        cfg = get_sync_config(company_id, scope)
         if cfg is None or sync_in_flight(cfg):
             return False
         # Mark before spawning so a second save in the same instant reads
         # "syncing" and skips (mirrors the trigger_sync route).
-        mark_syncing(company_id, prd_id)
+        mark_syncing(company_id, scope)
     except Exception:  # noqa: BLE001 — instant push is an enhancement only
         logger.warning("instant sync kick failed for %s", ticket_key)
         return False
@@ -761,12 +1007,13 @@ def kick_prd_sync_from_key(company_id: str, ticket_key: str) -> bool:
 
     def _run() -> None:
         try:
-            run_prd_sync(company_id, prd_id)
-        except Exception:  # noqa: BLE001 — recorded on the row by run_prd_sync
-            logger.exception("instant ticket sync failed for prd %s", prd_id)
+            run_ticket_sync(company_id, scope)
+        except Exception:  # noqa: BLE001 — recorded on the row by run_ticket_sync
+            logger.exception("instant ticket sync failed for %s %s",
+                             scope.kind, scope.id)
 
     threading.Thread(
-        target=_run, daemon=True, name=f"ticket-sync-{prd_id}"
+        target=_run, daemon=True, name=f"ticket-sync-{scope.kind}-{scope.id}"
     ).start()
     return True
 
@@ -794,13 +1041,13 @@ def kick_comment_push(
     company_id: str, ticket_key: str, comment_id: int, author: str, body: str
 ) -> bool:
     """Fire-and-forget push of one fresh comment to the bound tracker.
-    No-op (False) for unbound PRDs, malformed keys, or never-pushed tickets;
-    a failed push stays unmarked and the next sync pass retries it."""
-    parts = ticket_key.split("-", 2)
-    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+    No-op (False) for unbound artifacts, malformed keys, or never-pushed
+    tickets; a failed push stays unmarked and the next sync pass retries it."""
+    scope, story_ref = split_key(ticket_key)
+    if scope is None:
         return False
     try:
-        cfg = get_sync_config(company_id, int(parts[1]))
+        cfg = get_sync_config(company_id, scope)
     except Exception:  # noqa: BLE001 — comment push is an enhancement only
         return False
     if cfg is None:
@@ -813,12 +1060,22 @@ def kick_comment_push(
             tracker = _Tracker(
                 cfg["provider"], company_id, cfg["destination_id"]
             )
-            ref = tracker.task_ref(parts[2])
+            ref = tracker.task_ref(story_ref)
             if ref is None:
                 return  # never pushed — the pass creates it, then catches up
             tracker_cid = tracker.add_comment(ref, _comment_text(author, body))
             if tracker_cid:
                 _mark_comment_pushed(comment_id, tracker_cid)
+            else:
+                # The tracker call failed (its own log has the HTTP reason).
+                # Leave the comment unmarked so the next sync pass retries it,
+                # but say so — a silent None here is what makes a "my comment
+                # never synced" report impossible to diagnose from the logs.
+                logger.warning(
+                    "instant comment push for %s (%s) returned no id — "
+                    "unmarked, the next sync pass will retry",
+                    ticket_key, ref,
+                )
         except Exception:  # noqa: BLE001 — best-effort; the pass retries
             logger.warning("instant comment push failed for %s", ticket_key)
 
@@ -828,17 +1085,69 @@ def kick_comment_push(
     return True
 
 
+def kick_comment_delete(
+    company_id: str, ticket_key: str, tracker_comment_id: str
+) -> bool:
+    """Fire-and-forget removal of the tracker comment a now-deleted Sprntly
+    comment had been pushed as.
+
+    The counterpart to kick_comment_push. Without it, deleting a comment in
+    Sprntly left it standing in the customer's tracker forever — and unlike a
+    failed push there is no catch-up pass that could ever notice, because the
+    local row (the only record that the comment existed) is gone by then. So
+    this is called with the tracker id read BEFORE the local delete, and a
+    failure here is final: logged, not retried.
+
+    No-op (False) for unbound artifacts, malformed keys, or a comment that was
+    never pushed.
+    """
+    scope, story_ref = split_key(ticket_key)
+    if scope is None:
+        return False
+    if not tracker_comment_id:
+        return False
+    try:
+        cfg = get_sync_config(company_id, scope)
+    except Exception:  # noqa: BLE001 — comment delete is best-effort only
+        return False
+    if cfg is None:
+        return False
+
+    import threading
+
+    def _run() -> None:
+        try:
+            tracker = _Tracker(cfg["provider"], company_id, cfg["destination_id"])
+            ref = tracker.task_ref(story_ref)
+            if ref is None:
+                return  # the ticket itself was never pushed — nothing to delete
+            if not tracker.delete_comment(ref, tracker_comment_id):
+                logger.warning(
+                    "comment %s stays in %s for ticket %s — it was deleted in "
+                    "Sprntly but the tracker delete did not land, and the local "
+                    "row is gone so nothing will retry it",
+                    tracker_comment_id, cfg["provider"], ticket_key,
+                )
+        except Exception:  # noqa: BLE001 — best-effort, never raises
+            logger.warning("comment delete kick failed for %s", ticket_key)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"comment-delete-{tracker_comment_id}"
+    ).start()
+    return True
+
+
 def _unpushed_comments(
-    company_id: str, prd_id: int, bound_since: Any
+    company_id: str, scope: TicketScope, bound_since: Any
 ) -> dict[str, list[dict[str, Any]]]:
     """Unpushed comments per ticket_key, restricted to comments created AFTER
-    the PRD was bound — pre-binding history must never flood the tracker
+    the artifact was bound — pre-binding history must never flood the tracker
     (it already travels in the pushed description's Notes section)."""
     rows = (
         require_client().table("ticket_comments")
         .select("id, ticket_key, author, body, tracker_comment_id, created_at")
         .eq("company_id", company_id)
-        .like("ticket_key", f"prd-{prd_id}-%")
+        .like("ticket_key", f"{scope.key_prefix}%")
         .order("created_at")
         .execute().data
         or []
@@ -858,23 +1167,25 @@ def _unpushed_comments(
 # ── The pass ─────────────────────────────────────────────────────────────────
 
 
-def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
-    """One full two-way sync pass for one PRD (see module docstring).
+def run_ticket_sync(company_id: str, scope: TicketScope) -> dict[str, Any]:
+    """One full two-way sync pass for one artifact (see module docstring).
 
-    Raises TicketSyncNotConfiguredError when the PRD was never pushed. Any
+    Raises TicketSyncNotConfiguredError when the artifact was never pushed. Any
     other failure is recorded on the sync row (last_error) and re-raised.
-    Returns `{"pushed", "imported", "push_errors", "statuses"}`.
+    Returns `{"pushed", "imported", "push_errors", "statuses", "removed"}`.
     """
-    cfg = get_sync_config(company_id, prd_id)
+    cfg = get_sync_config(company_id, scope)
     if cfg is None:
-        raise TicketSyncNotConfiguredError(f"PRD {prd_id} has no sync destination")
+        raise TicketSyncNotConfiguredError(
+            f"{scope.kind} {scope.id} has no sync destination"
+        )
     provider = cfg.get("provider") or ""
     destination = cfg.get("destination_id") or ""
 
-    mark_syncing(company_id, prd_id)
+    mark_syncing(company_id, scope)
     try:
         result = _two_way_pass(
-            company_id, prd_id, provider, destination,
+            company_id, scope, provider, destination,
             prev_statuses=cfg.get("statuses") or {},
             bound_since=cfg.get("created_at"),
         )
@@ -883,38 +1194,92 @@ def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
             if result["push_errors"] else None
         )
         save_sync_result(
-            company_id, prd_id, statuses=result["statuses"], error=error
+            company_id, scope, statuses=result["statuses"], error=error
         )
         return result
     except Exception as e:
         # Leave the row idle with the failure recorded so the UI shows it and
         # the next tick retries; then let the caller see the real exception.
         try:
-            save_sync_result(company_id, prd_id, error=str(e)[:500])
+            save_sync_result(company_id, scope, error=str(e)[:500])
         except Exception:  # noqa: BLE001 — never mask the original failure
-            logger.exception("ticket sync: failed to record error for prd %s", prd_id)
+            logger.exception("ticket sync: failed to record error for %s %s",
+                             scope.kind, scope.id)
         raise
+
+
+def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
+    """One full two-way sync pass for one PRD's tickets."""
+    return run_ticket_sync(company_id, prd_scope(prd_id))
+
+
+def run_set_sync(company_id: str, set_id: int) -> dict[str, Any]:
+    """One full two-way sync pass for one standalone ticket set's tickets."""
+    return run_ticket_sync(company_id, set_scope(set_id))
+
+
+def _remove_off_tracker(tracker: "_Tracker", ctxs: list[dict[str, Any]]) -> int:
+    """Take deleted/excluded tickets out of the tracker. Returns how many left.
+
+    Driven by the MAPPING, not by a flag we set once: a ticket with no mapping
+    row was never pushed and needs nothing, and one whose removal failed keeps
+    its row and is retried here on the next pass. That is what makes the
+    removal eventually-consistent instead of a single best-effort shot at
+    delete time.
+    """
+    removed = 0
+    for c in ctxs:
+        ref = tracker.task_ref(c["tid"])
+        if ref is None:
+            continue  # never pushed (or already removed) — nothing to do
+        if not tracker.remove_task(ref):
+            continue  # keep the mapping; the next pass retries
+        # Forget the task AND its sub-task rows, so a later restore re-creates
+        # the ticket cleanly instead of updating an issue that is gone.
+        tracker.clear_ref(c["tid"])
+        removed += 1
+    return removed
 
 
 def _two_way_pass(
     company_id: str,
-    prd_id: int,
+    scope: TicketScope,
     provider: str,
     destination: str,
     *,
     prev_statuses: dict[str, Any],
     bound_since: Any = None,
 ) -> dict[str, Any]:
-    ctxs = _ticket_contexts(company_id, prd_id)
-    if not ctxs:
-        return {"pushed": 0, "imported": 0, "push_errors": 0, "statuses": {}}
+    all_ctxs = _ticket_contexts(company_id, scope)
+    if not all_ctxs:
+        return {"pushed": 0, "imported": 0, "push_errors": 0, "statuses": {},
+                "removed": 0}
+
+    # Deleted / excluded tickets take the removal path instead of the sync
+    # path: their tracker copy is deleted (or closed), their mapping dropped,
+    # and they are then invisible to everything below — never created, never
+    # updated, never imported back.
+    ctxs = [c for c in all_ctxs if c["active"]]
+    off_tracker = [c for c in all_ctxs if not c["active"]]
 
     tracker = _Tracker(provider, company_id, destination)
     now = utc_now()
+    # Run removals FIRST, before any create: a ticket can be excluded in the
+    # same window it would otherwise have been created in, and doing this
+    # second would push it out only to delete it moments later.
+    removed = _remove_off_tracker(tracker, off_tracker)
+    # Resolve each ticket's Sprntly assignee → tracker user id ONCE (Jira:
+    # email→accountId via one assignable-users lookup, cached on the tracker).
+    # Stashed on the merged story so both the create path (push_stories_to_jira
+    # reads story.assignee_account_id) and the per-ticket reconcile below use it.
+    for c in ctxs:
+        c["merged"].assignee_account_id = tracker.assignee_ref(
+            (c["edit"] or {}).get("assignee")
+        )
     # Comments not yet pushed (instant push failed / made while the pass ran),
     # post-binding only — see _unpushed_comments.
     try:
-        pending_comments = _unpushed_comments(company_id, prd_id, bound_since)
+        pending_comments = _unpushed_comments(company_id, scope, bound_since)
     except Exception:  # noqa: BLE001 — comment catch-up never blocks a pass
         pending_comments = {}
     statuses: dict[str, Any] = {}
@@ -998,14 +1363,17 @@ def _two_way_pass(
 
         if direction == "import":
             remote_title = (remote.get("title") or "").strip()
-            remote_text = normalize_imported_description(remote.get("description") or "")
+            remote_text = normalize_imported_description(
+                remote.get("description") or "",
+                c["merged"].description_layout,
+            )
             if remote_title and remote_title != c["merged"].title:
                 import_fields["title"] = remote_title
             if remote_text and remote_text != story_editable_text(c["merged"]):
                 import_fields["description"] = remote_text
         elif direction == "push":
             try:
-                tracker.push(ref, c["merged"])
+                tracker.push(ref, c["merged"], remote)
                 pushed += 1
                 # Re-read so the stored hash reflects the tracker's own
                 # normalization of what we sent (hash comparisons stay
@@ -1088,6 +1456,18 @@ def _two_way_pass(
         ):
             tracker.set_issue_type(ref, tracker.meta_issue_type(local_type))
 
+        # ── Assignee (Jira), resolved from the Sprntly assignee's email ──
+        # Sprntly owns assignment: whenever the resolved accountId changes
+        # since last pass, write it out best-effort (reconciled independently
+        # of content direction, like status/priority, so an assignee-only
+        # change still lands). Matched by email in assignee_ref; a member with
+        # no public Jira email / no match → want_account is None and Jira's
+        # assignee is left untouched (never force-unassigned). Non-Jira
+        # providers resolve to None here, so this is a no-op for them.
+        want_account = getattr(c["merged"], "assignee_account_id", None)
+        if want_account and want_account != prev.get("assignee_account_id"):
+            tracker.set_assignee(ref, want_account)
+
         # ── Custom fields, tracker-native only (meta present) ──
         # Field-by-field: the tracker changed a field since last pass →
         # import (merged into the edit row). A LOCAL OVERRIDE that differs
@@ -1106,19 +1486,24 @@ def _two_way_pass(
             baseline_cf = not isinstance(prev_cf, dict)
             import_cf: dict[str, Any] = {}
             push_cf: dict[str, Any] = {}
+            # A local override of None is a CLEAR the user asked for, not an
+            # absent override — `fid in local_cf` is the test, never
+            # `lv is not None`. Gating on non-null was why clearing a field in
+            # Sprntly never reached the tracker: the clear was the one edit the
+            # push filtered out.
             for fid, rv in remote_cf.items():
                 pv = (prev_cf or {}).get(fid)
                 lv = local_cf.get(fid, pv)
                 if baseline_cf:
-                    if fid in local_cf and local_cf[fid] is not None and local_cf[fid] != rv:
+                    if fid in local_cf and local_cf[fid] != rv:
                         push_cf[fid] = local_cf[fid]
                 elif rv != pv and rv != lv:
                     import_cf[fid] = rv
-                elif fid in local_cf and lv is not None and lv != rv and rv == pv:
+                elif fid in local_cf and lv != rv and rv == pv:
                     push_cf[fid] = lv
             if push_cf:
                 try:
-                    tracker.push_custom_fields(ref, push_cf)
+                    tracker.push_custom_fields(ref, push_cf, remote_cf)
                     # Snapshot what we just wrote so the next pass doesn't
                     # read our own push back as a remote change.
                     remote_cf.update(push_cf)
@@ -1153,6 +1538,10 @@ def _two_way_pass(
         statuses[tid] = {
             "status": remote_status,
             "assignee": remote.get("assignee"),
+            # The accountId we last wrote for this ticket (from the Sprntly
+            # assignee's email). Kept when unresolved so we neither re-push a
+            # matched assignee every pass nor lose the last-known mapping.
+            "assignee_account_id": want_account or prev.get("assignee_account_id"),
             "url": remote.get("url"),
             "content_hash": remote_hash,
             "synced_at": now,
@@ -1178,4 +1567,5 @@ def _two_way_pass(
     return {
         "pushed": pushed, "imported": imported,
         "push_errors": push_errors, "statuses": statuses,
+        "removed": removed,
     }

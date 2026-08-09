@@ -68,10 +68,16 @@ export function getConnectorRowState(
 
   // Not connected (or connection in a non-active state like "error").
   // "Connect" is clickable if an OAuth backend exists OR the provider uses
-  // API-key auth (commit J — Fireflies) OR a credentials form (Superset).
+  // API-key auth (commit J — Fireflies) OR a credentials form (Superset) OR a
+  // document upload (`uploads` — the user's own files ARE the credential).
   // All surface as "Connect" in the UI; the click handler in
   // ConnectorsSettings picks the right flow based on authType.
-  if (item.oauth || item.authType === "apikey" || item.authType === "credentials") {
+  if (
+    item.oauth
+    || item.authType === "apikey"
+    || item.authType === "credentials"
+    || item.authType === "upload"
+  ) {
     return {
       status: "off",
       actionLabel: "Connect",

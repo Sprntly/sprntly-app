@@ -153,6 +153,17 @@ CREATE TABLE prototype_comments (
     resolved_at  TEXT,
     user_id        TEXT
 );
+-- Multi-screenshot design source: render_export_markdown now resolves
+-- screenshot_count via resolve_screenshot_keys, so the export-path fake DB
+-- needs this table even when no screenshot is seeded.
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

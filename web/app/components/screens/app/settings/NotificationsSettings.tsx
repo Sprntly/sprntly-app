@@ -8,124 +8,45 @@ import {
   connectorsApi,
   type ConnectionSummary,
 } from "../../../../lib/api"
+import {
+  BRIEF_DAYS as DAYS,
+  BRIEF_FREQUENCIES,
+  BRIEF_HOURS as HOURS,
+  type BriefFrequency,
+  anchorForSave,
+  browserTimezone,
+  coerceWeekday,
+  dayOptionLabel,
+  frequencyUsesDay,
+  nextBriefLabel,
+  resolveFrequency,
+  timezones,
+  tzOptionLabel,
+} from "../../../../lib/briefSchedule"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
+import {
+  SELECTABLE_INSIGHT_TYPES,
+  selectableInsightTypes,
+} from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
-const DAYS = [
-  { value: 0, label: "Monday" },
-  { value: 1, label: "Tuesday" },
-  { value: 2, label: "Wednesday" },
-  { value: 3, label: "Thursday" },
-  { value: 4, label: "Friday" },
-  { value: 5, label: "Saturday" },
-  { value: 6, label: "Sunday" },
-]
-// Short weekday names indexed by the DAYS value convention (0 = Monday).
-const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-function hourLabel(h: number): string {
-  const period = h < 12 ? "AM" : "PM"
-  const display = h % 12 === 0 ? 12 : h % 12
-  return `${display}:00 ${period}`
-}
-const HOURS = Array.from({ length: 24 }, (_, h) => ({ value: h, label: hourLabel(h) }))
-
-function timezones(): string[] {
-  // Full IANA list where supported; small sensible fallback otherwise.
-  try {
-    const fn = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] })
-      .supportedValuesOf
-    if (fn) return fn("timeZone")
-  } catch {
-    /* fall through */
-  }
-  return [
-    "UTC",
-    "America/Los_Angeles",
-    "America/Denver",
-    "America/Chicago",
-    "America/New_York",
-    "Europe/London",
-    "Europe/Berlin",
-    "Asia/Kolkata",
-    "Asia/Singapore",
-    "Australia/Sydney",
-  ]
-}
-
-function browserTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  } catch {
-    return "UTC"
-  }
-}
-
-/** "America/Los_Angeles" → "PT" (generic short name), cached per zone. */
-const tzShortCache = new Map<string, string>()
-function tzShort(tz: string): string {
-  let s = tzShortCache.get(tz)
-  if (s === undefined) {
-    try {
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: tz,
-        timeZoneName: "shortGeneric",
-      }).formatToParts(new Date())
-      s = parts.find((p) => p.type === "timeZoneName")?.value ?? ""
-    } catch {
-      s = ""
-    }
-    tzShortCache.set(tz, s)
-  }
-  return s
-}
-
-function tzOptionLabel(tz: string): string {
-  const short = tzShort(tz)
-  const pretty = tz.replace(/_/g, " ")
-  return short ? `${pretty} (${short})` : pretty
-}
-
-/** "Monday, June 1 · 7:00 AM PT" — the next moment the brief will land, in
- *  the delivery timezone. Null if the zone is bogus (line simply hides). */
-function nextBriefLabel(weekday: number, hour: number, tz: string): string | null {
-  const target = WEEKDAY_SHORT[weekday]
-  if (!target) return null
-  try {
-    const now = new Date()
-    for (let i = 0; i <= 7; i++) {
-      const cand = new Date(now.getTime() + i * 86400000)
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: tz,
-        weekday: "short",
-        month: "long",
-        day: "numeric",
-        hour: "numeric",
-        hour12: false,
-      }).formatToParts(cand)
-      const get = (t: string) => parts.find((p) => p.type === t)?.value ?? ""
-      if (get("weekday") !== target) continue
-      // Today, but this week's send time already passed → next week's slot.
-      if (i === 0 && Number(get("hour")) >= hour) continue
-      const wdLong = new Intl.DateTimeFormat("en-US", {
-        timeZone: tz,
-        weekday: "long",
-      }).format(cand)
-      const short = tzShort(tz)
-      return `${wdLong}, ${get("month")} ${get("day")} · ${hourLabel(hour)}${short ? ` ${short}` : ""}`
-    }
-    return null
-  } catch {
-    return null
-  }
-}
 
 type ScheduleFields = {
   emailDigest: boolean
+  frequency: BriefFrequency
   weekday: number
   hour: number
   timezone: string
+  // Workspace-level Top Insights filter — which insight types the brief should
+  // surface for everyone in the workspace (companies.notification_settings.
+  // brief_insight_types). Empty = surface everything.
+  insightTypes: string[]
+}
+
+/** Stable order-insensitive key for comparing an insight-type selection. */
+function typesKey(types: string[]): string {
+  return [...types].sort().join(",")
 }
 
 export function NotificationsSettings() {
@@ -133,9 +54,15 @@ export function NotificationsSettings() {
 
   // "When" (company-wide, persisted on companies.notification_settings).
   const [emailDigest, setEmailDigest] = useState(false)
+  const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
   const [weekday, setWeekday] = useState(0)
   const [hour, setHour] = useState(6)
   const [timezone, setTimezone] = useState("UTC")
+  // Workspace-level insight-type filter.
+  const [insightTypes, setInsightTypes] = useState<string[]>([])
+  // The persisted "every other week" anchor. Kept out of ScheduleFields on
+  // purpose: it is derived, never edited directly, so it must not arm Save.
+  const [storedAnchor, setStoredAnchor] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -155,31 +82,58 @@ export function NotificationsSettings() {
     const loaded: ScheduleFields = {
       emailDigest:
         n.email_enabled != null ? Boolean(n.email_enabled) : n.email_digest === true,
-      weekday: typeof n.brief_weekday === "number" ? n.brief_weekday : 0,
+      // Absent/unknown → weekly, so a company saved before this control existed
+      // keeps firing exactly as it does today.
+      frequency: resolveFrequency(n),
+      // Coerced to Mon–Fri: the Day picker no longer offers a weekend, and a
+      // <select> holding an unofferable value renders a lie.
+      weekday: coerceWeekday(typeof n.brief_weekday === "number" ? n.brief_weekday : 0),
       hour: typeof n.brief_hour === "number" ? n.brief_hour : 6,
       timezone:
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
+      // Narrowed to the offered types: a stored slug with no chip would be
+      // invisible state the admin can neither see nor clear.
+      insightTypes: selectableInsightTypes(n.brief_insight_types),
     }
     setEmailDigest(loaded.emailDigest)
+    setFrequency(loaded.frequency)
     setWeekday(loaded.weekday)
     setHour(loaded.hour)
     setTimezone(loaded.timezone)
+    setInsightTypes(loaded.insightTypes)
+    setStoredAnchor(typeof n.brief_anchor_date === "string" ? n.brief_anchor_date : null)
     setSnapshot(loaded)
   }, [workspace])
 
   const dirty =
     snapshot != null &&
     (emailDigest !== snapshot.emailDigest ||
+      frequency !== snapshot.frequency ||
       weekday !== snapshot.weekday ||
       hour !== snapshot.hour ||
-      timezone !== snapshot.timezone)
+      timezone !== snapshot.timezone ||
+      typesKey(insightTypes) !== typesKey(snapshot.insightTypes))
+
+  function toggleInsightType(value: string) {
+    setInsightTypes((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    )
+    setSaved(false)
+  }
 
   const loadSlack = useCallback(async () => {
     setSlackLoading(true)
     setSlackError(null)
     try {
       const r = await connectorsApi.list()
-      setSlack(r.connections.find((c) => c.provider === "slack") ?? null)
+      // Delivery is per-user: ignore the company's SHARED Slack connection
+      // (voice-of-customer view) — only the user's own install carries
+      // their delivery target.
+      setSlack(
+        r.connections.find(
+          (c) => c.provider === "slack" && !c.config?.company_connection,
+        ) ?? null,
+      )
     } catch (e) {
       setSlackError(
         e instanceof ApiError ? apiErrorMessage(e.status, e.body)
@@ -239,17 +193,32 @@ export function NotificationsSettings() {
       // Merge — don't clobber other notification_settings keys (email_recipients,
       // drip, etc.). Only the fields this page owns are overwritten.
       const existing = workspace.notification_settings ?? {}
+      const anchor = anchorForSave(new Date(), timezone, { weekday, hour })
       await updateWorkspace(workspace.id, {
         notification_settings: {
           ...existing,
           email_enabled: emailDigest,
+          brief_frequency: frequency,
+          // "Every other week" needs an anchor to be deterministic. Stamp it on
+          // every save (cheap, and harmless for the other cadences, which
+          // ignore it): the anchor is the date of the FIRST run after this
+          // save, so the next brief the user sees is always an ON week and the
+          // alternation counts from there.
+          brief_anchor_date: anchor,
           brief_weekday: weekday,
           brief_hour: hour,
           brief_minute: 0,
           timezone,
+          // Workspace-level Top Insights filter. Cleaned to the offered slugs so
+          // a stale client can't violate the companies_brief_insight_types check
+          // constraint. brief_insight_note is deliberately not written — the
+          // free-text override was removed from both pickers; any value already
+          // stored survives in `existing`.
+          brief_insight_types: selectableInsightTypes(insightTypes),
         },
       })
-      setSnapshot({ emailDigest, weekday, hour, timezone })
+      setStoredAnchor(anchor)
+      setSnapshot({ emailDigest, frequency, weekday, hour, timezone, insightTypes })
       setSaved(true)
       await refresh()
     } catch (e) {
@@ -257,14 +226,16 @@ export function NotificationsSettings() {
     } finally {
       setSaving(false)
     }
-  }, [workspace, emailDigest, weekday, hour, timezone, refresh])
+  }, [workspace, emailDigest, frequency, weekday, hour, timezone, insightTypes, refresh])
 
   function onDiscard() {
     if (!snapshot) return
     setEmailDigest(snapshot.emailDigest)
+    setFrequency(snapshot.frequency)
     setWeekday(snapshot.weekday)
     setHour(snapshot.hour)
     setTimezone(snapshot.timezone)
+    setInsightTypes(snapshot.insightTypes)
     setError(null)
   }
 
@@ -283,7 +254,7 @@ export function NotificationsSettings() {
         <div className="pset-body">
           <SettingsSection title="Comms & Brief" sub="Complete onboarding first.">
             <p className="settings-placeholder">
-              <a href="/onboarding/strategy">Finish onboarding →</a>
+              <a href="/onboarding/workspace">Finish onboarding →</a>
             </p>
           </SettingsSection>
         </div>
@@ -293,7 +264,20 @@ export function NotificationsSettings() {
 
   const slackActive = slack?.status === "active"
   const displayName = profileDisplayName(profile ?? null, profile?.email)
-  const nextLabel = nextBriefLabel(weekday, hour, timezone)
+  const showDay = frequencyUsesDay(frequency)
+  // Preview the anchor that will actually be IN EFFECT. While the form is
+  // clean that's the persisted one (so a saved biweekly schedule correctly
+  // shows its off-week skip); an unsaved edit re-anchors from now, which is
+  // precisely what Save is about to store.
+  const previewAnchor = dirty
+    ? anchorForSave(new Date(), timezone, { weekday, hour })
+    : storedAnchor
+  const nextLabel = nextBriefLabel(new Date(), timezone, {
+    weekday,
+    hour,
+    frequency,
+    anchor: previewAnchor,
+  })
 
   return (
     <div className="pset">
@@ -308,26 +292,63 @@ export function NotificationsSettings() {
       />
 
       <div className="pset-body">
-        <h2 className="pset-title">Comms &amp; Brief delivery</h2>
+        <h2 className="pset-title">Communications to you on the Top Product Insights</h2>
         <p className="pset-sub">
-          When the Brief lands, who gets it, and where. All editable — changes
-          take effect on the next run.
+          We send you notifications when we find insights about your business,
+          select the channel and the cadence.
         </p>
 
         <div className="pset-stack">
+          {/* ───────── WHAT: workspace Top Insights filter ─────────
+              Workspace-level — the admin picks which insight types the brief
+              surfaces for everyone. Empty = surface everything. */}
+          <section className="pset-card">
+            <div className="pset-card-head">
+              <h3 className="pset-card-title">Top Insights</h3>
+              <span className="pset-card-hint">
+                · what your workspace should surface — pick any, or leave empty for everything
+              </span>
+            </div>
+            <div className="metric-chips" data-field="insight-types">
+              {SELECTABLE_INSIGHT_TYPES.map((opt) => {
+                const isSel = insightTypes.includes(opt.value)
+                return (
+                  <button
+                    type="button"
+                    key={opt.value}
+                    className={`metric ${isSel ? "sel" : ""}`}
+                    aria-pressed={isSel}
+                    title={opt.description}
+                    onClick={() => toggleInsightType(opt.value)}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+
           {/* ───────── WHERE: Slack (per-user) ───────── */}
           <section className="pset-card">
             <div className="pset-card-head">
               <h3 className="pset-card-title">Slack</h3>
-              <span className="pset-card-hint">· where the Brief is delivered</span>
             </div>
             {slackLoading ? (
               <p className="ob-slack-sub">Checking Slack connection…</p>
             ) : slackActive ? (
               <>
+                {/*
+                  "Pick where Sprntly posts your brief" undersold this: the
+                  picker below sets the target for everything this page sends,
+                  and it offers a DM as well as a channel — so name both, and
+                  use the same "product comms" wording as the not-connected
+                  state directly below. account_label stays interpolated so
+                  someone with two Slack installs knows which one this is.
+                */}
                 <p className="ob-slack-sub">
                   Connected{slack?.account_label ? ` — ${slack.account_label}` : ""}.
-                  Pick where Sprntly posts your brief below.
+                  Choose where Sprntly sends your product comms — a channel, or
+                  a direct message to you.
                 </p>
                 <SlackChannelPicker
                   savedTargetType={slack?.config?.target_type as "channel" | "dm" | undefined}
@@ -348,7 +369,7 @@ export function NotificationsSettings() {
             ) : (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
                 <p className="ob-slack-sub" style={{ margin: 0 }}>
-                  Connect Slack to get your weekly brief in a channel or a DM.
+                  Connect your slack and we will send your product comms through it
                 </p>
                 <button
                   type="button"
@@ -369,8 +390,9 @@ export function NotificationsSettings() {
               hint left, toggle right (no inner row restating the same copy). */}
           <section className="pset-card">
             <div className="pset-card-head" style={{ marginBottom: 0 }}>
-              <h3 className="pset-card-title">Email digest</h3>
-              <span className="pset-card-hint">· also email the Brief to the team</span>
+              <h3 className="pset-card-title">
+                Email Digest: Send communication to me via email.
+              </h3>
               <button
                 type="button"
                 className={`toggle ${emailDigest ? "on" : ""}`}
@@ -385,23 +407,43 @@ export function NotificationsSettings() {
           {/* ───────── WHEN: schedule (company-wide) ───────── */}
           <section className="pset-card">
             <div className="pset-card-head">
-              <h3 className="pset-card-title">Schedule</h3>
-              <span className="pset-card-hint">· when the Brief is generated and sent</span>
+              <h3 className="pset-card-title">
+                Schedule, select a day and time to receive insights about your product.
+              </h3>
             </div>
             <div className="pset-grid pset-grid--3">
               <div className="pset-field">
-                <label className="pset-label" htmlFor="comms-day">Day</label>
+                <label className="pset-label" htmlFor="comms-frequency">Frequency</label>
                 <select
-                  id="comms-day"
+                  id="comms-frequency"
                   className="input"
-                  value={weekday}
-                  onChange={(e) => setWeekday(Number(e.target.value))}
+                  value={frequency}
+                  onChange={(e) => setFrequency(e.target.value as BriefFrequency)}
                 >
-                  {DAYS.map((d) => (
-                    <option key={d.value} value={d.value}>{d.label}s</option>
+                  {BRIEF_FREQUENCIES.map((f) => (
+                    <option key={f.value} value={f.value}>{f.label}</option>
                   ))}
                 </select>
               </div>
+              {/* Daily (weekdays) fires Mon–Fri, so the Day picker would be a
+                  control that does nothing — hide it rather than show it inert. */}
+              {showDay && (
+                <div className="pset-field">
+                  <label className="pset-label" htmlFor="comms-day">Day</label>
+                  <select
+                    id="comms-day"
+                    className="input"
+                    value={weekday}
+                    onChange={(e) => setWeekday(Number(e.target.value))}
+                  >
+                    {DAYS.map((d) => (
+                      <option key={d.value} value={d.value}>
+                        {dayOptionLabel(d.label, frequency)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="pset-field">
                 <label className="pset-label" htmlFor="comms-time">Time</label>
                 <select

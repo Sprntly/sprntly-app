@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 //
-// Round-trip tests for the Templates screen ("what good looks like"): it lists
-// the company's gold-standard templates, uploads a new one (calling
-// templatesApi.upload), and removes one (calling templatesApi.remove) — then
-// re-fetches via templatesApi.list each time.
+// Round-trip tests for the EXEMPLAR half of the Templates screen ("what good
+// looks like"): it lists the company's gold-standard examples, uploads a new
+// one (calling templatesApi.upload), and removes one (calling
+// templatesApi.remove) — then re-fetches via templatesApi.list each time.
+//
+// The screen now mounts a SECOND section above this one — ArtifactFormatsSection,
+// the governing format library — so this file's api mock has to carry
+// `artifactTemplatesApi` and the two contexts that section reads. Without them
+// the mount throws and every test here fails for a reason that has nothing to
+// do with exemplars. The last describe guards the one thing about the pairing
+// that belongs in this file: both sections render, formats on top.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -13,13 +20,42 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const listMock = vi.fn()
 const uploadMock = vi.fn()
 const removeMock = vi.fn()
+const formatsListMock = vi.fn()
 
 vi.mock("../../../../lib/api", () => ({
+  ApiError: class ApiError extends Error {
+    status = 0
+    body: unknown = null
+  },
   templatesApi: {
     list: (...a: unknown[]) => listMock(...a),
     upload: (...a: unknown[]) => uploadMock(...a),
     remove: (...a: unknown[]) => removeMock(...a),
   },
+  artifactTemplatesApi: {
+    list: (...a: unknown[]) => formatsListMock(...a),
+    create: vi.fn(),
+    upload: vi.fn(),
+    update: vi.fn(),
+    compile: vi.fn(),
+    preview: vi.fn(),
+    activate: vi.fn(),
+    deactivate: vi.fn(),
+    remove: vi.fn(),
+    get: vi.fn(),
+  },
+}))
+
+vi.mock("../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    orgRole: "admin",
+    activeWorkspace: { id: "ws-1" },
+    workspace: { display_name: "Acme" },
+  }),
+}))
+
+vi.mock("../../../../context/NavigationContext", () => ({
+  useNavigation: () => ({ showToast: vi.fn() }),
 }))
 
 // AppLayout drags in app contexts; the screen logic under test doesn't need it.
@@ -53,6 +89,10 @@ beforeEach(() => {
   listMock.mockResolvedValue([T1])
   uploadMock.mockResolvedValue({ ok: true, ...T1, id: "t2", filename: "new.md" })
   removeMock.mockResolvedValue({ ok: true, id: "t1" })
+  formatsListMock.mockResolvedValue({
+    templates: [],
+    generation_enabled: { prd: false, tickets: false, impl_spec: false },
+  })
 })
 
 afterEach(() => {
@@ -60,7 +100,18 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("TemplatesScreen", () => {
+// SKIPPED because §2 "Examples we learn from" is commented out of
+// TemplatesScreen (owner, 2026-08-06) — hidden, not deleted. Every one of these
+// exercises the exemplar library THROUGH the screen, so with the block absent
+// they assert markup that is deliberately not rendered. They are skipped rather
+// than deleted for the same reason the block is commented rather than removed:
+// uncommenting it must restore its coverage in one move, and rewriting these
+// from scratch later would silently lose the upload/remove/filter cases.
+//
+// The exemplar component itself is NOT skipped — TemplatesView.test.tsx still
+// runs in full, so the library's own markup and behaviour stay covered while
+// only its mounting is withheld.
+describe.skip("TemplatesScreen — exemplar library (hidden, see comment above)", () => {
   it("lists templates fetched from templatesApi.list on mount", async () => {
     await act(async () => {
       render(React.createElement(TemplatesScreen))
@@ -131,5 +182,49 @@ describe("TemplatesScreen", () => {
       render(React.createElement(TemplatesScreen))
     })
     await waitFor(() => expect(screen.getByText(/network down/i)).toBeTruthy())
+  })
+})
+
+// ── what the screen mounts ───────────────────────────────────────────────────
+describe("TemplatesScreen — the formats library", () => {
+  it("mounts the governing library, alone, inside the one scroller", async () => {
+    const { container } = render(React.createElement(TemplatesScreen))
+    await act(async () => {})
+    await waitFor(() => expect(formatsListMock).toHaveBeenCalled())
+
+    expect(container.querySelector(".tplpage")).toBeTruthy()
+    expect(container.querySelector(".tplpage > .afmt")).toBeTruthy()
+    expect(screen.getByText(/Formats we write in/)).toBeTruthy()
+
+    // §2 is commented out of the screen for now (hidden, not deleted). Asserted
+    // rather than left implicit: if someone uncomments the block, this fails and
+    // makes them revisit the tests that were skipped alongside it, instead of
+    // the exemplar library quietly reappearing with no coverage behind it.
+    expect(screen.queryByText(/Examples we learn from/)).toBeNull()
+  })
+
+  it("shows the formats error in place, with nothing else on screen to confuse it", async () => {
+    formatsListMock.mockRejectedValue(new Error("formats down"))
+    await act(async () => {
+      render(React.createElement(TemplatesScreen))
+    })
+    await waitFor(() =>
+      expect(screen.getByText(/We couldn't load your document formats/)).toBeTruthy(),
+    )
+  })
+
+  it("offers All, PRD and Tickets — engineering spec is withheld for now", async () => {
+    render(React.createElement(TemplatesScreen))
+    await act(async () => {})
+    await waitFor(() => expect(formatsListMock).toHaveBeenCalled())
+
+    expect(screen.getByRole("tab", { name: /^All/ })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: /^PRD/ })).toBeTruthy()
+    expect(screen.getByRole("tab", { name: /^Tickets/ })).toBeTruthy()
+    // Hidden in the UI only — the backend still accepts, compiles and generates
+    // from engineering-spec formats, and a company that already activated one
+    // keeps using it. This asserts the tab is absent, NOT that the feature is.
+    expect(screen.queryByRole("tab", { name: /Engineering spec/ })).toBeNull()
+    expect(screen.queryByRole("heading", { name: "Engineering spec" })).toBeNull()
   })
 })

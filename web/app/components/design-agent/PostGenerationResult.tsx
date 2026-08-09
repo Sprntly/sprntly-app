@@ -201,8 +201,10 @@ export type PostGenerationResultProps = {
   /** Apply a pin comment by running it
    *  through the canvas's SHARED iterate runner IMMEDIATELY (pin-context string +
    *  comment body as the instruction) instead of pre-filling the composer. When
-   *  supplied it takes precedence over `onPinApply`. */
-  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
+   *  supplied it takes precedence over `onPinApply`. Resolves `true` when the
+   *  runner actually started a run, `false` when rejected (e.g. a second submit
+   *  while one is already in flight). */
+  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => Promise<boolean>
   /** the live agent-flow activity for
    *  the LEFT panel — the user request, working steps, completion / clarifying
    *  question / error — driven by the shared runner (useIterateRun). */
@@ -270,8 +272,10 @@ export type PostGenerationResultViewProps = {
   onBundleAssetError?: () => void
   /** Called on the authed iframe `onLoad` so the container can probe the real
    *  status (a 404 body fires `load`, not `error`) and cover a briefly-
-   *  unavailable bundle. Absent on the public surface. */
-  onBundleLoad?: () => void
+   *  unavailable bundle. Absent on the public surface. May return a Promise
+   *  that resolves once the readiness decision is in, so the viewer's load
+   *  mask stays up until then. */
+  onBundleLoad?: () => void | Promise<void>
   /** Bumped on a successful re-mint so the iframe is forced to reload the
    *  now-re-authorized bundle. Folded into the viewer remount key. */
   bundleGrantReloadKey?: number
@@ -356,8 +360,10 @@ export type PostGenerationResultViewProps = {
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
   onSkipQuestion?: () => void | Promise<void>
-  /** pin Apply → immediate iterate. */
-  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
+  /** pin Apply → immediate iterate. Resolves `true` when the runner actually
+   *  started a run, `false` when rejected (e.g. a second submit while one is
+   *  already in flight). */
+  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => Promise<boolean>
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
@@ -1105,7 +1111,13 @@ export function PostGenerationResultView({
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
   // Only appends when the nonce has advanced (keeps the initial load url clean +
   // SSR output stable when no iterate has run). Preserves any existing query.
-  const reloadBundleUrl = viewerSrc(bundleUrl, bundleReloadNonce)
+  // Cache-bust on EITHER trigger: bundleReloadNonce (the caller-owned manual
+  // "Refresh preview" affordance) OR bundleGrantReloadKey (useViewGrant's own
+  // consolidated reloadSignal — bumped only after a CONFIRMED successful mint
+  // for the current checkpoint). Summing two independent, monotonically
+  // non-decreasing counters is sufficient: the composite value only needs to
+  // CHANGE whenever either source changes, it carries no meaning of its own.
+  const reloadBundleUrl = viewerSrc(bundleUrl, bundleReloadNonce + bundleGrantReloadKey)
   // P6-16 (UX-6): the primary View affordance is ALWAYS rendered (never a hidden
   // / dead link — the #6 bug). It is gated only on a built bundle existing:
   // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
@@ -1188,6 +1200,7 @@ export function PostGenerationResultView({
       maskUntilLoaded
       onAssetError={onBundleAssetError}
       onBundleLoad={onBundleLoad}
+      iterateRunning={iterateRunning}
     />
   ) : null
 
@@ -1530,7 +1543,7 @@ export function PostGenerationResult({
   // until the grant exists, so the iframe `src` is never set without a credential
   // the asset GETs can carry. `notifyAssetError` re-mints ONCE on an asset 401
   // (bounded — see useViewGrant). The bundle url is opaque here; we never parse it.
-  const grant = useViewGrant(prototype.id, prototype.bundle_url)
+  const grant = useViewGrant(prototype.id, prototype.bundle_url, prototype.current_checkpoint_id ?? null)
 
   // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
   // (the stateful container) and threaded into the SSR-renderable pure view,
@@ -1637,7 +1650,7 @@ export function PostGenerationResult({
       bundleGrantError={grant.error}
       onBundleAssetError={grant.notifyAssetError}
       onBundleLoad={grant.notifyBundleLoaded}
-      bundleGrantReloadKey={grant.reloadKey}
+      bundleGrantReloadKey={grant.reloadSignal}
       bundleNotReady={grant.notReady}
       onStateChange={(state) => {
         setIsComplete(state.isComplete)
@@ -1691,7 +1704,22 @@ export function PostGenerationResult({
       onSkipQuestion={onSkipQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
-      onRefreshBundle={onRefreshBundle}
+      // Compose the caller's own refresh action (PrototypeRoute's
+      // bundleReloadNonce bump) with a grant-recovery retry: retryAfterError
+      // is a no-op while the grant is healthy, so this changes NOTHING for the
+      // already-working case — it only gives the terminal-error state (where
+      // the caller's nonce bump does nothing, since `viewer` is unmounted) a
+      // real recovery path. Composed here (not in PrototypeRoute) because
+      // `grant` — the only thing that can reset the re-mint budget — is owned
+      // by THIS container, one level above where onRefreshBundle is received.
+      onRefreshBundle={
+        onRefreshBundle
+          ? () => {
+              grant.retryAfterError()
+              onRefreshBundle()
+            }
+          : undefined
+      }
       computedPinPositions={pin.computedPinPositions}
       occludedPins={pin.occludedPins}
       leftPanelRef={leftPanelRef}

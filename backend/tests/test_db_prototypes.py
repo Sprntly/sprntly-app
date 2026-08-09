@@ -378,6 +378,49 @@ def test_find_prototype_by_prd_is_workspace_scoped(proto):
     )
 
 
+# ─── find_prototypes_by_prd — multi-candidate sibling ───────────────────────
+# Backs GET /by-prd/{prd_id}/active, which needs to look PAST a newer row that
+# matches the SQL-level status filter but fails an additional Python-side
+# check (see get_active_by_prd's docstring) — find_prototype_by_prd's
+# `.limit(1)` can't express that fallback.
+
+
+def test_find_prototypes_by_prd_returns_newest_first(proto):
+    # Multiple matching rows come back ordered newest (highest id) first.
+    older = proto.start_prototype(prd_id=90, workspace_id="app", template_version=1)
+    proto.complete_prototype(prototype_id=older, workspace_id="app", bundle_url="https://x")
+    newer = proto.start_prototype(prd_id=90, workspace_id="app", template_version=1)
+    found = proto.find_prototypes_by_prd(
+        prd_id=90, workspace_id="app", statuses=["ready", "generating"]
+    )
+    assert [r["id"] for r in found] == [newer, older]
+
+
+def test_find_prototypes_by_prd_respects_limit(proto):
+    # `limit` bounds the candidate window returned.
+    ids = [
+        proto.start_prototype(prd_id=91, workspace_id="app", template_version=1)
+        for _ in range(4)
+    ]
+    found = proto.find_prototypes_by_prd(
+        prd_id=91, workspace_id="app", statuses=["generating"], limit=2
+    )
+    assert [r["id"] for r in found] == list(reversed(ids))[:2]
+
+
+def test_find_prototypes_by_prd_returns_empty_list_when_no_row(proto):
+    # No matching PRD → [] (not None — the caller iterates the result directly).
+    assert proto.find_prototypes_by_prd(prd_id=999, workspace_id="app") == []
+
+
+def test_find_prototypes_by_prd_is_workspace_scoped(proto):
+    # A row in a FOREIGN workspace is invisible.
+    pid = proto.start_prototype(prd_id=92, workspace_id="other", template_version=1)
+    assert proto.find_prototypes_by_prd(prd_id=92, workspace_id="app") == []
+    found = proto.find_prototypes_by_prd(prd_id=92, workspace_id="other")
+    assert [r["id"] for r in found] == [pid]
+
+
 def test_find_existing_prototype_untouched_by_collapse(proto):
     # Regression guard for the "do not fold this in" decision: find_existing_prototype
     # still filters on template_version/variant and is unaffected by the collapse of

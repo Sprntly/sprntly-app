@@ -1,7 +1,7 @@
   const SIDEBAR_HTML = `
     <div class="sb-brand"><span class="sb-brand-text">spr<span>ntly</span></span></div>
     <div class="sb-section-title">Intelligence</div>
-    <a class="sb-item" data-goto="brief"><span class="sb-icon">✦</span>Weekly brief<span class="sb-count">4</span></a>
+    <a class="sb-item" data-goto="brief"><span class="sb-icon">✦</span>Top Insights<span class="sb-count">4</span></a>
     <a class="sb-item" data-goto="ondemand"><span class="sb-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Ask Sprntly<span class="sb-count">12</span></a>
     <a class="sb-item" data-goto="shipped"><span class="sb-icon">✓</span>Shipped</a>
     <div class="sb-spacer"></div>
@@ -23,7 +23,7 @@
 
   const AI_CONTEXTS = {
     chat:     { path: '/ home', suggest: ['Open this week\'s brief', 'Help me prioritize my roadmap', 'What should I focus on today?'] },
-    brief:    { path: '/ weekly brief', suggest: ['Why is #01 ranked higher than #02?', 'Show the raw signals behind the SMS issue', 'Compare this brief to last week\'s'] },
+    brief:    { path: '/ Top Insights brief', suggest: ['Why is #01 ranked higher than #02?', 'Show the raw signals behind the SMS issue', 'Compare this brief to last week\'s'] },
     detail:   { path: '/ evidence', suggest: ['Run a sensitivity analysis on the revenue model', 'Pull more similar tickets', 'Who has context on SMS verification?'] },
     prd:      { path: '/ PRD', suggest: ['Make the test plan more rigorous', 'Add rollback criteria', 'Who should own this?'] },
     ondemand: { path: '/ ask sprntly', suggest: ['Generate a Q3 strategy', 'Draft a PRD for team folder permissions', 'Compare retention across our top 3 segments'] },

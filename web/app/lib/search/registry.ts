@@ -16,7 +16,7 @@ import type { SearchItem } from "./types"
 /** Extra matchable aliases per settings pane, beyond its nav label. */
 const SETTINGS_KEYWORDS: Partial<Record<SettingsSectionId, string[]>> = {
   profile: ["account", "name", "avatar", "role"],
-  "comms-brief": ["email", "notifications", "weekly brief", "slack"],
+  "comms-brief": ["email", "notifications", "top insights", "slack"],
   "product-category": ["product", "category"],
   "company-profile": ["mission", "icp", "tone", "voice", "company"],
   process: ["planning", "sprint", "cadence"],
@@ -24,7 +24,7 @@ const SETTINGS_KEYWORDS: Partial<Record<SettingsSectionId, string[]>> = {
   "business-context": ["context", "lens", "strategy"],
   workspaces: ["workspace", "rename", "create workspace"],
   team: ["members", "roles", "invite", "permissions"],
-  connectors: ["integrations", "google drive", "github", "figma", "slack", "jira", "clickup", "hubspot", "asana"],
+  connectors: ["integrations", "google drive", "github", "figma", "slack", "jira", "confluence", "clickup", "hubspot", "asana", "zoom", "google meet"],
   mcp: ["token", "api", "model context protocol", "access"],
   billing: ["plan", "subscription", "payment", "invoice"],
   security: ["password", "sign out", "sessions"],
@@ -45,7 +45,7 @@ export const STATIC_PAGE_ITEMS: SearchItem[] = [
   {
     id: "page:/brief",
     group: "pages",
-    title: "Weekly brief",
+    title: "Top Insights",
     subtitle: "This week's findings and insights",
     breadcrumb: ["Pages"],
     url: "/brief",

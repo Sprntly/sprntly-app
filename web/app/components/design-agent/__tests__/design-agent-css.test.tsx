@@ -369,3 +369,179 @@ describe("no new palette (AC6)", () => {
     }
   })
 })
+
+// ── Reskinned viewer placeholder (iterate-reload load mask) ────────────────
+describe("viewer placeholder layout matches the bundle-loading cover", () => {
+  it("test_design_agent_css_viewer_placeholder_matches_bundle_loading_layout", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-viewer-placeholder\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex")
+    expect(rule).toContain("align-items: center")
+    expect(rule).toContain("justify-content: center")
+    expect(rule).toContain("backdrop-filter: blur(")
+  })
+})
+
+describe("public chrome PrototypeViewer mount stays timing-unaffected", () => {
+  it("test_public_chrome_prototype_viewer_has_no_on_bundle_load_prop", () => {
+    const start = PUBLIC_CHROME.indexOf("<PrototypeViewer")
+    expect(start).toBeGreaterThan(-1)
+    // The mount's own self-closing `/>` sits at the SAME indent as the opening
+    // tag; nested JSX (e.g. headControls/stageOverlay children) closes at a
+    // deeper indent, so matching on indent (not the first `/>` seen) finds the
+    // mount's real end rather than a nested self-closing child element.
+    const lineStart = PUBLIC_CHROME.lastIndexOf("\n", start) + 1
+    const indent = PUBLIC_CHROME.slice(lineStart, start)
+    const closeMarker = `\n${indent}/>`
+    const end = PUBLIC_CHROME.indexOf(closeMarker, start)
+    expect(end).toBeGreaterThan(start)
+    const block = PUBLIC_CHROME.slice(start, end)
+    expect(block).not.toContain("onBundleLoad=")
+  })
+})
+
+describe("bundle-loading cover has no fade-in (residual-exposure closure)", () => {
+  it("test_da_bundle_loading_has_no_fade_in_animation", () => {
+    // A mount-time opacity ramp would technically paint whatever sits
+    // underneath (including a raw error body) at near-zero opacity during
+    // its opening frames — the cover must render at full strength the
+    // instant it mounts, with no animation at all.
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-bundle-loading\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).not.toMatch(/animation:/)
+    expect(CSS).not.toContain("@keyframes da-bundle-fade")
+  })
+})
+
+// ── Done-turn response body colour (branding: ink, not accent) ────────────
+describe("done-turn response body colour", () => {
+  it("test_da_activity_done_body_deemphasized_typography — .da-activity-done-body reads as de-emphasized body copy, not a shouted accent label", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-body\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("font-weight: 400;")
+    expect(rule).toContain("color: var(--ink-2);")
+    expect(rule).toContain("align-items: flex-start;")
+    expect(rule).not.toContain("font-weight: 600;")
+    expect(rule).not.toContain("color: var(--ink);")
+    expect(rule).not.toContain("var(--accent-ink)")
+    expect(rule).not.toContain("align-items: center;")
+  })
+
+  it("test_da_activity_done_body_layout_declarations_unchanged — .da-activity-done-body keeps its display/gap layout declarations", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-body\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex;")
+    expect(rule).toContain("gap: 8px;")
+  })
+
+  it("test_da_activity_done_icon_has_optical_margin_nudge — .da-activity-done-icon gains a 1px top margin to align with the de-emphasized, top-aligned body", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-icon\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("margin-top: 1px;")
+  })
+
+  it("test_da_activity_done_icon_other_declarations_unchanged — .da-activity-done-icon's other declarations are byte-unchanged", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-icon\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("flex-shrink: 0;")
+    expect(rule).toContain("width: 16px;")
+    expect(rule).toContain("height: 16px;")
+    expect(rule).toContain("background: var(--accent-soft);")
+    expect(rule).toContain("color: var(--accent);")
+    expect(rule).toContain("border-radius: 50%;")
+    expect(rule).toContain("font-size: 10px;")
+  })
+
+  it("test_da_activity_terminal_done_label_has_scoped_margin — a new, more-specific selector scopes the done-card label's margin to 6px", () => {
+    const block = [
+      ".design-agent-surface .da-activity-terminal--done .da-activity-agent-label {",
+      "  margin: 0 0 6px;",
+      "}",
+    ].join("\n")
+    expect(CSS).toContain(block)
+  })
+
+  it("test_da_activity_agent_label_base_rule_unaffected_by_scoped_override — the BASE, unscoped .da-activity-agent-label rule keeps its 4px margin", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-agent-label\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("margin: 0 0 4px;")
+  })
+
+  it("test_da_activity_terminal_base_rule_is_a_flex_row — the shared .da-activity-terminal rule (skipped/error single-line layout) stays an unstacked flex row", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-terminal\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex;")
+    expect(rule).toContain("align-items: center;")
+    expect(rule).not.toContain("flex-direction")
+  })
+
+  it("test_da_activity_terminal_done_overrides_to_a_column_stack — the done variant overrides the shared row layout into a full-width column stack (label above the response body, not squeezed beside it)", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-terminal--done\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("flex-direction: column;")
+    expect(rule).toContain("align-items: stretch;")
+  })
+
+  it("test_da_activity_terminal_skipped_and_error_unaffected_by_done_override — the --skipped/error terminal kinds are untouched by the done-only column override", () => {
+    expect(CSS).not.toMatch(
+      /\.design-agent-surface\s+\.da-activity-terminal--skipped\s*\{[^}]*flex-direction/,
+    )
+    // the --skipped selector itself still exists unmodified (icon + text rules).
+    expect(CSS).toContain(
+      ".design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-icon {",
+    )
+    expect(CSS).toContain(
+      ".design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-text {",
+    )
+  })
+
+  it("test_da_activity_agent_label_color_unchanged — .da-activity-agent-label keeps its accent colour (regression pin, label unaffected)", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-agent-label\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("color: var(--accent);")
+  })
+
+  it("test_da_activity_done_rule_byte_unchanged — the sibling .da-activity-done rule (confirmed dead) is untouched, still accent-ink", () => {
+    const block = [
+      ".design-agent-surface .da-activity-done {",
+      "  display: flex;",
+      "  align-items: center;",
+      "  gap: 8px;",
+      "  font-size: 12.5px;",
+      "  font-weight: 600;",
+      "  color: var(--accent-ink);",
+      "}",
+    ].join("\n")
+    expect(CSS).toContain(block)
+  })
+})

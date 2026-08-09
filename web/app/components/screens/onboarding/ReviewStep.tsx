@@ -6,23 +6,35 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { saveBusinessContextSummary } from "../../../lib/onboarding/store"
-import {
-  prefetchBusinessContextDraft,
-  prefetchMetricDefinitions,
-} from "../../../lib/onboarding/draftPrefetch"
+import { prefetchBusinessContextDraft } from "../../../lib/onboarding/draftPrefetch"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 
 const DRAFT_KEY = "review-step"
 
 /**
- * Onboarding step 09 — "Here's what we learned" (v6 screenshot spec
- * 2026-07-17). The closing NUMBERED step.
+ * Widths of the shimmer lines standing in for the drafted prose, as ragged
+ * paragraph-ish runs so the placeholder reads as text rather than a bar chart.
+ * Inline so the shared `.assistant-skel-line` nth-child widths (tuned for a
+ * 3-line chat skeleton) don't apply here.
+ */
+const DRAFT_SKELETON_WIDTHS = [
+  "96%", "88%", "93%", "61%",
+  "91%", "97%", "84%", "72%",
+  "94%", "89%", "46%",
+]
+
+/**
+ * Onboarding step 08 — "Here's what we learned" (2026-07-21 screenshot spec).
  *
  * Shows the AI-drafted business-context prose (from everything shared plus
  * the website analysis and connected data), fully editable, with a "This
  * looks accurate" checkbox. Accepting stores it on
- * companies.business_context_summary (+ accepted stamp) and hands off to the
- * define-metrics sub-flow, which completes onboarding.
+ * companies.business_context_summary (+ accepted stamp) and continues to the
+ * personalize step.
+ *
+ * This step used to own the define-metrics gate. Personalize was inserted
+ * between it and the sub-flow, so the branch (and the metric-definition
+ * prefetch that warms it) moved there — see PersonalizeStep.
  *
  * Draft resolution order: an in-progress local draft → the previously saved
  * summary → a fresh backend draft (with a graceful manual-writing fallback
@@ -75,19 +87,6 @@ export function ReviewStep() {
       .finally(() => setDrafting(false))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // While the user reads/edits the prose, draft the metric definitions in the
-  // BACKGROUND so the define-metrics screens open pre-filled instead of
-  // spinning. Same memoized request DefineMetrics joins; fire-and-forget.
-  useEffect(() => {
-    if (!workspace) return
-    if (workspace.metric_definitions.length) return
-    const names = workspace.kpi_tree.metrics
-      .map((m) => m.name.trim())
-      .filter(Boolean)
-    if (!names.length) return
-    prefetchMetricDefinitions(workspace.id, names).catch(() => {})
-  }, [workspace])
-
   async function accept() {
     if (!workspace || auth.kind !== "authed") return
     setError(null)
@@ -104,7 +103,7 @@ export function ReviewStep() {
       )
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/define-metrics")
+      router.push("/onboarding/personalize")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your business context.")
       setSaving(false)
@@ -115,7 +114,7 @@ export function ReviewStep() {
 
   return (
     <OnboardingChrome
-      step={10}
+      step={9}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -126,7 +125,7 @@ export function ReviewStep() {
       footerMeta="Review business context"
       onBack={() => router.push("/onboarding/invite")}
       onContinue={() => void accept()}
-      continueLabel="Next · define metrics"
+      continueLabel="Next · personalize"
       continueDisabled={saving || drafting || !summary.trim()}
       loading={saving}
       wideCard
@@ -142,9 +141,30 @@ export function ReviewStep() {
       </div>
 
       {drafting ? (
-        <p className="onb-field-hint" role="status">
-          Drafting your business context from everything you shared…
-        </p>
+        // Keep the page shaped like the editor it's about to become: a
+        // textarea-sized shimmer plus the checkbox row, so the card doesn't
+        // read as empty (with a dead Continue) while the draft generates.
+        <>
+          <div className="onb-draft-skel" aria-hidden>
+            {DRAFT_SKELETON_WIDTHS.map((width, i) => (
+              <span key={i} className="assistant-skel-line" style={{ width }} />
+            ))}
+          </div>
+          <div
+            style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}
+            aria-hidden
+          >
+            <span
+              className="assistant-skel-line"
+              style={{ width: 13, height: 13, borderRadius: 3 }}
+            />
+            <span className="assistant-skel-line" style={{ width: 128 }} />
+          </div>
+          <p className="onb-field-hint" role="status">
+            Generating your business context from everything you shared — this
+            usually takes a few seconds.
+          </p>
+        </>
       ) : (
         <>
           {draftFailed && !summary.trim() && (

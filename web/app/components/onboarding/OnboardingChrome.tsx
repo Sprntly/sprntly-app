@@ -23,6 +23,8 @@ export function OnboardingChrome({
   footerMeta,
   children,
   onBack,
+  onSkip,
+  skipLabel = "Skip",
   onContinue,
   continueLabel = "Continue",
   continueDisabled,
@@ -37,6 +39,13 @@ export function OnboardingChrome({
   footerMeta?: ReactNode
   children: ReactNode
   onBack?: () => void
+  /**
+   * Optional Skip button, rendered between Back and Continue. Used by steps
+   * that advance something in place (the connector accordion) rather than
+   * leaving the step, where a footer-meta text link reads too weakly.
+   */
+  onSkip?: () => void
+  skipLabel?: string
   onContinue?: () => void
   continueLabel?: string
   continueDisabled?: boolean
@@ -82,6 +91,16 @@ export function OnboardingChrome({
             disabled={loading}
           >
             <ArrowLeft style={{ width: 13, height: 13 }} aria-hidden /> Back
+          </button>
+        )}
+        {onSkip && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onSkip}
+            disabled={loading}
+          >
+            {skipLabel}
           </button>
         )}
         {onContinue && (

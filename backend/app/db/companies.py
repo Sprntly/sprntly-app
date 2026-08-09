@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 
 from app.db.authcache import memberships_cache, profile_name_cache
 from app.db.client import require_client, retry_on_disconnect
+from app.llm_providers import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    normalize_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +29,7 @@ def list_companies() -> list[dict]:
 
     Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
     to read each company owner's timezone (profiles.timezone, resolved via the
-    company's `owner`-role member) so the weekly brief fires Monday 06:00 in the
+    company's `owner`-role member) so the Top Insights brief fires Monday 06:00 in the
     owner's local time.
 
     notification_settings is selected best-effort: the fake test Supabase + any
@@ -313,14 +319,56 @@ def get_notification_settings(company_id: str) -> dict:
     return result.data[0].get("notification_settings") or {}
 
 
-@retry_on_disconnect
-def get_company_llm_config(company_id: str) -> tuple[str | None, bool, bool]:
-    """Everything the key resolver (app.llm_keys) needs in one read:
+# Where each provider's Fernet-encrypted key lives on `companies`. Keyed by the
+# value stored in `companies.llm_provider` (see app.llm_providers for the
+# provider identities themselves), so adding a provider is one entry here plus a
+# client factory — no call site changes.
+_KEY_COLUMNS = {
+    PROVIDER_ANTHROPIC: "llm_api_key_encrypted",
+    PROVIDER_OPENAI: "openai_api_key_encrypted",
+}
 
-      (encrypted_key_or_None, use_platform_key, onboarding_complete)
+
+def _key_column(provider: str) -> str:
+    """The key column for `provider`, defaulting to Anthropic's.
+
+    Falls back rather than raising: `llm_provider` is constrained in the schema,
+    but this sits on the LLM hot path and an unexpected value must degrade to
+    today's behaviour rather than take generation down.
+    """
+    return _KEY_COLUMNS.get(provider, _KEY_COLUMNS[PROVIDER_ANTHROPIC])
+
+
+@dataclass(frozen=True)
+class CompanyLLMConfig:
+    """Everything the key resolver (app.llm_keys) needs, in one read.
+
+    Was a 3-tuple until the OpenAI provider landed. Both ciphertexts are carried
+    whichever provider is active, deliberately: an admin can hold a Claude key
+    and an OpenAI key at once and flip `provider` between them, so the resolver
+    reads the pair and picks — it never has to go back to the DB on a switch.
+    """
+
+    provider: str = PROVIDER_ANTHROPIC
+    anthropic_cipher: str | None = None
+    openai_cipher: str | None = None
+    use_platform_key: bool = False
+    onboarding_complete: bool = False
+
+    def cipher_for(self, provider: str) -> str | None:
+        return (
+            self.openai_cipher
+            if provider == PROVIDER_OPENAI
+            else self.anthropic_cipher
+        )
+
+
+@retry_on_disconnect
+def get_company_llm_config(company_id: str) -> CompanyLLMConfig:
+    """The company's LLM posture: active provider, both keys, billing flags.
 
     `onboarding_complete` is `companies.onboarding_completed_at IS NOT NULL`. A
-    missing company row returns (None, False, False) — treated as still
+    missing company row returns the all-defaults config — treated as still
     onboarding (lenient: platform allowed) by the resolver. An id that isn't
     even a valid UUID (a legacy dataset slug or telemetry tag bound by an older
     gateway caller) is definitionally not a company: it gets the same lenient
@@ -335,58 +383,90 @@ def get_company_llm_config(company_id: str) -> tuple[str | None, bool, bool]:
             "(platform-key posture). Fix the caller to bind a company id.",
             company_id,
         )
-        return (None, False, False)
+        return CompanyLLMConfig()
     client = require_client()
     result = (
         client.table("companies")
-        .select("llm_api_key_encrypted, use_platform_key, onboarding_completed_at")
+        .select(
+            "llm_api_key_encrypted, openai_api_key_encrypted, llm_provider, "
+            "use_platform_key, onboarding_completed_at"
+        )
         .eq("id", company_id)
         .limit(1)
         .execute()
     )
     if not result.data:
-        return (None, False, False)
+        return CompanyLLMConfig()
     row = result.data[0]
-    cipher = row.get("llm_api_key_encrypted") or None
-    use_platform = bool(row.get("use_platform_key"))
-    onboarding_complete = row.get("onboarding_completed_at") is not None
-    return (cipher, use_platform, onboarding_complete)
+    return CompanyLLMConfig(
+        # A pre-migration row read by a newer process has no value here; treat
+        # it as Anthropic so the column's absence can never move a workspace
+        # onto a provider nobody chose.
+        provider=normalize_provider(row.get("llm_provider")),
+        anthropic_cipher=row.get("llm_api_key_encrypted") or None,
+        openai_cipher=row.get("openai_api_key_encrypted") or None,
+        use_platform_key=bool(row.get("use_platform_key")),
+        onboarding_complete=row.get("onboarding_completed_at") is not None,
+    )
 
 
 @retry_on_disconnect
-def get_llm_api_key_encrypted(company_id: str) -> str | None:
-    """Read a company's Fernet-encrypted Claude API key ciphertext, or None when
-    unset. Decryption happens at the point of use (app.llm_keys); this returns
-    the raw ciphertext exactly as stored."""
+def get_llm_api_key_encrypted(
+    company_id: str, provider: str = PROVIDER_ANTHROPIC
+) -> str | None:
+    """Read a company's Fernet-encrypted key ciphertext for `provider`, or None
+    when unset. Decryption happens at the point of use (app.llm_keys); this
+    returns the raw ciphertext exactly as stored."""
+    column = _key_column(provider)
     client = require_client()
     result = (
         client.table("companies")
-        .select("llm_api_key_encrypted")
+        .select(column)
         .eq("id", company_id)
         .limit(1)
         .execute()
     )
     if not result.data:
         return None
-    return result.data[0].get("llm_api_key_encrypted") or None
+    return result.data[0].get(column) or None
 
 
 @retry_on_disconnect
-def set_llm_api_key_encrypted(company_id: str, cipher: str) -> None:
-    """Store a company's Fernet-encrypted Claude API key (ciphertext only — the
-    column never holds plaintext)."""
+def set_llm_api_key_encrypted(
+    company_id: str, cipher: str, provider: str = PROVIDER_ANTHROPIC
+) -> None:
+    """Store a company's Fernet-encrypted key for `provider` (ciphertext only —
+    the column never holds plaintext)."""
     client = require_client()
     client.table("companies").update(
-        {"llm_api_key_encrypted": cipher}
+        {_key_column(provider): cipher}
     ).eq("id", company_id).execute()
 
 
 @retry_on_disconnect
-def clear_llm_api_key(company_id: str) -> None:
-    """Remove a company's Claude API key (revert to the platform key)."""
+def clear_llm_api_key(company_id: str, provider: str = PROVIDER_ANTHROPIC) -> None:
+    """Remove a company's key for `provider` (revert to the platform key).
+
+    Deliberately does NOT change `llm_provider`: "I no longer want you holding
+    my OpenAI key" and "put me back on Claude" are separate decisions, and
+    silently switching provider on a delete would move every subsequent call to
+    a different model family without anyone asking for it. A workspace still
+    pointed at a provider it has no key for runs on the platform key for that
+    provider, exactly as a keyless Claude workspace always has."""
     client = require_client()
     client.table("companies").update(
-        {"llm_api_key_encrypted": None}
+        {_key_column(provider): None}
+    ).eq("id", company_id).execute()
+
+
+@retry_on_disconnect
+def set_llm_provider(company_id: str, provider: str) -> None:
+    """Set which provider this company's LLM calls run on."""
+    if provider not in _KEY_COLUMNS:
+        raise ValueError(f"Unknown LLM provider: {provider!r}")
+    client = require_client()
+    client.table("companies").update(
+        {"llm_provider": provider}
     ).eq("id", company_id).execute()
 
 

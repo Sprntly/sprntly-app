@@ -149,12 +149,23 @@ export function RoadmapDocScreen() {
             <EmptyPane title="Loading your roadmap…" hint="" placeholders={3} />
           )}
 
+          {/* The "or Settings" half of this pointer used to be dead: there was
+              no roadmap upload anywhere in Settings. Now there is (Settings →
+              Process & Planning → Roadmap document), so name it exactly and
+              link straight there. */}
           {state.kind === "empty" && (
-            <EmptyPane
-              title="No roadmap uploaded yet"
-              hint="Upload your roadmap in onboarding (Strategy step) or Settings — Sprntly loads it in and pressure-tests it against your data."
-              placeholders={0}
-            />
+            <>
+              <EmptyPane
+                title="No roadmap uploaded yet"
+                hint="Add it in Settings → Process & Planning, or at the Workspace step of onboarding — Sprntly loads it in and pressure-tests it against your data."
+                placeholders={0}
+              />
+              <div className="rmdoc-foot">
+                <a href="/settings?section=process">
+                  Upload a roadmap in Process &amp; Planning →
+                </a>
+              </div>
+            </>
           )}
 
           {state.kind === "error" && (

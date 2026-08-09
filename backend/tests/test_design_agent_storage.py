@@ -996,6 +996,20 @@ def _stub_generate(monkeypatch, routes_mod, *, status="complete", iters=1, virtu
     monkeypatch.setattr(routes_mod, "generate_prototype", _fake)
 
 
+async def _repair_noop(**kwargs):
+    """Simulate the agent failing to fix the build: return the source unchanged
+    at zero cost so a build-repair loop runs its full bounded re-tries before
+    giving up, WITHOUT ever calling the real design-agent client — the client
+    factory's config isn't reloaded per-test (see `env`'s docstring), so any
+    test that lets a caught ViteBuildError/TypeCheckError fall into the real
+    `repair_build_run` is exercising live-provider config, not this route's
+    own retry/exhaustion contract. Stub this on `routes_mod` whenever a test
+    stubs `vite_build_with_repair` to raise — mirrors
+    `test_complete_path_repairs_then_precise_fails_on_typecheck_error`."""
+    result = SimpleNamespace(usage=SimpleNamespace(est_cost_usd=lambda m: 0.0))
+    return result, kwargs["virtual_fs"]
+
+
 def _async_return(value):
     async def _f(*args, **kwargs):
         return value
@@ -1133,6 +1147,11 @@ async def test_route_hook_marks_failed_on_vite_build_error(env, monkeypatch):
         env.routes, "vite_build_with_repair",
         _async_raise(ViteBuildError("vite build exit=1: SyntaxError")),
     )
+    # The route re-enters the agent-driven repair loop on a ViteBuildError (see
+    # `_stage_complete_run`'s except clause); stub it so the identical mocked
+    # ViteBuildError just exhausts the bounded re-tries deterministically,
+    # without touching the real design-agent client/provider config.
+    monkeypatch.setattr(env.routes, "repair_build_run", _repair_noop)
     monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)

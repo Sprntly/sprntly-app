@@ -145,6 +145,23 @@ describe("connectorsApi Slack methods", () => {
     expect(body.channel_name).toBeUndefined()
   })
 
+  it("setSlackSyncChannels POSTs the {id, name} selection to /slack/sync-channels", async () => {
+    await connectorsApi.setSlackSyncChannels([
+      { id: "C1", name: "customer-feedback" },
+      { id: "C2" },
+    ])
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack/sync-channels`)
+    expect(lastCall!.init?.method).toBe("POST")
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      channels: [{ id: "C1", name: "customer-feedback" }, { id: "C2" }],
+    })
+  })
+
+  it("setSlackSyncChannels POSTs an empty list to clear the selection", async () => {
+    await connectorsApi.setSlackSyncChannels([])
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({ channels: [] })
+  })
+
   it("setSlackConfig (dm) POSTs only target_type, no channel fields", async () => {
     await connectorsApi.setSlackConfig({ targetType: "dm" })
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({ target_type: "dm" })

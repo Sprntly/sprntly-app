@@ -6,6 +6,12 @@ The scheduler (app/scheduler.py) runs `run_drip_cycle` periodically; this
 module owns the cadence definition, the per-step copy, and the Resend send
 path.
 
+Each step has a BOUNDED send window — day_offset <= age_days <=
+day_offset + grace (DEFAULT_GRACE_DAYS, overridable per-company and
+globally; see resolve_grace_days). A step that ages out is recorded as
+"skipped" so it is permanently disarmed. Without that upper bound a member
+older than the whole ladder received every unsent step in a single burst.
+
 Design mirrors app/team_email.py:
   - Resolve config (settings / supabase client) at call time so the test
     suite's config reload + monkeypatched client win.
@@ -41,7 +47,10 @@ class DripStep:
     """One step of the onboarding drip sequence.
 
     `key`        — stable id persisted in drip_email_sends.step_key.
-    `day_offset` — send once the member is at least this many days old.
+    `day_offset` — the LOWER edge of the send window: send once the member is
+                   at least this many days old. The upper edge is
+                   day_offset + the resolved grace (see resolve_grace_days);
+                   run_drip_cycle disarms anything past it.
     `subject` / `body_text` — rendered with the recipient/company context.
     """
 
@@ -63,7 +72,7 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
         body_text=(
             "Hi {name},\n\n"
             "Welcome to Sprntly! You're one step away from turning {company}'s "
-            "product signals into a weekly brief.\n\n"
+            "product signals into a Top Insights brief.\n\n"
             "To get the most out of Sprntly, connect your first data source "
             "(Slack, Linear, Zendesk, or Amplitude) so we can start building "
             "your knowledge graph.\n\n"
@@ -98,12 +107,86 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
 )
 
 
+# How many days past a step's day_offset that step may still be sent.
+#
+# Why 2:
+#   - The job runs every DRIP_INTERVAL_HOURS (default 6), so a 2-day window is
+#     8 consecutive cycles. A step only ages out if the scheduler was down (or
+#     the backend was mid-deploy) for a full weekend — the realistic outage
+#     shape here, cf. the 2026-07-19 Actions/deploy outage.
+#   - It keeps the worst-case burst small. The default ladder is 1/3/7, so with
+#     grace 2 the windows are [1,3], [3,5], [7,9]: at most two of them can be
+#     armed for the same member on the same cycle (only at exactly age 3), vs.
+#     the whole unsent ladder firing at once before this bound existed.
+#   - It stays well under the smallest gap in the ladder (day_1 → day_3 = 2
+#     days), so a member who is being served normally never sits inside three
+#     windows at once.
+# Overridable per-company via notification_settings["drip"]["grace_days"] and
+# globally via DRIP_GRACE_DAYS — same precedence shape as the cadence itself.
+DEFAULT_GRACE_DAYS = 2
+
+
+def _coerce_grace(value) -> int | None:
+    """Coerce a configured grace value to a non-negative int, or None if it
+    isn't usable (so the caller falls through to the next precedence level).
+
+    `bool` is rejected explicitly: it is an int subclass, and silently reading
+    `grace_days: true` as a 1-day window would be a surprising, hard-to-spot
+    narrowing of the send window."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        grace = int(value)
+    except (TypeError, ValueError):
+        return None
+    # A negative window is meaningless; clamp to 0 = "same-day only".
+    return max(0, grace)
+
+
+def resolve_grace_days(notification_settings: dict | None) -> int:
+    """Resolve the send-window grace (in days) for a company.
+
+    Resolution order mirrors resolve_cadence (highest precedence first):
+      1. Per-company: notification_settings["drip"]["grace_days"].
+      2. Global: settings.drip_grace_days (DRIP_GRACE_DAYS).
+      3. DEFAULT_GRACE_DAYS.
+
+    Unparseable values at any level fall through to the next one rather than
+    raising — this runs inside the scheduler's email path, where a typo in a
+    tenant's JSONB must not take out the cycle for every other company.
+
+    Note this does NOT re-check notification_settings["drip"]["enabled"]: the
+    per-company kill switch already lives in resolve_cadence (which returns []
+    and short-circuits the whole company)."""
+    ns = notification_settings or {}
+    drip_cfg = ns.get("drip") if isinstance(ns, dict) else None
+    drip_cfg = drip_cfg if isinstance(drip_cfg, dict) else {}
+
+    # 1. Per-company override.
+    grace = _coerce_grace(drip_cfg.get("grace_days"))
+    if grace is not None:
+        return grace
+
+    # 2. Global override.
+    raw = getattr(config_mod.settings, "drip_grace_days", "")
+    raw = raw.strip() if isinstance(raw, str) else raw
+    if raw != "" and raw is not None:
+        grace = _coerce_grace(raw)
+        if grace is not None:
+            return grace
+
+    # 3. Built-in default.
+    return DEFAULT_GRACE_DAYS
+
+
 def _from_address() -> str:
     """The From: header for drip emails. Overridable via DRIP_FROM_EMAIL;
-    defaults to a sane onboarding sender. Resolved at call time so test
-    config reloads apply."""
+    defaults to the onboarding sender on the Resend-verified mail.sprntly.ai
+    domain — the API key is scoped to that domain, so a bare-sprntly.ai
+    sender is rejected with a 403. Resolved at call time so test config
+    reloads apply."""
     return getattr(config_mod.settings, "drip_from_email", "") or (
-        "Sprntly <onboarding@sprntly.ai>"
+        "Sprntly <onboarding@mail.sprntly.ai>"
     )
 
 
@@ -195,7 +278,7 @@ def render_step(step: DripStep, *, company: str, name: str) -> tuple[str, str]:
 
 
 # Branded shell tokens — mirrors supabase/templates/*.html and the
-# weekly-brief email (app/synthesis/email_delivery.py): paper background,
+# top-insights email (app/synthesis/email_delivery.py): paper background,
 # white card, serif headline, green CTA.
 _SERIF = "'Spectral',Georgia,'Times New Roman',serif"
 _SANS = "'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
@@ -306,15 +389,31 @@ def send_drip_email(*, to_email: str, subject: str, body_text: str) -> bool:
 def run_drip_cycle() -> dict:
     """One pass of the onboarding drip scheduler.
 
-    For every active company, resolve its cadence, find members who have
-    crossed each step's day_offset and haven't received that step yet, send
-    the email, and record the step in drip_email_sends. Per-company and
-    per-recipient error isolation: a raise for one tenant/member is logged
-    and the loop continues.
+    For every active company, resolve its cadence, find members inside each
+    step's send window, send the email, and record the step in
+    drip_email_sends. Per-company and per-recipient error isolation: a raise
+    for one tenant/member is logged and the loop continues.
 
-    Returns a small summary dict (sent / skipped / steps_considered) for
-    logging + tests. Safe to call repeatedly — already-sent steps are
-    filtered out by drip_email_sends.
+    A step's send window is bounded on BOTH sides:
+        step.day_offset <= age_days <= step.day_offset + grace
+    (grace via resolve_grace_days). Below the window the step stays armed for
+    a later cycle; above it the step is recorded as "skipped" and never sends.
+    Without the upper bound, a member older than the whole ladder received
+    every unsent step in one burst — e.g. a two-week-old member being told to
+    "connect your first data source".
+
+    Consequence worth knowing: the first cycle after this bound ships records
+    a "skipped" row for every already-aged-out step of every existing member
+    and sends nothing for them. That backfill-suppression is the point — it is
+    what stops the historical burst — and it is one-way, since
+    sent_steps_for_company() treats 'skipped' as delivered.
+
+    Returns a small summary dict (sent / skipped / aged_out /
+    steps_considered) for logging + tests. "skipped" means a send was
+    attempted and did not go out (e.g. no RESEND_API_KEY); "aged_out" means
+    the step was past its window and disarmed without any send attempt. Safe
+    to call repeatedly — already-recorded steps are filtered out by
+    drip_email_sends.
 
     Gated by settings.drip_emails_enabled at the scheduler level (see
     app/scheduler.py); callable directly in tests regardless of that flag.
@@ -325,7 +424,13 @@ def run_drip_cycle() -> dict:
     from app.db import drip as drip_db
     from app.db.companies import list_companies
 
-    summary = {"companies": 0, "sent": 0, "skipped": 0, "steps_considered": 0}
+    summary = {
+        "companies": 0,
+        "sent": 0,
+        "skipped": 0,
+        "aged_out": 0,
+        "steps_considered": 0,
+    }
 
     try:
         companies = list_companies() or []
@@ -344,6 +449,7 @@ def run_drip_cycle() -> dict:
             cadence = resolve_cadence(notif)
             if not cadence:
                 continue
+            grace_days = resolve_grace_days(notif)
             members = drip_db.list_members_with_email(company_id)
             already = drip_db.sent_steps_for_company(company_id)
         except Exception:
@@ -360,10 +466,38 @@ def run_drip_cycle() -> dict:
                 continue
             name = member.get("name") or ""
             for step in cadence:
+                # Not due yet — leave it armed for a later cycle.
                 if age_days < step.day_offset:
                     continue
                 if (user_id, step.key) in already:
                     continue
+
+                # Upper bound on the send window. Past day_offset + grace the
+                # step is stale: firing it would mean telling a member who has
+                # been active for weeks to "connect your first data source".
+                # Record it as "skipped" rather than silently ignoring it —
+                # sent_steps_for_company() treats 'skipped' exactly like 'sent',
+                # so this permanently disarms the step and it can never fire
+                # later even if the window logic changes again.
+                if age_days > step.day_offset + grace_days:
+                    try:
+                        drip_db.record_drip_sent(
+                            company_id=company_id,
+                            user_id=user_id,
+                            step_key=step.key,
+                            email=email,
+                            status="skipped",
+                        )
+                        already.add((user_id, step.key))
+                        summary["aged_out"] += 1
+                    except Exception:
+                        logger.exception(
+                            "drip-cycle: failed to record aged-out step %s "
+                            "for %s/%s",
+                            step.key, company_id, user_id,
+                        )
+                    continue
+
                 summary["steps_considered"] += 1
                 subject, body = render_step(
                     step, company=company_name, name=name
@@ -389,8 +523,9 @@ def run_drip_cycle() -> dict:
                     )
 
     logger.info(
-        "drip-cycle: %d companies, %d sent, %d skipped (%d steps considered)",
+        "drip-cycle: %d companies, %d sent, %d skipped, %d aged out "
+        "(%d steps considered)",
         summary["companies"], summary["sent"], summary["skipped"],
-        summary["steps_considered"],
+        summary["aged_out"], summary["steps_considered"],
     )
     return summary

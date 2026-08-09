@@ -326,7 +326,7 @@ export function McpSettingsView({
             Give it a name so you can recognize it later (e.g. &quot;Claude
             Desktop&quot;), and pick who it&apos;s for: Developer tokens get
             ticket &amp; PRD tools only; PM tokens also get datasets, the
-            backlog, and the weekly brief.
+            backlog, and the Top Insights brief.
           </div>
           <div className="mcp-token-form-controls">
             <input

@@ -40,12 +40,14 @@ vi.mock("../DesignAgentDrawer", async (importOriginal) => {
 import { GenerateModal } from "../GenerateModal"
 import { runGenerateFlow } from "../DesignAgentDrawer"
 import {
+  ApiError,
   connectorsApi,
   designAgentApi,
   type ConnectionSummary,
   type GitHubRepo,
   type LocateResponse,
 } from "../../../lib/api"
+import type { DesignSourcePreference } from "../../../lib/onboarding/types"
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -250,6 +252,58 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
     expect(onGenStart).toHaveBeenCalledWith(
       expect.objectContaining({ chosenScreenRoute: "/team" }),
     )
+  })
+
+  it("generate loading label is generic for a non-codebase source", async () => {
+    // designSource "website" (not github) → codebaseMode is false regardless
+    // of any connection state, so runGenerateForRoute fires immediately.
+    const { container } = render(
+      React.createElement(GenerateModal, manualProps({ _testInitSource: "website" })),
+    )
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-label"]'),
+      ).toBeTruthy(),
+    )
+    const label = container.querySelector(
+      '[data-testid="generate-loading-label"]',
+    )?.textContent
+    expect(label).toBe("Generating your prototype…")
+    expect(label).not.toContain("codebase")
+  })
+
+  it("generate loading label stays codebase-specific during the locating phase", async () => {
+    // Locate poll left unresolved — same pattern as the first test in this
+    // block — pins the UNCHANGED codebase-default label during "locating".
+    let resolveLater: (s: { status: "done"; result: LocateResponse }) => void =
+      () => {}
+    vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+      job_id: "job-1",
+      status: "running",
+    })
+    vi.spyOn(designAgentApi, "locateJob").mockReturnValue(
+      new Promise((res) => {
+        resolveLater = res
+      }),
+    )
+
+    const { container } = render(React.createElement(GenerateModal, manualProps()))
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-label"]'),
+      ).toBeTruthy(),
+    )
+    expect(
+      container.querySelector('[data-testid="generate-loading-label"]')
+        ?.textContent,
+    ).toBe("Looking through your codebase…")
+
+    // Clean up the dangling promise.
+    act(() => resolveLater({ status: "done", result: autoProceed() }))
   })
 })
 
@@ -472,6 +526,413 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
     expect(spy).toHaveBeenCalledTimes(1)
     // No auto-pick of the sub-threshold candidate — generation has NOT started.
     expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+})
+
+// ─── re-entry guard on the non-codebase (figma/website) manual path ──────────
+//
+// The codebase path's double-click guard above (`locateInFlightRef` inside
+// enterLoadingFlow) does not cover figma/website, which calls
+// runGenerateForRoute directly. These drive the guard independently of the
+// auto-generate effect (no savedPreference rerender involved, unlike the
+// GenerateModalAutoSkipLocate suite's T1/AC2) — a second handleGenerate
+// invocation before any re-render lands must still be refused, matching the
+// codebase branch's own re-entry guarantee (AC3).
+
+describe("re-entry guard on the manual non-codebase path (AC3)", () => {
+  it("T2 — a second submission fired before any re-render (in-flight) is refused, driven independently of the effect", async () => {
+    const onSavePreference = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
+      React.createElement(
+        GenerateModal,
+        manualProps({ _testInitSource: "figma", onSavePreference }),
+      ),
+    )
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+
+    // Both invocations happen inside the SAME synchronous act callback — no
+    // render lands between them, so `submitting` state cannot have flushed
+    // yet. Only a ref-based guard (not state) can catch this.
+    act(() => {
+      btn!.click()
+      btn!.click()
+    })
+
+    await waitFor(() =>
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
+    )
+    expect(onSavePreference).toHaveBeenCalledTimes(1)
+  })
+
+  it("T4 — rapid double-clicks on Generate (website source) produce one request", async () => {
+    const { container } = render(
+      React.createElement(GenerateModal, manualProps({ _testInitSource: "website" })),
+    )
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+
+    act(() => {
+      btn!.click()
+      btn!.click()
+    })
+
+    await waitFor(() =>
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
+    )
+  })
+})
+
+// ─── manual-flow regression: a locate failure never blanks the surface ───────
+//
+// The render-guard change for the undetermined-fallback is scoped entirely
+// inside `if (savedPreference && ...)` — this suite's flows never pass one.
+// This confirms that scoping actually holds: the ordinary manual failure →
+// error → Switch source recovery (unrelated to any saved preference) is
+// unaffected by the new machinery.
+
+describe("no regression: a manual locate failure never blanks the surface", () => {
+  it("T5 — locate failure → error → Switch source renders the config form again, never blank", async () => {
+    vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container } = render(React.createElement(GenerateModal, manualProps()))
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    expect(container.querySelector('[data-testid="locate-retry"]')).toBeTruthy()
+
+    const switchSource = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-error-switch-source"]',
+    )
+    expect(switchSource).toBeTruthy()
+    act(() => switchSource!.click())
+
+    // Back in config, never blank.
+    expect(
+      container.querySelector('[data-testid="generate-btn"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="locate-error-state"]'),
+    ).toBeNull()
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+})
+
+// ─── a failed kickoff must not leave the "generating" card stuck open ────────
+//
+// The module mock above stands `runGenerateFlow` in for every OTHER suite so
+// generation never runs for real. These tests swap in the REAL implementation
+// (via `vi.importActual`) for the duration of a single test, because the fix
+// under test lives inside that shared function's own `catch` — a stand-in
+// would only prove this modal reacts correctly to a signal that already
+// existed, not that the signal now actually fires on a kickoff failure.
+
+function reopenableModal(overrides: Record<string, unknown> = {}) {
+  function Harness() {
+    const [open, setOpen] = React.useState(true)
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement("button", {
+        type: "button",
+        "data-testid": "test-host-reopen",
+        onClick: () => setOpen(true),
+      }),
+      React.createElement(GenerateModal, {
+        ...manualProps(overrides),
+        open,
+        onClose: () => setOpen(false),
+      }),
+    )
+  }
+  return React.createElement(Harness)
+}
+
+async function useRealRunGenerateFlow() {
+  const actual = await vi.importActual<typeof import("../DesignAgentDrawer")>(
+    "../DesignAgentDrawer",
+  )
+  vi.mocked(runGenerateFlow).mockImplementation(actual.runGenerateFlow)
+}
+
+describe("a failed kickoff resets the modal instead of freezing it", () => {
+  it("a kickoff failure leaves nothing rendering a generating state (AC1)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    vi.spyOn(designAgentApi, "generate").mockRejectedValue(
+      new Error("Internal Server Error"),
+    )
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    // The locate auto-proceeds first — the generating card mounts.
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-state"]'),
+      ).toBeTruthy(),
+    )
+
+    // The kickoff POST rejects. Assert the ABSENCE of a generating claim —
+    // not the presence of the failure toast, which already fires correctly
+    // today and proves nothing about this bug.
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+    expect(
+      container.querySelector('[data-testid="generate-loading-state"]'),
+    ).toBeNull()
+  })
+
+  it("after a failed kickoff the modal reopens clean and a second attempt succeeds (AC2)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    const generateSpy = vi
+      .spyOn(designAgentApi, "generate")
+      .mockRejectedValueOnce(new Error("Internal Server Error"))
+      .mockResolvedValueOnce({ prototype_id: 41, status: "generating" })
+    vi.spyOn(designAgentApi, "get").mockResolvedValue({
+      id: 41,
+      status: "ready",
+      bundle_url: "https://example.test/bundle",
+      error: null,
+    })
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+    expect(generateSpy).toHaveBeenCalledTimes(1)
+
+    // Reopen the SAME instance the way a host's own CTA would — no manual
+    // dismissal was needed to get here.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="test-host-reopen"]')!
+        .click()
+    })
+
+    expect(
+      container.querySelector('[data-testid="generate-btn"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="generate-loading-state"]'),
+    ).toBeNull()
+
+    clickGenerate(container)
+    await waitFor(() => expect(generateSpy).toHaveBeenCalledTimes(2))
+  })
+
+  it("the legacy drawer's stay-open contract is untouched: omitting onKickoffFailed means no close call fires (AC3)", async () => {
+    const actual = await vi.importActual<typeof import("../DesignAgentDrawer")>(
+      "../DesignAgentDrawer",
+    )
+    const onOpenChange = vi.fn()
+    const showToast = vi.fn()
+
+    await actual.runGenerateFlow({
+      params: {
+        prd_id: PRD_ID,
+        target_platform: "desktop",
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockRejectedValue(new Error("server 500")),
+      runGeneration: vi.fn(),
+      onOpenChange,
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+      // onKickoffFailed intentionally omitted — mirrors the legacy drawer's
+      // own call site, which never wires it.
+    })
+
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith("Generate failed", "server 500")
+  })
+
+  it("a successful kickoff still closes the modal exactly as today (AC4)", async () => {
+    await useRealRunGenerateFlow()
+    mockLocateResolves(autoProceed())
+    vi.spyOn(designAgentApi, "generate").mockResolvedValue({
+      prototype_id: 42,
+      status: "generating",
+    })
+    vi.spyOn(designAgentApi, "get").mockResolvedValue({
+      id: 42,
+      status: "ready",
+      bundle_url: "https://example.test/bundle",
+      error: null,
+    })
+
+    const { container } = render(reopenableModal())
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(container.querySelector("#modal-generate")).toBeNull(),
+    )
+  })
+})
+
+// ─── late arrival (AC9) ────────────────────────────────────────────────────
+//
+// The repo list resolving AFTER the undetermined fallback has already
+// rendered must be absorbed in place — repopulate, preserve the selection,
+// drop the notice — never replace the surface, never re-arm the auto-skip.
+// A late list that turns out NOT to contain the saved repo instead falls back
+// to the existing unhealthy-preference UI; no new state is invented for it.
+
+describe("T8 — late arrival: the repo list resolves after the undetermined fallback has rendered", () => {
+  function githubPref(): DesignSourcePreference {
+    return {
+      design_source: "github",
+      github_repo: SEL_REPO,
+      figma_file_key: null,
+      website_url: null,
+    }
+  }
+
+  function otherRepo(name: string): GitHubRepo {
+    return {
+      full_name: name,
+      name: name.split("/")[1] ?? name,
+      private: false,
+      html_url: `https://github.com/${name}`,
+      default_branch: "main",
+      description: null,
+      updated_at: "2024-01-01T00:00:00Z",
+      stargazers_count: 0,
+    }
+  }
+
+  it("positive: the list arrives late and contains the saved repo — repopulates, selection survives, notice drops, no auto-skip", async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveRepos: (r: { repositories: GitHubRepo[] }) => void = () => {}
+      vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+        new Promise((res) => {
+          resolveRepos = res
+        }),
+      )
+      const locateSpy = vi.spyOn(designAgentApi, "locate")
+
+      const { container } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: githubPref(),
+          _testConnections: GITHUB_CONN,
+        }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+
+      // The fallback is showing: notice present, select seeded with the
+      // single saved repo as both its option and its value.
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeTruthy()
+      let select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe(SEL_REPO)
+
+      const fullerList = [...REPOS, otherRepo("org/other-repo")]
+      await act(async () => {
+        resolveRepos({ repositories: fullerList })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // Repopulated with the full list; the selection is preserved; the
+      // notice is gone; the surface was never replaced (still the config
+      // form), and no auto-skip fired underneath the user.
+      select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe(SEL_REPO)
+      expect(select!.options.length).toBe(3) // "Pick repo…" + 2 repos
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeNull()
+      expect(
+        container.querySelector('[data-testid="generate-btn"]'),
+      ).toBeTruthy()
+      expect(locateSpy).not.toHaveBeenCalled()
+      expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("negative: the list arrives late and does NOT contain the saved repo — pre-selection clears, existing unhealthy behaviour applies, no new state", async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveRepos: (r: { repositories: GitHubRepo[] }) => void = () => {}
+      vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+        new Promise((res) => {
+          resolveRepos = res
+        }),
+      )
+
+      const { container } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: githubPref(),
+          _testConnections: GITHUB_CONN,
+        }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeTruthy()
+
+      await act(async () => {
+        resolveRepos({ repositories: [otherRepo("org/other-repo")] })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // Existing unhealthy-preference behaviour takes over — empty select,
+      // Generate disabled, the pre-existing footer helper. No new state.
+      const select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Select a repo"]',
+      )
+      expect(select!.value).toBe("")
+      expect(
+        container.querySelector('[data-testid="saved-source-undetermined"]'),
+      ).toBeNull()
+      expect(
+        container.querySelector('[data-testid="codebase-no-repo-helper"]'),
+      ).toBeTruthy()
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn!.disabled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

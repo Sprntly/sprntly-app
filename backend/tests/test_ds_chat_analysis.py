@@ -135,10 +135,15 @@ def test_answer_malformed_file_does_not_crash(workspace):
     assert isinstance(out["answer"], str) and out["answer"]
 
 
-def test_qa_agent_routes_to_ds(monkeypatch):
-    """qa_agent.answer intercepts a data-analysis ask before generic routing."""
+def test_qa_agent_routes_to_ds(workspace, monkeypatch):
+    """qa_agent.answer intercepts a data-analysis ask before generic routing.
+
+    Tabular data must actually exist for the interceptor to claim the turn
+    at all (Part 3 capability gate, AC10) — `workspace` provides a real
+    raw/ dir; a file must be in it too."""
     import app.qa_agent as qa
 
+    _plant_users_csv(workspace, n=10)
     sentinel = {"answer": "ds!", "key_points": [], "citations": [],
                 "confidence": 0.9, "unanswered": "", "_skill": "ds-agent"}
     monkeypatch.setattr(ca, "answer", lambda **kw: sentinel)
@@ -148,6 +153,22 @@ def test_qa_agent_routes_to_ds(monkeypatch):
         dataset="acme",
     )
     assert out is sentinel
+
+
+def test_staging_is_the_shared_helper(workspace):
+    """`_stage_workspace` now lives in app.ds.staging so both DS engines stage
+    identically — the extraction must be behaviour-preserving, not a copy."""
+    from app.ds import staging
+
+    assert ca._stage_workspace is staging.stage_workspace
+    assert ca._MAX_FILE_BYTES == staging.MAX_FILE_BYTES == 20 * 1024 * 1024
+
+    _plant_users_csv(workspace, n=20)
+    (workspace / "notes.pdf").write_bytes(b"%PDF-1.4")
+    out = tmp = workspace.parent / "stage"
+    tmp.mkdir()
+    assert staging.stage_workspace(workspace, out) == ["users.csv"]
+    assert (out / "users.csv").is_file()
 
 
 def test_answer_unanalyzable_summary_sheet(workspace):

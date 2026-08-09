@@ -10,26 +10,53 @@
  * Pure state helpers (no React) so they're unit-testable under the
  * node/View test pattern.
  */
-import { CONNECTOR_CATALOG, connectableCatalog } from "../connectorsCatalog"
+import {
+  CONNECTOR_CATALOG,
+  connectableCatalog,
+  UPLOADS_PROVIDER_ID,
+} from "../connectorsCatalog"
 import type { ConnectorCategoryRow } from "../../types/content"
 
-/** The category id that gates Continue — at least one must be connected. */
+/**
+ * The Analytics category key.
+ *
+ * Nothing in onboarding is mandatory — Continue is never gated on a connector
+ * — but a LIVE connection in this category is what decides whether the
+ * post-review define-metrics sub-flow runs (see hasLiveAnalyticsConnection).
+ */
 export const REQUIRED_CATEGORY_KEY = "analytics"
 
 /**
  * The categories the v6 onboarding wizard walks through, in screenshot-spec
- * order (matches CONNECTOR_CATALOG order). Settings-only extras (docs,
- * revenue) are deliberately absent — they stay in Settings → Connectors.
+ * order (matches CONNECTOR_CATALOG order). Revenue is the one deliberate
+ * omission — it stays in Settings → Connectors.
  */
 export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
   "analytics",
   "voice",
+  // Research is a wizard category as well as a Settings one (product decision
+  // 2026-08-02): a PM arrives with existing research long before they can
+  // connect a repository, and it's real brief evidence, so we ask for it during
+  // onboarding. It survives wizardCategories' empty-category drop via the
+  // catalog's `keepWhenEmpty` flag — see connectableCatalog.
+  "research",
   "crm",
   "pm",
   "monitoring",
   "design",
   "code",
-  "comms",
+  // No "comms" step: the Communications category was removed from the catalog
+  // (2026-08-04) and Slack now lives solely on the Voice shelf, which the
+  // wizard already walks through. Leaving the key here would have asked the PM
+  // to connect Slack a second time — or, once the category was gone, rendered
+  // an onboarding step that Settings → Connectors no longer has.
+  // Company documentation joined the wizard 2026-08-03. Confluence and Google
+  // Docs are both OAuth-wired, and a team wiki is the densest product context
+  // we can read on day one — leaving it Settings-only meant most PMs never
+  // wired it at all. It renders LAST (catalog order, after Codebase) rather
+  // than beside the evidence shelves: it is context, not customer signal, so
+  // it should not push the analytics/voice categories down.
+  "docs",
 ]
 
 /**
@@ -39,32 +66,61 @@ export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
  * Mirrors Settings → Connectors: only connectors we actually support today
  * (OAuth or API-key wired, per `isConnectableConnector`) are shown, and any
  * category that ends up with no supported connector is hidden entirely — so
- * we never ask the PM to "connect" something they can't yet use (e.g. the
- * whole Analytics category today, or MS Teams under Communication).
+ * we never ask the PM to "connect" something they can't yet use (e.g. Linear
+ * under Project Management, or the whole Monitoring category today).
  *
  * `alsoKeepIds` (e.g. providers with a live connection) are never hidden even
  * if not yet wired, and a category kept alive by such a provider is retained.
+ *
+ * One provider is dropped unconditionally: `uploads` under Company
+ * documentation. It is the user's own named document sources, not a
+ * third-party integration — it has no auth flow for the wizard's connect modal
+ * to open, and the "Add a document source" picker that drives it is rendered
+ * only by Settings → Connectors. Settings excludes it from its connector rows
+ * for exactly the same reason; onboarding would otherwise show a tile that
+ * opens an empty modal.
  */
 export function wizardCategories(
   alsoKeepIds: ReadonlySet<string> = new Set(),
 ): ConnectorCategoryRow[] {
-  return connectableCatalog(alsoKeepIds).filter((c) =>
-    ONBOARDING_CONNECTOR_CATEGORIES.includes(c.key),
-  )
+  return connectableCatalog(alsoKeepIds)
+    .filter((c) => ONBOARDING_CONNECTOR_CATEGORIES.includes(c.key))
+    .map((c) => ({
+      ...c,
+      items: c.items.filter((i) => i.id !== UPLOADS_PROVIDER_ID),
+    }))
+    // Re-run the empty-category drop: connectableCatalog ran it before we
+    // removed `uploads`, so a category carried solely by that provider would
+    // otherwise survive as an empty shelf.
+    .filter((c) => c.items.length > 0 || c.keepWhenEmpty === true)
 }
 
-/** Connector ids belonging to the required (Analytics) category. */
+/** Connector ids belonging to the Analytics category. */
 export function requiredCategoryIds(): string[] {
   const cat = CONNECTOR_CATALOG.find((c) => c.key === REQUIRED_CATEGORY_KEY)
   return cat ? cat.items.map((i) => i.id) : []
 }
 
 /**
- * Has the PM satisfied the hard requirement (≥1 Analytics connector,
- * whether live or selected-this-session)?
+ * Is there a LIVE analytics connection (not merely "planned this session")?
+ *
+ * Gates the post-review define-metrics sub-flow: that flow exists to map each
+ * metric onto real analytics events, so with no analytics connector it has
+ * nothing to detect and we finish onboarding straight from Review instead.
+ *
+ * Prefers the backend's `types` (source of truth, mirrors
+ * backend/app/connectors/catalog.py) and falls back to the local catalog's
+ * Analytics ids for older payloads that predate the field.
  */
-export function hasRequiredConnector(selected: ReadonlySet<string>): boolean {
-  return requiredCategoryIds().some((id) => selected.has(id))
+export function hasLiveAnalyticsConnection(
+  connections: readonly { provider: string; status: string; types?: string[] }[],
+): boolean {
+  const analyticsIds = new Set(requiredCategoryIds())
+  return connections.some(
+    (c) =>
+      c.status === "active" &&
+      (c.types?.includes(REQUIRED_CATEGORY_KEY) || analyticsIds.has(c.provider)),
+  )
 }
 
 /** Clamp a category index into [0, lastCategory]. */

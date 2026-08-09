@@ -35,11 +35,14 @@ logger = logging.getLogger(__name__)
 
 AGENT = "onboarding_wizard_drafts"
 
+# team_name / team_scope / team_strategy / team_roadmap / additional_context
+# now live on the DEFAULT workspace row (2026-07-22 — moved off companies); they
+# are read via _default_workspace_row below. prioritization_framework and
+# decision_process still live on companies.
 _COMPANY_COLUMNS = (
     "display_name, mission, strategy, portfolio, planning_cycle, industry, "
-    "business_type, competitors, team_name, team_scope, "
-    "prioritization_framework, team_strategy, team_roadmap, decision_process, "
-    "additional_context, kpi_tree, business_context"
+    "business_type, competitors, prioritization_framework, decision_process, "
+    "kpi_tree, business_context"
 )
 
 
@@ -53,6 +56,18 @@ def _company_row(company_id: str) -> dict:
         .execute()
     )
     return dict(r.data[0]) if r.data else {}
+
+
+def _default_workspace_row(company_id: str) -> dict:
+    """The company's default workspace row — the source of truth for the
+    workspace-owned fields (name + team_scope/strategy/roadmap/additional_context)
+    since 2026-07-22. Best-effort: grounding never fails the draft."""
+    try:
+        from app.db.workspaces import default_workspace_for_company
+
+        return dict(default_workspace_for_company(company_id) or {})
+    except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
+        return {}
 
 
 def _primary_product(company_id: str) -> dict:
@@ -92,6 +107,7 @@ def _facts_block(company_id: str) -> str:
     Values the PM never filled are simply absent — the model must not invent
     them."""
     company = _company_row(company_id)
+    workspace = _default_workspace_row(company_id)
     product = _primary_product(company_id)
     providers = _active_providers(company_id)
 
@@ -119,13 +135,14 @@ def _facts_block(company_id: str) -> str:
     add(lines, "Monetization", product.get("monetization"))
     add(lines, "Users / customers", product.get("users_description"))
     add(lines, "Positioning", product.get("positioning"))
-    add(lines, "Team name", company.get("team_name"))
-    add(lines, "Team scope of work", company.get("team_scope"))
+    # Workspace-owned fields (2026-07-22 — read from the default workspace row).
+    add(lines, "Team name", workspace.get("name"))
+    add(lines, "Team scope of work", workspace.get("team_scope"))
     add(lines, "Prioritization framework", company.get("prioritization_framework"))
-    add(lines, "Team strategy", company.get("team_strategy"))
-    add(lines, "Team roadmap", company.get("team_roadmap"))
+    add(lines, "Team strategy", workspace.get("team_strategy"))
+    add(lines, "Team roadmap", workspace.get("team_roadmap"))
     add(lines, "How the team decides", company.get("decision_process"))
-    add(lines, "Additional context", company.get("additional_context"))
+    add(lines, "Additional context", workspace.get("additional_context"))
     add(lines, "Success metrics (KPI tree)", company.get("kpi_tree"))
     add(lines, "Connected data sources", providers)
     # The structured lens the website analysis maintains — richest single input.

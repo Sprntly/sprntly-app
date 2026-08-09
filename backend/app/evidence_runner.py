@@ -20,9 +20,8 @@ import logging
 
 from app.corpus import load_corpus
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
+from app.evidence_html import normalize_evidence_html
 from app.graph.gateway import llm_call
-from app.html_style import inject_canonical_css
-from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
@@ -37,11 +36,16 @@ AGENT = "evidence"
 
 
 def _run_sync(
-    evidence_id: int, brief_id: int, insight_index: int, on_delta=None
+    evidence_id: int, brief_id: int, insight_index: int, on_delta=None,
+    background: bool = False,
 ) -> None:
     # `on_delta(text)` — optional; forwards each HTML text delta as it streams
     # (threaded through from the KG runner's fallback so the corpus path
     # streams over the same `evidence:<id>` channel — see app.graph.token_stream).
+    # `background=True` routes the model call through the LLM gate's low-priority
+    # lane (capped, always behind interactive waiters) — set by the post-brief
+    # warm storm so pre-warming every insight's evidence never queues a user's
+    # own generation behind it.
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise RuntimeError(f"brief_id={brief_id} not found")
@@ -70,26 +74,31 @@ def _run_sync(
         prompt_version=EVIDENCE_KG_PROMPT_VERSION,
         system=EVIDENCE_KG_SYSTEM,
         input=user,
-        # Same binding as the KG path: SKILL.md is METHOD + HTML output contract.
-        # evidence-brief is a registered long-output skill, so the gateway
-        # streams on the long read timeout (the HTML brief is a big generation).
+        # Same binding as the KG path: the skill supplies the RENDERING CONTRACT,
+        # EVIDENCE_KG_SYSTEM supplies the analysis. evidence-brief is a
+        # registered long-output skill, so the gateway streams on the long read
+        # timeout (the HTML brief is a big generation).
         skill="evidence-brief",
         on_delta=on_delta,
+        background=background,
     )
-    raw = result.output if isinstance(result.output, str) else str(result.output)
-    # Strip any ```html code fence the model added so the stored payload is raw HTML.
-    html = strip_code_fence(raw)
-    # The model emits an EMPTY `<style>`; inject the canonical stylesheet so the
-    # stored brief is self-contained and matches the KG path (see app.html_style).
-    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
+    # Same normalisation as the KG path, so a corpus-grounded brief is stored
+    # under exactly the same contract (see app.evidence_html).
+    html = normalize_evidence_html(
+        result.output, get_skill("evidence-brief").assets["evidence.css"]
+    )
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     complete_evidence(evidence_id=evidence_id, title=title, md=html)
 
 
 async def generate_evidence(
-    evidence_id: int, brief_id: int, insight_index: int
+    evidence_id: int, brief_id: int, insight_index: int,
+    background: bool = False,
 ) -> None:
-    """Run evidence generation in a worker thread; update DB with result."""
+    """Run evidence generation in a worker thread; update DB with result.
+
+    `background=True` (the brief warm storm) demotes the LLM call to the gate's
+    low-priority lane so warming never delays an interactive generation."""
     logger.info(
         "Evidence generation starting evidence_id=%s brief_id=%s insight_index=%s",
         evidence_id,
@@ -97,7 +106,10 @@ async def generate_evidence(
         insight_index,
     )
     try:
-        await asyncio.to_thread(_run_sync, evidence_id, brief_id, insight_index)
+        await asyncio.to_thread(
+            _run_sync, evidence_id, brief_id, insight_index,
+            background=background,
+        )
         logger.info("Evidence generation succeeded evidence_id=%s", evidence_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"

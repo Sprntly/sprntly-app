@@ -64,15 +64,24 @@ def test_binds_test_scenario_builder_skill(monkeypatch):
     assert md == _SCENARIOS_DOC
 
 
-def test_skill_installed_and_routable():
-    from app.skills.catalog import NON_ROUTABLE, routable_manifest
-    from app.skills.loader import get_skill
+def test_binding_survives_the_skill_no_longer_being_vendored():
+    """`test-scenario-builder` is no longer a vendored skill, and the QA agent's
+    `skill="test-scenario-builder"` binding must DEGRADE, not raise.
 
-    assert get_skill("test-scenario-builder").method.strip()
-    # Bound by name from the QA agent, but ALSO a valid standalone chat skill
-    # (give it a story → scenarios), so unlike evidence-brief it stays routable.
-    assert "test-scenario-builder" not in NON_ROUTABLE
-    assert any(s["id"] == "test-scenario-builder" for s in routable_manifest())
+    It was one of ~78 chat-routable methods and is not on the nine-skill
+    keep-list, so its directory is gone. The binding stays at the call site —
+    it is how the decision log attributes the call — and
+    `gateway._build_method_prefix` answers a missing directory with an empty
+    method block plus a `+bare` version suffix. This is the ACCEPTED degradation
+    (the generated scenarios are now model-shaped rather than method-shaped);
+    what would not be acceptable is the 500 an intolerant lookup produced."""
+    from app.graph.gateway import _build_method_prefix
+    from app.skills.loader import list_skills
+
+    assert "test-scenario-builder" not in list_skills()
+    block, suffix = _build_method_prefix("test-scenario-builder", None)
+    assert block == ""
+    assert suffix == "+bare"
 
 
 def test_build_input_frames_prd_as_spec():

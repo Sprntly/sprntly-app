@@ -243,3 +243,70 @@ def test_reorder_ignores_foreign_ids(tenant_client, isolated_settings):
     assert resp.status_code == 200
     ids = {i["id"] for i in resp.json()["items"]}
     assert ids == {mine["id"]}
+
+
+# ── GET /v1/ideation/{id}/detail ────────────────────────────────────────────
+# Backs the Ideation popup: the row plus the KG evidence behind its theme. The
+# list route deliberately doesn't carry evidence (the table doesn't need it),
+# so the popup fetches per-idea on open.
+
+
+def test_detail_returns_the_item_with_framing_fields(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    item = _seed_ideation_theme(
+        t.company_id, theme_id="theme-x", title="Bulk onboarding",
+        rank=7, reasoning="Admins re-key every seat by hand.",
+    )
+
+    resp = t.client.get(f"/v1/ideation/{item['id']}/detail")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == item["id"]
+    assert body["title"] == "Bulk onboarding"
+    assert body["theme_id"] == "theme-x"
+    assert body["rank"] == 7
+    # The pain-point TL;DR the popup renders.
+    assert body["reasoning"] == "Admins re-key every seat by hand."
+    assert body["is_manual"] is False
+    # No KG signals seeded → an empty trail, not an error.
+    assert body["evidence"] == []
+    assert body["evidence_count"] == 0
+    assert body["sources"] == []
+
+
+def test_detail_for_a_manual_idea_has_no_evidence(tenant_client, isolated_settings):
+    """A "+ Add idea" row has a synthetic manual: theme_id with no KG theme
+    behind it, so there is nothing to walk — it must report is_manual so the
+    popup can say so rather than implying the evidence is merely missing."""
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    created = bl.create_manual_ideation_item(t.company_id, title="My own idea")
+
+    resp = t.client.get(f"/v1/ideation/{created['id']}/detail")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "My own idea"
+    assert body["is_manual"] is True
+    assert body["evidence"] == []
+    assert body["evidence_count"] == 0
+
+
+def test_detail_unknown_item_returns_404(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    resp = t.client.get("/v1/ideation/00000000-0000-0000-0000-000000000000/detail")
+    assert resp.status_code == 404
+
+
+def test_detail_cross_tenant_returns_404(tenant_client, isolated_settings):
+    """Tenant isolation: company-b must not read company-a's idea detail."""
+    a = tenant_client.make(slug="company-a")
+    _save_current_brief(isolated_settings["db"], dataset="company-a")
+    item = _seed_ideation_theme(a.company_id, theme_id="t-a", title="A only")
+
+    b = tenant_client.make(slug="company-b")
+    _save_current_brief(isolated_settings["db"], dataset="company-b")
+
+    resp = b.client.get(f"/v1/ideation/{item['id']}/detail")
+    assert resp.status_code == 404

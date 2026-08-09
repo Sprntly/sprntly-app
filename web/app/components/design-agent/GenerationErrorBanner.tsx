@@ -94,6 +94,37 @@ export function isRetryableFailure(raw: string): boolean {
 }
 
 /**
+ * Maps the raw failure `error` string to curated human copy for the comment-
+ * driven iterate path (`useIterateRun`'s two `throw new Error(proto.error ...)`
+ * sites). Mirrors `reasonCopy`'s substring-detection order and reuses its four
+ * provider-class strings verbatim (none of them say "regenerate", so they read
+ * fine in an iterate context). Diverges from `reasonCopy` on the raw-exception
+ * and generic-fallback branches: there is no "regenerate" action on the
+ * comments/iterate surface, so those three branches get iterate-flavored copy
+ * ("try again" / "resubmit") instead. Never returns the raw string (Rule #24).
+ *
+ * Deliberately does NOT map `"UnresolvedImportRepairExhausted"`, `"invalidated"`,
+ * or `"timed out"` — none of those are reachable on the iterate path (iterate
+ * runs no build-repair loop, template-changed is a generate-only concept, and
+ * the client-side iterate timeout throws its own clean string that never
+ * reaches this function). Any of those strings would safely fall through to
+ * the generic fallback below if they somehow did reach it.
+ */
+export function iterateFailureCopy(raw: string, refId?: number | string): string {
+  if (raw.includes("PROVIDER_BILLING") || raw.includes("PROVIDER_AUTH"))
+    return `Something went wrong on our end — we've been notified.${refId != null ? ` (Ref: ${refId})` : ""}`
+  if (raw.includes("PROVIDER_CAPACITY"))
+    return "High demand right now — try again in a few minutes."
+  if (raw.includes("PROVIDER_UNAVAILABLE"))
+    return "The prototype service is temporarily unavailable. Try again shortly."
+  if (raw.includes("ViteBuildError") || raw.includes("TypeCheckError"))
+    return "The change couldn't be built. Try again, or adjust your comment and resubmit."
+  if (raw.includes("emitted no files"))
+    return "The agent didn't produce a change. Try again."
+  return "Couldn't apply the change. Try again." // generic fallback
+}
+
+/**
  * Pure presentational banner — no hooks, no I/O → SSR-renderable in node-env
  * vitest. `role="alert"` so assistive tech announces the failure. Centered,
  * calm composition (art tile + serif title + curated body + actions +

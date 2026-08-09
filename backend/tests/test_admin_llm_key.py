@@ -1,12 +1,16 @@
-"""Per-company Claude API key — resolution policy, factories, middleware, routes.
+"""Per-company LLM key — resolution policy, factories, middleware, routes.
 
 Policy under test:
   * company has its own key                              → use it (never platform)
   * no key, still onboarding                             → platform (allowed)
-  * no key, onboarding complete, use_platform_key=false  → FAIL
+  * no key, onboarding complete, use_platform_key=false  → platform (allowed)
   * no key, onboarding complete, use_platform_key=true   → platform (allowed)
   * unbound (no company in scope)                        → platform
   * OpenAI embeddings                                    → never touched
+
+Provider selection lives in test_llm_provider_openai.py; this file stays on the
+Anthropic path it has always covered, so a regression there is attributable
+without reading two files.
 """
 from __future__ import annotations
 
@@ -40,13 +44,28 @@ def _bind(company_id: str):
         llm_keys.invalidate(company_id)
 
 
-def _stub_config(monkeypatch, *, cipher=None, use_platform=False, onboarded=False):
+def _stub_config(
+    monkeypatch,
+    *,
+    cipher=None,
+    use_platform=False,
+    onboarded=False,
+    provider="anthropic",
+    openai_cipher=None,
+):
     import app.db.companies as companies_mod
+    from app.db.companies import CompanyLLMConfig
 
     monkeypatch.setattr(
         companies_mod,
         "get_company_llm_config",
-        lambda _cid: (cipher, use_platform, onboarded),
+        lambda _cid: CompanyLLMConfig(
+            provider=provider,
+            anthropic_cipher=cipher,
+            openai_cipher=openai_cipher,
+            use_platform_key=use_platform,
+            onboarding_complete=onboarded,
+        ),
     )
 
 
@@ -98,10 +117,13 @@ def test_non_uuid_company_id_is_missing_row_not_an_error(isolated_settings):
     # tag as the acting "company". That is definitionally not an onboarded
     # company — it must resolve like a missing row (lenient, platform allowed),
     # not blow up the uuid-typed DB lookup and fail the whole LLM call.
-    from app.db.companies import get_company_llm_config
+    from app.db.companies import CompanyLLMConfig, get_company_llm_config
 
-    assert get_company_llm_config("313") == (None, False, False)
-    assert get_company_llm_config("legacy-dataset-slug") == (None, False, False)
+    assert get_company_llm_config("313") == CompanyLLMConfig()
+    assert get_company_llm_config("legacy-dataset-slug") == CompanyLLMConfig()
+    # The all-defaults config is the lenient posture: Anthropic, no key, so the
+    # resolver falls through to the platform key rather than raising.
+    assert get_company_llm_config("313").provider == "anthropic"
 
 
 def test_config_read_failure_raises_unavailable_not_key_required(
@@ -129,10 +151,12 @@ def test_config_read_failure_is_not_cached(isolated_settings, monkeypatch):
     calls = {"n": 0}
 
     def _flaky(_cid):
+        from app.db.companies import CompanyLLMConfig
+
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("Server disconnected")
-        return (None, True, True)  # use_platform_key=true, onboarded
+        return CompanyLLMConfig(use_platform_key=True, onboarding_complete=True)
 
     monkeypatch.setattr(companies_mod, "get_company_llm_config", _flaky)
     with _bind("co-1"):

@@ -94,7 +94,7 @@ export function SignInView(props: SignInViewProps) {
               ? "Sending…"
               : "Signing in…"
             : forgotMode
-              ? "Send reset link"
+              ? "Send reset code"
               : "Sign in"}
           {!props.submitting && !forgotMode && <ArrowRight width={14} height={14} />}
         </button>

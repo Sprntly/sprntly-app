@@ -33,7 +33,7 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
             {"provider": "github",   "status": "active"},
             {"provider": "hubspot",  "status": "active"},
             {"provider": "figma",    "status": "active"},   # no puller → skipped
-            {"provider": "slack",    "status": "active"},   # no puller → skipped
+            {"provider": "slack",    "status": "active"},   # own company-level kick
             {"provider": "clickup",  "status": "inactive"}, # inactive → skipped
         ],
         "co-b": [
@@ -47,6 +47,7 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
             "app.scheduler.db.list_connections",
             side_effect=lambda cid: conns_by_company.get(cid, []),
          ), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
          patch("app.scheduler.kickoff_sync") as mock_kickoff:
         _refresh_all_company_connectors()
 
@@ -57,6 +58,9 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
         ("co-b", "fireflies"),
         ("co-b", "github"),
     ])
+    # Slack refreshes through its own company-level corpus kick, not
+    # kickoff_sync — once for the company that has it.
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
 
 
 def test_refresh_isolates_per_company_failures():
@@ -96,16 +100,60 @@ def test_refresh_no_companies_is_a_clean_no_op():
 
 
 def test_refresh_skips_providers_without_kg_pullers():
-    """figma / slack / google_drive have their own corpus-sync routes
-    (or are per-user) — never fire kickoff_sync for them even if they're
-    the company's only active connection."""
+    """figma has its own corpus-sync route — never fire kickoff_sync for it.
+    slack refreshes through kickoff_slack_corpus_sync (company-level), never
+    kickoff_sync."""
     from app.scheduler import _refresh_all_company_connectors
 
     companies = [{"id": "co-a", "slug": "acme"}]
     conns = [
-        {"provider": "figma",        "status": "active"},
-        {"provider": "slack",        "status": "active"},
+        {"provider": "figma", "status": "active"},
+        {"provider": "slack", "status": "active"},
+    ]
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections", return_value=conns), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    mock_kickoff.assert_not_called()
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
+
+
+def test_refresh_kicks_slack_once_per_company_despite_many_installs():
+    """Slack is per-user for delivery, so a company can hold several rows —
+    but the voice-of-customer corpus sync is company-level: exactly ONE
+    kick per company per cycle, however many members installed the bot."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme"}]
+    conns = [
+        {"provider": "slack", "status": "active", "user_id": "u-pm"},
+        {"provider": "slack", "status": "active", "user_id": "u-eng"},
+        {"provider": "slack", "status": "revoked", "user_id": "u-old"},
+    ]
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections", return_value=conns), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    mock_kickoff.assert_not_called()
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
+
+
+def test_refresh_includes_google_drive():
+    """google_drive has no token puller but IS wired for periodic refresh —
+    kickoff_sync special-cases it (picked Drive files that change get
+    re-pulled into corpus + KG)."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme"}]
+    conns = [
         {"provider": "google_drive", "status": "active"},
+        {"provider": "figma",        "status": "active"},  # still skipped
     ]
 
     with patch("app.scheduler.list_companies", return_value=companies), \
@@ -113,12 +161,14 @@ def test_refresh_skips_providers_without_kg_pullers():
          patch("app.scheduler.kickoff_sync") as mock_kickoff:
         _refresh_all_company_connectors()
 
-    mock_kickoff.assert_not_called()
+    assert [(c.args[0], c.args[1]) for c in mock_kickoff.call_args_list] == [
+        ("co-a", "google_drive")
+    ]
 
 
 def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     """When SCHEDULER_ENABLED=true, the connector-refresh job must be
-    wired alongside the weekly-brief tick — distinct IDs so they show up
+    wired alongside the top-insights tick — distinct IDs so they show up
     separately in logs."""
     from app import scheduler as sched_mod
 
@@ -146,10 +196,142 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
 
     sched_mod.start_scheduler()
 
-    # Both jobs registered: weekly brief tick + connector refresh
+    # Both jobs registered: Top Insights brief tick + connector refresh
     ids = sorted(j["id"] for j in fake.jobs)
-    assert "weekly_brief_tick" in ids
+    assert "brief_tick" in ids
     assert "refresh_connectors" in ids
     assert started == [True]
 
     sched_mod.shutdown_scheduler()
+
+
+def test_refresh_also_tops_up_the_call_index_for_fireflies():
+    """kickoff_sync fills the KG (distilled summaries); the call INDEX holds the
+    per-call metadata chat answers listings from, and only the index can answer
+    "which calls last week" without a ~168s corpus pass.
+
+    Fireflies must get BOTH — the index kickoff is not a `continue`, because
+    fireflies IS in PULLERS and still needs its KG pull.
+    """
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme", "display_name": "Acme"}]
+    conns = {
+        "co-a": [
+            {"provider": "fireflies", "status": "active"},
+            {"provider": "github", "status": "active"},
+        ]
+    }
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections",
+               side_effect=lambda cid: conns.get(cid, [])), \
+         patch("app.scheduler.kickoff_slack_corpus_sync"), \
+         patch("app.scheduler.kickoff_call_index_sync") as mock_index, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    assert [c.args[0] for c in mock_index.call_args_list] == ["co-a"]
+    # …and the KG pull still happened for fireflies alongside it.
+    assert ("co-a", "fireflies") in {
+        (c.args[0], c.args[1]) for c in mock_kickoff.call_args_list
+    }
+
+
+def test_refresh_tops_up_the_call_index_for_zoom_too():
+    """Zoom is the index's second source. Without this branch a Zoom-only
+    company's index is never populated on a schedule, and every listing
+    question degrades to the ~168s path with nothing reporting a problem."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme", "display_name": "Acme"}]
+    conns = {"co-a": [{"provider": "zoom", "status": "active"}]}
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections",
+               side_effect=lambda cid: conns.get(cid, [])), \
+         patch("app.scheduler.kickoff_slack_corpus_sync"), \
+         patch("app.scheduler.kickoff_call_index_sync") as mock_index, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    assert [c.args[0] for c in mock_index.call_args_list] == ["co-a"]
+    # …and the KG pull still happened for zoom alongside it — the index branch
+    # must not `continue` past a provider that is also in PULLERS.
+    assert ("co-a", "zoom") in {
+        (c.args[0], c.args[1]) for c in mock_kickoff.call_args_list
+    }
+
+
+def test_a_company_with_both_call_sources_indexes_both_in_one_kickoff():
+    """`sync_all_sources` walks every connected source in a single pass, so one
+    kickoff covers both. Kicking per provider would race two threads of the
+    same name onto the same company and do the work twice — and BOTH must still
+    get their KG pull."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme", "display_name": "Acme"}]
+    conns = {
+        "co-a": [
+            {"provider": "fireflies", "status": "active"},
+            {"provider": "zoom", "status": "active"},
+        ]
+    }
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections",
+               side_effect=lambda cid: conns.get(cid, [])), \
+         patch("app.scheduler.kickoff_slack_corpus_sync"), \
+         patch("app.scheduler.kickoff_call_index_sync") as mock_index, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    # Exactly ONE index kickoff for the company, not one per source.
+    assert [c.args[0] for c in mock_index.call_args_list] == ["co-a"]
+    kg = {(c.args[0], c.args[1]) for c in mock_kickoff.call_args_list}
+    assert ("co-a", "fireflies") in kg
+    assert ("co-a", "zoom") in kg
+
+
+def test_a_company_without_a_call_source_gets_no_index_kickoff():
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme", "display_name": "Acme"}]
+    conns = {"co-a": [{"provider": "github", "status": "active"}]}
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections",
+               side_effect=lambda cid: conns.get(cid, [])), \
+         patch("app.scheduler.kickoff_slack_corpus_sync"), \
+         patch("app.scheduler.kickoff_call_index_sync") as mock_index, \
+         patch("app.scheduler.kickoff_sync"):
+        _refresh_all_company_connectors()
+
+    mock_index.assert_not_called()
+
+
+def test_a_raising_index_kickoff_does_not_kill_the_cycle():
+    """One tenant's failure must not stop the rest of the refresh."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [
+        {"id": "co-a", "slug": "acme", "display_name": "Acme"},
+        {"id": "co-b", "slug": "globex", "display_name": "Globex"},
+    ]
+    conns = {
+        "co-a": [{"provider": "fireflies", "status": "active"}],
+        "co-b": [{"provider": "github", "status": "active"}],
+    }
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections",
+               side_effect=lambda cid: conns.get(cid, [])), \
+         patch("app.scheduler.kickoff_slack_corpus_sync"), \
+         patch("app.scheduler.kickoff_call_index_sync",
+               side_effect=RuntimeError("boom")), \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    assert ("co-b", "github") in {
+        (c.args[0], c.args[1]) for c in mock_kickoff.call_args_list
+    }

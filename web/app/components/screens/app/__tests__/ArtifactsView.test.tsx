@@ -44,7 +44,27 @@ const EVIDENCE: ArtifactItem = {
   source: { brief_id: 10, week_label: "Week of May 20", insight_index: 1 },
   open: { brief_id: 10, insight_index: 1, evidence_id: 3 },
 }
-const ITEMS = [PROTO, PRD, EVIDENCE]
+// Typed as the report MEMBER (not the union) so the spread-and-override cases
+// below narrow to a report instead of a union of every artifact's `source`.
+const REPORT: Extract<ArtifactItem, { type: "report" }> = {
+  type: "report",
+  id: 4,
+  title: "Voice of Customer Report · Q2",
+  status: "",
+  created_at: new Date().toISOString(),
+  skill: "voice-of-customer-report",
+  share_mode: "private",
+  source: {
+    skill: "voice-of-customer-report",
+    question: "what are customers saying?",
+    conversation_id: 77,
+    conversation_title: "Q2 customer themes",
+    prd_id: null,
+    prd_title: null,
+  },
+  open: { report_id: 4 },
+}
+const ITEMS = [PROTO, PRD, EVIDENCE, REPORT]
 
 const noop = () => {}
 
@@ -64,12 +84,16 @@ function markup(override: Partial<Props> = {}): string {
 afterEach(cleanup)
 
 describe("ArtifactsView — chrome", () => {
-  it("renders all four filter chips", () => {
+  it("renders all six filter chips", () => {
     const html = markup()
     expect(html).toContain("All")
+    expect(html).toContain("Reports")
     expect(html).toContain("PRDs")
     expect(html).toContain("Prototypes")
     expect(html).toContain("Evidence")
+    // "Tickets", not "Non-PRD tickets": a PRD's tickets are not in this library
+    // at all, so the qualifier would name a distinction the user can't see.
+    expect(html).toContain("Tickets")
   })
 
   it("renders a row per artifact with a type badge", () => {
@@ -277,5 +301,79 @@ describe("ArtifactsView — interaction (jsdom)", () => {
     )
     expect(container.querySelector('[data-artifact-type="prototype"]')).toBeNull()
     expect(container.querySelector('[data-artifact-type="prd"]')).not.toBeNull()
+  })
+})
+
+describe("ArtifactsView — reports", () => {
+  it("renders a report row with its REPORT badge and kind", () => {
+    const html = markup()
+    expect(html).toContain("Voice of Customer Report · Q2")
+    expect(html).toContain(">REPORT<")
+    // The source line leads with the report's KIND, humanised from the skill id.
+    expect(html).toContain("Voice of Customer report")
+  })
+
+  it("names the chat room a report is attached to", () => {
+    const html = markup()
+    expect(html).toContain("from Q2 customer themes")
+  })
+
+  it("names the PRD a report is attached to", () => {
+    const attached: typeof REPORT = {
+      ...REPORT,
+      source: { ...REPORT.source, prd_id: 1, prd_title: "Checkout revamp" },
+    }
+    const html = markup({ items: [attached] })
+    expect(html).toContain("on PRD Checkout revamp")
+  })
+
+  it("omits the attachment entirely when the report stands alone", () => {
+    const alone: typeof REPORT = {
+      ...REPORT,
+      source: {
+        ...REPORT.source,
+        conversation_id: null, conversation_title: null,
+        prd_id: null, prd_title: null,
+      },
+    }
+    const html = markup({ items: [alone] })
+    expect(html).toContain("Voice of Customer report")
+    expect(html).not.toContain("from ")
+    expect(html).not.toContain("on PRD")
+  })
+
+  it("shows no label for an attachment whose chat was deleted", () => {
+    // `on delete set null` leaves the id but no title — the row must not invent
+    // a name, and must still render.
+    const orphaned: typeof REPORT = {
+      ...REPORT,
+      source: { ...REPORT.source, conversation_id: 999, conversation_title: null },
+    }
+    const html = markup({ items: [orphaned] })
+    expect(html).toContain("Voice of Customer Report · Q2")
+    expect(html).not.toContain("from ")
+  })
+
+  it("renders only reports when filter=report", () => {
+    const html = markup({ filter: "report" })
+    expect(html).toContain(">REPORT<")
+    expect(html).not.toContain(">PRD<")
+    expect(html).not.toContain(">EVIDENCE<")
+    expect(html).not.toContain(">PROTOTYPE<")
+  })
+
+  it("opens a report row on click, passing the report_id", () => {
+    const onOpen = vi.fn()
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [REPORT], filter: "all", loading: false,
+        onFilterChange: noop, onOpen,
+      }),
+    )
+    const row = container.querySelector('[data-artifact-type="report"]') as HTMLElement
+    expect(row).toBeTruthy()
+    fireEvent.click(row)
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect(onOpen.mock.calls[0][0].open).toEqual({ report_id: 4 })
   })
 })

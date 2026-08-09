@@ -19,6 +19,7 @@ import sys
 import time
 import types
 
+import anthropic
 import pytest
 
 from app.design_agent import runner
@@ -592,6 +593,122 @@ def test_dispatch_exception_returns_is_error_tool_result(monkeypatch):
     assert "error" in tr["content"]  # carries the exception class + message
 
 
+# ─── Observable retry around the one LLM call site ──────────────────────────
+
+
+def test_retryable_transient_failures_recover_and_generation_completes(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[tuple] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append((pid, ev)))
+    client = _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert len(client.calls) == 3
+    reconnect_calls = [ev for _pid, ev in calls if ev.get("text") == "Reconnecting to the model — retrying automatically"]
+    assert len(reconnect_calls) == 2
+
+
+def test_retries_exhausted_after_max_attempts_classifies_as_before(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    client = _install_client(monkeypatch, [anthropic.APITimeoutError(request=None)] * 4)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "error"
+    assert result.error_class == "PROVIDER_UNAVAILABLE"
+    assert result.error_message == "The prototype service is temporarily unavailable."
+    assert len(client.calls) == 4
+
+
+def test_usage_added_exactly_once_per_iteration_despite_retries(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert result.usage.output_tokens == 10
+
+
+def test_non_retryable_exception_fails_immediately_no_retry(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append((pid, ev)))
+    client = _install_client(monkeypatch, [RuntimeError("boom")])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert len(client.calls) == 1
+    assert result.status == "error"
+    texts = [ev.get("text") for _pid, ev in calls]
+    assert "Reconnecting to the model — retrying automatically" not in texts
+    assert "Something went wrong." in texts
+
+
+def test_publish_step_order_terminal_message_before_finish_on_retry_exhaustion(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    order: list[str] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: order.append(f"publish_step:{ev.get('text')}"))
+    monkeypatch.setattr(runner, "_sse_close", lambda *a, **kw: order.append("_sse_close"))
+    _install_client(monkeypatch, [anthropic.APITimeoutError(request=None)] * 4)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "error"
+    assert order[-1] == "_sse_close"
+    assert order[-2] == "publish_step:The prototype service is temporarily unavailable."
+
+
+def test_publish_step_reconnecting_text_is_exact(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[dict] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append(ev))
+    _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    reconnect = [ev for ev in calls if ev.get("kind") == "step" and "Reconnecting" in ev.get("text", "")]
+    assert len(reconnect) == 2
+    for ev in reconnect:
+        assert ev["text"] == "Reconnecting to the model — retrying automatically"
+        assert ev["state"] == "active"
+
+
+def test_retry_re_arms_tool_step_dedup(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[dict] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append(ev))
+    client = _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"x": "content"})
+    result = _run(agent_loop(_system(), _user(), ctx))
+    assert result.status == "complete"
+    # The retried attempt's own tool-step label must still appear — proving the
+    # recovered attempt's dispatch-time step announcement fires normally after
+    # a mid-iteration retry (the per-tool label the dedup-guard reset in
+    # _stream() protects, even though this fake stream's no-op __iter__ can't
+    # directly exercise the in-stream dedup path itself).
+    expected_label = runner._tool_step_label("view", {"path": "x"})
+    tool_step_texts = [ev.get("text") for ev in calls]
+    assert expected_label in tool_step_texts
+
+
 # ─── _hash_tool_call ─────────────────────────────────────────────────────────
 
 
@@ -788,9 +905,28 @@ def test_publish_step_called_once_per_loop_iteration(monkeypatch):
         assert ev["state"] == "active"
 
 
+# See runner._finish's `defer_done_terminal` comment: a complete run in
+# "scaffold" (generate) or "execute" (iterate) mode no longer closes the SSE
+# stream itself. `agent_loop` derives the defer from `mode` BEFORE the loop
+# runs (`_defer_done_terminal = mode in ("scaffold", "execute")`) — and
+# "scaffold" is `agent_loop`'s own default, the same default these three
+# tests already exercised, which is why fixing the premature close turns them
+# red rather than leaving them silently stale. The route
+# (routes/design_agent.py: _stage_complete_run / _stage_iterate_run) now owns
+# the actual close, after staging succeeds — covered by
+# test_design_agent_routes.py / test_design_agent_iterate.py's own tests, not
+# here. "manual" (manual-edit) is NOT deferred — nothing stages after it in
+# this scope — so it is the mode these three tests use below to keep testing
+# `_finish`'s summary-attachment mechanics directly via an immediate close,
+# exactly as before.
+
+
 def test_sse_stream_closed_with_done_on_complete_run(monkeypatch):
-    """_sse_close is called with kind='done' on a normal complete run, and the
-    agent's final text block is threaded through as the `summary`."""
+    """A complete run in the default ("scaffold") mode does NOT close the SSE
+    stream from `_finish` — the terminal `done` is deferred to the route,
+    which emits it after staging actually succeeds. Before this fix, `_finish`
+    closed here immediately regardless of whether the prototype was staged
+    yet; that premature close was the bug."""
     closed: list[tuple] = []
 
     def _capture_close(pid, *, kind, summary=""):
@@ -799,14 +935,56 @@ def test_sse_stream_closed_with_done_on_complete_run(monkeypatch):
     monkeypatch.setattr(runner, "_sse_close", _capture_close)
 
     _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
-    _run(agent_loop(_system(), _user(), _ctx(prototype_id=7)))
+    result = _run(agent_loop(_system(), _user(), _ctx(prototype_id=7)))
 
-    assert closed == [(7, "done", "done")]
+    assert result.status == "complete"
+    assert closed == []
+
+
+def test_sse_done_deferred_for_execute_mode_too(monkeypatch):
+    """The same deferral applies to iterate's "execute" mode (also staged by
+    the route, via _stage_iterate_run) — `_finish` is shared by generate and
+    iterate, and both entry points stage after a complete run."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind, summary))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    result = _run(agent_loop(_system(), _user(), _ctx(prototype_id=13), mode="execute"))
+
+    assert result.status == "complete"
+    assert closed == []
+
+
+def test_sse_done_not_deferred_for_manual_edit_mode(monkeypatch):
+    """Manual edit ("manual") is explicitly out of this fix's scope: `_finish`
+    still closes immediately for it, unchanged from before."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind, summary))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=14), mode="manual"))
+
+    assert closed == [(14, "done", "done")]
 
 
 def test_sse_done_summary_is_last_text_block_stripped(monkeypatch):
     """The done summary is the LAST type=='text' block of the OUTER run's final
-    content, stripped — the 1-2 sentence change summary the agent ends with."""
+    content, stripped — the 1-2 sentence change summary the agent ends with.
+
+    Exercised on "manual" (a mode `_finish` does NOT defer) so this
+    stays a direct test of the summary-attachment mechanics via an immediate
+    `_sse_close`. The deferred (scaffold/execute) path computes the identical
+    `_final_text_summary(result.final_content)` in the route and threads it
+    into its own deferred close — see test_design_agent_routes.py /
+    test_design_agent_iterate.py."""
     closed: list[tuple] = []
 
     def _capture_close(pid, *, kind, summary=""):
@@ -821,14 +999,16 @@ def test_sse_done_summary_is_last_text_block_stripped(monkeypatch):
         [_text("Working on it..."), _text("  Renamed the CTA to 'Get started'.  ")],
     )
     _install_client(monkeypatch, [final_turn])
-    _run(agent_loop(_system(), _user(), _ctx(prototype_id=11)))
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=11), mode="manual"))
 
     assert closed == [(11, "done", "Renamed the CTA to 'Get started'.")]
 
 
 def test_sse_done_summary_empty_when_no_text_block(monkeypatch):
     """A complete run whose final turn carries no text block yields an empty
-    summary (graceful) — _sse_close then omits the `text` key on the sentinel."""
+    summary (graceful) — _sse_close then omits the `text` key on the sentinel.
+    Exercised on "manual" (non-deferred) for the same reason as the sibling
+    summary test above."""
     closed: list[tuple] = []
 
     def _capture_close(pid, *, kind, summary=""):
@@ -838,7 +1018,7 @@ def test_sse_done_summary_empty_when_no_text_block(monkeypatch):
 
     # stop != tool_use with no text blocks → complete with empty final_content text.
     _install_client(monkeypatch, [_msg("end_turn", [])])
-    _run(agent_loop(_system(), _user(), _ctx(prototype_id=12)))
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=12), mode="manual"))
 
     assert closed == [(12, "done", "")]
 

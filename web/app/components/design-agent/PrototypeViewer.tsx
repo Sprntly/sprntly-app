@@ -99,8 +99,13 @@ type Props = {
    *  fires `load` (not `error`), so the authed container probes the real status
    *  here to detect a briefly-unavailable bundle and cover it with a loading
    *  state instead of the raw 404 body. Absent on the public `/p/<token>` surface
-   *  — that path is unchanged (no probe, no onLoad handler). */
-  onBundleLoad?: () => void
+   *  — that path is unchanged (no probe, no onLoad handler). May return a
+   *  Promise that resolves once the readiness decision is in — when it does,
+   *  the load mask stays up until then instead of clearing on the raw `load`
+   *  event, closing the gap where a freshly-rebuilt bundle's raw 404/401 body
+   *  could otherwise be briefly exposed. A synchronous (non-thenable) return
+   *  keeps today's behavior unchanged. */
+  onBundleLoad?: () => void | Promise<void>
   /** C2b: optional overlay rendered INSIDE `.proto-stage` (which is
    *  position:relative), layered OVER the iframe. The public viewer passes the
    *  mark overlay + pin layer here so marking renders on top of the prototype.
@@ -119,6 +124,16 @@ type Props = {
    *  for any direct mount that doesn't opt in — renders nothing extra, keeping
    *  that path byte-for-byte unchanged. */
   maskUntilLoaded?: boolean
+  /** Iterate-aware label for the load mask: true only while a genuine
+   *  iterate/apply is running, so the mask reads "Applying changes…";
+   *  false/undefined (a passive reload — the manual "Refresh preview"
+   *  button, or a brand-new prototype's first load) reads the neutral
+   *  "Loading…". Mirrors PostGenerationResult's existing bundle-not-ready
+   *  label logic verbatim, threaded one level down so both covers show
+   *  identical copy for the identical situation. Optional; undefined →
+   *  "Loading…", so every other call site (public viewer, fullscreen
+   *  overlay, any direct mount) is unaffected. */
+  iterateRunning?: boolean
 }
 
 export function PrototypeViewer({
@@ -138,6 +153,7 @@ export function PrototypeViewer({
   onBundleLoad,
   hideChrome = false,
   maskUntilLoaded = false,
+  iterateRunning,
 }: Props) {
   // Glitch A: mask the iframe with a neutral surface cover until it has painted
   // (first `load`). Local to this instance, so a genuine reload (new `key`
@@ -145,8 +161,21 @@ export function PrototypeViewer({
   // pre-paint. A passive re-render never resets it.
   const [loaded, setLoaded] = useState(false)
   const handleLoad = () => {
-    setLoaded(true)
-    onBundleLoad?.()
+    // A readiness-aware caller (useViewGrant's notifyBundleLoaded) returns a
+    // promise that resolves only once the async proxy-status preflight has
+    // decided ready / not-ready / unauthorized. Keep the mask up until THEN —
+    // closing the race where a freshly-rebuilt bundle's raw 404 body (or a
+    // lapsed-grant 401 body) would otherwise be exposed for the gap between
+    // this synchronous `load` event and that async decision. A caller with no
+    // onBundleLoad, or one that returns a plain (non-thenable) value — the
+    // public `/p/<token>` surface, which passes neither — keeps the ORIGINAL
+    // synchronous clear below, byte-identical to today.
+    const readiness = onBundleLoad?.()
+    if (readiness && typeof (readiness as Promise<void>).then === "function") {
+      void (readiness as Promise<void>).then(() => setLoaded(true))
+    } else {
+      setLoaded(true)
+    }
   }
   // Timeout fallback: while masking and still unloaded, lift the cover after
   // MASK_TIMEOUT_MS so a stalled bundle can never leave it up forever. Lifting
@@ -270,16 +299,24 @@ export function PrototypeViewer({
               maskUntilLoaded || onBundleLoad ? handleLoad : undefined
             }
           />
-          {/* Glitch A: neutral surface cover over the iframe until it paints
-              (or the MASK_TIMEOUT_MS fallback lifts it). Opt-in — both
-              production mounts (signed-in editor + public/passcode chrome) set
+          {/* Glitch A (reskinned): scrim + spinner + iterate-aware label cover
+              over the iframe until it paints AND (when a readiness-aware
+              onBundleLoad is wired) the readiness decision is in — or until
+              the MASK_TIMEOUT_MS fallback lifts it. Opt-in — both production
+              mounts (signed-in editor + public/passcode chrome) set
               `maskUntilLoaded`; the default renders nothing here. */}
           {maskUntilLoaded && !loaded && (
             <div
               className="da-viewer-placeholder"
               data-testid="da-viewer-placeholder"
-              aria-hidden="true"
-            />
+              role="status"
+              aria-live="polite"
+            >
+              <span className="da-spinner da-bundle-loading-spinner" aria-hidden="true" />
+              <span className="da-bundle-loading-label">
+                {iterateRunning ? "Applying changes…" : "Loading…"}
+              </span>
+            </div>
           )}
           {/* C2b: optional marking overlay, layered over the iframe inside the
               position:relative stage. Undefined → nothing (signed-in path). */}

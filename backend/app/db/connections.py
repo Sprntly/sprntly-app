@@ -439,6 +439,48 @@ def delete_slack_connection(company_id: str, user_id: str) -> bool:
     return bool(resp.count) if resp.count is not None else True
 
 
+def get_orphan_slack_connection(company_id: str) -> dict | None:
+    """The oldest Slack row in this company whose `user_id` is NULL, or
+    None. These predate migration 20260608150000_slack_per_user.sql (rows
+    that existed before Slack became per-user keep user_id = NULL rather
+    than being backfilled) and are invisible to every per-user accessor
+    above, which all filter on a specific non-null user_id — without this,
+    such a row can never be looked up, let alone deleted, by anyone."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq(_owner_column(), company_id)
+        .eq("provider", SLACK_PROVIDER)
+        .is_("user_id", "null")
+        .order("created_at", desc=False)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return _to_legacy_shape(resp.data[0])
+
+
+def delete_slack_connection_by_id(company_id: str, connection_id: str) -> bool:
+    """Delete a specific Slack row by primary key, still scoped to
+    `company_id` for tenant safety. Used when the row being torn down is
+    not the acting user's own (the company's resolved sync row, or a
+    legacy orphan reached via get_orphan_slack_connection) — the plain
+    `delete_slack_connection(company_id, user_id)` above can't target
+    those because it always filters on a specific user_id."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .delete()
+        .eq(_owner_column(), company_id)
+        .eq("id", connection_id)
+        .eq("provider", SLACK_PROVIDER)
+        .execute()
+    )
+    return bool(resp.count) if resp.count is not None else True
+
+
 def patch_slack_connection_config(
     company_id: str, user_id: str, config: dict
 ) -> dict | None:

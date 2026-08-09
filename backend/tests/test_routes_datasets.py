@@ -138,8 +138,11 @@ def test_upload_to_unowned_dataset_404(tenant_client):
 def test_generate_kicks_off_async(tenant_client):
     t = tenant_client.make(slug="acme")
     t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
-    from app.datasets import dataset_path
+    from app.datasets import dataset_path, raw_path
     (dataset_path("acme") / "ctx.md").write_text("hi")
+    # A user-uploaded raw file satisfies the data-source gate.
+    raw_path("acme").mkdir(parents=True, exist_ok=True)
+    (raw_path("acme") / "voice-notes.txt").write_text("hi")
     r = t.client.post("/v1/datasets/acme/generate")
     assert r.status_code == 200
     assert r.json()["started"] is True
@@ -177,6 +180,45 @@ def test_list_after_create_and_upload(tenant_client):
     assert listing[0]["raw_file_count"] == 1
     assert listing[0]["md_file_count"] == 1
     assert listing[0]["has_brief"] is False
+
+
+def test_upload_records_category_and_lists_it(tenant_client):
+    """A file uploaded with a `category` is listed under that category; one
+    uploaded without stays uncategorized (category == "")."""
+    t = tenant_client.make(slug="acme")
+    t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
+    t.client.post(
+        "/v1/datasets/acme/files",
+        files=[("files", ("tagged.txt", io.BytesIO(b"hi"), "text/plain"))],
+        data={"category": "business_docs"},
+    )
+    t.client.post(
+        "/v1/datasets/acme/files",
+        files=[("files", ("legacy.txt", io.BytesIO(b"hey"), "text/plain"))],
+    )
+    by_name = {f["filename"]: f for f in t.client.get("/v1/datasets/acme/files").json()["files"]}
+    assert by_name["tagged.txt"]["category"] == "business_docs"
+    assert by_name["legacy.txt"]["category"] == ""
+
+
+def test_delete_forgets_category(tenant_client):
+    """Deleting a categorized file drops its attribution so a later re-upload of
+    the same name doesn't inherit the stale category."""
+    t = tenant_client.make(slug="acme")
+    t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
+    t.client.post(
+        "/v1/datasets/acme/files",
+        files=[("files", ("doc.txt", io.BytesIO(b"hi"), "text/plain"))],
+        data={"category": "analytics"},
+    )
+    assert t.client.delete("/v1/datasets/acme/files/doc.txt").status_code == 200
+    # Re-upload the same name with no category → must come back uncategorized.
+    t.client.post(
+        "/v1/datasets/acme/files",
+        files=[("files", ("doc.txt", io.BytesIO(b"hi again"), "text/plain"))],
+    )
+    files = t.client.get("/v1/datasets/acme/files").json()["files"]
+    assert [f["category"] for f in files if f["filename"] == "doc.txt"] == [""]
 
 
 # ---- cross-tenant isolation -------------------------------------------------

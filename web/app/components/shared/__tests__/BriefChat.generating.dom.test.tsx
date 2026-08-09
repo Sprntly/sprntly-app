@@ -6,7 +6,7 @@
 // once in AppShell) reports kind === "generating" and mirrors it into
 // ContentContext as `content.briefHydration`. BriefChat reads that flag and, as
 // long as there's no brief to show yet, renders a distinct spinner + "Generating
-// your Weekly brief…" WIP block IN PLACE OF the empty greeting / finding cards.
+// your Top Insights…" WIP block IN PLACE OF the empty greeting / finding cards.
 //
 // These tests mount the real BriefChat inside the real Navigation + Content
 // providers and drive `content` through a small harness, proving:
@@ -38,6 +38,9 @@ vi.mock("../../../lib/api", () => {
       current: vi.fn(),
       status: vi.fn(),
       regenerate: vi.fn(),
+      dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+      defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+      restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
     },
   }
 })
@@ -138,6 +141,18 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
   insufficientEvidence: false,
 }
 
+// Every EMPTY-brief scenario below (failed / insufficient-evidence / plain
+// empty) is about which GREETING an empty brief gets — which presupposes the
+// workspace has a source to have gotten a brief from at all. Without a
+// connector, BriefChat short-circuits to the "connect a source" page instead
+// (BriefChat.no-connector.dom.test.tsx owns that path), so these seed an
+// evidence connector to reach the greeting under test.
+// `connectorsHydrated` marks the connectors fetch as having actually answered;
+// without it the surface correctly holds its loading placeholder instead of
+// judging an empty brief against an unknown connector list
+// (BriefChat.initial-load.dom.test.tsx owns that window).
+const WITH_SOURCE = { connectedConnectorIds: ["superset"], connectorsHydrated: true }
+
 // Harness: renders BriefChat plus a hidden button per state we want to set, so
 // each test can flip `content` (briefHydration + briefV2) imperatively.
 function Harness() {
@@ -166,7 +181,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-failed",
-        onClick: () => set({ briefHydration: "failed", briefV2: null }),
+        onClick: () => set({ briefHydration: "failed", briefV2: null, ...WITH_SOURCE }),
       },
       "failed",
     ),
@@ -175,7 +190,7 @@ function Harness() {
       {
         "data-testid": "set-insufficient-evidence",
         onClick: () =>
-          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF }),
+          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF, ...WITH_SOURCE }),
       },
       "insufficient-evidence",
     ),
@@ -183,7 +198,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-plain-empty",
-        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF }),
+        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF, ...WITH_SOURCE }),
       },
       "plain-empty",
     ),
@@ -219,7 +234,7 @@ function mountHarness() {
   )
 }
 
-const WIP_TITLE = "Generating your Weekly brief…"
+const WIP_TITLE = "Generating your Top Insights…"
 const EMPTY_GREETING = "add and connect more sources"
 
 afterEach(() => {

@@ -11,10 +11,12 @@ import {
   BusinessContextSettingsView,
   CompanyShapeSettingsView,
   buildLayers,
+  withCurrentOption,
   type BusinessContextSettingsViewProps,
   type CompanyShapeSettingsViewProps,
 } from "../BusinessContextSettings"
 import type { BcLeaf, BusinessContextDoc } from "../../../../../lib/api"
+import { BUSINESS_TYPES, INDUSTRIES } from "../../../../../lib/onboarding/types"
 
 function leaf(value: unknown, src: BcLeaf["src"] = "inferred", extra: Partial<BcLeaf> = {}): BcLeaf {
   return { value, src, conf: "high", as_of: "2026-06-01", evidence: null, ...extra }
@@ -148,6 +150,23 @@ describe("BusinessContextSettingsView — admin vs read-only", () => {
     expect(html).toContain("Only admins can edit")
     // fields are present but disabled for non-admins
     expect(html).toContain("disabled")
+  })
+})
+
+describe("BusinessContextSettingsView — async refresh state (triggered by Company Shape save)", () => {
+  it("shows a regenerating indicator while refreshing is true", () => {
+    const html = render({ refreshing: true })
+    expect(html).toContain("Regenerating business context")
+  })
+
+  it("shows no regenerating indicator when refreshing is false", () => {
+    const html = render({ refreshing: false })
+    expect(html).not.toContain("Regenerating business context")
+  })
+
+  it("still surfaces refreshError with no button present", () => {
+    const html = render({ refreshError: "web tool unavailable" })
+    expect(html).toContain("web tool unavailable")
   })
 })
 
@@ -311,5 +330,45 @@ describe("BusinessContextSettingsView — Save wiring", () => {
     submit?.({ preventDefault() {} })
     expect(onSave).toHaveBeenCalledTimes(1)
     void el
+  })
+})
+
+// ── withCurrentOption — off-list value injection ─────────────────────────────
+describe("withCurrentOption", () => {
+  it("passes through a listed value unchanged", () => {
+    expect(withCurrentOption(INDUSTRIES, "Fintech")).toEqual([...INDUSTRIES])
+  })
+
+  it("prepends an unlisted value", () => {
+    const out = withCurrentOption(INDUSTRIES, "Software / Product Management Tooling")
+    expect(out[0]).toBe("Software / Product Management Tooling")
+    expect(out.length).toBe(INDUSTRIES.length + 1)
+  })
+
+  it("ignores an empty current value", () => {
+    expect(withCurrentOption(BUSINESS_TYPES, "")).toEqual([...BUSINESS_TYPES])
+  })
+})
+
+// ── off-list company-shape rendering + copy ───────────────────────────────────
+describe("CompanyShapeSettingsView — off-list values", () => {
+  it("renders an <option> for an off-list industry", () => {
+    const html = renderShape({ industry: "Software / Product Management Tooling" })
+    expect(html).toContain(">Software / Product Management Tooling</option>")
+  })
+
+  it("renders an <option> for an off-list business type", () => {
+    const html = renderShape({ businessType: "Agentic PM Platform" })
+    expect(html).toContain(">Agentic PM Platform</option>")
+  })
+})
+
+describe("BusinessContextSettingsView — Company lens copy states the real provenance rule", () => {
+  it("describes changed/unchanged/cleared correctly and drops the old false claim", () => {
+    const html = render({ canEdit: true })
+    expect(html).toContain("will not overwrite")
+    expect(html).toContain("stay agent-maintained")
+    expect(html).toContain("clearing")
+    expect(html).not.toContain("marked as authoritative")
   })
 })

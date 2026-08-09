@@ -1,4 +1,5 @@
-// View tests for the Settings → Connectors pane (commit D).
+// View tests for the Settings → Connectors pane (commit D; master/detail
+// layout — category rail + one open category panel).
 // Same node-env SSR pattern as design-agent component tests
 // (web/app/components/design-agent/__tests__/CompletionBar.test.tsx).
 import * as React from "react"
@@ -13,6 +14,7 @@ import {
   connectStartErrorMessage,
   filterConnectorCategories,
   isAdminGateError,
+  resolveSelectedCategory,
 } from "../ConnectorsSettings"
 import {
   CONNECTOR_CATALOG,
@@ -30,6 +32,11 @@ import {
 
 function noop() {}
 function noopUpload() {}
+
+/** Connector rows in the (single) open category panel. */
+function countRows(html: string): number {
+  return (html.match(/class="set-conn-row"/g) ?? []).length
+}
 
 function activeConn(provider: string, label = "alice@meridian.health"): ConnectionSummary {
   return {
@@ -89,7 +96,7 @@ describe("ConnectorsSettingsView — Regenerate brief", () => {
     const html = render()
     expect(html).toContain("Regenerate brief")
     expect(html).toContain(
-      "Digest new sources and rebuild your weekly brief",
+      "Digest new sources and rebuild your Top Insights brief",
     )
     // Idle button is enabled and labeled "Regenerate brief".
     expect(html).toMatch(
@@ -123,23 +130,102 @@ describe("ConnectorsSettingsView — Regenerate brief", () => {
   })
 })
 
-describe("ConnectorsSettingsView — grouped by category", () => {
-  it("renders one card per catalog category with its title", () => {
-    const html = render()
-    for (const cat of CONNECTOR_CATALOG) {
-      expect(html).toContain(`data-category="${cat.key}"`)
-      // `&` in titles (e.g. "Customer Voice & Support") is HTML-encoded.
-      expect(html).toContain(cat.title.replace(/&/g, "&amp;"))
-    }
-    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
-      CONNECTOR_CATALOG.length,
+describe("resolveSelectedCategory", () => {
+  it("returns null when there are no categories", () => {
+    expect(resolveSelectedCategory([], "analytics")).toBeNull()
+  })
+
+  it("defaults to the first category when nothing is selected", () => {
+    expect(resolveSelectedCategory(CONNECTOR_CATALOG, null)?.key).toBe(
+      CONNECTOR_CATALOG[0].key,
     )
   })
 
-  it("shows category sub-labels as the card-head hint", () => {
+  it("returns the selected category when the key matches", () => {
+    expect(resolveSelectedCategory(CONNECTOR_CATALOG, "design")?.key).toBe("design")
+  })
+
+  it("falls back to the first VISIBLE category for a stale/filtered-out key", () => {
+    const visible = filterConnectorCategories(CONNECTOR_CATALOG, "jira")
+    expect(resolveSelectedCategory(visible, "design")?.key).toBe("pm")
+  })
+})
+
+describe("ConnectorsSettingsView — category rail (master column)", () => {
+  it("renders one rail tab per catalog category, in catalog order", () => {
     const html = render()
-    expect(html).toContain("· required") // Analytics
-    expect(html).toContain("· powers On-Call Agent") // Monitoring
+    const keys = [...html.matchAll(/role="tab" id="conn-cat-tab-([a-z_]+)"/g)].map(
+      (m) => m[1],
+    )
+    expect(keys).toEqual(CONNECTOR_CATALOG.map((c) => c.key))
+    for (const cat of CONNECTOR_CATALOG) {
+      // `&` in titles (e.g. "Voice of Customer & Support") is HTML-encoded.
+      expect(html).toContain(cat.title.replace(/&/g, "&amp;"))
+    }
+    expect(html).toContain('role="tablist"')
+  })
+
+  it("selects the first category by default (dark pill + aria-selected)", () => {
+    const html = render()
+    const first = CONNECTOR_CATALOG[0]
+    expect(html).toContain(
+      `id="conn-cat-tab-${first.key}" aria-controls="conn-cat-panel-${first.key}" ` +
+        'aria-selected="true" tabindex="0" class="set-conn-rail-item is-active"',
+    )
+    // Roving tabindex: every other tab is out of the page tab order.
+    expect((html.match(/tabindex="0"/g) ?? []).length).toBe(1)
+    expect((html.match(/tabindex="-1"/g) ?? []).length).toBe(
+      CONNECTOR_CATALOG.length - 1,
+    )
+  })
+
+  it("renders ONLY the selected category's panel and connector rows", () => {
+    const html = render({ selectedCategoryKey: "design" })
+    // One panel, and it's Design.
+    expect((html.match(/role="tabpanel"/g) ?? []).length).toBe(1)
+    expect(html).toContain('id="conn-cat-panel-design"')
+    // Design's connectors are rendered; other categories' are not.
+    expect(html).toContain("Figma")
+    expect(html).toContain("Framer")
+    expect(html).not.toContain("Slack")
+    expect(html).not.toContain("Mixpanel")
+    expect(countRows(html)).toBe(
+      CONNECTOR_CATALOG.find((c) => c.key === "design")!.items.length,
+    )
+  })
+
+  it("swaps the rendered connectors when another category is selected", () => {
+    const design = render({ selectedCategoryKey: "design" })
+    const voice = render({ selectedCategoryKey: "voice" })
+    expect(design).toContain("Figma")
+    expect(design).not.toContain("Slack")
+    // Voice is Slack's only shelf since the Communications category was
+    // removed (2026-08-04).
+    expect(voice).toContain("Slack")
+    expect(voice).not.toContain("Figma")
+    expect(voice).toContain('id="conn-cat-panel-voice"')
+    expect(voice).toContain(
+      'id="conn-cat-tab-voice" aria-controls="conn-cat-panel-voice" aria-selected="true"',
+    )
+  })
+
+  it("shows the selected category's sub-label as the panel-head hint", () => {
+    expect(render({ selectedCategoryKey: "analytics" })).toContain("· required")
+    expect(render({ selectedCategoryKey: "monitoring" })).toContain(
+      "· powers On-Call Agent",
+    )
+    // The hint belongs to the OPEN category only.
+    expect(render({ selectedCategoryKey: "analytics" })).not.toContain(
+      "· powers On-Call Agent",
+    )
+  })
+
+  it("falls back to the first visible category when search hides the selection", () => {
+    // "design" is selected but the query only leaves the PM category.
+    const html = render({ selectedCategoryKey: "design", searchQuery: "jira" })
+    expect(html).toContain('id="conn-cat-panel-pm"')
+    expect(html).toContain("Jira")
+    expect(html).not.toContain("Figma")
   })
 })
 
@@ -214,19 +300,27 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 40 connector rows total (v6 catalog: + Segment, App/Play Store, CRM roster)", () => {
-    const html = render()
-    const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(40)
+  it("renders only the OPEN category's rows, not all 44 catalog rows", () => {
+    const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
+    // v6 catalog + Uploaded documents + Marvin + Zoom + Google Meet, less the
+    // Communications category (Slack's second placement + MS Teams) removed
+    // 2026-08-04.
+    expect(total).toBe(44)
+    for (const cat of CONNECTOR_CATALOG) {
+      // The `uploads` provider is never rendered as a connector row — it's
+      // surfaced as the document-source list instead.
+      const expected = cat.items.filter((i) => i.id !== "uploads").length
+      expect(countRows(render({ selectedCategoryKey: cat.key }))).toBe(expected)
+    }
   })
 
   it("Asana row is wired for OAuth connect (no sync-engine support yet)", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "pm" })
     expect(html).toContain("Asana")
   })
 
   it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "design" })
     // Both `oauth: true` and `authType: "apikey"` rows surface a Connect action.
     expect(html).toContain("Figma")
     expect(html).toContain("Connect")
@@ -245,7 +339,7 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   })
 
   it("shows 'Coming soon' (disabled) action for non-OAuth connector with no connection", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // Mixpanel has oauth: false — should be disabled with "Coming soon".
     expect(html).toContain("Coming soon")
     // The Coming soon buttons should be disabled.
@@ -255,47 +349,62 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   it("shows 'Active' pill + 'Configure' action when a matching active connection exists", () => {
     const map = new Map<string, ConnectionSummary>()
     map.set("figma", activeConn("figma", "design@meridian.health"))
-    const html = render({ connectionByProvider: map })
+    const html = render({ connectionByProvider: map, selectedCategoryKey: "design" })
     expect(html).toContain("Active")
     expect(html).toContain("Configure")
     expect(html).toContain("design@meridian.health")
   })
 
   it("uses inline brand-color background on the logo box for letter-only connectors", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // Connectors without a bundled SVG → brand-color box + letter.
     expect(html).toContain("background:#7856FF") // Mixpanel
     expect(html).toContain("background:#FF6E6E") // Heap
   })
 })
 
-describe("ConnectorsSettingsView — per-category upload strips", () => {
-  it("renders one upload strip per category card", () => {
-    const html = render()
+describe("ConnectorsSettingsView — the open category's upload strip", () => {
+  it("renders exactly one upload strip — the open category's", () => {
+    const html = render({ selectedCategoryKey: "analytics" })
     const matches = html.match(/class="set-conn-upload"/g) ?? []
-    expect(matches.length).toBe(CONNECTOR_CATALOG.length)
+    expect(matches.length).toBe(1)
+    expect(html).toContain("Upload files to this category")
   })
 
-  it("labels each strip with its category (e.g. 'Upload analytics export')", () => {
-    const html = render()
-    expect(html).toContain("Upload analytics export")
-    expect(html).toContain("Upload project management export")
+  it("hides the upload strip for integration-only categories (code, pm)", () => {
+    // Those categories must be populated by connecting the real integration,
+    // so they opt out via `allowsManualUpload: false` in the catalog.
+    for (const key of ["code", "pm"]) {
+      const html = render({ selectedCategoryKey: key })
+      expect(html).not.toContain("Upload files to this category")
+      // The connector rows themselves are untouched.
+      expect(countRows(html)).toBe(
+        CONNECTOR_CATALOG.find((c) => c.key === key)!.items.length,
+      )
+    }
+    expect(render({ selectedCategoryKey: "code" })).toContain("GitHub")
+    expect(render({ selectedCategoryKey: "pm" })).toContain("Jira")
+    // Voice — Slack's only shelf now — is NOT integration-only: an exported
+    // transcript is legitimate customer voice, so its strip stays.
+    expect(render({ selectedCategoryKey: "voice" })).toContain(
+      "Upload files to this category",
+    )
   })
 
   it("advertises the shared accepted-types hint", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // The `&` in the hint is HTML-encoded as `&amp;` by renderToStaticMarkup.
     expect(html).toContain(UPLOAD_ACCEPT_HINT.replace(/&/g, "&amp;"))
   })
 
   it("accepts the shared broad extension list", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
   })
 
   it("shows the idle upload labels and enabled inputs by default", () => {
-    const html = render()
-    expect(html).toContain("ti-cloud-upload")
+    const html = render({ selectedCategoryKey: "analytics" })
+    expect(html).toContain("tabler-icon-cloud-upload")
     // Idle: no busy markers, inputs are selectable.
     expect(html).not.toContain("Uploading…")
     expect(html).not.toContain("is-uploading")
@@ -303,10 +412,10 @@ describe("ConnectorsSettingsView — per-category upload strips", () => {
   })
 
   it("shows an in-flight busy state (spinner + 'Uploading…') and disables the inputs while uploading", () => {
-    const html = render({ uploading: true })
+    const html = render({ uploading: true, selectedCategoryKey: "analytics" })
     expect(html).toContain("Uploading…")
     // Spinner icon swaps in; busy class + aria-busy drive the visible state.
-    expect(html).toContain("ti-spin")
+    expect(html).toContain("icon-spin")
     expect(html).toContain("is-uploading")
     expect(html).toMatch(/aria-busy="true"/)
     // The file inputs are blocked so overlapping uploads can't be fired mid-flight.
@@ -314,14 +423,19 @@ describe("ConnectorsSettingsView — per-category upload strips", () => {
   })
 })
 
-describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
-  function sourceFile(filename: string, kind = "pdf"): SourceFile {
+describe("ConnectorsSettingsView — uploaded files list (per category)", () => {
+  function sourceFile(
+    filename: string,
+    kind = "pdf",
+    category = "",
+  ): SourceFile {
     return {
       filename,
       kind,
       size_bytes: 2048,
       md_chars: 100,
       added_at: "2026-06-01T10:00:00Z",
+      category,
     }
   }
 
@@ -329,59 +443,162 @@ describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
     expect(render({ files: [] })).not.toContain("Uploaded files")
   })
 
-  it("renders a single company-wide list when files exist", () => {
+  it("hides uncategorized (legacy) files entirely", () => {
     const html = render({
       files: [sourceFile("q2-metrics.pdf"), sourceFile("notes.txt", "txt")],
     })
+    expect(html).not.toContain("Uploaded files")
+    expect(html).not.toContain("not yet under a category")
+    expect(html).not.toContain("q2-metrics.pdf")
+    expect(html).not.toContain("notes.txt")
+  })
+
+  it("lists a categorized file under its category, not in the global list", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    // Shown under the selected category…
+    expect(html).toContain('data-testid="category-files"')
+    expect(html).toContain("dash.pdf")
+    // …and NOT surfaced in the global "not yet under a category" bucket.
+    expect(html).not.toContain("not yet under a category")
+  })
+
+  it("does not show a category's files under a different category", () => {
+    const html = render({
+      selectedCategoryKey: "design",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    expect(html).not.toContain('data-testid="category-files"')
+    expect(html).not.toContain("dash.pdf")
+  })
+
+  it("offers an icon-only trash button to remove each uploaded file", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    expect(html).toContain('data-testid="category-files"')
+    expect(html).toContain("src-trash")
+    expect(html).toContain("tabler-icon-trash")
+    expect(html).toContain('aria-label="Remove dash.pdf"')
+  })
+
+  it("separates uploaded files from connectors with a labeled divider", () => {
+    const html = render({
+      selectedCategoryKey: "voice",
+      files: [sourceFile("guide.pdf", "pdf", "voice")],
+    })
+    // A labeled "Uploaded files" divider heads the file list so it doesn't
+    // read as another connector card.
+    expect(html).toContain("set-conn-uploads-head")
     expect(html).toContain("Uploaded files")
-    expect(html).toContain("across all categories")
-    expect(html).toContain("q2-metrics.pdf")
-    expect(html).toContain("notes.txt")
-    // One shared list, not one per category.
-    const lists = html.match(/class="src-list"/g) ?? []
-    expect(lists.length).toBe(1)
+    expect(html).toContain('data-testid="category-files"')
+  })
+
+  it("shows a Removing… busy state on the file being removed", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+      removingFilename: "dash.pdf",
+    })
+    expect(html).toContain("Removing…")
+    expect(html).toContain("icon-spin")
+    expect(html).toMatch(/aria-busy="true"/)
+    expect(html).toMatch(/<button[^>]*disabled/)
+  })
+
+  it("does not surface legacy uncategorized files under any category", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("old.pdf")],
+    })
+    expect(html).not.toContain("old.pdf")
+    expect(html).not.toContain('data-testid="category-files"')
   })
 })
 
 describe("ConnectorsSettingsView — Settings tab uses the connectable-only catalog", () => {
+  /** Every category's panel markup concatenated — the whole connectable set. */
+  function renderAllPanels(): string {
+    const cats = connectableCatalog()
+    return cats
+      .map((c) => render({ categories: cats, selectedCategoryKey: c.key }))
+      .join("")
+  }
+
   it("renders no 'Coming soon' rows when given connectableCatalog()", () => {
-    const html = render({ categories: connectableCatalog() })
+    const html = renderAllPanels()
     expect(html).not.toContain("Coming soon")
     expect(html).not.toMatch(/<button[^>]*disabled/)
   })
 
   it("shows the wired connectors and hides the 'Coming soon' ones", () => {
-    const html = render({ categories: connectableCatalog() })
+    const html = renderAllPanels()
     // Wired (kept):
     for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Jira", "Google Docs", "HubSpot", "Fireflies"]) {
       expect(html).toContain(name)
     }
     // Coming soon (removed):
-    for (const name of ["Mixpanel", "Amplitude", "Sentry", "Linear", "Stripe", "MS Teams"]) {
+    for (const name of ["Mixpanel", "Amplitude", "Sentry", "Linear", "Stripe"]) {
       expect(html).not.toContain(name)
     }
+    // MS Teams is not merely hidden — it left the catalog with the
+    // Communications category (2026-08-04).
+    expect(html).not.toContain("MS Teams")
   })
 
-  it("groups the wired connectors into their categories (empty categories dropped)", () => {
-    const html = render({ categories: connectableCatalog() })
+  it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // 11 wired connector rows across the surviving categories, one upload
-    // strip per surviving category.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(11)
-    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
+    // One rail tab per surviving category. 15 connectors are wired, but the
+    // `uploads` provider is never shown as a row (it's the document-source
+    // list), Slack renders on ONE shelf (voice) rather than two, and Zoom and
+    // Google Meet add one row each, so 14 connector rows render across the
+    // panels.
+    const one = render({ categories: keptCategories })
+    expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
     )
-    expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(
-      keptCategories.length,
+    expect((one.match(/role="tabpanel"/g) ?? []).length).toBe(1)
+    const rowsAcrossPanels = keptCategories.reduce(
+      (n, c) =>
+        n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
+      0,
     )
+    expect(rowsAcrossPanels).toBe(14)
+    // Each surviving category that allows manual upload shows its strip.
+    expect(
+      keptCategories.filter(
+        (c) =>
+          (render({ categories: keptCategories, selectedCategoryKey: c.key }).match(
+            /class="set-conn-upload"/g,
+          ) ?? []).length === 1,
+      ).length,
+    ).toBe(keptCategories.filter((c) => c.allowsManualUpload !== false).length)
     // Categories with no wired connectors (e.g. Monitoring) are dropped.
-    expect(html).not.toContain("powers On-Call Agent")
+    expect(one).not.toContain("powers On-Call Agent")
+  })
+
+  it("keeps the Research panel — no connector rows, but its upload strip is live", () => {
+    const keptCategories = connectableCatalog()
+    const research = keptCategories.find((c) => c.key === "research")
+    // Marvin is coming-soon, so the shelf survives only on `keepWhenEmpty`. It
+    // has to: the dropzone is the entire feature until Marvin is wired.
+    expect(research).toBeTruthy()
+    const html = render({ categories: keptCategories, selectedCategoryKey: "research" })
+    expect(countRows(html)).toBe(0)
+    expect(html).not.toContain("Marvin")
+    expect(html).toContain('class="set-conn-upload"')
+    // The rail still offers it as a tab, so the user can get to that dropzone.
+    expect(render({ categories: keptCategories })).toContain("Research")
   })
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
-    const html = render({ categories: connectableCatalog() })
-    // 8 of the 10 wired connectors have an official bundled SVG mark
-    // (Fireflies and Sprinklr keep their letter glyphs).
+    const html = renderAllPanels()
+    // 11 of the 12 wired connectors have a bundled SVG mark (Fireflies and
+    // Sprinklr keep their letter glyphs). Slack's mark renders once now that
+    // its card sits on the voice shelf alone, so 11 <img> tags.
     for (const id of [
       "slack",
       "github",
@@ -391,10 +608,13 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
       "jira",
       "google_drive",
       "asana",
+      "confluence",
+      "zoom",
+      "google_meet",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(8)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(11)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).
@@ -450,5 +670,89 @@ describe("ConnectorsSettings — admin-gate connect error mapping", () => {
     expect(html).not.toContain("Could not start google_drive connect")
     // It surfaces in the alert region for accessibility.
     expect(html).toContain('role="alert"')
+  })
+})
+
+describe("ConnectorsSettingsView — uploaded document sources", () => {
+  const source = {
+    id: "s-1",
+    name: "Q3 churn interviews",
+    description: "12 enterprise accounts — why they left.",
+    created_at: "2026-07-20T00:00:00Z",
+    file_count: 3,
+    files: [],
+  }
+
+  // The named-source UI now lives under the merged "Company documentation"
+  // category (key "docs"), which is where the `uploads` connector was moved.
+  function renderDocs(
+    override: Partial<React.ComponentProps<typeof ConnectorsSettingsView>> = {},
+  ): string {
+    return render({ selectedCategoryKey: "docs", ...override })
+  }
+
+  it("offers an add-a-source affordance on the Company documentation category", () => {
+    const html = renderDocs()
+    expect(html).toContain('data-testid="add-upload-source"')
+    expect(html).toContain("Add a document source")
+    // Direct file-picker flow — no name/description step.
+    expect(html).toContain("Pick files")
+    expect(html).toContain('type="file"')
+  })
+
+  it("does not render the generic upload strip on the Company documentation category", () => {
+    // Files are attached inside the named-source flow instead
+    // (allowsManualUpload: false on the merged category).
+    expect(renderDocs()).not.toContain("Upload files to this category")
+  })
+
+  it("lists each source with its name and description (no doc-count chip)", () => {
+    const html = renderDocs({ uploadSources: [source] })
+    expect(html).toContain('data-testid="upload-sources"')
+    expect(html).toContain("Q3 churn interviews")
+    expect(html).toContain("12 enterprise accounts")
+    // The "N docs" chip was removed from source rows.
+    expect(html).not.toContain("src-kind-chip")
+    expect(html).not.toContain("3 docs")
+  })
+
+  it("removes a source via an icon-only trash button (no 'Remove' text label)", () => {
+    const html = renderDocs({ uploadSources: [source] })
+    // Icon-only delete: the .src-trash button carries the trash glyph, and the
+    // "Remove" wording lives in aria-label/title, not a visible text node.
+    expect(html).toContain("src-trash")
+    expect(html).toContain("tabler-icon-trash")
+    expect(html).toContain(`aria-label="Remove ${source.name}"`)
+    // Adding more files to an existing source was removed.
+    expect(html).not.toContain("Add files")
+  })
+
+  it("shows a Removing… busy state on the source being removed", () => {
+    const html = renderDocs({ uploadSources: [source], removingSourceId: source.id })
+    expect(html).toContain("Removing…")
+    expect(html).toContain("icon-spin")
+    expect(html).toMatch(/aria-busy="true"/)
+    expect(html).toMatch(/<button[^>]*disabled/)
+  })
+
+  it("renders no source list when there are none", () => {
+    expect(renderDocs()).not.toContain('data-testid="upload-sources"')
+  })
+
+  it("does NOT render the Uploaded documents provider as a connector row", () => {
+    // It's the user's own files, surfaced as the source list — not a connector.
+    const html = renderDocs()
+    expect(html).not.toContain("Uploaded documents")
+  })
+
+  it("still shows the real doc connectors (Google Docs) under the category", () => {
+    const html = renderDocs()
+    expect(html).toContain("Google Docs")
+  })
+
+  it("separates the document sources from the connector with a labeled divider", () => {
+    const html = renderDocs({ uploadSources: [source] })
+    expect(html).toContain("set-conn-uploads-head")
+    expect(html).toContain("Your documents")
   })
 })

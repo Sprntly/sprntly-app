@@ -201,6 +201,15 @@ describe("prototype route — active-prototype resume decision (actionForActiveP
       actionForActiveProto({ id: 2, status: "invalidated" } as PrototypeRecord),
     ).toEqual({ kind: "none" })
   })
+
+  it("reveals a failed prototype that still has a bundle (a later iterate failed, not the first generation)", () => {
+    const proto = {
+      id: 30,
+      status: "failed",
+      bundle_url: "https://cdn/b.js",
+    } as PrototypeRecord
+    expect(actionForActiveProto(proto)).toEqual({ kind: "reveal", proto })
+  })
 })
 
 describe("prototype route — failed-latest decision (actionForLatestProto)", () => {

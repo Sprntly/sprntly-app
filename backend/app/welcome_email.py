@@ -6,7 +6,7 @@ from the drip cadence in app/drip_email.py — that is a scheduler-driven day-1/
 3/7 nudge sequence; this is an instant, completion-triggered transactional
 email signed by the founder.
 
-Reuses the same transport and branding as the drip / weekly-brief emails:
+Reuses the same transport and branding as the drip / top-insights emails:
   - Resend HTTPS API over httpx (env RESEND_API_KEY; no SMTP, no SDK).
   - Config resolved at CALL TIME (config_mod.settings.*) so the test suite's
     config reload + monkeypatched client win.
@@ -89,10 +89,12 @@ def _app_base() -> str:
 
 def _guide_url() -> str:
     """The one-page onboarding guide link. Overridable via WELCOME_GUIDE_URL;
-    defaults to `<app_base>/guide` so the email always carries a working link
-    even before a dedicated guide URL is configured."""
+    defaults to `<app_base>/docs/sprntly-how-to-guide` (the public docs page) so
+    the email always carries a working link even before a dedicated guide URL is
+    configured."""
     return getattr(config_mod.settings, "welcome_guide_url", "") or (
-        f"{_app_base()}/guide"
+        f"{_app_base()}/docs/sprntly-how-to-guide"
+        # f"https://public-access.s3.us-east-1.amazonaws.com/Sprntly-How-To-Guide.docx"
     )
 
 

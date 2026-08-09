@@ -3,10 +3,10 @@
 // Sidebar nav-wiring DOM tests.
 //
 // After the brief/chat unification, the home surface (`/`, ChatScreen) defaults
-// to the pinned Weekly-brief tab on a fresh load. So the sidebar "New chat" `+`
+// to the pinned Top Insights tab on a fresh load. So the sidebar "New chat" `+`
 // must NOT use the plain goTo("chat") nav (that would land on the brief) — it
 // uses goToNewChat() (→ `/?new=1`, consumed by ChatScreen to start a fresh chat).
-// The "Weekly brief" and "All chats" rail items keep their plain goTo() nav.
+// The "Top Insights" and "All chats" rail items keep their plain goTo() nav.
 //
 // These tests mount the REAL Sidebar, mocking only the context boundaries it
 // reads, and assert the click→nav wiring (not a re-implementation).
@@ -18,11 +18,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const goTo = vi.fn()
 const goToNewChat = vi.fn()
+const goToWorkbench = vi.fn()
+const openPalette = vi.fn()
 const toggleSidebar = vi.fn()
 let sidebarCollapsed = true
 
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ currentScreen: "brief", goTo, goToNewChat, sidebarCollapsed, toggleSidebar }),
+  useNavigation: () => ({
+    currentScreen: "brief",
+    goTo,
+    goToNewChat,
+    goToWorkbench,
+    openPalette,
+    sidebarCollapsed,
+    toggleSidebar,
+  }),
 }))
 
 vi.mock("../../../context/ContentContext", () => ({
@@ -66,6 +76,8 @@ import { Sidebar } from "../Sidebar"
 beforeEach(() => {
   goTo.mockClear()
   goToNewChat.mockClear()
+  goToWorkbench.mockClear()
+  openPalette.mockClear()
   toggleSidebar.mockClear()
   setActiveWorkspace.mockClear()
   sidebarCollapsed = true
@@ -83,14 +95,40 @@ describe("Sidebar — New chat wiring", () => {
     expect(goTo).not.toHaveBeenCalledWith("chat")
   })
 
-  it("'Weekly brief' and 'All chats' rail items keep their plain goTo() nav", () => {
+  it("'Top Insights' and 'All chats' rail items keep their plain goTo() nav", () => {
     render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Weekly brief"))
+    fireEvent.click(screen.getByLabelText("Top Insights"))
     expect(goTo).toHaveBeenCalledWith("brief")
     fireEvent.click(screen.getByLabelText("Chat history"))
     expect(goTo).toHaveBeenCalledWith("chats")
     // The new-chat helper was not triggered by either.
     expect(goToNewChat).not.toHaveBeenCalled()
+  })
+})
+
+// ── Workbench: hidden from the rail (2026-08-07) ─────────────────────────────
+// The Workbench trigger is commented out of the rail on a product call, the
+// same way Search is. The surface behind it is NOT gone: goToWorkbench and the
+// `/?tab=last` one-shot ChatScreen consumes are untouched, so these tests only
+// assert the rail no longer offers the door — never that the tab stopped
+// working. Top Insights keeps its own, separate door to the pinned brief tab.
+describe("Sidebar — Workbench (hidden)", () => {
+  it("no longer renders the Workbench trigger", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByTestId("sidebar-workbench")).toBeNull()
+    expect(screen.queryByLabelText("Workbench")).toBeNull()
+    expect(goToWorkbench).not.toHaveBeenCalled()
+  })
+
+  it("Top Insights is now the first rail item, and still routes to the pinned brief tab", () => {
+    const { container } = render(React.createElement(Sidebar))
+    const labels = Array.from(container.querySelectorAll(".sb-rail-nav .sb-rail-label")).map(
+      (el) => el.textContent,
+    )
+    expect(labels[0]).toBe("Top Insights")
+    fireEvent.click(screen.getByLabelText("Top Insights"))
+    expect(goTo).toHaveBeenCalledWith("brief")
+    expect(goToWorkbench).not.toHaveBeenCalled()
   })
 })
 
@@ -100,13 +138,27 @@ describe("Sidebar — New chat wiring", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Weekly brief, All chats, Sources, Settings + Feedback", () => {
+  // The rail's Search trigger is hidden for now (product call, 2026-07-31). The
+  // palette is NOT removed: AppShell still renders it and owns ⌘K, so this only
+  // asserts the button is absent — never that search stopped working.
+  it("no longer renders the Search trigger (palette + ⌘K are untouched)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByTestId("palette-trigger")).toBeNull()
+    expect(screen.queryByLabelText("Search (Ctrl+K)")).toBeNull()
+    expect(openPalette).not.toHaveBeenCalled()
+  })
+
+  // Workbench is deliberately absent from this list — it is hidden on a product
+  // call (2026-08-07), guarded by the "Workbench (hidden)" suite above.
+  it("renders New chat, Top Insights, All chats, Templates, Guide, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
-      "Weekly brief",
+      "Top Insights",
       "Chat history",
-      "Sources",
+      "Ideation",
+      "Templates",
+      "Guide",
       "Settings",
       "Feedback",
     ]) {
@@ -114,14 +166,49 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     }
   })
 
+  // Templates came back on the rail with artifact formats (2026-08): the screen
+  // now decides what every PRD, ticket and engineering spec Sprntly writes
+  // LOOKS like, not only which finished examples it reads for voice. That is a
+  // setting a PM sets up once and returns to, so it needs a door of its own —
+  // while the screen was exemplars-only the item stayed commented out.
+  it("renders the Templates rail item and navigates to the /templates screen", () => {
+    render(React.createElement(Sidebar))
+    const item = screen.getByLabelText("Templates")
+    expect(item).toBeTruthy()
+    fireEvent.click(item)
+    // goTo("templates") is what routes.ts maps to "/templates"; the label
+    // deliberately still matches ScreenId, MAIN_CHROME_TITLE and the palette.
+    expect(goTo).toHaveBeenCalledWith("templates")
+    expect(goToNewChat).not.toHaveBeenCalled()
+  })
+
+  it("Guide is an anchor to the public /docs site (not a goTo screen), opening safely in a new tab", () => {
+    render(React.createElement(Sidebar))
+    const guide = screen.getByTestId("sidebar-guide-link") as HTMLAnchorElement
+    expect(guide.tagName).toBe("A")
+    expect(guide.getAttribute("href")).toBe("/docs")
+    expect(guide.getAttribute("target")).toBe("_blank")
+    expect(guide.getAttribute("rel")).toBe("noopener noreferrer")
+    // It navigates via the anchor, never through the SPA screen router.
+    fireEvent.click(guide)
+    expect(goTo).not.toHaveBeenCalled()
+    expect(goToNewChat).not.toHaveBeenCalled()
+  })
+
+  it("no longer renders a Sources rail item (hidden from the rail; screen + route kept)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByLabelText("Sources")).toBeNull()
+  })
+
   it("no longer renders a Sign out affordance (it lives in Settings → Account)", () => {
     render(React.createElement(Sidebar))
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("no longer renders the Ideation rail icon (functionality kept, icon removed)", () => {
+  it("renders the Ideation rail icon (restored to the nav)", () => {
     render(React.createElement(Sidebar))
-    expect(screen.queryByLabelText("Ideation")).toBeNull()
+    fireEvent.click(screen.getByLabelText("Ideation"))
+    expect(goTo).toHaveBeenCalledWith("ideation")
   })
 
   it("Feedback opens the feedback modal (not a nav)", () => {

@@ -1,12 +1,21 @@
-"""Sync explicitly-picked Google Drive files into a dataset corpus.
+"""Sync explicitly-picked Google Drive files and folders into a dataset corpus.
 
-Under the ``drive.file`` OAuth scope this app can only see files the user
-explicitly picks via the Google Picker — there is no Drive-wide listing or
-folder browsing. The frontend Picker POSTs the picked file IDs (see
-``routes/connectors.py`` ``POST /v1/connectors/google-drive/files``) which we
-store in the connection config under ``config["files"]`` as a list of
-``{"id": "...", "name": "..."}`` entries. ``sync_google_drive`` iterates those
-IDs, fetches each file's metadata, downloads/exports it, and ingests it.
+Under the ``drive.file`` OAuth scope this app can only see what the user
+explicitly picks via the Google Picker — there is still no Drive-wide listing.
+The frontend Picker POSTs the picked IDs (see ``routes/connectors.py``
+``POST /v1/connectors/google-drive/files``) which we store in the connection
+config under ``config["files"]`` as ``{"id": "...", "name": "..."}`` entries.
+
+FOLDERS: the Picker shows them so a user can browse INTO one and pick the files
+inside, but does not let a folder itself be selected. Verified against a live
+Drive on 2026-08-03 — under ``drive.file`` the Picker grants the folder OBJECT
+and nothing beneath it: the folder's metadata reads fine while ``files.list``
+on it returns zero children, not a 403. A connected folder is therefore
+undetectably inert, contributing no documents while looking connected, so the
+selection is blocked at the Picker rather than failing quietly later. A folder
+still in ``config["files"]`` from before that change is skipped with copy
+saying what to do instead. Folder-as-a-source needs ``drive.readonly``, which
+is a scope decision, not a code one.
 """
 from __future__ import annotations
 
@@ -27,7 +36,7 @@ from app import datasets, db
 from app.connectors import google_oauth
 from app.connectors.google_oauth import credentials_from_token_json
 from app.connectors.tokens import decrypt_token_json, encrypt_token_json
-from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType
+from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType, convert
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +66,10 @@ class SyncResult:
     synced: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    # Files handed to the KG extractor this run (names). Extraction itself is
+    # async unless kg_inline — kg_signals is only populated on the inline path.
+    kg_queued: list[str] = field(default_factory=list)
+    kg_signals: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +77,8 @@ class SyncResult:
             "synced": self.synced,
             "skipped": self.skipped,
             "errors": self.errors,
+            "kg_queued": self.kg_queued,
+            "kg_signals": self.kg_signals,
         }
 
 
@@ -172,7 +187,8 @@ def get_file_metadata(service: Resource, file_id: str) -> dict:
     granted this app access to."""
     return (
         service.files()
-        .get(fileId=file_id, fields="id, name, mimeType, modifiedTime, size")
+        .get(fileId=file_id,
+             fields="id, name, mimeType, modifiedTime, size, webViewLink")
         .execute()
     )
 
@@ -212,17 +228,42 @@ def download_file_content(service: Resource, meta: dict) -> tuple[str, bytes] | 
     return name, data
 
 
+def _mark_corpus_doc(company_id: str, doc_name: str, md_text: str) -> None:
+    """Best-effort corpus-doc ledger mark (see
+    ``synthesis_brief.mark_corpus_doc_ingested``). A failed mark only risks
+    the corpus seed double-extracting this doc as origin="upload" — extraction
+    is content-keyed idempotent, so that costs an LLM call, not correctness."""
+    try:
+        from app.graph.facade import GraphFacade
+        from app.synthesis_brief import mark_corpus_doc_ingested
+
+        mark_corpus_doc_ingested(GraphFacade(), company_id, doc_name, md_text)
+    except Exception:  # noqa: BLE001
+        logger.warning("drive sync: corpus-doc ledger mark failed for %r",
+                       doc_name, exc_info=True)
+
+
 def sync_google_drive(
     *,
     company_id: str,
     dataset: str | None = None,
     files: list[dict] | None = None,
+    kg_inline: bool = False,
 ) -> SyncResult:
     """Download + ingest the explicitly-picked Drive files stored in the
     connection config (``config["files"]``). Pass ``files`` to overwrite the
     stored picked-file list first (used by the save-picked-files endpoint);
     otherwise the existing config is used. An empty picked-file list is a
-    graceful no-op — not an error."""
+    graceful no-op — not an error.
+
+    Two freshness ledgers per file: ``file_mtime`` (corpus copy) and
+    ``kg_file_mtime`` (KG extraction). A file changed against either gets
+    re-downloaded; the corpus copy re-ingests only when corpus-stale, and
+    KG-stale files are handed to the connector-origin extractor
+    (``kg_ingest.drive_extract``) — in a background thread by default, or
+    synchronously with ``kg_inline=True`` (the brief's first-time seed).
+    ``kg_file_mtime`` advances only after successful extraction, so a lost
+    background thread is retried on the next scheduled/manual sync."""
     row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise SyncConfigError("Google Drive is not connected")
@@ -255,6 +296,26 @@ def sync_google_drive(
         return result
 
     mtime_map: dict[str, str] = dict(config.get("file_mtime") or {})
+    kg_mtime_map: dict[str, str] = dict(config.get("kg_file_mtime") or {})
+    # Grandfather pre-existing connections: on the very first KG-aware sync
+    # (no kg_file_mtime key in config, ever) the already-synced files were
+    # extracted long ago by the corpus seed — adopt their corpus mtimes
+    # instead of re-extracting the same bytes into near-duplicate signals.
+    # New and edited files still extract normally. The key is then persisted
+    # below even when empty, so this fires exactly once per connection — a
+    # later sync where extraction is still pending/failed must NOT
+    # re-grandfather away the retry.
+    grandfathered = "kg_file_mtime" not in config
+    if grandfathered:
+        kg_mtime_map = dict(mtime_map)
+
+    from app.kg_ingest.drive_extract import (  # lazy — keeps graph/LLM deps off module load
+        DriveDoc,
+        kickoff_drive_extract,
+        run_drive_extract,
+    )
+
+    kg_docs: list[DriveDoc] = []
 
     try:
         service = build_drive_service(row)
@@ -264,6 +325,30 @@ def sync_google_drive(
             company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg
         )
         raise SyncConfigError(msg) from e
+
+    # ── Resolve the picked entries to FILES ──────────────────────────────────
+    #
+    # A picked entry is a file or a folder, and only its metadata says which.
+    # Folders are expanded to the files beneath them here, so everything below
+    # this block deals in files only and folder support costs the ingest loop
+    # nothing. Expanding at SYNC time rather than at pick time is the whole
+    # value of picking a folder: files added to it later are picked up by the
+    # next sync without the user touching the Picker again.
+    targets: list[dict] = []
+    seen_ids: set[str] = set()
+    # folder id -> the files it expanded to, so the UI can show what connecting
+    # a folder actually brought in. Rebuilt from scratch every sync rather than
+    # merged, so a folder the user disconnects takes its listing with it and a
+    # folder that shrank in Drive shrinks here too.
+    folder_contents: dict[str, list[dict]] = {}
+
+    def _add_target(meta: dict) -> None:
+        fid = meta.get("id")
+        # A file reachable from two picked folders, or picked directly AND
+        # inside a picked folder, must ingest once — not once per path to it.
+        if fid and fid not in seen_ids:
+            seen_ids.add(fid)
+            targets.append(meta)
 
     for entry in picked:
         file_id = entry["id"]
@@ -281,8 +366,41 @@ def sync_google_drive(
             continue
 
         name = meta.get("name") or picked_name
+
+        if (meta.get("mimeType") or "") != GOOGLE_FOLDER:
+            _add_target(meta)
+            continue
+
+        # A FOLDER. The Picker no longer lets one be selected — folders are
+        # browsable so the user can go inside and pick the files — so reaching
+        # here means a folder connected before that changed.
+        #
+        # Verified against a live Drive on 2026-08-03: under drive.file the
+        # Picker grants the folder OBJECT and nothing beneath it. The folder's
+        # own metadata reads fine while `files.list` on it returns zero children
+        # — not a 403, just an empty answer — so a folder cannot even be
+        # detected as broken; it silently contributes no documents. Walking it
+        # is therefore pointless rather than merely bounded, which is why the
+        # expansion machinery is gone instead of disabled. Folder-as-a-source
+        # needs drive.readonly, a scope decision rather than a code one.
+        folder_contents[file_id] = []
+        result.skipped.append({
+            "name": name,
+            "reason": (
+                "folder is connected but Google only grants access to items "
+                "picked directly — open it in the picker and select the "
+                "files inside"
+            ),
+        })
+
+    for meta in targets:
+        file_id = meta["id"]
+        name = meta.get("name") or file_id
+
         modified = meta.get("modifiedTime") or ""
-        if mtime_map.get(file_id) == modified:
+        corpus_fresh = mtime_map.get(file_id) == modified
+        kg_fresh = kg_mtime_map.get(file_id) == modified
+        if corpus_fresh and kg_fresh:
             result.skipped.append({"name": name, "reason": "unchanged"})
             continue
 
@@ -293,49 +411,140 @@ def sync_google_drive(
             continue
 
         if downloaded is None:
-            result.skipped.append(
+            result.errors.append(
                 {
                     "name": name,
-                    "reason": f"unsupported type ({meta.get('mimeType')})",
+                    "error": (
+                        f"Unsupported file type ({meta.get('mimeType')}) — "
+                        "Sprntly reads documents, spreadsheets, slides and PDFs."
+                    ),
                 }
             )
             continue
 
         filename, data = downloaded
         if len(data) > MAX_SYNC_BYTES:
-            result.skipped.append(
+            result.errors.append(
                 {
                     "name": name,
-                    "reason": f"exceeds {MAX_SYNC_BYTES // (1024 * 1024)}MB limit",
+                    "error": "File is larger than the 20MB sync limit.",
                 }
             )
             continue
 
-        try:
-            ingested = datasets.ingest_file(slug, filename, data)
-        except UnsupportedFileType:
-            result.skipped.append({"name": name, "reason": "unsupported after export"})
-            continue
-        except Exception as e:
-            result.errors.append({"name": name, "error": str(e)})
-            continue
+        md_text = ""
+        # Where this file's converted markdown landed, when this pass is the
+        # one that writes it. Empty on the KG-only refresh below: that branch
+        # converts in memory and writes nothing, so it has no name to report
+        # and the extractor keeps whatever an earlier sync recorded.
+        md_path = ""
+        if not corpus_fresh:
+            try:
+                ingested = datasets.ingest_file(slug, filename, data)
+            except UnsupportedFileType:
+                result.errors.append({
+                    "name": name,
+                    "error": "Sprntly couldn't convert this file after downloading it.",
+                })
+                continue
+            except Exception as e:
+                result.errors.append({"name": name, "error": str(e)})
+                continue
 
-        mtime_map[file_id] = modified
-        result.synced.append(
-            {
-                "filename": ingested.original_filename,
-                "md_path": ingested.md_path,
-                "md_chars": ingested.md_chars,
-            }
-        )
+            md_path = ingested.md_path
+            try:
+                md_text = Path(ingested.md_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                logger.warning("drive sync: could not re-read md for %r", filename,
+                               exc_info=True)
+            # Mark the corpus-doc ledger so the brief's corpus seed doesn't
+            # re-extract this same content as origin="upload" — Drive content
+            # reaches the KG through its own connector-origin path below.
+            if md_text:
+                _mark_corpus_doc(company_id, Path(ingested.md_path).stem, md_text)
+            mtime_map[file_id] = modified
+            result.synced.append(
+                {
+                    "filename": ingested.original_filename,
+                    "md_path": ingested.md_path,
+                    "md_chars": ingested.md_chars,
+                }
+            )
+        else:
+            # KG-only refresh (first pass after KG ingest shipped, or a prior
+            # extraction that never completed) — convert in memory, no
+            # duplicate corpus write.
+            try:
+                md_text = convert(filename, data)
+            except UnsupportedFileType:
+                result.errors.append({
+                    "name": name,
+                    "error": "Sprntly couldn't convert this file after downloading it.",
+                })
+                continue
+            except Exception as e:
+                result.errors.append({"name": name, "error": str(e)})
+                continue
 
-    merge_config(row, {"file_mtime": mtime_map, "dataset": slug})
+        if not kg_fresh and md_text.strip():
+            kg_docs.append(DriveDoc(
+                file_id=file_id,
+                name=Path(filename).stem,
+                modified=modified,
+                text=md_text,
+                mime=meta.get("mimeType") or "",
+                link=meta.get("webViewLink") or "",
+                # The corpus location this sync just wrote. Carried through so
+                # the extractor can record it on the file's provenance row:
+                # the converted name is normalised and collision-suffixed, so
+                # this is the only moment it is knowable.
+                dataset=slug,
+                md_file=md_path,
+            ))
+
+    patch: dict = {
+        "file_mtime": mtime_map,
+        "dataset": slug,
+        # Whole-value replace, not a merge — see where this is built.
+        "folder_contents": folder_contents,
+    }
+    if grandfathered:
+        # Persist the adopted ledger so the next sync doesn't grandfather
+        # again over a by-then-updated file_mtime. Safe from clobbering the
+        # extraction thread's own patch: the KG kick below hasn't run yet.
+        patch["kg_file_mtime"] = kg_mtime_map
+    merge_config(row, patch)
     err = None
     if result.errors:
-        err = f"{len(result.errors)} file(s) failed"
+        first = result.errors[0]
+        err = f"{first['name']}: {first['error']}"
+        if len(result.errors) > 1:
+            err = f"{err} (+{len(result.errors) - 1} more)"
+        err = err[:500]
     db.update_connection_sync(
         company_id,
         google_oauth.GOOGLE_DRIVE_PROVIDER,
         last_sync_error=err,
     )
+
+    if kg_docs:
+        result.kg_queued = [d.name for d in kg_docs]
+        started = False
+        try:
+            if kg_inline:
+                extract = run_drive_extract(company_id, kg_docs)
+                result.kg_signals = extract.get("signals", 0)
+                started = True
+            else:
+                started = kickoff_drive_extract(company_id, kg_docs)
+        except Exception:  # noqa: BLE001 — extraction must never fail the sync
+            logger.exception(
+                "drive sync: KG extraction kick failed for %s", company_id
+            )
+        if not started:
+            msg = "Files synced, but knowledge-graph extraction didn't start. Re-run the sync."
+            result.errors.append({"name": "knowledge graph", "error": msg})
+            db.update_connection_sync(
+                company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg[:500],
+            )
     return result

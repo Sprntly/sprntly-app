@@ -687,8 +687,12 @@ export type CommentsPanelProps = {
    *  runner immediately (instead of pre-filling the composer). The host passes the
    *  runner's `runIterate` here; the comment body becomes the iterate instruction
    *  and the comment is resolved. Takes precedence over `onApply` when present.
-   *  The agent decides applicability — the client never fabricates a change. */
-  onIterateComment?: (comment: CommentRecord) => void
+   *  The agent decides applicability — the client never fabricates a change.
+   *  Resolves `true` when the runner actually started a run, `false` when it was
+   *  rejected (e.g. a second submit while one is already in flight) —
+   *  `handleClarifyConfirm` awaits this and only resolves the comment + closes
+   *  the dialog when it resolves `true`. */
+  onIterateComment?: (comment: CommentRecord) => Promise<boolean>
   /** Disables Apply while the shared runner is mid-iterate to prevent overlapping runs. */
   iterateBusy?: boolean
   /** When true, the composer is suppressed (no contextmenu listener, no write
@@ -887,12 +891,18 @@ export function CommentsPanel({
   }
 
   // Called by ClarifyDialog's "Apply change" button with the (optionally enriched)
-  // prompt. Routes the enriched comment to the parent seam and resolves the original.
-  function handleClarifyConfirm(enrichedPrompt: string) {
+  // prompt. Routes the enriched comment to the parent seam and resolves the
+  // original — but only once the runner actually started a run: awaiting
+  // `onIterateComment` and gating the resolve on `true` stops a rejected Apply
+  // (a run already in flight) from marking the comment resolved as if it had
+  // been handled. On `false` the dialog stays open with the enriched prompt
+  // intact so the user can retry once the in-flight run finishes.
+  async function handleClarifyConfirm(enrichedPrompt: string) {
     if (!clarifyTarget) return
     const enriched: CommentRecord = { ...clarifyTarget, body: enrichedPrompt }
     if (onIterateComment) {
-      onIterateComment(enriched)
+      const started = await onIterateComment(enriched)
+      if (!started) return
     } else {
       onApply?.(enriched)
     }

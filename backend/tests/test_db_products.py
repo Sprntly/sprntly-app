@@ -213,6 +213,86 @@ def test_get_company_website_filters_by_company_id(products):
     assert products.mod.get_company_website("co-a") != "https://b-co.example"
 
 
+# ─── get_primary_product — the answer-prompt workspace-config source ─────────
+
+
+def test_get_primary_product_prefers_primary(products):
+    """The primary product's (name, website) wins over a non-primary's."""
+    db = products.db
+    _seed_product(
+        db, "co-x", pid="p-secondary", website="https://secondary.example",
+        is_primary=False, created_at="2026-01-01T00:00:00", name="Secondary",
+    )
+    _seed_product(
+        db, "co-x", pid="p-primary", website="https://primary.example",
+        is_primary=True, created_at="2026-03-01T00:00:00", name="Primary",
+    )
+
+    result = products.mod.get_primary_product("co-x")
+    assert result == {"name": "Primary", "website": "https://primary.example"}
+
+
+def test_get_primary_product_falls_back_to_recent_when_none_primary(products):
+    """No `is_primary` row → the most-recently created product, same ordering
+    as get_company_website."""
+    db = products.db
+    _seed_product(
+        db, "co-y", pid="p-older", website="https://older.example",
+        is_primary=False, created_at="2026-01-01T00:00:00", name="Older",
+    )
+    _seed_product(
+        db, "co-y", pid="p-newer", website="https://newer.example",
+        is_primary=False, created_at="2026-03-01T00:00:00", name="Newer",
+    )
+
+    assert products.mod.get_primary_product("co-y") == {
+        "name": "Newer", "website": "https://newer.example",
+    }
+
+
+def test_get_primary_product_never_fans_out_across_multiple_products(products):
+    """Exactly ONE row is read even when the company has several products —
+    the LIMIT 1 in the query, not post-filtering in Python. The primary row is
+    ALSO seeded as most-recent so the assertion holds under both a
+    primary-first order (real Postgres) and a most-recent-only order (the
+    fake — see module note)."""
+    db = products.db
+    _seed_product(
+        db, "co-multi", pid="p-2", website="https://two.example",
+        is_primary=False, created_at="2026-01-01T00:00:00", name="Two",
+    )
+    _seed_product(
+        db, "co-multi", pid="p-3", website="https://three.example",
+        is_primary=False, created_at="2026-02-01T00:00:00", name="Three",
+    )
+    _seed_product(
+        db, "co-multi", pid="p-1", website="https://one.example",
+        is_primary=True, created_at="2026-03-01T00:00:00", name="One",
+    )
+
+    result = products.mod.get_primary_product("co-multi")
+    assert result == {"name": "One", "website": "https://one.example"}
+
+
+def test_get_primary_product_website_empty_string_when_null(products):
+    """A product with no website returns '' (not None) for that field, so the
+    caller's truthiness checks stay simple."""
+    _seed_product(
+        products.db, "co-nowebsite", pid="p-1", website=None, is_primary=True,
+        name="No Website Co",
+    )
+    result = products.mod.get_primary_product("co-nowebsite")
+    assert result == {"name": "No Website Co", "website": ""}
+
+
+def test_get_primary_product_returns_none_when_no_product(products):
+    """A company with no product row at all → None, no exception."""
+    _seed_company(products.db, "co-empty-2")
+    assert products.mod.get_primary_product("co-empty-2") is None
+    assert products.mod.get_primary_product("") is None
+    assert products.mod.get_primary_product(None) is None
+
+
 # ─── route precedence fixture + helpers ───────────────────────────────────────
 
 

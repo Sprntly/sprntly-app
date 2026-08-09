@@ -236,7 +236,7 @@ def test_staff_lists_companies_with_counts(isolated_settings, monkeypatch):
 def test_staff_patch_entitlements_roundtrip(isolated_settings, monkeypatch):
     ctx = _staff_ctx(monkeypatch)
     _db().table("companies").update(
-        {"feature_flags": {"weekly_brief": True}}
+        {"feature_flags": {"top_insights": True}}
     ).eq("id", ctx.company_id).execute()
 
     r = ctx.client.patch(
@@ -254,7 +254,7 @@ def test_staff_patch_entitlements_roundtrip(isolated_settings, monkeypatch):
     assert body["prototype_enabled"] is True
     assert body["use_platform_key"] is True
     # feature_flags is a partial MERGE — pre-existing keys survive.
-    assert body["feature_flags"] == {"weekly_brief": True, "research_agent": True}
+    assert body["feature_flags"] == {"top_insights": True, "research_agent": True}
 
     # Explicit null clears the seat limit (unlimited).
     r = ctx.client.patch(
@@ -289,7 +289,7 @@ def test_staff_invite_create_list_revoke_resend(isolated_settings, monkeypatch):
             "seat_limit": 3,
             "prototype_enabled": True,
             "use_platform_key": True,
-            "feature_flags": {"weekly_brief": True},
+            "feature_flags": {"top_insights": True},
         },
     )
     assert r.status_code == 201, r.text
@@ -324,6 +324,36 @@ def test_staff_invite_create_list_revoke_resend(isolated_settings, monkeypatch):
         json={"email": "admin@customer.com", "company_name": "Customer Inc"},
     )
     assert r.status_code == 201
+
+
+def test_staff_invite_prototype_defaults_on(isolated_settings, monkeypatch):
+    """An invite that never touches the Prototype toggle grants it: prototype
+    is a default-ON module for every organization (the staff toggle is an
+    opt-OUT). Regression for the pre-20260721130000 default-false, which made
+    every un-ticked invite (and self-serve signup) silently 404 on
+    /v1/design-agent/generate."""
+    ctx = _staff_ctx(monkeypatch)
+    _no_email_sends(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/staff/invites",
+        json={"email": "defaults@customer.com", "company_name": "Customer Inc"},
+    )
+    assert r.status_code == 201, r.text
+    invite = r.json()
+    assert invite["prototype_enabled"] is True
+
+    # An explicit opt-out still sticks.
+    r = ctx.client.post(
+        "/v1/staff/invites",
+        json={
+            "email": "optout@customer.com",
+            "company_name": "Optout Inc",
+            "prototype_enabled": False,
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["prototype_enabled"] is False
 
 
 def test_staff_invite_validation(isolated_settings, monkeypatch):

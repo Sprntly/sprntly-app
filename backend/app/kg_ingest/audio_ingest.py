@@ -135,6 +135,10 @@ def ingest_audio(
             text=record.render(),
             agent=f"ingest:{source}:audio",
             source_hint=_SOURCE_HINT,
+            # Haiku relevance + category triage ahead of every chunk — a
+            # raw recording's content is unvetted, unlike the
+            # already-distilled Fireflies puller summaries.
+            triage=True,
         )
         for k in totals:
             totals[k] += extracted[k]

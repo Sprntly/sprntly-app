@@ -9,7 +9,7 @@ and any task the request spawns (`asyncio.create_task`, BackgroundTasks).
 
 This is what guarantees EVERY request-scoped Claude call is enforced against the
 company's key policy without each call site opting in. Non-request contexts (the
-KG gateway, the weekly-brief scheduler, warm Ask jobs, the design-agent worker
+KG gateway, the top-insights scheduler, warm Ask jobs, the design-agent worker
 process) bind explicitly via `company_llm_key(...)` at their own entry points.
 
 Best-effort: any request without a resolvable single-company membership (public

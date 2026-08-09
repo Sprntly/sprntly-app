@@ -49,6 +49,8 @@ def start_prd(
     run_id: str | None = None,
     source: str = "brief",
     theme_id: str | None = None,
+    question: str | None = None,
+    ask_id: int | None = None,
 ) -> int:
     """Insert an empty PRD row in 'generating' state. Returns the new id.
 
@@ -56,6 +58,14 @@ def start_prd(
     `source`/`theme_id` mark an ideation-sourced PRD (source='ideation', theme_id
     set) vs a brief PRD (source='brief', theme_id NULL — its theme resolves from
     brief.insights[insight_index]). See the 20260702 migration.
+
+    `question`/`ask_id` are the originating-chat-question linkage (mirrors
+    db/reports.py's `question`/`ask_id`) — set only on paths that actually have
+    a typed question behind them (the chat-task PRD command); every other path
+    (brief insight click, ideation, import) leaves both NULL, which the reader
+    treats as "no originating question" rather than an error. The originating
+    CONVERSATION is tracked separately via `conversations.prd_id` (see
+    db/conversations.bind_conversation_to_prd) — not duplicated here.
     """
     c = require_client()
     resp = c.table("prds").insert({
@@ -69,6 +79,8 @@ def start_prd(
         "run_id": run_id,
         "source": source,
         "theme_id": theme_id,
+        "question": question,
+        "ask_id": ask_id,
     }).execute()
     return resp.data[0]["id"]
 
@@ -122,6 +134,27 @@ def complete_prd(prd_id: int, title: str, md: str) -> None:
     }).eq("id", prd_id).execute()
 
 
+def set_prd_artifact_template(prd_id: int, artifact_template_id: str | None) -> None:
+    """Record WHICH uploaded format produced this PRD (migration
+    20260806160000_prds_artifact_template.sql).
+
+    A separate write rather than a new `complete_prd` argument: `complete_prd`
+    has many callers on paths that have nothing to do with formats (imports,
+    restores, the 2-part variant), and this is only ever known on the generation
+    path. Best-effort by construction — the caller treats a failure here as
+    losing a provenance stamp, never as failing a finished PRD.
+
+    Called with None on the built-in path, which is a no-op write: NULL is
+    already what the column holds and what "written in Sprntly's own format"
+    means, so nothing is stamped and nothing needs to be cleared."""
+    if artifact_template_id is None:
+        return
+    c = require_client()
+    c.table("prds").update(
+        {"artifact_template_id": artifact_template_id}
+    ).eq("id", prd_id).execute()
+
+
 def complete_prd_2part(prd_id: int, title: str, human_md: str, llm_part: str) -> None:
     """Complete a 2-part PRD (prd-author skill): Part A (human-readable) goes to
     `payload_md` — what the frontend renders, unchanged — and Part B (the
@@ -166,6 +199,33 @@ def get_prd(prd_id: int) -> dict | None:
     c = require_client()
     resp = c.table("prds").select("*").eq("id", prd_id).limit(1).execute()
     return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
+def resolve_prd_id_by_public_id(public_id: str) -> int | None:
+    """The real internal `id` for a PRD's opaque, unguessable `public_id` —
+    the ONLY identifier a URL (internal `?prd=` deep-link, or the bare-link
+    guest-access primitive) should ever carry, so a raw sequential id is
+    never exposed for blind enumeration. Callers MUST still run their own
+    ownership check on the resolved id (this function does none) — it only
+    translates the identifier shape, same non-disclosure posture either way:
+    an invalid/malformed/foreign public_id resolves to None here exactly
+    like a missing/foreign integer id would fail ownership downstream.
+
+    Validates UUID shape BEFORE querying: the `public_id` column is a real
+    Postgres `uuid`, so a non-UUID string (e.g. a stale bare integer `?prd=`
+    link, or a bot probing garbage input) would otherwise make PostgREST
+    raise a query error the client library surfaces as a 500 — a malformed
+    identifier must 404 exactly like an unknown one, never 500."""
+    import uuid as uuid_module
+
+    try:
+        uuid_module.UUID(public_id)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    c = require_client()
+    resp = c.table("prds").select("id").eq("public_id", public_id).limit(1).execute()
+    return resp.data[0]["id"] if resp.data else None
 
 
 def get_prd_rendered(prd_id: int) -> dict | None:

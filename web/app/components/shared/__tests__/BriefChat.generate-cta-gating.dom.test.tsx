@@ -35,6 +35,9 @@ vi.mock("../../../lib/api", () => {
       current: vi.fn(),
       status: vi.fn(),
       regenerate: vi.fn(),
+      dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+      defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+      restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
     },
   }
 })
@@ -130,6 +133,15 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
   insufficientEvidence: false,
 }
 
+// These scenarios gate CTAs on an EMPTY brief, which presupposes the workspace
+// has a source to have gotten a brief from. With no connector BriefChat shows
+// the "connect a source" page instead (BriefChat.no-connector.dom.test.tsx),
+// so seed an evidence connector to reach the greeting under test.
+// `connectorsHydrated` marks the connectors fetch as having actually answered;
+// without it the surface holds its loading placeholder rather than judging an
+// empty brief against an unknown connector list.
+const WITH_SOURCE = { connectedConnectorIds: ["superset"], connectorsHydrated: true }
+
 function Harness() {
   const { setContent } = useContent()
   const set = (patch: Partial<AppContentState>) => setContent(patch)
@@ -149,7 +161,7 @@ function Harness() {
       {
         "data-testid": "set-insufficient-evidence",
         onClick: () =>
-          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF }),
+          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF, ...WITH_SOURCE }),
       },
       "insufficient-evidence",
     ),
@@ -157,7 +169,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-plain-empty",
-        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF }),
+        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF, ...WITH_SOURCE }),
       },
       "plain-empty",
     ),

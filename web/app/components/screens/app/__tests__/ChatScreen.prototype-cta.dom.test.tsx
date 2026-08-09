@@ -46,6 +46,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: {
@@ -211,5 +212,44 @@ describe("ChatScreen — View Prototype appears only when ready, and navigates",
     const btn = within(insightMsg()).getByRole("button", { name: "View Prototype" })
     fireEvent.click(btn)
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(OLD_PRD_ID))
+  })
+})
+
+// The chat CTA now opts into the same cross-surface `da:generating` signal the
+// ticket panel already consumes (GeneratePrototypeCTA's listenForCrossSurfaceGenerating
+// + its `label` render-prop value). Proven here by dispatching the REAL window
+// event against a REAL (unmocked) useGeneratePrototype instance and reading the
+// rendered label — not by asserting a prop was passed to the component.
+describe("ChatScreen — cross-surface generating signal (AC1/AC2)", () => {
+  it("test_chat_cta_reads_generating_while_a_cross_surface_generation_is_running: the CTA flips to the generating label the instant a real da:generating window event fires, and reverts once da:generating-done fires", async () => {
+    seedRestoredTab()
+    seedMapEntry(null) // PRD exists, no ready prototype yet — canPrototype true
+    await act(async () => { renderChatScreen() })
+
+    expect(protoBtn().textContent).toBe("Generate Prototype")
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("da:generating", { detail: { prototypeId: 1 } }))
+    })
+    expect(protoBtn().textContent).toBe("Generating Prototype")
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("da:generating-done", { detail: { prototypeId: 1 } }))
+    })
+    expect(protoBtn().textContent).toBe("Generate Prototype")
+  })
+
+  it("test_chat_cta_idle_and_ready_labels_unchanged_by_the_generating_wiring — AC2: no cross-surface event in flight, the button still reads 'Generate Prototype' (no PRD/no ready prototype) or 'View Prototype' (ready prototype)", async () => {
+    seedRestoredTab()
+    seedMapEntry(null)
+    await act(async () => { renderChatScreen() })
+    expect(protoBtn().textContent).toBe("Generate Prototype")
+    cleanup()
+
+    protoMap.clear()
+    seedRestoredTab()
+    seedMapEntry({ ready: true, preview_image_url: null })
+    await act(async () => { renderChatScreen() })
+    expect(protoBtn().textContent).toBe("View Prototype")
   })
 })

@@ -2,7 +2,14 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { getSupabase, isSupabaseConfigured, postLoginPath } from "../../lib/supabase/client"
+import type { Session } from "@supabase/supabase-js"
+import {
+  getPriorSessionSnapshot,
+  getSupabase,
+  isSupabaseConfigured,
+  postLoginPath,
+  setPendingInviteSession,
+} from "../../lib/supabase/client"
 import { isInviteFlow, isRecoveryFlow } from "../../lib/authRecovery"
 
 const RESET_PASSWORD_PATH = "/reset-password"
@@ -29,11 +36,43 @@ export default function AuthCallbackPage() {
     // authenticated by the link but has NO password yet — force them through
     // /set-password before the app (2026-07-17 invite rules).
     const invite = isInviteFlow(window.location.href)
+    // Who was signed in BEFORE this link initialized the client — captured
+    // pre-detectSessionInUrl, so it survives the invite session overwriting it.
+    const prior = getPriorSessionSnapshot()
 
     async function nextPath(): Promise<string> {
       if (recovery) return RESET_PASSWORD_PATH
       if (invite) return SET_PASSWORD_PATH
       return await postLoginPath()
+    }
+
+    // Route once a session is in hand — but guard the invite case: if an invite
+    // magic link was opened in a browser already signed in as a DIFFERENT user,
+    // Supabase has swapped the persisted session to the invitee, silently
+    // logging the original user out. Hold the (already minted) invitee session
+    // in memory — its one-time link can't be reopened — then restore the
+    // original account and let /invite-conflict offer a choice between the two.
+    // Only invite links are guarded — an OAuth/password sign-in is a deliberate
+    // account switch and must be allowed to replace the session.
+    async function routeForSession(active: Session): Promise<void> {
+      if (invite && prior && prior.userId !== active.user.id) {
+        setPendingInviteSession({
+          email: active.user.email ?? null,
+          accessToken: active.access_token,
+          refreshToken: active.refresh_token,
+        })
+        try {
+          await supabase.auth.setSession({
+            access_token: prior.accessToken,
+            refresh_token: prior.refreshToken,
+          })
+        } catch {
+          // Best-effort restore; either way we do NOT enter as the invitee.
+        }
+        router.replace("/invite-conflict?kept=1")
+        return
+      }
+      router.replace(await nextPath())
     }
 
     async function finish() {
@@ -52,7 +91,7 @@ export default function AuthCallbackPage() {
         data: { session },
       } = await supabase.auth.getSession()
       if (session && !cancelled) {
-        router.replace(await nextPath())
+        await routeForSession(session)
         return
       }
 
@@ -65,7 +104,7 @@ export default function AuthCallbackPage() {
           return
         }
         if (nextSession && !cancelled) {
-          router.replace(await nextPath())
+          await routeForSession(nextSession)
         }
       })
       subscription = data.subscription
@@ -76,7 +115,7 @@ export default function AuthCallbackPage() {
           data: { session: late },
         } = await supabase.auth.getSession()
         if (late) {
-          router.replace(await nextPath())
+          await routeForSession(late)
         } else {
           setMessage("Sign-in failed. Redirecting…")
           router.replace("/sign-in")

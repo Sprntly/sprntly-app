@@ -159,11 +159,22 @@ ORPHAN_ASK_JOB_ERROR = (
     "Generation was interrupted by a server restart. Please ask again."
 )
 
-# How long an `ask_jobs` row may sit in `generating` before we treat it as
-# abandoned. Deliberately well above the slowest real answer (multi-step asks
-# run a couple of minutes) — see fail_orphan_generating_ask_jobs for why this
+# How long an `ask_jobs` row may sit in `generating` WITHOUT A HEARTBEAT before
+# we treat it as abandoned. See fail_orphan_generating_ask_jobs for why this
 # must not be tightened to "anything generating at startup".
+#
+# The age is measured against `updated_at`, and a live worker now bumps that
+# every ORPHAN_ASK_JOB_HEARTBEAT_SECONDS (ask_job_runner). Before the heartbeat
+# existed this window was a hard ceiling on answer DURATION, not on abandonment:
+# a report path that legitimately runs longer than 15 minutes had its row failed
+# out from under a worker that was still going, and because complete_ask_job is
+# guarded on `status == 'generating'`, the answer it eventually produced was
+# then silently discarded. Observed on staging with the competitive-intelligence
+# review (~20 min), where it cost a full run every time.
 ORPHAN_ASK_JOB_AFTER_MINUTES = 15
+# Comfortably inside the window above, so a couple of missed beats (a slow DB, a
+# blocked thread) still don't trip the sweep.
+ORPHAN_ASK_JOB_HEARTBEAT_SECONDS = 60
 
 
 def fail_orphan_generating_ask_jobs(
@@ -253,6 +264,66 @@ def complete_ask_job(ask_id: int, payload: dict) -> None:
         "error": None,
         "updated_at": _now(),
     }).eq("id", ask_id).eq("status", "generating").execute()
+
+
+def set_ask_job_route(
+    ask_id: int, skill_id: str | None, action: str | None = None
+) -> None:
+    """Record the skill the router picked, WHILE the job is still generating.
+
+    The routed skill used to reach the client only inside `response`, which
+    `complete_ask_job` writes at the very end of the run — so the chat's waiting
+    surface could not name the skill it was waiting for until the wait was over.
+    The Ask worker calls this the moment `qa_agent.route()` resolves, and
+    `GET /v1/ask/{id}` surfaces the columns from `generating` onwards.
+
+    Guarded on `status == 'generating'`, like touch_ask_job: a route write must
+    never touch a row the user already cancelled or a worker already finished.
+    A no-skill decision (direct answer, out-of-scope refusal, or one of the
+    pre-routing interceptors) writes NOTHING — the columns stay NULL, which is
+    the signal the UI uses to render no chip rather than invent a default.
+
+    Best-effort by contract: this is display metadata, so any DB error is logged
+    and swallowed rather than failing an answer that is otherwise fine.
+    """
+    if not skill_id:
+        return
+    try:
+        c = require_client()
+        c.table("ask_jobs").update({
+            "routed_skill": skill_id,
+            "routed_skill_action": action or None,
+            "updated_at": _now(),
+        }).eq("id", ask_id).eq("status", "generating").execute()
+    except Exception:  # noqa: BLE001 — display metadata must never fail the ask
+        logger.warning("routed-skill write failed for ask_id=%s", ask_id, exc_info=True)
+
+
+def touch_ask_job(ask_id: int) -> bool:
+    """Heartbeat: bump `updated_at` so the orphan sweep can tell a LIVE long
+    answer from a dead worker's abandoned row.
+
+    Guarded on `status == 'generating'` so a beat can never resurrect a job the
+    user cancelled or a worker already finished. Returns True when the row was
+    still generating (i.e. the beat landed), False otherwise — the caller uses
+    that to stop beating.
+
+    Best-effort by contract: a transient DB error returns True (keep beating)
+    rather than aborting a healthy answer over a blip.
+    """
+    try:
+        c = require_client()
+        resp = (
+            c.table("ask_jobs")
+            .update({"updated_at": _now()})
+            .eq("id", ask_id)
+            .eq("status", "generating")
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — a blip must not stop the heartbeat
+        logger.warning("ask heartbeat failed for ask_id=%s", ask_id, exc_info=True)
+        return True
+    return bool(resp.data)
 
 
 def fail_ask_job(ask_id: int, error: str) -> None:

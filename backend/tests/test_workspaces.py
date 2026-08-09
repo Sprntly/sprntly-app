@@ -311,7 +311,18 @@ def test_put_member_workspaces_unknown_id_is_400(isolated_settings, monkeypatch)
 
 def test_onboarding_workspace_renames_default(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
-    r = ctx.client.post("/v1/onboarding/workspace", json={"name": "Sprntly App"})
+    r = ctx.client.post(
+        "/v1/onboarding/workspace",
+        json={
+            "name": "Sprntly App",
+            # The six "Your workspace" fields now land on the workspace row.
+            "team_scope": "Owns food logging end to end.",
+            "team_strategy": "Grow WAU this half.",
+            "team_roadmap": "Q3: logging v2.",
+            "sizing_methodology": "Fibonacci points.",
+            "additional_context": "We call it 'sleep sync'.",
+        },
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["is_default"] is True
@@ -321,6 +332,13 @@ def test_onboarding_workspace_renames_default(isolated_settings, monkeypatch):
     # Never a second workspace; caller became workspace-admin; dataset bound.
     all_ws = _rows("workspaces", company_id=ctx.company_id)
     assert len(all_ws) == 1
+    # The five typed fields were written to the workspace row, not companies.
+    row = all_ws[0]
+    assert row["team_scope"] == "Owns food logging end to end."
+    assert row["team_strategy"] == "Grow WAU this half."
+    assert row["team_roadmap"] == "Q3: logging v2."
+    assert row["sizing_methodology"] == "Fibonacci points."
+    assert row["additional_context"] == "We call it 'sleep sync'."
     members = _rows("workspace_members", workspace_id=body["id"], user_id=ctx.user_id)
     assert members and members[0]["role"] == "admin"
     ds = _rows("datasets", slug="acme")
@@ -330,3 +348,25 @@ def test_onboarding_workspace_renames_default(isolated_settings, monkeypatch):
     r2 = ctx.client.post("/v1/onboarding/workspace", json={"name": "Sprntly App"})
     assert r2.status_code == 200
     assert len(_rows("workspaces", company_id=ctx.company_id)) == 1
+
+
+def test_patch_workspace_updates_owned_fields(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    default = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+
+    # A partial PATCH writes only the provided fields (name + a subset).
+    r = ctx.client.patch(
+        f"/v1/workspaces/{default['id']}",
+        json={"name": "Growth", "team_scope": "Activation & retention."},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Growth"
+    assert body["team_scope"] == "Activation & retention."
+    # The GET serializer exposes the workspace-owned fields too.
+    listed = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    assert listed["team_scope"] == "Activation & retention."
+
+    row = _rows("workspaces", id=default["id"])[0]
+    assert row["name"] == "Growth"
+    assert row["team_scope"] == "Activation & retention."

@@ -600,6 +600,43 @@ def fetch_repo_tree(access_token: str, repo_full_name: str, branch: str,
     return paths[:max_entries]
 
 
+def fetch_repo_tree_entries(access_token: str, repo_full_name: str, ref: str,
+                            max_entries: int = 1000) -> tuple[list[dict], bool]:
+    """Recursive tree entries WITH their metadata, plus GitHub's `truncated`.
+
+    Sibling of fetch_repo_tree rather than a change to it: that function
+    returns bare blob PATHS and design_agent/codebase_map/repo_reader.py
+    depends on exactly that contract. Callers that must reason about an entry's
+    TYPE and MODE need the raw dicts — the skill importer rejects symlinks
+    (mode 120000, whose blob content is the link target, not a file) and
+    submodules (type "commit", which points into another repo entirely), and
+    skips blobs over the Contents API's 1 MB base64 ceiling using `size`.
+
+    The second return value is the API's own `truncated` flag: with
+    ?recursive=1 GitHub caps the tree at 100,000 entries / 7 MB and sets it
+    when the listing was clipped
+    (https://docs.github.com/en/rest/git/trees). A caller that ignores it
+    silently reasons about a partial repo, so it is surfaced rather than
+    swallowed. Returns ([], False) on any failure — like fetch_repo_tree, the
+    caller decides whether an empty listing is fatal.
+    """
+    resp = _api_get(
+        access_token, f"/repos/{repo_full_name}/git/trees/{ref}",
+        params={"recursive": "1"},
+    )
+    if not resp.ok:
+        logger.warning(
+            "GitHub tree fetch failed for %s@%s: %s %s",
+            repo_full_name, ref, resp.status_code, resp.text[:200],
+        )
+        return [], False
+    payload = resp.json() or {}
+    tree = payload.get("tree") or []
+    entries = [t for t in tree if isinstance(t, dict) and t.get("path")]
+    truncated = bool(payload.get("truncated")) or len(entries) > max_entries
+    return entries[:max_entries], truncated
+
+
 def fetch_repo_meta(access_token: str, repo_full_name: str) -> dict[str, Any]:
     """Repo metadata (description, default_branch, topics…). {} on failure."""
     resp = _api_get(access_token, f"/repos/{repo_full_name}")

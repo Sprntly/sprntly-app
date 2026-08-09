@@ -7,6 +7,7 @@
 //   • + Add idea         → ideationApi.create (persisted)
 //   • Re-sequence        → ideationApi.reorder (persisted, by impact score)
 //   • Sync ideas         → re-fetch ideationApi.list
+//   • Mark done          → ideationApi.setStatus(id, "done") (persisted)
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -19,8 +20,11 @@ import type { IdeationItem, IdeationList, CompletedList } from "../../../../lib/
 
 const listMock = vi.fn<() => Promise<IdeationList>>()
 const completedMock = vi.fn<() => Promise<CompletedList>>()
+// The detail popup fetches the idea's evidence trail when it opens.
+const detailMock = vi.fn<(id: string) => Promise<unknown>>()
 const createMock = vi.fn()
 const reorderMock = vi.fn()
+const setStatusMock = vi.fn()
 const runFromIdeationMock = vi.fn()
 const pushMock = vi.fn()
 const setContentMock = vi.fn()
@@ -31,7 +35,8 @@ vi.mock("../../../../lib/api", () => ({
   ideationApi: {
     list: () => listMock(),
     completed: () => completedMock(),
-    setStatus: vi.fn(),
+    setStatus: (id: string, status: string) => setStatusMock(id, status),
+    detail: (id: string) => detailMock(id),
     create: (title: string, tag: unknown) => createMock(title, tag),
     reorder: (ids: string[]) => reorderMock(ids),
   },
@@ -88,8 +93,15 @@ async function selectFirstIdea(title: string) {
 beforeEach(() => {
   listMock.mockReset()
   completedMock.mockReset().mockResolvedValue({ items: [], count: 0 })
+  detailMock.mockReset().mockResolvedValue({
+    id: "a", theme_id: "t4", title: "Bulk onboarding", tag: "something_new",
+    rank: 4, score: 0.5, status: "proposed",
+    reasoning: "Admins re-key every seat by hand",
+    evidence: [], evidence_count: 0, sources: [], is_manual: false,
+  })
   createMock.mockReset().mockResolvedValue(item({ id: "new-1", title: "Fresh idea" }))
   reorderMock.mockReset().mockResolvedValue({ items: [], count: 0 })
+  setStatusMock.mockReset().mockResolvedValue(item({ id: "a", status: "done" }))
   runFromIdeationMock.mockReset()
   pushMock.mockReset()
   setContentMock.mockReset()
@@ -109,9 +121,14 @@ describe("IdeationScreen — wired actions", () => {
     // An ideation PRD opens as a NEW chat tab (with the Evidence/PRD/Tickets
     // panel over it) — IdeationScreen hands the generation off via openPrdTab,
     // and ChatScreen drives it — instead of streaming into an in-place panel.
+    // The seed fields ground the thread in the idea: the pain point becomes the
+    // opening insight card, the ask becomes a real user turn.
     await waitFor(() => expect(openPrdTabMock).toHaveBeenCalledTimes(1))
     expect(openPrdTabMock).toHaveBeenCalledWith({
       title: "PRD · Bulk onboarding",
+      insightBody: "Admins re-key every seat by hand",
+      seedQuery:
+        "Generate a brief for \"Bulk onboarding\" — an ideation idea that didn't make this week's top 3.",
       source: { kind: "generateIdeation", ideationItemId: "a" },
     })
     // Generation no longer runs on the ideation surface itself.
@@ -166,6 +183,37 @@ describe("IdeationScreen — wired actions", () => {
     await act(async () => { fireEvent.click(screen.getByText("Sync ideas")) })
 
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
+  })
+
+  it("Mark done persists via ideationApi.setStatus, closes the modal, and re-fetches the list", async () => {
+    await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
+    await selectFirstIdea("Bulk onboarding")
+    expect(listMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => { fireEvent.click(screen.getByText("Mark done")) })
+
+    // The real write path: PATCH /v1/ideation/{id} with status="done" — this is
+    // what triggers the backend's outcome-entity + VALIDATES edge creation.
+    await waitFor(() => expect(setStatusMock).toHaveBeenCalledWith("a", "done"))
+
+    // Closes the detail popup and re-fetches the Proposed list so the
+    // now-done idea (excluded server-side) drops out of view.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
+  })
+
+  it("Mark done shows an error and keeps the modal open when the PATCH fails", async () => {
+    setStatusMock.mockReset().mockRejectedValue(new Error("network down"))
+    await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
+    await selectFirstIdea("Bulk onboarding")
+
+    await act(async () => { fireEvent.click(screen.getByText("Mark done")) })
+
+    await waitFor(() => expect(setStatusMock).toHaveBeenCalledWith("a", "done"))
+    // The modal stays open on failure — no silent data loss — and the list is
+    // not re-fetched since nothing actually changed server-side.
+    expect(screen.getByRole("dialog")).toBeTruthy()
+    expect(listMock).toHaveBeenCalledTimes(1)
   })
 
   it("renders no Voice buttons (removed — voice input was never wired)", async () => {

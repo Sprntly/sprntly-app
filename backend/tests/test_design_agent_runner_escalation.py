@@ -240,12 +240,12 @@ def test_escalated_run_still_honours_hard_cap(monkeypatch):
     call_count = [0]
     original_should_abort = runner.should_abort
 
-    def _patched_should_abort(usage, model, cap):
+    def _patched_should_abort(usage, model, cap, iters):
         call_count[0] += 1
         # Trigger abort only after escalation has occurred (third invocation)
         if call_count[0] >= 3:
             return True
-        return original_should_abort(usage, model, cap)
+        return original_should_abort(usage, model, cap, iters)
 
     monkeypatch.setattr(runner, "should_abort", _patched_should_abort)
     _install_client(monkeypatch, [

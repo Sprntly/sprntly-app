@@ -10,7 +10,8 @@ import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, briefApi, prdApi, type AskResponse } from "../../lib/api"
 import { runAskGeneration } from "../../lib/runAskGeneration"
 import { markdownToPrdState } from "../../lib/prd-adapter"
-import { runPrdGeneration } from "../../lib/runPrdGeneration"
+import { runPrdGenerationFromTask } from "../../lib/runPrdGeneration"
+import { isPrdCommand, prdCommandTask } from "../../lib/prd-commands"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
@@ -226,17 +227,33 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
-  /** Detect agent commands like "generate PRD" */
-  const isPrdCommand = (q: string) =>
-    /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
-
-  /** Detect multi-agent command: "generate PRD first" / "multi-agent" / "aggressive analysis" */
+  /**
+   * Multi-agent command: "generate PRD first" / "multi-agent" / "aggressive
+   * analysis". Gated on the shared `isPrdCommand` so it inherits every guard —
+   * without it, "how do I generate a PRD first?" kicked off the heaviest
+   * generation in the product.
+   */
   const isMultiAgentCommand = (q: string) =>
-    /\b(generate|create)\b.*\bprd\s+first\b/i.test(q) ||
+    (isPrdCommand(q) && /\bprd\s+first\b/i.test(q)) ||
     /\bmulti[- ]?agent\b/i.test(q) ||
     /\baggressive\s+(analysis|mode)\b/i.test(q)
 
-  const handlePrdCommand = useCallback(async () => {
+  /**
+   * Generate a PRD from the task the USER named.
+   *
+   * This handler used to ignore the message entirely and generate from
+   * `brief.insights[0]`, so "how do I write a PRD?" produced a real PRD about
+   * an unrelated topic — the spurious-PRD symptom users reported. It now
+   * mirrors ChatScreen's `prdCommandFlow`: the user's own words are the task.
+   *
+   * A GENERIC command with no topic ("generate a PRD") does not fire at all.
+   * ChatScreen can resolve a bare command against the conversation thread;
+   * AIBar is a one-shot ask bar with no thread, so there is nothing to resolve
+   * against and the brief's top insight is a guess — exactly the guess that
+   * caused this bug. We ask for a topic instead, with the same copy ChatScreen
+   * uses for its own no-topic branch.
+   */
+  const handlePrdCommand = useCallback(async (task: string) => {
     expandAiPanel()
     setAgentWorking(true)
     setAgentAction(null)
@@ -247,23 +264,14 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     if (ta) { ta.style.height = "auto"; ta.style.height = `${AI_TEXTAREA_MIN_PX}px` }
 
     try {
-      // Try to get the current brief's top insight to generate a PRD from
-      const brief = await briefApi.current(activeCompany)
-      const insights = brief.insights || []
-      if (!insights.length) {
-        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
-        return
-      }
-      // Use the first (top-ranked) insight
-      const insightIndex = 0
-      const insight = insights[insightIndex]
-
       // Open the PRD rail immediately and stream the draft into it live as the
       // Part A HTML arrives, instead of only announcing it when finished.
-      setContent({ prd: null, prdMeta: { briefId: brief.id, insightIndex }, prdGenerating: true, prdPartialHtml: null })
+      // No prdMeta: a task PRD is anchored to a synthesized insight, not to a
+      // (briefId, insightIndex) pair.
+      setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
       openContentPanel("prd")
-      const result = await runPrdGeneration(
-        { briefId: brief.id, insightIndex },
+      const result = await runPrdGenerationFromTask(
+        task,
         (html) => setContent({ prdPartialHtml: html }),
       )
 
@@ -273,12 +281,12 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
         return
       }
 
-      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex }, prdGenerating: false, prdPartialHtml: null })
+      setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
       setAgentAction({
         kind: "prd",
         prdId: result.prd.prd_id,
         title: result.prd.title,
-        message: `Drafted the PRD from the "${insight.title}" insight. Opened it on the right — fully editable, auto-saving. **Goal:** ${insight.recommendation?.slice(0, 120) || insight.title}.`,
+        message: `Drafted a PRD for "${task.length > 120 ? `${task.slice(0, 120)}…` : task}". Opened it on the right — fully editable, auto-saving.`,
       })
     } catch (e) {
       setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -287,7 +295,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     } finally {
       setAgentWorking(false)
     }
-  }, [activeCompany, expandAiPanel, openContentPanel, setAIBarValue, setContent])
+  }, [expandAiPanel, openContentPanel, setAIBarValue, setContent])
 
   const handleMultiAgentCommand = useCallback(async () => {
     expandAiPanel()
@@ -303,7 +311,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
-        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
+        setAskError("No brief insights available yet. Generate a Top Insights brief first.")
         return
       }
       const result = await runMultiAgentGeneration(brief.id, 0, "aggressive")
@@ -334,15 +342,30 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       return
     }
 
-    // Detect agent commands — multi-agent FIRST (more specific match)
+    // Detect agent commands — multi-agent FIRST (more specific match).
+    // Both gates run the SHARED rules (web/app/lib/prd-commands.ts), which is
+    // where the tickets guard, the question guard and the existing-document
+    // reference guard live. A tickets phrasing ("convert this PRD into
+    // tickets") is never a PRD command there, so it falls through to the ask
+    // agent instead of silently generating a document.
     if (isMultiAgentCommand(q)) {
       setLastSubmittedQuestion(q)
       void handleMultiAgentCommand()
       return
     }
     if (isPrdCommand(q)) {
+      const task = prdCommandTask(q)
       setLastSubmittedQuestion(q)
-      void handlePrdCommand()
+      if (!task) {
+        // Generic command, no topic, and no conversation thread to resolve it
+        // against — ask rather than generate a PRD about a guess.
+        showToast(
+          "What should the PRD cover?",
+          "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\".",
+        )
+        return
+      }
+      void handlePrdCommand(task)
       return
     }
 

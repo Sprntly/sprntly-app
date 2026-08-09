@@ -20,12 +20,16 @@ function renderStep1(override: Partial<SignUpStep1ViewProps> = {}): string {
   const defaults: SignUpStep1ViewProps = {
     email: "",
     password: "",
+    confirmPassword: "",
     showPassword: false,
+    submitting: false,
+    googleSubmitting: false,
     error: null,
     termsHref: "/terms",
     privacyHref: "/privacy",
     onEmailChange: noop,
     onPasswordChange: noop,
+    onConfirmPasswordChange: noop,
     onToggleShowPassword: noop,
     onSubmit: noop,
     onGoogle: noop,
@@ -39,13 +43,11 @@ function renderStep2(override: Partial<SignUpStep2ViewProps> = {}): string {
     firstName: "",
     lastName: "",
     role: "Product Manager",
-    priorities: "",
     submitting: false,
     error: null,
     onFirstNameChange: noop,
     onLastNameChange: noop,
     onRoleChange: noop,
-    onPrioritiesChange: noop,
     onSubmit: noop,
     onBack: noop,
   }
@@ -92,6 +94,44 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).toContain("Email")
     expect(html).not.toContain("Work email")
   })
+
+  it("test_sign_up_step1_view_mounts_share_context_strip_when_present", () => {
+    const html = renderStep1({
+      shareContext: { title: "Q3 Retention PRD", sharerName: "Priya Shah", requiredDomain: "acme.com" },
+    })
+    expect(html).toContain("share-context-strip")
+    expect(html).toContain("Priya Shah")
+    expect(html).toContain("acme.com")
+  })
+
+  it("test_sign_up_step1_view_unchanged_without_share_context", () => {
+    const html = renderStep1()
+    expect(html).not.toContain("share-context-strip")
+    expect(html).not.toContain("sign-up-domain-hint")
+  })
+
+  it("test_sign_up_step1_create_button_shows_busy_state_while_checking", () => {
+    const html = renderStep1({ submitting: true })
+    expect(html).toContain("Checking…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).toContain('aria-busy="true"')
+    // Disabled so a second click can't fire another availability check.
+    expect(html).toContain("disabled")
+  })
+
+  it("test_sign_up_step1_create_button_is_idle_by_default", () => {
+    const html = renderStep1()
+    expect(html).toContain("Create account")
+    expect(html).not.toContain("auth-btn-spin")
+    expect(html).not.toContain("Checking…")
+  })
+
+  it("test_sign_up_step1_google_button_stays_busy_through_the_redirect", () => {
+    const html = renderStep1({ googleSubmitting: true })
+    expect(html).toContain("Redirecting…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).not.toContain("Sign up with Google")
+  })
 })
 
 describe("SignUpStep2View (v4 page 03 — about you)", () => {
@@ -124,10 +164,28 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
     expect(renderStep2()).toContain("<em>you?</em>")
   })
 
-  it("renders the optional priorities textarea (v6)", () => {
-    const html = renderStep2({ priorities: "grow MAU" })
-    expect(html).toContain('id="priorities"')
-    expect(html).toContain("Your priorities")
-    expect(html).toContain("grow MAU")
+  it("test_sign_up_step2_continue_button_shows_spinner_while_creating", () => {
+    const html = renderStep2({ submitting: true })
+    expect(html).toContain("Creating account…")
+    expect(html).toContain("auth-btn-spin")
+    expect(html).toContain('aria-busy="true"')
+    expect(html).not.toContain(">Continue")
+  })
+
+  it("test_sign_up_step2_continue_button_is_idle_by_default", () => {
+    const html = renderStep2()
+    expect(html).toContain("Continue")
+    expect(html).not.toContain("auth-btn-spin")
+    expect(html).not.toContain('aria-busy="true"')
+  })
+
+  it("no longer renders a priorities textarea (v7 — about-you is name + role only)", () => {
+    const html = renderStep2()
+    expect(html).not.toContain('id="priorities"')
+    expect(html).not.toContain("Your priorities")
+    // The three fields the step DOES own are still there.
+    expect(html).toContain('id="firstName"')
+    expect(html).toContain('id="lastName"')
+    expect(html).toContain('id="role"')
   })
 })

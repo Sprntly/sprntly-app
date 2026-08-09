@@ -295,11 +295,21 @@ async def _generate_stories_safe(company_id: str, prd: dict) -> str:
     if not prd or prd.get("status") != "ready":
         return ""
     try:
+        from app.config import settings
         from app.stories.generate import generate_user_stories
+
+        # Honor the same fan-out settings as the /v1/stories route — this path
+        # used to fall back to strategy="single" (one ~3 min 32k-token call,
+        # observed 171s on prod vs ~110s fanned out) because it never passed a
+        # strategy. There is no per-batch consumer here (the result is one
+        # markdown blob), so no on_batch.
         stories = await asyncio.to_thread(
             generate_user_stories,
             company_id,
             prd_id=prd.get("id"),
+            strategy="fanout" if settings.ticket_gen_fanout else "single",
+            batch_size=settings.ticket_gen_batch_size,
+            max_parallel=settings.ticket_gen_max_parallel,
         )
         lines = ["## User Stories\n"]
         for s in stories:

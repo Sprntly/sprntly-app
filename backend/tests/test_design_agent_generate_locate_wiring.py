@@ -227,6 +227,100 @@ async def test_no_route_passes_located_screen_none(env, monkeypatch):
     assert calls == []
 
 
+def _user_message_text(gen_kwargs: list[dict]) -> str:
+    """Extract the assembled user-turn text from a captured generate_prototype
+    call's user_message (the first text content block)."""
+    content = gen_kwargs[0]["user_message"]["content"]
+    return content[0]["text"]
+
+
+async def test_external_surface_hint_appends_placeholder_directive(env, monkeypatch):
+    """No chosen screen + external_surface_hint present + no screenshot →
+    the placeholder directive rides the assembled scaffold user turn."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: None,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route=None, chosen_screen_id=None, map_commit_sha=None,
+        external_surface_hint="an SMS the user receives on their phone",
+    )
+
+    text = _user_message_text(gen_kwargs)
+    assert "EXTERNAL ENTRY POINT" in text
+    assert "an SMS the user receives on their phone" in text
+
+
+async def test_external_surface_hint_dropped_when_screen_chosen(env, monkeypatch):
+    """Defensive belt-and-suspenders: a chosen screen means a real match was
+    found (or the PM picked one manually), so the hint is DROPPED even if a
+    caller somehow sent both — the placeholder directive never rides a
+    genuinely-grounded recreate run."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    fake_map = _make_map(route="/team", commit_sha="shaABC")
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route="/team", map_commit_sha="shaABC",
+        external_surface_hint="an SMS the user receives on their phone",
+    )
+
+    text = _user_message_text(gen_kwargs)
+    assert "EXTERNAL ENTRY POINT" not in text
+
+
+async def test_no_external_hint_is_byte_identical_to_pre_amendment(env, monkeypatch):
+    """external_surface_hint omitted (old client / ordinary flow) → the
+    assembled user turn is unaffected — no regression on the plain path."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: None,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route=None, chosen_screen_id=None, map_commit_sha=None,
+    )
+
+    text = _user_message_text(gen_kwargs)
+    assert "EXTERNAL ENTRY POINT" not in text
+
+
 async def test_unresolvable_route_falls_back_none_no_raise(env, monkeypatch, caplog):
     """AC3: route that matches NO node in the map → located_screen=None,
     generation still completes (no exception, no wire_failed warning)."""
@@ -813,6 +907,19 @@ def test_generate_request_old_shape_back_compat(env):
     assert body2.map_commit_sha == "abc"
 
 
+def test_generate_request_external_surface_hint_field(env):
+    """external_surface_hint is optional (old-client back-compat) and accepts
+    an explicit free-text value when the recovery panel's placeholder CTA sent
+    one."""
+    body = env.routes.GenerateRequest(prd_id=1)
+    assert body.external_surface_hint is None
+
+    body2 = env.routes.GenerateRequest(
+        prd_id=1, external_surface_hint="an SMS the user receives",
+    )
+    assert body2.external_surface_hint == "an SMS the user receives"
+
+
 def test_locate_response_carries_commit_sha(env):
     """AC8: LocateResponse surfaces a commit_sha field; unmapped path empty."""
     # Mapped path: explicit commit_sha threads through.
@@ -831,6 +938,30 @@ def test_locate_response_carries_commit_sha(env):
     # Unmapped helper writes "".
     unmapped = env.routes._unmapped_locate_response("org/repo")
     assert unmapped.commit_sha == ""
+
+
+def test_locate_response_external_surface_field(env):
+    """LocateResponse.external_surface defaults to None and accepts the
+    ExternalSurfaceOut shape when a signal is present; the unmapped fail-open
+    helper never carries one (no locate call ran on that path)."""
+    default = env.routes.LocateResponse(
+        decision="ranked_confirm", chosen=[], ranked=[], top_confidence=0,
+        threshold=80, repo="org/repo", posture="PARTIAL",
+    )
+    assert default.external_surface is None
+
+    with_signal = env.routes.LocateResponse(
+        decision="ranked_confirm", chosen=[], ranked=[], top_confidence=0,
+        threshold=80, repo="org/repo", posture="PARTIAL",
+        external_surface=env.routes.ExternalSurfaceOut(
+            detected=True, surface_description="an email the customer receives", confidence=85,
+        ),
+    )
+    assert with_signal.external_surface.detected is True
+    assert with_signal.external_surface.surface_description == "an email the customer receives"
+
+    unmapped = env.routes._unmapped_locate_response("org/repo")
+    assert unmapped.external_surface is None
 
 
 # ── Observability + integrity — AC10 / AC11 ───────────────────────────────────

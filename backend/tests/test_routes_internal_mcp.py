@@ -968,3 +968,46 @@ def test_ticket_write_routes_401_without_internal_key(isolated_settings, monkeyp
         params={"company_id": "x", "user_id": "y"},
         json={"body": "x"},
     ).status_code == 401
+
+
+def test_get_prd_evidence_carries_the_golden_html_brief_intact(
+    isolated_settings, monkeypatch
+):
+    """CONSUMER: the MCP `get_prd_evidence` tool.
+
+    It is a STRUCTURAL consumer in one narrow way — `content_format` is derived
+    from `variant`, not from the bytes — so a change that kept storing HTML but
+    stopped stamping v3 would tell an AI client to read markdown and hand it a
+    document. Pinned against the same golden brief the render contract uses, so
+    the two cannot drift apart. See tests/test_evidence_render_contract.py.
+    """
+    from pathlib import Path
+
+    golden = (
+        Path(__file__).resolve().parent / "fixtures" / "evidence" / "golden_brief.html"
+    ).read_text(encoding="utf-8")
+
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_chain(db, company_id=cid, slug="acme", prd_id=131)
+    prd = db.table("prds").select("*").eq("id", 131).execute().data[0]
+    db.table("evidences").insert(
+        {"brief_id": prd["brief_id"], "insight_index": prd["insight_index"],
+         "title": "SSO Is the Gate on Enterprise Expansion",
+         "payload_md": golden, "status": "ready", "variant": "v3"}
+    ).execute()
+
+    body = client.get(
+        "/internal/mcp/prd/131/evidence", params={"company_id": cid},
+        headers=_headers(),
+    ).json()
+
+    assert body["content_format"] == "html"
+    assert body["content_truncated"] is False
+    # The whole document reaches the client — an AI reader needs the prose, and
+    # the headings/quotes are where it lives.
+    assert body["content"] == golden
+    assert "SSO Is the Gate on Enterprise Expansion" in body["content"]
+    assert "<script" not in body["content"].lower()

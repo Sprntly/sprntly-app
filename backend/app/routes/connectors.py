@@ -20,6 +20,8 @@
   GET    /v1/connectors/slack/history            -> read channel/DM messages
   GET    /v1/connectors/slack/search             -> search the user's own content
   POST   /v1/connectors/slack/sync-to-corpus    -> sync messages into corpus
+  POST   /v1/connectors/slack/events             -> Events API sink (signature-auth)
+  POST   /v1/connectors/slack/commands          -> slash-command sink (signature-auth)
 
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
@@ -32,37 +34,58 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
 import sys
 import time
 from typing import Annotated
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 import requests
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from pydantic import BaseModel, Field
 
 from app import db
 from app import datasets as datasets_service
-from app.auth import CompanyContext, require_company
+from app import html_report
+from app.auth import (  # noqa: F401 — require_workspace re-exported for tests' dependency_overrides
+    CompanyContext,
+    WorkspaceContext,
+    require_company,
+    require_workspace,
+)
 from app.config import settings
 from app.connectors import (
     asana_oauth,
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     fireflies_apikey,
     github_app,
+    google_meet,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
+    uploads,
+    zoom_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -75,7 +98,15 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
-from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
+from app.deps.ownership import require_owned_dataset
+from app.kg_ingest.auto_sync import (
+    kickoff_call_index_sync,
+    kickoff_corpus_seed,
+    kickoff_slack_corpus_sync,
+    kickoff_sync,
+)
+from app.prompt_history import clamp_turn_text
+from app.skill_router import is_competitive_report_request
 
 logger = logging.getLogger(__name__)
 
@@ -192,19 +223,101 @@ def _require_admin_for_org_connector(
         )
 
 
+def _gate_dataset(dataset: str, company_id: str) -> str:
+    """Shape-validate + tenant-gate a CLIENT-SUPPLIED dataset slug, returning
+    the normalized slug to use downstream.
+
+    Every connector→corpus sync route takes its target dataset from the request
+    body. `require_company` proves who the caller is and
+    `_require_admin_for_org_connector` proves they're an admin OF THEIR OWN
+    company — neither has ever looked at that slug. Since the backend holds the
+    service-role key (RLS bypassed), nothing below the route re-checks it
+    either: `corpus.load_corpus` is a slug→directory reader by design, and
+    `google_drive_sync` only asserts `dataset_exists` (existence, not
+    ownership — which doubles as a slug-enumeration oracle). So the guard has to
+    live here, and it has to run before the slug reaches any of three sinks:
+    the `settings.data_path / slug` write (fixed filenames, so a hit OVERWRITES
+    the victim's file), `_seed_corpus_after_sync` (which would glob another
+    tenant's whole corpus into THIS company's kg_signal rows), and
+    `upsert_input_source` (which flips rows on another tenant's dataset).
+
+    Two checks, in this order:
+
+      * Shape (422). Reusing `datasets.validate_slug` rather than a second
+        regex — a slug is `[a-z0-9][a-z0-9_-]{1,62}`, which also covers the
+        multi-workspace `{company}--{workspace}` form. This is what stops
+        `../../escaped` being joined onto DATA_DIR; the ownership check alone
+        would reject it, but shape-first means a traversal string never reaches
+        a path join at all. Format before tenancy matches routes/datasets.py.
+      * Ownership (404, never 403 — `require_owned_dataset`), so a foreign
+        tenant can't tell "exists but not yours" from "doesn't exist". Company
+        slugs are low-entropy (`acme`), so existence disclosure alone would be
+        enough to enumerate tenants.
+
+    Company-level, not workspace-level: these routes run on `require_company`
+    and the connections they sync are themselves company-scoped, so
+    `workspace_id` is deliberately left off (see the commit body).
+    """
+    try:
+        slug = datasets_service.validate_slug(dataset)
+    except datasets_service.InvalidSlug as e:
+        raise HTTPException(422, str(e)) from e
+    return require_owned_dataset(slug, company_id)
+
+
 def _visible_connection_rows(company: CompanyContext) -> list[dict]:
     """Connection rows the CURRENT user may see: every company-scoped
-    provider (shared) plus only THIS user's own Slack row. Other members'
-    per-user Slack rows (and legacy NULL-user Slack rows) are filtered out
-    so one member never sees another's personal Slack."""
+    provider (shared) plus exactly ONE Slack row.
+
+    Slack's two roles have two scopes. Delivery config is per-user, so a
+    member sees their OWN Slack row untouched. But the voice-of-customer
+    side is company-level: a member who never installed the bot still sees
+    the COMPANY's sync connection (see slack_company.py) so the Voice shelf
+    reads Connected and the shared pull selection is visible — SANITIZED,
+    with the owner's personal delivery target stripped, so one member never
+    reads another's delivery config. Legacy NULL-user Slack rows stay
+    hidden."""
     rows = db.list_connections(company.company_id)
     out: list[dict] = []
+    own_slack = False
     for r in rows:
         if r.get("provider") == slack_oauth.SLACK_PROVIDER:
             if r.get("user_id") != company.user_id:
                 continue
+            own_slack = True
         out.append(r)
+    if not own_slack:
+        shared = _company_slack_row_sanitized(company.company_id)
+        if shared:
+            out.append(shared)
     return out
+
+
+def _company_slack_row_sanitized(company_id: str) -> dict | None:
+    """The company's Slack sync row, safe to show to a member who doesn't
+    own it: personal delivery config removed, company-level pull config
+    kept, and flagged `company_connection` so the web knows this is the
+    shared workspace connection rather than the member's own install."""
+    from app.connectors.slack_company import (
+        resolve_company_slack_row,
+        row_config,
+    )
+    from app.connectors.slack_sync import (
+        CONFIG_SYNC_CHANNEL_IDS,
+        CONFIG_SYNC_CHANNEL_NAMES,
+    )
+
+    row = resolve_company_slack_row(company_id)
+    if not row:
+        return None
+    cfg = row_config(row)
+    sanitized = {
+        k: v
+        for k, v in cfg.items()
+        if k in (CONFIG_SYNC_CHANNEL_IDS, CONFIG_SYNC_CHANNEL_NAMES, "team")
+    }
+    sanitized["company_connection"] = True
+    return {**row, "config_json": json.dumps(sanitized)}
 
 
 @router.get("")
@@ -305,6 +418,27 @@ def _build_post_oauth_redirect(payload: dict, provider: str) -> RedirectResponse
     return RedirectResponse(target)
 
 
+def _build_post_oauth_error_redirect(
+    payload: dict, provider: str, code: str
+) -> RedirectResponse:
+    """Same return-page redirect as above, but carrying a failure the user has
+    to act on rather than a new connection.
+
+    `code` is a STABLE SPRNTLY CODE (e.g. "zoom_app_not_approved"), never the
+    provider's own error string. Two reasons: a provider's wording changes
+    without notice and would leak straight onto a screen, and the copy for
+    "ask your Zoom admin to approve Sprntly" is the web layer's to write — the
+    backend's job is to say precisely which failure happened.
+    """
+    return_to = payload.get("return_to")
+    frontend = settings.frontend_url.rstrip("/")
+    params = {"provider": provider, "error": code}
+    if return_to and _is_safe_return_to(return_to):
+        params["return_to"] = return_to
+    target = f"{frontend}/connectors/return?{urlencode(params)}"
+    return RedirectResponse(target)
+
+
 class StartOauthIn(BaseModel):
     dataset: str | None = None
     # Optional relative path the callback redirects to instead of the
@@ -390,6 +524,38 @@ def start_oauth(
         )
         return {"authorize_url": url}
 
+    if provider == confluence_oauth.CONFLUENCE_PROVIDER:
+        if not confluence_oauth.confluence_configured():
+            raise HTTPException(500, "Confluence OAuth is not configured on the server")
+        url = confluence_oauth.authorize_url(
+            state=confluence_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == zoom_oauth.ZOOM_PROVIDER:
+        if not zoom_oauth.zoom_configured():
+            raise HTTPException(500, "Zoom OAuth is not configured on the server")
+        url = zoom_oauth.authorize_url(
+            state=zoom_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == google_meet.GOOGLE_MEET_PROVIDER:
+        if not google_meet.google_meet_configured():
+            raise HTTPException(
+                500, "Google Meet OAuth is not configured on the server"
+            )
+        url = google_meet.authorize_url(
+            state=google_meet.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
     if provider == sprinklr_oauth.SPRINKLR_PROVIDER:
         if not sprinklr_oauth.sprinklr_configured():
             raise HTTPException(500, "Sprinklr OAuth is not configured on the server")
@@ -456,10 +622,16 @@ def test_connection(
 
     from app.connector_probe import ProbeError, probe_connection
 
-    # Slack is per-user: validate THIS user's own connection, never a
-    # company-shared one. Every other provider stays company-scoped.
+    # Slack: validate THIS user's own connection when they have one; a
+    # member without their own install probes the COMPANY sync connection
+    # instead (read-only health check — the drawer's status pill must read
+    # Connected for the shared voice-of-customer connection they can see).
     if provider == slack_oauth.SLACK_PROVIDER:
         row = db.get_slack_connection(company.company_id, company.user_id)
+        if not row:
+            from app.connectors.slack_company import resolve_company_slack_row
+
+            row = resolve_company_slack_row(company.company_id)
     else:
         row = db.get_connection(company.company_id, provider)
     if not row:
@@ -547,18 +719,61 @@ def google_drive_callback(code: str, state: str):
     return _build_post_oauth_redirect(payload, google_oauth.GOOGLE_DRIVE_PROVIDER)
 
 
+def _drive_config_dataset(company_id: str) -> str | None:
+    """The dataset slug stored on this company's Drive connection config, if any.
+
+    Written at OAuth time from `?dataset=` on /google-drive/authorize (and
+    start-oauth), which is not ownership-checked either. `sync_google_drive`,
+    `_auto_enable_drive_input_source` and `_seed_corpus_after_sync` all fall
+    back to it when the request body omits a dataset, so it is a second,
+    equally client-controlled route into the same sinks — which is why the Drive
+    routes gate the EFFECTIVE slug (body value, else this) rather than just the
+    body value."""
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not row or not row.get("config_json"):
+        return None
+    try:
+        cfg = json.loads(row["config_json"])
+    except (TypeError, ValueError):
+        return None
+    slug = cfg.get("dataset")
+    return str(slug) if slug else None
+
+
+def _gate_effective_drive_dataset(
+    dataset: str | None, company_id: str
+) -> str | None:
+    """Tenant-gate the slug a Drive sync will ACTUALLY act on, and return the
+    value to pass downstream (None when the request named none).
+
+    `dataset` is optional on both Drive routes, and when it's absent
+    `sync_google_drive` / `_auto_enable_drive_input_source` fall back to the
+    slug on the connection config. Gating only the body value would therefore
+    leave that stored slug — written from an unchecked `?dataset=` at OAuth
+    time — as a live bypass into the same sinks, so whichever one will be used
+    is the one that gets checked.
+
+    Returns the NORMALIZED body slug when one was supplied, so the string that
+    was verified is the string that reaches the `data_path / slug` join. When
+    the body named nothing it returns None rather than the stored slug: the
+    existing fallbacks stay exactly as they were (notably
+    `_seed_corpus_after_sync`, which falls back to the company's own slug and
+    not to the config value), now that the value they resolve to has been
+    verified. A request naming nothing anywhere is unchanged — every fallback
+    already lands on the caller's own company.
+    """
+    if dataset:
+        return _gate_dataset(dataset, company_id)
+    stored = _drive_config_dataset(company_id)
+    if stored:
+        _gate_dataset(stored, company_id)
+    return None
+
+
 def _auto_enable_drive_input_source(company_id: str, dataset: str | None) -> None:
     """Flip the dataset's google_drive input source on after a sync. Falls back
     to the dataset stored in the connection config when not passed explicitly."""
-    dataset_slug = dataset
-    if not dataset_slug:
-        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-        if row and row.get("config_json"):
-            try:
-                cfg = json.loads(row["config_json"])
-                dataset_slug = cfg.get("dataset")
-            except (TypeError, ValueError):
-                pass
+    dataset_slug = dataset or _drive_config_dataset(company_id)
     if dataset_slug:
         try:
             db.upsert_input_source(
@@ -618,6 +833,9 @@ def google_drive_save_files(
     app can only read those specific files. We persist them in the connection
     config under config["files"], then run a sync so the picked files land in
     the corpus immediately."""
+    # Tenant gate first — `dataset` is optional here, so what gets checked is
+    # the EFFECTIVE slug (body value, else the one stored on the connection).
+    dataset = _gate_effective_drive_dataset(body.dataset, company.company_id)
     _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
@@ -629,14 +847,14 @@ def google_drive_save_files(
         normalize_picked_files(picked)
         result = sync_google_drive(
             company_id=company.company_id,
-            dataset=body.dataset,
+            dataset=dataset,
             files=picked,
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
 
-    _auto_enable_drive_input_source(company.company_id, body.dataset)
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _auto_enable_drive_input_source(company.company_id, dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
@@ -645,18 +863,21 @@ def google_drive_sync(
     body: GoogleDriveSyncIn | None = None,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     payload = body or GoogleDriveSyncIn()
+    # Tenant gate first — see google_drive_save_files: the effective slug is the
+    # body value, else the one stored on the connection at OAuth time.
+    dataset = _gate_effective_drive_dataset(payload.dataset, company.company_id)
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     try:
         result = sync_google_drive(
             company_id=company.company_id,
-            dataset=payload.dataset,
+            dataset=dataset,
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
 
-    _auto_enable_drive_input_source(company.company_id, payload.dataset)
-    _seed_corpus_after_sync(company.company_id, payload.dataset)
+    _auto_enable_drive_input_source(company.company_id, dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
@@ -678,8 +899,19 @@ def google_drive_picker_token(
     to the owner's own browser grants them nothing they couldn't already do
     with their own Google account.
 
-    Returns ``{"access_token", "expires_in"}`` (seconds until expiry). 404 if
-    Drive isn't connected — matching how the other Drive routes signal that.
+    Also returns ``app_id``: the Google Cloud project number, required by the
+    Picker's ``setAppId()`` under the ``drive.file`` scope so a picked file is
+    bound to this app (without it Drive answers "File not found" for files
+    picked but never otherwise granted). Google OAuth client ids are shaped
+    ``<PROJECT_NUMBER>-<random>.apps.googleusercontent.com``, so we derive the
+    project number from ``settings.google_client_id`` rather than adding a new
+    config value that could drift from the OAuth client if it's ever rotated
+    into another project. Empty string if the client id is unset or
+    unexpectedly shaped (missing ``-``) — the route still returns 200.
+
+    Returns ``{"access_token", "expires_in", "app_id"}`` (seconds until
+    expiry). 404 if Drive isn't connected — matching how the other Drive
+    routes signal that.
     """
     _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
@@ -711,7 +943,10 @@ def google_drive_picker_token(
         if remaining > 0:
             expires_in = remaining
 
-    return {"access_token": creds.token, "expires_in": expires_in}
+    client_id = settings.google_client_id or ""
+    app_id = client_id.split("-", 1)[0] if "-" in client_id else ""
+
+    return {"access_token": creds.token, "expires_in": expires_in, "app_id": app_id}
 
 
 @router.delete("/google-drive")
@@ -894,13 +1129,15 @@ def figma_sync_to_corpus(
     body: FigmaSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     """Sync Figma file structure and design tokens into the corpus.
 
     Fetches file tree + published styles and writes a markdown summary
     into DATA_DIR/{dataset}/figma_design_context.md. Company-scoped: uses
-    the caller's company's Figma connection only.
+    the caller's company's Figma connection only, and writes only into a
+    dataset the caller's company owns.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     token = _figma_access_token(company.company_id)
 
     # Fetch file structure + styles
@@ -936,20 +1173,20 @@ def figma_sync_to_corpus(
             lines.append(entry)
 
     md_text = "\n".join(lines) + "\n"
-    target = settings.data_path / body.dataset / "figma_design_context.md"
+    target = settings.data_path / dataset / "figma_design_context.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(md_text, encoding="utf-8")
 
     # Auto-enable figma input source
     try:
         db.upsert_input_source(
-            body.dataset, "figma", enabled=True,
+            dataset, "figma", enabled=True,
             config={"file_key": body.file_key, "last_sync_at": db.utc_now()},
         )
     except Exception:
         logger.warning("Failed to auto-enable figma input source", exc_info=True)
 
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return {"ok": True, "chars": len(md_text), "path": str(target)}
 
 
@@ -1404,14 +1641,16 @@ def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     """Sync tracked GitHub PRs into the corpus as a markdown file.
 
     Reads open PRs from the github_pull_requests table and writes
     a summary into DATA_DIR/{dataset}/github_active_prs.md.
 
-    Company-scoped: only the caller's company's PRs are read. A supplied
-    installation_id must belong to the caller's company (else 404)."""
+    Company-scoped: only the caller's company's PRs are read, a supplied
+    installation_id must belong to the caller's company (else 404), and the
+    target dataset must be one the caller's company owns (else 404)."""
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     if body.installation_id is not None and not db.get_github_installation_for_company(
         body.installation_id, company.company_id
     ):
@@ -1444,14 +1683,14 @@ def github_sync_to_corpus(
             lines.append("")
 
     md_text = "\n".join(lines) + "\n"
-    target = settings.data_path / body.dataset / "github_active_prs.md"
+    target = settings.data_path / dataset / "github_active_prs.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(md_text, encoding="utf-8")
 
     # Auto-enable github input source
     try:
         db.upsert_input_source(
-            body.dataset, "github", enabled=True,
+            dataset, "github", enabled=True,
             config={"last_sync_at": db.utc_now()},
         )
     except Exception:
@@ -1628,6 +1867,641 @@ def jira_disconnect(
     return {"deleted": True, "provider": jira_oauth.JIRA_PROVIDER}
 
 
+# ─────────────────────── Confluence ───────────────────────
+
+
+@router.get("/confluence/callback")
+def confluence_callback(code: str, state: str):
+    payload = confluence_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = confluence_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Confluence did not return an access_token")
+
+    # Same cloud_id quirk as Jira: it is required for every subsequent REST
+    # call and is NOT in the token response, so cache it (and the site list)
+    # on the connection.
+    sites = confluence_oauth.get_accessible_resources(access_token)
+    cloud_id = sites[0].get("id") if sites else None
+    user = (
+        confluence_oauth.fetch_current_user(access_token, cloud_id)
+        if cloud_id else {}
+    )
+    label = confluence_oauth.account_label_from(user, sites)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides inside the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed (PULLERS key
+            # "company_id") — the puller needs the connection's config, which
+            # a lone access token can't reach. See token_payload_to_store.
+            confluence_oauth.token_payload_to_store(
+                token_json, company_id=company_id
+            )
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=confluence_oauth.CONFLUENCE_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=confluence_oauth.CONFLUENCE_SCOPES,
+        account_label=label,
+        config_json=json.dumps(
+            {
+                confluence_oauth.CONFIG_CLOUD_ID: cloud_id,
+                "sites": sites,
+                "user": user,
+            }
+        ),
+    )
+
+    # No-op today (confluence has no entry in kg_ingest PULLERS yet) but wired
+    # now so the puller PR is a one-line registration rather than a route edit.
+    kickoff_sync(company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, confluence_oauth.CONFLUENCE_PROVIDER)
+
+
+@router.delete("/confluence")
+def confluence_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, confluence_oauth.CONFLUENCE_PROVIDER)
+    row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Confluence is not connected")
+    db.delete_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    return {"deleted": True, "provider": confluence_oauth.CONFLUENCE_PROVIDER}
+
+
+@router.get("/confluence/spaces")
+def confluence_list_spaces(
+    company: CompanyContext = Depends(require_company),
+):
+    """The spaces the connected account can read, for the picker.
+
+    Readable by any member (mirrors slack_list_channels, which is not
+    admin-gated) — seeing what COULD be synced is not a privileged action;
+    changing the selection is.
+
+    Personal spaces are excluded. Note this list is bounded by the connecting
+    user's own Confluence permissions: a space they cannot read simply is not
+    here, and there is no scope that would widen it."""
+    try:
+        ctx = confluence_oauth.sync_context(company.company_id)
+        spaces = confluence_oauth.list_spaces(ctx.access_token, ctx.cloud_id)
+    except confluence_oauth.ConfluenceNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    except confluence_oauth.ConfluenceAuthExpiredError as e:
+        # Must be caught: an escaping exception becomes an unhandled 500 with
+        # no CORS headers, which the browser reports as a bare "Failed to
+        # fetch" — the picker then shows a network error for what is really a
+        # reconnect prompt. The commonest cause is a token minted before the
+        # granular v2 scopes were added, which fails with
+        # "Unauthorized; scope does not match".
+        raise HTTPException(400, str(e)) from e
+    return {"spaces": spaces, "selected_ids": ctx.space_ids}
+
+
+class ConfluenceSpaceIn(BaseModel):
+    id: str
+    key: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("space id cannot be empty")
+
+
+class ConfluenceSyncSpacesIn(BaseModel):
+    spaces: list[ConfluenceSpaceIn]
+
+    def model_post_init(self, _context) -> None:
+        # The puller caps at _MAX_SPACES — refuse a selection it could never
+        # honor rather than silently truncating one.
+        if len(self.spaces) > 25:
+            raise ValueError("select at most 25 spaces")
+
+
+@router.post("/confluence/spaces")
+def confluence_save_sync_spaces(
+    body: ConfluenceSyncSpacesIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which spaces the KG ingest pulls from — COMPANY-WIDE.
+
+    An EMPTY list clears the selection, which means every readable space
+    again. That is the backwards-compatible default (same rule as Slack's
+    channel selection): a connection made before this picker existed has no
+    stored selection and must keep working.
+
+    Keys are stored alongside the ids so a space that later becomes
+    unreadable can be reported BY NAME in the sync log rather than as an
+    opaque id."""
+    _require_admin_for_org_connector(company, confluence_oauth.CONFLUENCE_PROVIDER)
+    row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Confluence is not connected")
+    # Dedupe preserving order — the puller walks the selection in order.
+    ids = list(dict.fromkeys(s.id for s in body.spaces))
+    keys = {
+        s.id: s.key.strip()
+        for s in body.spaces
+        if s.key and s.key.strip()
+    }
+    updated = db.patch_connection_config(
+        company.company_id,
+        confluence_oauth.CONFLUENCE_PROVIDER,
+        {
+            confluence_oauth.CONFIG_SYNC_SPACE_IDS: ids,
+            confluence_oauth.CONFIG_SYNC_SPACE_KEYS: keys,
+        },
+    )
+    try:
+        config = json.loads((updated or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    # Pull the new selection now rather than waiting for the 6-hourly sweep —
+    # the user just told us what they want ingested.
+    kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
+    return {"ok": True, "config": config}
+
+
+# ─────────────────────── Zoom ───────────────────────
+#
+# Cloud recordings + transcripts. ORG-WIDE, not per-user: every scope is an
+# `:admin` scope so one connection reads every host's recordings, which is why
+# zoom is deliberately NOT in _PERSONAL_PROVIDERS and every mutating route here
+# goes through _require_admin_for_org_connector.
+#
+# CURRENT SCOPE: connect / disconnect / probe / host picker. No kg_ingest
+# puller yet, so a connected Zoom is healthy and ingests nothing.
+
+
+@router.get("/zoom/callback")
+def zoom_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Zoom's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Zoom calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state being replayed here.
+    """
+    payload = zoom_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. THREE different things end up here and
+    # they need three different sentences from the return page, so they get
+    # three stable codes rather than one catch-all:
+    #
+    #   access_denied         the user clicked Decline. Nothing is wrong; they
+    #                         just have to try again and accept. Telling them to
+    #                         "ask your Zoom admin to approve Sprntly" would
+    #                         send them to bother a colleague over their own
+    #                         click.
+    #   approval prose        a Zoom admin has not pre-approved the app
+    #                         (Marketplace → Manage → Approved Apps). This one
+    #                         genuinely does need another person.
+    #   anything else         honest generic failure.
+    #
+    # Zoom's own error string is never forwarded: it changes without notice and
+    # would land straight on a screen.
+    if error:
+        logger.warning(
+            "Zoom consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        if zoom_oauth.looks_like_app_not_approved(error, error_description):
+            code_out = "zoom_app_not_approved"
+        elif (error or "").strip().lower() == "access_denied":
+            code_out = "zoom_consent_declined"
+        else:
+            code_out = "zoom_oauth_failed"
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Zoom did not return an authorization code")
+
+    try:
+        token_json = zoom_oauth.exchange_code_for_token(code)
+    except zoom_oauth.ZoomAppNotApprovedError:
+        return _build_post_oauth_error_redirect(
+            payload, zoom_oauth.ZOOM_PROVIDER, "zoom_app_not_approved",
+        )
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Zoom did not return an access_token")
+
+    # Best-effort label only. fetch_current_user answers on `user:read:user:admin`
+    # while everything this connector reads answers on the cloud_recording
+    # scopes, so a failure here says nothing about whether the connection works
+    # — it must not block the connect. The probe validates the read that
+    # matters.
+    user = zoom_oauth.fetch_current_user(access_token)
+    label = zoom_oauth.account_label_from(user)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed: the puller needs
+            # the picked hosts off connections.config, which a lone access token
+            # can't reach. See zoom_oauth.token_payload_to_store.
+            zoom_oauth.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect — which is not a rare event here:
+    # Zoom refresh tokens expire at 90 days, so every long-lived customer
+    # reconnects on a schedule. Writing a fresh `{"user": …}` would silently
+    # drop `sync_user_ids`, and an empty selection means EVERY HOST — so a
+    # workspace that deliberately narrowed sync to three sales hosts would
+    # quietly widen to the whole company every quarter, with no event to trace
+    # it to. Start from the existing config and only add.
+    existing = db.get_connection(company_id, zoom_oauth.ZOOM_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only three fields of the identity payload are kept — config_json is
+    # returned verbatim to every company member by GET /v1/connectors, and
+    # Zoom's user object carries the admin's personal meeting URL, phone number
+    # and department. `id` is the one that matters: it is the real userId the
+    # probe addresses instead of `me`. And an identity lookup that failed writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    if user:
+        config[zoom_oauth.CONFIG_USER] = zoom_oauth.identity_to_store(user)
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=zoom_oauth.ZOOM_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=zoom_oauth.ZOOM_SCOPES,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep — a first connect
+    # backfills three months of recordings, and a customer who just connected
+    # should see calls in the graph, not an empty one until this evening.
+    kickoff_sync(company_id, zoom_oauth.ZOOM_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, zoom_oauth.ZOOM_PROVIDER)
+
+
+@router.delete("/zoom")
+def zoom_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Zoom, revoking the grant on Zoom's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete: a
+    refresh token we merely forget stays valid on Zoom's side for the rest of
+    its 90 days, so forgetting without revoking leaves a live credential to this
+    customer's recordings in a token store we no longer show them. If the revoke
+    fails we still delete — the user asked to disconnect, and keeping our copy
+    would be the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        zoom_oauth.revoke_token(token_json.get("access_token") or "")
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Zoom revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    # Drop Zoom's half of the call index with the connection — same reasoning as
+    # the Fireflies disconnect: chat answering call questions from indexed Zoom
+    # rows while the connector list correctly reports Zoom as disconnected puts
+    # two contradictory claims in one answer. SCOPED, so a company that also
+    # runs Fireflies keeps its Fireflies index intact.
+    try:
+        from app import call_index
+
+        call_index.clear_company(company.company_id, call_index.PROVIDER_ZOOM)
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("zoom: could not clear call index for %s",
+                       company.company_id, exc_info=True)
+    return {"deleted": True, "provider": zoom_oauth.ZOOM_PROVIDER}
+
+
+#: How many hosts the picker will return. Zoom accounts run to thousands of
+#: users; past this a picker needs search rather than a longer scroll, and
+#: `truncated` is how the UI says so honestly instead of silently showing a
+#: prefix.
+_ZOOM_USER_PICKER_LIMIT = 500
+
+
+@router.get("/zoom/users")
+def zoom_list_users(
+    company: CompanyContext = Depends(require_company),
+):
+    """The hosts on the connected Zoom account, for the picker.
+
+    Readable by any member (mirrors confluence_list_spaces and
+    slack_list_channels) — seeing what COULD be synced is not a privileged
+    action; changing the selection is.
+
+    `recording_count` is present on every row and is null in this slice: the
+    count needs one windowed recordings call PER HOST, which is the puller's
+    job. It ships as a declared null rather than a missing key so the client
+    renders "—" from day one instead of gaining a new field later.
+
+    Three fields describe the size of the answer, and they mean different
+    things. `total` is HOW MANY WE FETCHED, not how many exist. `fetch_capped`
+    says Zoom still had more pages when the listing budget ran out — on a
+    5,000-host account that is the difference between an honest "showing the
+    first 500 of at least 1,200" and a flat lie about the customer's own org.
+    `truncated` says the response itself was cut to the picker limit.
+
+    `selected_names` returns the names stored WITH the selection rather than
+    only the ids. That is the entire reason they are persisted: a host who has
+    since been deactivated is gone from `users` (the listing is active-only), so
+    without their name the picker can only render a bare opaque id — or, worse,
+    silently show a shorter selection than the one actually in force.
+    """
+    try:
+        ctx = zoom_oauth.sync_context(company.company_id)
+        found, fetch_capped = zoom_oauth.list_users(ctx.access_token)
+    except zoom_oauth.ZoomNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    except zoom_oauth.ZoomAuthExpiredError as e:
+        # Must be caught. An escaping exception becomes an unhandled 500 with no
+        # CORS headers, which the browser reports as a bare "Failed to fetch" —
+        # the picker then shows a network error for what is really a reconnect
+        # prompt. That exact defect shipped on Confluence's space picker
+        # (a1e16c40); the likeliest trigger here is the same one: a token minted
+        # before a scope changed, or the connecting admin losing their admin role.
+        raise HTTPException(400, str(e)) from e
+    truncated = len(found) > _ZOOM_USER_PICKER_LIMIT
+    users = [
+        {**u, "recording_count": None} for u in found[:_ZOOM_USER_PICKER_LIMIT]
+    ]
+    return {
+        "users": users,
+        "selected_ids": ctx.user_ids,
+        "selected_names": ctx.user_names,
+        # Fetched, NOT the account's true user count — see the docstring.
+        "total": len(found),
+        "fetch_capped": fetch_capped,
+        "truncated": truncated,
+    }
+
+
+#: How many hosts one selection may name. Mirrors Confluence's 25-space cap and
+#: exists for the same reason: refuse a selection the puller could never honor
+#: rather than silently truncating one. Sized for Zoom's cost shape — the puller
+#: pays ONE windowed recordings call per selected host per sync window, so 100
+#: hosts is 100 calls a pass before a single transcript is read.
+_ZOOM_MAX_SYNC_USERS = 100
+
+
+class ZoomUserIn(BaseModel):
+    id: str
+    email: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("user id cannot be empty")
+
+
+class ZoomSyncUsersIn(BaseModel):
+    users: list[ZoomUserIn]
+
+    def model_post_init(self, _context) -> None:
+        if len(self.users) > _ZOOM_MAX_SYNC_USERS:
+            raise ValueError(
+                f"select at most {_ZOOM_MAX_SYNC_USERS} hosts — "
+                "leave the selection empty to sync every host instead"
+            )
+
+
+@router.post("/zoom/users")
+def zoom_save_sync_users(
+    body: ZoomSyncUsersIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which hosts' recordings the KG ingest pulls — COMPANY-WIDE.
+
+    An EMPTY list clears the selection, which means every host on the account
+    again. That is the backwards-compatible default (the same rule as
+    Confluence's spaces and Slack's channels): a connection made before this
+    picker existed has no stored selection and must keep working.
+
+    Emails are stored alongside the ids so a host who is later deactivated can
+    be reported BY NAME in the sync log rather than as an opaque Zoom user id.
+    """
+    _require_admin_for_org_connector(company, zoom_oauth.ZOOM_PROVIDER)
+    row = db.get_connection(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Zoom is not connected")
+    # Dedupe preserving order — the puller walks the selection in order, one
+    # windowed recordings call per host, so a duplicated id is a duplicated call.
+    ids = list(dict.fromkeys(u.id for u in body.users))
+    names = {
+        u.id: u.email.strip()
+        for u in body.users
+        if u.email and u.email.strip()
+    }
+    updated = db.patch_connection_config(
+        company.company_id,
+        zoom_oauth.ZOOM_PROVIDER,
+        {
+            zoom_oauth.CONFIG_SYNC_USER_IDS: ids,
+            zoom_oauth.CONFIG_SYNC_USER_NAMES: names,
+        },
+    )
+    try:
+        config = json.loads((updated or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    # Pull the new selection now rather than waiting for the next sweep — the
+    # user just told us what they want ingested.
+    kickoff_sync(company.company_id, zoom_oauth.ZOOM_PROVIDER)
+    return {"ok": True, "config": config}
+
+
+# ─────────────────────── Google Meet ───────────────────────
+#
+# Meeting transcripts, read from the Meet REST API v2. Shares the Google Cloud
+# project and OAuth client with the Drive connector but is a fully separate
+# provider — its own redirect URI, its own connection row, its own state signer
+# and its own scope list (see connectors/google_meet.py for why the scope lists
+# must never merge).
+#
+# NOT ORG-WIDE, and this is the opposite of Zoom. Google exposes only the
+# conferences the connected account ORGANIZED; there is no admin-level listing
+# and no scope that would add one. It is nevertheless treated as an ORG
+# connector for RBAC (absent from _PERSONAL_PROVIDERS, every mutation behind
+# _require_admin_for_org_connector), because the connection row is
+# company-scoped: one row per company, so whoever holds it decides what the
+# whole workspace ingests. Per-user Meet connections would need the per-user
+# row shape Slack has, which is its own change.
+#
+# There is no picker route. There is nothing to pick: coverage is fixed to the
+# connecting account's own meetings, and the 30-day retention window is Google's
+# to set, not the customer's.
+
+
+@router.get("/google-meet/callback")
+def google_meet_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Google's OAuth redirect target.
+
+    UNAUTHENTICATED by construction — Google calls this, not the user's app tab,
+    so there is no session and no company header. The signed `state` JWT is the
+    entire trust boundary: `verify_oauth_state` is what decides whose company
+    this token gets written to, and its provider claim is what stops another
+    connector's state (including the Drive connector's, minted by the very same
+    OAuth client) being replayed here.
+    """
+    payload = google_meet.verify_oauth_state(state)
+    company_id = payload["company_id"]
+
+    # Consent did not produce a code. Google's own error string is never
+    # forwarded — it changes without notice and would land straight on a screen
+    # — so this collapses to two stable codes the return page maps to copy:
+    # the user declined (nothing is wrong, try again and accept), or anything
+    # else (honest generic failure).
+    if error:
+        logger.warning(
+            "Google Meet consent failed for %s: %s (%s)",
+            company_id, error, (error_description or "")[:200],
+        )
+        code_out = (
+            "google_meet_consent_declined"
+            if (error or "").strip().lower() == "access_denied"
+            else "google_meet_oauth_failed"
+        )
+        return _build_post_oauth_error_redirect(
+            payload, google_meet.GOOGLE_MEET_PROVIDER, code_out,
+        )
+    if not code:
+        raise HTTPException(400, "Google Meet did not return an authorization code")
+
+    token_json = google_meet.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Google Meet did not return an access_token")
+
+    # The email comes free out of the OIDC id_token (we request openid +
+    # userinfo.email), so the common path costs no extra round trip. The
+    # userinfo call is only the fallback, and a failure there costs the LABEL,
+    # never the connection: userinfo answers on a different scope from every
+    # meeting read, so it says nothing about whether the connector works. The
+    # probe validates the read that matters.
+    email = google_meet.email_from_id_token(token_json)
+    user = {} if email else google_meet.fetch_current_user(access_token)
+    label = google_meet.account_label_from(user, email=email)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            # company_id rides INSIDE the encrypted payload because it IS the
+            # credential the kg_ingest puller will be handed — see
+            # google_meet.token_payload_to_store.
+            google_meet.token_payload_to_store(token_json, company_id=company_id)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    # RECONNECT SAFETY. `upsert_connection` REPLACES config_json wholesale, and
+    # this callback runs on every reconnect. Writing a fresh dict would drop
+    # whatever else lives there — today the puller's sync counters, tomorrow
+    # anything a config surface adds — which is exactly the regression the Zoom
+    # callback had to be fixed for (there it silently widened a narrowed host
+    # selection back to every host, once a quarter, with no event to trace it
+    # to). Start from the existing config and only add.
+    existing = db.get_connection(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    try:
+        config = json.loads((existing or {}).get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    # Only {id, email} of the identity payload is kept — config_json is returned
+    # verbatim to every company member by GET /v1/connectors, and Google's
+    # userinfo carries the connecting person's full name, profile picture URL,
+    # locale and hosted domain. An identity lookup that produced nothing writes
+    # nothing at all rather than stamping an empty dict over a good one.
+    identity = google_meet.identity_to_store(user, email=email)
+    if identity.get("id") or identity.get("email"):
+        config[google_meet.CONFIG_USER] = identity
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_meet.GOOGLE_MEET_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=google_meet.MEET_SCOPE_STRING,
+        account_label=label,
+        config_json=json.dumps(config),
+    )
+
+    # Pull now rather than waiting for the 6-hourly sweep. It matters more here
+    # than on any other connector: the corpus is only ever the last 30 days, so
+    # every hour of delay is an hour of the window that will expire unread.
+    kickoff_sync(company_id, google_meet.GOOGLE_MEET_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, google_meet.GOOGLE_MEET_PROVIDER)
+
+
+@router.delete("/google-meet")
+def google_meet_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect Google Meet, revoking the grant on Google's side first.
+
+    The revoke is best-effort and deliberately ordered BEFORE the delete. It
+    matters more than on the connectors with a token clock: Google refresh
+    tokens do not expire on a schedule, so one we merely forget stays live
+    indefinitely — a permanent credential to this customer's meeting
+    transcripts, in a token store we no longer show them. If the revoke fails we
+    still delete: the user asked to disconnect, and keeping our copy would be
+    the worse of the two outcomes.
+    """
+    _require_admin_for_org_connector(company, google_meet.GOOGLE_MEET_PROVIDER)
+    row = db.get_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Meet is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        # The refresh token is the one worth killing — revoking any token of a
+        # grant invalidates the whole grant, and the access token would have
+        # expired within the hour anyway.
+        google_meet.revoke_token(
+            token_json.get("refresh_token") or token_json.get("access_token") or ""
+        )
+    except Exception:  # noqa: BLE001 — an unreadable token is still deletable
+        logger.warning(
+            "Google Meet revoke skipped for %s — deleting the row anyway",
+            company.company_id, exc_info=True,
+        )
+    db.delete_connection(company.company_id, google_meet.GOOGLE_MEET_PROVIDER)
+    return {"deleted": True, "provider": google_meet.GOOGLE_MEET_PROVIDER}
+
+
 # ─────────────────────── HubSpot ───────────────────────
 #
 # Commit I. OAuth-only — no corpus sync yet.
@@ -1741,9 +2615,10 @@ def sprinklr_disconnect(
 
 # ─────────────────────── Asana ───────────────────────
 #
-# OAuth connect ONLY for now: no KG puller (kickoff_sync no-ops until an
-# `asana` entry lands in kg_ingest PULLERS) and no ticket-sync branch, so
-# Asana never appears on the sync button (stories/sync.py SYNC_PROVIDERS).
+# OAuth connect, two-way ticket sync (stories/sync.py SYNC_PROVIDERS) and KG
+# ingestion (kickoff_sync → kg_ingest PULLERS["asana"]) are all wired — a
+# connected Asana workspace shows up on the sync button and feeds the KG on
+# the usual 6-hourly schedule, same as ClickUp/Jira.
 
 
 @router.get("/asana/callback")
@@ -1805,17 +2680,19 @@ def hubspot_sync(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
 
     Fetches data from HubSpot API, converts to markdown, and writes
     into DATA_DIR/{dataset}/ so it enters the knowledge base. Company-scoped:
-    uses the caller's company's HubSpot connection only.
+    uses the caller's company's HubSpot connection only, and writes only into
+    a dataset the caller's company owns.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset, company_id=company.company_id)
+        result = sync_hubspot(dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1826,12 +2703,13 @@ def hubspot_sync_to_corpus(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
-    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
+    dataset = _gate_dataset(body.dataset, company.company_id)
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset, company_id=company.company_id)
+        result = sync_hubspot(dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1889,6 +2767,33 @@ def slack_callback(code: str, state: str):
         }),
     )
 
+    # Populate the KG immediately, like every other connector callback — but
+    # via the corpus path, not kickoff_sync. Slack has no kg_ingest PULLERS
+    # entry, so `kickoff_sync(company_id, "slack")` is a documented no-op
+    # (auto_sync.kickoff_sync); its ingest is sync_slack → corpus → seed.
+    # Until this call existed the ONLY trigger was the 6-hourly connector
+    # refresh (scheduler._refresh_all_company_connectors), so a brief asked for
+    # right after connecting Slack synthesized zero Slack signal and then
+    # silently started working an interval later.
+    #
+    # Company-level on purpose: the row is per-user, but voice-of-customer
+    # pulling resolves the company's sync row + its shared pull-channel
+    # selection (slack_company.resolve_company_slack_row), the same contract
+    # the scheduler and the manual Sync button already use.
+    #
+    # Guarded even though the callee swallows its own failures: its lazy
+    # `from app.connectors.slack_company import ...` sits outside that guard,
+    # and the connection is already committed above — a raise here would 500 a
+    # connect that in fact succeeded, stranding the user on an error page with
+    # Slack connected.
+    try:
+        kickoff_slack_corpus_sync(company_id)
+    except Exception:  # noqa: BLE001 — a sync kickoff must never fail a connect
+        logger.warning(
+            "slack: corpus-sync kickoff failed after connect for %s",
+            company_id, exc_info=True,
+        )
+
     return _build_post_oauth_redirect(payload, slack_oauth.SLACK_PROVIDER)
 
 
@@ -1896,13 +2801,37 @@ def slack_callback(code: str, state: str):
 def slack_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
-    # Disconnect only THIS user's Slack — never another member's.
+    # Disconnect only THIS user's Slack — never another member's. That guard
+    # is unconditional: it applies before we even look at role.
     row = db.get_slack_connection(company.company_id, company.user_id)
+    owned_by_caller = row is not None
+
+    # This member has no personal Slack row of their own. If the only Slack
+    # connection visible to them is the shared company sync row (see
+    # _company_slack_row_sanitized / resolve_company_slack_row), that row is
+    # STILL someone else's personal install, only promoted to also serve the
+    # company's voice-of-customer sync — it is NOT workspace-scoped, and
+    # Slack is dual-typed (catalog.py), so deleting it would also kill that
+    # owner's own DM/brief delivery, not just the company's channel sync.
+    # That case stays owner-only, same as any other personal connection —
+    # an admin gets no special reach into it.
+    #
+    # The one shape with no other remedy is a pre-per-user-migration orphan
+    # (user_id IS NULL): no owner exists to disconnect it themselves, so an
+    # admin/owner may clear it on the company's behalf. Everyone else
+    # (including an admin facing another member's promoted personal row)
+    # gets the same 404 as before.
+    if row is None and company.role in ("owner", "admin"):
+        row = db.get_orphan_slack_connection(company.company_id)
+
     if not row:
         raise HTTPException(404, "Slack is not connected")
+
     # Revoke the token on Slack's side first (best-effort), so the install is
     # torn down for the workspace, not just deleted locally — Slack Marketplace
-    # expects a clean uninstall. A revoke failure must not block the local delete.
+    # expects a clean uninstall. A revoke failure must not block the local
+    # delete — the whole point of this path is recovering a connection whose
+    # credential is already dead.
     try:
         token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
         bot_token = token_json.get("access_token")
@@ -1910,7 +2839,11 @@ def slack_disconnect(
             slack_oauth.revoke_token(bot_token)
     except Exception:  # noqa: BLE001 — never let revoke block the disconnect
         logger.warning("Slack token revoke on disconnect failed", exc_info=True)
-    db.delete_slack_connection(company.company_id, company.user_id)
+
+    if owned_by_caller:
+        db.delete_slack_connection(company.company_id, company.user_id)
+    else:
+        db.delete_slack_connection_by_id(company.company_id, row["id"])
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
@@ -2022,12 +2955,13 @@ async def _handle_slack_message(
     from app import qa_agent
     from app.db.companies import slug_for_company_id
 
+    marker: str | None = None
     try:
         resolved = _resolve_slack_inbound(team_id, slack_user)
         if not resolved:
             logger.info("slack inbound: no connection for team=%s — ignoring", team_id)
             return
-        company_id, _user_id, bot_token, bot_user_id = resolved
+        company_id, _user_id, bot_token, bot_user_id, scopes = resolved
         # Defence-in-depth self-message guard (bot_id is checked at the webhook;
         # this also catches the rare bot_id-less self post).
         if bot_user_id and slack_user == bot_user_id:
@@ -2047,6 +2981,19 @@ async def _handle_slack_message(
             if not is_mention
             else []
         )
+        # A report ask takes MINUTES (staged web research), and Slack gives no
+        # typing indicator to a bot. Without an up-front acknowledgement the
+        # channel just goes quiet and the user asks again, which starts a second
+        # run. Ack first, with the duration, then run.
+        if is_competitive_report_request(question):
+            marker = _register_slack_report(
+                team_id=team_id, channel=channel, thread_ts=thread_ts,
+                question=question,
+            )
+            await _post_best_effort(
+                bot_token, channel=channel, thread_ts=thread_ts,
+                text=_REPORT_ACK,
+            )
         payload = await asyncio.to_thread(
             qa_agent.answer,
             enterprise_id=company_id,
@@ -2060,12 +3007,9 @@ async def _handle_slack_message(
                 "I couldn't find an answer to that one. Try rephrasing, or ask "
                 "me something about your product data."
             )
-        await asyncio.to_thread(
-            slack_oauth.post_message,
-            bot_token,
-            channel=channel,
-            text=answer_text,
-            thread_ts=thread_ts,
+        await _deliver_slack_answer(
+            bot_token, channel=channel, thread_ts=thread_ts,
+            answer_text=answer_text, skill=payload.get("_skill"), scopes=scopes,
         )
         # Analytics parity with the web Ask path (never fail the answer on this).
         try:
@@ -2080,21 +3024,26 @@ async def _handle_slack_message(
             logger.exception("slack inbound: log_ask failed")
     except Exception:  # noqa: BLE001 — a webhook task must never crash the loop
         logger.exception("slack inbound: handler failed team=%s", team_id)
+    finally:
+        _clear_slack_report(marker)
 
 
 def _resolve_slack_inbound(
     team_id: str, slack_user: str
-) -> tuple[str, str, str, str] | None:
+) -> tuple[str, str, str, str, str] | None:
     """Map an inbound Slack (team_id, slack_user) to one Sprntly connection.
 
-    Returns (company_id, user_id, bot_token, bot_user_id), or None if the team
-    has no usable connection. The installing user's Slack id (authed_user_id)
+    Returns (company_id, user_id, bot_token, bot_user_id, scopes), or None if the
+    team has no usable connection. The installing user's Slack id (authed_user_id)
     lives inside the encrypted token blob — not an indexed column — so we list
     the team's connections and prefer the one whose authed_user_id matches the
     messaging user; absent a match we fall back to the team's first connection
-    (1 install = 1 company by design, so its bot token + company apply)."""
-    chosen: tuple[str, str, str, str] | None = None
-    fallback: tuple[str, str, str, str] | None = None
+    (1 install = 1 company by design, so its bot token + company apply).
+
+    `scopes` is the granted-scope string recorded at install time; report
+    delivery reads it to decide between a file upload and a text fallback."""
+    chosen: tuple[str, str, str, str, str] | None = None
+    fallback: tuple[str, str, str, str, str] | None = None
     for row in db.list_slack_connections_by_team(team_id):
         try:
             tj = json.loads(decrypt_token_json(row["token_json_encrypted"]))
@@ -2108,6 +3057,7 @@ def _resolve_slack_inbound(
             row["user_id"],
             bot_token,
             tj.get("bot_user_id") or "",
+            row.get("scopes") or tj.get("scope") or "",
         )
         if fallback is None:
             fallback = cand
@@ -2154,10 +3104,337 @@ def _slack_conversation_history(
         history.append(
             {
                 "role": "assistant" if is_bot else "user",
-                "content": content if is_bot else _strip_leading_mention(content),
+                # Clamped at construction (#949's per-turn clamp). The consuming
+                # fold in qa_agent clamps too, but this path is the one that now
+                # carries REPORT answers: a Slack DM thread can hold the bot's
+                # own report summary, and before file delivery it could hold a
+                # whole HTML document. Bounding it here means every downstream
+                # fold — qa_agent's and every divert's — sees a sane turn.
+                "content": clamp_turn_text(
+                    content if is_bot else _strip_leading_mention(content)
+                ),
             }
         )
     return history[-12:]
+
+
+# ───── Report delivery into Slack (ack → summary → file) ─────
+
+CIR_SKILL = "competitive-intelligence-review"
+
+# Posted BEFORE the run starts. Names the duration, because the alternative is a
+# silent channel and a second ask that starts a second multi-minute run.
+_REPORT_ACK = (
+    ":mag: On it — running your competitive scan now. This takes about 5-10 "
+    "minutes (a full quarterly review can take 10-20), because I research each "
+    "competitor on the live web rather than answering from memory. I'll post "
+    "the report here when it's ready."
+)
+
+_REPORT_FILENAME = {
+    CIR_SKILL: "competitive-intelligence-report.html",
+    "public-feedback-report": "public-feedback-report.html",
+    "voice-of-customer-report": "voice-of-customer-report.html",
+}
+_REPORT_TITLE = {
+    CIR_SKILL: "Competitive Intelligence report",
+    "public-feedback-report": "Public Feedback report",
+    "voice-of-customer-report": "Voice of Customer report",
+}
+# Shown when the install predates file delivery (no files:write). Adding a scope
+# forces a workspace reinstall, which is the user's call — so we say where the
+# report is instead of failing.
+_NO_UPLOAD_SCOPE = (
+    "The full report is a formatted document, and this Slack install can't "
+    "receive file uploads yet — open Sprntly chat to read it, or reconnect "
+    "Slack from Settings → Connectors to enable file delivery here."
+)
+# ...and a DIFFERENT message when the scope IS present and the upload still
+# failed. Telling someone their install "can't receive uploads yet" when it can
+# sends them to reinstall Slack for nothing; this is a transient failure, and the
+# honest line says so.
+_UPLOAD_FAILED = (
+    "I couldn't attach the full report here just now — open Sprntly chat to "
+    "read it, or ask me again to retry the upload."
+)
+
+
+async def _post_best_effort(bot_token: str, *, channel: str, text: str,
+                            thread_ts: str | None) -> bool:
+    """post_message off the event loop, swallowing failures. Used for the ack and
+    the fallbacks, where a delivery failure must not lose the answer that
+    follows it."""
+    try:
+        await asyncio.to_thread(
+            slack_oauth.post_message, bot_token,
+            channel=channel, text=text, thread_ts=thread_ts,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — one failed post can't break delivery
+        logger.warning("slack: post failed for channel=%s", channel, exc_info=True)
+        return False
+
+
+async def _deliver_slack_answer(
+    bot_token: str, *, channel: str, thread_ts: str | None, answer_text: str,
+    skill: str | None, scopes: str,
+) -> None:
+    """Post an agent answer to Slack, handling the HTML-report case.
+
+    A prose answer posts as-is (unchanged behaviour). An answer that IS a
+    self-contained HTML document — the CIR / public-feedback / VoC reports —
+    would post as a wall of CSS that Slack then truncates, so instead we post a
+    short text summary read from the document's own opening and attach the
+    document as a file. Missing `files:write` degrades to the summary plus a
+    pointer to Sprntly chat; the answer is never lost.
+    """
+    if not html_report.looks_like_html_report(answer_text):
+        await _post_best_effort(bot_token, channel=channel, text=answer_text,
+                                thread_ts=thread_ts)
+        return
+
+    label = _REPORT_TITLE.get(skill or "", "report")
+    summary = html_report.summarize_report(answer_text)
+    header = f":page_facing_up: Your {label} is ready."
+    await _post_best_effort(
+        bot_token, channel=channel, thread_ts=thread_ts,
+        text=f"{header}\n\n{summary}" if summary else header,
+    )
+    if not slack_oauth.has_file_upload_scope(scopes):
+        await _post_best_effort(bot_token, channel=channel, thread_ts=thread_ts,
+                                text=_NO_UPLOAD_SCOPE)
+        return
+    filename = _REPORT_FILENAME.get(skill or "", "sprntly-report.html")
+    uploaded = False
+    try:
+        uploaded = await asyncio.to_thread(
+            slack_oauth.upload_file, bot_token,
+            channel=channel, filename=filename, content=answer_text,
+            title=label, thread_ts=thread_ts,
+        )
+    except Exception:  # noqa: BLE001 — upload_file already swallows; belt and braces
+        logger.warning("slack: report upload raised", exc_info=True)
+    if not uploaded:
+        # The scope IS present (checked above), so this is a transient upload
+        # failure — do NOT tell them to reinstall Slack.
+        await _post_best_effort(bot_token, channel=channel, thread_ts=thread_ts,
+                                text=_UPLOAD_FAILED)
+
+
+# ───── In-flight report markers (shutdown interrupt) ─────
+#
+# A Slack report run lives in a fire-and-forget task, so a restart mid-run drops
+# it silently: the user got an ack promising a report in ~5-10 minutes and then
+# nothing, forever. These markers let `sweep_interrupted_slack_reports` say so.
+#
+# The sweep is called from the lifespan's SHUTDOWN half (app/main.py), not
+# startup. That is load-bearing: this registry is in-process, so a fresh
+# process's dict is empty by construction and a startup sweep could never fire.
+# At shutdown the loop is still alive and the bot token still readable, so the
+# notice actually goes out.
+#
+# KNOWN LIMIT: this covers an orderly shutdown (SIGTERM on deploy/restart) and
+# a task lost inside one process lifetime. A SIGKILL or a hard crash skips the
+# lifespan entirely and the markers die with the process. Durable markers need a
+# table and a migration; the sweep is already wired, so making it durable later
+# is a schema change rather than a rewrite.
+_slack_report_markers: dict[str, dict] = {}
+# Marker keys must be unique for the lifetime of the process. len(dict) is not:
+# register → clear → register reuses the same suffix, and two concurrent report
+# runs in one channel/thread could collide and lose a marker. A monotonic
+# counter cannot.
+_slack_report_seq = itertools.count(1)
+_INTERRUPTED_REPORT = (
+    ":warning: That report run was interrupted before it finished — nothing was "
+    "posted. Ask again and I'll rerun it."
+)
+
+
+def _register_slack_report(*, team_id: str, channel: str,
+                           thread_ts: str | None, question: str) -> str:
+    key = f"{team_id}:{channel}:{thread_ts or ''}:{next(_slack_report_seq)}"
+    _slack_report_markers[key] = {
+        "team_id": team_id, "channel": channel, "thread_ts": thread_ts,
+        "question": question, "started_at": time.time(),
+    }
+    return key
+
+
+def _clear_slack_report(marker: str | None) -> None:
+    if marker:
+        _slack_report_markers.pop(marker, None)
+
+
+def sweep_interrupted_slack_reports() -> list[dict]:
+    """Post "interrupted — ask again" for every report run still marked
+    in-flight, and clear the markers. Returns the markers it swept (so the
+    caller can log a count). Best-effort per marker: a failed post is logged and
+    the sweep continues.
+
+    Called from the lifespan SHUTDOWN half — see the note above the registry for
+    why it cannot be startup."""
+    swept = list(_slack_report_markers.values())
+    _slack_report_markers.clear()
+    for m in swept:
+        resolved = None
+        try:
+            resolved = _resolve_slack_inbound(m.get("team_id") or "", "")
+        except Exception:  # noqa: BLE001 — a sweep must never break startup
+            logger.warning("slack sweep: connection lookup failed", exc_info=True)
+        if not resolved:
+            continue
+        try:
+            slack_oauth.post_message(
+                resolved[2], channel=m.get("channel") or "",
+                text=_INTERRUPTED_REPORT, thread_ts=m.get("thread_ts"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("slack sweep: retry notice post failed", exc_info=True)
+    return swept
+
+
+# ───── Slash commands ─────
+
+
+@router.post("/slack/commands")
+async def slack_commands(request: Request):
+    """Slack slash-command sink. Unauthenticated by design — the signing-secret
+    request signature is the auth, exactly as for /slack/events.
+
+    Slack requires a response within 3 SECONDS or the user sees an operation
+    timeout, and a competitive scan takes minutes. So this endpoint does no LLM
+    work at all: it verifies the signature, returns an ephemeral ack
+    immediately, and runs the report in a background task that delivers via the
+    command's `response_url` plus an in-channel post (with the HTML document
+    attached as a file).
+
+    `/competitive-scan [competitor names…]` is the intended command; any
+    competitor names in the text override the stored roster for that run. The
+    endpoint accepts whatever command Slack sends, because ACTIVATING a slash
+    command is a Slack app-manifest change made per app (prod and dev are
+    SEPARATE apps) — deliberately NOT part of this code. Until the command is
+    registered nothing reaches here, and this endpoint is simply idle; it never
+    assumes registration."""
+    raw = await request.body()
+    ts = request.headers.get("X-Slack-Request-Timestamp", "")
+    sig = request.headers.get("X-Slack-Signature", "")
+    if not slack_oauth.verify_signature(ts, raw, sig):
+        raise HTTPException(401, "invalid Slack signature")
+    form = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
+    command = (form.get("command") or "").strip()
+    text = (form.get("text") or "").strip()
+    team_id = (form.get("team_id") or "").strip()
+    channel = (form.get("channel_id") or "").strip()
+    slack_user = (form.get("user_id") or "").strip()
+    response_url = (form.get("response_url") or "").strip()
+    if not (team_id and channel):
+        # Nothing actionable; still 200 so Slack doesn't show an error.
+        return {"response_type": "ephemeral",
+                "text": "I couldn't read that command — try again."}
+
+    coro = _run_slack_report_command(
+        team_id=team_id, channel=channel, slack_user=slack_user,
+        text=text, command=command, response_url=response_url,
+    )
+    if "pytest" in sys.modules:
+        # Same reason as /slack/events: the TestClient loop doesn't persist
+        # between requests, so a fire-and-forget task would never run.
+        await coro
+    else:
+        task = asyncio.create_task(coro)
+        _slack_inflight_tasks.add(task)
+        task.add_done_callback(_slack_inflight_tasks.discard)
+
+    return {
+        "response_type": "ephemeral",
+        "text": _REPORT_ACK,
+    }
+
+
+def _command_question(text: str) -> str:
+    """The question the command runs. Names in the command text override the
+    stored roster for this run (they reach the pipeline through the question,
+    which is where `named_competitors` reads an ad-hoc set from)."""
+    names = text.strip()
+    if not names:
+        return "Run a competitive intelligence report"
+    return f"Run a competitive intelligence report vs {names}"
+
+
+async def _run_slack_report_command(
+    *, team_id: str, channel: str, slack_user: str, text: str, command: str,
+    response_url: str,
+) -> None:
+    """Background half of a slash command: run the report pinned to the CIR
+    skill and deliver it. Best-effort throughout — a slash command must never
+    crash the event loop, and every failure path still tells the user."""
+    from app import qa_agent
+    from app.db.companies import slug_for_company_id
+
+    marker: str | None = None
+    try:
+        resolved = _resolve_slack_inbound(team_id, slack_user)
+        if not resolved:
+            await _respond_to_command(
+                response_url,
+                "Sprntly isn't connected to this workspace yet — connect Slack "
+                "from Settings → Connectors and try again.",
+            )
+            return
+        company_id, _user_id, bot_token, _bot_user_id, scopes = resolved
+        dataset = slug_for_company_id(company_id) or ""
+        question = _command_question(text)
+        marker = _register_slack_report(
+            team_id=team_id, channel=channel, thread_ts=None, question=question,
+        )
+        payload = await asyncio.to_thread(
+            qa_agent.answer,
+            enterprise_id=company_id,
+            question=question,
+            dataset=dataset,
+            pinned_skill=CIR_SKILL,
+        )
+        answer_text = (payload.get("answer") or "").strip()
+        if not answer_text:
+            await _respond_to_command(
+                response_url,
+                "I couldn't complete that competitive scan. Please try again.",
+            )
+            return
+        await _deliver_slack_answer(
+            bot_token, channel=channel, thread_ts=None,
+            answer_text=answer_text, skill=payload.get("_skill") or CIR_SKILL,
+            scopes=scopes,
+        )
+        await _respond_to_command(response_url, "Your report is posted above. :white_check_mark:")
+    except Exception:  # noqa: BLE001 — a background task must never crash the loop
+        logger.exception("slack command failed: %s team=%s", command, team_id)
+        await _respond_to_command(
+            response_url,
+            "Something went wrong running that competitive scan. Please try again.",
+        )
+    finally:
+        _clear_slack_report(marker)
+
+
+async def _respond_to_command(response_url: str, text: str) -> None:
+    """Post a follow-up to a slash command's `response_url` (valid for 30
+    minutes, 5 uses). Ephemeral so a long report's progress chatter doesn't
+    clutter the channel. No-op without a URL; never raises."""
+    if not response_url:
+        return
+
+    def _post() -> None:
+        requests.post(
+            response_url,
+            json={"response_type": "ephemeral", "text": text},
+            timeout=15,
+        )
+
+    try:
+        await asyncio.to_thread(_post)
+    except Exception:  # noqa: BLE001 — the in-channel post is the real delivery
+        logger.warning("slack command response_url post failed", exc_info=True)
 
 
 def _slack_token_json(company_id: str, user_id: str) -> tuple[dict, dict]:
@@ -2210,9 +3487,26 @@ def _slack_user_token(company_id: str, user_id: str) -> tuple[str, dict]:
 def slack_list_channels(
     company: CompanyContext = Depends(require_company),
 ):
-    """List channels the bot can post into. Backs the channel-picker
-    in the Configure drawer. Resolves THIS user's own Slack."""
-    token, _row = _slack_bot_token(company.company_id, company.user_id)
+    """List channels the bot can post into. Backs both channel pickers
+    (delivery target + pull channels). Resolves THIS user's own Slack,
+    falling back to the COMPANY's sync connection so members who never
+    installed their own bot can still see the shared pull selection —
+    channel names only, never another member's delivery config."""
+    from app.connectors.slack_company import (
+        CompanySlackError,
+        company_slack_token,
+    )
+
+    if db.get_slack_connection(company.company_id, company.user_id):
+        token, _row = _slack_bot_token(company.company_id, company.user_id)
+        return {"channels": slack_oauth.list_channels(token)}
+    try:
+        resolved = company_slack_token(company.company_id)
+    except CompanySlackError as e:
+        raise HTTPException(500, str(e)) from e
+    if not resolved:
+        raise HTTPException(404, "Slack is not connected")
+    token, _row = resolved
     return {"channels": slack_oauth.list_channels(token)}
 
 
@@ -2346,6 +3640,264 @@ def slack_save_config(
     return {"ok": True, "config": config, "joined": joined}
 
 
+class SlackSyncChannelIn(BaseModel):
+    id: str
+    # Display name, stored alongside the id so an unjoined channel can be
+    # reported by name at sync time.
+    name: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("channel id cannot be empty")
+
+
+class SlackSyncChannelsIn(BaseModel):
+    channels: list[SlackSyncChannelIn]
+
+    def model_post_init(self, _context) -> None:
+        # The sync caps at 50 channels (slack_sync.MAX_CHANNELS) — refuse a
+        # selection it could never honor.
+        if len(self.channels) > 50:
+            raise ValueError("select at most 50 channels")
+
+
+def _slack_delivery_channel_ids(company_id: str) -> set[str] | None:
+    """Every channel this company currently DELIVERS to over Slack, or None
+    when the lookup itself failed.
+
+    Delivery is per-user (each member picks their own target — see
+    connectors/slack_company.py), so this reads every member's Slack row, not
+    just the company sync row. A channel in this set must never be left even
+    when it is unticked in the pull picker: the bot has to stay a member to
+    post there, and `post_to_target` only re-joins PUBLIC channels — walking
+    out of a private delivery channel would silently break that member's
+    briefs, nudges and design-agent notifications with no way back but a
+    manual /invite.
+
+    Matches `slack_oauth.post_to_target`'s own reading of the config, including
+    its default: an absent `target_type` means "channel", so a row carrying
+    only `channel_id` still counts.
+
+    Returns None — NOT an empty set — when the connection lookup blows up. The
+    two mean opposite things to the caller: empty is "nothing is a delivery
+    target, every leave is safe", None is "we don't know", and the only safe
+    response to not knowing is to leave nothing at all. An empty set here would
+    turn a transient DB hiccup into a silently broken brief channel.
+    """
+    from app.connectors.slack_company import row_config
+
+    targets: set[str] = set()
+    try:
+        rows = db.list_slack_connections(company_id)
+    except Exception:  # noqa: BLE001 — unknown targets ⇒ skip every leave
+        logger.exception("slack delivery-target lookup failed for %s", company_id)
+        return None
+    for row in rows:
+        cfg = row_config(row)
+        target_type = (
+            cfg.get("target_type") or slack_oauth.TARGET_CHANNEL
+        ).strip()
+        if target_type != slack_oauth.TARGET_CHANNEL:
+            continue
+        channel_id = str(cfg.get("channel_id") or "").strip()
+        if channel_id:
+            targets.add(channel_id)
+    return targets
+
+
+@router.post("/slack/sync-channels")
+def slack_save_sync_channels(
+    body: SlackSyncChannelsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which channels the Slack corpus sync pulls from — COMPANY-WIDE.
+
+    Voice-of-customer pulling is company-level (one selection, one scheduled
+    sync per company — see slack_company.py), so the selection is stored on
+    the company's Slack sync connection, whichever member installed it, and
+    only admins may change it. An empty list clears the selection (back to
+    every channel the bot is a member of). Selected public channels are
+    best-effort self-joined right away (idempotent, `channels:join`) so the
+    first sync doesn't skip them as not_in_channel; private channels can't
+    be self-joined and need a manual /invite.
+
+    UNTICKING REVERSES TICKING. A channel dropped from the selection is
+    diffed out of the PREVIOUS selection and then undone in both directions
+    ticking it went: the bot leaves the channel in Slack
+    (`slack_oauth.leave_channel`), and the messages that channel already
+    contributed are stripped out of the company's synced corpus
+    (`slack_sync.purge_channels_from_synced_data`), which then re-seeds the KG
+    the way an ordinary sync does. Two rules bound that:
+
+      * A channel that is somebody's DELIVERY target is never left, only
+        purged — see `_slack_delivery_channel_ids`.
+      * Every leave and every purge is best-effort. The selection write above
+        them is the source of truth and has already committed; cleanup that
+        fails is logged and reported in the response, never turned into an
+        error the admin's save disappears into.
+    """
+    from app.connectors.slack_company import (
+        CompanySlackError,
+        company_slack_token,
+        resolve_company_slack_row,
+        row_config,
+    )
+    from app.connectors.slack_sync import (
+        CONFIG_SYNC_CHANNEL_IDS,
+        CONFIG_SYNC_CHANNEL_NAMES,
+        purge_channels_from_synced_data,
+    )
+
+    # Company-wide config → org-connector RBAC, even though the underlying
+    # connection row is a member's install.
+    if company.role not in ("owner", "admin"):
+        raise HTTPException(
+            403,
+            "Only admins can choose the channels Sprntly pulls from. "
+            "Ask your workspace admin to update the selection.",
+        )
+    row = resolve_company_slack_row(company.company_id)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    # Snapshot the OUTGOING selection before the patch overwrites it — this is
+    # the only moment both halves of the diff exist. The names map matters as
+    # much as the ids: the corpus keys its per-channel sections by channel NAME
+    # (`## #support`), and the new payload no longer carries a name for a
+    # channel that was just unticked.
+    previous = row_config(row)
+    previous_ids = [
+        str(cid) for cid in (previous.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
+    ]
+    previous_names = previous.get(CONFIG_SYNC_CHANNEL_NAMES)
+    if not isinstance(previous_names, dict):
+        # A hand-edited or pre-picker config can carry anything here; a bad
+        # names map must degrade to "no name known", not to a 500 on save.
+        previous_names = {}
+    # Dedupe preserving order — the sync pulls in selection order.
+    ids = list(dict.fromkeys(c.id for c in body.channels))
+    names = {
+        c.id: c.name.strip()
+        for c in body.channels
+        if c.name and c.name.strip()
+    }
+    updated = db.patch_slack_connection_config(
+        company.company_id,
+        row.get("user_id") or "",
+        {CONFIG_SYNC_CHANNEL_IDS: ids, CONFIG_SYNC_CHANNEL_NAMES: names},
+    )
+    config = row_config(updated) if updated else {}
+    joined: list[str] = []
+    if ids:
+        try:
+            resolved = company_slack_token(company.company_id)
+            if resolved:
+                bot_token, _row = resolved
+                for cid in ids:
+                    try:
+                        if slack_oauth.join_channel(bot_token, cid):
+                            joined.append(cid)
+                    except Exception:  # noqa: BLE001 — join is best-effort per channel
+                        logger.exception("slack auto-join failed for %s", cid)
+        except CompanySlackError:
+            logger.exception("slack auto-join on sync-channels save failed")
+        except Exception:  # noqa: BLE001 — join must never block the save
+            logger.exception("slack auto-join on sync-channels save failed")
+
+    # ── Unticked channels: leave in Slack, then un-sync their messages ──
+    #
+    # An empty incoming list is "clear the selection back to every bot-member
+    # channel", NOT "unsubscribe from everything the bot is in" — clearing
+    # widens what the sync reads, so nothing is removed and nothing is left.
+    selected = set(ids)
+    removed_ids = (
+        [cid for cid in previous_ids if cid not in selected] if ids else []
+    )
+    left: list[str] = []
+    leave_failed: list[str] = []
+    delivery_skipped: list[str] = []
+    purged: dict = {"datasets": [], "sections_removed": 0, "reseeded": []}
+
+    if removed_ids:
+        delivery_targets = _slack_delivery_channel_ids(company.company_id)
+        if delivery_targets is None:
+            # Couldn't establish which channels deliver — skip every leave
+            # rather than risk walking out of a brief channel.
+            delivery_skipped = list(removed_ids)
+            logger.warning(
+                "slack un-sync: delivery targets unknown for company=%s — "
+                "skipping all %d leave(s); data purge still runs",
+                company.company_id, len(removed_ids),
+            )
+        else:
+            try:
+                resolved = company_slack_token(company.company_id)
+            except CompanySlackError:
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            except Exception:  # noqa: BLE001 — never block the save
+                resolved = None
+                logger.exception("slack leave on sync-channels save failed")
+            if resolved:
+                bot_token, _leave_row = resolved
+                for cid in removed_ids:
+                    if cid in delivery_targets:
+                        # Still purged below — the guard protects DELIVERY, not
+                        # the corpus. The admin asked for this channel's
+                        # messages to stop being read; the bot just has to stay
+                        # in the room to keep posting there.
+                        delivery_skipped.append(cid)
+                        logger.info(
+                            "slack un-sync: keeping bot in %s — it is a Slack "
+                            "delivery target for this company", cid,
+                        )
+                        continue
+                    try:
+                        if slack_oauth.leave_channel(bot_token, cid):
+                            left.append(cid)
+                        else:
+                            leave_failed.append(cid)
+                    except Exception:  # noqa: BLE001 — per-channel isolation
+                        leave_failed.append(cid)
+                        logger.exception("slack leave failed for %s", cid)
+            else:
+                leave_failed = list(removed_ids)
+
+        # Purge every removed channel's pulled messages, delivery targets
+        # included. Names come from the OUTGOING map; a channel we never
+        # stored a name for has no addressable corpus section, so it is
+        # reported rather than guessed at.
+        removed_names = [
+            str(previous_names.get(cid) or "").strip() for cid in removed_ids
+        ]
+        purge_names = [n for n in removed_names if n]
+        if len(purge_names) < len(removed_ids):
+            logger.warning(
+                "slack un-sync: %d of %d removed channels had no stored name — "
+                "their corpus sections cannot be located and are left for the "
+                "next full sync to overwrite",
+                len(removed_ids) - len(purge_names), len(removed_ids),
+            )
+        try:
+            purged = purge_channels_from_synced_data(
+                company.company_id, purge_names
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "slack un-sync: purge failed for company=%s", company.company_id
+            )
+
+    return {
+        "ok": True,
+        "config": config,
+        "joined": joined,
+        "left": left,
+        "leave_failed": leave_failed,
+        "delivery_skipped": delivery_skipped,
+        "purged": purged,
+    }
+
+
 class SlackSyncCorpusIn(BaseModel):
     dataset: str
     history_days: int = 90
@@ -2359,22 +3911,27 @@ def slack_sync_to_corpus(
     """Sync Slack channels, messages, and threads into the corpus.
 
     Fetches data from the Slack API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base. Uses THIS
-    user's own Slack bot token (per-user scope; also fixes the prior
-    company-less token lookup).
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. COMPANY-LEVEL:
+    whoever clicks Sync, the sync uses the company's Slack connection and
+    its shared pull-channel selection (see slack_company.py) — the same
+    corpus every member reads. Also runs on the scheduled connector refresh.
+
+    Slack is a `_PERSONAL_PROVIDERS` connector, so there is deliberately no
+    admin gate here — any member can sync. That makes the dataset gate below
+    the ONLY thing between an ordinary member and another tenant's corpus.
     """
+    dataset = _gate_dataset(body.dataset, company.company_id)
     from app.connectors.slack_sync import SlackSyncError, sync_slack
 
     try:
         result = sync_slack(
-            body.dataset,
+            dataset,
             company_id=company.company_id,
-            user_id=company.user_id,
             history_days=body.history_days,
         )
     except SlackSyncError as e:
         raise HTTPException(400, str(e)) from e
-    _seed_corpus_after_sync(company.company_id, body.dataset)
+    _seed_corpus_after_sync(company.company_id, dataset)
     return result.to_dict()
 
 
@@ -2429,6 +3986,14 @@ def fireflies_connect_apikey(
     )
 
     kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Populate the CALL INDEX at connect time too. kickoff_sync above fills the
+    # KG (distilled summaries); this fills the metadata index chat answers call
+    # listings from. Without it the index stays empty until the next 6-hourly
+    # scheduler cycle, and an empty index is not an error anyone can see — every
+    # interception in qa_agent just returns None and the question silently
+    # degrades to the old expensive path. Same gap, same fix as d30ca7ee's
+    # "sync Slack the moment it's connected, not six hours later".
+    kickoff_call_index_sync(company.company_id)
 
     return {
         "ok": True,
@@ -2446,6 +4011,25 @@ def fireflies_disconnect(
     if not row:
         raise HTTPException(404, "Fireflies is not connected")
     db.delete_connection(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+    # Drop the call index with the connection. Leaving it is NOT harmless: chat
+    # would keep answering call questions from indexed rows while
+    # prompts.connected_sources_line correctly reports that no transcript source
+    # is connected — two contradictory claims inside one answer, with no way for
+    # the reader to tell which half is wrong. Best-effort; call_index.ensure_fresh
+    # independently refuses to serve once the source is gone, so a failure here
+    # degrades to "no answer from the index" rather than to a stale one.
+    try:
+        from app import call_index
+
+        # SCOPED to Fireflies. An unscoped wipe would also destroy a working
+        # Zoom index — disconnect one tool, silently lose another tool's call
+        # history — now that two sources populate this table.
+        call_index.clear_company(
+            company.company_id, call_index.PROVIDER_FIREFLIES
+        )
+    except Exception:  # noqa: BLE001 — a cleanup failure must not fail a disconnect
+        logger.warning("fireflies: could not clear call index for %s",
+                       company.company_id, exc_info=True)
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 
@@ -2521,6 +4105,285 @@ def superset_disconnect(
         raise HTTPException(404, "Superset is not connected")
     db.delete_connection(company.company_id, superset_auth.SUPERSET_PROVIDER)
     return {"deleted": True, "provider": superset_auth.SUPERSET_PROVIDER}
+
+
+# ─────────────────── Uploaded documents (no third party) ─────────────────────
+#
+# The user's own business documents as a first-class connector. There is no
+# OAuth and no API key: the "credential" is the corpus they uploaded, so the
+# connect gesture IS the first upload. A source has a NAME, an OPTIONAL
+# description of what the documents are, and any number of files of any type.
+#
+#   GET    /v1/connectors/uploads/sources                  -> list sources
+#   POST   /v1/connectors/uploads/sources                  -> create + upload
+#   POST   /v1/connectors/uploads/sources/{id}/files       -> add more files
+#   DELETE /v1/connectors/uploads/sources/{id}             -> remove a source
+#   DELETE /v1/connectors/uploads                          -> disconnect
+#
+# Every write ends in kickoff_sync, the same fire-and-forget ingest every other
+# connector runs on connect — so uploaded documents reach the KG immediately
+# instead of waiting for the weekly scheduler.
+
+#: 20 MB per file, mirroring the dataset / roadmap / company-document caps.
+UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024
+
+#: A single source can't be an unbounded dumping ground; the cap keeps one
+#: upload gesture (and its background extraction) bounded.
+UPLOAD_MAX_FILES_PER_REQUEST = 50
+
+
+def _ensure_uploads_connection(company_id: str) -> None:
+    """Create/refresh the `uploads` connection row so the connector shows
+    Active in Settings and is picked up by the scheduler + brief data-source
+    gate. Idempotent — re-uploading just re-stamps the row."""
+    db.upsert_connection(
+        company_id=company_id,
+        provider=uploads.UPLOADS_PROVIDER,
+        token_encrypted=encrypt_token_json(uploads.credential_to_store(company_id)),
+        scopes="",
+        account_label=uploads.ACCOUNT_LABEL,
+        config_json="{}",
+    )
+
+
+async def _store_uploaded_files(
+    company_id: str,
+    source_id: str,
+    files: list[UploadFile],
+) -> tuple[list[dict], list[dict]]:
+    """Read + convert + persist each upload. Partial success is fine: an
+    oversized or unreadable file is reported per-file so the frontend can show
+    ✓/✗ on each, exactly like the dataset upload route."""
+    from app.document_sources import add_document_file
+
+    stored: list[dict] = []
+    errors: list[dict] = []
+
+    def _store_one(name: str, blob: bytes, content_type: str | None) -> None:
+        """Convert + persist one file, recording a per-file error on failure."""
+        try:
+            saved = add_document_file(
+                company_id, source_id,
+                filename=name, data=blob, content_type=content_type,
+            )
+        except Exception as e:  # noqa: BLE001 — one bad file must not fail the batch
+            logger.exception("uploads: could not store %s", name)
+            errors.append({"filename": name, "error": f"Could not store: {e}"})
+            return
+        stored.append({
+            "id": saved.id,
+            "filename": saved.filename,
+            "content_type": saved.content_type,
+            "size_bytes": saved.size_bytes,
+            # Never the text itself — the list surfaces how much we extracted,
+            # the same shape the company-document list uses.
+            "extracted_chars": len(saved.extracted_text or ""),
+            "uploaded_at": saved.uploaded_at,
+        })
+
+    for upload in files[:UPLOAD_MAX_FILES_PER_REQUEST]:
+        filename = upload.filename or "untitled"
+        data = await upload.read()
+        if not data:
+            errors.append({"filename": filename, "error": "Empty file"})
+            continue
+        if len(data) > UPLOAD_MAX_FILE_BYTES:
+            errors.append({
+                "filename": filename,
+                "error": f"File exceeds {UPLOAD_MAX_FILE_BYTES // (1024 * 1024)}MB limit",
+            })
+            continue
+        # A .zip is a container, not a document: expand it and store each
+        # member as its own file, matching the dataset upload route. Without
+        # this the archive itself went through the converter — i.e. landed as
+        # an unreadable placeholder — and none of its contents reached the KG.
+        if filename.lower().endswith(".zip"):
+            from app.datasets import DatasetError, expand_zip_members
+
+            try:
+                members, zip_errors = expand_zip_members(
+                    filename, data, per_member_max_bytes=UPLOAD_MAX_FILE_BYTES,
+                )
+            except DatasetError as e:
+                errors.append({"filename": filename, "error": str(e)})
+                continue
+            errors.extend(zip_errors)
+            if not members:
+                errors.append({
+                    "filename": filename,
+                    "error": "Archive contained no usable files",
+                })
+            for member_name, member_bytes in members:
+                _store_one(member_name, member_bytes, None)
+            continue
+        _store_one(filename, data, upload.content_type)
+
+    if len(files) > UPLOAD_MAX_FILES_PER_REQUEST:
+        errors.append({
+            "filename": "",
+            "error": f"Only the first {UPLOAD_MAX_FILES_PER_REQUEST} files were "
+                     "accepted — upload the rest in another batch.",
+        })
+    return stored, errors
+
+
+def _public_source(src, files: list) -> dict:
+    return {
+        "id": src.id,
+        "name": src.name,
+        "description": src.description,
+        "created_at": src.created_at,
+        "file_count": len(files),
+        "files": [
+            {
+                "id": f.id,
+                "filename": f.filename,
+                "content_type": f.content_type,
+                "size_bytes": f.size_bytes,
+                "extracted_chars": len(f.extracted_text or ""),
+                "uploaded_at": f.uploaded_at,
+            }
+            for f in files
+        ],
+    }
+
+
+@router.get("/uploads/sources")
+def uploads_list_sources(
+    company: CompanyContext = Depends(require_company),
+):
+    """Every named document source for the company, newest first, with files.
+    Readable by any member (mutations below are admin-only, like every other
+    org-wide connector)."""
+    from app.document_sources import list_document_sources, list_source_files
+
+    out = [
+        _public_source(src, list_source_files(company.company_id, src.id))
+        for src in list_document_sources(company.company_id)
+    ]
+    return {"sources": out}
+
+
+@router.post("/uploads/sources")
+async def uploads_create_source(
+    files: Annotated[list[UploadFile], File(description="Documents of any type")],
+    name: Annotated[str, Form(description="What to call this source")],
+    description: Annotated[str, Form()] = "",
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Create a named document source from one or more uploaded files.
+
+    `name` is required, `description` is the optional "what are these documents
+    and why do they matter" step — both are carried into every KG record the
+    uploads puller emits, so the agents read the user's own framing of the
+    corpus, not just filenames.
+
+    Any file type is accepted: the shared ingest converter extracts pdf / docx /
+    xlsx / csv / txt / md / pptx richly, passes other textual formats through,
+    and stores a stub for binary content rather than failing the upload.
+    """
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    label = (name or "").strip()
+    if not label:
+        raise HTTPException(422, "name is required")
+    if len(label) > 200:
+        raise HTTPException(422, "name must be 200 characters or fewer")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    from app.document_sources import create_document_source, list_source_files
+
+    src = create_document_source(
+        company.company_id,
+        name=label,
+        description=(description or "").strip(),
+        workspace_id=company.workspace_id,
+    )
+    stored, errors = await _store_uploaded_files(company.company_id, src.id, files)
+    if not stored:
+        # Nothing landed — don't leave an empty source (or claim a connection).
+        from app.document_sources import delete_document_source
+
+        delete_document_source(company.company_id, src.id)
+        raise HTTPException(
+            400,
+            "; ".join(f"{e['filename']}: {e['error']}" for e in errors)
+            or "No files could be stored",
+        )
+
+    _ensure_uploads_connection(company.company_id)
+    # Same fire-and-forget ingest every other connector runs on connect.
+    kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+
+    return {
+        "ok": True,
+        "provider": uploads.UPLOADS_PROVIDER,
+        "source": _public_source(src, list_source_files(company.company_id, src.id)),
+        "errors": errors,
+    }
+
+
+@router.post("/uploads/sources/{source_id}/files")
+async def uploads_add_files(
+    source_id: str,
+    files: Annotated[list[UploadFile], File(description="Documents of any type")],
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Add more documents to an existing source."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    from app.document_sources import get_document_source, list_source_files
+
+    src = get_document_source(company.company_id, source_id)
+    if src is None:
+        raise HTTPException(404, "Document source not found")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    stored, errors = await _store_uploaded_files(company.company_id, source_id, files)
+    if stored:
+        _ensure_uploads_connection(company.company_id)
+        kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+
+    return {
+        "ok": bool(stored),
+        "source": _public_source(src, list_source_files(company.company_id, source_id)),
+        "errors": errors,
+    }
+
+
+@router.delete("/uploads/sources/{source_id}")
+def uploads_delete_source(
+    source_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """Remove a source and its documents. Signals already extracted into the KG
+    stay (same soft-delete semantics as disconnecting any other connector)."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    from app.document_sources import delete_document_source, list_document_sources
+
+    if not delete_document_source(company.company_id, source_id):
+        raise HTTPException(404, "Document source not found")
+    # Last source gone → the connector has nothing behind it; drop the row so
+    # Settings shows "Off" rather than an Active connector with no data.
+    if not list_document_sources(company.company_id):
+        db.delete_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    return {"deleted": True, "id": source_id}
+
+
+@router.delete("/uploads")
+def uploads_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect the connector. Like every other disconnect this drops the
+    connection row only — the uploaded documents (and anything already
+    extracted into the KG) are left in place, so reconnecting is a re-upload
+    of nothing."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    row = db.get_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Uploaded documents is not connected")
+    db.delete_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    return {"deleted": True, "provider": uploads.UPLOADS_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────
@@ -2703,3 +4566,270 @@ async def github_webhook(
         logger.info("GitHub webhook: ignoring event %s delivery=%s", event, x_github_delivery)
         return {"ok": True, "event": event, "handled": False}
     return {"ok": True, "event": event, "handled": True}
+
+
+# ───────────────────── Bring-your-own-LLM context ─────────────────────
+#
+#   GET    /v1/connectors/llm-context/prompt          -> the prompt to paste
+#   POST   /v1/connectors/llm-context/import          -> upload the .md
+#   GET    /v1/connectors/llm-context/import/{job_id} -> the LLM pass's result
+#
+# The user runs our prompt in whichever assistant they already use — Claude,
+# ChatGPT, Gemini — and uploads the Markdown it returns. Deliberately
+# integration-free: there is no OAuth path here, because an Anthropic token
+# authorises Messages API calls and cannot read a user's claude.ai
+# conversation history, so a "connect your account" flow could not actually
+# produce the context it promised. One prompt works everywhere instead.
+#
+# ONE READ, IN THE BACKGROUND. The POST files the .md as a company document,
+# hands it to the knowledge-graph ingest and kicks an LLM extraction, then
+# returns a job id — no fields. Until v3 a deterministic heading walk also ran
+# inline, but the v3 prompt is the product team's own document rather than our
+# heading contract, so that reader was deleted (see app/llm_context.py). The
+# extraction reads documents of any shape, which is what the walk never could.
+#
+# That background pass is why the import step hands off to CONNECTORS rather
+# than product: connecting tools is the one step in the flow the import cannot
+# prefill, so it is the step worth spending the extraction's latency on. By the
+# time the user reaches metrics and product, the job has landed.
+#
+# It does not write to the workspace: it returns `fields` for the onboarding
+# form to prefill and the user to confirm. An import must never silently
+# overwrite something the user already typed.
+#
+# Strong refs to in-flight extraction tasks — asyncio holds only a weak
+# reference to a bare create_task result, so without this the task can be
+# garbage-collected mid-run and the row would be stuck 'generating' (mirrors
+# routes/onboarding.py).
+_context_tasks: set[asyncio.Task] = set()
+
+#: Context exports are prose, not corpora — a few hundred KB at the outside.
+#: A tighter cap than the 20MB document limit keeps a mis-drop (a video, a DB
+#: dump) from being read into memory before we reject it.
+LLM_CONTEXT_MAX_BYTES = 2 * 1024 * 1024
+
+#: The document source the uploaded export is filed under, so the context the
+#: user handed over also grounds the agents instead of only prefilling a form.
+LLM_CONTEXT_SOURCE_NAME = "LLM context export"
+LLM_CONTEXT_SOURCE_DESCRIPTION = (
+    "Company, product, user and strategy context exported from the user's own "
+    "AI assistant during onboarding."
+)
+
+
+def _context_result(parsed, *, note: str | None = None) -> dict:
+    """The response shape the import returns."""
+    return {
+        "ok": not parsed.is_empty,
+        "fields": parsed.fields,
+        "unmapped": parsed.unmapped,
+        "format_version": parsed.format_version,
+        # Honest reporting: an export we could not read anything out of is a
+        # failed import the user should hear about, not a silent no-op.
+        "note": note
+        or (
+            None
+            if not parsed.is_empty
+            else "We couldn't read anything usable out of that file. Check it's "
+            "the .md your assistant produced, or fill the steps in manually."
+        ),
+    }
+
+
+async def _run_context_extraction(job_id: int, markdown: str) -> None:
+    """Background worker: run the LLM extraction and complete the job row.
+
+    Never raises — `extract_context_fields` already degrades to an empty read
+    on any LLM failure, and anything left (a DB blip while writing the row) is
+    logged and marked `error` so the client's poll terminates instead of
+    spinning on 'generating' forever.
+    """
+    from app.db.llm_context_jobs import complete_context_job, fail_context_job
+    from app.llm_context import extract_context_fields
+
+    try:
+        parsed = await asyncio.to_thread(extract_context_fields, markdown)
+        complete_context_job(job_id, _context_result(parsed))
+    except Exception as exc:  # noqa: BLE001 — a stuck job is worse than a failed one
+        logger.exception("llm-context: extraction job %s failed", job_id)
+        try:
+            fail_context_job(job_id, str(exc))
+        except Exception:  # noqa: BLE001
+            logger.exception("llm-context: could not mark job %s failed", job_id)
+
+
+async def _start_context_extraction(company_id: str, markdown: str) -> int | None:
+    """Kick the background LLM pass, returning its job id (None if it couldn't
+    start). It is the ONLY reader (see app/llm_context.py), so a job that never
+    starts means the upload prefills nothing — the caller says so in `note`
+    rather than leaving the client polling an id it never got."""
+    from app.db.llm_context_jobs import start_context_job
+
+    try:
+        job_id = start_context_job(company_id)
+    except Exception:  # noqa: BLE001 — the inline parse still stands
+        logger.exception("llm-context: could not start the extraction job")
+        return None
+
+    if "pytest" in sys.modules:
+        # The TestClient doesn't keep the app's event loop alive between
+        # requests, so a fire-and-forget create_task would never run and a
+        # client's status poll would spin forever. Run the worker inline under
+        # pytest for deterministic results (mirrors routes/onboarding.py).
+        await _run_context_extraction(job_id, markdown)
+        return job_id
+
+    task = asyncio.create_task(_run_context_extraction(job_id, markdown))
+    _context_tasks.add(task)
+    task.add_done_callback(_context_tasks.discard)
+    return job_id
+
+
+async def _import_context_markdown(company, markdown: str) -> dict:
+    """File the raw document, kick the LLM pass, and hand back its job id.
+
+    Since v3 there is no deterministic reader (see app/llm_context.py), so this
+    response carries no fields — only the version we recognised the file as and
+    the `job_id` the client polls. The shape is unchanged so the onboarding form
+    applies a POST result and a poll result through one code path.
+
+    Filing is best-effort and never fails the import: it is the half of the
+    upload that does not depend on an LLM, so a storage hiccup is reported in
+    `note` rather than swallowed, and never blocks the extraction.
+    """
+    from app.llm_context import ParsedContext, detect_format_version
+
+    parsed = ParsedContext(format_version=detect_format_version(markdown))
+    note = None
+    # Whether the raw .md was actually filed as a document source AND handed to
+    # the KG ingest. This is the real "your context reached the knowledge graph"
+    # signal — distinct from `ok` (did the extraction read structured fields).
+    # The Settings/Business-Context card leans on it: it never prefills, so
+    # filing IS the whole outcome there, and it must not claim a KG feed that a
+    # storage hiccup silently swallowed.
+    filed = False
+    try:
+        from app.document_sources import add_document_file, create_document_source
+
+        src = create_document_source(
+            company.company_id,
+            name=LLM_CONTEXT_SOURCE_NAME,
+            description=LLM_CONTEXT_SOURCE_DESCRIPTION,
+            workspace_id=getattr(company, "workspace_id", None),
+        )
+        add_document_file(
+            company.company_id,
+            src.id,
+            filename="llm-context-export.md",
+            data=markdown.encode("utf-8"),
+            content_type="text/markdown",
+        )
+        _ensure_uploads_connection(company.company_id)
+        kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+        filed = True
+    except Exception:  # noqa: BLE001 — filing must not cost the user their prefill
+        logger.exception("llm-context: could not file the export as a document source")
+        note = (
+            "We read your context, but couldn't also save the file to your "
+            "documents. Nothing is lost — you can upload it again from Settings."
+        )
+
+    job_id = await _start_context_extraction(company.company_id, markdown)
+    result = _context_result(parsed, note=note)
+    # `ok` is about whether the USER's upload produced anything usable, and the
+    # only reader runs in that job. So this response is never the verdict while
+    # a job is live — the client shows "reading…" and the poll settles it either
+    # way. Preserve a FILING-failure note though (filed is False): that isn't
+    # the "found nothing" verdict the job can overturn, it's the KG feed the
+    # user needs to know about.
+    if job_id is not None and not result["ok"] and filed:
+        result["note"] = None
+    return {**result, "job_id": job_id, "filed": filed}
+
+
+@router.get("/llm-context/prompt")
+def llm_context_prompt(
+    company_name: str = Query(default="", max_length=500),
+    company_website: str = Query(default="", max_length=500),
+):
+    """The prompt the user pastes into Claude / ChatGPT / Gemini.
+
+    The caller passes what it already knows about the company and gets those
+    values written into the prompt's confirmed-values block. Since 2026-07-27
+    the company step runs BEFORE the import step, so onboarding always has the
+    name and website by the time it asks for this — and the assistant starts
+    with the entity locked rather than inferring it from a search.
+
+    Both are optional and unauthenticated on purpose: the values come from the
+    caller's own form, they are written into a prompt returned to that same
+    caller (who can edit it in the textarea anyway), and a caller that has
+    neither still gets a usable prompt with an empty block. Making this
+    tenant-scoped would buy nothing and would break the fetch for anyone who
+    reaches the step without a company row yet.
+
+    It lives on the connectors router so the frontend has one place to fetch it
+    and the copy shown in the UI can never drift from what the extraction
+    expects to read back.
+    """
+    from app.llm_context import CONTEXT_FORMAT_VERSION, build_context_prompt
+
+    return {
+        "prompt": build_context_prompt(
+            company_name=company_name, company_website=company_website
+        ),
+        "format_version": CONTEXT_FORMAT_VERSION,
+    }
+
+
+@router.post("/llm-context/import")
+async def llm_context_import(
+    file: Annotated[UploadFile, File(description="The .md the assistant produced")],
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Upload the Markdown export and get back onboarding prefill fields."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "That file is empty")
+    if len(data) > LLM_CONTEXT_MAX_BYTES:
+        raise HTTPException(
+            413,
+            "Context exports are text — this one is over "
+            f"{LLM_CONTEXT_MAX_BYTES // (1024 * 1024)}MB. "
+            "Upload the .md the prompt produced.",
+        )
+    try:
+        markdown = data.decode("utf-8")
+    except UnicodeDecodeError:
+        # A PDF/DOCX dropped on a Markdown field is the likely cause; say so
+        # rather than surfacing a decoder error.
+        raise HTTPException(
+            415,
+            "That doesn't look like a text file. Upload the .md your assistant "
+            "produced, or add other documents under Settings -> Connectors.",
+        ) from None
+    return await _import_context_markdown(company, markdown)
+
+
+@router.get("/llm-context/import/{job_id}")
+def llm_context_import_status(
+    job_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Status + result for the background LLM extraction.
+
+    Returns `{status, result, error}`. Once `status == 'ready'`, `result`
+    carries the SAME {ok, fields, unmapped, format_version, note} shape the
+    POST returns, so the onboarding form applies it through one code path
+    regardless of which read produced it. 404 when the job doesn't belong to
+    the caller's company (no cross-tenant existence disclosure).
+    """
+    from app.db.llm_context_jobs import get_context_job
+
+    row = get_context_job(job_id)
+    if not row or row.get("company_id") != company.company_id:
+        raise HTTPException(404, "Import job not found")
+    return {
+        "status": row.get("status") or "generating",
+        "result": row.get("result"),
+        "error": row.get("error"),
+    }

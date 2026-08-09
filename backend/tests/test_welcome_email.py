@@ -58,9 +58,10 @@ def test_render_guide_is_a_link_not_an_attachment(isolated_settings):
     # The founder note's "I've attached a one-page guide" becomes a LINK.
     assert "attached" not in text.lower()
     assert "one-page guide" in text
-    # Default guide URL falls back to <frontend_url>/guide and renders as <a>.
-    assert "/guide" in text
-    assert 'href="' in html and "/guide" in html
+    # Default guide URL falls back to <frontend_url>/docs/sprntly-how-to-guide
+    # (the public docs page) and renders as <a>.
+    assert "/docs/sprntly-how-to-guide" in text
+    assert 'href="' in html and "/docs/sprntly-how-to-guide" in html
 
 
 def test_render_guide_url_override(isolated_settings, monkeypatch):

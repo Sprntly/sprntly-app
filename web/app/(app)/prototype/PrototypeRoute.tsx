@@ -53,11 +53,13 @@ import { GenerateModal } from "../../components/design-agent/GenerateModal"
 import {
   acknowledge,
   markCancelled,
+  markPending,
   wasCancelled,
 } from "../../components/design-agent/notificationStore"
 import { GenerationErrorBanner, reasonCopy, isRetryableFailure } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
+import { useDesignAgentLiveTerminal } from "../../components/design-agent/useDesignAgentLiveTerminal"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
 import { PrototypeEmptyState } from "../../components/design-agent/PrototypeEmptyState"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
@@ -248,7 +250,7 @@ export type ActiveProtoAction =
 export function actionForActiveProto(
   found: PrototypeRecord | null,
 ): ActiveProtoAction {
-  if (found && found.status === "ready" && found.bundle_url) {
+  if (found && (found.status === "ready" || found.status === "failed") && found.bundle_url) {
     return { kind: "reveal", proto: found }
   }
   if (found && found.status === "generating") {
@@ -381,21 +383,27 @@ function InTabCanvas({
   // reload nonce so the iframe reloads.
   const iterateRun = useIterateRun({
     prototypeId: proto.id,
-    onComplete: (fresh, opts) => {
+    onComplete: (fresh) => {
       onProtoChange(fresh)
-      // Only bump the reload nonce (force a fresh iframe load) when the run
-      // actually advanced the bundle. A clarifying-question pause passes
-      // `reloadBundle: false` — keep the current preview, don't re-fetch a bundle
-      // that didn't change (avoids a transient 404 window). Any caller that omits
-      // opts still reloads, preserving the prior behaviour.
-      if (opts?.reloadBundle !== false) setBundleReloadNonce((n) => n + 1)
+      // No longer force a reload here. useViewGrant's own checkpoint-advance
+      // detection (inside PostGenerationResult's `grant`, driven by the fresh
+      // current_checkpoint_id this onProtoChange call just threaded through) now
+      // owns deciding WHEN a checkpoint-driven reload is safe — it bumps its own
+      // consolidated reloadSignal only once a mint for the NEW checkpoint is
+      // CONFIRMED successful. This removes the independent, synchronous bump that
+      // used to fire in the SAME commit as this onProtoChange call, before the
+      // grant hook's own checkpoint effect had even started its mint.
     },
   })
 
-  // The single fixed entry the composer and both Apply paths call.
+  // The single fixed entry the composer and both Apply paths call. Returns the
+  // shared runner's outcome (true = a run started, false = rejected — e.g. a
+  // second submit while one is already in flight) so every caller can await it
+  // and only proceed with its own optimistic UI update when a run actually
+  // started, instead of assuming success the instant it is called.
   const runCanvasIterate = useCallback(
     (instruction: string, appliedCommentId?: number | null) => {
-      void iterateRun.runIterate(instruction, appliedCommentId)
+      return iterateRun.runIterate(instruction, appliedCommentId)
     },
     [iterateRun],
   )
@@ -404,7 +412,7 @@ function InTabCanvas({
   // comment id. The agent decides applicability; the client fabricates no change.
   const runCommentIterate = useCallback(
     (comment: CommentRecord) => {
-      runCanvasIterate(comment.body, comment.id)
+      return runCanvasIterate(comment.body, comment.id)
     },
     [runCanvasIterate],
   )
@@ -827,6 +835,13 @@ export function PrototypeRoute() {
         .catch(() => {
           /* degrade — the tab stays on the generate panel for a retry */
         })
+    } else if (result && !result.ok && result.timedOut) {
+      // The local resume-poll's wait expired; the run is still going. Do NOT
+      // surface the error banner — that invites a duplicate paid regeneration of
+      // work that is about to finish. Re-arm the sessionStorage recovery path so
+      // the shell notifies honestly on completion (idempotent: markPending
+      // upserts, so re-arming an entry that already exists is a no-op write).
+      if (genProtoId != null) markPending(genProtoId, prdId)
     } else {
       // FAILURE / no result (failed / invalidated / timeout / throw, OR the
       // GenerateModal's `.catch(() => onGenDone())` no-arg path). Surface a loud,
@@ -842,6 +857,38 @@ export function PrototypeRoute() {
     }
   }
 
+  // Late SSE terminal event, delivered by useDesignAgentLiveTerminal after this
+  // route's own GenerationLoadingScreen instance has already unmounted (its
+  // render branch is one arm of the early-return chain below, not always
+  // mounted — see useDesignAgentLiveTerminal's file header). Re-fetches the
+  // real backend truth rather than trusting the bare "done"/"error" tag, so
+  // there is one source of truth for the status→result mapping (the same one
+  // runDesignAgentGeneration.ts already owns). Calling handleGenDone a second
+  // time is safe here: unlike useGeneratePrototype's handleGenDone (which
+  // toasts and dispatches an event, needing a resolvedRef dedup guard), this
+  // handleGenDone only sets local component state — re-setting the same
+  // values twice is a harmless no-op re-render.
+  const handleLiveTerminal = (_kind: "done" | "error") => {
+    if (genProtoId == null) return
+    designAgentApi
+      .get(genProtoId)
+      .then((proto) => {
+        if (proto.status === "ready") {
+          handleGenDone({ ok: true, prototype: proto })
+        } else if (proto.status === "failed") {
+          handleGenDone({ ok: false, message: proto.error || "Generation failed" })
+        } else if (proto.status === "invalidated") {
+          handleGenDone({ ok: false, message: "Template invalidated; retry" })
+        }
+        // status === "generating": the SSE terminal event race-beat the DB
+        // read catching up. No-op — a second terminal event or the existing
+        // markPending/resumePendingNotifications recovery path still covers it.
+      })
+      .catch(() => {
+        /* transient GET failure — sessionStorage recovery path still covers it */
+      })
+  }
+
   // Retry from the generation-error state. Mirrors GenerateModal's locate Retry:
   // clear the failure and re-open the generate panel so the user re-initiates the
   // run explicitly (re-using the existing kickoff path — the empty-state →
@@ -855,10 +902,9 @@ export function PrototypeRoute() {
   // "Notify me when ready" — dismiss the full-screen loading overlay, show a
   // processing toast, signal the shell's PrototypeGeneratingCard (da:generating),
   // hand off the completion poll to the shell owner (da:notify-generation), and
-  // navigate away so the user can keep working. Guarded: no-op when no in-flight
-  // prototype id exists yet (the generate POST hasn't returned). On navigate, prefer
-  // history.back(); fall back to the bare prototype path when there is no history
-  // entry to return to (fresh tab / direct open).
+  // navigate straight to Top Insights so the user can keep working. Guarded:
+  // no-op when no in-flight prototype id exists yet (the generate POST
+  // hasn't returned).
   const handleNotifyWhenReady = useCallback(() => {
     if (genProtoId == null) return
     showToast("Prototype is processing", "We'll let you know when it's ready.")
@@ -866,15 +912,21 @@ export function PrototypeRoute() {
     if (prdId != null) {
       window.dispatchEvent(new CustomEvent("da:notify-generation", { detail: { prototypeId: genProtoId, prdId } }))
     }
-    if (window.history.length > 1) {
-      router.back()
-    } else {
-      router.push(prototypePath(prdId!))
-    }
-  }, [showToast, genProtoId, prdId, router])
+    goTo("brief")
+  }, [showToast, genProtoId, prdId, goTo])
+
+  // Mounted unconditionally, BEFORE the early-return chain below — this is
+  // the entire point. This route's own GenerationLoadingScreen instance sits
+  // behind that chain (one arm of it, not always mounted), so its SSE
+  // connection is torn down the moment genLoading flips false and the
+  // component swaps to a different render branch. This hook's own effect
+  // (keyed only on prototypeId) is not inside any branch that can unmount, so
+  // it keeps listening for the real backend terminal event after the overlay
+  // is gone — the exact gap the client's local 6-minute poll timeout exposed.
+  useDesignAgentLiveTerminal(genProtoId, handleLiveTerminal)
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
-  // user to the weekly brief, where a PRD opens in the right-rail card and offers
+  // user to the Top Insights brief, where a PRD opens in the right-rail card and offers
   // "Generate Prototype". EXCEPT when a resolved prototype exists — a pid-only
   // deep link (the prototype-ready notification) selects a ready prototype with
   // no `?prd=` in the URL, so the ready branch below must win over this one.

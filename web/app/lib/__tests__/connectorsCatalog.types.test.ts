@@ -2,8 +2,9 @@
 // type in use, and the ticket-sync tracker list derives from types ∩
 // backend-implemented — the sync button follows the catalog instead of
 // hardcoded provider ids. Mirrors backend/app/connectors/catalog.py.
-// Cardinality is a product decision: exactly ONE type per connector for now,
-// kept list-shaped so multi-type support later is a data change only.
+// Cardinality is a product decision (2026-07-30): connectors may carry
+// MULTIPLE types when the tool genuinely is more than one thing (Slack is
+// communication + customer-voice); every entry carries at least one.
 import { describe, expect, it } from "vitest"
 
 import {
@@ -15,9 +16,12 @@ import {
 } from "../connectorsCatalog"
 
 describe("connector types", () => {
-  it("every catalog connector carries exactly one type (for now)", () => {
+  it("every catalog connector carries at least one type", () => {
     for (const item of CONNECTOR_CATALOG.flatMap((c) => c.items)) {
-      expect(item.types?.length, `${item.id} must have exactly 1 type`).toBe(1)
+      expect(
+        item.types?.length ?? 0,
+        `${item.id} must carry at least 1 type`,
+      ).toBeGreaterThanOrEqual(1)
     }
   })
 
@@ -33,12 +37,22 @@ describe("connector types", () => {
   it("classifies task-management tools vs communication tools", () => {
     expect(connectorTypes("clickup")).toEqual(["task-management"])
     expect(connectorTypes("jira")).toEqual(["task-management"])
-    expect(connectorTypes("slack")).toEqual(["communication"])
     expect(connectorTypes("hubspot")).toEqual(["crm"])
     expect(connectorTypes("unknown-tool")).toEqual([])
     const trackerIds = connectorsWithType("task-management").map((i) => i.id)
     expect(trackerIds).toEqual(expect.arrayContaining(["jira", "clickup", "linear", "asana"]))
     expect(trackerIds).not.toContain("slack")
+  })
+
+  it("Slack is dual-typed communication + customer-voice (multi-type)", () => {
+    expect(connectorTypes("slack")).toEqual(["communication", "customer-voice"])
+    // It answers to BOTH type queries even though it renders a single card on
+    // the Voice shelf — types describe what the tool IS, not where it is
+    // shelved. Its communication half is what Comms & Brief delivery uses.
+    const commsIds = connectorsWithType("communication").map((i) => i.id)
+    const voiceIds = connectorsWithType("customer-voice").map((i) => i.id)
+    expect(commsIds.filter((id) => id === "slack")).toEqual(["slack"])
+    expect(voiceIds.filter((id) => id === "slack")).toEqual(["slack"])
   })
 
   it("ticketSyncTrackers = task-management type ∩ backend-implemented", () => {

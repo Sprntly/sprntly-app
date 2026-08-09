@@ -31,7 +31,7 @@ from app.llm import (
     call_md,
 )
 from app.llm_telemetry import MODEL_PRICING
-from app.skills.loader import get_skill
+from app.skills.loader import SkillSpec, UnknownSkillError, get_skill
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # accumulating the streamed text into the same return value. Behavior for all
 # other skills/callers is unchanged.
 _LONG_OUTPUT_SKILLS = frozenset(
-    {"prd-author", "implementation-spec", "evidence-brief"}
+    {"prd-author", "implementation-spec", "evidence-brief", "ideation-prioritize"}
 )
 
 
@@ -50,13 +50,24 @@ def _is_long_output(skill: Optional[str]) -> bool:
     return skill is not None and skill in _LONG_OUTPUT_SKILLS
 
 
-def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, str]:
+def _build_method_prefix(
+    skill: str, skill_module: Optional[str], spec: Optional["SkillSpec"] = None
+) -> tuple[str, str]:
     """Resolve a bound skill into (method_text_block, version_suffix).
 
     The method block is the skill's SKILL.md (plus the named module, if any)
     under a delimited header so the model reads it as the METHOD layer. The
     version suffix (`+<id>@<hash>`) is appended to prompt_version so the
     decision log records the exact method version behind the call.
+
+    `spec` lets a caller inject a spec that is NOT a vendored disk skill — a
+    company's uploaded custom skill (PRD 1854), resolved from the DB by
+    qa_agent via app.skills.resolver. When None (every built-in call site),
+    the id loads from disk exactly as before. The ONE deliberate difference
+    for an injected spec: its header carries a `company-uploaded` tag, so the
+    untrusted method text is labeled where the model reads it (the system
+    prompt's custom-skill addendum points at that tag). The version suffix
+    is built identically either way.
 
     The skill's `references/*` docs are appended to the block under
     `### REFERENCE: <name>` headers. SKILL.md instructs the model to *read*
@@ -68,9 +79,29 @@ def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, 
     then a cache read on subsequent calls. `assets/*` (e.g. a render template)
     are deliberately NOT injected: the app renders from the structured payload,
     so the template is a downstream view, not a prompt input.
+
+    TOLERANT BY DESIGN when the id names no vendored directory. The vendored
+    library is now a small keep-list (nine skills), while a dozen-odd pipelines
+    still pass `skill=<id>` at their call site — those bindings are how the
+    decision log attributes a call, and several of them name a method we no
+    longer ship. Raising here would turn "this pipeline has no method doc" into
+    a 500 for a pipeline that is otherwise perfectly able to run on its own
+    prompt, so a missing directory degrades to running METHOD-LESS instead:
+    empty block, and `+bare` recorded in `prompt_version` so the audit spine can
+    tell a method-less run apart from a method-backed one.
+
+    NOT tolerant of an INJECTED spec (a company upload) — that path never
+    touches disk, so there is nothing to be missing.
     """
-    spec = get_skill(skill)
-    header = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n"
+    injected = spec is not None
+    if not injected:
+        try:
+            spec = get_skill(skill)
+        except UnknownSkillError:
+            # Not vendored -> run method-less. See the docstring.
+            return "", "+bare"
+    origin = ", company-uploaded" if injected else ""
+    header = f"## METHOD (skill: {spec.id} @{spec.content_hash}{origin})\n"
     block = header + spec.method
     if skill_module:
         try:
@@ -130,6 +161,7 @@ def llm_call(
     user_cacheable_prefix: Optional[str] = None,
     skill: Optional[str] = None,
     skill_module: Optional[str] = None,
+    skill_spec: Optional["SkillSpec"] = None,
     long_output: bool = False,
     log: bool = True,
     background: bool = False,
@@ -151,7 +183,11 @@ def llm_call(
     chosen_model = model or DEFAULT_MODEL
     method_block = ""
     if skill is not None:
-        method_block, version_suffix = _build_method_prefix(skill, skill_module)
+        # `skill_spec` carries a DB-backed custom skill (PRD 1854); None means
+        # a vendored built-in, loaded from disk by id as always.
+        method_block, version_suffix = _build_method_prefix(
+            skill, skill_module, spec=skill_spec
+        )
         prompt_version = f"{prompt_version}{version_suffix}"
         # The bound skill's method is a large, byte-stable block — route it into
         # the cacheable prefix (BEFORE any caller-supplied prefix) so it is a
@@ -159,10 +195,17 @@ def llm_call(
         # the json and md paths now share this: call_md gained a cacheable-prefix
         # parameter, so markdown skills (prd-author, implementation-spec,
         # evidence-brief) stop folding the method uncached into `system`.
-        user_cacheable_prefix = (
-            method_block if user_cacheable_prefix is None
-            else f"{method_block}\n{user_cacheable_prefix}"
-        )
+        #
+        # Guarded on `method_block` being non-empty: a method-less run (the
+        # skill id names no vendored dir — see _build_method_prefix) must leave
+        # the caller's prefix exactly as it was, and must NOT turn a `None`
+        # prefix into an empty string, which app.llm reads as "there is a
+        # cacheable prefix" and would emit as an empty cache-controlled block.
+        if method_block:
+            user_cacheable_prefix = (
+                method_block if user_cacheable_prefix is None
+                else f"{method_block}\n{user_cacheable_prefix}"
+            )
     # Long-output calls stream on the long read timeout so a large/slow
     # generation never trips the default per-request timeout. Triggered either by
     # a registered long-output skill (e.g. prd-author) OR an explicit
@@ -184,17 +227,31 @@ def llm_call(
     # propagates even when the primitive runs the Anthropic call on a worker
     # thread. See app.llm_keys.
     from app.llm_keys import company_llm_key
+    from app.usage_context import feature_for_agent, usage_scope
 
-    with company_llm_key(enterprise_id):
+    # Usage metering reads the acting company from `company_llm_key` and the
+    # feature label from `usage_scope`, both at the `messages.create` inside.
+    # Deriving the label from the `agent`/`purpose` this function already
+    # receives means every gateway caller is attributed without being touched.
+    # An explicit inner scope set by a caller still wins (usage_scope inherits
+    # only what the inner block leaves unset).
+    with company_llm_key(enterprise_id), usage_scope(
+        feature=feature_for_agent(agent), operation=purpose
+    ):
         if json_schema is not None:
             # The method (if any) is already merged into user_cacheable_prefix
             # above, so it stays cache-friendly across calls; the agent system
             # prompt is the layer after it.
+            #
+            # `on_delta` on a structured call receives the raw PARTIAL-JSON
+            # fragments of the tool input (the deltas a forced-tool stream
+            # actually emits) — the caller wraps it in an extractor (e.g.
+            # app.ask_stream.AnswerFieldExtractor) to turn them into text.
             output: Any = call_json(
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
-                temperature=temperature,
+                temperature=temperature, on_json_delta=on_delta,
             )
         else:
             # call_md now supports the same cacheable prefix, so the method
@@ -238,10 +295,14 @@ def llm_call(
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "cache_read_input_tokens": result.cache_read_input_tokens,
-                    # Cache WRITES too: a fleet of concurrent calls that should
-                    # share one cached prefix but each shows cache_read=0 +
-                    # cache_creation>0 is racing the cache (all prefilling
-                    # before any write lands) — invisible without this field.
+                    # The write side of the cache, without which the read count
+                    # alone can't yield a hit rate from the audit spine —
+                    # `LLMResult` has carried it all along, it just never landed
+                    # in `factors`. Needed to measure whether the router's
+                    # cacheable menu prefix is actually being hit, and to see a
+                    # cache RACE: a fleet of concurrent calls that should share
+                    # one cached prefix but each shows cache_read=0 +
+                    # cache_creation>0 is prefilling before any write lands.
                     "cache_creation_input_tokens": result.cache_creation_input_tokens,
                     "cost_usd": result.cost_usd,
                     "latency_ms": result.latency_ms,

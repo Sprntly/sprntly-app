@@ -57,7 +57,14 @@ from __future__ import annotations
 # patterns, safe-area insets, keyboard-aware inputs, scroll-based content) so
 # mobile-flagged runs stop producing desktop-shaped layouts. Changes the
 # scaffold user prompt for mobile/both runs → template-invalidating.
-DESIGN_AGENT_TEMPLATE_VERSION = 9
+# v10 (external-entry-point placeholder): a codebase run whose locate call
+# flagged the PRD's entry point as external (an email/SMS/partner UI/etc — see
+# ExternalEntryPointSignal) and that carries no reference screenshot now
+# appends DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE to the scaffold user
+# turn, asking for one generic best-effort placeholder screen ahead of the
+# real flow instead of dead-ending. Changes the assembled prompt text for that
+# class of run → template-invalidating.
+DESIGN_AGENT_TEMPLATE_VERSION = 10
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -314,6 +321,39 @@ in the screenshot but are not in the PRD.
 """
 
 
+# ─── External-entry-point placeholder directive ───────────────────────────
+# Appended to the scaffold user turn when codebase-locate's SAME LLM call
+# detected that the PRD's entry point genuinely originates OUTSIDE the
+# connected codebase (an email, an SMS, a third-party partner UI, or any other
+# external surface — see ExternalEntryPointSignal in codebase_map/locate.py)
+# and no reference screenshot was provided for this run. A real screenshot
+# always wins: the caller only passes external_surface_hint when
+# has_screenshot is False (render_scaffold_user's elif below is a second,
+# redundant guard so this function stays safe even if a future caller passes
+# both). Generalized by construction — {surface_description} is free text the
+# locate call wrote describing WHAT the external surface is, never a fixed
+# category, so this template never special-cases any one channel (email
+# included). LLM-facing: property-tested for length, required content, and the
+# explicit precedence/best-effort framing.
+DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE = """\
+EXTERNAL ENTRY POINT — GENERIC PLACEHOLDER SCREEN REQUIRED:
+The PRD's flow begins on a surface OUTSIDE this connected codebase: {surface_description}.
+No source for that surface exists in this repo and no reference screenshot was provided,
+so build ONE ADDITIONAL SCREEN as a generic, best-effort stand-in for it before the rest
+of the flow:
+- Make the placeholder CLEARLY generic — a plausible, on-brand representation of the KIND
+  of surface described (an inbox-shaped layout for an email/message, a phone-shaped
+  message thread for an SMS, a simple external-site-shaped page for a third-party portal,
+  etc.) — NOT an attempt at pixel-perfect specificity. A small caption naming it as a
+  placeholder for a step outside this app is welcome.
+- Give it exactly ONE way to continue: a single, obvious action (e.g. "Open" / "Continue"
+  / "Confirm") that navigates into the real screens the PRD describes, so the flow is
+  clickable start to finish.
+- Spend minimal effort here — this is one lightweight scene-setting screen, not the
+  prototype's focus. The rest of the PRD's real screens still get your full attention.
+"""
+
+
 # ─── Target-platform directive ────────────────────────────────────────────
 # The actionable form-factor instruction injected into the scaffold user turn.
 # Keyed on the normalised (lowercased) target platform; anything unrecognised
@@ -377,6 +417,7 @@ def render_scaffold_user(
     figma_frames: str,
     codebase_repo: str | None = None,
     has_screenshot: bool = False,
+    external_surface_hint: str | None = None,
 ) -> str:
     """Render the scaffold user template with the supplied context.
 
@@ -396,6 +437,15 @@ def render_scaffold_user(
     to the user message (this function stays pure-text; a directive that talks
     about an image that is not attached would mislead the agent). When False
     (the default) the output is byte-identical to the pre-screenshot render.
+
+    `external_surface_hint` appends DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE
+    (filled with this text) — set it ONLY when codebase-locate's own read of the
+    PRD flagged the entry point as external (see ExternalEntryPointSignal) AND
+    no chosen screen exists to seed the recreate branch. A real screenshot always
+    WINS over this heuristic: `has_screenshot` takes precedence — when both are
+    truthy, only the screenshot directive renders, so this function itself is
+    safe even if a caller passes both. None/blank (the default) leaves the
+    output byte-identical to the pre-amendment render.
     """
     repo = (codebase_repo or "").strip()
     codebase_block = (
@@ -410,6 +460,14 @@ def render_scaffold_user(
     )
     if has_screenshot:
         rendered = f"{rendered}\n{DESIGN_AGENT_SCREENSHOT_DIRECTIVE}"
+    elif external_surface_hint and external_surface_hint.strip():
+        # A real screenshot always wins — this branch only reaches when
+        # has_screenshot is False, so the placeholder directive never renders
+        # alongside the screenshot directive.
+        directive = DESIGN_AGENT_EXTERNAL_ENTRY_DIRECTIVE_TEMPLATE.format(
+            surface_description=external_surface_hint.strip()
+        )
+        rendered = f"{rendered}\n{directive}"
     return rendered
 
 
@@ -453,6 +511,12 @@ fetches — the prototype is a static SPA with client-side mock data (AD19/AD20)
 4. STOP when the requested change is done. End your turn with a 1-2 sentence
    summary of what you changed. Do NOT gold-plate adjacent areas, do NOT "while
    I'm here" refactor, do NOT polish things the request did not ask for.
+   WRITE THE SUMMARY FOR A NON-TECHNICAL PRODUCT MANAGER: describe the visible
+   or functional effect only, in plain language. NEVER name a CSS custom
+   property, a hex color code, a file path, or any other code identifier.
+   Good: "The body and secondary text across the app now appears in green."
+   Bad: "Changed --foreground-sub to #1A6B47 and --foreground-muted to
+   #4A9E75."
 
 [3b] TURN BUDGET
 You run in a bounded loop; each assistant turn consumes ONE turn and the loop
@@ -618,7 +682,8 @@ def render_iterate_user(
     open_comments: list[dict],
     iterate_prompt: str,
     applied_comment: dict | None,
-    screenshot_block: dict | None = None,
+    mode: str = "execute",
+    screenshot_blocks: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """Assemble the iterate user-turn content with the AD2 cache breakpoint.
 
@@ -626,22 +691,25 @@ def render_iterate_user(
 
     - ``cacheable_prefix_blocks`` — the STABLE prefix that changes only when the
       bundle or the open comments change: the current source files + the open
-      comment threads (+ the reference-screenshot image block when the prototype
-      carries one — the image is immutable per prototype, so it is
-      prefix-stable). The LAST block carries
+      comment threads (+ the reference-screenshot image block(s) when the
+      prototype carries any — the images are immutable per prototype, so they
+      are prefix-stable). The LAST block carries
       ``cache_control: {type: "ephemeral", ttl: "1h"}`` so this whole prefix
       (and the system blocks above it) is cached across the run's iterations.
     - ``volatile_user_block`` — the per-call suffix: the user's iterate prompt
       (plus the applied-comment anchor/body when F10 pre-filled it). It carries
       NO ``cache_control`` because it changes every call.
 
-    ``screenshot_block`` is a ready-made Anthropic image content block (built by
-    the route from the stored upload) or None. When present it is appended as
-    the LAST stable block and the cache breakpoint MOVES onto it — the
-    breakpoint marks the END of the stable prefix, so leaving it on the text
-    block would strand the image below the breakpoint and silently re-bill it
-    on every turn. The caller's dict is not mutated. When None, the single text
-    block keeps the breakpoint, byte-identical to the pre-screenshot shape.
+    ``screenshot_blocks`` is a ready-made list of Anthropic content blocks
+    (built by the route from the stored upload(s) — image blocks, each
+    optionally preceded by its own "Image N:" text label) or None/[]. When
+    non-empty they are appended, IN ORDER, as the LAST stable blocks and the
+    cache breakpoint MOVES onto the very last one — the breakpoint marks the
+    END of the stable prefix, so leaving it on the text block would strand the
+    image(s) below the breakpoint and silently re-bill them on every turn.
+    None of the caller's dicts are mutated (each is shallow-copied before the
+    breakpoint is attached). When None/[], the single text block keeps the
+    breakpoint, byte-identical to the pre-screenshot shape.
 
     The CALLER assembles the user message as
     ``{"role": "user", "content": [*cacheable_prefix_blocks, volatile_user_block]}``
@@ -656,13 +724,14 @@ def render_iterate_user(
         "of truth — `view` files before editing.\n\n"
         f"{source_text}\n\n{comments_text}"
     )
-    if screenshot_block is not None:
+    if screenshot_blocks:
         cacheable_prefix_blocks = [
             {"type": "text", "text": cacheable_text},
+            # Shallow-copy every block; never mutate the caller's list/dicts.
+            *[{**b} for b in screenshot_blocks[:-1]],
             {
-                # Shallow copy: never mutate the caller's block.
-                **screenshot_block,
-                # Breakpoint at the END of the stable prefix — now the image.
+                **screenshot_blocks[-1],
+                # Breakpoint at the END of the stable prefix — now the last image.
                 "cache_control": {"type": "ephemeral", "ttl": "1h"},
             },
         ]
@@ -696,10 +765,19 @@ def render_iterate_user(
                 f"(not a specific element). The feedback says: {body}"
             )
     volatile_parts.append(f"ITERATE REQUEST:\n{iterate_prompt.strip()}")
-    volatile_parts.append(
-        "Apply this change with the smallest possible diff, then end your turn "
-        "with a 1-2 sentence summary."
-    )
+    if mode == "plan":
+        volatile_parts.append(
+            "Apply this change with the smallest possible diff, then end your turn "
+            "with a 1-2 sentence summary."
+        )
+    else:
+        volatile_parts.append(
+            "Apply this change with the smallest possible diff, then end your turn "
+            "with a 1-2 sentence summary. Write it in plain language for a "
+            "non-technical product manager — describe the visible/functional "
+            "effect, never a CSS custom-property name, hex color code, file path, "
+            "or other code identifier."
+        )
     volatile_user_block = {"type": "text", "text": "\n\n".join(volatile_parts)}
 
     return cacheable_prefix_blocks, volatile_user_block
@@ -942,7 +1020,12 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
     }
   ],
   "is_multi_node": false,
-  "read_cues": []
+  "read_cues": [],
+  "external_entry_point": {
+    "detected": false,
+    "surface_description": "",
+    "confidence": 0
+  }
 }
 
 Rules:
@@ -980,6 +1063,37 @@ headings, button text — list those cues here, and re-rank the screen candidate
 toward the surface the screenshot depicts. This is a text/route-cue read, NOT a \
 visual pixel-match against the screenshot. When no screenshot is attached, omit \
 "read_cues" or return an empty list.
+- "external_entry_point" reports whether the PRD's OWN description implies its \
+starting trigger genuinely originates OUTSIDE this connected application entirely — \
+not merely a screen you failed to find, but a surface that could never exist in this \
+codebase because it is a DIFFERENT SYSTEM: an email the user receives, an SMS/text \
+message, a push notification, a third-party partner's website or app, a Slack or \
+chat message, a physical event (a scanned QR code, a phone call), or any other \
+channel outside this application. This must generalize to ANY such surface — do NOT \
+treat "email" as a special case; the same judgement applies whether the PRD says \
+"the user gets an email", "the user receives a text", "the user opens the partner \
+portal", or describes some other external channel entirely.
+  - Set "detected": true ONLY when the PRD's OWN wording places the trigger on such an \
+outside surface — look for language like "receives an email", "gets a text message", \
+"clicks a link sent to them", "opens the partner's app", "scans a code" — not merely \
+because no good in-app candidate exists. A PRD that is simply vague, or that describes \
+an in-app feature you cannot confidently place, is NOT external — leave "detected": \
+false and let the ordinary candidate ranking (including "no-host-decline" above) \
+speak for that case instead.
+  - When "detected" is true, "surface_description" is a short, plain-language, one- \
+sentence description of WHAT that external surface is (e.g. "a confirmation email \
+sent to the customer", "an SMS the user receives on their phone", "the partner's \
+booking website") — free text, not a fixed category, so it can describe any external \
+surface the PRD implies. Keep it under 200 characters. Leave it empty when "detected" \
+is false.
+  - "confidence" (within this object) is 0-100: how certain you are that the trigger is \
+genuinely external, independent of any candidate's own confidence field. Calibrate \
+honestly — this is a SEPARATE signal from a candidate's "confidence" and from \
+"classification_confidence"; do not inflate it to seem more certain than you are. Leave \
+it 0 when "detected" is false.
+  - This signal must NEVER prevent you from also returning your best in-app \
+candidate(s) when one exists — the two are independent. Only when there truly is no \
+usable in-app candidate does the caller act on this signal at all.
 
 Classification — for each candidate, also label the KIND of placement the PRD implies:
 - "classification" is one of three values: "modify-existing" (the PRD changes or \

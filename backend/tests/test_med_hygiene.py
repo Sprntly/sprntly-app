@@ -70,10 +70,54 @@ def test_prd_autoversion_success_does_not_log_warning(isolated_settings, caplog)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def test_prd_autoversion_still_snapshots_when_the_actor_is_unresolvable(
+    isolated_settings, caplog
+):
+    """The snapshot is the undo point; the `saved_by` label is metadata.
+
+    Version attribution (2026-08-03) made the PUT path read the acting user off
+    the context to stamp `saved_by`, and that read happens INSIDE the `try` that
+    guards the snapshot write. A context that cannot yield an identity must
+    therefore still produce a snapshot under the anonymous "auto" label — if the
+    lookup raised instead, the `except` would swallow it and the user would
+    silently lose their undo point while the log blamed the write.
+    """
+    import app.routes.prd as prd_routes
+
+    row = {"id": 7, "title": "Old", "payload_md": "old body"}
+
+    with patch.object(prd_routes, "require_owned_prd", return_value=row), \
+         patch.object(prd_routes, "save_prd_version", return_value={"id": 1}) as snap, \
+         patch.object(prd_routes, "update_prd_content",
+                      return_value={"id": 7, "title": "New", "payload_md": "b"}), \
+         caplog.at_level(logging.WARNING, logger=prd_routes.logger.name):
+        body = prd_routes.PrdUpdateIn(title="New", payload_md="b")
+        prd_routes.update(7, body, company=_IdentitylessCompany())
+
+    snap.assert_called_once()
+    assert snap.call_args.kwargs["saved_by"] == "auto"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 class _DummyCompany:
     company_id = "co-1"
     # Routes read ctx.workspace_id since the multi-workspace slice; None keeps
     # require_owned_prd on the company-wide (legacy) check.
+    workspace_id = None
+    # Version attribution (2026-08-03) made the PRD edit paths stamp the acting
+    # user onto `prd_versions.saved_by`, so the stub carries the same identity
+    # fields the real WorkspaceContext does. Keep this in step with
+    # app.auth.CompanyContext — the route reads identity off the context.
+    user_id = "user-1"
+    user_email = "editor@example.com"
+    user_name = "Ed Itor"
+
+
+class _IdentitylessCompany:
+    """A context carrying no identity at all — the degenerate case the
+    snapshot must survive rather than skip."""
+
+    company_id = "co-1"
     workspace_id = None
 
 
@@ -89,7 +133,7 @@ def _patch_extract_and_transcribe(text: str):
 
     captured: list[str] = []
 
-    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint):
+    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint, **kw):
         captured.append(text)
         return {"signals": 1, "themes": 1, "skipped": 0}
 
@@ -165,7 +209,7 @@ def test_audio_chunk_dedup_content_hash_stable_across_chunks():
     long_text = "word " * ai._TRANSCRIPT_CHAR_BUDGET
     names: list[str] = []
 
-    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint):
+    def fake_extract(facade, eid, *, doc_name, text, agent, source_hint, **kw):
         names.append(doc_name)
         return {"signals": 0, "themes": 0, "skipped": 0}
 

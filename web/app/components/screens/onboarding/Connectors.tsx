@@ -6,12 +6,20 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep } from "../../../lib/onboarding/store"
-import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
+import {
+  advanceOnboardingStep,
+  markSkippedFields,
+} from "../../../lib/onboarding/store"
+import {
+  companiesApi,
+  connectorsApi,
+  type ConnectionSummary,
+} from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
 import { ConnectorLogo } from "../../connectors/ConnectorLogo"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
+import { stepForSlug } from "../../../lib/onboarding/types"
 import { Check } from "../../auth/icons"
 import {
   firstIncompleteCategory,
@@ -24,17 +32,47 @@ import {
 /**
  * Onboarding "connectors" step (design-v4 page 06) — "Connect your tools."
  *
- * A vertical ACCORDION of connector categories with sequential unlock:
- * the PM works one category at a time — "each one opens the next" — with
- * Skip / Done·next per category. Done categories collapse with a done
- * state and stay re-openable; later ones stay locked until the previous
- * is done/skipped. Categories + connectors come from CONNECTOR_CATALOG
- * so this page tracks Settings automatically (the design kit's hardcoded
- * grid is NOT the source of truth).
+ * The PM works ONE category at a time. The card shows only the categories
+ * already behind them — collapsed to a "Connected" summary row — plus the one
+ * they're on, expanded. Categories they haven't reached yet are NOT rendered
+ * at all (no locked placeholder rows): the list grows downward as they go.
  *
- * Mandatory for COMPANY accounts (registration spec 2026-07): Continue
- * requires at least one LIVE connection; the skip link is hidden. PERSONAL
- * accounts keep everything optional with the "Connect later" skip.
+ * The FOOTER drives it: Skip / Continue complete the open category, collapse
+ * it, and reveal the next. Once none are left Continue leaves the step,
+ * relabelled "Continue to your key". A progress bar + "N of M reviewed"
+ * counter track position within the step.
+ *
+ * WHY THIS SITS AT STEP 3, right after the context import: this step and the
+ * api-key step after it are the only two the import cannot prefill — one wires
+ * OAuth, the other takes a secret — so they are the two worth spending the
+ * background extraction's latency on. The user works through these categories
+ * while the LLM reads their uploaded file; every step from metrics onward
+ * opens pre-filled on the other side.
+ *
+ * Reviewed categories stay re-openable. Categories + connectors come from
+ * CONNECTOR_CATALOG so this page tracks Settings automatically (the design
+ * kit's hardcoded grid is NOT the source of truth) — which is why the counter
+ * says "of M" rather than a literal: wizardCategories hides any category with
+ * no connectable provider, so the total moves as connectors get wired.
+ *
+ * Company documentation is the last category (added 2026-08-03) — Confluence
+ * and Google Docs. It is the one category with no upload strip AND no
+ * onboarding-side upload alternative: its named-source picker ("Add a document
+ * source") is a Settings-only surface, so here it is connectors only.
+ *
+ * Every connector is OPTIONAL: leaving is never gated on having a live
+ * connection, and a reviewed category reads "Connected" whether or not
+ * anything was wired — the summary row marks progress through the list, not
+ * connection state (per the design spec). Leaving having wired nothing at all
+ * stamps `connectors` onto the profile's skipped_fields so we can nudge the PM
+ * later. Downstream handles the no-connector case — the personalize step
+ * finishes onboarding directly rather than handing off to define-metrics,
+ * which has nothing to detect without analytics.
+ *
+ * Categories that allow it also expose a manual file-upload fallback
+ * (companiesApi.uploadFiles), so a PM with no OAuth access can still seed
+ * evidence from an export.
+ *
  * Connectable providers open the real OAuth/API-key modal; everything else
  * toggles a "planned" selection that pre-stages intent for
  * Settings → Connectors.
@@ -46,12 +84,15 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   pm: "Roadmap, sprints, capacity",
   docs: "Specs, docs & wikis — product context the agent can read",
   voice: "Tickets, transcripts, reviews, NPS, CSAT",
+  research: "Interviews, usability studies, surveys — upload what you already have",
   crm: "Accounts, pipeline, lifecycle & revenue signals",
   revenue: "Billing & subscription data — ties work to revenue",
   code: "Repos & PRs — so the agent reads real code and ships fixes",
   monitoring: "Error tracking, APM, paging — powers the On-Call agent",
   design: "Design system & files — so prototypes match your brand",
-  comms: "Where your weekly brief lands — with a thread to ask follow-ups",
+  // No `comms` entry: the Communications category was removed from the catalog
+  // (2026-08-04), so the wizard no longer has a step to describe. Where the
+  // brief lands is a Settings → Comms & Brief preference, not a connector.
 }
 
 /* Inline SVG category icons (tabler-style strokes) — the design kit's
@@ -91,6 +132,15 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
       <path d="M3 20l1.3-3.9A8 8 0 1 1 7.9 19z" />
     </svg>
   ),
+  // Magnifier over a document — research, not the speech bubble Voice uses.
+  research: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M19 12V8l-5-5H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+      <circle cx="16.5" cy="17.5" r="3.5" />
+      <path d="M21 22l-2-2" />
+    </svg>
+  ),
   crm: (p) => (
     <svg {...iconProps(p)}>
       <circle cx="9" cy="7" r="3" />
@@ -127,12 +177,6 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
       <path d="M15.5 10.5h.01" />
     </svg>
   ),
-  comms: (p) => (
-    <svg {...iconProps(p)}>
-      <path d="M21 14l-3-3h-7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1z" />
-      <path d="M14 15v2a1 1 0 0 1-1 1H6l-3 3V11a1 1 0 0 1 1-1h2" />
-    </svg>
-  ),
   docs: (p) => (
     <svg {...iconProps(p)}>
       <path d="M14 3v4a1 1 0 0 0 1 1h4" />
@@ -157,21 +201,13 @@ function CategoryIcon({ catKey }: { catKey: string }) {
   return <Icon />
 }
 
-function LockIcon(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg {...iconProps({ width: 12, height: 12, ...props })}>
-      <rect x="5" y="11" width="14" height="10" rx="2" />
-      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-    </svg>
-  )
-}
-
-/** Down-arrow on the "Done · next ↓" button — the next category opens below. */
-function ArrowDownIcon(props: SVGProps<SVGSVGElement>) {
+/** Upload glyph on the per-category manual-upload fallback strip. */
+function UploadIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...iconProps({ width: 13, height: 13, ...props })}>
-      <path d="M12 5v14" />
-      <path d="M19 12l-7 7-7-7" />
+      <path d="M12 19V5" />
+      <path d="M5 12l7-7 7 7" />
+      <path d="M5 21h14" />
     </svg>
   )
 }
@@ -188,6 +224,11 @@ export function Connectors() {
   const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  // Category keys that had a file uploaded this session — they count as
+  // "Connected" in the summary row even with no provider selected.
+  const [uploadedCats, setUploadedCats] = useState<Set<string>>(new Set())
+  const [uploadingCat, setUploadingCat] = useState<string | null>(null)
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null)
 
   // Show only supported connectors / non-empty categories (see
   // wizardCategories), but never hide a provider with a live connection.
@@ -260,21 +301,64 @@ export function Connectors() {
     setOpenCat((cur) => (cur === i ? null : i))
   }
 
-  /** Skip / Done·next: mark done, collapse, open the next incomplete one. */
+  /** Skip / Continue: mark done, collapse, open the next incomplete one. */
   function completeCategory(i: number) {
     const nextDone = markCategoryDone(doneCats, i)
     setDoneCats(nextDone)
+    setUploadNotice(null)
     setOpenCat(firstIncompleteCategory(nextDone, categories.length))
   }
 
-  async function go() {
+  /**
+   * Manual upload fallback. Files land as company-wide sources (same path as
+   * Settings → Connectors), and mark the category as reviewed-with-evidence
+   * so its summary row reads Connected rather than Skipped.
+   */
+  async function onUploadFiles(categoryKey: string, picked: FileList | null) {
+    if (!picked || picked.length === 0 || !workspace) return
+    const list = Array.from(picked)
+    setUploadingCat(categoryKey)
+    setUploadNotice(null)
+    try {
+      const r = await companiesApi.uploadFiles(workspace.slug, list)
+      if (r.ingested.length > 0) {
+        setUploadedCats((prev) => new Set(prev).add(categoryKey))
+        setUploadNotice(
+          r.ingested.length === 1
+            ? `${r.ingested[0].filename} uploaded.`
+            : `${r.ingested.length} files uploaded.`,
+        )
+      }
+      if (r.errors.length > 0) {
+        setUploadNotice(
+          r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
+        )
+      }
+    } catch (e) {
+      setUploadNotice(e instanceof Error ? e.message : String(e))
+    } finally {
+      setUploadingCat(null)
+    }
+  }
+
+  /**
+   * Leave the step. `skipped` records that the PM moved on without wiring
+   * anything, so Settings / later nudges can pick it back up; it never blocks
+   * the advance either way.
+   */
+  async function go(skipped: boolean) {
     if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
-      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 6)
+      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
+      // Derived, not hardcoded: the flow order has been renumbered twice and a
+      // stale literal here silently resumes the user onto the wrong step.
+      const updated = await advanceOnboardingStep(
+        workspace.id,
+        stepForSlug("api-key") ?? 4,
+      )
       setWorkspace(updated)
-      router.push("/onboarding/team")
+      router.push("/onboarding/api-key")
     } finally {
       setSaving(false)
     }
@@ -291,15 +375,53 @@ export function Connectors() {
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const selectedCount = categories
-    .flatMap((c) => c.items)
-    .filter((it) => selected.has(it.id)).length
+  const reviewedCount = doneCats.size
+  const total = categories.length
 
-  const hasLiveConnection = connected.size > 0
+  /**
+   * Only the categories the PM has actually reached render: everything already
+   * reviewed, plus the one currently open. Unreached categories are omitted
+   * entirely rather than shown as locked placeholders, so the card grows
+   * downward one category at a time.
+   */
+  const furthestReached = Math.max(
+    openCat ?? -1,
+    doneCats.size ? Math.max(...doneCats) : -1,
+  )
+  const reachedCategories = categories.slice(0, furthestReached + 1)
+  const anySelected = categories
+    .flatMap((c) => c.items)
+    .some((it) => selected.has(it.id))
+
+  /** Done-set after completing whichever category is open right now. */
+  const doneAfterOpen =
+    openCat === null ? doneCats : markCategoryDone(doneCats, openCat)
+  /**
+   * Completing the open category leaves nothing incomplete → the footer's
+   * Continue leaves the step. Derived rather than "is openCat the last index"
+   * so that re-opening an already-reviewed category to double-check it doesn't
+   * strand the PM on a Continue that refuses to advance.
+   */
+  const leavesStep = firstIncompleteCategory(doneAfterOpen, total) === null
+
+  /**
+   * Footer Skip/Continue. Within the accordion they complete the open category
+   * and expand the next incomplete one; once none are left they leave the step.
+   * `skipped` only records intent when they leave having wired nothing at all.
+   */
+  function onFooterAdvance(isSkip: boolean) {
+    const nextOpen = firstIncompleteCategory(doneAfterOpen, total)
+    setDoneCats(doneAfterOpen)
+    setUploadNotice(null)
+    setOpenCat(nextOpen)
+    if (nextOpen === null) {
+      void go(isSkip && !anySelected && uploadedCats.size === 0)
+    }
+  }
 
   return (
     <OnboardingChrome
-      step={5}
+      step={3}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -308,17 +430,38 @@ export function Connectors() {
       }
       subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
       footerMeta={
-        hasLiveConnection
-          ? `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
-          : "Connect at least one source to continue — it's what your briefs are built from."
+        <>
+          <strong>
+            {reviewedCount} of {total}
+          </strong>{" "}
+          reviewed
+        </>
       }
-      onBack={() => router.push("/onboarding/api-key")}
-      onContinue={() => void go()}
-      continueDisabled={saving || !hasLiveConnection}
+      onBack={() => router.push("/onboarding/import-context")}
+      onSkip={() => onFooterAdvance(true)}
+      onContinue={() => onFooterAdvance(false)}
+      continueLabel={leavesStep ? "Continue to your key" : "Continue"}
+      continueDisabled={saving}
       loading={saving}
     >
+      {/* Position within the step. Distinct from the header's step dots, which
+          track position across the whole wizard. */}
+      <div
+        className="conn-progress"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={reviewedCount}
+        aria-label="Connector categories reviewed"
+      >
+        <span
+          className="conn-progress-fill"
+          style={{ width: `${total === 0 ? 0 : (reviewedCount / total) * 100}%` }}
+        />
+      </div>
+
       <div className="conn-steps">
-        {categories.map((cat, i) => {
+        {reachedCategories.map((cat, i) => {
           const isDone = doneCats.has(i)
           const isOpen = openCat === i
           const unlocked = isCategoryUnlocked(doneCats, i)
@@ -344,22 +487,15 @@ export function Connectors() {
                     {CATEGORY_DESCRIPTIONS[cat.key] ?? cat.subtitle ?? ""}
                   </div>
                 </div>
-                <span
-                  className="conn-step-state"
-                  data-state={isDone ? "done" : isOpen ? "open" : unlocked ? "ready" : "locked"}
-                >
-                  {isDone ? (
-                    <>
-                      <Check style={{ width: 12, height: 12 }} aria-hidden /> Done
-                    </>
-                  ) : isOpen ? (
-                    "In progress"
-                  ) : unlocked ? (
-                    "Up next"
-                  ) : (
-                    <LockIcon aria-label="Locked" />
-                  )}
-                </span>
+                {/* A category behind the PM collapses to a single "Connected"
+                    row. There is deliberately no "Skipped" variant — the row
+                    marks progress through the list, not connection state. */}
+                {isDone && !isOpen && (
+                  <span className="conn-step-state" data-state="connected">
+                    <Check style={{ width: 11, height: 11 }} aria-hidden />
+                    Connected
+                  </span>
+                )}
               </button>
 
               {isOpen && (
@@ -387,28 +523,41 @@ export function Connectors() {
                       )
                     })}
                   </div>
-                  <div className="conn-step-foot">
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => completeCategory(i)}
+                  {/* Manual fallback for PMs without OAuth access. Hidden for
+                      categories that opt out in the catalog (pm, code, docs) —
+                      ticket and repo data can't stay current from a one-off
+                      export, and Company documentation takes uploads through
+                      the named-source picker in Settings instead. */}
+                  {cat.allowsManualUpload !== false && (
+                    <label
+                      className="conn-upload"
+                      aria-busy={uploadingCat === cat.key}
                     >
-                      Skip
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-brand"
-                      onClick={() => completeCategory(i)}
-                    >
-                      {i < categories.length - 1 ? (
-                        <>
-                          Done · next <ArrowDownIcon aria-hidden />
-                        </>
-                      ) : (
-                        "Done"
-                      )}
-                    </button>
-                  </div>
+                      <UploadIcon aria-hidden />
+                      <span className="t">
+                        {uploadingCat === cat.key
+                          ? "Uploading…"
+                          : "Or upload files manually"}
+                      </span>
+                      <span className="s">{cat.uploadAccept ?? ""}</span>
+                      <input
+                        type="file"
+                        multiple
+                        accept={(cat.uploadExtensions ?? []).join(",")}
+                        disabled={uploadingCat !== null}
+                        style={{ display: "none" }}
+                        onChange={(e) => {
+                          void onUploadFiles(cat.key, e.target.files)
+                          e.target.value = ""
+                        }}
+                      />
+                    </label>
+                  )}
+                  {uploadNotice && (
+                    <p className="onb-field-hint" role="status">
+                      {uploadNotice}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

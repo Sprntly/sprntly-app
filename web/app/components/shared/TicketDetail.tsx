@@ -2,15 +2,16 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
-  IconArrowLeft, IconChevronDown, IconCheck, IconExternalLink,
-  IconPlus, IconX,
+  IconArrowLeft, IconBan, IconChevronDown, IconCheck, IconExternalLink,
+  IconLoader2, IconPlus, IconTrash, IconX,
 } from "@tabler/icons-react"
 import { useNavigation } from "../../context/NavigationContext"
+import { ConfirmDialog } from "./ConfirmDialog"
 import {
   ticketDataApi, teamApi,
   type ClickUpTicketState, type GeneratedStory, type TicketAssignee,
-  type TeamMemberRecord, type TrackerFieldValue, type TrackerMeta,
-  type TrackerProvider, type TrackerTransition,
+  type TeamMemberRecord, type TicketLifecycle, type TrackerFieldValue,
+  type TrackerMeta, type TrackerProvider, type TrackerTransition,
 } from "../../lib/api"
 import { TrackerFieldEditor } from "./TrackerFieldEditor"
 
@@ -100,6 +101,20 @@ export function ticketKeyFor(prdId: number, story: GeneratedStory): string {
   return `prd-${prdId}-${slug || "ticket"}`
 }
 
+/** The same key for a ticket that belongs to a STANDALONE SET instead of a PRD.
+ *
+ *  The `set-` namespace is deliberately disjoint from `prd-` (backend:
+ *  app/stories/scope.py), which is what makes stale code fail CLOSED — a set
+ *  key handed to the PRD-only paths is rejected rather than resolved onto some
+ *  other artifact's tickets. The slug fallback mirrors `ticketKeyFor` exactly,
+ *  because the backend's `title_slug` mirrors both. */
+export function ticketKeyForSet(setId: number, story: GeneratedStory): string {
+  if (story.id) return `set-${setId}-${story.id}`
+  const slug = (story.title || "ticket")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)
+  return `set-${setId}-${slug || "ticket"}`
+}
+
 type Attachment = { id: number; label: string; sub: string }
 type Comment = { id: number; author: string; body: string; time: string }
 
@@ -127,16 +142,59 @@ function splitAcTag(text: string): { tag: "failure" | "edge" | null; rest: strin
 // parses that text back into the same styled sections — so an edited ticket
 // keeps its What / Why now / … layout instead of collapsing to a blob.
 
-const DESC_SECTION_LABELS = ["What", "Why now", "User story", "The ticket must cover", "Out of scope"]
+// A ticket generated under the company's own ticket format carries its LAYOUT:
+// an ordered [{label, source}] naming which sections render, in what order,
+// under what labels. Mirrors backend/app/stories/layout.py — the labels here
+// MUST match what `sync.story_editable_text` produces, or the editor parses
+// text it cannot recognise and the tracker sync sees a permanent phantom diff.
+type DescLayoutEntry = { label: string; source: string }
+
+/** The default layout's EDIT labels, in order. `scope` is deliberately labelled
+ *  "The ticket must cover" — a legacy rename the backend mirrors exactly. */
+const DEFAULT_DESC_LAYOUT: DescLayoutEntry[] = [
+  { label: "What", source: "what" },
+  { label: "Why now", source: "why_now" },
+  { label: "User story", source: "user_story" },
+  { label: "The ticket must cover", source: "scope" },
+  { label: "Out of scope", source: "out_of_scope" },
+]
+
+/** A story's layout, or the default. Read defensively — a ticket generated
+ *  before formats existed simply has no `description_layout`. */
+export function descLayoutOf(s: GeneratedStory): DescLayoutEntry[] {
+  const raw = (s as { description_layout?: unknown }).description_layout
+  if (!Array.isArray(raw) || raw.length === 0) return DEFAULT_DESC_LAYOUT
+  const out = raw.filter(
+    (e): e is DescLayoutEntry =>
+      !!e &&
+      typeof (e as DescLayoutEntry).label === "string" &&
+      typeof (e as DescLayoutEntry).source === "string",
+  )
+  return out.length ? out : DEFAULT_DESC_LAYOUT
+}
+
+const DESC_SECTION_LABELS = DEFAULT_DESC_LAYOUT.map((e) => e.label)
+
+/** The content behind one layout entry: a string, a list (scope), or "". */
+function sectionValue(s: GeneratedStory, e: DescLayoutEntry): string | string[] {
+  if (e.source.startsWith("custom:")) {
+    const key = e.source.slice("custom:".length)
+    const custom = (s as { custom_sections?: Record<string, string> }).custom_sections
+    return (custom && custom[key]) || ""
+  }
+  if (e.source === "scope") return s.scope || []
+  return (s as unknown as Record<string, string>)[e.source] || ""
+}
 
 /** Serialize a structured story's sections into the editable text form. */
 export function storyToEditableText(s: GeneratedStory): string {
   const parts: string[] = []
-  if (s.what) parts.push(`What\n${s.what}`)
-  if (s.why_now) parts.push(`Why now\n${s.why_now}`)
-  if (s.user_story) parts.push(`User story\n${s.user_story}`)
-  if (s.scope && s.scope.length) parts.push(`The ticket must cover\n${s.scope.map((x) => `- ${x}`).join("\n")}`)
-  if (s.out_of_scope) parts.push(`Out of scope\n${s.out_of_scope}`)
+  for (const e of descLayoutOf(s)) {
+    const v = sectionValue(s, e)
+    if (!v || (Array.isArray(v) && !v.length)) continue
+    const body = Array.isArray(v) ? v.map((x) => `- ${x}`).join("\n") : v
+    parts.push(`${e.label}\n${body}`)
+  }
   return parts.length ? parts.join("\n\n") : (s.body || "")
 }
 
@@ -146,11 +204,14 @@ type DescBlock = { label: string | null; text: string; items?: string[] }
  *  is exactly a known section label starts a section; a block of "- " bullets
  *  renders as a list; anything else is a plain paragraph. Freeform text (no
  *  labels) comes back as one unlabeled block. */
-export function parseDescBlocks(text: string): DescBlock[] {
+export function parseDescBlocks(
+  text: string,
+  labels: string[] = DESC_SECTION_LABELS,
+): DescBlock[] {
   const blocks: DescBlock[] = []
   let cur: DescBlock | null = null
   for (const line of text.split(/\r?\n/)) {
-    const label = DESC_SECTION_LABELS.find(
+    const label = labels.find(
       (l) => line.trim().toLowerCase() === l.toLowerCase(),
     )
     if (label) {
@@ -192,18 +253,31 @@ function gwtHtml(text: string): string {
   )
 }
 
-/** A generated (structured) story's sections as editable HTML. */
+/** A generated (structured) story's sections as editable HTML, in the layout
+ *  the ticket was written under.
+ *
+ *  A section the company's own format asked for renders its LABEL even when it
+ *  is empty (house keep-empty-fields rule): the format says a ticket has that
+ *  section, so a reader has to see that it is blank rather than wonder whether
+ *  it was dropped. The five canonical sections keep their existing
+ *  skip-when-empty behaviour, so a default-layout ticket looks exactly as it
+ *  did. */
 function structuredDescHtml(s: GeneratedStory): string {
   const parts: string[] = []
-  const label = (l: string) => `<div class="tkv2-dlbl">${l}</div>`
-  if (s.what) parts.push(`${label("What")}<p class="tkv2-dtx">${escapeHtml(s.what)}</p>`)
-  if (s.why_now) parts.push(`${label("Why now")}<p class="tkv2-dtx">${escapeHtml(s.why_now)}</p>`)
-  if (s.user_story) parts.push(`${label("User story")}<p class="tkv2-dtx">${gwtHtml(s.user_story)}</p>`)
-  if (s.scope && s.scope.length) {
-    parts.push(`${label("The ticket must cover")}<ul class="tkv2-dlist">${
-      s.scope.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`)
+  const label = (l: string) => `<div class="tkv2-dlbl">${escapeHtml(l)}</div>`
+  for (const e of descLayoutOf(s)) {
+    const v = sectionValue(s, e)
+    const empty = !v || (Array.isArray(v) && !v.length)
+    if (empty && !e.source.startsWith("custom:")) continue
+    if (Array.isArray(v)) {
+      parts.push(`${label(e.label)}<ul class="tkv2-dlist">${
+        v.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`)
+    } else if (e.source === "user_story") {
+      parts.push(`${label(e.label)}<p class="tkv2-dtx">${gwtHtml(v)}</p>`)
+    } else {
+      parts.push(`${label(e.label)}<p class="tkv2-dtx">${escapeHtml(v)}</p>`)
+    }
   }
-  if (s.out_of_scope) parts.push(`${label("Out of scope")}<p class="tkv2-dtx">${escapeHtml(s.out_of_scope)}</p>`)
   return parts.length ? parts.join("") : (s.body ? `<p class="tkv2-dtx" style="white-space:pre-wrap">${escapeHtml(s.body)}</p>` : "")
 }
 
@@ -334,20 +408,118 @@ function InlineEditList({ items, commit, addLabel, itemLabel, renderRow }: {
   )
 }
 
+/** The destination tool's display name.
+ *
+ *  `fallback` is what an UNBOUND ticket reads as, and the two callers want
+ *  different things: the field editors describe a shape ClickUp happens to
+ *  define, while the lifecycle copy is a sentence about where a ticket is
+ *  going — and promising an unbound ticket to "ClickUp" would name a tool the
+ *  user may not even have connected. */
+function providerName(
+  provider: TrackerProvider | null | undefined, fallback = "ClickUp",
+): string {
+  if (provider === "jira") return "Jira"
+  if (provider === "asana") return "Asana"
+  if (provider === "clickup") return "ClickUp"
+  return fallback
+}
+
 /** In-panel ticket detail — the `ticket` skill's canonical detail (Jira
  *  anatomy): full-width five-section description over a two-column zone (main
  *  story column + Details rail). Structured fields drive it; legacy/thin
  *  tickets fall back to the plain description + a generated-AC flag. */
-export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracker }: {
-  story: GeneratedStory; index: number; prdId: number; onBack: () => void
+export function TicketDetail({ story, index, prdId, setId, onBack, onOpenLinked, tracker, onLifecycleChange }: {
+  story: GeneratedStory; index: number; onBack: () => void
+  /** The PRD this ticket was broken out of — the owner for a pipeline ticket.
+   *  Exactly one of `prdId`/`setId` is passed; they name the two artifacts a
+   *  ticket can belong to and they decide the ticket key everything downstream
+   *  (edits, comments, lifecycle, tracker sync) is stored under. */
+  prdId?: number
+  /** The standalone `ticket_sets` row this ticket belongs to — tickets
+   *  generated from a chat with no PRD. */
+  setId?: number
   /** Open a sibling ticket by its title (linked issues are title references). */
   onOpenLinked?: (title: string) => void
   /** Bound-tracker context — switches status/priority to the destination's
    *  real vocabulary. Omit for unbound tickets (default vocabulary). */
   tracker?: TicketTrackerCtx | null
+  /** Exclude / delete / restore this ticket. The list owner updates its own
+   *  copy (dropping a deleted ticket, marking an excluded one) — omit to hide
+   *  the controls entirely. */
+  onLifecycleChange?: (lifecycle: TicketLifecycle) => void
 }) {
   const { showToast } = useNavigation()
-  const key = useMemo(() => ticketKeyFor(prdId, story), [prdId, story])
+  // Which owner this ticket has decides its key. `prd-0-…` is the fail-closed
+  // fallback for the impossible case of neither being passed: it parses, so the
+  // backend's ownership check rejects it with a 404 instead of the key landing
+  // on a real artifact's ticket.
+  const key = useMemo(
+    () => (setId != null ? ticketKeyForSet(setId, story) : ticketKeyFor(prdId ?? 0, story)),
+    [prdId, setId, story],
+  )
+  const [lifecycle, setLifecycle] = useState<TicketLifecycle>(story.lifecycle || "active")
+  const [lcBusy, setLcBusy] = useState(false)
+  // The state to confirm, or null for no open dialog. Holding the PENDING
+  // state (rather than a bare boolean) is what lets one dialog serve both
+  // actions while still naming the specific consequence of each.
+  const [lcConfirm, setLcConfirm] = useState<TicketLifecycle | null>(null)
+  const trackerName = providerName(tracker?.provider, "your PM tool")
+
+  /** Both non-active states DELETE the tracker copy — that is what "not in the
+   *  PM tool" has to mean — so each is confirmed with the consequence spelled
+   *  out rather than a generic "Are you sure?". Restoring needs no confirm: it
+   *  only ever adds a ticket back. */
+  const applyLifecycle = async (next: TicketLifecycle) => {
+    setLcBusy(true)
+    try {
+      await ticketDataApi.setLifecycle(key, next)
+      setLifecycle(next)
+      setLcConfirm(null)
+      onLifecycleChange?.(next)
+      if (next === "deleted") onBack()
+    } catch {
+      // Keep the dialog open on failure — closing it would read as "done".
+      showToast("Couldn't update the ticket", "Try again.")
+    } finally {
+      setLcBusy(false)
+    }
+  }
+
+  const requestLifecycle = (next: TicketLifecycle) => {
+    if (next === "active") { void applyLifecycle(next) } else { setLcConfirm(next) }
+  }
+
+  /** What the confirm says. A FUNCTION, not an object built during render:
+   *  it reads `title`, which is declared further down, and evaluating it up
+   *  here would hit the temporal dead zone.
+   *
+   *  The tracker sentence is stated only when the ticket was actually pushed —
+   *  promising to delete a Jira issue that never existed would be a lie, and
+   *  its absence tells the user something true. */
+  const confirmCopy = (next: "deleted" | "excluded") => {
+    const name = title || story.title
+    const pushed = Boolean(tracker?.synced?.url)
+    if (next === "deleted") {
+      return {
+        title: "Delete this ticket?",
+        body: pushed
+          ? `"${name}" will be removed from Sprntly, and its ${trackerName} issue will be deleted.`
+          : `"${name}" will be removed from Sprntly. It was never pushed, so nothing changes in ${trackerName}.`,
+        confirmLabel: "Delete ticket",
+        busyLabel: "Deleting…",
+        tone: "danger" as const,
+      }
+    }
+    return {
+      title: `Exclude from ${trackerName}?`,
+      body: pushed
+        ? `"${name}" stays in Sprntly and stays editable, but its ${trackerName} issue will be deleted and it won't be sent again.`
+        : `"${name}" stays in Sprntly and stays editable, but it won't be sent to ${trackerName}.`,
+      confirmLabel: `Exclude from ${trackerName}`,
+      busyLabel: "Excluding…",
+      tone: "default" as const,
+    }
+  }
 
   const [title, setTitle] = useState(story.title)
   const [status, setStatus] = useState("Backlog")
@@ -490,20 +662,15 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
     : PRIORITY_OPTIONS.map((name) => ({ name, color: null }))
 
   // Custom-field save: merge locally, send only the changed field (the
-  // backend merges too — sibling overrides survive). null clears an override.
+  // backend merges too — sibling overrides survive). A null is KEPT as an
+  // explicit null rather than deleted: it records that the user cleared the
+  // field, which is what makes the clear reach the tracker instead of reading
+  // as "no override" and leaving the old value there.
   const saveCustomField = (fieldId: string, v: TrackerFieldValue) => {
-    setCustomFields((m) => {
-      const next = { ...m }
-      if (v == null) delete next[fieldId]
-      else next[fieldId] = v
-      return next
-    })
+    setCustomFields((m) => ({ ...m, [fieldId]: v }))
     saveFields({ custom_fields: { [fieldId]: v } })
   }
-  const providerLabel =
-    tracker?.provider === "jira" ? "Jira"
-    : tracker?.provider === "asana" ? "Asana"
-    : "ClickUp"
+  const providerLabel = providerName(tracker?.provider)
 
   // Issue type (Jira-bound tickets): the destination's real non-subtask
   // types. Displayed value = local edit ?? pulled tracker type ?? "Task".
@@ -524,7 +691,11 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
   // when a blur commits state, never mid-edit).
   const descHtml = useMemo(() => {
     if (structured && !hasDescOverride) return structuredDescHtml(story)
-    return description ? descBlocksHtml(parseDescBlocks(description)) : ""
+    return description
+      ? descBlocksHtml(
+          parseDescBlocks(description, descLayoutOf(story).map((e) => e.label)),
+        )
+      : ""
   }, [structured, hasDescOverride, description, story])
 
   const onDescInput = () => {
@@ -613,8 +784,23 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
   const acCount = criteria.length
   const routeAgentReady = (story.route || "").toLowerCase().includes("agent")
 
+  const lcCopy = lcConfirm && lcConfirm !== "active" ? confirmCopy(lcConfirm) : null
+
   return (
     <div className="tkv2 tkv2-detail">
+      {lcCopy ? (
+        <ConfirmDialog
+          open
+          title={lcCopy.title}
+          body={lcCopy.body}
+          confirmLabel={lcCopy.confirmLabel}
+          busyLabel={lcCopy.busyLabel}
+          tone={lcCopy.tone}
+          busy={lcBusy}
+          onConfirm={() => applyLifecycle(lcConfirm as TicketLifecycle)}
+          onCancel={() => setLcConfirm(null)}
+        />
+      ) : null}
       {/* Header strip */}
       <div className="tkv2-dtop">
         <div className="tkv2-crumb">
@@ -622,6 +808,27 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
             <IconArrowLeft size={13} /> All tickets
           </button>
           &nbsp; /&nbsp; <span className="tkv2-key" style={{ padding: "3px 9px" }}>{`T-${index + 1}`}</span>
+          {onLifecycleChange ? (
+            <span className="tkv2-lcactions">
+              {lifecycle === "excluded" ? (
+                <button type="button" className="tkv2-lcbtn" disabled={lcBusy}
+                  onClick={() => requestLifecycle("active")}>
+                  {lcBusy ? <IconLoader2 size={12} className="icon-spin" aria-hidden /> : null}
+                  {lcBusy ? "Including…" : `Include in ${trackerName}`}
+                </button>
+              ) : (
+                <button type="button" className="tkv2-lcbtn" disabled={lcBusy}
+                  onClick={() => requestLifecycle("excluded")}
+                  title={`Keep this ticket in Sprntly but remove it from ${trackerName}`}>
+                  <IconBan size={12} /> Exclude from {trackerName}
+                </button>
+              )}
+              <button type="button" className="tkv2-lcbtn tkv2-lcbtn--danger" disabled={lcBusy}
+                onClick={() => requestLifecycle("deleted")}>
+                <IconTrash size={12} /> Delete
+              </button>
+            </span>
+          ) : null}
         </div>
         {loaded ? (
           <input
@@ -640,6 +847,13 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
         <div className="tkv2-empty" style={{ margin: "18px 2px" }}>Loading ticket…</div>
       ) : (
         <>
+
+      {lifecycle === "excluded" ? (
+        <div className="tkv2-lcbanner" role="status">
+          <IconBan size={13} /> Excluded — this ticket stays in Sprntly and is
+          not sent to {trackerName}.
+        </div>
+      ) : null}
 
       <div className="tkv2-edithint">
         ✎ Click any text — title, description, acceptance criteria, child
@@ -819,7 +1033,13 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
                   <TrackerFieldEditor
                     field={f}
                     providerLabel={providerLabel}
-                    value={customFields[f.id] ?? tracker.synced?.custom_fields?.[f.id]}
+                    // Key PRESENCE, not `??`: an override of null means the
+                    // user cleared this field, and `??` would fall straight
+                    // through to the tracker's stale value and redisplay what
+                    // they just removed.
+                    value={f.id in customFields
+                      ? customFields[f.id]
+                      : tracker.synced?.custom_fields?.[f.id]}
                     onSave={(v) => saveCustomField(f.id, v)}
                   />
                 </div>

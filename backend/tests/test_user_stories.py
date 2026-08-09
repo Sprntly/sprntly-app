@@ -142,6 +142,80 @@ def test_generate_requires_exactly_one_source(isolated_settings):
         generate_user_stories("ent-A", prd_id=1, insight="x")
 
 
+# ── Story-map placement: synthesized rollout phases ──────────────────────────
+# prd-author v4.4 retired the Rollout section from the PRD, so the ticket skill
+# synthesizes release phases itself (Part B's release plan wins when present).
+# These guard the plumbing that carries the placement onto every ticket.
+
+def test_ticket_schemas_carry_story_map_placement():
+    """Both generation contracts (single + fanout plan) emit `activity` and
+    `release`, so the synthesized phases ride every ticket into the cache."""
+    from app.stories.generate import _PLAN_SCHEMA, _SCHEMA
+
+    story_props = _SCHEMA["properties"]["stories"]["items"]["properties"]
+    stub_props = _PLAN_SCHEMA["properties"]["stubs"]["items"]["properties"]
+    for props in (story_props, stub_props):
+        assert "activity" in props
+        assert "release" in props
+
+
+def test_generation_prompts_synthesize_phases_not_read_prd_rollout():
+    """The PRD carries no rollout section — both prompts must tell the model to
+    synthesize phases (walking skeleton = Release 1), never to look for §8."""
+    from app.stories.generate import _PLAN_SYSTEM, _SYSTEM
+
+    for prompt in (_SYSTEM, _PLAN_SYSTEM):
+        assert "SYNTHESIZE" in prompt
+        assert "walking skeleton" in prompt
+        assert "no rollout section" in prompt
+
+
+def test_stamp_placement_plan_is_authoritative():
+    """Fanout: the plan leg (only call that sees the whole set) owns placement.
+    Enrich-emitted values are overwritten by the stub's, matched by title
+    case-insensitively; a story with no matching stub keeps its own values."""
+    from app.stories.generate import _stamp_placement_from_stubs
+
+    stories = [
+        Story(title="Build export", activity="drift", release="Release 9 — drift"),
+        Story(title="Renamed by model", activity="kept", release="Release 2 — kept"),
+    ]
+    stubs = [
+        {"title": "  build EXPORT ", "activity": "Export data",
+         "release": "Release 1 — walking skeleton"},
+        {"title": "Original stub title"},
+    ]
+    out = _stamp_placement_from_stubs(stories, stubs)
+    assert out[0].activity == "Export data"
+    assert out[0].release == "Release 1 — walking skeleton"
+    assert out[1].activity == "kept" and out[1].release == "Release 2 — kept"
+
+
+def test_stamp_placement_flat_set_clears_enrich_hallucination():
+    """Tickets-only sizing: the stub carries no placement, so a slice label the
+    enrich model invented anyway is cleared back to empty."""
+    from app.stories.generate import _stamp_placement_from_stubs
+
+    stories = [Story(title="A", activity="Ghost", release="Release 2 — ghost")]
+    out = _stamp_placement_from_stubs(stories, [{"title": "A"}])
+    assert out[0].activity == "" and out[0].release == ""
+
+
+def test_story_placement_survives_the_persistence_roundtrip():
+    s = Story(title="T", activity="Act", release="Release 1 — walking skeleton")
+    back = Story.from_dict(s.to_dict())
+    assert back.activity == "Act"
+    assert back.release == "Release 1 — walking skeleton"
+
+
+def test_skill_method_synthesizes_rollout_phases():
+    """The vendored skill doc must carry the synthesis rule and no stale
+    reference to reading rollout phases from Part A §8 (retired in v4.4)."""
+    method = get_skill("user-stories").method
+    assert "SYNTHESIZED" in method
+    assert "§8" not in method
+
+
 def test_generate_passes_prd_part_b_to_model(isolated_settings, monkeypatch):
     """A PRD with Part B (llm_part) is fed into the model input (spec-aware)."""
     import app.stories.generate as gen
@@ -585,3 +659,178 @@ def test_route_generate_requires_company(isolated_settings, monkeypatch):
     r = ctx.client.post("/v1/stories/generate", json={"insight": "x"},
                         headers={"Authorization": ""})
     assert r.status_code in (401, 403)
+
+
+# ── ticket description layout (the company's own ticket format) ──────────────
+#
+# The template governs the DESCRIPTION LAYOUT, not the field set: it may
+# rename, reorder and add sections, but not remove the notion of a user story.
+
+_CUSTOM_LAYOUT = [
+    {"label": "Summary", "source": "what"},
+    {"label": "Acceptance owner", "source": "custom:acceptance_owner"},
+    {"label": "The ask", "source": "user_story"},
+    {"label": "Covers", "source": "scope"},
+]
+
+
+def _story(**kw):
+    from app.stories.generate import Story
+
+    base = dict(
+        title="Ship it", body="As a user, I want X, so that Y.",
+        what="Build the thing", why_now="Churn is up 12%",
+        user_story="As a user, I want X, so that Y.",
+        scope=["cover A", "cover B"], out_of_scope="Not the mobile app",
+        acceptance_criteria=["Given A When B Then C"],
+    )
+    base.update(kw)
+    return Story(**base)
+
+
+def test_default_layout_description_is_byte_identical_to_the_legacy_render():
+    """THE regression guard for this milestone.
+
+    `to_description` is now layout-driven, and this is the exact string that
+    lands in Jira/ClickUp/Asana and that the import normaliser has to recognise
+    on the way back. Under the default layout it must be byte-for-byte what the
+    previous release produced — the five sections, that order, those bold
+    labels, empty sections skipped, the same tail."""
+    s = _story(subtasks=["child one"], prd_section="R3", route="agent-ready")
+    expected = (
+        "**What**\n"
+        "Build the thing\n"
+        "\n"
+        "**Why now**\n"
+        "Churn is up 12%\n"
+        "\n"
+        "**User story**\n"
+        "As a user, I want X, so that Y.\n"
+        "\n"
+        "**Scope**\n"
+        "- cover A\n"
+        "- cover B\n"
+        "\n"
+        "**Out of scope**\n"
+        "Not the mobile app\n"
+        "\n"
+        "**Acceptance criteria**\n"
+        "- Given A When B Then C\n"
+        "\n"
+        "**Child issues**\n"
+        "- child one\n"
+        "\n"
+        "_Provenance: R3_\n"
+        "_Route: agent-ready_"
+    )
+    assert s.to_description() == expected
+
+
+def test_default_layout_still_skips_empty_sections():
+    s = _story(why_now="", out_of_scope="", scope=[], acceptance_criteria=[])
+    out = s.to_description()
+    assert "**Why now**" not in out
+    assert "**Out of scope**" not in out
+    assert "**Scope**" not in out
+    assert out.startswith("**What**")
+
+
+def test_a_custom_layout_renames_reorders_and_adds_sections():
+    s = _story(
+        description_layout=_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    out = s.to_description()
+    # Their labels, their order.
+    assert out.index("**Summary**") < out.index("**Acceptance owner**")
+    assert out.index("**Acceptance owner**") < out.index("**The ask**")
+    assert out.index("**The ask**") < out.index("**Covers**")
+    assert "QA lead" in out
+    # A section the layout doesn't place simply isn't rendered.
+    assert "**Out of scope**" not in out
+    assert "**Why now**" not in out
+    # The house labels are gone — this is their format, not ours.
+    assert "**What**" not in out
+
+
+def test_a_layout_may_not_drop_the_user_story():
+    from app.stories.layout import normalize_layout
+
+    out = normalize_layout([
+        {"label": "Summary", "source": "what"},
+        {"label": "Covers", "source": "scope"},
+    ])
+    assert [e["source"] for e in out][-1] == "user_story"
+
+
+def test_an_unknown_source_is_dropped_at_the_boundary():
+    """Same posture as the PRD compiler's SECTION_FORMS: a source we don't know
+    must never be stored, or `to_description` renders a section with nothing
+    behind it on every ticket the company pushes."""
+    from app.stories.layout import normalize_layout
+
+    out = normalize_layout([
+        {"label": "Summary", "source": "what"},
+        {"label": "Mystery", "source": "whatever_the_model_said"},
+        {"label": "The ask", "source": "user_story"},
+    ])
+    assert [e["source"] for e in out] == ["what", "user_story"]
+
+
+def test_a_layout_with_nothing_usable_is_refused():
+    import pytest as _pytest
+
+    from app.stories.layout import TicketLayoutError, normalize_layout
+
+    with _pytest.raises(TicketLayoutError):
+        normalize_layout([{"label": "", "source": "nope"}])
+
+
+def test_compiling_a_ticket_format_maps_headings_to_sources():
+    from app.stories.layout import compile_ticket_layout
+
+    layout = compile_ticket_layout(
+        "# Acme ticket\n"
+        "## Summary\n"
+        "## Why now\n"
+        "**Acceptance owner**\n"
+        "## User story\n"
+        "## Out of scope\n"
+    )
+    by_source = {e["source"]: e["label"] for e in layout}
+    assert by_source["what"] == "Summary"
+    assert by_source["why_now"] == "Why now"
+    assert by_source["user_story"] == "User story"
+    assert by_source["out_of_scope"] == "Out of scope"
+    assert by_source["custom:acceptance_owner"] == "Acceptance owner"
+
+
+def test_the_custom_section_hint_names_only_the_custom_keys():
+    # The canonical five are already in the schema; repeating them would be
+    # prompt weight for no information.
+    from app.stories.layout import layout_prompt_hint
+
+    hint = layout_prompt_hint(_CUSTOM_LAYOUT)
+    assert "acceptance_owner" in hint
+    assert "what" not in hint.split("\n", 1)[1]
+    assert layout_prompt_hint(None) == ""
+
+
+def test_the_layout_round_trips_through_the_stored_dict():
+    from app.stories.generate import Story
+
+    s = _story(
+        description_layout=_CUSTOM_LAYOUT,
+        custom_sections={"acceptance_owner": "QA lead"},
+    )
+    back = Story.from_dict(s.to_dict())
+    assert back.description_layout == _CUSTOM_LAYOUT
+    assert back.custom_sections == {"acceptance_owner": "QA lead"}
+    assert back.to_description() == s.to_description()
+
+
+def test_a_default_layout_story_stores_no_layout_keys():
+    # Byte-identical storage for every company without a ticket format.
+    d = _story().to_dict()
+    assert "description_layout" not in d
+    assert "custom_sections" not in d

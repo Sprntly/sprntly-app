@@ -72,6 +72,44 @@ def test_render_includes_quotes_and_source_line():
     assert 'CTO: "We can\'t roll out without SAML SSO."' in rendered
 
 
+def test_fetch_calls_paginates_past_the_api_page_cap():
+    # Fireflies caps a transcripts query at 50 — a 30-day window with 70 calls
+    # must be fetched across pages, not truncated to the first page.
+    def page(i):
+        return {**_T, "id": f"ff-{i}"}
+    pages = [
+        _resp([page(i) for i in range(50)]),          # full page → keep going
+        _resp([page(i) for i in range(50, 70)]),      # short page → stop
+    ]
+    with patch("app.kg_ingest.pullers.fireflies.requests.post", side_effect=pages) as post:
+        calls = fireflies.fetch_calls("key")
+    assert len(calls) == 70
+    assert calls[0].external_id == "ff-0" and calls[-1].external_id == "ff-69"
+    skips = [c.kwargs["json"]["variables"]["skip"] for c in post.call_args_list]
+    assert skips == [0, 50]
+
+
+def test_fetch_calls_stops_at_the_digest_limit():
+    # A runaway window can't loop forever: the overall cap bounds total calls.
+    full = _resp([{**_T, "id": f"ff-{i}"} for i in range(50)])
+    with patch("app.kg_ingest.pullers.fireflies.requests.post", return_value=full) as post:
+        calls = fireflies.fetch_calls("key", limit=120)
+    assert len(calls) == 120
+    # Last page asked only for the remainder (120 - 100 = 20).
+    assert post.call_args_list[-1].kwargs["json"]["variables"]["limit"] == 20
+
+
+def test_render_max_quotes_trims_and_zero_drops_block():
+    with patch("app.kg_ingest.pullers.fireflies.requests.post", return_value=_resp([_T])):
+        c = fireflies.fetch_calls("key")[0]
+    trimmed = c.render(max_quotes=1)
+    assert 'CTO: "We can\'t roll out without SAML SSO."' in trimmed
+    assert "Got it" not in trimmed
+    summary_only = c.render(max_quotes=0)
+    assert "verbatim quotes:" not in summary_only
+    assert "summary: Acme wants SSO." in summary_only
+
+
 def test_pull_is_distilled_only_and_window_scoped():
     """The KG-ingest pull() must NOT request sentences (no raw-dump §6) and must
     forward the window to the API."""

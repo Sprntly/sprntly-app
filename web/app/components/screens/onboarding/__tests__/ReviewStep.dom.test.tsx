@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 09 — "Here's what we learned" (v6
-// screenshot spec 2026-07-17, NEW closing numbered step). On mount it requests
-// an AI business-context draft (onboardingApi.draftBusinessContext) unless the
-// workspace already carries an accepted summary; the prose is fully editable;
-// Continue ("Next · define metrics") saves via saveBusinessContextSummary and
-// hands off to /onboarding/define-metrics. A failed draft shows the manual-
-// entry hint; Continue stays disabled while drafting or while the textarea is
-// empty.
+// Container mount test for onboarding step 08 — "Here's what we learned" (v7
+// screenshot spec 2026-07-21). On mount it requests an AI business-context
+// draft (onboardingApi.draftBusinessContext) unless the workspace already
+// carries an accepted summary; the prose is fully editable. Continue saves via
+// saveBusinessContextSummary and always routes to the personalize step.
+//
+// This step used to own the define-metrics gate. Personalize was inserted
+// between it and the sub-flow, so the analytics branch moved there — the tests
+// for it live in PersonalizeStep.dom.test.tsx, and the assertions here pin
+// that this screen no longer branches or runs the closer.
+//
+// A failed draft shows the manual-entry hint; Continue stays disabled while
+// drafting or while the summary is empty.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -21,10 +26,16 @@ const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const saveSummaryMock = vi.fn()
 const draftMock = vi.fn()
+const setContentMock = vi.fn()
+const connectorsListMock = vi.fn()
+const finishMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
+}))
+vi.mock("../../../../context/ContentContext", () => ({
+  useContent: () => ({ setContent: setContentMock }),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
@@ -32,6 +43,11 @@ vi.mock("../../../../lib/onboarding/store", () => ({
 }))
 vi.mock("../../../../lib/api", () => ({
   onboardingApi: { draftBusinessContext: (...a: unknown[]) => draftMock(...a) },
+  connectorsApi: { list: (...a: unknown[]) => connectorsListMock(...a) },
+}))
+vi.mock("../../../../lib/onboarding/finishOnboarding", () => ({
+  finishOnboardingAndEnterApp: (...a: unknown[]) => finishMock(...a),
+  POST_ONBOARDING_PATH: "/?new=1",
 }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   saveDraft: vi.fn(),
@@ -63,21 +79,31 @@ function accurateCheckbox(): HTMLInputElement {
 
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Next · define metrics/.test(b.textContent ?? ""),
+    /Next · personalize/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
+}
+
+/** A live Analytics connection — what keeps the define-metrics hand-off alive. */
+function analyticsConnected() {
+  connectorsListMock.mockResolvedValue({
+    connections: [{ provider: "posthog", status: "active", types: ["analytics"] }],
+  })
 }
 
 beforeEach(() => {
   _resetDraftPrefetchForTests()
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+  // Default to analytics present so the define-metrics hand-off is exercised;
+  // the no-analytics path is asserted explicitly below.
+  analyticsConnected()
 })
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-describe("ReviewStep (onboarding step 09 — AI business context, review & accept)", () => {
-  it("requests a draft on mount, shows the drafting state, then fills the editable textarea", async () => {
+describe("ReviewStep (onboarding step 08 — AI business context, review & accept)", () => {
+  it("requests a draft on mount, shows the skeleton loading state, then fills the editable textarea", async () => {
     let resolveDraft: (v: { draft: string }) => void = () => {}
     draftMock.mockReturnValue(
       new Promise<{ draft: string }>((res) => {
@@ -86,12 +112,20 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     )
     const { container } = mount()
 
-    // Step 9 of the dots, drafting hint visible, Continue disabled meanwhile.
+    // Step 8 of the dots. While drafting the card keeps its shape — a shimmer
+    // standing in for the textarea plus an announced status — and Continue
+    // stays disabled rather than sitting live over an empty page.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("10")
+    ).toBe("9")
     expect(draftMock).toHaveBeenCalledTimes(1)
-    expect(screen.getByText(/Drafting your business context/)).not.toBeNull()
+    const skeleton = container.querySelector(".onb-draft-skel") as HTMLElement
+    expect(skeleton).not.toBeNull()
+    expect(skeleton.querySelectorAll(".assistant-skel-line").length).toBeGreaterThan(1)
+    const status = screen.getByText(/Generating your business context/)
+    expect(status.getAttribute("role")).toBe("status")
+    // The real editor is withheld until the prose lands.
+    expect(summaryTextarea()).toBeNull()
     expect(continueBtn().disabled).toBe(true)
 
     await act(async () => {
@@ -101,6 +135,9 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     await waitFor(() => {
       expect(summaryTextarea()).not.toBeNull()
     })
+    // Skeleton and status are gone once the real editor renders.
+    expect(container.querySelector(".onb-draft-skel")).toBeNull()
+    expect(screen.queryByText(/Generating your business context/)).toBeNull()
     expect(summaryTextarea().value).toBe(DRAFT_TEXT)
     // The prose is editable and the accept checkbox renders.
     fireEvent.change(summaryTextarea(), { target: { value: `${DRAFT_TEXT} Edited.` } })
@@ -121,7 +158,7 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     expect(summaryTextarea().value).toBe("Already accepted prose.")
   })
 
-  it("Continue saves the summary (+ accuracy flag) and routes to define-metrics", async () => {
+  it("Continue saves the summary (+ accuracy flag) and routes to personalize", async () => {
     draftMock.mockResolvedValue({ draft: DRAFT_TEXT })
     saveSummaryMock.mockResolvedValue(
       makeWorkspace({
@@ -141,18 +178,24 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/define-metrics")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/personalize")
     })
     expect(saveSummaryMock).toHaveBeenCalledWith("ws-1", DRAFT_TEXT, true)
+    // The define-metrics gate lives on the personalize step now — this screen
+    // must never branch to the sub-flow or run the closer itself.
+    expect(routerMock.push).not.toHaveBeenCalledWith("/onboarding/define-metrics")
+    expect(finishMock).not.toHaveBeenCalled()
   })
 
   it("a failed draft shows the manual-entry hint and Continue stays disabled until text is typed", async () => {
     draftMock.mockRejectedValue(new Error("llm down"))
-    mount()
+    const { container } = mount()
 
     await waitFor(() => {
       expect(screen.getByText(/couldn't draft this automatically/i)).not.toBeNull()
     })
+    // The skeleton clears on failure too — no shimmer left spinning forever.
+    expect(container.querySelector(".onb-draft-skel")).toBeNull()
     // Empty textarea → Continue disabled.
     expect(summaryTextarea().value).toBe("")
     expect(continueBtn().disabled).toBe(true)
@@ -160,7 +203,9 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     fireEvent.change(summaryTextarea(), {
       target: { value: "We reconcile payments for SMBs." },
     })
-    expect(continueBtn().disabled).toBe(false)
+    await waitFor(() => {
+      expect(continueBtn().disabled).toBe(false)
+    })
   })
 
   it("Back routes to the invite step", async () => {

@@ -52,16 +52,27 @@ const EMPTY: AppContentState = {
   prdGenerating: false,
   prdPartialHtml: null,
   evidence: null,
+  evidenceId: null,
   evidenceGenerating: false,
   evidencePartialHtml: null,
-  report: null,
+  conversationId: null,
+  reportFocusId: null,
+  reportFocusStandalone: false,
+  threadReports: [],
+  threadReportsStatus: "idle",
+  threadReportsConversationId: null,
   teamMembers: [],
   teamPending: [],
   connectorCategories: [],
   connectedConnectorIds: [],
+  connectorsHydrated: false,
   sidebarBriefCount: null,
   sidebarConvCount: null,
   aiScreenChips: {},
+  guestTickets: null,
+  ticketSet: null,
+  ticketSetGenerating: false,
+  ticketSetStandalone: false,
 }
 
 type ContentContextValue = {
@@ -71,7 +82,7 @@ type ContentContextValue = {
   resetContent: () => void
   /**
    * Clear the workspace-scoped brief slices back to their empty values. Called
-   * when the active workspace changes so the weekly brief screen doesn't keep
+   * when the active workspace changes so the Top Insights brief screen doesn't keep
    * rendering the previous workspace's brief while the new one loads — and never
    * leaks it at all when the new workspace has no brief yet. Unlike `setContent`
    * (which MERGES the nested `brief` object), this replaces the slices outright.

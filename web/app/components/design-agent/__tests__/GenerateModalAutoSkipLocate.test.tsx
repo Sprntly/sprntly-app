@@ -376,6 +376,181 @@ describe("saved figma / website auto-skip never call locate (no regression)", ()
   })
 })
 
+// ─── manual figma submission must not double-fire via the auto-skip effect ───
+//
+// The double-generate mechanism: a manual Generate click on a figma/website
+// source calls onSavePreference (an async save-then-refresh round trip) and
+// then fires the FIRST generate. In the live app, onSavePreference resolving
+// hands a NEWLY-IDENTITY savedPreference prop back down (the parent's
+// workspace context re-renders after refresh()) — that prop is in the
+// auto-generate effect's dep array, so the effect re-runs. Before the fix,
+// nothing had latched autoSkipFiredRef for a manual (non-effect) submission,
+// so the effect finds the preference the click itself just saved newly
+// "healthy" and fires a SECOND generate through the unguarded figma/website
+// branch. This test simulates that round trip directly via `rerender` with a
+// fresh savedPreference object (matching the existing dep-churn simulation
+// pattern used elsewhere in this file) rather than a real network wait, since
+// the point is the request count, not the timing.
+
+// Under fake timers, a passive effect triggered by `rerender()` does not
+// always flush its `setTimeout(…, 0)` scheduling synchronously within the
+// SAME act() callback that called rerender — React can defer the passive
+// effect to act()'s own end-of-callback flush, which lands AFTER an
+// `advanceTimersByTimeAsync` called inside that same callback has already
+// finished. A second, separate flush after the act() block returns catches
+// anything scheduled at that late point. (Confirmed by direct instrumentation
+// during this ticket's investigation — a single advance under-counts.)
+async function flushTimers() {
+  await act(async () => {
+    await vi.runAllTimersAsync()
+  })
+  await act(async () => {
+    await vi.runAllTimersAsync()
+  })
+}
+
+describe("manual figma submission does not re-enter the auto-generate effect (AC1/AC2/AC3)", () => {
+  // Fake timers make the figma/website branch's `setTimeout(…, 0)` (the
+  // generate call) deterministic — no reliance on macrotask/wall-clock
+  // ordering — and each test explicitly unmounts so a stale scheduled timer
+  // can never fire during a LATER test and pollute its call count.
+  it("T1 — one manual Generate click on a figma source, with the preference save wired, issues exactly one generate call", async () => {
+    vi.useFakeTimers()
+    try {
+      const onSavePreference = vi.fn().mockResolvedValue(undefined)
+      const { container, rerender, unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: null,
+          onSavePreference,
+          _testConnections: FIGMA_CONN,
+          _testRepos: null,
+          _testInitSource: "figma" as const,
+        }),
+      )
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn).toBeTruthy()
+      act(() => btn!.click())
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      expect(onSavePreference).toHaveBeenCalledWith(
+        expect.objectContaining({ design_source: "figma" }),
+      )
+
+      // Simulate the save's refresh() landing: the parent hands down a NEW
+      // savedPreference object identity carrying exactly what the click
+      // itself just saved (matches onSavePreference's payload above).
+      act(() => {
+        rerender(
+          React.createElement(GenerateModal, {
+            open: true,
+            onClose: vi.fn(),
+            prdId: PRD_ID,
+            figmaFileKey: null,
+            savedPreference: FIGMA_PREF,
+            onSavePreference,
+            _testConnections: FIGMA_CONN,
+            _testRepos: null,
+            _testInitSource: "figma" as const,
+          }),
+        )
+      })
+      await flushTimers()
+
+      // Still exactly one — the effect must not have re-entered.
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("AC2 — the same re-entry is refused on a website source too", async () => {
+    vi.useFakeTimers()
+    try {
+      const onSavePreference = vi.fn().mockResolvedValue(undefined)
+      const { container, rerender, unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: null,
+          onSavePreference,
+          _testConnections: [],
+          _testRepos: null,
+          _testInitSource: "website" as const,
+        }),
+      )
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      )
+      expect(btn).toBeTruthy()
+      act(() => btn!.click())
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+
+      act(() => {
+        rerender(
+          React.createElement(GenerateModal, {
+            open: true,
+            onClose: vi.fn(),
+            prdId: PRD_ID,
+            figmaFileKey: null,
+            savedPreference: WEBSITE_PREF,
+            onSavePreference,
+            _testConnections: [],
+            _testRepos: null,
+            _testInitSource: "website" as const,
+          }),
+        )
+      })
+      await flushTimers()
+
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("T3/AC4 — a returning user with a healthy saved figma source still auto-skips, exactly once", async () => {
+    // No manual click at all — this is the genuine returning-user path (the
+    // effect fires on mount). Must be unaffected by the handleGenerate latch
+    // change: only a MANUAL submission sets the latch pre-emptively; the
+    // effect's own mount-time fire still works exactly once.
+    vi.useFakeTimers()
+    try {
+      const { unmount } = render(
+        React.createElement(GenerateModal, {
+          open: true,
+          onClose: vi.fn(),
+          prdId: PRD_ID,
+          figmaFileKey: null,
+          savedPreference: FIGMA_PREF,
+          _testConnections: FIGMA_CONN,
+          _testRepos: null,
+        }),
+      )
+
+      await flushTimers()
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 // ─── github render-guard flash suppression ────────────────────────────────────
 //
 // The render-time guard (not the useEffect) must suppress the config form for
@@ -774,5 +949,249 @@ describe("auto-skip locate failure surfaces the error state, never blank", () =>
     await waitFor(() => expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1))
     expect(postSpy).toHaveBeenCalledTimes(2)
     expect(container.querySelector('[data-testid="locate-error-state"]')).toBeNull()
+  })
+})
+
+// ─── undetermined-fallback: the saved-preference decision never arrives ──────
+//
+// The render guard used to `return null` with no floor: a repo-list or
+// connector fetch that never settles left the modal permanently blank —
+// nothing (not the guard, not the auto-skip effect) could ever replace it.
+// These tests drive the two bounded-wait timers (300ms chrome-only, then a 5s
+// bound) with fake timers and assert the modal always reaches something
+// actionable rather than staying null forever.
+
+describe("undetermined-fallback: the saved-preference decision never arrives", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("T1 — RED today: a repo-list fetch that never settles still reaches an actionable state within 5s, not null", async () => {
+    vi.useFakeTimers()
+    // Never resolves — the concrete "stalls forever" path (a hung request or
+    // a persistent 401 both land here; T7 below drives the 401 variant
+    // specifically).
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        // No _testRepos — force the real (hanging) fetch.
+      }),
+    )
+
+    // Still inside the bound: nothing actionable yet.
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    expect(btn!.disabled).toBe(false)
+  })
+
+  it("T2 — the terminal state offers every other source and the proceed-anyway path (AC3)", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Proceeding anyway: Generate is enabled with the seeded repo.
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn?.disabled).toBe(false)
+
+    // Every other source is one click away — the pills are live, not stranded
+    // on the thing that stalled.
+    expect(container.querySelector('[data-val="figma"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="website"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="screenshot"]')).toBeTruthy()
+    expect(container.querySelector('[data-val="github"]')).toBeTruthy()
+  })
+
+  it("T3 — a healthy saved preference still auto-skips with no form flash, even once the deciding window fully elapses (AC5)", async () => {
+    vi.useFakeTimers()
+    mockLocateResolves(makeLocate())
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+      }),
+    )
+
+    // Data was injected synchronously (healthy, decided well inside 300ms) —
+    // neither the form nor the checking row ever mounts.
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    expect(
+      container.querySelector('[data-testid="saved-source-check"]'),
+    ).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Even once the bound has fully elapsed, the healthy auto-skip already
+    // took over — the undetermined fallback never appears, and generation
+    // proceeded through the normal locate→generate sequence.
+    expect(
+      container.querySelector('[data-testid="saved-source-undetermined"]'),
+    ).toBeNull()
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+  })
+
+  it("T4 — connections stalling produces the same handled outcome on the Figma/Website branch (AC6)", async () => {
+    vi.useFakeTimers()
+    // Never resolves — connections can stall for a non-github saved source
+    // exactly as it can for github.
+    vi.spyOn(connectorsApi, "list").mockReturnValue(new Promise<never>(() => {}))
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: WEBSITE_PREF,
+        // No _testConnections — force the real (hanging) fetch.
+      }),
+    )
+
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    // Website needs no connector confirmation to proceed.
+    expect(btn!.disabled).toBe(false)
+  })
+
+  it("T6 — RED today, AC7 (the one most likely to be skipped): with the repo list undetermined and a saved github_repo, the recovered form seeds the select AND enables Generate, and submitting it works", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(connectorsApi, "listAccessibleGithubRepos").mockReturnValue(
+      new Promise<never>(() => {}),
+    )
+    mockLocateResolves(makeLocate())
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // The load-bearing detail (AC7): the saved repo is BOTH the select's only
+    // option AND its value — not merely present somewhere on the page.
+    const select = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Select a repo"]',
+    )
+    expect(select).toBeTruthy()
+    expect(select!.value).toBe(SEL_REPO)
+    expect(
+      Array.from(select!.options).some((o) => o.value === SEL_REPO),
+    ).toBe(true)
+
+    // Falling through to the form alone is NOT what this asserts — the button
+    // state, not the form's presence, is the AC.
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn?.disabled).toBe(false)
+
+    act(() => btn!.click())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500)
+    })
+
+    // Submitting actually works: locate fired with the seeded repo and
+    // generation followed.
+    expect(designAgentApi.locate).toHaveBeenCalledWith({
+      prd_id: PRD_ID,
+      github_repo: SEL_REPO,
+    })
+    expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1)
+  })
+
+  it("T7 — the 401-swallowing path specifically: withAuthRetry exhausts on a persistent 401, setRepos is never called, and the modal still reaches an actionable state within the bound", async () => {
+    vi.useFakeTimers()
+    const reposSpy = vi
+      .spyOn(connectorsApi, "listAccessibleGithubRepos")
+      .mockRejectedValue(new ApiError(401, { detail: "unauthorized" }))
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+      }),
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // The 401 is swallowed by design — setRepos/setReposError never fire, so
+    // `repos` truly stays null (this is the "repos" reason, not the
+    // "connections" reason: the connector row still reads Connected, not
+    // "Couldn't check").
+    expect(
+      container.querySelector('[data-testid="src-unverified"]'),
+    ).toBeNull()
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )
+    expect(btn).toBeTruthy()
+    expect(btn!.disabled).toBe(false)
+    // withAuthRetry's one shot + one retry, both swallowed 401s.
+    expect(reposSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 })

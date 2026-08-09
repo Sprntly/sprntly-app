@@ -1100,3 +1100,406 @@ def test_search_route_404_when_not_connected(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.get("/v1/connectors/slack/search?q=x")
     assert r.status_code == 404
+
+
+# ─────────────────── /slack/sync-channels route ───────────────────
+
+
+def test_sync_channels_route_persists_selection(slack_env, monkeypatch):
+    """Saves the pull-channel selection on the connection config and
+    best-effort joins each selected channel."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda tok, channel_id: join_calls.append(channel_id) or True)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [
+            {"id": "C1", "name": "customer-feedback"},
+            {"id": "C2", "name": "support"},
+            {"id": "C1", "name": "customer-feedback"},  # dupe — dropped
+        ]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["config"]["sync_channel_ids"] == ["C1", "C2"]
+    assert body["config"]["sync_channel_names"] == {
+        "C1": "customer-feedback", "C2": "support",
+    }
+    assert join_calls == ["C1", "C2"]
+    assert body["joined"] == ["C1", "C2"]
+
+    # And persisted on the connection row (what the web reads back).
+    listed = ctx.client.get("/v1/connectors").json()
+    slack_row = next(c for c in listed["connections"] if c["provider"] == "slack")
+    assert slack_row["config"]["sync_channel_ids"] == ["C1", "C2"]
+
+
+def test_sync_channels_route_empty_list_clears_selection(slack_env, monkeypatch):
+    """An empty list clears the selection (sync reverts to every bot-member
+    channel) and never attempts a join."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda *a, **k: join_calls.append(a) or True)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": []}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["config"]["sync_channel_ids"] == []
+    assert body["joined"] == []
+    assert join_calls == []
+
+
+def test_sync_channels_route_join_failure_never_blocks_save(slack_env, monkeypatch):
+    """A failed auto-join (private channel, revoked scope) still saves."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+
+    def boom(tok, channel_id):
+        raise RuntimeError("method_not_supported_for_channel_type")
+
+    monkeypatch.setattr(slack_oauth, "join_channel", boom)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "G9", "name": "private-vips"}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["config"]["sync_channel_ids"] == ["G9"]
+    assert body["joined"] == []
+
+
+def test_sync_channels_route_rejects_empty_id(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "  ", "name": "x"}]},
+    )
+    assert r.status_code == 422
+
+
+def test_sync_channels_route_rejects_oversized_selection(slack_env, monkeypatch):
+    """The sync caps at 50 channels — a selection it can't honor is refused."""
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    channels = [{"id": f"C{i}", "name": f"ch-{i}"} for i in range(51)]
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": channels}
+    )
+    assert r.status_code == 422
+
+
+def test_sync_channels_route_404_when_not_connected(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "C1"}]},
+    )
+    assert r.status_code == 404
+
+
+# ───────── unticking a channel reverses ticking it (leave + un-sync) ────────
+#
+# Before this, unticking only dropped the id from the saved list: the bot sat
+# in the channel forever and every message it had already pulled stayed in the
+# corpus and the KG. These pin the teardown — and, just as importantly, pin
+# that a failure anywhere in it still lets the SELECTION save, because the
+# selection is the source of truth and the cleanup is best-effort behind it.
+
+
+SLACK_CORPUS_DOC = (
+    "# Slack Workspace Messages\n"
+    "\n"
+    "**Channels:** 2 | **Messages:** 5 | **Thread replies:** 0\n"
+    "\n"
+    "## Channels Overview\n"
+    "\n"
+    "**Total channels synced:** 2\n"
+    "\n"
+    "| Channel | Members | Messages Synced | Topic |\n"
+    "|---------|---------|-----------------|-------|\n"
+    "| #customer-feedback | 12 | 3 | Voice of customer |\n"
+    "| #support | 8 | 2 | Help desk |\n"
+    "\n---\n\n"
+    "## #customer-feedback\n"
+    "\n"
+    "**Alice** (2026-08-01):\n"
+    "Checkout keeps timing out on the billing step.\n"
+    "\n"
+    "## #support\n"
+    "\n"
+    "**Bob** (2026-08-02):\n"
+    "Ticket 42 reopened by the customer.\n"
+)
+
+
+def _slack_uncheck_harness(monkeypatch, *, leave=None):
+    """Seed a company whose Slack corpus already holds two channels, stub the
+    Slack round-trips, and return (ctx, calls, corpus_path).
+
+    `slack_sync` binds `settings` at import time and is not in conftest's
+    _RELOAD_ORDER, so it can be holding an earlier test's DATA_DIR — rebind it
+    to the freshly-reloaded settings or the trim happens in a directory this
+    test never wrote to and every assertion passes vacuously.
+    """
+    from pathlib import Path
+
+    import app.config as config_mod
+    import app.kg_ingest.auto_sync as auto_sync
+    from app.connectors import slack_oauth, slack_sync
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    monkeypatch.setattr(slack_sync, "settings", config_mod.settings)
+
+    corpus_dir = Path(config_mod.settings.data_path) / "acme"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    corpus = corpus_dir / "slack_channels.md"
+    corpus.write_text(SLACK_CORPUS_DOC, encoding="utf-8")
+
+    calls: dict = {"join": [], "leave": [], "seed": []}
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda _tok, cid: calls["join"].append(cid) or True)
+    monkeypatch.setattr(
+        slack_oauth, "leave_channel",
+        leave or (lambda _tok, cid: calls["leave"].append(cid) or True))
+    monkeypatch.setattr(
+        auto_sync, "kickoff_corpus_seed",
+        lambda cid, slug: calls["seed"].append(slug) or True)
+    return ctx, calls, corpus
+
+
+def _save_channels(ctx, channels):
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": channels}
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+CF = {"id": "C1", "name": "customer-feedback"}
+SUP = {"id": "C2", "name": "support"}
+
+
+def test_unchecking_leaves_the_channel_and_removes_its_messages(
+    slack_env, monkeypatch
+):
+    """The whole point: unticking #support walks the bot out of it AND takes
+    the messages it already pulled back out of the corpus."""
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+
+    _save_channels(ctx, [CF, SUP])
+    assert calls["leave"] == []          # ticking never leaves anything
+
+    body = _save_channels(ctx, [CF])     # untick #support
+
+    assert calls["leave"] == ["C2"]
+    assert body["left"] == ["C2"]
+    assert body["leave_failed"] == []
+    assert body["delivery_skipped"] == []
+    assert body["config"]["sync_channel_ids"] == ["C1"]
+
+    out = corpus.read_text(encoding="utf-8")
+    assert "Ticket 42 reopened" not in out
+    assert "## #support" not in out
+    assert "Checkout keeps timing out" in out   # the kept channel is untouched
+    assert body["purged"]["sections_removed"] == 1
+    # ...and the KG is refreshed through the same path a normal sync uses.
+    assert calls["seed"] == ["acme"]
+
+
+def test_unchecking_never_leaves_the_slack_delivery_channel(
+    slack_env, monkeypatch
+):
+    """#support is where this company's briefs get posted. Unticking it stops
+    Sprntly READING it, but the bot has to stay a member or delivery breaks —
+    so the leave is skipped and only the data purge runs."""
+    from app import db
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+    db.patch_slack_connection_config(
+        ctx.company_id, ctx.user_id,
+        {"target_type": "channel", "channel_id": "C2"},
+    )
+
+    _save_channels(ctx, [CF, SUP])
+    body = _save_channels(ctx, [CF])
+
+    assert calls["leave"] == []
+    assert body["left"] == []
+    assert body["delivery_skipped"] == ["C2"]
+    # The guard protects DELIVERY, not the corpus — the messages still go.
+    assert "Ticket 42 reopened" not in corpus.read_text(encoding="utf-8")
+    assert body["purged"]["sections_removed"] == 1
+
+
+def test_unchecking_tolerates_a_leave_that_slack_refuses(slack_env, monkeypatch):
+    """Slack returning ok:false — which is what every install does today,
+    since the app holds channels:join but not channels:manage — is reported,
+    not raised. The selection and the purge both still land."""
+    ctx, calls, corpus = _slack_uncheck_harness(
+        monkeypatch, leave=lambda _tok, cid: False)
+
+    _save_channels(ctx, [CF, SUP])
+    body = _save_channels(ctx, [CF])
+
+    assert body["left"] == []
+    assert body["leave_failed"] == ["C2"]
+    assert body["config"]["sync_channel_ids"] == ["C1"]
+    assert "Ticket 42 reopened" not in corpus.read_text(encoding="utf-8")
+
+
+def test_unchecking_tolerates_a_leave_that_throws(slack_env, monkeypatch):
+    """A transport-level explosion is the same story: 200, reported, purged."""
+    def boom(_tok, _cid):
+        raise RuntimeError("slack timed out")
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch, leave=boom)
+
+    _save_channels(ctx, [CF, SUP])
+    body = _save_channels(ctx, [CF])
+
+    assert body["leave_failed"] == ["C2"]
+    assert body["config"]["sync_channel_ids"] == ["C1"]
+    assert "Ticket 42 reopened" not in corpus.read_text(encoding="utf-8")
+
+
+def test_unchecking_still_saves_when_the_purge_blows_up(slack_env, monkeypatch):
+    """Cleanup runs behind a save that already committed. If the corpus is
+    unreadable the admin must still get their selection, not a 500."""
+    from app.connectors import slack_sync
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+    _save_channels(ctx, [CF, SUP])
+
+    def boom(*_a, **_k):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(slack_sync, "purge_channels_from_synced_data", boom)
+
+    body = _save_channels(ctx, [CF])
+    assert body["config"]["sync_channel_ids"] == ["C1"]
+    assert body["left"] == ["C2"]
+    assert body["purged"]["sections_removed"] == 0
+
+
+def test_checking_a_channel_still_only_joins(slack_env, monkeypatch):
+    """The additive half is unchanged — ticking joins and removes nothing."""
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+
+    body = _save_channels(ctx, [CF])
+    assert calls["join"] == ["C1"]
+    assert body["joined"] == ["C1"]
+
+    body = _save_channels(ctx, [CF, SUP])   # add a second channel
+    assert calls["leave"] == []
+    assert body["left"] == []
+    assert body["purged"]["sections_removed"] == 0
+    out = corpus.read_text(encoding="utf-8")
+    assert "Ticket 42 reopened" in out
+    assert "Checkout keeps timing out" in out
+
+
+def test_clearing_the_selection_leaves_and_removes_nothing(slack_env, monkeypatch):
+    """An empty list means 'read every channel the bot is in', which WIDENS
+    what gets synced. Nothing was deselected, so nothing is torn down."""
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+
+    _save_channels(ctx, [CF, SUP])
+    body = _save_channels(ctx, [])
+
+    assert body["config"]["sync_channel_ids"] == []
+    assert calls["leave"] == []
+    assert body["left"] == []
+    assert body["purged"]["sections_removed"] == 0
+    assert "Ticket 42 reopened" in corpus.read_text(encoding="utf-8")
+
+
+def test_unchecking_a_channel_with_no_stored_name_skips_the_trim(
+    slack_env, monkeypatch
+):
+    """Corpus sections are keyed by channel NAME. A selection saved without
+    one (a private channel the picker couldn't see) still leaves the channel,
+    but has nothing addressable to trim — better than guessing and deleting
+    the wrong section."""
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+
+    _save_channels(ctx, [CF, {"id": "C2"}])   # no name for C2
+    body = _save_channels(ctx, [CF])
+
+    assert body["left"] == ["C2"]
+    assert body["purged"]["sections_removed"] == 0
+    assert "Ticket 42 reopened" in corpus.read_text(encoding="utf-8")
+
+
+def test_unchecking_is_admin_gated_like_the_rest_of_the_route(
+    slack_env, monkeypatch
+):
+    """The teardown is destructive, so it must sit behind the same org-
+    connector RBAC the selection already had — a member gets 403 and nothing
+    is left or purged."""
+    from app.db.authcache import invalidate_user
+    from app.db.client import require_client
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+    _save_channels(ctx, [CF, SUP])
+
+    require_client().table("company_members").update({"role": "member"}).eq(
+        "company_id", ctx.company_id
+    ).eq("user_id", ctx.user_id).execute()
+    invalidate_user(ctx.user_id)   # the role is auth-cached per user
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": [CF]}
+    )
+    assert r.status_code == 403
+    assert calls["leave"] == []
+    assert "Ticket 42 reopened" in corpus.read_text(encoding="utf-8")

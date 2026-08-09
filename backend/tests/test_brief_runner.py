@@ -125,8 +125,8 @@ def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypat
 
     ev_calls: list[tuple] = []
 
-    async def fake_generate_evidence(ev_id, b_id, idx):
-        ev_calls.append((ev_id, b_id, idx))
+    async def fake_generate_evidence(ev_id, b_id, idx, background=False):
+        ev_calls.append((ev_id, b_id, idx, background))
 
     monkeypatch.setattr(br, "generate_evidence", fake_generate_evidence)
 
@@ -148,6 +148,9 @@ def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypat
 
     # Evidence warmed for both insights; no PRD generation occurred.
     assert len(ev_calls) == 2, "expected evidence warmed for every insight"
+    # Warming is background-lane work: it must never queue a user's own
+    # generation (tickets / PRD / evidence click) behind it on the LLM gate.
+    assert all(c[3] is True for c in ev_calls), "warm storm must pass background=True"
 
 
 def test_warm_drilldowns_warms_predefined_and_dynamic_asks(isolated_settings, monkeypatch):

@@ -27,15 +27,19 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from app.connectors import (
     asana_oauth,
     clickup_oauth,
+    confluence_oauth,
     figma_oauth,
     fireflies_apikey,
     github_app,
+    google_meet,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
+    uploads,
+    zoom_oauth,
 )
 from app.connectors.tokens import (
     TokenEncryptionError,
@@ -175,6 +179,249 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
                 "email": raw_user.get("emailAddress"),
                 "name": raw_user.get("displayName"),
             }
+    elif provider == confluence_oauth.CONFLUENCE_PROVIDER:
+        # Same shape as the Jira branch above — Atlassian 3LO, ~1h access
+        # tokens, ROTATING refresh tokens, so a refresh must be persisted or
+        # the stored one is stranded. One extra obligation Jira doesn't have:
+        # company_id must survive the refresh, because it is the credential
+        # the kg_ingest puller receives (see token_payload_to_store).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = confluence_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    confluence_oauth.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    confluence_oauth.CONFLUENCE_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Confluence probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        cloud_id = (json.loads(row.get("config_json") or "{}")).get(
+            confluence_oauth.CONFIG_CLOUD_ID
+        ) or confluence_oauth.first_cloud_id(access_token)
+        # Probe with the call the CONNECTOR actually depends on, not a cheap
+        # identity endpoint. Confluence has two scope families: the v1
+        # current-user route answers on a CLASSIC scope, while everything this
+        # connector reads is v2 and needs GRANULAR ones. An identity-only probe
+        # therefore reports a healthy connection whose every sync 401s with
+        # "scope does not match" — which is exactly the state a token minted
+        # before the granular scopes were added is in. Listing one space costs
+        # the same round trip and proves the thing that matters.
+        if cloud_id:
+            try:
+                confluence_oauth.list_spaces(
+                    access_token, cloud_id, limit=1, max_pages=1
+                )
+            except confluence_oauth.ConfluenceAuthExpiredError as e:
+                raise ProbeError(
+                    f"Confluence rejected the token: {e}", reason="rejected"
+                ) from e
+        raw_user = (
+            confluence_oauth.fetch_current_user(access_token, cloud_id)
+            if cloud_id else {}
+        )
+        # Normalize Confluence's field names onto the keys _label_from_user
+        # expects (it answers with publicName when the org hides emails).
+        if raw_user:
+            user_obj = {
+                "email": raw_user.get("email"),
+                "name": raw_user.get("displayName") or raw_user.get("publicName"),
+            }
+        elif cloud_id:
+            # The scope check above passed, so the connection IS healthy even
+            # though the identity lookup came back empty (an org can refuse
+            # read:confluence-user while content reads work). Fall back to the
+            # site name so this doesn't read as a rejected credential.
+            user_obj = {
+                "name": confluence_oauth.site_name_for_cloud(access_token, cloud_id)
+            }
+    elif provider == zoom_oauth.ZOOM_PROVIDER:
+        # Zoom: 1h access tokens with 90-day ROTATING refresh tokens, so a
+        # refresh must be persisted or the stored one is spent and the
+        # connection dies at the next cycle. Same company_id obligation as
+        # Confluence: it is the credential the kg_ingest puller receives (see
+        # zoom_oauth.token_payload_to_store), so it has to survive the rewrite.
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = zoom_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    zoom_oauth.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    zoom_oauth.ZOOM_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except zoom_oauth.ZoomAuthExpiredError as e:
+                raise ProbeError(f"Zoom token rejected: {e}", reason="rejected") from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Zoom probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        try:
+            config = json.loads(row.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+        # Probe with the call the CONNECTOR actually depends on, not the cheap
+        # identity endpoint. `GET /users/me` answers on `user:read:user:admin`
+        # while every recording read answers on the cloud_recording scopes — so
+        # an identity-only probe reports a healthy connection whose every sync
+        # 401s, which is precisely the state a token minted before a scope
+        # change is in. That is not hypothetical: it is the second defect of the
+        # Confluence granular-scopes incident (a1e16c40), where a green probe
+        # concealed a wholly broken connector. Listing ONE recording for one
+        # host costs the same round trip and proves the thing that matters.
+        #
+        # Addressed by the REAL userId cached at connect, not `me`: this app is
+        # admin-managed, and Zoom documents account-level apps as passing an
+        # explicit userId. `allow_missing=False` for the same reason — a path
+        # that does not resolve answers 404, and 404 swallowed into an empty
+        # list would read as "this host recorded nothing", which reads as
+        # HEALTHY. A wrong path must never come back green.
+        #
+        # An empty list, on the other hand, IS healthy: an account with nothing
+        # recorded this month is a truthful state, and calling it disconnected
+        # would send a customer to reconnect something that works.
+        try:
+            zoom_oauth.list_user_recordings(
+                access_token,
+                zoom_oauth.probe_user_id(config),
+                page_size=1,
+                max_pages=1,
+                allow_missing=False,
+            )
+        except zoom_oauth.ZoomAuthExpiredError as e:
+            raise ProbeError(f"Zoom rejected the token: {e}", reason="rejected") from e
+        except zoom_oauth.ZoomNotFoundError as e:
+            raise ProbeError(
+                f"Zoom could not resolve the connected host: {e}", reason="rejected"
+            ) from e
+        raw_user = zoom_oauth.fetch_current_user(access_token) or {}
+        # The scope check above passed, so the connection IS healthy even when
+        # the identity lookup comes back empty. Fall back to the label stored at
+        # connect so this never reads as a rejected credential.
+        user_obj = {
+            "email": raw_user.get("email"),
+            "name": (
+                zoom_oauth.account_label_from(raw_user)
+                or row.get("account_label")
+                or "Zoom account"
+            ),
+        }
+    elif provider == google_meet.GOOGLE_MEET_PROVIDER:
+        # Google Meet: 1h access tokens with NON-rotating refresh tokens. The
+        # rotation hazard Zoom and Atlassian have is absent — but Google's
+        # refresh response omits `refresh_token` entirely, so persisting it
+        # verbatim would blank the stored one and kill the connection at the
+        # next cycle. Hence keep_refresh_token, which is load-bearing here even
+        # though it is a fallback elsewhere. Same company_id obligation as
+        # Confluence and Zoom: it is the credential the kg_ingest puller
+        # receives (see google_meet.token_payload_to_store).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = google_meet.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    google_meet.token_payload_to_store(
+                        new_json,
+                        company_id=(
+                            row.get("company_id")
+                            or token_json.get("company_id")
+                            or ""
+                        ),
+                        keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    google_meet.GOOGLE_MEET_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except google_meet.MeetAuthExpiredError as e:
+                raise ProbeError(
+                    f"Google Meet token rejected: {e}", reason="rejected"
+                ) from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Google Meet probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        # Probe with the call the CONNECTOR actually depends on, not a cheap
+        # identity endpoint. Google's userinfo answers on `userinfo.email` while
+        # every meeting read answers on `meetings.space.readonly` — and those
+        # scopes can genuinely come apart, because the Meet API has to be
+        # ENABLED on the Cloud project and can be turned off for a Workspace by
+        # its admin, neither of which touches sign-in. An identity-only probe
+        # would therefore report a healthy connection whose every sync 403s.
+        # That is not hypothetical: it is the second defect of the Confluence
+        # granular-scopes incident (a1e16c40), where a green probe concealed a
+        # wholly broken connector. Listing ONE conference record costs the same
+        # round trip and proves the thing that matters.
+        #
+        # An EMPTY list is healthy, and saying so matters more here than on any
+        # other connector: coverage is organizer-only over a 30-day window, so a
+        # PM who chairs no meetings legitimately has nothing — calling that
+        # disconnected would send a customer to reconnect something that works.
+        try:
+            google_meet.list_conference_records(
+                access_token, page_size=1, max_pages=1,
+            )
+        except google_meet.MeetAuthExpiredError as e:
+            raise ProbeError(
+                f"Google Meet rejected the token: {e}", reason="rejected"
+            ) from e
+        raw_user = google_meet.fetch_current_user(access_token) or {}
+        # The read check above passed, so the connection IS healthy even when
+        # the identity lookup comes back empty. Fall back to the label stored at
+        # connect so this never reads as a rejected credential.
+        user_obj = {
+            "email": raw_user.get("email"),
+            "name": (
+                google_meet.account_label_from(raw_user)
+                or row.get("account_label")
+                or "Google Meet account"
+            ),
+        }
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
         # Canonical token-validity check: team.info returns {id, name, domain},
@@ -266,6 +513,22 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
             )
         except superset_auth.SupersetAuthError:
             user_obj = {}  # soft rejection → "reconnect required" below
+    elif provider == uploads.UPLOADS_PROVIDER:
+        # Nothing to validate against a third party — the "credential" is the
+        # company's own document corpus. Healthy exactly while at least one
+        # named source still exists; deleting the last one reads as
+        # "disconnected", which is the truthful state for this connector.
+        from app.document_sources import list_document_sources
+
+        company_id = token_json.get(uploads.CREDENTIAL_KEY) or row.get("company_id") or ""
+        sources = list_document_sources(company_id)
+        if sources:
+            files = sum(s.file_count for s in sources)
+            user_obj = {
+                "name": f"{len(sources)} source"
+                        f"{'' if len(sources) == 1 else 's'} · "
+                        f"{files} file{'' if files == 1 else 's'}",
+            }
     else:
         raise ProbeError(
             f"Probe not supported for provider {provider!r}", reason="unsupported"

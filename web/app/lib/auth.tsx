@@ -56,8 +56,18 @@ export type SignUpInput = {
    *  company/personal split is retired from the UI). */
   accountType?: "company" | "personal"
   /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
-   *  auto-detect from the browser so the weekly brief fires Monday 06:00 local. */
+   *  auto-detect from the browser so the Top Insights brief fires Monday 06:00 local. */
   timezone?: string
+  /** An artifact-share token, when the sign-up originated from a valid
+   *  shared-artifact link. Persisted into user_metadata so postLoginPath()
+   *  can resolve it on ANY device/session, even if verification completes
+   *  somewhere other than where sign-up started. */
+  pendingShareToken?: string
+  /** A bare-link PRD's opaque public_id, when the sign-up originated from a
+   *  `?prd=` visit with NO share token (2026-08-02 "full parity" bare-link
+   *  scope) — the token-less sibling of pendingShareToken, same persistence
+   *  rationale. Never the raw sequential prd id. */
+  pendingPrdPublicId?: string
 }
 
 /** Best-effort IANA timezone of the current browser (e.g. "America/New_York").
@@ -78,6 +88,10 @@ type AuthCtx = AuthState & {
   signUpWithPassword: (input: SignUpInput) => Promise<SignUpResult>
   resetPassword: (email: string) => Promise<void>
   resendVerificationEmail: (email: string) => Promise<void>
+  /** Exchange the 6-digit signup code for a session. Throws on a bad/expired code. */
+  verifyEmailOtp: (email: string, token: string) => Promise<void>
+  /** Exchange the 6-digit recovery code for a session that can set a password. */
+  verifyPasswordResetOtp: (email: string, token: string) => Promise<void>
   signOut: () => Promise<void>
   refresh: () => Promise<void>
   postLoginPath: () => Promise<string>
@@ -102,6 +116,50 @@ function sessionToState(session: Session | null): AuthState {
 
 export function isUserEmailVerified(user: User): boolean {
   return !!user.email_confirmed_at
+}
+
+/**
+ * Wipe every session-scoped bit of client state so a DIFFERENT user never
+ * inherits the previous account's data (chat tabs, active company, conversation
+ * resume, in-memory settings caches). Used by both signOut and the account
+ * switch on /invite-conflict. Best-effort — storage may be disabled.
+ */
+export function clearSessionScopedStorage(): void {
+  try {
+    // Fixed keys
+    const SESSION_KEYS = [
+      "sprntly_active_company",
+      "sprntly_chat_tabs",
+      "sprntly_chat_active_tab",
+      "sprntly_resume_conv",
+    ]
+    for (const key of SESSION_KEYS) {
+      localStorage.removeItem(key)
+      sessionStorage.removeItem(key)
+    }
+    // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
+    const isTabKey = (key: string | null): key is string =>
+      !!key &&
+      (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
+    for (const store of [localStorage, sessionStorage]) {
+      const toRemove: string[] = []
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i)
+        if (isTabKey(key)) toRemove.push(key)
+      }
+      for (const key of toRemove) store.removeItem(key)
+    }
+  } catch {
+    // storage may be disabled; not fatal.
+  }
+  // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
+  // localStorage wipes — clear them too so the next user never flashes the
+  // previous account's connectors/tokens/team before revalidation.
+  try {
+    resetSettingsCaches()
+  } catch {
+    // Never let cache cleanup block the caller.
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -184,7 +242,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email: normalizeEmail(input.email),
         password: input.password,
         options: {
-          emailRedirectTo: authCallbackUrl(),
+          // No emailRedirectTo: the confirmation email carries a 6-digit code,
+          // not a link, and is redeemed on /verify-email via verifyEmailOtp.
           data: {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
@@ -192,6 +251,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             ...(input.priorities?.trim() ? { priorities: input.priorities.trim() } : {}),
             ...(input.accountType ? { account_type: input.accountType } : {}),
             ...(timezone ? { timezone } : {}),
+            ...(input.pendingShareToken ? { pending_share_token: input.pendingShareToken } : {}),
+            ...(input.pendingPrdPublicId
+              ? { pending_prd_public_id: input.pendingPrdPublicId }
+              : {}),
           },
         },
       })
@@ -203,9 +266,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const resetPassword = useCallback(async (email: string) => {
     const supabase = getSupabase()
-    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email), {
-      redirectTo: authCallbackUrl(),
-    })
+    // No redirectTo — the recovery email carries a 6-digit code, redeemed on
+    // /reset-password via verifyPasswordResetOtp.
+    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email))
     if (error) throw error
   }, [])
 
@@ -214,7 +277,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { error } = await supabase.auth.resend({
       type: "signup",
       email: normalizeEmail(email),
-      options: { emailRedirectTo: authCallbackUrl() },
+    })
+    if (error) throw error
+  }, [])
+
+  const verifyEmailOtp = useCallback(async (email: string, token: string) => {
+    const supabase = getSupabase()
+    // "signup" is the token type GoTrue mints for the signup-confirmation
+    // email (and for auth.resend({type:"signup"})) — the same token the old
+    // emailed link carried as .TokenHash, just in its typeable 6-digit form.
+    const { error } = await supabase.auth.verifyOtp({
+      type: "signup",
+      email: normalizeEmail(email),
+      token: token.trim(),
+    })
+    if (error) throw error
+  }, [])
+
+  const verifyPasswordResetOtp = useCallback(async (email: string, token: string) => {
+    const supabase = getSupabase()
+    const { error } = await supabase.auth.verifyOtp({
+      type: "recovery",
+      email: normalizeEmail(email),
+      token: token.trim(),
     })
     if (error) throw error
   }, [])
@@ -231,46 +316,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Drop the token cache immediately — the next user must never inherit a
       // still-valid bearer from the previous session.
       cachedSession = null
-      // Wipe all session-scoped storage so a different user logging in on the
-      // same browser never sees the previous user's data (chat tabs, active
-      // company, conversation resume, etc.). Chat tabs now live in
-      // sessionStorage (session-scoped by design — see ChatScreen); we clear
-      // BOTH storages: sessionStorage so a same-tab re-login starts fresh, and
-      // localStorage to sweep any stale tab entries written before that move.
-      try {
-        // Fixed keys
-        const SESSION_KEYS = [
-          "sprntly_active_company",
-          "sprntly_chat_tabs",
-          "sprntly_chat_active_tab",
-          "sprntly_resume_conv",
-        ]
-        for (const key of SESSION_KEYS) {
-          localStorage.removeItem(key)
-          sessionStorage.removeItem(key)
-        }
-        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
-        const isTabKey = (key: string | null): key is string =>
-          !!key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
-        for (const store of [localStorage, sessionStorage]) {
-          const toRemove: string[] = []
-          for (let i = 0; i < store.length; i++) {
-            const key = store.key(i)
-            if (isTabKey(key)) toRemove.push(key)
-          }
-          for (const key of toRemove) store.removeItem(key)
-        }
-      } catch {
-        // storage may be disabled; not fatal.
-      }
-      // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
-      // localStorage wipes — clear them too so the next user never flashes the
-      // previous account's connectors/tokens/team before revalidation.
-      try {
-        resetSettingsCaches()
-      } catch {
-        // Never let cache cleanup block sign-out.
-      }
+      // Wipe all session-scoped storage + in-memory caches so a different user
+      // logging in on the same browser never sees the previous user's data.
+      clearSessionScopedStorage()
       setState({ kind: "anonymous" })
     }
   }, [])
@@ -288,6 +336,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
+      verifyEmailOtp,
+      verifyPasswordResetOtp,
       signOut,
       refresh,
       postLoginPath,
@@ -300,6 +350,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
+      verifyEmailOtp,
+      verifyPasswordResetOtp,
       signOut,
       refresh,
       isEmailVerified,

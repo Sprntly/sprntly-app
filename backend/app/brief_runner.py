@@ -138,7 +138,10 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         insight_index,
     )
     async with _warm_sema():
-        await generate_evidence(ev_id, brief_id, insight_index)
+        # background=True: warming rides the LLM gate's low-priority lane so a
+        # user's own generation (tickets, PRD, evidence click) never queues
+        # behind the post-brief warm storm.
+        await generate_evidence(ev_id, brief_id, insight_index, background=True)
 
 
 def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:

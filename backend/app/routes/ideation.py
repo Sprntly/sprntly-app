@@ -11,7 +11,7 @@ Routes (all tenant-scoped via require_company):
                                   (in_progress | done | dismissed).
 
 Items are produced by the synthesis run (sequence_ideation) — every theme that
-didn't make the weekly brief's TOP 3, scored and persisted, with the weekly
+didn't make the Top Insights brief's TOP 3, scored and persisted, with the weekly
 prioritization pass marking the 25–30 worth showing as `shortlisted`. The GET
 route returns ONLY the visible set; the tail stays persisted but hidden (it
 competes again on the next weekly run).
@@ -34,6 +34,8 @@ from app.auth import CompanyContext, require_company
 from app.db.ideation import (
     PATCHABLE_STATUSES,
     create_manual_ideation_item,
+    get_ideation_item,
+    is_manual_item,
     list_ideation_items,
     list_visible_ideation_items,
     reorder_ideation_items,
@@ -42,6 +44,14 @@ from app.db.ideation import (
 from app.db.briefs import get_current_brief
 from app.db.companies import slug_for_company_id
 from app.db.finding_state import COMPLETED_ACTIONS, list_findings_by_action
+from app.evidence_kg import gather_evidence_trail
+from app.graph.decision_chain import (
+    artifacts_for_hypothesis,
+    create_outcome_from_artifact,
+    validate_hypothesis_from_outcome,
+)
+from app.graph.facade import GraphFacade
+from app.graph.retrieval import resolve_insight_hypothesis
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +77,7 @@ class ReorderIn(BaseModel):
 
 
 def _company_has_brief(company_id: str) -> bool:
-    """True iff a current weekly brief exists for this company.
+    """True iff a current Top Insights brief exists for this company.
 
     Briefs are keyed by the dataset slug (`briefs.dataset == companies.slug`),
     mirroring how the brief routes scope by slug. No slug / no brief row → the
@@ -84,7 +94,7 @@ def get_ideation(company: CompanyContext = Depends(require_company)):
     """The enterprise's visible ideas: the weekly shortlist (25–30, picked by
     the prioritization pass from the latest analysis) plus user-pinned rows.
 
-    Empty when no weekly brief has ever been generated for the company: the
+    Empty when no Top Insights brief has ever been generated for the company: the
     ideation pool is the remainder of the brief's ranking, so with no brief
     there is no analysis to draw ideas from.
     """
@@ -122,6 +132,90 @@ def get_completed(company: CompanyContext = Depends(require_company)):
     return {"items": items, "count": len(items)}
 
 
+# How many evidence excerpts the detail popup shows. The trail is sorted
+# strongest-first (weight, then confidence), so the head is the useful part; a
+# popup that lists 40 signals is a wall, not problem framing.
+_DETAIL_EVIDENCE_CAP = 6
+
+
+@router.get("/{item_id}/detail")
+def get_ideation_item_detail(
+    item_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """One idea, with the KG evidence behind it — backs the Ideation popup.
+
+    The list route returns only what the table needs (title/rank/tag/reasoning).
+    Opening an idea asks a different question: *why does this matter?* That
+    answer lives in the knowledge graph, not in `ideation_items` — the row
+    carries a one-line ranking rationale and nothing else. So we resolve the
+    row's theme the same way the ideation PRD path does (see routes/prd.py's
+    generate-from-ideation: synthesize an insight from the row, then walk the
+    trail) and return the supporting signals as the evidence excerpts the popup
+    frames the problem with.
+
+    Manual "+ Add idea" rows have a synthetic ``manual:`` theme_id with no KG
+    theme behind them, so they have no recoverable evidence — they return an
+    empty trail rather than a misleading one.
+
+    Best-effort on the KG read: a graph failure degrades to an empty trail (the
+    popup still renders the idea + its rationale) instead of 500-ing.
+    """
+    item = get_ideation_item(company.company_id, item_id)
+    if item is None:
+        raise HTTPException(404, "Ideation item not found")
+
+    theme_id = item.get("theme_id")
+    trail: list[dict] = []
+    if theme_id and not is_manual_item(item):
+        try:
+            facade = GraphFacade()
+            hypothesis = resolve_insight_hypothesis(
+                facade, company.company_id, theme_id, item.get("title")
+            )
+            trail = gather_evidence_trail(
+                facade,
+                company.company_id,
+                theme_id=theme_id,
+                hypothesis=hypothesis,
+            )
+        except Exception as exc:  # noqa: BLE001 — detail must not hard-fail
+            logger.info(
+                "ideation detail: evidence trail failed for %s (%s)", item_id, exc
+            )
+            trail = []
+
+    evidence = [
+        {
+            "signal_id": s.get("signal_id"),
+            "content": s.get("content"),
+            "kind": s.get("kind"),
+            "source_type": s.get("source_type"),
+            "provenance": s.get("provenance") or {},
+            "confidence": s.get("confidence"),
+        }
+        for s in trail[:_DETAIL_EVIDENCE_CAP]
+    ]
+    # Distinct source types across the WHOLE trail (not just the shown head) —
+    # "heard across 3 sources" is a breadth claim about all the evidence.
+    sources = sorted({str(s.get("source_type")) for s in trail if s.get("source_type")})
+
+    return {
+        "id": item.get("id"),
+        "theme_id": theme_id,
+        "title": item.get("title"),
+        "tag": item.get("tag"),
+        "rank": item.get("rank"),
+        "score": item.get("score"),
+        "status": item.get("status"),
+        "reasoning": item.get("reasoning"),
+        "evidence": evidence,
+        "evidence_count": len(trail),
+        "sources": sources,
+        "is_manual": is_manual_item(item),
+    }
+
+
 @router.post("")
 def create_ideation_item(
     body: CreateItem,
@@ -149,6 +243,55 @@ def reorder_ideation(
     return {"items": items, "count": len(items)}
 
 
+def _advance_artifact_to_outcome(company_id: str, item: dict) -> None:
+    """Artifact --REALIZES--> Outcome --VALIDATES--> Hypothesis
+    (`graph.decision_chain`) — trigger: an idea moving to status='done'.
+
+    Resolves the idea's hypothesis the SAME way the detail popup does
+    (`resolve_insight_hypothesis` on theme_id/title), then walks
+    PROMOTED_TO/RESULTED_IN forward to find the artifact(s) that hypothesis's
+    PRD(s) produced. No artifact in that walk (the idea never went through
+    Generate PRD, or the theme has no hypothesis at all) means there's
+    nothing to link an outcome to — silently skipped, not an error; most
+    completed ideas never ran the human-PRD flow this trigger depends on.
+    Manual items (no KG theme behind them) are skipped for the same reason.
+
+    Writes the outcome with `actual_impact=None` — no automatic source for
+    that measurement exists (no live analytics connector) — per the ticket's
+    "don't silently skip this edge; the value may start null/manual".
+
+    Best-effort: the status transition is already persisted by the time this
+    runs, so a KG write failure here must never turn a successful status
+    update into a failed request."""
+    theme_id = item.get("theme_id")
+    if not theme_id or is_manual_item(item):
+        return
+    try:
+        facade = GraphFacade()
+        hyp = resolve_insight_hypothesis(facade, company_id, theme_id, item.get("title"))
+        if hyp is None:
+            return
+        artifacts = artifacts_for_hypothesis(facade, company_id, hyp.id)
+        if not artifacts:
+            return
+        artifact = artifacts[0]  # most recent, per artifacts_for_hypothesis
+        title = item.get("title") or f"Outcome: {theme_id}"
+        outcome = create_outcome_from_artifact(
+            facade, company_id, artifact.id, label=title,
+            properties={"theme_id": theme_id, "ideation_item_id": item.get("id")},
+            provenance={"trigger": "ideation_done"},
+        )
+        validate_hypothesis_from_outcome(
+            facade, company_id, outcome.id, hyp.id, actual_impact=None,
+            provenance={"trigger": "ideation_done"},
+        )
+    except Exception:  # noqa: BLE001 — chain write is best-effort
+        logger.exception(
+            "decision-chain outcome write failed item=%s theme=%s",
+            item.get("id"), theme_id,
+        )
+
+
 @router.patch("/{item_id}")
 def patch_ideation_item(
     item_id: str,
@@ -161,7 +304,14 @@ def patch_ideation_item(
             400,
             f"Unknown status {body.status!r}; expected one of {PATCHABLE_STATUSES}",
         )
+    before = get_ideation_item(company.company_id, item_id)
+    if before is None:
+        raise HTTPException(404, "Ideation item not found")
     updated = update_ideation_status(company.company_id, item_id, body.status)
     if updated is None:
         raise HTTPException(404, "Ideation item not found")
+    # Trigger only on an ACTUAL transition into 'done' — an idempotent re-PATCH
+    # of an already-done item must not write a duplicate outcome/edge pair.
+    if body.status == "done" and before.get("status") != "done":
+        _advance_artifact_to_outcome(company.company_id, updated)
     return updated

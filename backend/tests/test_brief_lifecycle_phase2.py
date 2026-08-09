@@ -1,4 +1,4 @@
-"""Phase 2 weekly-brief lifecycle — route-level behavior.
+"""Phase 2 top-insights lifecycle — route-level behavior.
 
   - POST /v1/prd/generate records the insight's theme as 'prd_created'
   - POST /v1/brief/dismiss records the finding as 'dismissed'
@@ -18,6 +18,23 @@ def _save_brief(db_mod, dataset, insights):
     )
 
 
+def _stub_prd_warm(monkeypatch) -> None:
+    """POST /v1/prd/generate schedules `generate_prd_and_warm` as a fire-and-
+    forget `asyncio.create_task` — this route's tests only care about the
+    'prd_created' finding-state side effect recorded BEFORE that task is
+    scheduled, not PRD generation itself. Left unstubbed, that task's Part A/
+    Part B work (`_generate_human_prd` / `ensure_impl_spec`) runs real
+    `asyncio.to_thread` calls against the shared in-memory fake DB on
+    uncontrolled timing (see `tests/_fake_supabase.py`'s module docstring —
+    this is the exact hazard it names)."""
+    from app.routes import prd as prd_routes
+
+    async def _noop_warm(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", _noop_warm)
+
+
 def _finding_rows(db, company_id):
     return (
         db.table("brief_finding_state").select("*")
@@ -28,8 +45,9 @@ def _finding_rows(db, company_id):
 # ── PRD generation records 'prd_created' ─────────────────────────────────────
 
 def test_prd_generate_records_prd_created_for_insight_theme(
-    tenant_client, isolated_settings, fake_llm
+    tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
+    _stub_prd_warm(monkeypatch)
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _save_brief(db_mod, "acme", [
@@ -49,10 +67,11 @@ def test_prd_generate_records_prd_created_for_insight_theme(
 
 
 def test_prd_generate_without_theme_id_does_not_break(
-    tenant_client, isolated_settings, fake_llm
+    tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
     """A legacy brief insight with no theme_id still generates a PRD (best-effort
     action recording is a no-op)."""
+    _stub_prd_warm(monkeypatch)
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _save_brief(db_mod, "acme", [{"title": "Insight A"}])
@@ -110,6 +129,52 @@ def test_dismiss_foreign_brief_is_404(tenant_client, isolated_settings):
         "/v1/brief/dismiss", json={"brief_id": brief_id, "insight_index": 0}
     )
     assert resp.status_code == 404
+
+
+# ── defer + restore endpoints (phase 2A) ─────────────────────────────────────
+
+def test_defer_records_deferred_with_window(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post("/v1/brief/defer", json={"theme_id": "theme-xyz"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deferred"] is True and body["theme_id"] == "theme-xyz"
+    assert body["deferred_until"]
+
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert len(rows) == 1
+    assert rows[0]["action"] == "deferred"
+    assert rows[0]["deferred_until"]
+
+
+def test_defer_by_brief_insight_resolves_theme_id(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief(db_mod, "acme", [
+        {"title": "Insight A", "theme_id": "theme-aaa"},
+    ])
+    resp = t.client.post(
+        "/v1/brief/defer", json={"brief_id": brief_id, "insight_index": 0, "days": 14}
+    )
+    assert resp.status_code == 200
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert rows[0]["theme_id"] == "theme-aaa"
+    assert rows[0]["action"] == "deferred"
+
+
+def test_defer_missing_identifiers_is_400(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    assert t.client.post("/v1/brief/defer", json={}).status_code == 400
+
+
+def test_restore_clears_dismiss_and_deferral(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    assert t.client.post("/v1/brief/defer", json={"theme_id": "t-1"}).status_code == 200
+    resp = t.client.post("/v1/brief/restore", json={"theme_id": "t-1"})
+    assert resp.status_code == 200
+    rows = _finding_rows(isolated_settings["supabase"], t.company_id)
+    assert rows[0]["action"] == "surfaced"
+    assert rows[0].get("deferred_until") in (None, "")
 
 
 # ── completed read endpoint ──────────────────────────────────────────────────

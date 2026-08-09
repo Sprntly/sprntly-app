@@ -1,10 +1,19 @@
-"""Thin wrapper over the Anthropic SDK.
+"""Thin wrapper over the Anthropic SDK — and, for companies that choose it, over
+an OpenAI client wearing the same interface.
 
 All `messages.create` calls go through `_create_with_retries`, which adds
 exponential-backoff retries on transient failures (429 / 5xx / overloaded /
 timeouts / connection drops) and a per-request timeout. Existing callers
 (`call_json` / `call_md`) get this for free; the agent-facing gateway
 (`app.graph.gateway.llm_call`) layers tenant context + telemetry on top.
+
+`get_client()` returns whichever client the acting company's provider calls for
+— a real `anthropic.Anthropic`, or `app.openai_client.OpenAIMessagesClient`,
+which implements the same `messages.create` / `messages.stream` surface (see
+that module for the translation). Everything below this line is written against
+that shared surface and is provider-agnostic: the model id a caller passes is
+translated to the equivalent OpenAI tier inside the client, so no call site,
+prompt, or runner needs a provider conditional.
 """
 import json
 import logging
@@ -19,12 +28,19 @@ from anthropic import Anthropic
 from fastapi import HTTPException
 
 from app.config import settings
+from app.llm_metering import install_metering
+from app.llm_providers import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from app.openai_client import OpenAIAPIError, OpenAIMessagesClient
 
 logger = logging.getLogger(__name__)
 
+# Either client this module may hand back. Both expose `messages.create` /
+# `messages.stream` with the same kwargs and the same response shape.
+LLMClient = Anthropic | OpenAIMessagesClient
+
 DEFAULT_MODEL = "claude-sonnet-4-6"
 # Deep-reasoning tier. Reserved for the handful of calls that are genuinely
-# open-ended AND infrequent AND high-stakes — the weekly-brief composition and
+# open-ended AND infrequent AND high-stakes — the top-insights composition and
 # the onboarding business-context inference (each runs ~once per brief / per
 # company and seeds everything downstream). Everything else — structured
 # extraction, ranking, PRD templating, the per-message/loop paths — stays on
@@ -53,11 +69,18 @@ DEEP_MODEL = "claude-opus-4-7"
 # worker thread (see callers rerouted through `asyncio.to_thread`) so the loop
 # is never blocked here.
 #
-# Default 3: a conservative steady state (a couple of interactive calls plus a
-# warm) for an unsized box. Hosts with RAM headroom should raise it via
+# Default 6: raised from the original conservative 3 once a real caller started
+# dispatching several of its own calls concurrently (competitive_intel's
+# per-competitor capture fan-out) and would otherwise have queued behind this
+# gate, giving back most of the win concurrency was meant to buy. This is not a
+# new, untested number — it is exactly the "6 concurrent streams ~80 MB extra"
+# figure the comment above already measured and documented as safe on the prod
+# box. This gate is process-wide and shared by EVERY interactive LLM call in
+# the app, not just competitive_intel, so raising it affects every caller that
+# reaches this chokepoint. Hosts with RAM headroom can raise it further via
 # LLM_MAX_CONCURRENCY (and LLM_BG_CAP, to let warming use the extra slots).
 # Values <= 0 / unset fall back to the default (never 0, which would deadlock).
-_DEFAULT_MAX_CONCURRENCY = 3
+_DEFAULT_MAX_CONCURRENCY = 6
 # How long a call may wait for a slot before we emit a (single) saturation log,
 # so sustained contention is observable without spamming every queued call.
 _SLOT_WAIT_LOG_THRESHOLD_S = 5.0
@@ -177,23 +200,60 @@ def strip_code_fence(text: str) -> str:
 
 
 @lru_cache(maxsize=16)
-def _client_for_key(api_key: str) -> Anthropic:
+def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     """Cached Anthropic client keyed by the API key. max_retries=0: the SDK's own
-    retry layer is disabled so ours is the single source of truth."""
-    return Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    retry layer is disabled so ours is the single source of truth.
+
+    The client is instrumented for usage metering before being cached, so every
+    call through it lands in `llm_usage_events` without any call site opting in
+    (see app.llm_metering). `key_mode` records whose key is billed; it is part
+    of the cache key only for correctness-by-construction — it is a function of
+    `api_key`, so it never actually splits the cache.
+    """
+    client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    return install_metering(client, key_mode, provider=PROVIDER_ANTHROPIC)
 
 
-def get_client() -> Anthropic:
-    # Resolve the key for the acting company (see app.llm_keys): the company's own
-    # key when configured, the platform key only when allowed (unbound / still
-    # onboarding / contracted `use_platform_key`), else raise. Embeddings go
-    # through OpenAI and never call this factory.
-    from app.llm_keys import resolve_llm_api_key
+@lru_cache(maxsize=16)
+def _openai_client_for_key(
+    api_key: str, key_mode: str = "platform"
+) -> OpenAIMessagesClient:
+    """The OpenAI counterpart of `_client_for_key`, cached the same way.
 
-    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    Same contract: no client-side retry (ours is the only layer), the same
+    default read timeout, and metered before caching so an OpenAI workspace's
+    spend lands in `llm_usage_events` on exactly the same footing — tagged
+    `provider='openai'` so the usage dashboard can split the two.
+    """
+    client = OpenAIMessagesClient(api_key=api_key, timeout=_REQUEST_TIMEOUT_S)
+    return install_metering(client, key_mode, provider=PROVIDER_OPENAI)
+
+
+def get_client() -> LLMClient:
+    """The client for the acting company's provider and key (see app.llm_keys).
+
+    Provider and key are resolved in one step: the company's own key when it has
+    one for the provider it chose, that provider's platform key otherwise.
+    Unbound stacks (CLI, startup, unauthenticated) get Anthropic + the platform
+    key, exactly as before. Embeddings go through OpenAI directly and never call
+    this factory.
+    """
+    from app.llm_keys import resolve_llm_client_config
+
+    provider, key, key_mode = resolve_llm_client_config(
+        anthropic_platform_key=settings.anthropic_api_key or None,
+        openai_platform_key=settings.openai_api_key or None,
+    )
     if not key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-    return _client_for_key(key)
+        raise HTTPException(
+            500,
+            "OPENAI_API_KEY not configured"
+            if provider == PROVIDER_OPENAI
+            else "ANTHROPIC_API_KEY not configured",
+        )
+    if provider == PROVIDER_OPENAI:
+        return _openai_client_for_key(key, key_mode)
+    return _client_for_key(key, key_mode)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -202,6 +262,11 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, anthropic.APIStatusError):
         # 429 rate limit, 5xx server errors, 529 overloaded.
         return exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, OpenAIAPIError):
+        # Same rule on the OpenAI side. `status_code is None` means the request
+        # never got a response (connection/timeout) — the transport-failure case
+        # the two anthropic exceptions above cover.
+        return exc.status_code is None or exc.status_code == 429 or exc.status_code >= 500
     return False
 
 
@@ -210,8 +275,8 @@ def _attempt_delay(attempt: int) -> float:
 
 
 def _create_with_retries(
-    client: Anthropic, *, stream: bool = False, background: bool = False,
-    on_delta=None, **kwargs
+    client: LLMClient, *, stream: bool = False, background: bool = False,
+    on_delta=None, on_json_delta=None, **kwargs
 ):
     """`messages.create` with exponential backoff on transient failures.
 
@@ -229,6 +294,13 @@ def _create_with_retries(
     the stream, so on_delta may re-emit from the beginning; the caller treats
     the persisted final result as authoritative and uses on_delta only for
     progressive display. Callback exceptions are swallowed.
+
+    `on_json_delta(partial_json)` — the tool-use counterpart of `on_delta`:
+    when given AND streaming, each `input_json` PARTIAL-JSON fragment of the
+    forced tool's input is forwarded as it arrives (a caller-side extractor —
+    e.g. app.ask_stream — turns those into display text). Same restart caveat
+    as on_delta; between attempts a callback exposing `reset()` is rewound so
+    its incremental parse restarts with the re-emitted stream.
 
     The whole call (including its retries) holds ONE process-wide concurrency
     slot (`_llm_gate`) for its full duration, so the box never runs more
@@ -255,13 +327,30 @@ def _create_with_retries(
         last: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
+                # A retry restarts the stream from zero — rewind a stateful
+                # incremental extractor so it re-parses the fresh emission
+                # instead of gluing two attempts together.
+                if attempt and on_json_delta is not None:
+                    reset = getattr(on_json_delta, "reset", None)
+                    if callable(reset):
+                        reset()
                 if stream:
                     with client.messages.stream(**kwargs) as s:
                         # Drain the stream so deltas are consumed, then return
                         # the assembled final message (same shape as create).
                         # With on_delta, forward each text delta as it lands
                         # (progressive display) before assembling the final.
-                        if on_delta is not None:
+                        if on_json_delta is not None:
+                            # Tool-use streaming: the payload arrives as
+                            # `input_json` partial fragments, not text events.
+                            for _event in s:
+                                if getattr(_event, "type", None) != "input_json":
+                                    continue
+                                try:
+                                    on_json_delta(getattr(_event, "partial_json", "") or "")
+                                except Exception:  # noqa: BLE001 — display only
+                                    logger.exception("on_json_delta callback failed (continuing)")
+                        elif on_delta is not None:
                             for _text in s.text_stream:
                                 try:
                                     on_delta(_text)
@@ -340,12 +429,20 @@ def _build_base_kwargs(
 
 
 def _capture_meta(meta_out: dict | None, msg, model: str) -> None:
-    """Populate caller-supplied meta_out with usage/stop info (gateway telemetry)."""
+    """Populate caller-supplied meta_out with usage/stop info (gateway telemetry).
+
+    The RESPONSE's own model wins over the one the caller asked for, matching
+    what `app.llm_metering` records. It matters on two counts: an Anthropic
+    alias resolves to a concrete id, and on OpenAI the call site's Claude id was
+    translated to an OpenAI model — so trusting the request would have the
+    gateway price real OpenAI tokens against Claude's rate card in
+    `agent_decision_log`.
+    """
     if meta_out is None:
         return
     u = getattr(msg, "usage", None)
     meta_out.update({
-        "model": model,
+        "model": getattr(msg, "model", None) or model,
         "input_tokens": getattr(u, "input_tokens", 0) or 0,
         "output_tokens": getattr(u, "output_tokens", 0) or 0,
         "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
@@ -361,7 +458,7 @@ def _unwrap_response_envelope(out, schema):
     structured object under a single ``response`` key — cued by the tool name
     ``submit_response`` — even though the tool's ``input_schema`` is flat. Callers
     then read their real fields (e.g. ``insights``) off the top level and get
-    nothing. This was silently emptying every regenerated weekly brief.
+    nothing. This was silently emptying every regenerated Top Insights brief.
 
     Safe + narrow: only unwraps when the result is EXACTLY ``{"response": <dict>}``
     AND the requested schema does not itself declare a top-level ``response``
@@ -390,6 +487,7 @@ def call_json(
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
+    on_json_delta=None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -397,6 +495,10 @@ def call_json(
     — the SDK validates the structured input and returns a real dict, which
     eliminates the JSON-string-escaping failures that happen when an LLM
     hand-writes JSON containing markdown tables, quoted text, etc.
+
+    `on_json_delta(partial_json)` — optional; with `stream=True` and a schema,
+    forwards each partial-JSON fragment of the tool input as it streams (see
+    _create_with_retries). Ignored on the schema-less text-parse path.
 
     If `schema` is None, falls back to parsing the model's text response as
     JSON (used by endpoints whose payload is simple enough to round-trip
@@ -430,6 +532,7 @@ def call_json(
             client,
             stream=stream,
             background=background,
+            on_json_delta=on_json_delta,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
@@ -528,8 +631,10 @@ def run_tool_loop(
     Bounded by `max_iters` so a misbehaving model can't loop forever.
 
     This is the shared, single-chokepoint tool loop (same retry/concurrency gate
-    as every other call). Used for skills whose deterministic scripts run as
-    local tools (app.skills.scripts) — the math runs on our infra, not in-prompt.
+    as every other call). Used by the paths that need the model to REACH a live
+    system mid-answer — the tracker lookup, ticket updates, connector reads.
+    (It also backed the deleted `app.skills.scripts`, whose deterministic PM
+    math ran as a local tool; that path is gone, the live-read ones are not.)
     """
     client = get_client()
     base = _build_base_kwargs(
@@ -597,19 +702,43 @@ def call_with_web_search(
     "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
     prompt stays as the agent-specific layer after it. The web-search path has
     no cacheable-prefix mechanism, so the method rides the system prompt here.
+
+    TOLERANT of a `skill` that names no vendored directory, for the same reason
+    `graph.gateway._build_method_prefix` is: every research pass on this path
+    (public-feedback capture, company-research stages, the competitive sweep and
+    its weekly deep-dive) passes `skill=` for ATTRIBUTION as much as for method
+    text, and those ids no longer name a vendored skill. Raising here would take
+    the entire web-research capability down over a missing prompt fragment.
+    Each of those callers carries its own capture contract in `system`, which is
+    what the records are actually parsed against, so a missing method is a
+    quality tradeoff. A missing `skill_module` inside a skill that DOES exist
+    still raises — that is a caller bug, not a vendoring decision.
+
+    The request STREAMS on the long read timeout: a search-heavy call (the
+    server runs up to `max_searches` web searches before composing the answer)
+    routinely outlives the default non-streaming read timeout — the
+    public-feedback capture pass hit exactly that httpx.ReadTimeout on staging.
+    Streaming is the SDK's required pattern for slow/large requests; the
+    accumulated final Message keeps `_capture_meta` and content extraction
+    unchanged.
     """
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
-        from app.skills.loader import get_skill
+        from app.skills.loader import UnknownSkillError, get_skill
 
-        spec = get_skill(skill)
-        method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
-        if skill_module:
-            module_text = spec.modules[skill_module]
-            method += f"\n\n### MODULE: {skill_module}\n{module_text}"
-        system = f"{method}\n{system}"
+        try:
+            spec = get_skill(skill)
+        except UnknownSkillError:
+            spec = None  # not vendored -> run method-less; see the docstring
+        if spec is not None:
+            method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
+            if skill_module:
+                module_text = spec.modules[skill_module]
+                method += f"\n\n### MODULE: {skill_module}\n{module_text}"
+            system = f"{method}\n{system}"
     msg = _create_with_retries(
         get_client(),
+        stream=True,
         model=model,
         max_tokens=max_tokens,
         system=system,
@@ -619,6 +748,7 @@ def call_with_web_search(
             "name": "web_search",
             "max_uses": max_searches,
         }],
+        timeout=LONG_REQUEST_TIMEOUT_S,
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()

@@ -33,7 +33,23 @@ from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE_COLUMNS = "id, company_id, product_id, name, slug, is_default, created_at"
+_WORKSPACE_COLUMNS = (
+    "id, company_id, product_id, name, slug, is_default, created_at, "
+    "team_scope, team_strategy, team_roadmap, sizing_methodology, "
+    "additional_context"
+)
+
+# The optional workspace-owned fields update_workspace can patch (2026-07-22:
+# moved off the companies row). A sentinel distinguishes "not provided" from an
+# explicit None (which clears the column).
+_UNSET = object()
+_WORKSPACE_PATCH_FIELDS = (
+    "team_scope",
+    "team_strategy",
+    "team_roadmap",
+    "sizing_methodology",
+    "additional_context",
+)
 
 # Cached "no workspace_members row" marker. A sentinel object (never a string
 # or dict — real rows are dicts) so it can't collide with row data. Caching
@@ -181,14 +197,44 @@ def create_workspace(
     }
 
 
-def update_workspace(workspace_id: str, *, name: str) -> dict | None:
-    """Rename a workspace (cosmetic — slug and dataset binding unchanged, so
-    a rename never churns corpus paths or dataset-keyed rows)."""
-    require_client().table("workspaces").update({"name": name.strip()}).eq(
+def update_workspace(
+    workspace_id: str,
+    *,
+    name: str | None = None,
+    team_scope: object = _UNSET,
+    team_strategy: object = _UNSET,
+    team_roadmap: object = _UNSET,
+    sizing_methodology: object = _UNSET,
+    additional_context: object = _UNSET,
+) -> dict | None:
+    """Partial-update a workspace. `name` is the cosmetic rename (slug and
+    dataset binding unchanged, so it never churns corpus paths or dataset-keyed
+    rows); the five workspace-owned fields (2026-07-22, moved off the companies
+    row) are each optional — pass a value to set it, None to clear it, or omit
+    to leave it untouched. Only the provided keys are written."""
+    patch: dict = {}
+    if name is not None:
+        # Respect the DB workspaces_name_nonempty check — a blank rename is a
+        # no-op on the name (callers upstream validate/require it).
+        cleaned = name.strip()
+        if cleaned:
+            patch["name"] = cleaned
+    for field, value in (
+        ("team_scope", team_scope),
+        ("team_strategy", team_strategy),
+        ("team_roadmap", team_roadmap),
+        ("sizing_methodology", sizing_methodology),
+        ("additional_context", additional_context),
+    ):
+        if value is not _UNSET:
+            patch[field] = value
+    if not patch:
+        return get_workspace(workspace_id)
+    require_client().table("workspaces").update(patch).eq(
         "id", workspace_id
     ).execute()
-    # Drop the cached pre-rename row so the re-read below (and the route's
-    # response) reflects the new name; the route's coarse invalidation runs
+    # Drop the cached pre-update row so the re-read below (and the route's
+    # response) reflects the new values; the route's coarse invalidation runs
     # only after this returns.
     workspace_cache.invalidate(workspace_id)
     return get_workspace(workspace_id)
@@ -224,6 +270,60 @@ def get_workspace_member(workspace_id: str, user_id: str) -> dict | None:
     row = rows[0] if rows else None
     workspace_member_cache.set(key, _ABSENT if row is None else row)
     return row
+
+
+def user_can_act_in_workspace(
+    *, workspace_id: str | None, user_id: str, company_id: str, company_role: str
+) -> bool:
+    """True when `user_id` could reach `workspace_id` through the ORDINARY
+    app (i.e. `auth._resolve_workspace` would hand them a WorkspaceContext
+    for it), rather than needing the read-only guest surface.
+
+    A deliberate mirror of `auth._resolve_workspace`'s access rule, not a
+    second policy: org owner/admin implicitly administer every workspace of
+    their company; everyone else needs a `workspace_members` row. Kept here
+    (db layer) instead of in `auth` because the callers — the share /
+    bare-link resolvers — must ask the question WITHOUT a FastAPI request
+    to build a context from.
+
+    `workspace_id=None` is an unbound legacy dataset (pre-multi-workspace
+    rollout). `deps.ownership._dataset_in_workspace` DOES accept those from
+    any workspace of the owning company — but only once the request already
+    holds a WorkspaceContext, and `_resolve_workspace` is what decides that.
+    A plain member with no `workspace_members` row anywhere never gets one:
+    the no-header path falls back to `ensure_default_workspace` and then
+    403s "Not a member of this workspace". So an unbound dataset is NOT
+    unconditionally reachable, and answering True for everyone sent exactly
+    the caller `ArtifactShareGate` exists to protect — a domain-matched
+    fresh signup holding company membership and no workspace row — into an
+    app that 403s, with no Join prompt, when they used to get a working
+    read-only viewer. The question here is therefore "can this caller
+    obtain a WorkspaceContext at all?", which is what
+    `list_workspaces_for_user` answers.
+
+    That null branch is not hypothetical: measured 2026-08-05, 68 of 93
+    `datasets` rows are unbound and 448 PRDs hang off them, including two
+    live tenants (210 and 70 PRDs). It had zero currently-affected users
+    only because the break additionally requires a caller who is
+    `role='member'` AND holds no `workspace_members` row — every member of
+    those tenants happened to be owner/admin or already granted. One
+    domain-matched fresh signup on either tenant arms it.
+
+    Every other unresolvable case fails CLOSED (missing workspace, or one
+    belonging to a different company): returning False only ever costs the
+    caller the guest viewer they already get, whereas a wrong True routes
+    them into an app view that 404s or 403s.
+    """
+    if workspace_id is None:
+        if company_role in ("owner", "admin"):
+            return True
+        return bool(list_workspaces_for_user(company_id, user_id, company_role))
+    ws = get_workspace(workspace_id)
+    if not ws or ws.get("company_id") != company_id:
+        return False
+    if company_role in ("owner", "admin"):
+        return True
+    return get_workspace_member(workspace_id, user_id) is not None
 
 
 @retry_on_disconnect

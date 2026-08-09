@@ -16,11 +16,20 @@ export type FeatureFlags = {
    *  legacy keys below. Old rows without it fall back to the legacy keys at
    *  display time (see StaffAdminScreen); stored data is never rewritten. */
   agents: boolean
-  weekly_brief: boolean
+  top_insights: boolean
+  /** Action-envelope chat dispatch: when ON, every chat message is routed by
+   *  POST /v1/chat/intent (backend, history-aware) instead of the client
+   *  regex/classifier ladder. DEFAULT ON (decision 2026-07-26): a missing key
+   *  counts as ON — same grandfathering as agents/top_insights — so the staff
+   *  toggle is a per-company kill switch, not an opt-in. */
+  chat_intent_envelope: boolean
   // Legacy keys — superseded by `agents` but kept so old stored rows and the
   // dormant FeatureFlagsSettings surface still typecheck.
   on_demand_analysis: boolean
   auto_prd_generation: boolean
+  /** Pre-rename spelling of `top_insights` — kept so old stored rows still
+   *  typecheck; parseFeatureFlags folds it into the modern key. */
+  weekly_brief?: boolean
   engineer_agent: boolean
   research_agent: boolean
   on_call_agent: boolean
@@ -261,7 +270,8 @@ export const PLANNING_CYCLES = [
 
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   agents: true,
-  weekly_brief: true,
+  top_insights: true,
+  chat_intent_envelope: true,
   on_demand_analysis: true,
   auto_prd_generation: true,
   engineer_agent: false,
@@ -273,61 +283,104 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order. The flow follows
- * the 2026-07-17 screenshot spec + the restored optional api-key step
- * (2026-07-19) — 10 steps + the define-metrics sub-flow:
+ * the 2026-07-21 screenshot spec (which collapsed team/strategy/decisions into
+ * one workspace step and added a personalize step) + the optional api-key step
+ * the spec omits but we keep — 10 steps + the define-metrics sub-flow:
  *
- *   1. company     → CompanyStep         (name* + website + mission + strategy/
- *                                         OKRs; portfolio + planning cycle
+ *   1. company     → CompanyStep         (name* + website + strategy/OKRs;
+ *                                         mission, portfolio + planning cycle
  *                                         behind "Add more". Kicks the website
- *                                         analysis in the BACKGROUND.)
- *   2. product     → ProductStep         (name* + website + surfaces* +
- *                                         monetization + users; competitors
- *                                         behind a disclosure)
- *   3. metrics     → MetricsStep         (pick up to 5 success metrics* +
- *                                         prioritization framework*)
+ *                                         analysis in the BACKGROUND, and
+ *                                         creates the company row.)
+ *   2. import-context → ImportContextStep (hand over the .md your own
+ *                                         assistant already wrote — OPTIONAL.
+ *                                         Behind `company` since 2026-07-27 so
+ *                                         the name + website just entered are
+ *                                         written into the prompt it hands out.)
+ *   3. connectors  → Connectors          (connect your tools — OPTIONAL,
+ *                                         skippable; zero connectors is a
+ *                                         supported finish)
  *   4. api-key     → ApiKey              (the workspace's own Claude/Anthropic
  *                                         key — OPTIONAL, skippable; set now so
  *                                         the token-heavy knowledge-graph build
  *                                         runs on it, or later in Settings →
  *                                         Admin)
- *   5. connectors  → Connectors          (connect your tools — ≥1 live
- *                                         connection required)
- *   6. team        → TeamStep            (team name* + scope of work*)
- *   7. strategy    → StrategyRoadmapStep (team strategy + team roadmap —
- *                                         upload OR type; optional, skippable)
- *   8. decisions   → DecisionsStep       (how the team decides + anything
- *                                         else — upload OR type; optional)
- *   9. invite      → InviteStep          (teammates: email + job role +
- *                                         permission, CSV import; skippable)
- *  10. review      → ReviewStep          (AI-drafted business context — read,
- *                                         edit, accept → define metrics)
+ *   5. product     → ProductStep         (name* + website + surfaces* +
+ *                                         monetization + users; competitors
+ *                                         behind a disclosure)
+ *   6. workspace   → WorkspaceStep       (workspace name* + what it works on* +
+ *                                         team strategy/roadmap; sizing +
+ *                                         anything else behind "Add more")
+ *   7. metrics     → MetricsStep         (pick up to 5 success metrics* +
+ *                                         prioritization framework*)
+ *   8. invite      → InviteStep          (teammates: email + job role +
+ *                                         permission, bulk paste, CSV import;
+ *                                         skippable)
+ *   9. review      → ReviewStep          (AI-drafted business context — read,
+ *                                         edit, accept)
+ *  10. personalize → PersonalizeStep     (what the workspace surfaces + brief
+ *                                         delivery cadence/channel/time)
  *
  * After step 9 the UNNUMBERED define-metrics sub-flow (route
  * /onboarding/define-metrics, no progress dots — like the your-name gate)
  * confirms a definition + analytics mapping per picked metric, reviews them,
  * and "generate knowledge graph" COMPLETES onboarding + kicks the first brief.
+ * That sub-flow is GATED on a live analytics connection: with none there is
+ * nothing to map events against, so PersonalizeStep finishes onboarding
+ * directly instead. The gate lives on step 9 (it moved off Review when
+ * personalize was inserted between them) — see hasLiveAnalyticsConnection.
  *
  * The api-key step (restored 2026-07-19) is OPTIONAL/skippable for everyone —
  * skip it and the workspace runs on the platform key until a key is added here
- * or in Settings → Admin. Retired in v6 and still gone: workspace-naming (the
- * default workspace stays "Default"; renameable in Settings → Workspaces).
- * Step-6 team NAME is a company field, not the workspaces row.
+ * or in Settings → Admin.
+ *
+ * The step-6 workspace NAME is a company field (companies.team_name), not the
+ * workspaces row — renaming an actual workspace still lives in
+ * Settings → Workspaces.
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
  * persisted values (including stale ones from older flows) in range.
  */
 export const ONBOARDING_STEP_SLUGS = [
+  // `company` leads again (2026-07-27), and `import-context` sits directly
+  // behind it. The two swapped because the prompt the import step hands out
+  // OPENS by asking which company the file is about: run it first and the user
+  // retypes their own name and URL into it, run it second and we write both
+  // into the prompt for them from what they just entered — the assistant starts
+  // with the entity locked instead of inferring it, and a wrong company is the
+  // one error that whole document is built to avoid. (It briefly led the flow
+  // 2026-07-25 so it could prefill the company step too; filling that one step
+  // by hand is the price of filling the prompt correctly.)
   "company",
-  "product",
-  "metrics",
-  "api-key",
+  // Client feedback 2026-07-22: hand over the context you have already
+  // explained to your own AI assistant instead of retyping it. OPTIONAL —
+  // "Fill it in manually" advances with nothing imported, and every step behind
+  // this one is seeded fill-only, so a late extraction pops into anything the
+  // user hasn't typed.
+  "import-context",
+  // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
+  // `api-key` are pulled up to sit right behind the import + company pair.
+  //
+  // The reason is the import: it kicks a background LLM extraction over the
+  // uploaded file, and connectors + api-key are the two steps in the flow that
+  // extraction cannot prefill (one wires OAuth, the other takes a secret). So
+  // they are the steps worth spending its latency on. Everything the import
+  // DOES prefill — metrics, workspace scope, product — sits behind them, and
+  // opens with the extracted fields already in place.
   "connectors",
-  "team",
-  "strategy",
-  "decisions",
+  "api-key",
+  // `product` before `workspace` (2026-07-28). A workspace is defined as the
+  // slice of the product a team owns (see WorkspaceStep), so asking what the
+  // product IS before asking which part of it this team runs is the order the
+  // two steps actually read in — the reverse asked people to scope a thing they
+  // hadn't named yet. They swapped positions wholesale; neither screen changed.
+  "product",
+  "workspace",
+  "metrics",
   "invite",
   "review",
+  "personalize",
 ] as const
 
 export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]
@@ -416,7 +469,43 @@ export function parseKpiTree(raw: unknown): KpiTree {
 
 export function parseFeatureFlags(raw: unknown): FeatureFlags {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_FEATURE_FLAGS }
-  return { ...DEFAULT_FEATURE_FLAGS, ...(raw as Partial<FeatureFlags>) }
+  const partial = raw as Partial<FeatureFlags>
+  const flags = { ...DEFAULT_FEATURE_FLAGS, ...partial }
+  // Rows written before the Weekly Brief → Top Insights rename carry only the
+  // legacy key; honor it when the modern key is absent (mirrors backend
+  // entitlements.top_insights_enabled).
+  if (!("top_insights" in partial) && "weekly_brief" in partial) {
+    flags.top_insights = !!partial.weekly_brief
+  }
+  return flags
+}
+
+/**
+ * Is action-envelope chat dispatch on? DEFAULT ON (2026-08-03) — the staff
+ * checkbox is a per-company KILL SWITCH, not an opt-in.
+ *
+ * THREE states, and the third is why this isn't inlined at each call site:
+ *   * explicit `false`         → OFF (the kill switch)
+ *   * key absent               → ON  (grandfathered / newly onboarded)
+ *   * flags UNKNOWN (no
+ *     workspace loaded, or a
+ *     failed workspace read)   → ON, deliberately — it FAILS OPEN
+ *
+ * That last case is the opposite of `ds_claude_analysis` (backend
+ * app/qa_agent.py::_ds_claude_enabled), and the divergence is intentional:
+ * this flag picks a ROUTING STRATEGY, while that one decides whether a
+ * tenant's raw CSVs leave the box. "I couldn't read your flags" must not
+ * resolve to "so I shipped your data" — but it SHOULD resolve to the better
+ * router, since the envelope call carries its own fail-open fallback to the
+ * legacy ladder if the request itself fails.
+ *
+ * Takes the flags dict rather than a workspace so the app gates, the staff
+ * panel and the parsed/unparsed shapes all share ONE definition.
+ */
+export function chatIntentEnvelopeOn(
+  flags: Partial<FeatureFlags> | Record<string, boolean> | null | undefined,
+): boolean {
+  return flags?.chat_intent_envelope !== false
 }
 
 export function parseCompanyIcp(raw: unknown): CompanyIcp {

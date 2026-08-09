@@ -37,7 +37,11 @@ logger = logging.getLogger(__name__)
 URL = "https://api.fireflies.ai/graphql"
 _TIMEOUT = 30
 _LIMIT = 25            # KG-ingest cap — most recent meetings, pilot-scale
-_DIGEST_LIMIT = 50     # on-demand digest cap — a week/month of calls fits
+_PAGE_SIZE = 50        # Fireflies API max per transcripts query — paginate past it
+# On-demand digest cap — the safety ceiling across ALL pages, not a page size.
+# A busy quarter is ~150 calls; 300 leaves headroom while bounding a runaway
+# window. The digest runner discloses when a window hits this cap.
+_DIGEST_LIMIT = 300
 # Per-call verbatim-sentence cap for the digest. Bounds the transient corpus
 # (a long call can be 1000+ sentences); the skill only needs raw material to
 # pick 2–3 strong quotes per theme, not the whole transcript.
@@ -56,10 +60,11 @@ query Transcripts($limit: Int, $fromDate: DateTime, $toDate: DateTime) {
 }
 """
 
-# Digest query (on-demand path) — adds `sentences` for transient quotes.
+# Digest query (on-demand path) — adds `sentences` for transient quotes and
+# `skip` so windows holding more than one API page (50) can be fetched in full.
 _QUERY_WITH_SENTENCES = """
-query Transcripts($limit: Int, $fromDate: DateTime, $toDate: DateTime) {
-  transcripts(limit: $limit, fromDate: $fromDate, toDate: $toDate) {
+query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
+  transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
     id
     title
     date
@@ -71,9 +76,23 @@ query Transcripts($limit: Int, $fromDate: DateTime, $toDate: DateTime) {
 """
 
 
+#: The source a CallTranscript came from when nothing says otherwise. A DEFAULT
+#: rather than a required field so every existing construction site — this
+#: puller, connector_lookup/fireflies — is untouched, exactly as
+#: `call_index.CallRow.provider` was introduced for the same two sources.
+PROVIDER = "fireflies"
+
+
 @dataclass
 class CallTranscript:
-    """One Fireflies meeting, distilled + a bounded sample of verbatim quotes.
+    """One recorded customer call, distilled + a bounded sample of verbatim quotes.
+
+    Fireflies-shaped by history, PROVIDER-AGNOSTIC by contract: the on-demand
+    call digest (app/call_digest.py) fills this same record from Zoom cloud
+    recordings and merges both sources into one corpus, so nothing here may
+    assume a field only Fireflies can populate. It still lives in this module
+    because this is where it is populated most, and moving it would churn three
+    import sites for no behaviour change.
 
     Lives only for the duration of a digest request — never persisted. The
     `quotes` are the transient verbatim material the VoC skill mines; everything
@@ -87,25 +106,43 @@ class CallTranscript:
     action_items: str = ""
     keywords: list[str] = field(default_factory=list)
     quotes: list[dict] = field(default_factory=list)  # [{"speaker", "text"}]
+    #: Which source issued `external_id` — meaningful only to that provider.
+    #: Defaulted and placed last so every existing call site stays as it was.
+    provider: str = PROVIDER
+    #: An honest caveat about THIS call, rendered ahead of its content: a Zoom
+    #: recording whose account has audio transcription switched off still enters
+    #: the corpus saying so, rather than being dropped and leaving a gap nothing
+    #: explains. Empty for a call that needs no caveat — which is every
+    #: Fireflies call, since Fireflies only returns transcribed meetings.
+    note: str = ""
 
-    def render(self) -> str:
+    def render(self, max_quotes: Optional[int] = None) -> str:
         """Render one call into the skill's input corpus — header, distilled
         summary, action items, then the verbatim quote block (speaker-attributed
-        so the skill can source each quote)."""
+        so the skill can source each quote). `max_quotes` trims the quote block
+        (0 = summary only) so the digest runner can fit every call in a big
+        window into its corpus budget instead of dropping whole calls."""
         who = ", ".join(self.participants) if self.participants else "unknown"
-        parts = [
-            f"## Call: {self.title or '(untitled)'}",
-            f"date: {self.date or 'unknown'} · participants: {who}",
-        ]
+        head = f"date: {self.date or 'unknown'} · participants: {who}"
+        if self.provider and self.provider != PROVIDER:
+            # Only a NON-Fireflies call carries a source tag, so a corpus built
+            # from Fireflies alone renders byte-identically to before the digest
+            # learned about a second source — and a mixed corpus can still
+            # attribute every theme to where it was heard.
+            head += f" · source: {self.provider}"
+        parts = [f"## Call: {self.title or '(untitled)'}", head]
+        if self.note:
+            parts.append(f"note: {self.note}")
         if self.overview:
             parts.append(f"summary: {self.overview}")
         if self.action_items:
             parts.append(f"action items: {self.action_items}")
         if self.keywords:
             parts.append(f"keywords: {', '.join(self.keywords)}")
-        if self.quotes:
+        quotes = self.quotes if max_quotes is None else self.quotes[:max_quotes]
+        if quotes:
             parts.append("verbatim quotes:")
-            parts.extend(f'  - {q["speaker"]}: "{q["text"]}"' for q in self.quotes)
+            parts.extend(f'  - {q["speaker"]}: "{q["text"]}"' for q in quotes)
         return "\n".join(parts)
 
 
@@ -194,28 +231,39 @@ def fetch_calls(
     quotes per call, for the window. The quotes are transient (never persisted)
     — they exist only to give voice-of-customer-report real, sourced material.
 
-    Returns calls newest-first as the API yields them. Raises on API failure so
-    the digest runner can tell the user "couldn't reach Fireflies" rather than
-    silently produce an empty report."""
+    Pages through the API (Fireflies caps a transcripts query at 50) until the
+    window is exhausted or `limit` calls are collected, so "the last 30 days"
+    means every call in those 30 days — not the newest page. Returns calls
+    newest-first as the API yields them. Raises on API failure so the digest
+    runner can tell the user "couldn't reach Fireflies" rather than silently
+    produce an empty report."""
     calls: list[CallTranscript] = []
-    for t in _post(api_key, _QUERY_WITH_SENTENCES, {
-        "limit": limit, "fromDate": _iso(since), "toDate": _iso(until),
-    }):
-        s = t.get("summary") or {}
-        quotes: list[dict] = []
-        for sent in (t.get("sentences") or [])[:_QUOTES_PER_CALL]:
-            text = (sent.get("text") or "").strip()
-            if not text:
-                continue
-            quotes.append({"speaker": sent.get("speaker_name") or "?", "text": text})
-        calls.append(CallTranscript(
-            external_id=str(t["id"]),
-            title=t.get("title", ""),
-            date=_normalize_date(t.get("date")),
-            participants=t.get("participants") or [],
-            overview=s.get("overview") or "",
-            action_items=s.get("action_items") or "",
-            keywords=s.get("keywords") or [],
-            quotes=quotes,
-        ))
+    skip = 0
+    while len(calls) < limit:
+        page_size = min(_PAGE_SIZE, limit - len(calls))
+        page = _post(api_key, _QUERY_WITH_SENTENCES, {
+            "limit": page_size, "skip": skip,
+            "fromDate": _iso(since), "toDate": _iso(until),
+        })
+        for t in page[:page_size]:
+            s = t.get("summary") or {}
+            quotes: list[dict] = []
+            for sent in (t.get("sentences") or [])[:_QUOTES_PER_CALL]:
+                text = (sent.get("text") or "").strip()
+                if not text:
+                    continue
+                quotes.append({"speaker": sent.get("speaker_name") or "?", "text": text})
+            calls.append(CallTranscript(
+                external_id=str(t["id"]),
+                title=t.get("title", ""),
+                date=_normalize_date(t.get("date")),
+                participants=t.get("participants") or [],
+                overview=s.get("overview") or "",
+                action_items=s.get("action_items") or "",
+                keywords=s.get("keywords") or [],
+                quotes=quotes,
+            ))
+        if len(page) < page_size:  # short page → window exhausted
+            break
+        skip += page_size
     return calls
