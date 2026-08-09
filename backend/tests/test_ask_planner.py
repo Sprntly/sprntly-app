@@ -147,14 +147,19 @@ def test_a_source_the_company_has_not_connected_is_dropped():
 
 
 def test_a_source_with_no_live_reader_is_dropped():
-    """Asana is CONNECTED and syncs into the KG, but has no live-read adapter —
+    """Figma is CONNECTED and syncs into the KG, but has no live-read adapter —
     it is not in LOOKUP_PROVIDERS, so it can never be a `sources` entry. The
-    honest way to reach it is include_knowledge_graph."""
-    assert "asana" not in registry.LOOKUP_PROVIDERS
+    honest way to reach it is include_knowledge_graph.
+
+    This used to name Asana, which has since GAINED a live reader (as have
+    google_meet and zoom). The rule under test is "connected does not imply
+    live-readable", not any particular provider — so the example moves to one
+    that still has no adapter rather than the assertion being loosened."""
+    assert "figma" not in registry.LOOKUP_PROVIDERS
     plan = ap.apply_gates(
-        _plan_out(sources=["asana", "slack"]),
+        _plan_out(sources=["figma", "slack"]),
         enterprise_id=COMPANY,
-        connected=["asana", "slack"],
+        connected=["figma", "slack"],
     )
     assert plan.sources == ["slack"]
 
@@ -575,6 +580,9 @@ def test_the_schema_property_order_is_load_bearing():
     assert list(ap._PLANNER_SCHEMA["properties"]) == [
         "reason",
         "action", "task", "instruction",
+        # `open_artifact`'s two arguments sit with the action's other arguments,
+        # before any choice of skill or pipeline — same rule as task/instruction.
+        "artifact_type", "artifact_query",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
         "sources", "include_knowledge_graph", "web_search", "documents",
@@ -589,7 +597,8 @@ def test_the_schema_property_order_is_load_bearing():
     # reason matters more here: naming no document is the NORMAL outcome, and a
     # required field is an invitation to fill it. A document named wrongly makes
     # the assistant answer as that document — see app/document_referent.py.
-    for optional in ("constraints", "task", "instruction", "documents"):
+    for optional in ("constraints", "task", "instruction", "documents",
+                     "artifact_type", "artifact_query"):
         assert optional not in ap._PLANNER_SCHEMA["required"]
     assert len(ap._PLANNER_SCHEMA["required"]) == 10
 

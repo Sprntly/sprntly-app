@@ -38,6 +38,10 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         "confidence": 0.9,
         "task": "Build checkout v2",
         "instruction": None,
+        # `open_artifact`'s arguments ride the envelope for every verdict and
+        # are None on the ones they do not belong to.
+        "artifact_type": None,
+        "artifact_query": None,
         "reason": "asked for a spec",
         "source": "planner",
     }

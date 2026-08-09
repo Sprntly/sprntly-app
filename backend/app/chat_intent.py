@@ -509,6 +509,11 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         "confidence": plan.confidence,
         "task": plan.task or None,
         "instruction": plan.instruction or None,
+        "artifact_type": (
+            plan.artifact_type
+            if plan.artifact_type in NAMEABLE_ARTIFACT_TYPES else None
+        ),
+        "artifact_query": plan.artifact_query,
         "reason": plan.reason or "",
         "source": "planner",
     }
@@ -518,6 +523,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
         envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "open_artifact" and not envelope["artifact_query"]:
+        # The planner already gates this, but the rule is re-applied here for
+        # the same reason the other three are: this function owns what the
+        # CLIENT is told to do, and an open request with nothing to look up
+        # must reach it as `answer`, never as an open of nothing.
+        envelope.update(intent="answer", source="no_artifact_query")
     return envelope
 
 

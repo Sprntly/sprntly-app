@@ -144,6 +144,12 @@ _ACTIONS: frozenset[str] = frozenset({
     "generate_prototype",
     "update_ticket",
     "multi_agent",
+    # Retrieval, not authoring: "open the billing PRD" names a document to SHOW.
+    # It is a client intent (`chat_intent._CLIENT_INTENTS`), so a planner that
+    # could not emit it made that intent unreachable for every tenant once
+    # decide mode went on for everyone — the planner answers every message, and
+    # an action it cannot name is an action nothing can choose.
+    "open_artifact",
 })
 
 #: Actions that need a `task` brief, and ones that need an `instruction`. An
@@ -163,6 +169,10 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     "generate_tickets", "generate_prototype", "multi_agent",
 })
 _NEEDS_INSTRUCTION: frozenset[str] = frozenset({"edit_prd", "update_ticket"})
+#: `open_artifact` without a subject to look up is not an open request — the
+#: same "an action whose ARGUMENT is missing is worse than no action" rule the
+#: other two encode. Degrades to `answer`, which is the recoverable landing.
+_NEEDS_ARTIFACT_QUERY: frozenset[str] = frozenset({"open_artifact"})
 
 #: A synthesized brief is prose, not a clause. Bounded because it is logged and
 #: because a runaway generation should not become the whole prompt downstream.
@@ -226,6 +236,21 @@ _PLANNER_SCHEMA: dict = {
             "description": (
                 "edit_prd / update_ticket only: the change to apply, "
                 "self-contained."
+            ),
+        },
+        "artifact_type": {
+            "type": ["string", "null"],
+            "description": (
+                "open_artifact only: which KIND of existing artifact to bring "
+                "up — prd, evidence, prototype, report or tickets."
+            ),
+        },
+        "artifact_query": {
+            "type": ["string", "null"],
+            "description": (
+                "open_artifact only: the subject the user named the document "
+                "by, in their own words. Required for an open request — without "
+                "it there is nothing to look up."
             ),
         },
         "company_skill_id": {
@@ -650,6 +675,8 @@ class Plan:
     include_knowledge_graph: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
+    artifact_type: Optional[str] = None
+    artifact_query: Optional[str] = None
     documents: list[str] = field(default_factory=list)
     in_scope: bool = True
 
@@ -952,6 +979,11 @@ def _gate_constraints(raw: Any) -> dict:
     return out
 
 
+def _clean_str(value: Any) -> Optional[str]:
+    """A trimmed non-empty string, or None. Whitespace-only counts as absent."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
     """`(action, task, instruction)`, with an unusable action degraded to
     `answer` rather than dispatched.
@@ -1038,6 +1070,20 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
         sources = []
         web_search = False
 
+    # `open_artifact` needs a subject to look up. Same rule the task/instruction
+    # gate applies one line up — an action whose ARGUMENT is missing is worse
+    # than no action — but it needs the raw payload, which `_gate_action` (which
+    # only sees task and instruction) does not have.
+    _artifact_type = _clean_str(out.get("artifact_type"))
+    _artifact_query = _clean_str(out.get("artifact_query"))
+    if action == "open_artifact" and not _artifact_query:
+        action, task, instruction = ACTION_ANSWER, "", ""
+        _artifact_type = _artifact_query = None
+    if action != "open_artifact":
+        # Arguments belong to their action; a stray pair on any other verdict is
+        # noise that downstream would otherwise try to honour.
+        _artifact_type = _artifact_query = None
+
     reason = out.get("reason")
     return Plan(
         reason=(" ".join(reason.split())[:_REASON_CHARS] if isinstance(reason, str) else ""),
@@ -1055,6 +1101,8 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
         # normal in-scope path — same rule, and same reason, as `route()`'s
         # scope gate: partial output must never produce a canned refusal.
+        artifact_type=_artifact_type,
+        artifact_query=_artifact_query,
         documents=_gate_documents(out.get("documents"), enterprise_id),
         in_scope=out.get("in_scope") is not False,
     )
