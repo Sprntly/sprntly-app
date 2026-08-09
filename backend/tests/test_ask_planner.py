@@ -1382,3 +1382,81 @@ def test_the_raw_line_shows_what_the_gates_removed(monkeypatch, caplog):
     raw = _line(caplog, "ask-planner raw: ")["response"]
     assert raw["sources"] == ["slack", "hubspot"]        # what the model said
     assert _comparison(caplog)["planner"]["sources"] == ["slack"]  # what survived
+
+
+# ── the per-turn plan memo ───────────────────────────────────────────────────
+#
+# Two callers plan the SAME turn — `/v1/chat/intent`, whose verdict the client
+# awaits before it sends anything, and the ask worker, which needs the plan to
+# execute. Neither is removable, so the second must reuse the first.
+
+def test_one_turn_pays_for_exactly_one_planner_call(monkeypatch):
+    """The second caller reuses the first caller's plan instead of buying its own."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch, _plan_out(in_scope=True))
+    ap._plan_memo.clear()
+
+    first = ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?")
+    second = ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?")
+
+    assert first is not None and second is not None
+    assert len(calls) == 1, "the second caller bought a second planner call"
+
+
+def test_the_memo_survives_the_turn_being_persisted_between_the_two_calls(monkeypatch):
+    """THE regression this keying exists for.
+
+    `POST /v1/conversations/{id}/turns` writes the user's turn BETWEEN the two
+    calls, so the worker loads a history one turn LONGER than the intent call
+    saw. A memo keyed on history therefore never matched on a real turn — it
+    missed every time and the ask paid for two sonnet calls seconds apart."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch, _plan_out(in_scope=True))
+    ap._plan_memo.clear()
+
+    intent_history = [{"role": "user", "content": "earlier turn"}]
+    worker_history = intent_history + [{"role": "user", "content": "what changed?"}]
+
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="what changed?", history=intent_history
+    )
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="what changed?", history=worker_history
+    )
+
+    assert len(calls) == 1, "history grew between the calls and the memo missed"
+
+
+def test_the_memo_is_scoped_per_tenant(monkeypatch):
+    """A memo shared across tenants would hand one company's plan — and the
+    question inside it — to another."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch, _plan_out(in_scope=True))
+    ap._plan_memo.clear()
+
+    ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?")
+    ap.plan_for_answer(enterprise_id="co-other-9x2b", question="what changed?")
+
+    assert len(calls) == 2, "another tenant was served this company's plan"
+
+
+def test_a_failed_plan_is_not_memoised(monkeypatch):
+    """A planner outage must be retried by the next caller, not remembered as a
+    verdict for the rest of the TTL."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    ap._plan_memo.clear()
+
+    calls: list = []
+
+    def _boom(**k):
+        calls.append(k)
+        raise RuntimeError("planner down")
+
+    monkeypatch.setattr(ap, "llm_call", _boom)
+    assert ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?") is None
+    assert ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?") is None
+    assert len(calls) == 2, "a failure was cached as if it were a plan"

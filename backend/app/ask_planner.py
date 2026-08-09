@@ -1218,9 +1218,20 @@ def _clamp_for_log(text: str) -> str:
 # plan to execute the answer. Neither is removable, and before this they made
 # two independent sonnet calls seconds apart for one message.
 #
-# Keyed on (enterprise_id, question, history) because the plan is a function of
-# all three — and enterprise_id is in the key FIRST because a memo shared across
-# tenants would leak one company's plan, and the question inside it, to another.
+# Keyed on (enterprise_id, question), and NOT on history — which was the first
+# version of this and did not work. The user's turn is persisted by
+# `POST /v1/conversations/{id}/turns` BETWEEN the two calls, so the worker loads
+# a history one turn longer than the intent call saw. The key never matched and
+# the memo missed on every real turn, measured at ~6.4s of dead time paying for
+# a second sonnet call that decided nothing new.
+#
+# Dropping history costs a narrow, bounded thing: two IDENTICAL question strings
+# from one tenant inside the TTL share a plan even if the thread moved between
+# them. Same words, same company, seconds apart is the same turn in practice —
+# and the TTL is what keeps that true rather than a guess.
+#
+# enterprise_id stays in the key, and stays FIRST: a memo shared across tenants
+# would leak one company's plan, and the question inside it, to another.
 #
 # In-process, and consistent for the same reason `db.authcache` is: the
 # deployment is a single uvicorn worker (`backend/deploy/sprintly.service` has
@@ -1236,17 +1247,14 @@ _PLAN_MEMO_TTL_S = 180.0
 _plan_memo = TTLMap(_PLAN_MEMO_TTL_S)
 
 
-def _plan_memo_key(
-    enterprise_id: str, question: str, history: Optional[list[dict]]
-) -> str:
-    """A stable key for one turn's plan.
+def _plan_memo_key(enterprise_id: str, question: str) -> str:
+    """A stable key for one turn's plan. See `_plan_memo` for why history is
+    deliberately absent.
 
-    Hashed rather than concatenated: the question and history can be tens of
-    kilobytes (an inlined attachment block), and a dict key that large is pure
-    memory overhead for a value that only has to be compared for equality."""
-    payload = json.dumps(
-        [enterprise_id, question, history or []], sort_keys=True, default=str
-    )
+    Hashed rather than concatenated: the question can be tens of kilobytes (an
+    inlined attachment block), and a dict key that large is pure memory overhead
+    for a value that only has to be compared for equality."""
+    payload = json.dumps([enterprise_id, question], sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -1421,7 +1429,7 @@ def plan_for_answer(
     # action, and the ask worker, which needs the plan to execute the answer —
     # and neither can be dropped. So the second one reads what the first
     # computed instead of paying for sonnet again.
-    key = _plan_memo_key(enterprise_id, question, history)
+    key = _plan_memo_key(enterprise_id, question)
     memoised = _plan_memo.get(key)
     if memoised is not None:
         logger.info(
