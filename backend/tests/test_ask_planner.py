@@ -1460,3 +1460,68 @@ def test_a_failed_plan_is_not_memoised(monkeypatch):
     assert ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?") is None
     assert ap.plan_for_answer(enterprise_id=COMPANY, question="what changed?") is None
     assert len(calls) == 2, "a failure was cached as if it were a plan"
+
+
+# ── a planned turn does not also pay the router ──────────────────────────────
+
+def test_a_planned_turn_makes_no_router_call(monkeypatch):
+    """Router v7 decides three things — one of this customer's uploaded skills,
+    one of four research pipelines, or scope — and the plan already carries all
+    three (`company_skill_id`, `pipeline_id`, `in_scope`), plus a wider pipeline
+    vocabulary besides. Calling it on a planned turn was re-deciding, on a
+    smaller model, what the planner had decided seconds earlier: a haiku call
+    and its two filename reads in front of every message.
+
+    This is NOT the old built-in-menu question. Router v7 deleted the ~78-entry
+    menu, so there is no built-in skill left for either component to pick, which
+    is why nothing had to be taught to the planner for this to be safe."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "the direct answer", "citations": []},
+    )
+
+    routed: list = []
+
+    def _route_should_not_run(*a, **k):
+        routed.append(a)
+        return qa.RouteDecision(None, 0.0, "llm")
+
+    monkeypatch.setattr(qa, "route", _route_should_not_run)
+
+    plan = ap.apply_gates(
+        _plan_out(in_scope=True), enterprise_id=COMPANY, connected=["slack"],
+    )
+    qa.answer(
+        enterprise_id=COMPANY, question="what changed this week?",
+        dataset="acme", plan=plan,
+    )
+
+    assert routed == [], "a planned turn paid for the router as well"
+
+
+def test_an_unplanned_turn_still_routes(monkeypatch):
+    """The other half, so the test above cannot pass by the router being
+    unreachable. With no plan (a planner outage, or a pinned turn) `route()`
+    must still decide — that fallback is what keeps a planner failure a
+    degradation rather than a breakage."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "the direct answer", "citations": []},
+    )
+
+    routed: list = []
+    monkeypatch.setattr(
+        qa, "route",
+        lambda *a, **k: routed.append(a) or qa.RouteDecision(None, 0.0, "llm"),
+    )
+    monkeypatch.setattr(ap, "shadow_plan_async", lambda **k: None)
+
+    qa.answer(
+        enterprise_id=COMPANY, question="what changed this week?", dataset="acme",
+    )
+
+    assert len(routed) == 1, "an unplanned turn must still reach the router"

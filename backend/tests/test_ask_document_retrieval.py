@@ -3399,3 +3399,112 @@ def test_prefix_call_sites_still_bind():
 
     assert inspect.getsource(ask_runner).count("user_cacheable_prefix=") >= 2
     assert "user_cacheable_prefix=" in inspect.getsource(qa_agent)
+
+
+# ── Stage P: the documents the PLANNER named ─────────────────────────────────
+
+def test_a_planned_document_is_loaded(isolated_settings):
+    """The planner can name a catalog document and grounding loads it, without
+    the question containing the title (Stage N cannot match it) and without the
+    fused rank having to surface it."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="wiki-42",
+        title="Pricing Principles", summary="How we price.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["wiki-42"])
+    try:
+        _, manifest = document_grounding(_CID, "what does it say about pricing?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    assert any(m.get("file_id") == "confluence:wiki-42" for m in manifest), manifest
+
+
+def test_a_planned_document_is_marked_topic_not_named(isolated_settings):
+    """THE safety property, and the reason Stage P exists in this shape.
+
+    `document_referent` was written because an earlier attempt at model-picked
+    documents pinned a Confluence page onto "what's our pricing strategy?" and
+    the model answered AS that page. Its rule is that a FALSE REFERENT IS WORSE
+    THAN NO REFERENT.
+
+    "named" asserts the USER asked for this document. "topic" says it was
+    selected automatically — the honest claim for a model's pick, and the one
+    the answer prompt already tells the model it may ignore (rule 6). So a wrong
+    planner pick costs prompt budget, exactly like a wrong Stage T pick, instead
+    of hijacking the answer's voice. If this ever flips to "named", that guard
+    is gone."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="wiki-99",
+        title="Q3 Pricing", summary="Pricing for Q3.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["wiki-99"])
+    try:
+        _, manifest = document_grounding(_CID, "what's our pricing strategy?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    picked = [m for m in manifest if m.get("file_id") == "confluence:wiki-99"]
+    assert picked, manifest
+    assert picked[0]["match"] == "topic", (
+        "a planner-picked document must never be presented as one the USER "
+        "named — see app/document_referent.py"
+    )
+
+
+def test_a_planned_id_this_company_cannot_see_is_ignored(isolated_settings):
+    """Tenant scoping does not depend on the planner being well behaved: an id
+    that is not in THIS caller's catalog selects nothing."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="theirs-1",
+        title="Someone Else's Doc", company_id="co-other-tenant",
+    )
+
+    token = ask_runner.set_active_planned_documents(["theirs-1"])
+    try:
+        _, manifest = document_grounding(_CID, "what does it say?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    assert all(m.get("file_id") != "confluence:theirs-1" for m in manifest), manifest
+
+
+def test_stage_n_still_wins_over_a_planned_document(isolated_settings):
+    """A title the user SPELLED OUT is an unambiguous request. A model's opinion
+    must never displace it, which is why Stage P runs after Stage N."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="named-doc",
+        title="Billing Runbook", summary="Billing.",
+    )
+    _seed_catalog_row(
+        db, provider="confluence", external_id="planned-doc",
+        title="Something Else", summary="Other.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["planned-doc"])
+    try:
+        _, manifest = document_grounding(_CID, "what does the Billing Runbook say?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    named = [m for m in manifest if m.get("file_id") == "confluence:named-doc"]
+    assert named, manifest
+    assert named[0]["match"] == "named"
