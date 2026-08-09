@@ -394,8 +394,43 @@ def reset_active_conversation(tokens) -> None:
 # own, whereas None-because-embedding-failed must NOT trigger a second attempt.
 # The sentinel is the tuple's presence, not the vector's value.
 _active_question_embedding: contextvars.ContextVar[
-    tuple[list[float] | None, bool] | None
+    tuple[list[float] | None, bool] | object | None
 ] = contextvars.ContextVar("ask_runner_active_question_embedding", default=None)
+
+
+# A THIRD state for that slot: the ask has scoped it, but nothing has needed a
+# vector yet. It has to stay distinguishable from the other two, which is why
+# it is a sentinel object rather than another None:
+#
+#   * None             — nobody scoped it. A caller computes its own, as before.
+#   * _EMBED_PENDING   — scoped but unresolved. Compute on FIRST USE and memoise
+#                        the result back here, so the ask still pays for exactly
+#                        one embedding no matter how many consumers ask for it.
+#   * (vec, degraded)  — resolved. `(None, True)` means the attempt already
+#                        FAILED and must never be retried within this ask.
+#
+# The eager embed this replaces was pure waste on the two commonest shapes. A
+# tenant with no documents never reaches the topical stage that reads the
+# vector — `document_grounding` returns at its `not refs and not
+# conv_attachments and not connected` branch first — and a PRD-grounded ask
+# skips KG retrieval altogether. Both paid a full embedding round trip for a
+# vector no consumer ever read (measured at 2.8s on a doc-less tenant).
+_EMBED_PENDING: object = object()
+
+
+def set_active_question_embedding_pending():
+    """Scope this ask's embedding slot WITHOUT computing the vector.
+
+    The counterpart to `set_active_question_embedding` for the worker path:
+    it reserves the slot so `_resolve_question_embedding` knows it is allowed
+    to memoise into it, but issues no HTTP call. Whichever consumer needs a
+    vector first pays for it; consumers that never need one pay nothing.
+
+    Returns an opaque token for `reset_active_question_embedding` — the same
+    token discipline as the eager setter, so the caller's `finally` is
+    unchanged. `ContextVar.reset` restores whatever was there before THIS set,
+    so a value memoised into the slot afterwards is still correctly unwound."""
+    return _active_question_embedding.set(_EMBED_PENDING)
 
 
 def set_active_question_embedding(embedding: list[float] | None, degraded: bool):
@@ -418,8 +453,17 @@ def reset_active_question_embedding(token) -> None:
 
 def _carried_question_embedding() -> tuple[list[float] | None, bool] | None:
     """This ask's already-computed `(vector, degraded)`, or None if nothing set
-    one. Never computes — see `_resolve_question_embedding`."""
-    return _active_question_embedding.get()
+    one. Never computes — see `_resolve_question_embedding`.
+
+    A slot left at `_EMBED_PENDING` reads as None here on purpose: to a caller
+    that only wants an already-resolved vector, "scoped but not yet computed"
+    and "nobody scoped one" are the same answer. Only
+    `_resolve_question_embedding` distinguishes them, because only it is
+    allowed to do the work and write the result back."""
+    carried = _active_question_embedding.get()
+    if carried is _EMBED_PENDING:
+        return None
+    return carried  # type: ignore[return-value]
 
 
 # ── The conversation history, by the same request-scoped route ──────────────
@@ -899,6 +943,21 @@ def document_grounding(
     topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
     topical_candidates: list[dict] = []
     if topical_ran:
+        # Stage T's semantic channel is the first thing in an ask that actually
+        # READS the vector, so this is where the ask pays for it. Nothing above
+        # needs one — the index read, the ownership checks and Stage N's
+        # substring match are all lexical — and the `not refs and not
+        # conv_attachments and not connected` return further up means a
+        # workspace with no documents at all exits before reaching here and now
+        # embeds nothing whatsoever.
+        #
+        # Guarded on `is None` so a caller that threaded its own vector in still
+        # wins, and `embedding_degraded` keeps its documented meaning: it is set
+        # only on the branch where this ask computed the vector itself.
+        if question_embedding is None:
+            question_embedding, embedding_degraded = _resolve_question_embedding(
+                enterprise_id, question
+            )
         topical_candidates = _topical_candidates(
             enterprise_id,
             question,
@@ -1482,17 +1541,32 @@ def _resolve_question_embedding(
     """This ask's `(vector, degraded)`, computing it only if nothing already
     has.
 
-    `ask_job_runner._run_sync` embeds once per ask and publishes the result on
-    the request-scoped ContextVar, so on the worker path this returns that
-    value and issues no call. It falls through to `_question_embedding` for
-    callers that reach `compose_ask_answer` without the worker in front of them
-    — direct invocation, and the tests that do the same — which is what keeps
-    the embedding count at exactly one per ask on every path rather than one
-    per consumer."""
-    carried = _carried_question_embedding()
-    if carried is not None:
-        return carried
-    return _question_embedding(enterprise_id, question)
+    `ask_job_runner._run_sync` SCOPES the slot before `answer()` picks a path
+    but no longer fills it, so the first consumer that genuinely needs a vector
+    computes it here and memoises it back — every later consumer then reads
+    that one value and issues no call. An ask whose path never needs a vector
+    (a doc-less tenant, or a PRD-grounded ask that skips KG retrieval) now
+    issues none at all, where the old eager embed always paid for one.
+
+    It still falls through to a plain `_question_embedding` for callers that
+    reach `compose_ask_answer` without the worker in front of them — direct
+    invocation, and the tests that do the same. Those have no scoped slot, so
+    nothing is memoised and their behaviour is byte-for-byte what it was.
+
+    Read the ContextVar directly rather than through
+    `_carried_question_embedding`: that helper collapses `_EMBED_PENDING` to
+    None, and the whole decision here turns on telling those two apart."""
+    slot = _active_question_embedding.get()
+    if slot is not None and slot is not _EMBED_PENDING:
+        return slot  # type: ignore[return-value]
+    resolved = _question_embedding(enterprise_id, question)
+    if slot is _EMBED_PENDING:
+        # Memoise onto the slot the worker scoped for us. Writing only in this
+        # branch is what keeps the unscoped path leak-free: with no token to
+        # unwind it, a write there would outlive the request on this pooled
+        # thread — the exact hazard `ask_job_runner`'s `finally` exists to close.
+        _active_question_embedding.set(resolved)
+    return resolved
 
 
 def _retrieve_kg_bundle(

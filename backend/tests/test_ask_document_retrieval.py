@@ -2934,22 +2934,42 @@ def test_one_embedding_per_ask_shared_by_every_consumer(
     assert len(calls) == 1
 
 
-def test_ask_worker_publishes_the_embedding_and_always_clears_it(
+def test_ask_worker_scopes_the_embedding_lazily_and_always_clears_it(
     isolated_settings, monkeypatch
 ):
     """The worker's setter must be paired with a reset in a `finally`, exactly
     as the conversation pair is: a vector left on the context outlives its own
-    request and would be read by whatever reuses that context next."""
+    request and would be read by whatever reuses that context next.
+
+    The worker SCOPES that slot without filling it (`ask_runner._EMBED_PENDING`):
+    the vector is computed by the first consumer that actually needs one and
+    memoised back, so the ask still pays for at most one embedding but pays for
+    none at all when no consumer needs a vector. The reset discipline is
+    unchanged — `ContextVar.reset` unwinds whatever ended up in the slot,
+    resolved or not."""
     from app import ask_job_runner, ask_runner
 
     seen: dict = {}
+    calls: list = []
 
-    monkeypatch.setattr(
-        ask_runner, "_question_embedding", lambda eid, q: ([0.75] * 1536, False)
-    )
+    def _embed(eid, q):
+        calls.append(q)
+        return ([0.75] * 1536, False)
+
+    monkeypatch.setattr(ask_runner, "_question_embedding", _embed)
 
     def _boom(**kwargs):
-        seen["embedding"] = ask_runner._carried_question_embedding()
+        # Scoped, but nothing has needed a vector yet — nothing embedded.
+        seen["pending"] = (
+            ask_runner._active_question_embedding.get()
+            is ask_runner._EMBED_PENDING
+        )
+        seen["calls_before"] = len(calls)
+        # The first consumer to need one resolves it...
+        seen["first"] = ask_runner._resolve_question_embedding(_CID, "a question")
+        # ...and a second consumer reuses it rather than embedding again.
+        seen["second"] = ask_runner._resolve_question_embedding(_CID, "a question")
+        seen["calls_after"] = len(calls)
         raise RuntimeError("answer failed")
 
     monkeypatch.setattr(ask_job_runner.qa_agent, "answer", _boom)
@@ -2959,10 +2979,37 @@ def test_ask_worker_publishes_the_embedding_and_always_clears_it(
             1, _CID, "a question", "asurion", [], None, None, None,
         )
 
-    # Visible to the answer call...
-    assert seen["embedding"] == ([0.75] * 1536, False)
+    # Scoped but unresolved when the answer call began: no embedding paid for.
+    assert seen["pending"] is True
+    assert seen["calls_before"] == 0
+    # First consumer resolves, second reuses — ONE call across both.
+    assert seen["first"] == ([0.75] * 1536, False)
+    assert seen["second"] == ([0.75] * 1536, False)
+    assert seen["calls_after"] == 1
     # ...and gone once the call has returned, even though it raised.
     assert ask_runner._carried_question_embedding() is None
+    assert ask_runner._active_question_embedding.get() is None
+
+
+def test_ask_that_needs_no_vector_embeds_nothing(isolated_settings, monkeypatch):
+    """A workspace with no documents returns from `document_grounding` before
+    Stage T, which is the only consumer that reads the vector. The old eager
+    embed paid a full round trip for a vector nothing then read (2.8s on the
+    trace that motivated this); scoping it lazily must drop that to zero."""
+    from app import ask_job_runner, ask_runner
+
+    calls: list = []
+
+    def _embed(eid, q):
+        calls.append(q)
+        return ([0.75] * 1536, False)
+
+    monkeypatch.setattr(ask_runner, "_question_embedding", _embed)
+    monkeypatch.setattr(ask_job_runner.qa_agent, "answer", lambda **kw: {"answer": "x"})
+
+    ask_job_runner._run_sync(1, _CID, "a question", "asurion", [], None, None, None)
+
+    assert calls == []
 
 
 # ══════════════════ Cache-prefix ordering: content preservation ════════════

@@ -161,11 +161,25 @@ async function pollAskToResult(
   // delta is indistinguishable from a skill that simply doesn't stream, so it
   // stays invisible.
   let sawDelta = false
+  // The stream's `done` frame is the earliest signal that the job has finished
+  // writing its row, and it lands well before the next poll tick would. Waking
+  // the poll on it removes up to a full interval of dead time between an answer
+  // being ready and being shown.
+  //
+  // It WAKES the poll rather than resolving it: SSE frames are display-only and
+  // the polled row stays authoritative, so the loop still re-reads status and
+  // decides for itself. Deliberately not wired to `onError` — a dropped stream
+  // says nothing about whether the job finished, and the ordinary interval
+  // already covers that case.
+  let wakePoll: (() => void) | null = null
   const stopStream = throttled
     ? subscribeToGenerationStream((t) => askApi.streamUrl(askId, t), {
         onDelta: (full) => {
           sawDelta = true
           throttled.push(full)
+        },
+        onDone: () => {
+          wakePoll?.()
         },
         onError: () => {
           if (sawDelta) onStreamDrop?.()
@@ -173,7 +187,17 @@ async function pollAskToResult(
       })
     : () => {}
   try {
-    return await _pollAskLoop(askId, company, scope, isCancelled, isStopped)
+    return await _pollAskLoop(
+      askId, company, scope, isCancelled, isStopped,
+      // Registered per sleep; cleared on wake so a frame arriving between
+      // sleeps never parks a stale callback.
+      (wake) => {
+        wakePoll = wake
+        return () => {
+          wakePoll = null
+        }
+      },
+    )
   } finally {
     throttled?.cancel()
     stopStream()
@@ -208,6 +232,7 @@ async function _pollAskLoop(
   scope: string,
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
+  wakeOn?: (wake: () => void) => (() => void) | void,
 ): Promise<AskResponse> {
   // Log the routing decision ONCE, the first poll that reveals it — the column
   // is populated the moment `route()` returns, so this fires while the answer
@@ -232,6 +257,9 @@ async function _pollAskLoop(
     intervalMs: POLL_INTERVAL_MS,
     // Either signal stops the local poll; the two are disambiguated below.
     isCancelled: () => Boolean(isCancelled?.() || isStopped?.()),
+    // Absent on the no-preview paths (AIBar, resume without onPartial), which
+    // keep the plain interval exactly as before.
+    wakeOn,
   })
   // Explicit user Stop → the ask is deliberately abandoned: CLEAR the marker so
   // a remount does not resume it, and surface AskStoppedError (swallowed by the

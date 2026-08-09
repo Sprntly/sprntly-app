@@ -1,8 +1,11 @@
 """Tests for `app.graph` — meta-model dataclasses + GraphFacade + decision log.
 
-Uses the shared isolated_settings fixture (in-memory fake Supabase). pgvector
-`find_candidates` is integration-tested separately against real Supabase;
-in the fake it returns []."""
+Uses the shared isolated_settings fixture (in-memory fake Supabase). The
+pgvector kNN behind `find_candidates` is still integration-tested separately
+against real Supabase, but its HYDRATION half is covered here: the fake does
+support `rpc`, so registering rows via `FakeSupabaseClient.rpc_returns` (see
+the `kg_candidates` fixture) exercises the ordering and batching that three
+find-or-create callers depend on."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -484,12 +487,20 @@ def test_active_signals_tenant_isolation_holds_under_ordering_and_limit(isolated
     assert all(i.startswith("ent-B-sig-") for i in b_ids)
 
 
-def test_limit_reached_log_carries_identifiers_only(isolated_settings, caplog):
+def test_limit_reached_log_carries_identifiers_only(
+    isolated_settings, caplog, monkeypatch
+):
     """If a limit-reached log fires, it carries `enterprise_id` and counts
-    only — never signal content or provenance."""
+    only — never signal content or provenance.
+
+    The log fires only at the DEFAULT fetch width, so the default is patched
+    down to the seeded row count rather than the call being widened to 1000."""
     import logging as _logging
 
     from app.graph import GraphFacade
+    from app.graph import facade as facade_mod
+
+    monkeypatch.setattr(facade_mod, "_ACTIVE_SIGNALS_LIMIT", 5)
 
     db = isolated_settings["supabase"]
     sentinel_content = "SENTINEL-DO-NOT-LOG-CONTENT"
@@ -515,6 +526,31 @@ def test_limit_reached_log_carries_identifiers_only(isolated_settings, caplog):
         assert sentinel_content not in msg
         assert sentinel_marker not in msg
         assert "ent-A" in msg
+
+
+def test_a_deliberately_narrowed_fetch_does_not_warn(isolated_settings, caplog):
+    """A caller that narrows the window on purpose hits the cap on EVERY call
+    by design, so warning there converts a real diagnostic into constant noise.
+
+    Ask asks for 250 rows to read the newest 8; before this the ask logged
+    "active_signals hit the fetch limit" on every single question."""
+    import logging as _logging
+
+    from app.graph import GraphFacade
+
+    db = isolated_settings["supabase"]
+    db.table("kg_signal").insert([{
+        "id": f"n-{i}", "enterprise_id": "ent-A", "source_type": "revenue",
+        "kind": "x", "content": "y", "properties": {}, "provenance": {},
+        "valid_at": "2026-06-01T00:00:00+00:00",
+        "transaction_at": "2026-06-01T00:00:00+00:00",
+    } for i in range(5)]).execute()
+
+    with caplog.at_level(_logging.INFO, logger="app.graph.facade"):
+        got = GraphFacade().active_signals("ent-A", limit=5)
+
+    assert len(got) == 5          # the fetch itself is unchanged...
+    assert not [r for r in caplog.records if "limit" in r.getMessage().lower()]
 
 
 def test_write_relationship_and_edges_from_to(facade):
@@ -644,6 +680,234 @@ def test_get_signals_single_query(facade, monkeypatch):
     got = facade.get_signals("ent-A", [s.id for s in sigs])
     assert len(got) == 5
     assert calls["n"] == 1   # exactly one kg_signal table access for the batch
+
+
+# ---------- batched get_entities / edges_to_many (Ask N+1 kill) ----------
+
+def test_get_entities_batched_returns_dict(facade):
+    from app.graph import Entity
+    a = Entity(enterprise_id="ent-A", type="theme", canonical_label="aa")
+    b = Entity(enterprise_id="ent-A", type="theme", canonical_label="bb")
+    facade.create_entity("ent-A", a)
+    facade.create_entity("ent-A", b)
+    got = facade.get_entities("ent-A", [a.id, b.id])
+    assert set(got) == {a.id, b.id}
+    assert got[a.id].canonical_label == "aa"
+    assert got[b.id].canonical_label == "bb"
+
+
+def test_get_entities_empty_list_returns_empty_dict(facade):
+    assert facade.get_entities("ent-A", []) == {}
+
+
+def test_get_entities_dedups_and_skips_missing_and_is_tenant_scoped(facade):
+    """Missing ids must be ABSENT rather than raising — callers rely on that to
+    preserve `get_entity`'s "row gone → skip this candidate" semantics with a
+    plain `.get()`."""
+    from app.graph import Entity
+    a = Entity(enterprise_id="ent-A", type="theme", canonical_label="aa")
+    other = Entity(enterprise_id="ent-B", type="theme", canonical_label="cc")
+    facade.create_entity("ent-A", a)
+    facade.create_entity("ent-B", other)
+    got = facade.get_entities("ent-A", [a.id, a.id, "does-not-exist", other.id])
+    assert set(got) == {a.id}          # missing + cross-tenant absent, dup collapsed
+    assert got[a.id].canonical_label == "aa"
+
+
+def test_get_entities_single_query(facade, monkeypatch):
+    """The batch must issue ONE underlying read, not one per id — this is the
+    whole point of the method (it replaces up to 23 single-row reads per ask)."""
+    from app.graph import Entity
+    ents = []
+    for i in range(5):
+        e = Entity(enterprise_id="ent-A", type="theme", canonical_label=f"e{i}")
+        facade.create_entity("ent-A", e)
+        ents.append(e)
+
+    calls = {"n": 0}
+    orig_table = facade._client.table
+
+    def _counting_table(name):
+        if name == "kg_entity":
+            calls["n"] += 1
+        return orig_table(name)
+
+    monkeypatch.setattr(facade._client, "table", _counting_table)
+    got = facade.get_entities("ent-A", [e.id for e in ents])
+    assert len(got) == 5
+    assert calls["n"] == 1
+
+
+def test_edges_to_many_covers_every_target_in_one_query(facade, monkeypatch):
+    """One query for N targets, and every target's inbound edges still land."""
+    from app.graph import Entity, Relationship
+    themes, sources = [], []
+    for i in range(4):
+        t = Entity(enterprise_id="ent-A", type="theme", canonical_label=f"t{i}")
+        s = Entity(enterprise_id="ent-A", type="account", canonical_label=f"s{i}")
+        facade.create_entity("ent-A", t)
+        facade.create_entity("ent-A", s)
+        facade.write_relationship("ent-A", Relationship(
+            enterprise_id="ent-A", type="AFFECTS", source_kind="entity",
+            source_id=s.id, target_kind="entity", target_id=t.id))
+        themes.append(t)
+        sources.append(s)
+
+    calls = {"n": 0}
+    orig_table = facade._client.table
+
+    def _counting_table(name):
+        if name == "kg_relationship":
+            calls["n"] += 1
+        return orig_table(name)
+
+    monkeypatch.setattr(facade._client, "table", _counting_table)
+    edges = facade.edges_to_many("ent-A", [t.id for t in themes])
+    assert calls["n"] == 1
+    assert {e.target_id for e in edges} == {t.id for t in themes}
+
+
+def test_edges_to_many_is_tenant_scoped_and_filters_by_type(facade):
+    from app.graph import Entity, Relationship
+    t = Entity(enterprise_id="ent-A", type="theme", canonical_label="t")
+    s = Entity(enterprise_id="ent-A", type="account", canonical_label="s")
+    facade.create_entity("ent-A", t)
+    facade.create_entity("ent-A", s)
+    facade.write_relationship("ent-A", Relationship(
+        enterprise_id="ent-A", type="PROMOTED_TO", source_kind="entity",
+        source_id=s.id, target_kind="entity", target_id=t.id))
+    facade.write_relationship("ent-A", Relationship(
+        enterprise_id="ent-A", type="AFFECTS", source_kind="entity",
+        source_id=s.id, target_kind="entity", target_id=t.id))
+
+    assert len(facade.edges_to_many("ent-A", [t.id])) == 2
+    assert len(facade.edges_to_many("ent-A", [t.id], type="PROMOTED_TO")) == 1
+    # Another tenant asking for the same id sees nothing.
+    assert facade.edges_to_many("ent-B", [t.id]) == []
+
+
+def test_edges_to_many_empty_returns_empty(facade):
+    assert facade.edges_to_many("ent-A", []) == []
+
+
+# ---------- find_candidates: hydration order + batching ----------
+#
+# This path had no CI coverage: the fake returns [] for any RPC nobody
+# registered, so every test that reached `find_candidates` got an empty
+# candidate list and asserted nothing about how rows are hydrated. Batching the
+# hydration made that gap load-bearing — three callers gate a find-or-create on
+# `candidates[0]` being the NEAREST match, and a reordering there wires signals
+# to the wrong theme or creates duplicates in a forward-only graph.
+
+_KG_CANDIDATES_FN = "kg_find_candidates"
+
+
+@pytest.fixture
+def kg_candidates():
+    """Register rows for the `kg_find_candidates` RPC on the fake client."""
+    from tests._fake_supabase import FakeSupabaseClient
+
+    FakeSupabaseClient.rpc_returns.pop(_KG_CANDIDATES_FN, None)
+
+    def _set(rows):
+        FakeSupabaseClient.rpc_returns[_KG_CANDIDATES_FN] = rows
+
+    yield _set
+    FakeSupabaseClient.rpc_returns.pop(_KG_CANDIDATES_FN, None)
+
+
+def test_find_candidates_preserves_rpc_order_not_score_order(facade, kg_candidates):
+    """Output order must equal the RPC's row order verbatim.
+
+    The scores here are deliberately EQUAL and the labels deliberately
+    anti-alphabetical, so any implementation that re-sorts — by score, by label,
+    or by iterating the hydration dict — produces a different first element and
+    fails. `candidates[0]` is what three find-or-create callers trust."""
+    from app.graph import Entity
+
+    ents = []
+    for i in range(4):
+        e = Entity(enterprise_id="ent-A", type="theme", canonical_label=f"theme-{3 - i}")
+        facade.create_entity("ent-A", e)
+        ents.append(e)
+
+    kg_candidates([
+        {"id": e.id, "canonical_label": e.canonical_label, "type": "theme",
+         "score": 0.5}
+        for e in ents
+    ])
+
+    got = facade.find_candidates("ent-A", "theme", [0.1] * 1536, k=4)
+    assert [e.id for e, _ in got] == [e.id for e in ents]
+    assert got[0][0].id == ents[0].id
+
+
+def test_find_candidates_skips_a_row_deleted_after_the_knn(facade, kg_candidates):
+    """A candidate whose row is gone is skipped, not a KeyError — the same
+    behaviour the per-row `if ent:` guard gave."""
+    from app.graph import Entity
+
+    live = Entity(enterprise_id="ent-A", type="theme", canonical_label="live")
+    facade.create_entity("ent-A", live)
+
+    kg_candidates([
+        {"id": "vanished-between-knn-and-fetch", "canonical_label": "gone",
+         "type": "theme", "score": 0.9},
+        {"id": live.id, "canonical_label": "live", "type": "theme", "score": 0.4},
+    ])
+
+    got = facade.find_candidates("ent-A", "theme", [0.1] * 1536, k=2)
+    assert [e.id for e, _ in got] == [live.id]
+
+
+def test_find_candidates_returns_full_entities_in_one_query(facade, kg_candidates,
+                                                            monkeypatch):
+    """Hydration must stay FULL (the RPC returns no `aliases`, and
+    `graph.extractor` reads it) while costing one query, not one per row."""
+    from app.graph import Entity
+
+    ents = []
+    for i in range(5):
+        e = Entity(enterprise_id="ent-A", type="theme", canonical_label=f"t{i}",
+                   aliases=[f"alias-{i}"])
+        facade.create_entity("ent-A", e)
+        ents.append(e)
+
+    kg_candidates([
+        {"id": e.id, "canonical_label": e.canonical_label, "type": "theme",
+         "score": 0.9 - (i * 0.1)}
+        for i, e in enumerate(ents)
+    ])
+
+    calls = {"n": 0}
+    orig_table = facade._client.table
+
+    def _counting_table(name):
+        if name == "kg_entity":
+            calls["n"] += 1
+        return orig_table(name)
+
+    monkeypatch.setattr(facade._client, "table", _counting_table)
+    got = facade.find_candidates("ent-A", "theme", [0.1] * 1536, k=5)
+
+    assert len(got) == 5
+    assert calls["n"] == 1                      # one batched hydration
+    assert got[0][0].aliases == ["alias-0"]     # the column the RPC never returns
+
+
+def test_find_candidates_is_tenant_scoped(facade, kg_candidates):
+    """A candidate id belonging to another tenant hydrates to nothing, so it
+    cannot cross the boundary even if the RPC handed it back."""
+    from app.graph import Entity
+
+    other = Entity(enterprise_id="ent-B", type="theme", canonical_label="theirs")
+    facade.create_entity("ent-B", other)
+
+    kg_candidates([
+        {"id": other.id, "canonical_label": "theirs", "type": "theme", "score": 0.99},
+    ])
+
+    assert facade.find_candidates("ent-A", "theme", [0.1] * 1536, k=1) == []
 
 
 # ---------- decision log ----------

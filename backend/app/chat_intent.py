@@ -125,6 +125,82 @@ _AUTHORING_VERB_RE = re.compile(
 )
 
 
+# ── Plain-question pre-gate ──────────────────────────────────────────────────
+# This module's call is not free and it is not off the answer path: the
+# frontend AWAITS `POST /v1/chat/intent` before `POST /v1/ask` is even sent, so
+# its sonnet call is serial dead time in front of every message (5.3s on the
+# trace that motivated this, ~3s of it the model). On a message that is plainly
+# a question the verdict is `answer` — the identical envelope the fail-open
+# path below already produces — so the call bought nothing but the wait.
+#
+# Same design rule as `looks_like_open_request`: narrow, because its job is to
+# be RIGHT rather than complete. Everything it declines still goes to the model
+# with its verdict unchanged, so a false negative costs only the latency we pay
+# today; a false positive would resurrect the exact failure this module was
+# built to fix, where "break this into work items" gets answered as prose
+# instead of dispatched. Hence conditions that a command cannot satisfy by
+# accident, all required:
+#
+#   1. opens with an interrogative — the shape a question actually has;
+#   2. ends with "?" — so the gate only touches what the user PUNCTUATED as a
+#      question, never an imperative phrased politely ("could you draft this");
+#   3. no authoring verb ANYWHERE — the same vocabulary the open-vs-generate
+#      backstop vetoes on, so a compound "how should we price this, and write
+#      it up?" is left entirely to the model;
+#   4. not a retrieval request, which is its own intent (`open_artifact`);
+#   5. short — a long message is where a buried instruction hides.
+#
+# The caller adds a sixth: the gate is not consulted at all when a PRD is open
+# or a file is attached, because those are precisely the contexts where a
+# question IS an action ("what should we change here?" on an open PRD).
+_QUESTION_OPENERS_RE = re.compile(
+    r"^\s*(?:what|why|how|when|who|whom|whose|where|which|"
+    r"is|are|was|were|do|does|did|has|have|had|"
+    r"can|could|should|would|will|any|tell\s+me)\b",
+    re.I,
+)
+_PRE_GATE_MAX_CHARS = 200
+
+
+def is_plain_question(message: str) -> bool:
+    """True when `message` is UNAMBIGUOUSLY a question and nothing else.
+
+    Pure and deterministic. Used only to skip the envelope's model call in
+    favour of the `answer` verdict that call would have returned anyway; it
+    never dispatches anything, so its failure mode is "we paid for the model
+    call we already pay for today", not "the wrong thing happened".
+    """
+    text = (message or "").strip()
+    if not text or len(text) > _PRE_GATE_MAX_CHARS:
+        return False
+    if not text.endswith("?"):
+        return False
+    if not _QUESTION_OPENERS_RE.search(text):
+        return False
+    if _AUTHORING_VERB_RE.search(text):
+        return False
+    if looks_like_open_request(text):
+        return False
+    return True
+
+
+def _pre_gated() -> dict:
+    """The `answer` envelope for a message the pre-gate resolved without the
+    model. Shaped exactly like `_fallback`'s, but `source` distinguishes the
+    two: this is a deliberate skip, not a failure, and the two must not be
+    indistinguishable in telemetry."""
+    return {
+        "intent": "answer",
+        "confidence": 1.0,
+        "task": None,
+        "instruction": None,
+        "artifact_type": None,
+        "artifact_query": None,
+        "reason": "plain question — resolved without the model",
+        "source": "pre_gate",
+    }
+
+
 def _subject_of(task: Optional[str]) -> Optional[str]:
     """A generation BRIEF reduced to something you can search titles with.
 
@@ -386,6 +462,14 @@ def resolve_chat_intent(
     it only names the subject. The lookup (and its 0/1/many verdict) belongs to
     app.artifact_open, called by the route where the tenant scope lives.
     """
+    # Skip the model entirely on a message that is plainly a question and
+    # nothing else — the verdict would be `answer`, which is what this returns.
+    # Deliberately NOT applied when a PRD is open or a file is attached: those
+    # are the contexts where a question can carry an action ("what should we
+    # change here?" against an open PRD is an edit), and the model is the only
+    # thing that can tell. See `is_plain_question` for why the gate is narrow.
+    if prd_id is None and not has_attachments and is_plain_question(message):
+        return _pre_gated()
     try:
         result = llm_call(
             enterprise_id=enterprise_id,

@@ -48,6 +48,11 @@ _SIGNALS_PER_THEME = 6
 # Recent non-stale signals to fold in regardless of theme match (covers
 # fresh connector data not yet wired to a resolved theme).
 _RECENT_SIGNALS = 8
+#: How many rows to FETCH to fill those 8. The staleness filter runs in Python
+#: after the fetch, so this needs headroom over `_RECENT_SIGNALS` — but not the
+#: facade's 1000-row default, which shipped a thousand signal rows per ask to
+#: read eight. See the call site for why 250 is the safe width.
+_RECENT_SIGNALS_FETCH = 250
 
 #: Cosine similarity below which a theme match is indistinguishable from
 #: noise. `kg_find_candidates` is a pure kNN (ORDER BY <=> ... LIMIT k) — it
@@ -145,8 +150,85 @@ def _ledger_entities(
       - hypothesis: VALIDATES-in    -> validated_by_outcome
       - outcome:    VALIDATES-out   -> validates_hypothesis
     A failed edge read for one entity never breaks the others or raises;
-    `related` is simply omitted (the caller falls back to label+properties)."""
+    `related` is simply omitted (the caller falls back to label+properties).
+
+    The edge reads and the label lookups are both BATCHED across `rows`. Walked
+    per entity this was the ask's largest N+1 after the theme walk — 21 typed
+    edge queries plus 11 single-row label fetches on a normal ledger — and it
+    collapses to at most two edge queries and one label query per kind. Both
+    batches fall back to the original per-entity path on failure, so the
+    degradation profile above still holds exactly."""
     out: list[dict] = []
+    if not rows:
+        return out
+
+    ids = [e.id for e in rows]
+
+    def _group(edges: list, attr: str) -> dict[str, list]:
+        grouped: dict[str, list] = {}
+        for edge in edges:
+            grouped.setdefault(getattr(edge, attr), []).append(edge)
+        return grouped
+
+    # One query per direction this kind actually walks, instead of one per
+    # entity per direction. `batched` going False is what re-arms the original
+    # per-entity reads below.
+    inbound: dict[str, list] = {}
+    outbound: dict[str, list] = {}
+    batched = True
+    try:
+        if kind == "decision":
+            inbound = _group(
+                facade.edges_to_many(enterprise_id, ids, type="PROMOTED_TO"), "target_id"
+            )
+            outbound = _group(
+                facade.edges_from_many(enterprise_id, ids, type="RESULTED_IN"), "source_id"
+            )
+        elif kind == "hypothesis":
+            inbound = _group(
+                facade.edges_to_many(enterprise_id, ids, type="VALIDATES"), "target_id"
+            )
+        elif kind == "outcome":
+            outbound = _group(
+                facade.edges_from_many(enterprise_id, ids, type="VALIDATES"), "source_id"
+            )
+    except Exception as exc:  # noqa: BLE001 — ledger enrichment is best-effort
+        logger.info(
+            "Ask KG retrieval: batched ledger edges failed kind=%s (%s); "
+            "falling back to per-entity reads", kind, exc,
+        )
+        inbound, outbound, batched = {}, {}, False
+
+    # Warm the shared label cache in ONE fetch for every entity these edges
+    # point at. `_resolve_label` reads that cache first, so a warm entry costs
+    # it no round trip — and ids an earlier kind already resolved cost nothing
+    # here either, since the cache is shared across all three calls.
+    if batched:
+        referenced: list[str] = []
+        for e in rows:
+            referenced.extend(
+                edge.source_id for edge in inbound.get(e.id, [])
+                if edge.source_kind == "entity"
+            )
+            referenced.extend(
+                edge.target_id for edge in outbound.get(e.id, [])
+                if edge.target_kind == "entity"
+            )
+        missing = [i for i in dict.fromkeys(referenced) if i not in label_cache]
+        if missing:
+            try:
+                fetched = facade.get_entities(enterprise_id, missing)
+                for eid in missing:
+                    ent = fetched.get(eid)
+                    # Negative caching preserved: an id that did not resolve is
+                    # cached as None so `_resolve_label` never retries it.
+                    label_cache[eid] = ent.canonical_label if ent else None
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Ask KG retrieval: batched label fetch failed kind=%s (%s); "
+                    "falling back to per-id lookups", kind, exc,
+                )
+
     for e in rows:
         entry: dict[str, Any] = {
             "entity_id": e.id, "label": e.canonical_label, "properties": e.properties or {},
@@ -154,27 +236,43 @@ def _ledger_entities(
         related: dict[str, str] = {}
         try:
             if kind == "decision":
-                for edge in facade.edges_to(enterprise_id, e.id, type="PROMOTED_TO"):
+                promoted = (
+                    inbound.get(e.id, []) if batched
+                    else facade.edges_to(enterprise_id, e.id, type="PROMOTED_TO")
+                )
+                for edge in promoted:
                     if edge.source_kind != "entity":
                         continue
                     label = _resolve_label(facade, enterprise_id, edge.source_id, label_cache)
                     if label:
                         related["promoted_from_hypothesis"] = label
-                for edge in facade.edges_from(enterprise_id, e.id, type="RESULTED_IN"):
+                resulted = (
+                    outbound.get(e.id, []) if batched
+                    else facade.edges_from(enterprise_id, e.id, type="RESULTED_IN")
+                )
+                for edge in resulted:
                     if edge.target_kind != "entity":
                         continue
                     label = _resolve_label(facade, enterprise_id, edge.target_id, label_cache)
                     if label:
                         related["resulted_in_artifact"] = label
             elif kind == "hypothesis":
-                for edge in facade.edges_to(enterprise_id, e.id, type="VALIDATES"):
+                validated = (
+                    inbound.get(e.id, []) if batched
+                    else facade.edges_to(enterprise_id, e.id, type="VALIDATES")
+                )
+                for edge in validated:
                     if edge.source_kind != "entity":
                         continue
                     label = _resolve_label(facade, enterprise_id, edge.source_id, label_cache)
                     if label:
                         related["validated_by_outcome"] = label
             elif kind == "outcome":
-                for edge in facade.edges_from(enterprise_id, e.id, type="VALIDATES"):
+                validates = (
+                    outbound.get(e.id, []) if batched
+                    else facade.edges_from(enterprise_id, e.id, type="VALIDATES")
+                )
+                for edge in validates:
                     if edge.target_kind != "entity":
                         continue
                     label = _resolve_label(facade, enterprise_id, edge.target_id, label_cache)
@@ -189,6 +287,37 @@ def _ledger_entities(
             entry["related"] = related
         out.append(entry)
     return out
+
+
+def _shared_ask_embedding(
+    enterprise_id: str, question: str
+) -> Optional[tuple[Optional[list[float]], bool]]:
+    """This ask's shared `(vector, degraded)` when an ask is in scope, else None.
+
+    Three outcomes, mapping onto `ask_runner`'s three slot states:
+      * no slot        -> None. The caller is not inside an ask (oncall,
+                          research, tests); it should embed for itself.
+      * slot pending   -> resolve it now and memoise, so this becomes the ask's
+                          one shared vector and later consumers reuse it.
+      * slot resolved  -> hand back what the ask already computed, including a
+                          degraded `(None, True)`, which must NOT be retried.
+
+    Imported lazily because `app.ask_runner` imports THIS module — a top-level
+    import would be circular. Same idiom as `embed_texts` below.
+
+    Never raises: any failure to reach the ask context degrades to "no slot",
+    which is the pre-existing self-embed path."""
+    try:
+        from app import ask_runner
+
+        slot = ask_runner._active_question_embedding.get()
+        if slot is None:
+            return None
+        if slot is ask_runner._EMBED_PENDING:
+            return ask_runner._resolve_question_embedding(enterprise_id, question)
+        return slot  # type: ignore[return-value]
+    except Exception:  # noqa: BLE001 — sharing is an optimisation, never a dependency
+        return None
 
 
 def retrieve_context(
@@ -278,11 +407,30 @@ def retrieve_context(
     qvec: Optional[list[float]] = question_embedding
     try:
         if qvec is None and not skip_semantic:
-            from app.graph.embeddings import embed_texts
+            # Before embedding anything, ask whether THIS ask already has a
+            # vector in scope. `ask_runner` publishes one request-scoped slot
+            # per ask precisely so the question is embedded once and shared —
+            # but this function is reached by a second route the sharing never
+            # covered: `connector_lookup.knowledge_graph.search` calls it with
+            # neither `question_embedding` nor `skip_semantic`, so it fell
+            # straight through to the self-embed below and paid for a second
+            # vector of the SAME question (both legs logged `input_tokens=8`).
+            #
+            # `_shared_ask_embedding` returns None for every caller that has no
+            # ask in scope — oncall, research, the tests — so those keep
+            # self-embedding here exactly as before.
+            shared = _shared_ask_embedding(enterprise_id, question)
+            if shared is not None:
+                # A degraded share is authoritative: `(None, True)` means the
+                # ask already tried and failed, and retrying it here is the
+                # doomed second call `skip_semantic` exists to prevent.
+                qvec, _shared_degraded = shared
+            else:
+                from app.graph.embeddings import embed_texts
 
-            vecs = embed_texts([question], enterprise_id=enterprise_id,
-                               purpose="kg_retrieval")
-            qvec = vecs[0] if vecs else None
+                vecs = embed_texts([question], enterprise_id=enterprise_id,
+                                   purpose="kg_retrieval")
+                qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
 
@@ -349,6 +497,38 @@ def retrieve_context(
     themes_out: list[dict] = []
     theme_edge_ids: list[tuple[Any, float, list[str]]] = []
     needed_ids: list[str] = []
+
+    # ONE batched inbound-edge read covering every matched theme, replacing the
+    # per-theme `edges_to` that cost twelve serial round trips at the default
+    # k=12. `edges_to_many` filters on `(enterprise_id, target_id)`, the same
+    # `kg_rel_to_idx` index the per-id form used, so this is fewer trips over
+    # the same plan — no migration, no new index.
+    #
+    # Regrouped by target_id in ARRIVAL ORDER, which is load-bearing: the cap
+    # further down keeps the first `_SIGNALS_PER_THEME` edges rather than the
+    # highest-ranked ones, so which evidence survives depends on the order rows
+    # come back in. Appending in iteration order reproduces exactly what the
+    # per-theme reads saw.
+    #
+    # The fallback is not belt-and-braces. The old shape degraded ONE theme
+    # when a read failed and kept the rest; a single batched query turns any
+    # failure into "no KG evidence at all", and the ask would then answer
+    # corpus-only without ever saying that is what it did.
+    edges_by_theme: Optional[dict[str, list[Any]]] = None
+    try:
+        _batched = facade.edges_to_many(
+            enterprise_id, [t.id for t, _ in matched_themes]
+        )
+        edges_by_theme = {}
+        for _e in _batched:
+            edges_by_theme.setdefault(_e.target_id, []).append(_e)
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "Ask KG retrieval: batched edges_to_many failed (%s); falling back "
+            "to per-theme reads", exc,
+        )
+        edges_by_theme = None
+
     for theme, score in matched_themes:
         themes_out.append(
             {"entity_id": theme.id, "label": theme.canonical_label, "score": round(float(score), 4)}
@@ -357,11 +537,16 @@ def retrieve_context(
         # theme-matched evidence floats above generic recent signals without
         # swamping the evidence-weight term.
         boost = max(0.0, float(score)) * 0.5
-        try:
-            edges = facade.edges_to(enterprise_id, theme.id)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("Ask KG retrieval: edges_to(%s) failed (%s)", theme.id, exc)
-            continue
+        if edges_by_theme is not None:
+            # A theme with no inbound edges is absent from the map, not an
+            # error — same as the empty list the per-theme read returned.
+            edges = edges_by_theme.get(theme.id, [])
+        else:
+            try:
+                edges = facade.edges_to(enterprise_id, theme.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Ask KG retrieval: edges_to(%s) failed (%s)", theme.id, exc)
+                continue
         edge_ids = [e.source_id for e in edges if e.source_kind == "signal"]
         theme_edge_ids.append((theme, boost, edge_ids))
         needed_ids.extend(edge_ids)
@@ -387,7 +572,21 @@ def retrieve_context(
     # 4) Recent non-stale signals (no theme boost). Covers fresh connector
     #    data the synthesis pass hasn't wired to a theme yet.
     try:
-        recent = facade.active_signals(enterprise_id)
+        # Only the newest `_RECENT_SIGNALS` survive the slice below, so asking
+        # for the facade's full 1000-row default shipped ~1000 rows — content,
+        # properties and provenance JSON included — to read eight of them. This
+        # tenant was already logging `active_signals hit the fetch limit`, i.e.
+        # paying that in full on every ask.
+        #
+        # 250 rather than 8: the stale filter runs in Python AFTER the fetch
+        # (`facade.active_signals` does this so the in-memory test fake, which
+        # supports neither OR nor `gt`, behaves like real Supabase), so the
+        # fetch has to carry enough headroom that staleness can't starve the
+        # slice. 250 leaves 242 stale signals of room before the result could
+        # differ from the old width — and if a tenant ever did have that many
+        # consecutive stale recent signals, the effect is a slightly shorter
+        # recent list, not a wrong one.
+        recent = facade.active_signals(enterprise_id, limit=_RECENT_SIGNALS_FETCH)
     except Exception as exc:  # noqa: BLE001
         logger.info("Ask KG retrieval: active_signals failed (%s)", exc)
         recent = []

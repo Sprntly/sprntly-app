@@ -16,9 +16,13 @@
  * before its next status poll. Server-side jobs are idempotent, so waking early
  * simply re-reads the real status and lets the UI catch up.
  */
-export function sleepUntilNextPoll(ms: number): Promise<void> {
+export function sleepUntilNextPoll(
+  ms: number,
+  wakeOn?: (wake: () => void) => (() => void) | void,
+): Promise<void> {
   return new Promise((resolve) => {
     let done = false
+    let unsubscribe: (() => void) | void
     const finish = () => {
       if (done) return
       done = true
@@ -26,6 +30,7 @@ export function sleepUntilNextPoll(ms: number): Promise<void> {
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisible)
       }
+      unsubscribe?.()
       resolve()
     }
     const onVisible = () => {
@@ -36,6 +41,23 @@ export function sleepUntilNextPoll(ms: number): Promise<void> {
     const timer = setTimeout(finish, ms)
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisible)
+    }
+    // An optional external "the job may be finished" signal, on exactly the
+    // same contract as the visibility wake above: it can only SHORTEN a sleep,
+    // never lengthen it, and waking early just re-reads the real status. The
+    // ask stream's `done` frame lands before the next poll tick would, so
+    // without this the answer sits rendered-but-unshown for up to a full
+    // interval. Opt-in, so the six other pollUntil callers are untouched.
+    if (wakeOn) {
+      try {
+        const off = wakeOn(finish)
+        // `wakeOn` may fire synchronously — if it already did, unsubscribe now
+        // rather than parking a listener nothing will ever clear.
+        if (done) off?.()
+        else unsubscribe = off
+      } catch {
+        /* a broken wake source must never stall the poll */
+      }
     }
   })
 }
@@ -55,6 +77,15 @@ export type PollUntilOptions<T> = {
   intervalMs: number
   /** Optional cooperative cancel — when it returns true the loop bails out. */
   isCancelled?: () => boolean
+  /**
+   * Optional early-wake source. Receives a `wake` callback and returns an
+   * unsubscribe. Firing `wake` cuts the current sleep short and re-reads
+   * status immediately; it does NOT resolve the poll or supply a value. That
+   * separation is deliberate — the ask's SSE frames are display-only and the
+   * polled row stays authoritative, so a wake can never make the loop believe
+   * a job finished when the server has not said so.
+   */
+  wakeOn?: (wake: () => void) => (() => void) | void
 }
 
 /**
@@ -66,7 +97,7 @@ export type PollUntilOptions<T> = {
  * once.
  */
 export async function pollUntil<T>(opts: PollUntilOptions<T>): Promise<T> {
-  const { fetchStatus, isDone, maxMs, intervalMs, isCancelled } = opts
+  const { fetchStatus, isDone, maxMs, intervalMs, isCancelled, wakeOn } = opts
   const start = Date.now()
   let value = await fetchStatus()
   while (
@@ -74,7 +105,7 @@ export async function pollUntil<T>(opts: PollUntilOptions<T>): Promise<T> {
     !isCancelled?.() &&
     Date.now() - start < maxMs
   ) {
-    await sleepUntilNextPoll(intervalMs)
+    await sleepUntilNextPoll(intervalMs, wakeOn)
     if (isCancelled?.()) return value
     value = await fetchStatus()
   }
