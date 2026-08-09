@@ -1226,9 +1226,39 @@ CREATE TABLE custom_skills (
     uploader_id   TEXT NOT NULL,
     uploader_name TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which synced folder produced this skill (20260807170000_skill_sources.sql).
+    -- NULL for every hand-uploaded skill; non-NULL makes the skill read-only in
+    -- the UI and at the PATCH route, because the repo owns its text.
+    source_id     TEXT,
     UNIQUE (company_id, slug)
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+CREATE INDEX custom_skills_source_id_idx ON custom_skills (source_id);
+
+-- Synced skill folders (mirrors 20260807170000_skill_sources.sql, SQLite-ized).
+-- One row per (company, repo, ref, path) folder a company keeps synced: the
+-- 30-minute sweep re-runs GitHub discovery over it and re-imports every .md it
+-- finds. `ref` empty means the repo's default branch, `path` empty the repo
+-- root. `last_commit_sha` is the sweep's short-circuit — unchanged head means
+-- no work. No company/workspace FKs, matching custom_skills above.
+CREATE TABLE skill_sources (
+    id              TEXT PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    installation_id INTEGER NOT NULL,
+    repo            TEXT NOT NULL,
+    ref             TEXT NOT NULL DEFAULT '',
+    path            TEXT NOT NULL DEFAULT '',
+    last_commit_sha TEXT NOT NULL DEFAULT '',
+    last_synced_at  TEXT,
+    last_error      TEXT NOT NULL DEFAULT '',
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, repo, ref, path)
+);
+CREATE INDEX skill_sources_company_id_idx ON skill_sources (company_id);
 
 -- Artifact format templates (mirrors 20260805120000_artifact_templates.sql,
 -- SQLite-ized). COMPANY-scoped uploaded PRD / ticket / engineering-spec FORMS
@@ -1637,6 +1667,43 @@ def _no_background_template_compile(request, monkeypatch):
         if hasattr(mod, "schedule_compile"):
             monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
                                 raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_referent_adjudication(request, monkeypatch):
+    """Keep document RESOLUTION from firing a real model call.
+
+    `document_referent.adjudicate` runs on the ask path whenever a question
+    carries a document cue and a candidate clears the content-term floor — and
+    it goes through `graph.gateway.llm_call`, which holds its own `call_json`
+    reference bound at import time and so is NOT reached by `fake_llm`
+    (see `_no_background_template_compile` above for the same hazard).
+    Several existing ask tests ask cue-bearing questions in passing; without
+    this guard each of them would attempt a real Anthropic request and sit on
+    a network timeout before failing open.
+
+    Returning None is the resolver's own no-referent answer, so a guarded test
+    sees exactly the grounding it saw before resolution existed — the guard
+    cannot mask a resolution bug by inventing a resolution.
+
+    Opt out with `@pytest.mark.real_referent_adjudication`;
+    `test_document_referent.py`'s own suite stubs `adjudicate` with a
+    controllable fake instead, which overrides this for the tests that need to
+    steer the verdict."""
+    if request.node.get_closest_marker("real_referent_adjudication"):
+        yield
+        return
+    import importlib
+
+    try:
+        mod = importlib.import_module("app.document_referent")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        mod, "adjudicate", lambda **kw: None, raising=False
+    )
     yield
 
 

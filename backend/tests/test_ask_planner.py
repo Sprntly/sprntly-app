@@ -577,14 +577,19 @@ def test_the_schema_property_order_is_load_bearing():
         "action", "task", "instruction",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
-        "sources", "include_knowledge_graph", "web_search",
+        "sources", "include_knowledge_graph", "web_search", "documents",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
     # `constraints` is optional (a question carrying no window, count or entity
     # should omit it rather than invent one) and so are `task`/`instruction`,
     # which belong to specific actions.
-    for optional in ("constraints", "task", "instruction"):
+    #
+    # `documents` is optional for the same reason as `constraints`, and the
+    # reason matters more here: naming no document is the NORMAL outcome, and a
+    # required field is an invitation to fill it. A document named wrongly makes
+    # the assistant answer as that document — see app/document_referent.py.
+    for optional in ("constraints", "task", "instruction", "documents"):
         assert optional not in ap._PLANNER_SCHEMA["required"]
     assert len(ap._PLANNER_SCHEMA["required"]) == 10
 

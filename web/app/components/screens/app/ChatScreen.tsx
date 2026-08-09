@@ -36,7 +36,8 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
-import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -119,12 +120,31 @@ type ThreadTurn = {
    *  explanation. Never an error: the poll still delivers the real answer.
    *  Transient, like `partial`. */
   streamDropped?: boolean
+  /** "Open the PRD for X" matched SEVERAL documents — the candidates, rendered
+   *  as chips under this turn's reply. Each chip carries its artifact's ids and
+   *  opens the panel on click; it does NOT re-send its label as a message,
+   *  which is what made the old suggestion chip inert (it asked the same
+   *  question again and got the document read back as chat text).
+   *
+   *  PERSISTED with the turn (it rides the normal slim payload — only the
+   *  streaming fields below are stripped), so the chips are still answerable
+   *  after a reload instead of leaving an unanswerable question behind. */
+  openCandidates?: OpenArtifactCandidate[]
   /** The 12-minute client budget expired while the job was still generating.
    *  NOT a failure — the persisted ask_id is deliberately left in place, so a
    *  reload re-attaches and picks the answer up. Transient: after a reload the
    *  resume effect puts this turn back into the generating state, which is what
    *  the message promises. */
   timedOut?: boolean
+}
+
+/** Artifact kinds a user can NAME in an open request that this panel does not
+ *  render. Each one opens somewhere — just not here — so the reply names the
+ *  thing they asked for rather than quietly handing back a PRD of that name. */
+const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
+  prototype: "A prototype",
+  report: "A report",
+  tickets: "Tickets",
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -438,6 +458,26 @@ type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
    *  live thread) instead of spawning a new tab. Set by the in-chat command
    *  flows when the active tab is a plain, PRD-less chat. */
   inTabId?: string
+  /** This open resolves ENTIRELY from the target tab's cache: `openPrdInTab`
+   *  returns before reaching its async block, so nothing will ever run later to
+   *  settle a deferred acknowledgment — the ack must ride the seed turn instead.
+   *
+   *  It is a field rather than a local because TWO functions have to agree on
+   *  it: `openPrdInTab` decides whether the seed turn carries its reply inline,
+   *  and `seedCommandTurn` — which runs AFTER it — decides whether to register
+   *  the turn in `deferredAckRef`. The second cannot safely re-derive the answer
+   *  from tab state the first has already started mutating.
+   *
+   *  Disagreement is not cosmetic. `settleCommandAck` writes the visible thread
+   *  unconditionally but only PERSISTS when it finds a registered entry, so a
+   *  settle arriving before the registration looks perfect on screen while
+   *  silently dropping the assistant turn from the conversation — and the NEXT
+   *  one then pairs its reply with the previous turn's id, inverting the
+   *  user→assistant order `hydratePrdThread`'s rebuild depends on.
+   *
+   *  Computed once by the caller that knows whether the document is cached
+   *  (`openArtifactInPanel`), read by both. */
+  ackInline?: boolean
 }
 
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
@@ -458,11 +498,20 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   // thread. The copy said "above" for every case, so a command-opened chat
   // pointed the user at a button that was in fact sitting under this message.
   const inline = source.kind === "importDoc" || source.kind === "generateTask"
-    || (source.kind === "resume" && !!req.seedQuery)
+    || ((source.kind === "resume" || source.kind === "load") && !!req.seedQuery)
   const locator = inline
     ? "Use the View PRD button just below to reopen the panel anytime."
     : "Use the View PRD button above to reopen the panel anytime."
-  const lead = withTickets
+  // OPENING an existing document, not producing one — so the copy must not
+  // promise generation. Every other branch here describes work about to start;
+  // this one describes a document that already exists arriving on screen, which
+  // is the whole distinction the open_artifact action protects.
+  const opening = source.kind === "load" || source.kind === "evidence"
+  const lead = opening
+    ? source.kind === "evidence"
+      ? "Opening that evidence in the panel on the right."
+      : "Opening that PRD in the panel on the right."
+    : withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
     ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
@@ -472,6 +521,25 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
         ? "Importing your document as a PRD — it'll open in the panel on the right when ready."
         : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready."
   return { answer: `${lead} ${locator}`, key_points: [], citations: [], confidence: 1, unanswered: "" }
+}
+
+/** An open that resolved to a real document the panel then refused to show —
+ *  a PRD mid-regeneration is the live case (`loadPrdById` returns "PRD isn't
+ *  ready yet").
+ *
+ *  This settles the deferred ack as ORDINARY PROSE rather than routing through
+ *  failDeferredAck's error state, because it is neither a failure nor a
+ *  generation: the shared error card says "That answer didn't come through.
+ *  Nothing was saved." — three claims that are all false about an open that
+ *  simply found the document busy. */
+function openFailureReply(detail: string): AskResponse {
+  const reason = detail.trim().replace(/[.\s]+$/, "")
+  return {
+    answer: reason
+      ? `I couldn't open that PRD — ${reason.charAt(0).toLowerCase()}${reason.slice(1)}. Try again in a moment.`
+      : "I couldn't open that PRD just now. Try again in a moment.",
+    key_points: [], citations: [], confidence: 1, unanswered: "",
+  } as AskResponse
 }
 
 // Attached-file chips. Rendered by BOTH composers — attachments live in shared
@@ -1828,14 +1896,21 @@ export function ChatScreen() {
    *  happened instead. No-op once the ack or the questions have already landed. */
   const failDeferredAck = useCallback((tabId: string, seedTurnId: string | undefined, message: string) => {
     if (!seedTurnId || !deferredAckRef.current.has(tabId)) return
-    const turnId = deferredAckRef.current.get(tabId)!.turnId
+    const deferred = deferredAckRef.current.get(tabId)!
+    const turnId = deferred.turnId
     deferredAckRef.current.delete(tabId)
     const detail = message.trim().slice(0, 200)
+    // The verb has to match what was actually attempted. An OPEN that fails
+    // ("PRD isn't ready yet" from loadPrdById) reported as "I couldn't start
+    // that PRD" describes a generation the user never asked for — the same
+    // class of false statement the deferral exists to prevent.
+    const verb = deferred.req.source.kind === "load" ? "open" : "start"
+    const lead = `I couldn't ${verb} that PRD`
     setTabs((prev) => prev.map((t) => t.id === tabId
       ? {
           ...t,
           thread: t.thread.map((tn) => tn.id === seedTurnId
-            ? { ...tn, error: detail ? `I couldn't start that PRD — ${detail}` : "I couldn't start that PRD." }
+            ? { ...tn, error: detail ? `${lead} — ${detail}` : `${lead}.` }
             : tn),
         }
       : t))
@@ -1884,11 +1959,24 @@ export function ChatScreen() {
     // (and a reload of one) always arrives with the generic title "PRD", which
     // never matches the real tab's "PRD · <name>", so title-matching alone
     // spawned a SECOND tab for a PRD that was already open.
+    //
+    // …and a `load` STOPS there: it always knows its prd id, so a title match
+    // can only ever be a DIFFERENT document that happens to share a name. That
+    // is not hypothetical here — same-titled PRDs are precisely what the open
+    // flow's disambiguation surfaces as chips, so "open 2216, then click the
+    // chip for the other Compliance Reporting" would have matched 2216's tab by
+    // title, found its cached `prd`, and shown 2216 while the user asked for
+    // 2214, with nothing signalling the substitution. #1039's lesson exactly:
+    // any dedupe keyed on a display string breaks as soon as two entries share
+    // one. Key on the identifier, and where there is an identifier, do not fall
+    // back to the string at all.
     const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
       ?? (source.kind === "load"
         ? tabsRef.current.find((t) => t.prdId === source.prdId)
         : undefined)
-      ?? tabsRef.current.find((t) => t.title === title)
+      ?? (source.kind === "load"
+        ? undefined
+        : tabsRef.current.find((t) => t.title === title))
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
     // "generate a PRD"): seed the thread with the user's message + an
@@ -1898,7 +1986,23 @@ export function ChatScreen() {
     // until the clarify gate says which response the user is actually getting
     // (see deferredAckRef). Its reply-less turn shows the thinking indicator for
     // that window and is filled in by settleCommandAck.
-    const deferAck = source.kind === "generateTask"
+    //
+    // The in-chat OPEN command ("open the PRD for X" — a `load` carrying a seed
+    // query) defers for the same reason, one step earlier in the same lesson:
+    // "Opening that PRD in the panel on the right" is a claim about something
+    // that has not happened yet. A resolved candidate is only an ID, and
+    // loadPrdById still says no to a PRD mid-regeneration — which left that
+    // sentence in the thread, and in the persisted conversation, next to a
+    // panel that never opened. Now the ack is written only once the document is
+    // actually on screen (settleCommandAck below), and a refusal writes what
+    // really happened (failDeferredAck).
+    // …but NOT when the document is already cached on the target tab: that open
+    // returns below without ever entering the async block, so a deferred ack
+    // would have nothing to settle it. `ackInline` is the caller's verdict on
+    // exactly that, shared with seedCommandTurn so the two cannot disagree.
+    const deferAck =
+      source.kind === "generateTask" ||
+      (source.kind === "load" && !!req.seedQuery && !req.ackInline)
     const seedTurn: ThreadTurn | null = req.seedQuery
       ? {
           id: `seed-${Date.now()}`,
@@ -1917,10 +2021,14 @@ export function ChatScreen() {
     // insight card + questions INLINE below the command turn. generateIdeation
     // carries a seedQuery too but is a HEADER open (its framing card stays on
     // top), so it's deliberately excluded here. See the render block below.
+    // A `load` carrying a seedQuery is the in-chat OPEN command ("open the PRD
+    // for X") — the same shape as the other command kinds, so its PRD card
+    // belongs inline under that command turn. A load WITHOUT one is a deep link
+    // / reload, which stays a header open exactly as before.
     const prdInFlow =
       source.kind === "importDoc" ||
       source.kind === "generateTask" ||
-      (source.kind === "resume" && !!req.seedQuery)
+      ((source.kind === "resume" || source.kind === "load") && !!req.seedQuery)
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
@@ -2002,6 +2110,11 @@ export function ChatScreen() {
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
+      // No ack settling here, deliberately. This return is upstream of the turn
+      // ever being registered (seedCommandTurn runs after openPrdInTab), so a
+      // settle would write the thread and skip persistence entirely. `ackInline`
+      // has already told the seed turn to carry its reply, so the acknowledgment
+      // is on screen AND in the conversation before we get here.
       return tabId
     }
     // Caller already holds the PRD — show it immediately, no async work.
@@ -2192,12 +2305,27 @@ export function ChatScreen() {
           ) {
             postSummaryRef.current?.(tabId, "prd", result.prd.prd_id)
           }
+          // The OPEN command's deferred ack, settled the moment the claim it
+          // makes became true: the document is loaded and the panel is showing
+          // it. Anything earlier is a promise, and this one had a real way of
+          // going unkept (a PRD mid-regeneration refuses to load).
+          if (deferAck && source.kind === "load" && seedTurn) {
+            settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
+          }
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-          failDeferredAck(tabId, seedTurn?.id, result.message)
+          if (deferAck && source.kind === "load" && seedTurn) {
+            // An OPEN that found the document busy is a refusal we can explain,
+            // not a failed generation — so it settles as prose. The error card
+            // the other kinds get would claim the answer didn't come through
+            // and that nothing was saved, neither of which happened here.
+            settleCommandAck(tabId, seedTurn.id, openFailureReply(result.message))
+          } else {
+            failDeferredAck(tabId, seedTurn?.id, result.message)
+          }
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
@@ -3045,7 +3173,20 @@ export function ChatScreen() {
     // wrote a promise the agent then didn't keep, sitting in the thread (and in
     // the conversation history) above the questions it contradicted. Register
     // the turn instead; settleCommandAck writes whichever reply actually wins.
-    if (req.source.kind === "generateTask") {
+    //
+    // "open the PRD for X" (a `load` with a seed query) defers on the same
+    // rule: "Opening that PRD in the panel on the right" is only true once the
+    // load succeeds, and a PRD being regenerated refuses to load.
+    //
+    // `ackInline` is the exception, and MUST be read here rather than
+    // re-derived: that open already returned from cache, so registering a turn
+    // for it would strand an entry no settle ever consumes — and the next
+    // command on this tab would then find that stale entry and persist its own
+    // reply against the wrong turn id. See the field's doc comment.
+    if (
+      req.source.kind === "generateTask" ||
+      (req.source.kind === "load" && !req.ackInline)
+    ) {
       deferredAckRef.current.set(tabId, { turnId, req })
       return
     }
@@ -3591,6 +3732,201 @@ export function ChatScreen() {
     seedCommandTurn(req, tabId)
   }, [activeCompany, openPrdInTab, reusableActiveTab, seedCommandTurn])
 
+  // ── "Open the PRD for X" ───────────────────────────────────────────────────
+  // The ACTION half of the open_artifact envelope. The backend has already done
+  // the hard part (this is an OPEN, not a generate; here is the document, or
+  // here are the two it could be, or here is nothing) — everything below is
+  // about putting the named artifact in the right-hand panel of the CHAT, which
+  // is the part that was missing: the old flow answered with the document
+  // reconstructed as chat text and never opened a panel at all.
+
+  /** Put ONE artifact in the panel. Returns false for a candidate that carries
+   *  no openable id (nothing happens rather than an empty panel).
+   *
+   *  `seedQuery` seeds the user's typed command as a thread turn. A CHIP click
+   *  passes none — it is direct manipulation of the panel, not another message,
+   *  so it must not put words in the user's mouth or spend an ask. */
+  const openArtifactInPanel = useCallback(
+    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
+      if (candidate.type === "evidence") {
+        if (candidate.brief_id == null || candidate.insight_index == null) return false
+        // The SAME binding guard the PRD branch uses. Pinning the active tab
+        // unconditionally let an evidence open hijack a tab already holding a
+        // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
+        // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
+        // the panel renders B's evidence beside A's document and the tab is
+        // flagged evidence-only while holding a prd id. `reusableActiveTab`
+        // declines exactly that tab, and the open gets a chat of its own.
+        const inTab = reusableActiveTab()
+        const req: LocalPrdTabRequest = {
+          title: candidate.title || "Evidence",
+          ...(seedQuery ? { seedQuery } : {}),
+          ...(inTab ? { inTabId: inTab.id } : {}),
+          source: {
+            kind: "evidence",
+            meta: { briefId: candidate.brief_id, insightIndex: candidate.insight_index },
+            detail: null,
+          },
+        }
+        const tabId = openPrdInTab(req)
+        seedCommandTurn(req, tabId)
+        return true
+      }
+      const prdId = candidate.prd_id ?? candidate.id
+      if (prdId == null) return false
+      // Reuse BY PRD ID, never by title. A tab already holding this document
+      // wins over the tab the user is typing in, so opening a PRD that is
+      // already open focuses it instead of spawning a second tab for the same
+      // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
+      // this path would otherwise reintroduce from a different entry point (the
+      // titles here are real document titles, so a title match would look like
+      // it works right up until two documents share a name).
+      const holder = tabsRef.current.find(
+        (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
+      )
+      // Otherwise: the CHAT the user is in, so the panel opens beside the
+      // conversation that asked for it (the stated requirement) rather than in
+      // a tab of its own. `reusableActiveTab` declines a tab already bound to a
+      // different PRD/insight, which must not be repointed.
+      const inTab = holder ?? reusableActiveTab()
+      // Is the document ALREADY cached on the tab we're about to open into? Then
+      // openPrdInTab returns straight from that cache and never reaches the
+      // async block, so the acknowledgment has to ride the seed turn instead of
+      // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
+      // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
+      // returns tabs with no PRD by definition.
+      const ackInline = holder?.prd?.prd_id === prdId
+      const req: LocalPrdTabRequest = {
+        title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
+        ...(seedQuery ? { seedQuery } : {}),
+        ...(inTab ? { inTabId: inTab.id } : {}),
+        ...(ackInline ? { ackInline: true } : {}),
+        source: {
+          kind: "load",
+          prdId,
+          // The finding this PRD came from, so the panel's Evidence tab has
+          // something to load (it reads `content.prdMeta` and fetches by
+          // (briefId, insightIndex) — with null meta that tab is simply dead,
+          // while the SAME document opened from Artifacts worked).
+          //
+          // Only when the backend says the pair is real: a chat / ideation /
+          // uploaded PRD carries insight_index 0 as a storage sentinel, and
+          // passing that would load the brief's first finding under a document
+          // that has nothing to do with it. Those PRDs genuinely have no
+          // insight, so null is the correct answer for them, not a limitation.
+          meta:
+            candidate.brief_anchored &&
+            candidate.brief_id != null &&
+            candidate.insight_index != null
+              ? { briefId: candidate.brief_id, insightIndex: candidate.insight_index }
+              : null,
+        },
+      }
+      const tabId = openPrdInTab(req)
+      seedCommandTurn(req, tabId)
+      return true
+    },
+    [openPrdInTab, reusableActiveTab, seedCommandTurn],
+  )
+
+  /** Post an assistant turn that opens NOTHING — the ambiguous and not-found
+   *  halves of the contract. Mirrors ticketSetCommandFlow's seeding so the
+   *  exchange lands in the rail and Supabase like any other turn.
+   *
+   *  It appends to whatever chat the user is in — including a PRD-bound one —
+   *  because unlike the command flows this turn is pure text: it binds nothing
+   *  to the tab, so there is no binding to protect and no reason to answer a
+   *  question in a tab the user wasn't looking at. Only the thread-less brief
+   *  tab (and no tab at all) spawns a chat, matching submitAsk. */
+  const postOpenArtifactReply = useCallback(
+    (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => {
+      const activeId = activeTabIdRef.current
+      const inTab = activeId && activeId !== BRIEF_TAB_ID
+        ? tabsRef.current.find((t) => t.id === activeId)
+        : undefined
+      const turnId =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      const reply: AskResponse = {
+        answer, sources: [], follow_ups: [], key_points: [], citations: [],
+        confidence: 1, unanswered: "",
+      } as AskResponse
+      const seedTurn: ThreadTurn = {
+        id: turnId,
+        query: seedQuery,
+        reply,
+        ...(candidates.length ? { openCandidates: candidates } : {}),
+      }
+      const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+      let tabId: string
+      if (inTab) {
+        tabId = inTab.id
+        setTabs((prev) => prev.map((t) => t.id === inTab.id
+          ? {
+              ...t,
+              title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+              thread: [...t.thread, seedTurn],
+            }
+          : t))
+        setDraft("")
+      } else {
+        tabId = openTab(handle, [seedTurn])
+      }
+      pushPendingConversation(turnId, seedQuery, tabId)
+      // Only the prose is persisted: the chips are a live affordance, and the
+      // conversation record is what the assistant SAID.
+      void finalizeConversationTurn(turnId, { reply }, tabId)
+    },
+    [openTab, pushPendingConversation, finalizeConversationTurn],
+  )
+
+  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so — and a
+   *  kind this panel can't show says where it DOES live. */
+  const openArtifactFlow = useCallback(
+    (seedQuery: string, open: OpenArtifactResult) => {
+      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+      if (open.status === "unsupported_type") {
+        // They named a real thing we simply don't render here. Substituting the
+        // PRD of the same name would hand over the wrong document with nothing
+        // to signal the swap, so name what they asked for and point at where it
+        // opens.
+        postOpenArtifactReply(
+          seedQuery,
+          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
+          [],
+        )
+        return
+      }
+      if (open.status === "resolved" && open.artifact) {
+        if (openArtifactInPanel(open.artifact, seedQuery)) return
+        // A match we cannot actually open (no usable id) is a NOT-FOUND from
+        // the user's side; saying so beats opening an empty panel.
+        postOpenArtifactReply(
+          seedQuery,
+          `I found "${open.artifact.title}" but couldn't open it — try it from the Artifacts tab.`,
+          [],
+        )
+        return
+      }
+      if (open.status === "ambiguous") {
+        postOpenArtifactReply(
+          seedQuery,
+          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
+          open.candidates,
+        )
+        return
+      }
+      // not_found. Deliberately does NOT offer to generate one: the user asked
+      // to open something, and turning that into a generation is the exact
+      // failure this action exists to prevent.
+      postOpenArtifactReply(
+        seedQuery,
+        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
+        [],
+      )
+    },
+    [openArtifactInPanel, postOpenArtifactReply],
+  )
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const trimmed = rawQuery.trim()
@@ -3725,11 +4061,56 @@ export function ChatScreen() {
       // A "/skill …" message is EXPLICIT intent with its own backend fast-path
       // (qa_agent's slash route) — the user named the skill, so there is
       // nothing to infer and no call to spend.
+      // Attachment text, read ONCE and read EARLY — before the planner is asked
+      // to decide, because the decision depends on it.
+      //
+      // This used to run after the intent call, and the planner therefore judged
+      // "generate a PRD" with a deck attached as a request with no subject: it
+      // returned generate_prd at 0.5 confidence, the action floor (0.6) downgraded
+      // it to `answer`, and the user got prose instead of a document. The ask
+      // worker then planned the SAME turn again a few seconds later, this time
+      // with the extracted text in the question, and scored it 0.97 — the right
+      // answer, arriving after the client had already committed to the wrong one.
+      //
+      // Extracting first costs no extra wall-clock: this work was always on the
+      // critical path, just later in it. Best-effort by design — a failure here
+      // yields null and the message goes to the planner bare, exactly as before;
+      // the real extraction below keeps its own rollback/toast handling and is
+      // still the thing that decides whether the send can proceed.
+      let earlyExtracted: (string | null)[] | null = null
+      if (attachments.length > 0) {
+        earlyExtracted = await Promise.all(
+          attachments.map((a) =>
+            a.content
+              ? Promise.resolve<string | null>(a.content)
+              : a.file
+              ? askApi
+                  .extractFile(a.file)
+                  .then((r) => r.markdown.slice(0, 50000))
+                  .catch(() => null)
+              : Promise.resolve<string | null>(a.content ?? null),
+          ),
+        )
+      }
+
       if (!trimmed.startsWith("/")) {
         const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
+        // The planner sees what the answer path will see. Same `[Attached files]`
+        // framing and the same 100k clamp the send below uses, so the question
+        // the plan was made for and the question that gets executed match — which
+        // is also what lets the worker reuse this plan instead of buying another.
+        const attachedForIntent = earlyExtracted?.some((t) => t)
+          ? attachments
+              .map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`)
+              .join("\n\n")
+              .slice(0, 100000)
+          : null
+        const intentMessage = attachedForIntent
+          ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}`
+          : trimmed
         const envelope = await import("../../../lib/api")
           .then(({ chatIntentApi }) =>
-            chatIntentApi.resolve(trimmed, {
+            chatIntentApi.resolve(intentMessage, {
               conversationId: activeTab?.dbConvId ?? null,
               prdId: tabPrdId,
               hasAttachments: attachments.length > 0,
@@ -3766,6 +4147,20 @@ export function ChatScreen() {
             }
             // No resolvable target/instruction → grounded ask (it can at least
             // answer about the document).
+          } else if (envelope.intent === "open_artifact") {
+            // OPEN, never generate. The two verbs are told apart in exactly one
+            // place (backend app/chat_intent.py's OPEN-vs-GENERATE rule) and
+            // this branch is the whole of the client's half: it can open a
+            // document, ask which one, or say there isn't one — it has no path
+            // into any generation flow, so a misfire here can never cost the
+            // user an unwanted PRD.
+            if (envelope.open) {
+              openArtifactFlow(trimmed, envelope.open)
+              settlePendingSend()
+              return
+            }
+            // No lookup on the envelope (an older backend): fall through to the
+            // grounded ask, which at least answers about the document.
           } else if (envelope.intent === "generate_prd") {
             if (docFile) {
               setAttachments([])
@@ -3883,13 +4278,20 @@ export function ChatScreen() {
           // is best-effort (a failure leaves the text-only chip, never blocks the
           // send). Order is preserved via the resolved array.
           const extracted = await Promise.all(
-            pending.map(async (a) => {
+            pending.map(async (a, idx) => {
               const [text, stored] = await Promise.all([
                 // Text files were already read client-side (content present) — use
                 // it. Only binary docs (content empty, raw file kept) need the
                 // server-side markdown extraction.
+                //
+                // `earlyExtracted` is that extraction, already done above so the
+                // planner could see it. Reused here rather than repeated: without
+                // this, giving the planner the attachment text would have cost a
+                // second parse of every document on every send.
                 a.content
                   ? Promise.resolve(a.content)
+                  : earlyExtracted?.[idx] != null
+                  ? Promise.resolve(earlyExtracted[idx] as string)
                   : a.file
                   ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
                   : Promise.resolve(a.content),
@@ -4156,7 +4558,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -6069,6 +6471,20 @@ export function ChatScreen() {
                                 // this thread, and the turn itself is just the card
                                 // that opens it — on THIS report, not on a list.
                                 onOpenReport={openReportByTitle}
+                              />
+                            ) : null}
+                            {/* "Which PRD did you mean?" — the candidates, as
+                                buttons that OPEN their document. Rendered on
+                                the turn that asked (not in the composer's
+                                suggestion strip) because they answer that one
+                                question, and they stay clickable on older turns
+                                so scrolling back to an unanswered question
+                                still works. */}
+                            {turn.openCandidates?.length ? (
+                              <OpenArtifactChips
+                                candidates={turn.openCandidates}
+                                disabled={busy}
+                                onOpen={(candidate) => { openArtifactInPanel(candidate) }}
                               />
                             ) : null}
                             {isLast && turn.reply && activeTab?.prdCommandThinking ? (

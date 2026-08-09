@@ -654,6 +654,11 @@ export type CustomSkillInfo = {
    *  name (same id, same trigger, new content) rather than adding a new one.
    *  Absent on list items, where it would mean nothing. */
   replaced?: boolean
+  /** This skill comes from a SYNCED GitHub folder, so the repository owns its
+   *  text: it is re-imported on every sweep, the edit form is closed to it, and
+   *  deleting it is refused (both 409 server-side). Stopping the folder's sync
+   *  releases it and this goes false. */
+  synced?: boolean
 }
 
 /** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
@@ -744,6 +749,39 @@ export type GithubSkillImportResult = {
   skipped: SkippedSkill[]
   commit_sha: string
   ref: string
+  /** The folder was registered to keep syncing, so the imported skills are
+   *  read-only and the folder's later contents will arrive on their own. */
+  synced: boolean
+}
+
+/** One folder a company keeps synced — GET /v1/skills/sources.
+ *
+ *  `ref` empty means "whatever the repo's default branch is", deliberately not
+ *  resolved to a name: the folder follows the default branch rather than being
+ *  pinned to whatever it was called at import time. `last_error` is the last
+ *  failure verbatim and is cleared by the next clean sync, so a non-empty value
+ *  is a live problem rather than history. */
+export type SyncedFolder = {
+  id: string
+  repo: string
+  ref: string
+  path: string
+  active: boolean
+  last_synced_at: string | null
+  last_commit_sha: string
+  last_error: string
+}
+
+/** POST /v1/skills/sources/{id}/sync — what one forced re-read did. `error`
+ *  non-empty means the sync itself failed; the call still answers 200, because
+ *  a GitHub outage is something the panel shows, not an exception it can't
+ *  explain. */
+export type SyncedFolderSyncResult = {
+  source: SyncedFolder
+  imported: number
+  replaced: number
+  skipped: string[]
+  error: string
 }
 
 /** Discriminates the two upload bodies by shape (the multi one has no `id`).
@@ -820,13 +858,39 @@ export const skillsApi = {
    *  isn't a skill in that repo imports nothing rather than reading a file.
    *  Each imported skill follows the upload rules: a name the company already
    *  used replaces that skill in place, a built-in's name takes the next free
-   *  trigger. Per-skill failures come back in `skipped`. */
+   *  trigger. Per-skill failures come back in `skipped`.
+   *
+   *  `sync: true` also REGISTERS the folder: the half-hourly sweep re-imports
+   *  whatever markdown it holds from then on, so the ticked list stops being
+   *  the unit — a file added to that folder later arrives on its own, whether
+   *  or not anyone would have ticked it. The skills it produces become
+   *  read-only (edit and delete both 409). Requires a non-empty `path`; the
+   *  server 422s a synced repo ROOT, since a whole repository's markdown is not
+   *  a skill library. */
   importGithub: (body: {
     repo: string
     ref?: string
     path?: string
     paths: string[]
+    sync?: boolean
   }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
+  /** The company's synced folders, active and stopped alike — a stopped folder
+   *  is still where its skills came from. */
+  listSources: () => api.get<{ sources: SyncedFolder[] }>("/v1/skills/sources"),
+  /** Re-read one folder now instead of waiting for the sweep. Forced, so it
+   *  re-imports even when the commit hasn't moved — the button exists for the
+   *  case where the library visibly doesn't match the folder. */
+  syncSource: (id: string) =>
+    api.post<SyncedFolderSyncResult>(
+      `/v1/skills/sources/${encodeURIComponent(id)}/sync`,
+      {},
+    ),
+  /** Stop syncing a folder. Its skills STAY in the library and become editable
+   *  again — `released` is how many were handed back. */
+  stopSyncingSource: (id: string) =>
+    api.delete<{ stopped: true; id: string; released: number }>(
+      `/v1/skills/sources/${encodeURIComponent(id)}`,
+    ),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(
@@ -858,13 +922,19 @@ export type ChatIntentEnvelope = {
     | "generate_tickets"
     | "generate_prototype"
     | "multi_agent"
+    | "open_artifact"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
   /** edit_prd: the change to apply, self-contained. */
   instruction: string | null
+  /** open_artifact: which existing artifact kind to bring up. */
+  artifact_type: OpenArtifactKind | null
+  /** open_artifact: the subject the user named the document by. */
+  artifact_query: string | null
   reason: string
-  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction" */
+  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
+   *  | "no_artifact_query" */
   source: string
   prd_id: number | null
   prd_title: string | null
@@ -873,6 +943,52 @@ export type ChatIntentEnvelope = {
    *  ONLY: nothing branches on it, it is logged to the browser console so you
    *  can see WHY a message went where it did without tailing the backend. */
   plan?: Record<string, unknown>
+  /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
+   *  company's artifact library. Absent for every other intent. */
+  open?: OpenArtifactResult
+}
+
+/** Artifact kinds an OPEN request can name. Both have an existing right-panel
+ *  view in the chat; prototypes/reports deliberately do not appear here. */
+export type OpenArtifactKind = "prd" | "evidence"
+
+/** One artifact the user's phrase could have meant — carrying the IDS needed to
+ *  open it, so a disambiguation chip is a real action and never a re-sent
+ *  message. `prd_id` for the PRD panel; `brief_id` + `insight_index` for the
+ *  Evidence panel, which is scoped by the insight rather than by an evidence
+ *  row id (matching ChatScreen's `kind: "evidence"` open). */
+export type OpenArtifactCandidate = {
+  type: OpenArtifactKind
+  id: number
+  title: string
+  status: string
+  prd_id: number | null
+  brief_id: number | null
+  insight_index: number | null
+  /** Whether `insight_index` names a REAL brief finding rather than the storage
+   *  sentinel a chat/ideation/uploaded PRD carries (always `0`). Only pass the
+   *  pair to the panel as `meta` when this is true — the panel's Evidence tab
+   *  loads by (briefId, insightIndex), so a sentinel would render the brief's
+   *  first finding underneath an unrelated document. */
+  brief_anchored: boolean
+  week_label: string | null
+}
+
+/** The 0/1/many verdict for an open request. All three outcomes are part of the
+ *  contract: `not_found` must open NOTHING and say so (it never degrades into
+ *  generating a new document — see backend/app/artifact_open.py), `ambiguous`
+ *  must ask, `resolved` opens directly. */
+export type OpenArtifactResult = {
+  /** `unsupported_type` = the user named a real artifact kind this panel cannot
+   *  show (a prototype, a report). It is NOT coerced into a PRD — say where the
+   *  thing actually lives instead. */
+  status: "resolved" | "ambiguous" | "not_found" | "unsupported_type"
+  /** What the user NAMED — may be a kind outside OpenArtifactKind when the
+   *  status is `unsupported_type`. */
+  artifact_type: OpenArtifactKind | string
+  query: string
+  artifact: OpenArtifactCandidate | null
+  candidates: OpenArtifactCandidate[]
 }
 
 export const chatIntentApi = {
@@ -4051,6 +4167,11 @@ export type UsageSummary = {
    *  are counted. Usage on Sprntly's platform key is spend we absorb and is
    *  deliberately excluded — it is not the customer's to see or pay. */
   scope: string
+  /** Which provider this payload covers, echoed back by the server; null when
+   *  the request was un-scoped and the figures span every provider. Read this
+   *  rather than the requested value — a chart must be captioned with the scope
+   *  it was actually served. */
+  provider: LlmProvider | null
   totals: UsageBucket
   /** One entry per calendar day in the range — empty days included. */
   daily: (UsageBucket & { day: string })[]
@@ -4069,15 +4190,38 @@ function localTimeZone(): string {
   }
 }
 
+/** `&provider=…` when scoping to one provider, empty when spanning all of them.
+ *  Omitting the param is what asks the server for every provider, so an absent
+ *  value must not be sent as the empty string. */
+function usageProviderQuery(provider?: LlmProvider | null): string {
+  return provider ? `&provider=${encodeURIComponent(provider)}` : ""
+}
+
 export const usageApi = {
-  summary: (days: number, tz: string = localTimeZone()) =>
+  /** `provider` scopes every figure in the response — totals, daily series and
+   *  all breakdowns — to that provider alone. The Admin pane always passes the
+   *  one it is running on: Claude and OpenAI bill separately, so a blended
+   *  number reconciles against neither invoice. */
+  summary: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<UsageSummary>(
-      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
   /** The same rollup as CSV text (the request helper returns non-JSON as-is). */
-  exportCsv: (days: number, tz: string = localTimeZone()) =>
+  exportCsv: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<string>(
-      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
 }
 

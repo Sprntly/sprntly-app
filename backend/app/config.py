@@ -370,6 +370,45 @@ class Settings(BaseSettings):
     # Setting it false disables the sweep for EVERY company regardless of flags.
     chat_cross_connector_sweep: bool = True
 
+    # Per-provider rollout switches for the sweep legs added in #1113
+    # (app/connector_lookup/asana.py, .../google_meet.py). DEFAULT OFF, which is
+    # the whole point of them.
+    #
+    # WHY THESE EXIST when the sweep already has a kill switch above: a sweep
+    # leg is not only a read. `connector_lookup/sweep_persist.py` writes what a
+    # leg read into the tenant's KNOWLEDGE GRAPH, and merging to main deploys to
+    # staging, and STAGING WRITES LAND ON THE PROD SUPABASE. So merging these
+    # two brand-new adapters unflagged would start writing prod tenants' graphs
+    # from code that has never run against real data — an irreversible data
+    # action taken as a side effect of a merge.
+    #
+    # A bad graph write is worse than a bad migration, and our safety apparatus
+    # is pointed at the migration: that one gets a gate, a file, a version row
+    # and a repair path, and it fails loudly. This one happens at runtime, on
+    # the scheduler's terms, with no artifact recording what was written, and it
+    # fails silently and STAYS — a poisoned signal with a connected source_type
+    # counts toward `has_sufficient_evidence` and can surface in a customer's
+    # weekly brief as though it were something a real person said on a call.
+    #
+    # Global rather than per-company on purpose: this is a rollout switch for
+    # unproven code, not a product capability anyone opts into. Flip to true
+    # per provider once the leg has been watched against real data.
+    chat_sweep_asana: bool = False
+    chat_sweep_google_meet: bool = False
+
+    # Live read of the configured Slack customer-feedback channels
+    # (app/connector_lookup/slack_voc.py), which the voice-of-customer pass runs
+    # for every feedback-shaped question. Same operational-kill-switch shape and
+    # same reasoning as `chat_cross_connector_sweep` above: it adds a bounded,
+    # parallel round of I/O to a path that is already the slowest in chat, so it
+    # needs an off switch that is not a DB write per company.
+    #
+    # Checked inside `slack_voc.read` itself — the CHOKE POINT, not the call
+    # sites — so a future caller cannot bypass it. The sweep learned that the
+    # hard way (2026-08-05): it had two entry points and its flag only gated
+    # one, so "disabled" left half the feature running.
+    slack_voc_channels: bool = True
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
@@ -412,6 +451,14 @@ class Settings(BaseSettings):
     # tracker API rate limits ever bite.
     ticket_sync_enabled: bool = True
     ticket_sync_interval_minutes: int = 15
+    # Synced GitHub skill folders: how often the sweep re-reads each registered
+    # folder and imports the markdown it now holds (app/skills/github_sync.py).
+    # 30 min by default — a method someone just committed should be usable in
+    # the same sitting. An unchanged folder costs one GitHub request per tick,
+    # so this is safe to leave fine-grained; raise it via
+    # SKILL_SYNC_INTERVAL_MINUTES if an installation's REST budget ever bites
+    # (the Design Agent's codebase map spends from the same 5,000/hour pocket).
+    skill_sync_interval_minutes: int = 30
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
 
     # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────

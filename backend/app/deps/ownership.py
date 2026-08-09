@@ -81,12 +81,31 @@ def require_owned_dataset(
     Raises 404 when the slug maps to a different company/workspace (or to no
     company), so a caller can never act on, list files of, or seed an LLM
     answer from a dataset that isn't theirs.
+
+    Resolves the workspace binding ONCE and answers both questions from it.
+    `company_id_for_dataset` and `_dataset_in_workspace` are each self-contained
+    — they both do a `workspace_for_dataset_slug` lookup and both fall back to
+    `company_id_for_slug` — so calling them in sequence issued each of those two
+    queries twice. One ownership gate cost four reads, which is where the
+    duplicated `datasets?slug=…` and `companies?select=id&slug=…` pairs on
+    every ask came from. The checks themselves are unchanged, including the
+    unbound-dataset rollout fallback.
     """
-    owner = company_id_for_dataset(slug)
+    from app.db.workspaces import workspace_for_dataset_slug
+
+    bound = workspace_for_dataset_slug(slug) if slug else None
+    owner = bound["company_id"] if bound else (company_id_for_slug(slug) if slug else None)
     if owner is None or owner != company_id:
         raise _not_found(f"Dataset {slug!r} not found")
-    if workspace_id and not _dataset_in_workspace(slug, company_id, workspace_id):
-        raise _not_found(f"Dataset {slug!r} not found")
+    if workspace_id:
+        # Bound datasets must match exactly; an unbound dataset (NULL
+        # workspace_id) owned by the caller's company is still accepted during
+        # rollout. `owner == company_id` is already established above, which is
+        # exactly what the unbound branch of `_dataset_in_workspace` re-read
+        # the database to re-establish.
+        in_workspace = bound["workspace_id"] == workspace_id if bound else True
+        if not in_workspace:
+            raise _not_found(f"Dataset {slug!r} not found")
     return slug
 
 

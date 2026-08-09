@@ -130,6 +130,89 @@ def test_feature_flags_for_company_read_failure_is_empty(monkeypatch):
     assert feature_flags_for_company("whatever") == {}
 
 
+# ---- TTL cache -------------------------------------------------------------
+# The flags row is read up to three times per ask (require_agents_module, plus
+# qa_agent's DS and sweep gates) and was the only per-request tenancy read with
+# no cache. Caching it has exactly one dangerous edge, tested below.
+
+def test_feature_flags_are_cached_after_the_first_read(fake_llm):
+    """A second read must not hit the database again."""
+    import uuid
+
+    from app.db.client import require_client
+
+    cid = uuid.uuid4().hex
+    require_client().table("companies").insert(
+        {"id": cid, "slug": "cache-co", "display_name": "Cache Co",
+         "feature_flags": {"agents": False}}
+    ).execute()
+
+    assert feature_flags_for_company(cid) == {"agents": False}
+
+    # Pull the row out from under it — a cached answer is unaffected.
+    require_client().table("companies").update(
+        {"feature_flags": {"agents": True}}
+    ).eq("id", cid).execute()
+
+    assert feature_flags_for_company(cid) == {"agents": False}
+
+
+def test_a_failed_flags_read_is_never_cached(fake_llm, monkeypatch):
+    """THE dangerous edge. `read_feature_flags` returns None for a READ
+    FAILURE, and `feature_flags_for_company` grandfathers that to `{}` → every
+    module ON. Caching it would hand a company whose flags say `agents: false`
+    a full TTL of access it is not entitled to, so a failure must stay a miss
+    and be retried on the very next call.
+
+    Same class of invariant as authcache's "never cache empty memberships"."""
+    import uuid
+
+    import app.db.client as client_mod
+    from app.db.client import require_client
+    from app.entitlements import read_feature_flags
+
+    cid = uuid.uuid4().hex
+    require_client().table("companies").insert(
+        {"id": cid, "slug": "fail-co", "display_name": "Fail Co",
+         "feature_flags": {"agents": False}}
+    ).execute()
+
+    real = client_mod.require_client
+    monkeypatch.setattr(client_mod, "require_client", lambda: (_ for _ in ()).throw(
+        RuntimeError("supabase down")))
+
+    assert read_feature_flags(cid) is None          # failure, and NOT cached
+
+    monkeypatch.setattr(client_mod, "require_client", real)
+
+    # The very next call must reach the database and see the real flags —
+    # if the None had been cached this would still be failing open.
+    assert read_feature_flags(cid) == {"agents": False}
+
+
+def test_invalidating_flags_makes_a_write_visible_immediately(fake_llm):
+    """An operator toggling a module must not wait out the TTL."""
+    import uuid
+
+    from app.db import authcache
+    from app.db.client import require_client
+
+    cid = uuid.uuid4().hex
+    require_client().table("companies").insert(
+        {"id": cid, "slug": "inval-co", "display_name": "Inval Co",
+         "feature_flags": {"agents": False}}
+    ).execute()
+
+    assert feature_flags_for_company(cid) == {"agents": False}
+
+    require_client().table("companies").update(
+        {"feature_flags": {"agents": True}}
+    ).eq("id", cid).execute()
+    authcache.invalidate_feature_flags(cid)
+
+    assert feature_flags_for_company(cid) == {"agents": True}
+
+
 # ---- ds_claude_analysis_enabled matrix --------------------------------------
 # DEFAULT ON since 2026-07-30 (Apurva): a missing key is ON, matching the
 # chat_intent_envelope grandfather pattern, and named customers opt out with an

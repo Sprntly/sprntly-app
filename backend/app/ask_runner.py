@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from app import document_referent
 from app.corpus import load_corpus
 from app.db import (
     complete_cached_ask,
@@ -393,8 +394,69 @@ def reset_active_conversation(tokens) -> None:
 # own, whereas None-because-embedding-failed must NOT trigger a second attempt.
 # The sentinel is the tuple's presence, not the vector's value.
 _active_question_embedding: contextvars.ContextVar[
-    tuple[list[float] | None, bool] | None
+    tuple[list[float] | None, bool] | object | None
 ] = contextvars.ContextVar("ask_runner_active_question_embedding", default=None)
+
+
+# A THIRD state for that slot: the ask has scoped it, but nothing has needed a
+# vector yet. It has to stay distinguishable from the other two, which is why
+# it is a sentinel object rather than another None:
+#
+#   * None             — nobody scoped it. A caller computes its own, as before.
+#   * _EMBED_PENDING   — scoped but unresolved. Compute on FIRST USE and memoise
+#                        the result back here, so the ask still pays for exactly
+#                        one embedding no matter how many consumers ask for it.
+#   * (vec, degraded)  — resolved. `(None, True)` means the attempt already
+#                        FAILED and must never be retried within this ask.
+#
+# The eager embed this replaces was pure waste on the two commonest shapes. A
+# tenant with no documents never reaches the topical stage that reads the
+# vector — `document_grounding` returns at its `not refs and not
+# conv_attachments and not connected` branch first — and a PRD-grounded ask
+# skips KG retrieval altogether. Both paid a full embedding round trip for a
+# vector no consumer ever read (measured at 2.8s on a doc-less tenant).
+_EMBED_PENDING: object = object()
+
+
+# ── The documents the PLANNER named, by the same request-scoped route ────────
+# `document_grounding` is reached positionally through
+# `qa_agent._answer_single_shot`, so a plan field cannot be threaded to it
+# without the four edits inside qa_agent.py that this whole mechanism exists to
+# avoid. Same route as the conversation pair, the embedding and the history.
+_active_planned_documents: contextvars.ContextVar[
+    list[str] | None
+] = contextvars.ContextVar("ask_runner_active_planned_documents", default=None)
+
+
+def set_active_planned_documents(external_ids: list[str] | None):
+    """Record the catalog ids THIS ask's plan named. Always undo in a
+    `finally`, exactly like the setters beside it."""
+    return _active_planned_documents.set(list(external_ids or []))
+
+
+def reset_active_planned_documents(token) -> None:
+    """Undo `set_active_planned_documents` — call from a `finally`."""
+    _active_planned_documents.reset(token)
+
+
+def _carried_planned_documents() -> list[str]:
+    """Catalog ids the plan named, or [] when nothing set any."""
+    return _active_planned_documents.get() or []
+
+
+def set_active_question_embedding_pending():
+    """Scope this ask's embedding slot WITHOUT computing the vector.
+
+    The counterpart to `set_active_question_embedding` for the worker path:
+    it reserves the slot so `_resolve_question_embedding` knows it is allowed
+    to memoise into it, but issues no HTTP call. Whichever consumer needs a
+    vector first pays for it; consumers that never need one pay nothing.
+
+    Returns an opaque token for `reset_active_question_embedding` — the same
+    token discipline as the eager setter, so the caller's `finally` is
+    unchanged. `ContextVar.reset` restores whatever was there before THIS set,
+    so a value memoised into the slot afterwards is still correctly unwound."""
+    return _active_question_embedding.set(_EMBED_PENDING)
 
 
 def set_active_question_embedding(embedding: list[float] | None, degraded: bool):
@@ -417,8 +479,56 @@ def reset_active_question_embedding(token) -> None:
 
 def _carried_question_embedding() -> tuple[list[float] | None, bool] | None:
     """This ask's already-computed `(vector, degraded)`, or None if nothing set
-    one. Never computes — see `_resolve_question_embedding`."""
-    return _active_question_embedding.get()
+    one. Never computes — see `_resolve_question_embedding`.
+
+    A slot left at `_EMBED_PENDING` reads as None here on purpose: to a caller
+    that only wants an already-resolved vector, "scoped but not yet computed"
+    and "nobody scoped one" are the same answer. Only
+    `_resolve_question_embedding` distinguishes them, because only it is
+    allowed to do the work and write the result back."""
+    carried = _active_question_embedding.get()
+    if carried is _EMBED_PENDING:
+        return None
+    return carried  # type: ignore[return-value]
+
+
+# ── The conversation history, by the same request-scoped route ──────────────
+# Document RESOLUTION (app.document_referent) needs the prior turns: "what does
+# it say about pricing?" has no name for Stage N to match and no useful topic
+# for Stage T to rank — the only thing that can say what "it" is, is the turn
+# that named a document. `routes/ask.py::_load_history` already loads exactly
+# that, and `ask_job_runner._run_sync` already holds it as a parameter, so
+# nothing new is fetched here.
+#
+# It rides a ContextVar for the same reason the conversation pair and the
+# embedding above do: `qa_agent._answer_single_shot` calls
+# `document_grounding(enterprise_id, question)` positionally, and threading a
+# fourth value through `answer() -> _answer_single_shot -> document_grounding`
+# is the set of edits inside qa_agent.py this mechanism exists to avoid.
+#
+# CRITICAL, and separately tested: history reaches RESOLUTION only. It is never
+# folded into `question`, which both grounding call sites still pass bare —
+# `_select_documents`' substring rule against a question with three turns of
+# prose glued onto it would match half the workspace's filenames at once.
+_active_history: contextvars.ContextVar[list[dict] | None] = contextvars.ContextVar(
+    "ask_runner_active_history", default=None
+)
+
+
+def set_active_history(history: list[dict] | None):
+    """Record THIS ask's conversation history for document resolution. Call
+    from `ask_job_runner._run_sync` beside `set_active_conversation`, and
+    always undo in the same `finally` — a worker thread that kept a previous
+    ask's history would resolve one user's pronoun against another user's
+    conversation.
+
+    Returns an opaque token for `reset_active_history`."""
+    return _active_history.set(history)
+
+
+def reset_active_history(token) -> None:
+    """Undo `set_active_history` — call from a `finally`."""
+    _active_history.reset(token)
 
 
 def _owned_conversation_attachments(
@@ -650,6 +760,7 @@ def document_grounding(
     conversation_id: int | None = None,
     *,
     question_embedding: list[float] | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Render the "UPLOADED DOCUMENTS" block (index of every uploaded file,
     plus the bodies selected for this question) and its server-derived
@@ -668,13 +779,35 @@ def document_grounding(
     wrong user, unset, or any read error — behaves exactly as if it had never
     been passed: no attachment entries, no error.
 
-    Selection runs in two stages. **Stage N** loads the documents the question
-    NAMES (`_select_documents`, substring match, binary, no tunable). **Stage
-    T** fills whatever slots remain with the documents the question is ABOUT,
-    by the catalog's fused lexical+semantic rank (`_topical_candidates`, no
-    floor, no threshold). Named beats topical always.
+    Selection runs in three stages. **Stage N** loads the documents the
+    question NAMES (`_select_documents`, substring match, binary, no tunable).
+    **Stage R** — only when Stage N found nothing — works out which document
+    the question is ABOUT WITHOUT naming it, from the message and from the
+    conversation (`app.document_referent`). **Stage T** fills whatever slots
+    remain with the documents the question is topically about, by the
+    catalog's fused lexical+semantic rank (`_topical_candidates`, no floor, no
+    threshold). Named beats resolved beats topical, always.
 
-    BOTH STAGES COVER EVERY PROVIDER. Documents that live in a connected
+    Stage R is the only stage that ASSERTS anything. Stages N and T put a
+    body in the prompt and leave the model to judge relevance (prompts rule
+    6); Stage R additionally renders a line saying *this* document is what the
+    question is about, which is a claim strong enough that a wrong one makes
+    the model answer as the wrong document. Its guards, and why a relevance
+    gate is right there and wrong in `_select_documents`, are in
+    `app.document_referent`'s module docstring. Its two failure modes are both
+    visible: no referent renders nothing extra and behaves exactly as this
+    function did before it existed, and an ambiguous referent renders a block
+    telling the model to ask which document is meant rather than pick.
+
+    `history` — this conversation's prior turns, oldest first, in
+    `routes.ask._load_history`'s `[{role, content}]` shape — is what lets
+    Stage R resolve "what does it say about pricing?" to the document a
+    previous turn established. Left at None it resolves from the ContextVar
+    `ask_job_runner._run_sync` sets, exactly as `conversation_id` and
+    `question_embedding` do. History is used ONLY by Stage R: Stages N and T
+    still see the bare question, never the thread.
+
+    ALL THREE STAGES COVER EVERY PROVIDER. Documents that live in a connected
     system — Confluence pages, Drive files — are indexed from the catalog and
     their bodies resolve through `document_bodies`: Drive from the corpus
     markdown its sync already wrote, Confluence by fetching the page live.
@@ -731,6 +864,8 @@ def document_grounding(
 
     if conversation_id is None:
         conversation_id = _active_conversation_id.get()
+    if history is None:
+        history = _active_history.get()
     caller_user_id = _active_conversation_user_id.get()
     conv_attachments = _owned_conversation_attachments(
         enterprise_id, conversation_id, caller_user_id
@@ -759,6 +894,7 @@ def document_grounding(
             enterprise_id,
             manifest=[],
             catalog_size=len(catalog_docs),
+            catalog_by_provider=_catalog_by_provider(catalog_docs),
             topical_ran=False,
             topical_candidates=0,
             question_embedding=question_embedding,
@@ -820,6 +956,43 @@ def document_grounding(
         chosen.key: ("named", None) for chosen in selected
     }
 
+    # ── Stage P: documents the PLANNER named.
+    #
+    # The planner is shown the catalog (ids, titles, one-line summaries) and can
+    # say which document a question is about. It sees the whole thread and the
+    # inlined attachment text, so it resolves the deictic case Stage N cannot —
+    # "what does it say about pricing?" has no title to substring-match.
+    #
+    # AFTER Stage N, never before: a title the user spelled out is an
+    # unambiguous request and a model's opinion must not displace it.
+    #
+    # LABELLED "topic", NOT "named", and that is the safety property rather than
+    # an oversight. `document_referent` exists because an earlier attempt at
+    # exactly this pinned a Confluence page onto "what's our pricing strategy?"
+    # and the model answered AS that page; its rule is that a FALSE REFERENT IS
+    # WORSE THAN NO REFERENT. "named" asserts the user asked for this document.
+    # "topic" says it was selected automatically — which is the honest claim for
+    # a model's pick, and which prompts.py rule 6 already tells the answering
+    # model it may ignore. So a wrong pick here costs prompt budget, exactly
+    # like a wrong Stage T pick, instead of hijacking the answer's voice.
+    #
+    # Filling slots here is also what lets Stage T's fused-rank RPC be skipped
+    # entirely (`topical_ran` below is `len(selected) < MAX_SELECTED_DOCUMENTS`)
+    # — measured at 8.67s on a live ask, and the single slowest query in it.
+    for _planned_id in _carried_planned_documents():
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        _doc = connected_by_external_id.get(_planned_id)
+        if _doc is None:
+            continue  # not visible to this caller — the gate already tenant-scoped it
+        _key = _connected_key(_doc)
+        if _key in match_by_id:
+            continue
+        selected.append(_Chosen(
+            key=_key, name=_doc.title, provider=_doc.provider, catalog_doc=_doc
+        ))
+        match_by_id[_key] = ("topic", None)
+
     # ── Stage T: fill whatever slots remain by fused rank.
     #
     # `match: "topic"` is set ONLY inside the loop below, once per candidate
@@ -833,6 +1006,21 @@ def document_grounding(
     topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
     topical_candidates: list[dict] = []
     if topical_ran:
+        # Stage T's semantic channel is the first thing in an ask that actually
+        # READS the vector, so this is where the ask pays for it. Nothing above
+        # needs one — the index read, the ownership checks and Stage N's
+        # substring match are all lexical — and the `not refs and not
+        # conv_attachments and not connected` return further up means a
+        # workspace with no documents at all exits before reaching here and now
+        # embeds nothing whatsoever.
+        #
+        # Guarded on `is None` so a caller that threaded its own vector in still
+        # wins, and `embedding_degraded` keeps its documented meaning: it is set
+        # only on the branch where this ask computed the vector itself.
+        if question_embedding is None:
+            question_embedding, embedding_degraded = _resolve_question_embedding(
+                enterprise_id, question
+            )
         topical_candidates = _topical_candidates(
             enterprise_id,
             question,
@@ -841,6 +1029,94 @@ def document_grounding(
             user_id=caller_user_id,
             exclude_external_ids=set(match_by_id),
         )
+
+    # ── Stage R: WHICH document is this question about, when it named none?
+    #
+    # Runs between the two existing stages and only when Stage N is empty —
+    # a question that spelled a document's name out has no implicit referent
+    # to work out, and resolution must never get to argue with an explicit
+    # name. Its own guards decide whether the question points at a document at
+    # all; see `app.document_referent`.
+    #
+    # It reads the candidate list Stage T just fetched rather than fetching
+    # its own, so adding resolution costs zero extra catalog queries. When it
+    # resolves, the referent is selected FIRST, ahead of the fill loop below,
+    # so a document identified as the subject of the question can never be
+    # crowded out of the body budget by a merely topical one.
+    resolution = document_referent.Resolution()
+    if not selected:
+        known = [
+            document_referent.KnownDocument(
+                key=ref.id, title=ref.filename, provider=PROVIDER_UPLOADS
+            )
+            for ref in refs
+        ] + [
+            document_referent.KnownDocument(
+                key=_connected_key(doc), title=doc.title, provider=doc.provider
+            )
+            for doc in connected
+        ]
+        # Candidates map back through the RENDERED lists only. A candidate
+        # whose upload was deleted since it was catalogued, or which fell
+        # below the index cap, has no Index entry — resolving to it would put
+        # a body under "Contents loaded" for a document the Index does not
+        # list, the one inconsistency the cap exists to prevent.
+        by_external_id = {
+            ref.id: document_referent.KnownDocument(
+                key=ref.id, title=ref.filename, provider=PROVIDER_UPLOADS
+            )
+            for ref in refs
+        }
+        by_external_id.update({
+            doc.external_id: document_referent.KnownDocument(
+                key=_connected_key(doc), title=doc.title, provider=doc.provider
+            )
+            for doc in connected
+        })
+        try:
+            resolution = document_referent.resolve(
+                enterprise_id=enterprise_id,
+                question=question,
+                history=history,
+                known=known,
+                candidates=topical_candidates,
+                by_external_id=by_external_id,
+            )
+        except Exception:  # noqa: BLE001 — resolution must never break an answer
+            logger.warning(
+                "document referent resolution failed for %s; answering with "
+                "no referent", enterprise_id, exc_info=True,
+            )
+            resolution = document_referent.Resolution()
+
+    if resolution.resolved:
+        referent = resolution.referent
+        chosen: _Chosen | None = None
+        if referent.provider == PROVIDER_UPLOADS:
+            ref = by_ref_id.get(referent.key)
+            if ref is not None:
+                chosen = _Chosen(
+                    key=ref.id, name=ref.filename,
+                    provider=PROVIDER_UPLOADS, ref=ref,
+                )
+        else:
+            doc = next(
+                (d for d in connected if _connected_key(d) == referent.key), None
+            )
+            if doc is not None:
+                chosen = _Chosen(
+                    key=referent.key, name=doc.title,
+                    provider=doc.provider, catalog_doc=doc,
+                )
+        if chosen is None:
+            # The referent named a document this turn will not render after
+            # all. Drop the assertion rather than keep a heading pointing at
+            # nothing — Stage T below still runs, unchanged.
+            resolution = document_referent.Resolution()
+        else:
+            selected.append(chosen)
+            match_by_id[chosen.key] = (resolution.how, None)
+
     for candidate in topical_candidates:
         if len(selected) >= MAX_SELECTED_DOCUMENTS:
             break
@@ -956,6 +1232,13 @@ def document_grounding(
             f"may still exist.]"
         )
 
+    # The referent (or the ambiguity) renders AFTER the Index and BEFORE the
+    # bodies, so the model reads "here is everything that exists", then "this
+    # is the one you are being asked about", then its text. Emitted from the
+    # same constants `prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM` quotes, so the
+    # rule and the marker cannot drift apart.
+    lines.extend(document_referent.render_referent_block(resolution))
+
     if bodies:
         lines.append("")
         lines.append("## Contents loaded for this question")
@@ -1034,10 +1317,13 @@ def document_grounding(
         enterprise_id,
         manifest=manifest,
         catalog_size=len(catalog_docs),
+        catalog_by_provider=_catalog_by_provider(catalog_docs),
         topical_ran=topical_ran,
         topical_candidates=len(topical_candidates),
         question_embedding=question_embedding,
         embedding_degraded=embedding_degraded,
+        resolution=resolution,
+        history_turns=len(history or []),
     )
     return block, manifest
 
@@ -1077,6 +1363,32 @@ def _topical_outcome(
     return TOPICAL_RANKED if topical_candidates else TOPICAL_SEARCHED_NO_MATCH
 
 
+def _catalog_by_provider(catalog_docs) -> dict[str, int]:
+    """{provider: row count} for what this caller can see. Counts only."""
+    counts: dict[str, int] = {}
+    for doc in catalog_docs or []:
+        provider = getattr(doc, "provider", None) or "unknown"
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
+#: How Stage R ended. `none` is the majority outcome and the RIGHT one for a
+#: question that is not about a document — it is recorded rather than being
+#: the absence of a record, because "resolution declined" and "resolution
+#: never ran" are opposite facts about the same silent answer.
+REFERENT_NONE = "none"
+REFERENT_AMBIGUOUS = "ambiguous"
+
+
+def _referent_outcome(resolution) -> str:
+    """`carried`, `resolved`, `ambiguous`, or `none`."""
+    if resolution is None:
+        return REFERENT_NONE
+    if resolution.resolved:
+        return resolution.how or REFERENT_NONE
+    return REFERENT_AMBIGUOUS if resolution.ambiguous_titles else REFERENT_NONE
+
+
 def _log_document_selection(
     enterprise_id: str,
     *,
@@ -1087,6 +1399,9 @@ def _log_document_selection(
     question_embedding: list[float] | None,
     embedding_degraded: bool,
     index_empty: bool = False,
+    resolution: "document_referent.Resolution | None" = None,
+    history_turns: int = 0,
+    catalog_by_provider: dict[str, int] | None = None,
 ) -> None:
     """Record how document selection went, from the ONE function both grounding
     call sites share.
@@ -1126,6 +1441,18 @@ def _log_document_selection(
                 # How many rows the catalog held for this caller, which is what
                 # separates "nothing to find" from "found nothing".
                 "catalog_size": catalog_size,
+                # The same separation, PER PROVIDER, and it is not a nicety.
+                # `catalog_size` and `topical_outcome` are whole-catalog: a
+                # tenant with 27 Confluence rows and ZERO Drive rows — which
+                # is the real fleet-wide shape as of 2026-08-07, because
+                # `drive_extract` only registers a file whose modifiedTime
+                # moved — reports `ranked` and looks perfectly healthy while
+                # Drive is structurally unreachable. Without this field, "this
+                # tenant has no Drive documents catalogued" and "Drive had
+                # documents and none matched" are the same record, and they
+                # call for opposite fixes: run the backfill, versus look at
+                # ranking. Counts only, keyed by provider — no titles.
+                "catalog_by_provider": dict(sorted((catalog_by_provider or {}).items())),
                 "topical_candidates": topical_candidates,
                 "topical_outcome": _topical_outcome(
                     catalog_size, topical_ran, topical_candidates,
@@ -1136,6 +1463,18 @@ def _log_document_selection(
                 # ranking query-independent, and it was invisible.
                 "semantic_channel": question_embedding is not None,
                 "retrieval_embedding_degraded": embedding_degraded,
+                # Stage R, as one enum. `none` covers by far the most asks and
+                # is the CORRECT outcome for an ordinary business question —
+                # a rising `resolved` rate against a flat `carried` one is the
+                # shape a precision regression would take, and without this
+                # field a false referent is indistinguishable in the record
+                # from a topical load.
+                "referent_outcome": _referent_outcome(resolution),
+                # Whether Stage R had a conversation to resolve against at
+                # all. Zero here on a follow-up question means the history
+                # never reached grounding — the wiring defect, not a
+                # resolution one, and the two look identical in an answer.
+                "history_turns": history_turns,
             },
         )
     except Exception:  # noqa: BLE001 — audit write must not block the answer
@@ -1265,17 +1604,32 @@ def _resolve_question_embedding(
     """This ask's `(vector, degraded)`, computing it only if nothing already
     has.
 
-    `ask_job_runner._run_sync` embeds once per ask and publishes the result on
-    the request-scoped ContextVar, so on the worker path this returns that
-    value and issues no call. It falls through to `_question_embedding` for
-    callers that reach `compose_ask_answer` without the worker in front of them
-    — direct invocation, and the tests that do the same — which is what keeps
-    the embedding count at exactly one per ask on every path rather than one
-    per consumer."""
-    carried = _carried_question_embedding()
-    if carried is not None:
-        return carried
-    return _question_embedding(enterprise_id, question)
+    `ask_job_runner._run_sync` SCOPES the slot before `answer()` picks a path
+    but no longer fills it, so the first consumer that genuinely needs a vector
+    computes it here and memoises it back — every later consumer then reads
+    that one value and issues no call. An ask whose path never needs a vector
+    (a doc-less tenant, or a PRD-grounded ask that skips KG retrieval) now
+    issues none at all, where the old eager embed always paid for one.
+
+    It still falls through to a plain `_question_embedding` for callers that
+    reach `compose_ask_answer` without the worker in front of them — direct
+    invocation, and the tests that do the same. Those have no scoped slot, so
+    nothing is memoised and their behaviour is byte-for-byte what it was.
+
+    Read the ContextVar directly rather than through
+    `_carried_question_embedding`: that helper collapses `_EMBED_PENDING` to
+    None, and the whole decision here turns on telling those two apart."""
+    slot = _active_question_embedding.get()
+    if slot is not None and slot is not _EMBED_PENDING:
+        return slot  # type: ignore[return-value]
+    resolved = _question_embedding(enterprise_id, question)
+    if slot is _EMBED_PENDING:
+        # Memoise onto the slot the worker scoped for us. Writing only in this
+        # branch is what keeps the unscoped path leak-free: with no token to
+        # unwind it, a write there would outlive the request on this pooled
+        # thread — the exact hazard `ask_job_runner`'s `finally` exists to close.
+        _active_question_embedding.set(resolved)
+    return resolved
 
 
 def _retrieve_kg_bundle(
@@ -1414,8 +1768,13 @@ def compose_ask_answer(
     # prefix — including the PRD-grounded branch below, which skips corpus +
     # KG for cost reasons but must not go blind to uploads (that would
     # reintroduce the false-denial bug inside PRD-tab chat).
+    # `history` threads in explicitly here because this call site HAS it as a
+    # parameter — the ContextVar route exists for `qa_agent._answer_single_shot`,
+    # which does not. Passed to RESOLUTION only: `question` stays bare, so the
+    # name and topic stages still see what the user typed, not the thread.
     docs_block, documents = document_grounding(
-        enterprise_id, question, question_embedding=question_embedding
+        enterprise_id, question,
+        question_embedding=question_embedding, history=history,
     )
 
     if prd_context:

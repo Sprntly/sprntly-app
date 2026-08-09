@@ -2152,6 +2152,42 @@ def answer(
         # gap that made this bug hard to see: an intercepted turn reported
         # routed_skill=None because interceptions never reach that hook.
         decision = _contest_memo[0]
+    elif plan is not None:
+        # THE PLAN ALREADY IS THIS DECISION — take it rather than buying it twice.
+        #
+        # Router v7 decides exactly three things: one of this customer's uploaded
+        # skills, one of four research pipelines, or scope. The planner emits all
+        # three (`company_skill_id`, `pipeline_id`, `in_scope`) and a wider
+        # pipeline vocabulary besides — `_gate_pipeline` accepts the six
+        # `_MACHINERY_IDS` on top of anything `_invocable`. So on a planned turn
+        # the router was re-deciding, on a smaller model, what the planner had
+        # already decided seconds earlier: a measured haiku call and ~4s of the
+        # pre-token wait, every message, for an answer we were holding.
+        #
+        # Note this is NOT the old "menu" question. The ~78-entry built-in skill
+        # menu was deleted in router v7; there is no built-in skill left for
+        # either component to pick, which is why nothing had to be taught to the
+        # planner for this to be safe — only stopped.
+        #
+        # `_routing_text_with_filenames` goes with it (two more DB reads). Its
+        # purpose was to let the scope gate see attached document NAMES; the
+        # planner is handed the question with the extracted document text
+        # already inlined, so it sees strictly more than the filenames ever gave.
+        if not plan.in_scope:
+            decision = RouteDecision(None, plan.confidence, "out_of_scope")
+        elif plan.company_skill_id:
+            decision = RouteDecision(
+                plan.company_skill_id, plan.company_confidence,
+                "planner_custom", plan.company_skill_id,
+            )
+        elif plan.pipeline_id:
+            decision = RouteDecision(
+                plan.pipeline_id, plan.confidence, "planner", plan.pipeline_id,
+            )
+        else:
+            # The plan named nothing — answer directly. Same shape the router
+            # returns for the common case, and `source` says who decided it.
+            decision = RouteDecision(None, plan.confidence, "planner")
     else:
         # AC5/AC5a: the router — and ONLY the router — additionally sees the
         # attached/uploaded document FILENAMES, never their content. The

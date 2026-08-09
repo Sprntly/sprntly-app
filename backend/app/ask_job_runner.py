@@ -113,22 +113,33 @@ def _run_sync(
     # whose documents share the workspace's own name, is nothing. Ranking was
     # then decided by recency and still reported as a topic match.
     #
-    # Computed HERE, once, before `answer()` picks a path, so both paths get
-    # the same vector and the ask pays for exactly one embedding:
-    # `compose_ask_answer` reuses this instead of computing its own.
+    # SCOPED here, once, before `answer()` picks a path, so that whichever path
+    # runs shares one vector and the ask pays for at most one embedding.
     #
-    # Computed BEFORE either setter, deliberately: this is the only step here
-    # that does real work (an HTTP call), and nothing between a `set_` and the
-    # `try` is covered by the `finally`. This worker runs on a pooled thread,
-    # and a ContextVar left set outlives the request into whatever ask reuses
-    # that thread next — a stale conversation id would then scope another
-    # user's document lookup. `_question_embedding` swallows its own failures
-    # and returns `(None, True)` rather than raising, so today that window is
-    # already closed; ordering it this way is what keeps it closed if that
-    # ever stops being true.
-    # THE PLANNER RUNS FIRST — ahead of the embedding call below, which is a
-    # live HTTP round trip. The two are independent, and having the planner wait
-    # on it put a network hop in front of every planned answer for no reason.
+    # Scoped rather than COMPUTED: the vector is only ever read by Stage T of
+    # document grounding and by KG retrieval, and there are two common shapes
+    # where neither runs. A workspace with no documents returns from
+    # `document_grounding` before Stage T, and a PRD-grounded ask skips KG
+    # retrieval entirely — both used to pay a full embedding round trip
+    # (measured at 2.8s) for a vector nothing then read. Deferring it to first
+    # use keeps the exactly-once guarantee (the resolver memoises back into
+    # this slot) while dropping that cost to zero on the paths that need
+    # nothing. See `ask_runner._EMBED_PENDING` for the three slot states.
+    #
+    # This also closes, rather than merely orders around, the hazard the eager
+    # call had to be careful about: nothing between a `set_` and the `try` is
+    # covered by the `finally`, and this worker runs on a POOLED thread where a
+    # ContextVar left set outlives the request into whatever ask reuses that
+    # thread next — a stale conversation id would then scope another user's
+    # document lookup. The eager embed was ordered before both setters to keep
+    # that window shut; scoping does no I/O at all, so there is no window.
+    #
+    # THE PLANNER RUNS FIRST, before `answer()` picks a path. It ran here
+    # originally to get ahead of the eager embedding call — a live HTTP round
+    # trip the plan did not depend on. That call is gone (the embedding is now
+    # resolved lazily by whichever consumer needs it, and on a planned turn that
+    # may be none at all), so the ordering is no longer load-bearing for
+    # latency; what keeps the planner here is the separation of concerns below.
     #
     # It runs HERE rather than inside `answer()` so that function stays a pure
     # executor of a plan it is handed, rather than something that both decides
@@ -146,13 +157,22 @@ def _run_sync(
             enterprise_id=enterprise_id, question=question, history=history
         )
 
-    embedding, embedding_degraded = ask_runner._question_embedding(
-        enterprise_id, question
-    )
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
-    embedding_token = ask_runner.set_active_question_embedding(
-        embedding, embedding_degraded
+    embedding_token = ask_runner.set_active_question_embedding_pending()
+    # The prior turns, by the same route and for the same reason: document
+    # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
+    # is without them, and the skill-routed path reaches document grounding
+    # through `qa_agent._answer_single_shot`, which calls it positionally.
+    # `history` is already loaded and already this function's parameter —
+    # `routes.ask._load_history` fetched it, ownership-checked, before the job
+    # started — so this publishes what is in hand rather than reading again.
+    # The documents the plan named, on the same request-scoped route and with
+    # the same finally-cleared discipline. Empty when nothing planned one, which
+    # is the normal outcome and leaves document selection exactly as it was.
+    planned_docs_token = ask_runner.set_active_planned_documents(
+        getattr(ask_plan, "documents", None) if ask_plan is not None else None
     )
+    history_token = ask_runner.set_active_history(history)
     try:
         payload = qa_agent.answer(
             plan=ask_plan,
@@ -180,6 +200,8 @@ def _run_sync(
     finally:
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
+        ask_runner.reset_active_history(history_token)
+        ask_runner.reset_active_planned_documents(planned_docs_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask

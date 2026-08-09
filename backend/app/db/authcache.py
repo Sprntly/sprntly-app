@@ -75,6 +75,19 @@ default_ws_cache = TTLMap(30.0)
 # (app.db.workspaces owns the sentinel — all workspace-member writes go
 # through backend routes, which invalidate, so caching absence is safe).
 workspace_member_cache = TTLMap(30.0)
+# company_id → the company's `feature_flags` dict.
+#
+# The odd one out until now: every other per-request tenancy read above was
+# cached and this one was not, so a single ask re-read the same row three times
+# (`require_agents_module`, plus `_ds_claude_enabled` and
+# `_cross_connector_sweep_enabled` in qa_agent).
+#
+# Subject to the same class of invariant as memberships, for the same reason in
+# mirror image: `entitlements.read_feature_flags` returns None to mean THE READ
+# FAILED, and its caller grandfathers a failed read to "on". Caching that None
+# would hand a company whose flags say `agents: false` a full TTL of access, so
+# only a genuine dict is ever stored — see `read_feature_flags`.
+feature_flags_cache = TTLMap(30.0)
 
 
 def invalidate_user(user_id: str) -> None:
@@ -91,6 +104,13 @@ def invalidate_workspace_caches() -> None:
     workspace_member_cache.clear()
 
 
+def invalidate_feature_flags(company_id: str) -> None:
+    """Drop a company's cached feature flags — call from every write that
+    touches `companies.feature_flags`, so an operator toggling a flag sees it
+    take effect on the next request rather than after a TTL."""
+    feature_flags_cache.invalidate(company_id)
+
+
 def clear_all() -> None:
     """Reset every cache — for tests."""
     memberships_cache.clear()
@@ -98,3 +118,4 @@ def clear_all() -> None:
     workspace_cache.clear()
     default_ws_cache.clear()
     workspace_member_cache.clear()
+    feature_flags_cache.clear()

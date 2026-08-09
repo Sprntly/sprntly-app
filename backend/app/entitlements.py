@@ -222,7 +222,16 @@ def read_feature_flags(company_id: str) -> dict | None:
     Callers that grandfather a missing key ON cannot tell those apart from `{}`
     alone — and a caller that must fail CLOSED on an unknown state needs to.
     """
+    from app.db.authcache import feature_flags_cache
     from app.db.client import require_client
+
+    # TTL-cached like every other per-request tenancy read (this was the only
+    # one that wasn't, and a single ask read the row three times). Writes
+    # invalidate via `authcache.invalidate_feature_flags`, so a toggled flag
+    # applies on the next request rather than after the TTL.
+    cached = feature_flags_cache.get(company_id)
+    if cached is not None:
+        return cached
 
     try:
         rows = (
@@ -237,11 +246,16 @@ def read_feature_flags(company_id: str) -> dict | None:
         )
     except Exception:  # noqa: BLE001 — the caller decides open vs closed
         logger.warning("feature_flags read failed for %s", company_id, exc_info=True)
+        # Deliberately NOT cached. None means the read FAILED, and
+        # `feature_flags_for_company` grandfathers a failed read to "on" —
+        # caching it would grant a company whose flags say `agents: false` a
+        # full TTL of access. Only a genuine dict is stored below. Same shape
+        # of invariant as authcache's "never cache empty memberships".
         return None
-    if not rows:
-        return {}
-    flags = rows[0].get("feature_flags")
-    return flags if isinstance(flags, dict) else {}
+    flags = rows[0].get("feature_flags") if rows else None
+    resolved = flags if isinstance(flags, dict) else {}
+    feature_flags_cache.set(company_id, resolved)
+    return resolved
 
 
 def feature_flags_for_company(company_id: str) -> dict:

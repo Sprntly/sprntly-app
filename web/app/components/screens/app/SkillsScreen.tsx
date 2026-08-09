@@ -40,8 +40,12 @@
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import {
+  IconAlertTriangle,
+  IconBrandGithub,
+  IconLoader2,
   IconPencil,
   IconPlus,
+  IconRefresh,
   IconTrash,
   IconUser,
   IconWand,
@@ -55,7 +59,32 @@ import {
   skillsApi,
   type CustomSkillDetail,
   type CustomSkillInfo,
+  type SyncedFolder,
 } from "../../../lib/api"
+
+/** "3 minutes ago" for a sync timestamp, "Never" before the first one.
+ *
+ *  Deliberately coarse: the panel answers "is this folder actually being
+ *  watched", and a to-the-second time invites reading it as a countdown to the
+ *  next sweep, which it isn't. Pure → testable without a clock fixture. */
+export function syncedAgo(iso: string | null, now: number = Date.now()): string {
+  if (!iso) return "Never synced"
+  const then = Date.parse(iso)
+  if (Number.isNaN(then)) return "Never synced"
+  const mins = Math.floor((now - then) / 60000)
+  if (mins < 1) return "Synced just now"
+  if (mins < 60) return `Synced ${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `Synced ${hours}h ago`
+  return `Synced ${Math.floor(hours / 24)}d ago`
+}
+
+/** One synced folder as a label: "acme/methods · skills · main". The branch is
+ *  omitted when the folder follows the repo default, because printing a
+ *  resolved name would claim a pin the row doesn't have. */
+export function folderLabel(f: Pick<SyncedFolder, "repo" | "path" | "ref">): string {
+  return [f.repo, f.path, f.ref].filter(Boolean).join(" · ")
+}
 
 /** First sentence of a skill's description, minus the routing-guidance tail
  *  ("Use when the user says …"). Descriptions are written for the classifier,
@@ -107,6 +136,11 @@ export function SkillsView({
   onDeleteRequest,
   onDeleteConfirm,
   onEditRequest,
+  syncedFolders,
+  syncingFolderId,
+  stoppingFolderId,
+  onSyncFolder,
+  onStopSyncingFolder,
 }: {
   /** The company's uploaded skills (already search-filtered by the caller). */
   customSkills: CustomSkillInfo[]
@@ -129,6 +163,16 @@ export function SkillsView({
   /** Open the edit modal for a skill. Non-destructive on its own — the modal
    *  loads the method text and owns every confirm from there. */
   onEditRequest: (id: string) => void
+  /** GitHub folders this company keeps synced. ACTIVE ones only — a stopped
+   *  folder has already handed its skills back and has nothing left to manage,
+   *  so listing it would be a row whose every control is a no-op. */
+  syncedFolders: SyncedFolder[]
+  /** Folder id whose forced re-read is in flight. */
+  syncingFolderId: string | null
+  /** Folder id whose stop-syncing is in flight. */
+  stoppingFolderId: string | null
+  onSyncFolder: (id: string) => void
+  onStopSyncingFolder: (id: string) => void
 }) {
   return (
     <div className="skl-wrap">
@@ -238,6 +282,20 @@ export function SkillsView({
                         Cancel
                       </button>
                     </span>
+                  ) : s.synced ? (
+                    // A synced skill's text belongs to the repo: the sweep
+                    // re-imports it every half hour, so an edit here would be
+                    // reverted and a delete would come back. Both are refused
+                    // server-side (409) — showing the buttons and then failing
+                    // would be the worse version of the same rule. The badge
+                    // says where the skill actually lives instead.
+                    <span
+                      className="skl-card-actions skl-card-synced"
+                      title="Synced from GitHub — edit it in the repository, or stop syncing its folder below"
+                    >
+                      <IconBrandGithub size={12} aria-hidden />
+                      Synced
+                    </span>
                   ) : (
                     // Edit and delete are one hover-revealed pair; the pencil
                     // sits left of the trash so the destructive one stays in
@@ -278,6 +336,77 @@ export function SkillsView({
               : "No skills yet — upload one to get started."}
           </p>
         ) : null}
+
+        {/* Synced folders. Deliberately BELOW the library and not filtered by
+            the search box: this is the settings half of the screen, and a
+            folder is not a skill you would search for by name. It exists so
+            syncing is not a one-way door — you can see what is being watched,
+            when it last ran, why it failed, and stop it. */}
+        {syncedFolders.length > 0 ? (
+          <section className="skl-sec skl-synced" aria-labelledby="skl-synced-h">
+            <h2 className="skl-sec-h" id="skl-synced-h">
+              <IconBrandGithub size={13} aria-hidden /> Synced folders
+            </h2>
+            <p className="skl-sec-sub">
+              Every Markdown file in these folders is imported as a skill, and
+              re-checked every 30 minutes. Their skills are edited in GitHub.
+            </p>
+            <ul className="skl-synced-list">
+              {syncedFolders.map((f) => {
+                const syncing = syncingFolderId === f.id
+                const stopping = stoppingFolderId === f.id
+                return (
+                  <li key={f.id} className="skl-synced-item">
+                    <span className="skl-synced-main">
+                      <code className="skl-synced-label">{folderLabel(f)}</code>
+                      {/* An error replaces the timestamp rather than sitting
+                          beside it: "synced 4m ago" next to a failure reads as
+                          though the sync worked, which is the one thing this
+                          row must never imply. */}
+                      {f.last_error ? (
+                        <span className="skl-synced-err">
+                          <IconAlertTriangle size={11} aria-hidden />
+                          {f.last_error}
+                        </span>
+                      ) : (
+                        <span className="skl-synced-when muted">
+                          {syncedAgo(f.last_synced_at)}
+                          {f.last_commit_sha ? ` · ${f.last_commit_sha}` : ""}
+                        </span>
+                      )}
+                    </span>
+                    <span className="skl-synced-acts">
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={syncing || stopping}
+                        aria-busy={syncing || undefined}
+                        onClick={() => onSyncFolder(f.id)}
+                      >
+                        {syncing ? (
+                          <IconLoader2 size={12} className="icon-spin" aria-hidden />
+                        ) : (
+                          <IconRefresh size={12} aria-hidden />
+                        )}
+                        {syncing ? "Syncing…" : "Sync now"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={syncing || stopping}
+                        aria-busy={stopping || undefined}
+                        onClick={() => onStopSyncingFolder(f.id)}
+                        title="Stop syncing this folder. Its skills stay and become editable here."
+                      >
+                        {stopping ? "Stopping…" : "Stop syncing"}
+                      </button>
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        ) : null}
       </div>
     </div>
   )
@@ -299,6 +428,11 @@ function SkillsScreenContent() {
   const [editError, setEditError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Synced GitHub folders. Only the ACTIVE ones are kept — a stopped folder has
+  // released its skills and has nothing left to manage.
+  const [syncedFolders, setSyncedFolders] = useState<SyncedFolder[]>([])
+  const [syncingFolderId, setSyncingFolderId] = useState<string | null>(null)
+  const [stoppingFolderId, setStoppingFolderId] = useState<string | null>(null)
   // `?q=` seeds the filter so the global search palette can deep-link a
   // specific skill (`/skills?q=<label>`); after mount the input owns it.
   const qParam = searchParams.get("q")
@@ -336,6 +470,24 @@ function SkillsScreenContent() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Synced folders, fetched alongside the library. Failing SILENTLY is the
+  // right call here and only here: the panel is a management aid, and a company
+  // with no synced folders is the common case, so an error banner about a
+  // section that would have been empty anyway is pure noise. A folder that is
+  // syncing but unreachable still shows its own `last_error` once this loads.
+  useEffect(() => {
+    let cancelled = false
+    void skillsApi
+      .listSources()
+      .then((r) => {
+        if (!cancelled) setSyncedFolders((r.sources || []).filter((s) => s.active))
+      })
+      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -450,6 +602,7 @@ function SkillsScreenContent() {
     ref?: string
     path?: string
     paths: string[]
+    sync?: boolean
   }) {
     const result = await skillsApi.importGithub(req)
     setCustomSkills((prev) => mergeUploadedSkills(prev, result.imported))
@@ -458,13 +611,89 @@ function SkillsScreenContent() {
     showToast(
       "Skills imported",
       countLine(result.imported.length - updated, updated) +
+        // A synced import is a standing arrangement, not a one-off, so the
+        // toast says so — this is the last moment the user is looking at the
+        // consequence they just agreed to.
+        (result.synced
+          ? ` ${req.path} stays synced — new Markdown files there become skills automatically.`
+          : "") +
         (skipped > 0
           ? ` ${skipped} ${skipped === 1 ? "skill" : "skills"} couldn’t be imported — see the details in the dialog.`
           : ""),
     )
+    // A folder registered by THIS import has to appear in the panel without a
+    // reload, and re-importing an already-synced folder must not list it twice.
+    if (result.synced) {
+      void skillsApi
+        .listSources()
+        .then((r) => setSyncedFolders((r.sources || []).filter((s) => s.active)))
+        .catch(() => {})
+    }
     // Reshaped to the upload result the modal already reports, so one panel
     // covers both routes into the library.
     return { skills: result.imported, skipped: result.skipped }
+  }
+
+  // Force one folder to be re-read now. The server syncs with force=true, so it
+  // re-imports even when the commit hasn't moved — that is the whole point of a
+  // manual button. It answers 200 even when the sync itself failed, carrying
+  // the reason, so a GitHub outage reports as a toast rather than a throw.
+  async function onSyncFolder(id: string) {
+    setSyncingFolderId(id)
+    try {
+      const result = await skillsApi.syncSource(id)
+      setSyncedFolders((prev) =>
+        prev.map((f) => (f.id === id ? result.source : f)),
+      )
+      if (result.error) {
+        showToast("Couldn't sync that folder", result.error)
+      } else {
+        const changed = result.imported + result.replaced
+        // The library only changes when the folder did, so a no-op says so
+        // rather than claiming an import that didn't happen.
+        showToast(
+          "Folder synced",
+          changed === 0
+            ? "Everything in that folder is already in your library."
+            : `${changed} ${changed === 1 ? "skill" : "skills"} imported from that folder.`,
+        )
+        const refreshed = await skillsApi.list().catch(() => null)
+        if (refreshed) setCustomSkills(refreshed.skills)
+      }
+    } catch (e) {
+      showToast(
+        "Couldn't sync that folder",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setSyncingFolderId(null)
+    }
+  }
+
+  // Stop syncing a folder. Its skills STAY — the server clears their link to
+  // the folder, which also makes them editable again, so the library list has
+  // to be re-read for the cards to lose their read-only state.
+  async function onStopSyncingFolder(id: string) {
+    const folder = syncedFolders.find((f) => f.id === id)
+    setStoppingFolderId(id)
+    try {
+      const result = await skillsApi.stopSyncingSource(id)
+      setSyncedFolders((prev) => prev.filter((f) => f.id !== id))
+      showToast(
+        "Stopped syncing",
+        `${folder ? folderLabel(folder) : "That folder"} won't be checked again. ` +
+          `${result.released} ${result.released === 1 ? "skill" : "skills"} stayed in your library and can be edited here now.`,
+      )
+      const refreshed = await skillsApi.list().catch(() => null)
+      if (refreshed) setCustomSkills(refreshed.skills)
+    } catch (e) {
+      showToast(
+        "Couldn't stop syncing",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setStoppingFolderId(null)
+    }
   }
 
   // Upload a custom skill: POST, then prepend the created skill so it appears
@@ -535,6 +764,11 @@ function SkillsScreenContent() {
         onDeleteRequest={setDeletePendingId}
         onDeleteConfirm={onDeleteConfirm}
         onEditRequest={onEditRequest}
+        syncedFolders={syncedFolders}
+        syncingFolderId={syncingFolderId}
+        stoppingFolderId={stoppingFolderId}
+        onSyncFolder={(id) => void onSyncFolder(id)}
+        onStopSyncingFolder={(id) => void onStopSyncingFolder(id)}
       />
       <EditSkillModal
         open={editingId != null}
