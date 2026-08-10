@@ -199,9 +199,11 @@ function ShareMenu({
               {shareUrl ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
                   <code
+                    title={shareUrl}
                     style={{
                       fontSize: 11, color: "var(--muted)", overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+                      maxWidth: 300, minWidth: 0,
                     }}
                   >
                     {shareUrl}
