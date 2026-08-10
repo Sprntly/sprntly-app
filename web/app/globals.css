@@ -2897,6 +2897,63 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Dictation sits inside the box on the right, immediately left of Send —
+     the two ways to finish a question, together. Deliberately a size down from
+     Send and unfilled: Send is the primary action, the mic is a way of typing. */
+  .cx-mic {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: none;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .cx-mic:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* A live microphone is the one control here that is recording the room, so
+     the ON state is not a tint of the OFF state — it inverts. Idle is an
+     outlined grey glyph; recording is a SOLID red button with a white glyph,
+     throwing an expanding red ring. Three independent signals (fill, colour,
+     motion) because the cost of a mic left on by accident is not a cosmetic
+     one, and because the fill alone still reads for anyone who can't see the
+     motion or the hue. */
+  .cx-mic.is-recording,
+  .cx-mic.is-recording:hover {
+    color: #fff;
+    background: var(--danger);
+    border-color: var(--danger);
+  }
+
+  .cx-mic.is-recording {
+    animation: cx-mic-pulse 1.5s ease-out infinite;
+  }
+
+  /* The ring is drawn with box-shadow rather than a pseudo-element so it can't
+     affect layout — the footer must not reflow every 1.5s. */
+  @keyframes cx-mic-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(193, 56, 56, 0.5); }
+    70% { box-shadow: 0 0 0 9px rgba(193, 56, 56, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(193, 56, 56, 0); }
+  }
+
+  /* The colour and the fill already carry the state; the motion is the part
+     that hurts, so it is the only part dropped. */
+  @media (prefers-reduced-motion: reduce) {
+    .cx-mic.is-recording {
+      animation: none;
+    }
+  }
+
   /* Send and Stop are the SAME box in the SAME place, so flipping between them
      on send moves nothing. */
   .cx-send {
