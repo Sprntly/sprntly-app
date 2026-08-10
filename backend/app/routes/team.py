@@ -12,6 +12,9 @@ Endpoints:
                                                  for real email re-send)
   PATCH  /v1/team/members/{user_id}       (C3) — change a member's role
   DELETE /v1/team/members/{user_id}       (C3) — remove a member
+  PATCH  /v1/team/members/{user_id}/job-role
+                                          — self-only edit of the caller's
+                                            own job designation (profiles.role)
 
   POST   /v1/invites/accept               (C3) — invitee auto-accepts their
                                                  pending invite. NOT on the
@@ -26,6 +29,7 @@ UX); team writes are gated to admin/owner. The accept endpoint uses
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -51,7 +55,10 @@ from app.db.team import (
     member_exists_for_email,
     touch_invite,
     update_member_role,
+    update_own_job_role,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -156,6 +163,10 @@ async def get_team_members(company: CompanyContext = Depends(require_company)):
                 "email": r.get("email"),
                 "avatar_url": r.get("avatar_url"),
                 "workspace_ids": ws_by_user.get(r.get("user_id"), []),
+                # profiles.role (job designation, ROLE_OPTIONS taxonomy) —
+                # keyed job_role to avoid colliding with the permission
+                # `role` key above (company_members.role).
+                "job_role": r.get("job_role"),
             }
             for r in rows
         ]
@@ -390,6 +401,39 @@ def patch_team_member(
     # The target's cached membership now carries a stale role.
     invalidate_user(user_id)
     return _public_member(updated or {"user_id": user_id, "role": body.role})
+
+
+class SelfJobRolePatch(BaseModel):
+    role: str | None = Field(default=None, max_length=60)
+
+    @field_validator("role")
+    @classmethod
+    def _strip(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+@router.patch("/members/{user_id}/job-role")
+def patch_my_job_role(
+    user_id: str,
+    body: SelfJobRolePatch,
+    company: CompanyContext = Depends(require_company),
+):
+    """Self-only edit of the caller's own `profiles.role` (job designation).
+
+    `user_id` in the path exists for symmetry with the permission-role PATCH
+    above, but it is only ever used as a self-only gate: a caller may never
+    edit a teammate's job designation here, even if they pass a different id
+    (or one smuggled into the body — the write target is always resolved
+    from the authenticated session, never client input).
+    """
+    if user_id != company.user_id:
+        raise HTTPException(403, "You can only edit your own role")
+    updated = update_own_job_role(user_id=company.user_id, role=body.role)
+    logger.info("profile_role_updated user_id=%s", company.user_id)
+    return {"user_id": company.user_id, "job_role": updated}
 
 
 class MemberWorkspacesPut(BaseModel):

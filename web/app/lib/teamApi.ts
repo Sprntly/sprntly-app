@@ -17,6 +17,11 @@ export type TeamMember = {
   /** Explicit workspace grants. Org owners/admins usually have none —
    *  their access is implicit across every workspace. */
   workspace_ids?: string[]
+  /** Job designation (profiles.role — ROLE_OPTIONS taxonomy: Founder / PM /
+   *  Engineer / Data Scientist / Designer / Other), captured at onboarding
+   *  and self-editable from Settings. Distinct from `role` above, which is
+   *  the permission role (owner/admin/member/viewer). */
+  job_role?: string | null
 }
 
 export type TeamInvite = {
@@ -60,6 +65,14 @@ export const teamApi = {
     api.patch<{ user_id: string; role: TeamRole }>(
       `/v1/team/members/${encodeURIComponent(userId)}`,
       { role },
+    ),
+  /** Self-only: set the caller's own job designation (profiles.role).
+   *  `userId` must be the signed-in user's own id — the backend 403s any
+   *  other target regardless of what's requested. */
+  patchMyJobRole: (userId: string, jobRole: string | null) =>
+    api.patch<{ user_id: string; job_role: string | null }>(
+      `/v1/team/members/${encodeURIComponent(userId)}/job-role`,
+      { role: jobRole },
     ),
   setMemberWorkspaces: (userId: string, workspaceIds: string[]) =>
     api.put<{ user_id: string; workspace_ids: string[] }>(

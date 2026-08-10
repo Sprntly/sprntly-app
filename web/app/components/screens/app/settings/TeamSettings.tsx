@@ -24,6 +24,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
 import { useWorkspace as useWorkspaceCtx } from "../../../../context/WorkspaceContext"
 import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
+import { ROLE_OPTIONS } from "../../../../lib/onboarding/types"
 import {
   teamApi,
   type InviteRole,
@@ -105,6 +106,12 @@ export type TeamSettingsViewProps = {
   onRemoveMember: (userId: string) => void
   /** Toggle one workspace grant on an existing member (multi-select row). */
   onToggleMemberWorkspace?: (userId: string, workspaceId: string) => void
+
+  /** Self-only: set the signed-in user's own job designation
+   *  (profiles.role). Not offered on teammate rows — title is a property
+   *  of the person, set by that person. */
+  onChangeMyJobRole?: (role: string | null) => void
+  myJobRoleSaving?: boolean
 }
 
 export function TeamSettingsView(props: TeamSettingsViewProps) {
@@ -133,6 +140,8 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
     onChangeMemberRole,
     onRemoveMember,
     onToggleMemberWorkspace,
+    onChangeMyJobRole,
+    myJobRoleSaving,
   } = props
 
   const canManage = currentUserRole === "owner" || currentUserRole === "admin"
@@ -256,6 +265,15 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
                   <div className="nm">{display}</div>
                   {m.email && m.email !== display && (
                     <div className="em">{m.email}</div>
+                  )}
+                  {isSelf ? (
+                    <SelfJobRoleField
+                      value={m.job_role ?? null}
+                      saving={myJobRoleSaving}
+                      onSave={onChangeMyJobRole}
+                    />
+                  ) : (
+                    m.job_role && <div className="em">{m.job_role}</div>
                   )}
                 </div>
                 {canManage ? (
@@ -399,6 +417,115 @@ function Avatar({
     <span className="set-team-row-av" style={style}>
       {initials}
     </span>
+  )
+}
+
+/** Self-only inline job-designation editor for the signed-in user's own
+ *  row. Teammate rows render their job_role as a plain "em" line (existing
+ *  module CSS in globals.css); this control matches that typography via
+ *  inline styles referencing the same CSS custom properties, rather than
+ *  adding a new globals.css class. No network I/O here — `onSave` is the
+ *  wrapper's PATCH call. */
+function SelfJobRoleField({
+  value,
+  saving,
+  onSave,
+}: {
+  value: string | null
+  saving?: boolean
+  onSave?: (role: string | null) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value ?? "")
+  const [draftOther, setDraftOther] = useState("")
+
+  const emStyle: React.CSSProperties = {
+    fontSize: 11,
+    color: "var(--ink-3)",
+    fontFamily: "var(--font-mono)",
+    marginTop: 1,
+  }
+
+  if (!onSave) {
+    // No handler wired (defensive) — render read-only, same as a teammate row.
+    return value ? <div style={emStyle}>{value}</div> : null
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(value ?? "")
+          setDraftOther(value && !(ROLE_OPTIONS as readonly string[]).includes(value) ? value : "")
+          setEditing(true)
+        }}
+        style={{
+          ...emStyle,
+          background: "none",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          textDecoration: "underline",
+          textUnderlineOffset: 2,
+        }}
+        aria-label={value ? "Edit your role" : "Add your role"}
+      >
+        {value || "+ Add your role"}
+      </button>
+    )
+  }
+
+  const draftIsOther = draft === "Other" || (draft !== "" && !(ROLE_OPTIONS as readonly string[]).includes(draft))
+
+  return (
+    <form
+      style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}
+      onSubmit={(e) => {
+        e.preventDefault()
+        const resolved = draftIsOther
+          ? draftOther.trim() || null
+          : draft.trim() || null
+        onSave(resolved)
+        setEditing(false)
+      }}
+    >
+      <select
+        value={draftIsOther ? "Other" : draft}
+        onChange={(e) => setDraft(e.target.value)}
+        aria-label="Your role"
+        disabled={saving}
+        style={{ fontSize: 11 }}
+      >
+        <option value="">No role</option>
+        {ROLE_OPTIONS.map((r) => (
+          <option key={r} value={r}>
+            {r}
+          </option>
+        ))}
+      </select>
+      {draftIsOther && (
+        <input
+          value={draftOther}
+          onChange={(e) => setDraftOther(e.target.value)}
+          placeholder="Your role"
+          aria-label="Your role (other)"
+          disabled={saving}
+          style={{ fontSize: 11, width: 100 }}
+        />
+      )}
+      <button type="submit" disabled={saving} style={{ fontSize: 11 }}>
+        Save
+      </button>
+      <button
+        type="button"
+        onClick={() => setEditing(false)}
+        disabled={saving}
+        style={{ fontSize: 11 }}
+      >
+        Cancel
+      </button>
+    </form>
   )
 }
 
@@ -700,6 +827,7 @@ export function TeamSettings() {
   const [invites, setInvites] = useState<TeamInvite[]>(() => _teamCache?.invites ?? [])
   const [loading, setLoading] = useState(() => _teamCache === null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [myJobRoleSaving, setMyJobRoleSaving] = useState(false)
 
   const [showInviteForm, setShowInviteForm] = useState(false)
   const [inviteEmail, setInviteEmail] = useState("")
@@ -743,6 +871,7 @@ export function TeamSettings() {
         email: row.email,
         avatar_url: row.avatar_url,
         workspace_ids: row.workspace_ids ?? [],
+        job_role: row.job_role ?? null,
       }))
       _teamCache = { members: nextMembers, invites: inv.invites }
       setMembers(nextMembers)
@@ -855,6 +984,21 @@ export function TeamSettings() {
     })()
   }
 
+  function changeMyJobRole(role: string | null) {
+    if (!currentUserId) return
+    setMyJobRoleSaving(true)
+    void (async () => {
+      try {
+        await teamApi.patchMyJobRole(currentUserId, role)
+        await reload()
+      } catch (e) {
+        setLoadError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setMyJobRoleSaving(false)
+      }
+    })()
+  }
+
   return (
     <TeamSettingsView
       members={members}
@@ -881,6 +1025,8 @@ export function TeamSettings() {
       onChangeMemberRole={changeRole}
       onRemoveMember={removeMember}
       onToggleMemberWorkspace={toggleMemberWorkspace}
+      onChangeMyJobRole={changeMyJobRole}
+      myJobRoleSaving={myJobRoleSaving}
     />
   )
 }
