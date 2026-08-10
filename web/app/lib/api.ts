@@ -654,6 +654,11 @@ export type CustomSkillInfo = {
    *  name (same id, same trigger, new content) rather than adding a new one.
    *  Absent on list items, where it would mean nothing. */
   replaced?: boolean
+  /** This skill comes from a SYNCED GitHub folder, so the repository owns its
+   *  text: it is re-imported on every sweep, the edit form is closed to it, and
+   *  deleting it is refused (both 409 server-side). Stopping the folder's sync
+   *  releases it and this goes false. */
+  synced?: boolean
 }
 
 /** One custom skill WITH its method text — GET /v1/skills/{id}, the source the
@@ -744,6 +749,39 @@ export type GithubSkillImportResult = {
   skipped: SkippedSkill[]
   commit_sha: string
   ref: string
+  /** The folder was registered to keep syncing, so the imported skills are
+   *  read-only and the folder's later contents will arrive on their own. */
+  synced: boolean
+}
+
+/** One folder a company keeps synced — GET /v1/skills/sources.
+ *
+ *  `ref` empty means "whatever the repo's default branch is", deliberately not
+ *  resolved to a name: the folder follows the default branch rather than being
+ *  pinned to whatever it was called at import time. `last_error` is the last
+ *  failure verbatim and is cleared by the next clean sync, so a non-empty value
+ *  is a live problem rather than history. */
+export type SyncedFolder = {
+  id: string
+  repo: string
+  ref: string
+  path: string
+  active: boolean
+  last_synced_at: string | null
+  last_commit_sha: string
+  last_error: string
+}
+
+/** POST /v1/skills/sources/{id}/sync — what one forced re-read did. `error`
+ *  non-empty means the sync itself failed; the call still answers 200, because
+ *  a GitHub outage is something the panel shows, not an exception it can't
+ *  explain. */
+export type SyncedFolderSyncResult = {
+  source: SyncedFolder
+  imported: number
+  replaced: number
+  skipped: string[]
+  error: string
 }
 
 /** Discriminates the two upload bodies by shape (the multi one has no `id`).
@@ -820,13 +858,39 @@ export const skillsApi = {
    *  isn't a skill in that repo imports nothing rather than reading a file.
    *  Each imported skill follows the upload rules: a name the company already
    *  used replaces that skill in place, a built-in's name takes the next free
-   *  trigger. Per-skill failures come back in `skipped`. */
+   *  trigger. Per-skill failures come back in `skipped`.
+   *
+   *  `sync: true` also REGISTERS the folder: the half-hourly sweep re-imports
+   *  whatever markdown it holds from then on, so the ticked list stops being
+   *  the unit — a file added to that folder later arrives on its own, whether
+   *  or not anyone would have ticked it. The skills it produces become
+   *  read-only (edit and delete both 409). Requires a non-empty `path`; the
+   *  server 422s a synced repo ROOT, since a whole repository's markdown is not
+   *  a skill library. */
   importGithub: (body: {
     repo: string
     ref?: string
     path?: string
     paths: string[]
+    sync?: boolean
   }) => api.post<GithubSkillImportResult>("/v1/skills/github/import", body),
+  /** The company's synced folders, active and stopped alike — a stopped folder
+   *  is still where its skills came from. */
+  listSources: () => api.get<{ sources: SyncedFolder[] }>("/v1/skills/sources"),
+  /** Re-read one folder now instead of waiting for the sweep. Forced, so it
+   *  re-imports even when the commit hasn't moved — the button exists for the
+   *  case where the library visibly doesn't match the folder. */
+  syncSource: (id: string) =>
+    api.post<SyncedFolderSyncResult>(
+      `/v1/skills/sources/${encodeURIComponent(id)}/sync`,
+      {},
+    ),
+  /** Stop syncing a folder. Its skills STAY in the library and become editable
+   *  again — `released` is how many were handed back. */
+  stopSyncingSource: (id: string) =>
+    api.delete<{ stopped: true; id: string; released: number }>(
+      `/v1/skills/sources/${encodeURIComponent(id)}`,
+    ),
   /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
   fileLinks: (id: string) =>
     api.get<{ name: string; view_url: string; download_url: string }>(
@@ -848,17 +912,74 @@ export const skillsApi = {
  *  tab-sent PRD, or the one the conversation is bound to) so the reducer acts
  *  on the same document the decision was grounded on. */
 export type ChatIntentEnvelope = {
-  intent: "answer" | "generate_prd" | "edit_prd" | "generate_tickets" | "generate_prototype"
+  intent:
+    | "answer"
+    | "generate_prd"
+    | "edit_prd"
+    | "generate_tickets"
+    | "generate_prototype"
+    | "open_artifact"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
   /** edit_prd: the change to apply, self-contained. */
   instruction: string | null
+  /** open_artifact: which existing artifact kind to bring up. */
+  artifact_type: OpenArtifactKind | null
+  /** open_artifact: the subject the user named the document by. */
+  artifact_query: string | null
   reason: string
-  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction" */
+  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
+   *  | "no_artifact_query" */
   source: string
   prd_id: number | null
   prd_title: string | null
+  /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
+   *  company's artifact library. Absent for every other intent. */
+  open?: OpenArtifactResult
+}
+
+/** Artifact kinds an OPEN request can name. Both have an existing right-panel
+ *  view in the chat; prototypes/reports deliberately do not appear here. */
+export type OpenArtifactKind = "prd" | "evidence"
+
+/** One artifact the user's phrase could have meant — carrying the IDS needed to
+ *  open it, so a disambiguation chip is a real action and never a re-sent
+ *  message. `prd_id` for the PRD panel; `brief_id` + `insight_index` for the
+ *  Evidence panel, which is scoped by the insight rather than by an evidence
+ *  row id (matching ChatScreen's `kind: "evidence"` open). */
+export type OpenArtifactCandidate = {
+  type: OpenArtifactKind
+  id: number
+  title: string
+  status: string
+  prd_id: number | null
+  brief_id: number | null
+  insight_index: number | null
+  /** Whether `insight_index` names a REAL brief finding rather than the storage
+   *  sentinel a chat/ideation/uploaded PRD carries (always `0`). Only pass the
+   *  pair to the panel as `meta` when this is true — the panel's Evidence tab
+   *  loads by (briefId, insightIndex), so a sentinel would render the brief's
+   *  first finding underneath an unrelated document. */
+  brief_anchored: boolean
+  week_label: string | null
+}
+
+/** The 0/1/many verdict for an open request. All three outcomes are part of the
+ *  contract: `not_found` must open NOTHING and say so (it never degrades into
+ *  generating a new document — see backend/app/artifact_open.py), `ambiguous`
+ *  must ask, `resolved` opens directly. */
+export type OpenArtifactResult = {
+  /** `unsupported_type` = the user named a real artifact kind this panel cannot
+   *  show (a prototype, a report). It is NOT coerced into a PRD — say where the
+   *  thing actually lives instead. */
+  status: "resolved" | "ambiguous" | "not_found" | "unsupported_type"
+  /** What the user NAMED — may be a kind outside OpenArtifactKind when the
+   *  status is `unsupported_type`. */
+  artifact_type: OpenArtifactKind | string
+  query: string
+  artifact: OpenArtifactCandidate | null
+  candidates: OpenArtifactCandidate[]
 }
 
 export const chatIntentApi = {
@@ -1548,6 +1669,207 @@ export const templatesApi = {
     ),
 }
 
+// ---- artifact format templates ----------------------------------------------
+//
+// The company's own PRD / ticket / engineering-spec FORMS. Distinct from
+// `templatesApi` directly above, which is the "what good looks like" exemplar
+// library — additive prose the prd-author skill reads as voice guidance. These
+// are a GOVERNING skeleton: at most one active per artifact type, and every
+// document of that type gets written into it. The two coexist.
+//
+// Mirrors backend/app/routes/artifact_templates.py. `X-Workspace-Id` is
+// injected centrally in this file's `request()` — never add it per call.
+
+/** Which generator a format governs. `impl_spec` is the implementation-spec
+ *  skill's Part B (the markdown the ticket generator consumes). */
+export type ArtifactTemplateType = "prd" | "tickets" | "impl_spec"
+
+/** Where a format is in the checking pipeline.
+ *    pending      — queued, nothing has checked it yet
+ *    compiling    — being checked right now
+ *    ready        — checked clean; can be activated
+ *    needs_review — checked, but something in it has no home; see compile_notes
+ *    failed       — could not be read at all */
+export type CompileStatus =
+  | "pending"
+  | "compiling"
+  | "ready"
+  | "needs_review"
+  | "failed"
+
+/** One problem found while checking a format. NEVER rendered raw — `code` keys
+ *  the translation table in lib/compileNotes.ts, because the backend's own
+ *  wording names CSS classes (`ul.ev`) that must never reach a screen.
+ *  `message` is plain-language and is the fallback for an unknown code. */
+export type CompileNote = {
+  code: string
+  message: string
+}
+
+/** How a section of the customer's format is written. Closed set, validated
+ *  server-side at compile time so one concept never gets two labels. */
+export type SectionForm = "prose" | "bullets" | "table" | "stories"
+
+/** One row of "how we mapped your format": the customer's section name, what
+ *  Sprntly writes into it, and the shape it takes. */
+export type SectionMapEntry = {
+  id: string
+  /** The Sprntly concept that lands here (plain words). */
+  house: string
+  /** The customer's own name for the section. */
+  customer: string
+  order: number
+  form: SectionForm
+}
+
+export type SectionMap = {
+  sections: SectionMapEntry[]
+  /** Sprntly elements the format has no section for — placed where they fit. */
+  unmapped_house: string[]
+  /** Sections that are the customer's alone, filled from their evidence. */
+  extra_sections: string[]
+}
+
+/** One library row. Carries everything the list screen renders, so no row ever
+ *  needs a detail fetch to display. */
+export type ArtifactTemplate = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  uploader_name: string
+  created_at: string | null
+  updated_at: string | null
+  compile_status: CompileStatus
+  is_active: boolean
+  /** Characters in the uploaded markdown. */
+  source_chars: number
+  /** The FIRST compile note's message, or null. */
+  compile_summary: string | null
+  /** How many notes there are — the "See all 3" affordance needs the count,
+   *  and it cannot be derived from `compile_summary`. */
+  compile_note_count: number
+}
+
+/** A row PLUS its uploaded source and full mapping — the edit form's source. */
+export type ArtifactTemplateDetail = ArtifactTemplate & {
+  source_md: string
+  content_hash: string
+  compile_notes: CompileNote[]
+  section_map: SectionMap
+}
+
+/** What the preview modal renders. `format` is an EXPLICIT discriminator —
+ *  never sniff a leading `<`, which is guesswork on model output. `body` is ""
+ *  until a compiler has run, which renders as "we couldn't build a preview
+ *  from this format yet", not as an error. */
+export type ArtifactTemplatePreview = {
+  id: string
+  name: string
+  artifact_type: ArtifactTemplateType
+  compile_status: CompileStatus
+  compile_notes: CompileNote[]
+  format: "html" | "markdown"
+  body: string
+  section_map: SectionMap
+}
+
+/** Which generators actually honour a custom format yet — TOP-LEVEL on the list
+ *  response, not per row, because the common state is zero rows and the screen
+ *  still renders all three group headers. Never hardcode this client-side. */
+export type GenerationEnabled = Record<ArtifactTemplateType, boolean>
+
+export type ArtifactTemplateList = {
+  templates: ArtifactTemplate[]
+  generation_enabled: GenerationEnabled
+}
+
+export type ArtifactTemplateDeleteResult = {
+  deleted: true
+  id: string
+  artifact_type: ArtifactTemplateType
+  /** True when this delete dropped the company back to the built-in format. */
+  fell_back_to_builtin: boolean
+}
+
+export const artifactTemplatesApi = {
+  /** The company's format library, newest first, optionally one type only.
+   *  Poll THIS (not each row) while anything is compiling — one request covers
+   *  every in-flight row. */
+  list: (type?: ArtifactTemplateType) => {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : ""
+    return api.get<ArtifactTemplateList>(`/v1/artifact-templates${qs}`)
+  },
+  /** One format WITH its markdown source and mapping. 404s on a foreign or
+   *  unknown id, indistinguishably. */
+  get: (id: string) =>
+    api.get<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+  /** Add a format from PASTED markdown. The server is the authoritative
+   *  validator (422 name/type, 400 empty, 413 over 50,000 characters); the
+   *  modal mirrors the cheap checks. Names are free text and are NOT
+   *  deconflicted — two formats may share a name and neither replaces the
+   *  other. */
+  create: (body: {
+    name: string
+    artifact_type: ArtifactTemplateType
+    source_md: string
+  }) => api.post<ArtifactTemplateDetail>("/v1/artifact-templates", body),
+  /** Add a format from an uploaded `.md` (≤ 2 MB). Same route as `create`,
+   *  multipart instead of JSON; the name defaults to the filename when
+   *  omitted. */
+  upload: (file: File, artifactType: ArtifactTemplateType, name?: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("artifact_type", artifactType)
+    if (name) form.append("name", name)
+    return api.post<ArtifactTemplateDetail>("/v1/artifact-templates", form)
+  },
+  /** Rename a format and/or replace its markdown. Send only what changed — an
+   *  omitted field is left alone, so the rename modal never blanks a source it
+   *  didn't render. Replacing the source re-queues the check; an ACTIVE format
+   *  stays active and keeps serving its last good skeleton meanwhile. */
+  update: (id: string, patch: { name?: string; source_md?: string }) =>
+    api.patch<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+      patch,
+    ),
+  /** Queue a (re)check of this format. Answers the preview shape with the row's
+   *  new status, so the caller can restart polling from the response. */
+  compile: (id: string) =>
+    api.post<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/compile`,
+    ),
+  /** The compiled skeleton + how we mapped the format onto it. Available at
+   *  every status — it is the diagnostic for a format that didn't map
+   *  cleanly. */
+  preview: (id: string) =>
+    api.get<ArtifactTemplatePreview>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/preview`,
+    ),
+  /** Make this THE format for its type, company-wide. Admin only (403
+   *  otherwise). 409 with a `{message, code, notes}` detail when the format
+   *  hasn't compiled clean — translate those notes, never print them. */
+  activate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/activate`,
+    ),
+  /** Go back to Sprntly's built-in format for this type. The format stays in
+   *  the library. Admin only (403 otherwise); idempotent. */
+  deactivate: (id: string) =>
+    api.post<ArtifactTemplateDetail>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}/deactivate`,
+    ),
+  /** Remove a format for the whole company. Deleting the ACTIVE one is admin
+   *  only (403) — it falls back to the built-in, which is what deactivating
+   *  does, and that is admin-gated. `fell_back_to_builtin` says whether it did,
+   *  so the toast can name it. */
+  remove: (id: string) =>
+    api.delete<ArtifactTemplateDeleteResult>(
+      `/v1/artifact-templates/${encodeURIComponent(id)}`,
+    ),
+}
+
 // ---- company documents (onboarding strategy step — scene onbstrat) ----------
 //
 // The strategy/context files a PM uploads on the FINAL onboarding step: a typed
@@ -1741,10 +2063,11 @@ export type ConnectionSummary = {
     // An entry may be a FOLDER: only Drive metadata says which, so the shape is
     // identical either way.
     files?: GoogleDrivePickedFile[]
-    // Written by the sync: folder id -> the files that folder expanded to on
-    // the last run. Present (possibly empty) for every picked entry that turned
-    // out to be a folder, which is also how the UI knows an entry IS one.
-    folder_contents?: Record<string, GoogleDrivePickedFile[]>
+    // Written by the sync: folder id -> the SUBTREE (sub-folders and files,
+    // each parented by parentId) that folder expanded to on the last run.
+    // Present (possibly empty) for every picked entry that turned out to be a
+    // folder, which is also how the UI knows an entry IS one.
+    folder_contents?: Record<string, GoogleDriveTreeNode[]>
     // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string
@@ -1836,6 +2159,25 @@ export type GoogleDriveSyncResult = {
 export type GoogleDrivePickedFile = {
   id: string
   name?: string
+}
+
+/** One node in a picked folder's stored subtree (see backend
+ *  `google_drive_sync.expand_folder`): a sub-folder or a file, parented to
+ *  the folder it was found in (`parentId` — the picked root's own id for a
+ *  direct child). Superset of GoogleDrivePickedFile, so legacy flat data (no
+ *  `mimeType`/`parentId`) still satisfies this shape. */
+export type GoogleDriveTreeNode = GoogleDrivePickedFile & {
+  mimeType?: string | null
+  parentId?: string | null
+}
+
+/** Service-account mode state for the Drive connector: the per-company SA email
+ *  the customer shares folders with, the enumerated top-level shared roots, and
+ *  the walked subtree keyed by folder id (same shape as OAuth folder_contents). */
+export type GoogleDriveServiceAccountState = {
+  service_account_email?: string | null
+  shared_roots?: GoogleDriveTreeNode[]
+  folder_contents?: Record<string, GoogleDriveTreeNode[]>
 }
 
 /** Short-lived, drive.file-scoped access token for the browser Google Picker. */
@@ -1937,6 +2279,15 @@ export const connectorsApi = {
     api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
     }),
+  /** Which Drive access route is active ("oauth" | "service_account"). */
+  getGoogleDriveMode: () =>
+    api.get<{ mode: string; service_account_configured: boolean }>(`/v1/connectors/google-drive/mode`),
+  /** SA mode: provision (idempotent) this company's service account; returns its email + any scanned tree. */
+  provisionGoogleDriveServiceAccount: (dataset?: string) =>
+    api.get<GoogleDriveServiceAccountState>(`/v1/connectors/google-drive/service-account${dataset ? `?dataset=${encodeURIComponent(dataset)}` : ""}`),
+  /** SA mode: enumerate + walk + ingest everything shared with the SA. */
+  scanGoogleDriveServiceAccount: (dataset?: string) =>
+    api.post<GoogleDriveSyncResult & GoogleDriveServiceAccountState>(`/v1/connectors/google-drive/service-account/scan`, { dataset }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
     `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
@@ -3743,23 +4094,57 @@ export const teamApi = {
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
-// ── Admin (owner/admin only): per-company Claude API key ──
-// When configured, ALL of the company's Claude LLM calls use THIS key instead
+// ── Admin (owner/admin only): LLM provider + per-company API keys ──
+// A workspace runs on Claude (Anthropic) or OpenAI. When a key is configured
+// for the ACTIVE provider, ALL of the company's LLM calls use THAT key instead
 // of the platform key. The full key is never returned — reads carry a masked
 // preview only.
+//
+// The two keys are independent of the provider switch: a workspace can hold
+// both and flip between them without re-entering either.
+
+/** The providers the backend can run on. Mirrors app/llm_providers.py. */
+export const LLM_PROVIDERS = ["anthropic", "openai"] as const
+export type LlmProvider = (typeof LLM_PROVIDERS)[number]
 
 export type LlmKeyStatus = { configured: boolean; masked: string | null }
 
+/** Which provider is live plus the key status of BOTH, in one request — so the
+ *  Admin pane can show "Claude key saved" on an inactive card without a second
+ *  round trip. */
+export type LlmConfig = {
+  provider: LlmProvider
+  providers: Record<LlmProvider, LlmKeyStatus>
+}
+
+/** `?provider=` on every key route. Omitted for Anthropic so the requests the
+ *  onboarding step and older clients send stay byte-identical. */
+function providerQuery(provider: LlmProvider): string {
+  return provider === "anthropic" ? "" : `?provider=${encodeURIComponent(provider)}`
+}
+
 export const adminApi = {
-  /** Current key status (masked preview, never the full key). */
-  getLlmKey: () => api.get<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Store / replace the company Claude key. */
-  setLlmKey: (apiKey: string) =>
-    api.put<LlmKeyStatus>("/v1/admin/llm-key", { api_key: apiKey }),
-  /** Remove the key (revert to the platform key). */
-  deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
-  /** Explicit, opt-in live validation of the stored key (one cheap call). */
-  testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
+  /** Active provider + both key statuses. */
+  getLlmConfig: () => api.get<LlmConfig>("/v1/admin/llm-config"),
+  /** Switch which provider this workspace's LLM calls run on. Allowed with no
+   *  key stored for the target — it then runs on Sprntly's key for that
+   *  provider, the same posture a keyless Claude workspace has always had. */
+  setLlmProvider: (provider: LlmProvider) =>
+    api.put<LlmConfig>("/v1/admin/llm-config", { provider }),
+  /** Current key status for one provider (masked preview, never the full key). */
+  getLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.get<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Store / replace the company key for one provider. */
+  setLlmKey: (apiKey: string, provider: LlmProvider = "anthropic") =>
+    api.put<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`, {
+      api_key: apiKey,
+    }),
+  /** Remove the key (revert to the platform key). Does not change the provider. */
+  deleteLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.delete<LlmKeyStatus>(`/v1/admin/llm-key${providerQuery(provider)}`),
+  /** Explicit, opt-in live validation of the stored key. */
+  testLlmKey: (provider: LlmProvider = "anthropic") =>
+    api.post<{ ok: true }>(`/v1/admin/llm-key/test${providerQuery(provider)}`),
 }
 
 // ── Usage (owner/admin only): LLM spend + token usage for this workspace ──
@@ -3782,10 +4167,15 @@ export type UsageBucket = {
 export type UsageSummary = {
   range: { start: string; end: string; days: number; tz: string }
   cost_basis: string
-  /** Always "customer_key": only calls billed to the company's OWN Anthropic
-   *  key are counted. Usage on Sprntly's platform key is spend we absorb and is
+  /** Always "customer_key": only calls billed to the company's OWN provider key
+   *  are counted. Usage on Sprntly's platform key is spend we absorb and is
    *  deliberately excluded — it is not the customer's to see or pay. */
   scope: string
+  /** Which provider this payload covers, echoed back by the server; null when
+   *  the request was un-scoped and the figures span every provider. Read this
+   *  rather than the requested value — a chart must be captioned with the scope
+   *  it was actually served. */
+  provider: LlmProvider | null
   totals: UsageBucket
   /** One entry per calendar day in the range — empty days included. */
   daily: (UsageBucket & { day: string })[]
@@ -3804,15 +4194,38 @@ function localTimeZone(): string {
   }
 }
 
+/** `&provider=…` when scoping to one provider, empty when spanning all of them.
+ *  Omitting the param is what asks the server for every provider, so an absent
+ *  value must not be sent as the empty string. */
+function usageProviderQuery(provider?: LlmProvider | null): string {
+  return provider ? `&provider=${encodeURIComponent(provider)}` : ""
+}
+
 export const usageApi = {
-  summary: (days: number, tz: string = localTimeZone()) =>
+  /** `provider` scopes every figure in the response — totals, daily series and
+   *  all breakdowns — to that provider alone. The Admin pane always passes the
+   *  one it is running on: Claude and OpenAI bill separately, so a blended
+   *  number reconciles against neither invoice. */
+  summary: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<UsageSummary>(
-      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
   /** The same rollup as CSV text (the request helper returns non-JSON as-is). */
-  exportCsv: (days: number, tz: string = localTimeZone()) =>
+  exportCsv: (
+    days: number,
+    provider?: LlmProvider | null,
+    tz: string = localTimeZone(),
+  ) =>
     api.get<string>(
-      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(tz)}`,
+      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(
+        tz,
+      )}${usageProviderQuery(provider)}`,
     ),
 }
 

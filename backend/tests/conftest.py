@@ -180,7 +180,14 @@ CREATE TABLE prds (
     -- defaults this via gen_random_uuid(), which sqlite has no equivalent
     -- for — nullable here; tests that exercise resolve_prd_id_by_public_id
     -- stamp a real uuid4 explicitly via an UPDATE after seeding.
-    public_id        TEXT
+    public_id        TEXT,
+    -- Which uploaded FORMAT produced this PRD (mirrors
+    -- 20260806160000_prds_artifact_template.sql). NULL = Sprntly's built-in
+    -- format, which is every pre-existing row and every PRD from a company that
+    -- never uploads one. Deliberately NOT a foreign key in either engine: a
+    -- format is deletable, and an FK would either erase this PRD's provenance
+    -- when the library is tidied or make the format undeletable.
+    artifact_template_id TEXT
 );
 
 CREATE TABLE evidences (
@@ -419,6 +426,13 @@ CREATE TABLE companies (
     -- Fernet-encrypted per-company Claude key (mirrors
     -- 20260711120000_company_llm_api_key.sql). Read by app.llm_keys.
     llm_api_key_encrypted TEXT,
+    -- The OpenAI counterpart, plus which of the two the company actually runs
+    -- on (mirrors 20260807120000_company_openai_key_and_provider.sql). Both
+    -- keys may be set at once; llm_provider decides which is live. Defaults to
+    -- 'anthropic' so an untouched row behaves exactly as it did before OpenAI
+    -- was an option.
+    openai_api_key_encrypted TEXT,
+    llm_provider        TEXT NOT NULL DEFAULT 'anthropic',
     -- Platform-key fallback flag + onboarding-completion marker. Read by
     -- app.llm_keys to decide whether a keyless company may use the platform key
     -- (mirrors 20260712120000_company_use_platform_key.sql +
@@ -517,6 +531,11 @@ CREATE TABLE connections (
     account_label        TEXT,
     scopes               TEXT NOT NULL DEFAULT '',
     token_json_encrypted TEXT NOT NULL,
+    -- Service-account private key (Fernet-encrypted), separate from the OAuth
+    -- user token above so both coexist on one connection. Mirrors migration
+    -- 20260807130000_connections_sa_key.sql. Never in the client-facing
+    -- serializer's allowlist.
+    sa_key_encrypted     TEXT,
     config               TEXT NOT NULL DEFAULT '{}',
     last_sync_at         TEXT,
     last_sync_error      TEXT,
@@ -1212,9 +1231,79 @@ CREATE TABLE custom_skills (
     uploader_id   TEXT NOT NULL,
     uploader_name TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which synced folder produced this skill (20260807170000_skill_sources.sql).
+    -- NULL for every hand-uploaded skill; non-NULL makes the skill read-only in
+    -- the UI and at the PATCH route, because the repo owns its text.
+    source_id     TEXT,
     UNIQUE (company_id, slug)
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+CREATE INDEX custom_skills_source_id_idx ON custom_skills (source_id);
+
+-- Synced skill folders (mirrors 20260807170000_skill_sources.sql, SQLite-ized).
+-- One row per (company, repo, ref, path) folder a company keeps synced: the
+-- 30-minute sweep re-runs GitHub discovery over it and re-imports every .md it
+-- finds. `ref` empty means the repo's default branch, `path` empty the repo
+-- root. `last_commit_sha` is the sweep's short-circuit — unchanged head means
+-- no work. No company/workspace FKs, matching custom_skills above.
+CREATE TABLE skill_sources (
+    id              TEXT PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    installation_id INTEGER NOT NULL,
+    repo            TEXT NOT NULL,
+    ref             TEXT NOT NULL DEFAULT '',
+    path            TEXT NOT NULL DEFAULT '',
+    last_commit_sha TEXT NOT NULL DEFAULT '',
+    last_synced_at  TEXT,
+    last_error      TEXT NOT NULL DEFAULT '',
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, repo, ref, path)
+);
+CREATE INDEX skill_sources_company_id_idx ON skill_sources (company_id);
+
+-- Artifact format templates (mirrors 20260805120000_artifact_templates.sql,
+-- SQLite-ized). COMPANY-scoped uploaded PRD / ticket / engineering-spec FORMS
+-- (all workspaces in a company share one library and one active format per
+-- type; workspace_id records the uploading workspace only and is never a query
+-- filter). section_map / compile_notes are JSON-encoded TEXT, matching the real
+-- column type. No company/workspace FKs, matching the workspaces-table note:
+-- route tests fabricate tenant ids that have no parent rows.
+--
+-- `is_active INTEGER` + the PARTIAL unique index below are the load-bearing
+-- part of this mirror: they are what makes activate_template's
+-- deactivate-siblings-then-activate order testable, because the other order
+-- trips the constraint here exactly as it does in Postgres.
+CREATE TABLE artifact_templates (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL,
+    workspace_id   TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL
+                     CHECK (artifact_type IN ('prd', 'tickets', 'impl_spec')),
+    name           TEXT NOT NULL,
+    source_md      TEXT NOT NULL,
+    source_chars   INTEGER NOT NULL DEFAULT 0,
+    compiled       TEXT NOT NULL DEFAULT '',
+    section_map    TEXT NOT NULL DEFAULT '{}',
+    compile_status TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (compile_status IN
+                            ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
+    compile_notes  TEXT NOT NULL DEFAULT '[]',
+    content_hash   TEXT NOT NULL DEFAULT '',
+    is_active      INTEGER NOT NULL DEFAULT 0,
+    uploader_id    TEXT NOT NULL,
+    uploader_name  TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX artifact_templates_company_id_idx ON artifact_templates (company_id);
+CREATE INDEX artifact_templates_company_type_idx
+    ON artifact_templates (company_id, artifact_type);
+CREATE UNIQUE INDEX artifact_templates_active_uniq
+    ON artifact_templates (company_id, artifact_type) WHERE is_active = 1;
 
 -- Captured HTML report documents (mirrors 20260730120000_reports.sql,
 -- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
@@ -1540,6 +1629,86 @@ def _no_background_connector_sync(request, monkeypatch):
         monkeypatch.setattr(scheduler_mod, "kickoff_sync", _noop_sync, raising=False)
     except Exception:
         pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_template_compile(request, monkeypatch):
+    """Keep POST/PATCH /v1/artifact-templates from starting a real format check.
+
+    `schedule_compile` (app.artifact_templates.compile_prd) claims the row and
+    runs the compile on a background thread — and that compile goes through
+    `graph.gateway.llm_call`, which holds its OWN `call_json` reference bound at
+    import time. The `fake_llm` fixture patches `app.llm.call_json`, which does
+    NOT reach the gateway's binding, so an unguarded upload in any route test
+    would fire a REAL Anthropic request from a daemon thread, against the
+    mid-reset in-memory DB — the same pair of hazards
+    `_no_background_connector_sync` above exists for.
+
+    Returning False (not True) is what keeps the route's contract intact under
+    the patch: `_with_compile_started` reads False as "a check is already in
+    flight", leaves the row alone, and the response still describes the row the
+    write produced.
+
+    Opt out with `@pytest.mark.real_template_compile` — the compile suite does,
+    and drives the gateway with its own stub."""
+    if request.node.get_closest_marker("real_template_compile"):
+        yield
+        return
+    import importlib
+
+    def _noop_schedule(company_id, template_id):  # noqa: ARG001
+        return False
+
+    # Patched on BOTH modules: routes/artifact_templates.py does
+    # `from ...compile_prd import schedule_compile`, so its binding is fixed at
+    # import and patching only the source module cannot reach it.
+    for mod_name in ("app.artifact_templates.compile_prd",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_compile"):
+            monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
+                                raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_referent_adjudication(request, monkeypatch):
+    """Keep document RESOLUTION from firing a real model call.
+
+    `document_referent.adjudicate` runs on the ask path whenever a question
+    carries a document cue and a candidate clears the content-term floor — and
+    it goes through `graph.gateway.llm_call`, which holds its own `call_json`
+    reference bound at import time and so is NOT reached by `fake_llm`
+    (see `_no_background_template_compile` above for the same hazard).
+    Several existing ask tests ask cue-bearing questions in passing; without
+    this guard each of them would attempt a real Anthropic request and sit on
+    a network timeout before failing open.
+
+    Returning None is the resolver's own no-referent answer, so a guarded test
+    sees exactly the grounding it saw before resolution existed — the guard
+    cannot mask a resolution bug by inventing a resolution.
+
+    Opt out with `@pytest.mark.real_referent_adjudication`;
+    `test_document_referent.py`'s own suite stubs `adjudicate` with a
+    controllable fake instead, which overrides this for the tests that need to
+    steer the verdict."""
+    if request.node.get_closest_marker("real_referent_adjudication"):
+        yield
+        return
+    import importlib
+
+    try:
+        mod = importlib.import_module("app.document_referent")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        mod, "adjudicate", lambda **kw: None, raising=False
+    )
     yield
 
 

@@ -5,17 +5,29 @@ import {
   ApiError,
   apiErrorMessage,
   usageApi,
+  type LlmProvider,
   type UsageBucket,
   type UsageSummary,
 } from "../../../../lib/api"
 import { SettingsSection, SettingsMessage } from "./SettingsLayout"
 
 /**
- * Usage — LLM spend and token usage for this workspace.
+ * Usage — LLM spend and token usage for this workspace, for ONE provider.
  *
- * Rendered inside the Admin pane, directly beneath the Claude API key it
+ * Rendered inside the Admin pane, directly beneath the provider + API key it
  * reports on (see AdminSettings): the key and what ran on it are one question,
  * so they share a screen rather than a nav entry each.
+ *
+ * Scoped to the ACTIVE provider, and it follows the cards above: picking Claude
+ * or OpenAI switches this dashboard with it, so the two never blend. They are
+ * separate accounts with separate invoices — a combined figure reconciles
+ * against neither, and captioning one provider's chart with the other's numbers
+ * is the specific failure this scoping exists to prevent. The provider is
+ * therefore in the section TITLE, not a footnote: it is the first thing read.
+ *
+ * The consequence, accepted deliberately: there is no way to read OpenAI's
+ * numbers while running on Claude. Seeing the other provider's history means
+ * switching to it above, which also switches what the workspace runs on.
  *
  * Restricted to owners/admins (the backend returns 403; AdminSettings skips
  * this component entirely when it already knows the caller is restricted, so
@@ -24,7 +36,7 @@ import { SettingsSection, SettingsMessage } from "./SettingsLayout"
  * Every money figure is ESTIMATED. The provider APIs return token counts, never
  * dollars, so the backend prices tokens against the published rate card. The UI
  * says so in three places (hero caption, section hint, footnote) because the
- * single worst outcome here is someone reconciling this against an Anthropic
+ * single worst outcome here is someone reconciling this against a provider
  * invoice and concluding one of them is broken.
  *
  * Charts are inline SVG rather than a charting dependency — two forms, one
@@ -45,7 +57,12 @@ const RANGES = [
 
 /** Which breakdown the chart area is showing. The two tab groups are
  *  independent: the range filters the data, the view reshapes it, so any
- *  combination is valid and switching one never resets the other. */
+ *  combination is valid and switching one never resets the other.
+ *
+ *  There is deliberately no "by provider" view: every figure on the panel is
+ *  already one provider's, so that breakdown could only ever draw a single bar
+ *  equal to the total beside it. Reading the other provider means selecting it
+ *  above. */
 export type UsageView = "daily" | "feature" | "model"
 
 const VIEWS: { id: UsageView; label: string; heading: string }[] = [
@@ -53,6 +70,27 @@ const VIEWS: { id: UsageView; label: string; heading: string }[] = [
   { id: "feature", label: "By feature", heading: "Estimated spend by feature" },
   { id: "model", label: "By model", heading: "Estimated spend by model" },
 ]
+
+/** Product-facing provider names. The UI says "Claude", not "Anthropic" — the
+ *  same wording the provider chooser above uses. */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Claude",
+  openai: "OpenAI",
+}
+
+export function providerLabel(slug: string): string {
+  return PROVIDER_LABELS[slug] ?? slug.replace(/^\w/, (c) => c.toUpperCase())
+}
+
+/** The provider a reader would have to switch to in order to see the rest of
+ *  their spend. Drives the hint on an empty panel: landing on "$0" with no idea
+ *  where the money you know you spent actually went is the worst outcome of
+ *  scoping, and one sentence removes it. Null once there is nothing else to
+ *  point at, so this stays correct if a third provider is ever added. */
+export function otherProviderLabel(provider: string): string | null {
+  const others = Object.keys(PROVIDER_LABELS).filter((p) => p !== provider)
+  return others.length === 1 ? providerLabel(others[0]) : null
+}
 
 const EMPTY_BUCKET: UsageBucket = {
   calls: 0,
@@ -296,10 +334,14 @@ export type UsageSettingsViewProps = {
   data: UsageSummary | null
   days: number
   view: UsageView
-  /** Whether this workspace has its own Anthropic key saved. Drives the empty
-   *  state: with no key there is nothing to bill and nothing to show, and the
-   *  reader needs telling why rather than being left with a blank chart. */
+  /** Whether this workspace has its own key saved for the ACTIVE provider.
+   *  Drives the empty state: with no key there is nothing to bill and nothing
+   *  to show, and the reader needs telling why rather than being left with a
+   *  blank chart. */
   keyConfigured: boolean
+  /** The active provider, so the empty state and the footnote name the console
+   *  the reader should actually go and check. */
+  provider: LlmProvider
   restricted: boolean
   loading: boolean
   error: string | null
@@ -312,6 +354,7 @@ export function UsageSettingsView({
   days,
   view,
   keyConfigured,
+  provider,
   restricted,
   loading,
   error,
@@ -353,11 +396,21 @@ export function UsageSettingsView({
     value: Number(m.est_cost_usd) || 0,
   }))
 
+  const breakdownRows: Record<Exclude<UsageView, "daily">, BreakdownRow[]> = {
+    feature: featureRows,
+    model: modelRows,
+  }
+
+  const providerName = providerLabel(provider)
+  const otherName = otherProviderLabel(provider)
+
   return (
     <>
       <SettingsSection
-        title="Usage"
-        sub="What Sprntly has run on your own Anthropic key — the calls billed to your account. Costs are estimated from token counts, not billed amounts."
+        title={`${providerName} usage`}
+        sub={`What Sprntly has run on your own ${providerName} key, and what it cost. Choosing a provider above switches this dashboard with it — ${providerName} and ${
+          otherName ?? "the other provider"
+        } bill separately, so their spend is never combined. Costs are estimated from token counts, not billed amounts.`}
       >
         {/* Two independent filter groups on one row: WHEN on the left, WHAT on
             the right. Both use the same pill control so it reads as one bar. */}
@@ -394,17 +447,29 @@ export function UsageSettingsView({
 
         {loading && !data ? (
           <p className="settings-placeholder">Loading usage…</p>
+        ) : error && !data ? (
+          // The error banner above already says what went wrong. Falling
+          // through to the empty state would add "no usage in this period"
+          // underneath it — a claim about data we failed to load.
+          null
         ) : !keyConfigured ? (
           <p className="settings-placeholder">
-            No API key saved, so everything currently runs on Sprntly's key at
-            our cost — there is nothing billed to you to show. Add your own
-            Anthropic key above and usage on it will appear here.
+            No API key saved, so everything currently runs on Sprntly&apos;s key
+            at our cost — there is nothing billed to you to show. Add your own{" "}
+            {providerName} key above and usage on it will appear here.
           </p>
         ) : !hasUsage ? (
           <p className="settings-placeholder">
-            No usage on your key in this period. Tracking starts the moment a
-            key is saved — anything Sprntly ran before that was on our key and
-            is not counted here.
+            No {providerName} usage on your key in this period. Tracking starts
+            the moment a key is saved — anything Sprntly ran before that was on
+            our key and is not counted here.
+            {otherName && (
+              <>
+                {" "}
+                Spend on {otherName} is counted separately: select it above to
+                see it.
+              </>
+            )}
           </p>
         ) : (
           <>
@@ -414,7 +479,7 @@ export function UsageSettingsView({
                   {formatUsd(totals.est_cost_usd)}
                 </div>
                 <div className="usage-hero-label">
-                  Estimated spend on your key · last {days} days
+                  Estimated spend on your {providerName} key · last {days} days
                 </div>
               </div>
               <div className="usage-stats">
@@ -453,15 +518,13 @@ export function UsageSettingsView({
                 onHover={setHovered}
               />
             ) : (
-              <BreakdownBars
-                rows={view === "feature" ? featureRows : modelRows}
-              />
+              <BreakdownBars rows={breakdownRows[view]} />
             )}
 
             <p className="usage-foot">
-              Costs are estimated by pricing token counts against Anthropic's
-              published rates — the API returns token counts, not charges. Use
-              your Anthropic console for billed amounts.
+              Costs are estimated by pricing token counts against the
+              provider&apos;s published rates — the API returns token counts,
+              not charges. Use your {providerName} console for billed amounts.
             </p>
           </>
         )}
@@ -472,12 +535,27 @@ export function UsageSettingsView({
 
 export function UsageSettings({
   keyConfigured,
+  provider,
 }: {
-  /** Passed down from AdminSettings, which has already fetched the key status —
+  /** Passed down from AdminSettings, which has already fetched the config —
    *  avoids a second request for something the parent pane already knows. */
   keyConfigured: boolean
+  provider: LlmProvider
 }) {
-  const [data, setData] = useState<UsageSummary | null>(null)
+  // The payload is held together with the provider it was fetched FOR. A
+  // provider switch re-fetches, and until the new payload lands the old one is
+  // still in state — rendering it would put Claude's numbers under an "OpenAI
+  // usage" heading for as long as the request takes. Pairing them makes that
+  // unrepresentable: the view is handed data only when the two agree.
+  //
+  // The pair is the source of truth rather than the server's echoed `provider`
+  // because it is also correct against a backend that predates the filter and
+  // ignores the param — that one returns blended figures with no echo, and
+  // captioning THOSE with a provider name is the same lie.
+  const [loaded, setLoaded] = useState<{
+    provider: LlmProvider
+    summary: UsageSummary
+  } | null>(null)
   const [days, setDays] = useState(30)
   // The view is pure presentation — every breakdown ships in the same payload,
   // so switching tabs reshapes what's already loaded and never refetches.
@@ -491,9 +569,9 @@ export function UsageSettings({
     setLoading(true)
     ;(async () => {
       try {
-        const s = await usageApi.summary(days)
+        const s = await usageApi.summary(days, provider)
         if (!cancelled) {
-          setData(s)
+          setLoaded({ provider, summary: s })
           setError(null)
         }
       } catch (e) {
@@ -514,14 +592,15 @@ export function UsageSettings({
     return () => {
       cancelled = true
     }
-  }, [days])
+  }, [days, provider])
 
   return (
     <UsageSettingsView
-      data={data}
+      data={loaded?.provider === provider ? loaded.summary : null}
       days={days}
       view={view}
       keyConfigured={keyConfigured}
+      provider={provider}
       restricted={restricted}
       loading={loading}
       error={error}

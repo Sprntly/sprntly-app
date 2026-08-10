@@ -9,7 +9,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
-    openai_api_key: str = ""  # embeddings (text-embedding-3-small)
+    # Two jobs, one key. Embeddings (text-embedding-3-small) have always run on
+    # it, and it is now ALSO the platform fallback for companies whose
+    # llm_provider is 'openai' but which have not supplied a key of their own —
+    # the mirror of what anthropic_api_key does for Claude workspaces.
+    openai_api_key: str = ""
+    # Override for an OpenAI-compatible gateway (Azure OpenAI, a proxy, a
+    # self-hosted relay). Unset means api.openai.com. Applies only to the chat
+    # client in app/openai_client.py; embeddings keep their own hardcoded URL.
+    openai_base_url: str = ""
     # Design Agent uses a dedicated key for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
@@ -61,6 +69,21 @@ class Settings(BaseSettings):
     ticket_gen_fanout: bool = True
     ticket_gen_batch_size: int = 4
     ticket_gen_max_parallel: int = 4
+    # Fast first batch: the leading enrich batch is carved down to this many
+    # stubs so the FIRST tickets reach the UI in roughly half a full batch's
+    # time (a batch's latency is dominated by its output tokens) and the
+    # Tickets tab visibly streams batch-by-batch instead of everything landing
+    # at once. 0 disables (uniform batches). Env: TICKET_GEN_FIRST_BATCH_SIZE.
+    ticket_gen_first_batch_size: int = 2
+    # Prime-then-fanout: sibling batches launch this many seconds after the
+    # first (or as soon as it finishes, whichever comes first), so the first
+    # batch's prompt-cache WRITE of the shared PRD prefix lands before the
+    # siblings prefill — measured live (2026-07-20): simultaneous shards all
+    # miss the cache and each re-pays the full ~15K-token PRD prefill. The
+    # stagger costs nothing end-to-end (siblings are larger and finish last
+    # anyway) and staggers batch completions for progressive rendering.
+    # 0 disables. Env: TICKET_GEN_PRIME_STAGGER_SECONDS.
+    ticket_gen_prime_stagger_seconds: float = 12.0
     # Tier 1 — process-wide cap on how many Design Agent generations may run
     # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
     # Default 1: on the 2-vCPU prod box, one generation already pins both cores
@@ -169,6 +192,23 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Drive access mode TOGGLE. "oauth" (DEFAULT) = the existing per-user OAuth
+    # Picker route (drive.file), unchanged. "service_account" = mint a
+    # per-company service account, the customer shares a folder with its email
+    # out-of-band, and Sprntly enumerates + ingests what the SA can see.
+    # "oauth_folder" = the per-user OAuth Picker with folder selection enabled,
+    # which requires requesting the RESTRICTED drive.readonly scope instead of
+    # drive.file — Google gates that scope behind CASA Tier 2 app verification,
+    # so this value stays dormant (not set anywhere) until that approval lands.
+    # The Drive connector branches on this one value.
+    google_drive_access_mode: str = "oauth"
+    # Bootstrap credential for service_account mode: a GCP project with the IAM
+    # API enabled and a bootstrap SA holding iam.serviceAccountAdmin +
+    # iam.serviceAccountKeyAdmin. Used ONLY to mint per-company SAs. Unset →
+    # service_account mode reports "not configured" rather than half-working.
+    gcp_sa_bootstrap_project: str = ""
+    # Path to the bootstrap SA key JSON on disk, OR the inline JSON itself.
+    gcp_sa_bootstrap_key_json: str = ""
     # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
     #
     # Sharing was the original design (one Cloud project, one client, a second
@@ -362,6 +402,45 @@ class Settings(BaseSettings):
     # Setting it false disables the sweep for EVERY company regardless of flags.
     chat_cross_connector_sweep: bool = True
 
+    # Per-provider rollout switches for the sweep legs added in #1113
+    # (app/connector_lookup/asana.py, .../google_meet.py). DEFAULT OFF, which is
+    # the whole point of them.
+    #
+    # WHY THESE EXIST when the sweep already has a kill switch above: a sweep
+    # leg is not only a read. `connector_lookup/sweep_persist.py` writes what a
+    # leg read into the tenant's KNOWLEDGE GRAPH, and merging to main deploys to
+    # staging, and STAGING WRITES LAND ON THE PROD SUPABASE. So merging these
+    # two brand-new adapters unflagged would start writing prod tenants' graphs
+    # from code that has never run against real data — an irreversible data
+    # action taken as a side effect of a merge.
+    #
+    # A bad graph write is worse than a bad migration, and our safety apparatus
+    # is pointed at the migration: that one gets a gate, a file, a version row
+    # and a repair path, and it fails loudly. This one happens at runtime, on
+    # the scheduler's terms, with no artifact recording what was written, and it
+    # fails silently and STAYS — a poisoned signal with a connected source_type
+    # counts toward `has_sufficient_evidence` and can surface in a customer's
+    # weekly brief as though it were something a real person said on a call.
+    #
+    # Global rather than per-company on purpose: this is a rollout switch for
+    # unproven code, not a product capability anyone opts into. Flip to true
+    # per provider once the leg has been watched against real data.
+    chat_sweep_asana: bool = False
+    chat_sweep_google_meet: bool = False
+
+    # Live read of the configured Slack customer-feedback channels
+    # (app/connector_lookup/slack_voc.py), which the voice-of-customer pass runs
+    # for every feedback-shaped question. Same operational-kill-switch shape and
+    # same reasoning as `chat_cross_connector_sweep` above: it adds a bounded,
+    # parallel round of I/O to a path that is already the slowest in chat, so it
+    # needs an off switch that is not a DB write per company.
+    #
+    # Checked inside `slack_voc.read` itself — the CHOKE POINT, not the call
+    # sites — so a future caller cannot bypass it. The sweep learned that the
+    # hard way (2026-08-05): it had two entry points and its flag only gated
+    # one, so "disabled" left half the feature running.
+    slack_voc_channels: bool = True
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
@@ -404,6 +483,14 @@ class Settings(BaseSettings):
     # tracker API rate limits ever bite.
     ticket_sync_enabled: bool = True
     ticket_sync_interval_minutes: int = 15
+    # Synced GitHub skill folders: how often the sweep re-reads each registered
+    # folder and imports the markdown it now holds (app/skills/github_sync.py).
+    # 30 min by default — a method someone just committed should be usable in
+    # the same sitting. An unchanged folder costs one GitHub request per tick,
+    # so this is safe to leave fine-grained; raise it via
+    # SKILL_SYNC_INTERVAL_MINUTES if an installation's REST budget ever bites
+    # (the Design Agent's codebase map spends from the same 5,000/hour pocket).
+    skill_sync_interval_minutes: int = 30
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
 
     # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────

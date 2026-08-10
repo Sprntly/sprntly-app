@@ -207,17 +207,25 @@ def _run_sync(company_id: str, provider: str) -> None:
 
 def _run_drive_sync(company_id: str) -> None:
     """Blocking Google Drive sync body — runs inside the daemon thread.
-    Fully isolated: sync_google_drive stamps its own per-file errors; genuine
-    failures raised before stamping are caught and stamped here best-effort.
+    Fully isolated: sync_google_drive/sync_service_account stamp their own
+    per-file errors; genuine failures raised before stamping are caught and
+    stamped here best-effort.
 
-    A connected-but-unconfigured row (no dataset, or nothing picked yet) is a
-    quiet no-op, NOT an error: pre-KG-ingest the scheduler never touched Drive
-    rows, and stamping "dataset is required" on them every cycle would surface
-    a scary Settings error for a state the user never acted on."""
+    Mode-aware, reading ``settings.google_drive_access_mode`` the same way
+    the connector routes do. In ``service_account`` mode the picked-file
+    gate does not apply — that mode has no Picker selection, so it is
+    unconfigured only when there is no dataset, or no service account has
+    been provisioned yet; a connected-but-unconfigured row is then a quiet
+    no-op, not an error, so a scheduler cycle never stamps a scary Settings
+    error for a state the user never acted on. ``oauth``/``oauth_folder``
+    keep the original gate (dataset AND at least one picked file/folder)
+    unchanged."""
     try:
         import json as _json
 
+        from app.config import settings
         from app.connectors.google_drive_sync import sync_google_drive
+        from app.connectors.google_service_account import sync_service_account
 
         row = db.get_connection(company_id, "google_drive")
         if not row:
@@ -226,14 +234,31 @@ def _run_drive_sync(company_id: str) -> None:
             config = _json.loads(row.get("config_json") or "{}")
         except (TypeError, ValueError):
             config = {}
-        if not (config.get("dataset") and config.get("files")):
-            logger.info(
-                "auto-sync: google_drive for %s has no dataset/picked files "
-                "yet — skipping", company_id,
-            )
-            return
 
-        result = sync_google_drive(company_id=company_id)
+        if settings.google_drive_access_mode == "service_account":
+            if not config.get("dataset"):
+                logger.info(
+                    "auto-sync: google_drive (service-account mode) for %s "
+                    "has no dataset yet — skipping", company_id,
+                )
+                return
+            if not row.get("sa_key_encrypted"):
+                logger.info(
+                    "auto-sync: google_drive (service-account mode) for %s "
+                    "has no service account provisioned yet — skipping",
+                    company_id,
+                )
+                return
+            result = sync_service_account(company_id)
+        else:
+            if not (config.get("dataset") and config.get("files")):
+                logger.info(
+                    "auto-sync: google_drive for %s has no dataset/picked "
+                    "files yet — skipping", company_id,
+                )
+                return
+            result = sync_google_drive(company_id=company_id)
+
         logger.info(
             "auto-sync done: %s/google_drive synced=%s kg_queued=%s",
             company_id, len(result.synced), len(result.kg_queued),

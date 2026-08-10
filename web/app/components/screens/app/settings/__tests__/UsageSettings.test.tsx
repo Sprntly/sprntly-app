@@ -40,6 +40,7 @@ function summary(over: Partial<UsageSummary> = {}): UsageSummary {
     },
     cost_basis: "estimated_from_tokens",
     scope: "customer_key",
+    provider: "anthropic",
     totals: bucket({
       calls: 120,
       failed_calls: 3,
@@ -59,7 +60,9 @@ function summary(over: Partial<UsageSummary> = {}): UsageSummary {
     by_model: [
       { ...bucket({ calls: 120, est_cost_usd: 8.25 }), model: "claude-sonnet-4-6" },
     ],
-    by_provider: [],
+    by_provider: [
+      { ...bucket({ calls: 120, est_cost_usd: 8.25 }), provider: "anthropic" },
+    ],
     by_operation: [],
     ...over,
   }
@@ -74,6 +77,7 @@ function render(
       days={30}
       view="daily"
       keyConfigured={true}
+      provider="anthropic"
       restricted={false}
       loading={false}
       error={null}
@@ -158,14 +162,34 @@ describe("UsageSettingsView", () => {
     const html = render()
     expect(html).toMatch(/estimated/i)
     expect(html).not.toMatch(/billed amount(?!s)/i)
-    // The footnote points at the authoritative source.
-    expect(html).toMatch(/Anthropic console/i)
+    // The footnote points at the authoritative source — the console of
+    // whichever provider the workspace is actually running on.
+    expect(html).toMatch(/Claude console/i)
+    expect(render({ provider: "openai" })).toMatch(/OpenAI console/i)
   })
 
-  it("frames the total as spend on the customer's OWN key", () => {
+  it("frames the total as spend on the customer's OWN key, for one provider", () => {
     const html = render()
-    expect(html).toMatch(/Estimated spend on your key/i)
-    expect(html).toMatch(/billed to your account/i)
+    expect(html).toMatch(/Estimated spend on your Claude key/i)
+    expect(render({ provider: "openai" })).toMatch(
+      /Estimated spend on your OpenAI key/i,
+    )
+  })
+
+  it("names the provider in the section title, not just in the small print", () => {
+    // The whole panel is one provider's figures. If that is only discoverable
+    // in a footnote, the headline number reads as total spend — which is the
+    // one thing it is not.
+    expect(render()).toMatch(/Claude usage/)
+    expect(render({ provider: "openai" })).toMatch(/OpenAI usage/)
+  })
+
+  it("says that choosing a provider above switches this dashboard", () => {
+    // The panel follows the provider cards, and a reader has to know that
+    // before they read a number off it.
+    const html = render()
+    expect(html).toMatch(/Choosing a provider above switches this dashboard/i)
+    expect(html).toMatch(/bill separately/i)
   })
 
   it("explains that nothing is billed when no key is saved", () => {
@@ -185,12 +209,25 @@ describe("UsageSettingsView", () => {
       keyConfigured: true,
       data: summary({ totals: bucket() }),
     })
-    expect(html).toMatch(/No usage on your key in this period/i)
+    expect(html).toMatch(/No Claude usage on your key in this period/i)
     // Sets the expectation that pre-key activity is deliberately not counted.
     expect(html).toMatch(/was on our key/i)
   })
 
-  it("offers both breakdown views alongside the date range", () => {
+  it("points an empty panel at where the rest of the spend is", () => {
+    // Scoping's worst outcome is landing on "$0" while knowing money was spent.
+    // One sentence says the other provider's spend exists and how to reach it.
+    const html = render({
+      provider: "openai",
+      keyConfigured: true,
+      data: summary({ provider: "openai", totals: bucket() }),
+    })
+    expect(html).toMatch(/No OpenAI usage on your key in this period/i)
+    expect(html).toMatch(/Spend on Claude is counted separately/i)
+    expect(html).toMatch(/select it above/i)
+  })
+
+  it("offers every breakdown view alongside the date range", () => {
     const html = render()
     // Two independent pill groups on one toolbar.
     expect(html).toMatch(/aria-label="Date range"/)
@@ -198,6 +235,14 @@ describe("UsageSettingsView", () => {
     expect(html).toMatch(/>Daily</)
     expect(html).toMatch(/>By feature</)
     expect(html).toMatch(/>By model</)
+  })
+
+  it("drops the by-provider breakdown, which is now always a single bar", () => {
+    // Every figure on the panel is already one provider's, so this view could
+    // only draw one bar equal to the total beside it.
+    const html = render()
+    expect(html).not.toMatch(/>By provider</)
+    expect(html).not.toMatch(/Estimated spend by provider/)
   })
 
   it("shows the daily chart by default, not a breakdown", () => {
@@ -225,6 +270,33 @@ describe("UsageSettingsView", () => {
     expect(html).toMatch(/claude-sonnet-4-6/)
     expect(html).toMatch(/120 calls/)
     expect(html).not.toMatch(/usage-chart-svg/)
+  })
+
+  it("renders an OpenAI payload wholly as OpenAI's, with no Claude bleed", () => {
+    // The server does the scoping; this asserts the panel presents what it was
+    // served as that provider's — heading, total and models all agreeing.
+    const html = render({
+      provider: "openai",
+      view: "model",
+      data: summary({
+        provider: "openai",
+        totals: bucket({ calls: 90, est_cost_usd: 6.0 }),
+        by_model: [
+          { ...bucket({ calls: 60, est_cost_usd: 5.5 }), model: "gpt-5.6-terra" },
+          { ...bucket({ calls: 30, est_cost_usd: 0.5 }), model: "gpt-5.6-luna" },
+        ],
+      }),
+    })
+    expect(html).toMatch(/OpenAI usage/)
+    expect(html).toMatch(/\$6\.00/)
+    expect(html).toMatch(/gpt-5\.6-terra/)
+    expect(html).not.toMatch(/claude-sonnet-4-6/)
+  })
+
+  it("tells an OpenAI workspace which key to add", () => {
+    const html = render({ keyConfigured: false, provider: "openai" })
+    expect(html).toMatch(/No API key saved/i)
+    expect(html).toMatch(/your own OpenAI key/i)
   })
 
   it("marks the active view and leaves the range untouched", () => {

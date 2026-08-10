@@ -668,6 +668,10 @@ describe("UploadSkillModal", () => {
         ref: "trunk",
         path: "",
         paths: ["skills/sprint-planner"],
+        // No folder named, so syncing is off and never offered: a whole
+        // repository's markdown is not a skill library, and the server refuses
+        // a synced root anyway.
+        sync: false,
       })
     })
 

@@ -79,6 +79,8 @@ import json
 import logging
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -164,6 +166,62 @@ MAX_PARTICIPANT_PAGE_SIZE = 250  # participants.list: default 100, max 250
 # bounded-attempts + honour-Retry-After shape as zoom_oauth.api_get.
 _MAX_ATTEMPTS = 3
 _MAX_BACKOFF_S = 30
+
+
+# ── Optional read deadline (for callers that must be abandonable) ────────────
+#
+# Nothing here changes for the puller or the probe: the default is None and the
+# behaviour with it is byte-for-byte what it was. This exists for ONE caller —
+# `connector_lookup/google_meet.py`'s keyword scan, which runs inside the chat
+# sweep's shared wall-clock budget and is abandoned, not waited on, when that
+# budget expires.
+#
+# WHY A CAP ON THE REQUEST ALONE WOULD NOT DO IT. `api_get` retries a 429 (and
+# a rate-limit-flavoured 403) up to `_MAX_ATTEMPTS`, honouring `Retry-After` up
+# to `_MAX_BACKOFF_S`. So one call can legitimately occupy 3 × `_TIMEOUT` of
+# HTTP plus 2 × 30s of SLEEP — around two minutes — and an abandoned sweep leg
+# would hold a worker thread for all of it, hammering a customer's quota with
+# nobody left to read the answer. A scan that checks the clock BETWEEN requests
+# cannot see inside that.
+#
+# A ContextVar rather than a parameter because the deadline has to reach
+# `api_get` through four `list_*` helpers and two puller functions that the
+# scan reuses deliberately (so live chat and the 6-hourly sync never disagree
+# about which transcript is "the" transcript). Threading a keyword through all
+# six would change every one of their signatures for one caller. A ContextVar
+# is per-thread — the sweep's leg runs on its own worker thread — so one
+# company's bounded scan cannot shorten another caller's reads.
+_read_deadline: ContextVar[float | None] = ContextVar(
+    "google_meet_read_deadline", default=None
+)
+
+
+class MeetDeadlineExceeded(RuntimeError):
+    """A bounded read gave up because its caller's deadline passed. Distinct
+    from an auth or transport failure: nothing is wrong with the connector, we
+    simply stopped. Callers report it as "not covered", never as "not there"."""
+
+
+@contextmanager
+def read_deadline(deadline: float | None):
+    """Bound every Meet read on THIS thread to `deadline` (a
+    `time.monotonic()` value). `None` restores the unbounded default."""
+    token = _read_deadline.set(deadline)
+    try:
+        yield
+    finally:
+        _read_deadline.reset(token)
+
+
+def _remaining_or_raise(what: str) -> float:
+    """Seconds of budget left for one request, or `_TIMEOUT` when unbounded."""
+    deadline = _read_deadline.get()
+    if deadline is None:
+        return float(_TIMEOUT)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MeetDeadlineExceeded(f"Google Meet {what}: read deadline passed")
+    return min(float(_TIMEOUT), remaining)
 
 
 def google_meet_configured() -> bool:
@@ -560,7 +618,10 @@ def api_get(
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
             },
-            timeout=_TIMEOUT,
+            # `_TIMEOUT` unless a caller has bound this thread to a deadline —
+            # see `read_deadline`. Raises MeetDeadlineExceeded rather than
+            # issuing a request there is no time left to receive.
+            timeout=_remaining_or_raise(what),
         )
         last_status = resp.status_code
         if resp.status_code == 429 or (
@@ -572,11 +633,21 @@ def api_get(
                 wait = int(resp.headers.get("Retry-After") or 2)
             except (TypeError, ValueError):
                 wait = 2
+            wait = min(max(wait, 0), _MAX_BACKOFF_S)
+            # The sleep is the part a between-requests clock check cannot see.
+            # A bounded caller must not spend its remaining budget waiting —
+            # and must not sleep PAST the deadline and then issue a request
+            # nobody is waiting for.
+            deadline = _read_deadline.get()
+            if deadline is not None and time.monotonic() + wait >= deadline:
+                raise MeetDeadlineExceeded(
+                    f"Google Meet {what}: rate-limited, and the backoff would "
+                    "outlast this read's deadline"
+                )
             logger.info(
-                "Google Meet %s rate-limited; retrying in %ss",
-                what, min(wait, _MAX_BACKOFF_S),
+                "Google Meet %s rate-limited; retrying in %ss", what, wait,
             )
-            time.sleep(min(max(wait, 0), _MAX_BACKOFF_S))
+            time.sleep(wait)
             continue
         if resp.status_code in (401, 403):
             logger.warning("Google Meet %s auth rejected: %s", what, resp.status_code)

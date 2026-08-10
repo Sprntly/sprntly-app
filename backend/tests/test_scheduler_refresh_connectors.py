@@ -179,8 +179,9 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     started: list = []
 
     class _FakeScheduler:
-        def __init__(self):
+        def __init__(self, job_defaults=None):
             self.jobs: list[dict] = []
+            self.job_defaults = job_defaults or {}
 
         def add_job(self, func, *, trigger=None, id=None, name=None, replace_existing=False):
             self.jobs.append({"func": func, "id": id, "name": name})
@@ -192,7 +193,8 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
             pass
 
     fake = _FakeScheduler()
-    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda: fake)
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler",
+                        lambda **kw: (fake.__init__(**kw), fake)[1])
 
     sched_mod.start_scheduler()
 
@@ -205,6 +207,41 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     sched_mod.shutdown_scheduler()
 
 
+def test_scheduler_grants_grace_so_a_late_firing_still_runs(monkeypatch):
+    """APScheduler defaults misfire_grace_time to 1 SECOND, which silently
+    DISCARDED 22 of 41 connector-refresh firings on prod over 14 days (`was
+    missed by 0:00:03`) — a 6h job that loses its slot loses the whole cycle,
+    and Fireflies went 41h unsynced. Grace must be generous, and coalesce keeps
+    a backlog from replaying every missed interval at once."""
+    from app import scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod.settings, "scheduler_enabled", True)
+    monkeypatch.setattr(sched_mod.settings, "pipeline_interval_hours", 6)
+    monkeypatch.setattr(sched_mod.settings, "weekly_brief_tick_minutes", 15)
+
+    seen: dict = {}
+
+    class _Fake:
+        def __init__(self, job_defaults=None):
+            seen["job_defaults"] = job_defaults
+
+        def add_job(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def shutdown(self, wait=False):
+            pass
+
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", _Fake)
+    sched_mod.start_scheduler()
+    sched_mod.shutdown_scheduler()
+
+    defaults = seen["job_defaults"] or {}
+    assert defaults.get("misfire_grace_time", 1) >= 600, \
+        "a firing delayed by a blocked event loop must still run"
+    assert defaults.get("coalesce") is True
 def test_refresh_also_tops_up_the_call_index_for_fireflies():
     """kickoff_sync fills the KG (distilled summaries); the call INDEX holds the
     per-call metadata chat answers listings from, and only the index can answer

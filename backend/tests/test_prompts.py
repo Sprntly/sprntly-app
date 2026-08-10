@@ -138,12 +138,30 @@ def test_ask_system_documents_addendum_length_bounds():
     Without (f) the failure path collapses back into exactly the false denial
     this work exists to remove.
 
-    4300 is ~8% above the current 3973 — room for wording repairs, not room
+    The third raise, 4300 -> 5400, pays for the two document-RESOLUTION
+    clauses, and they are the only clauses here that describe something the
+    model must do rather than something it must not conclude. (g) says a
+    "{DOCUMENT_REFERENT_HEADING}" section names the one document the message
+    is about, worked out from the message and the earlier turns — without it
+    the section is just another heading and "what does it say about pricing?"
+    has no subject. (h) says an ambiguity section means ASK, and says it at
+    length on purpose: the cheap failure is a model that reads two candidate
+    titles and picks the first, which is the exact behaviour the section
+    exists to prevent and the one a terse clause would not stop.
+
+    (g) also carries a sentence with no imperative in it at all — that most
+    questions have no such section and that this is normal. It is there
+    because the opposite reading is the expensive one: a model that treats the
+    section's ABSENCE as a prompt to go find a document to be about would
+    reintroduce, from the prompt side, the false-referent failure the resolver
+    is built to make unreachable.
+
+    5400 is ~7% above the current 5026 — room for wording repairs, not room
     for another feature's worth of instructions. This string is prepended to
     the system prompt of every ask that renders a document block, so its size
     is a per-request cost and the ceiling is the thing that keeps it honest.
     """
-    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 4300
+    assert 600 <= len(prompts.ASK_SYSTEM_DOCUMENTS_ADDENDUM) <= 5400
 
 
 def test_ask_system_documents_addendum_required_content():

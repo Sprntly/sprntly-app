@@ -99,6 +99,14 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.zoom import PROVIDER
 
         return PROVIDER
+    if name == "asana":
+        from app.connector_lookup.asana import PROVIDER
+
+        return PROVIDER
+    if name == "google_meet":
+        from app.connector_lookup.google_meet import PROVIDER
+
+        return PROVIDER
     return None
 
 
@@ -106,18 +114,11 @@ def provider_for(name: str) -> LookupProvider | None:
 #: not-supported copy agree with what actually exists.
 LOOKUP_PROVIDERS: tuple[str, ...] = (
     "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
-    "confluence", "zoom",
+    "confluence", "zoom", "asana", "google_meet",
 )
 
 #: Connected (they sync into the KG) but no live-read adapter yet.
 DEFERRED: dict[str, str] = {
-    "asana": "Asana",
-    # Syncs into the KG (kg_ingest/pullers/google_meet.py) but has no live-read
-    # adapter yet, so "what did we say in google meet yesterday" is answered
-    # honestly rather than from a half-capability. Deliberately listed rather
-    # than omitted: a user who names Meet deserves the honest answer, not a
-    # KG-flavoured guess from the generic path.
-    "google_meet": "Google Meet",
     "sprinklr": "Sprinklr",
     "superset": "Superset",
     "figma": "Figma",
@@ -168,11 +169,18 @@ MAX_TOOL_PROVIDERS = 3
 #: diff look like the cap vanished rather than split in two.
 MAX_PROVIDERS_PER_LOOKUP = MAX_TOOL_PROVIDERS
 
-#: How many named providers the parallel sweep may cover. Eight is every adapter
-#: that exists, so in practice this never binds — the real ceiling is what a
-#: company has connected, and no company in the database has more than six
-#: providers (of which `uploads` is not a live adapter at all).
-MAX_SWEEP_PROVIDERS = 8
+#: How many named providers the parallel sweep may cover. Sized to every
+#: adapter that exists (`len(LOOKUP_PROVIDERS)`), so in practice this never
+#: binds — the real ceiling is what a company has connected, and no company in
+#: the database has more than six providers (of which `uploads` is not a live
+#: adapter at all).
+#:
+#: It is a SLICE END (`supported[MAX_TOOL_PROVIDERS:MAX_SWEEP_PROVIDERS]`), so
+#: leaving it at a hand-written 8 while adapters grew past it would silently
+#: drop the last-ranked named sources back into the apology list — a coverage
+#: regression that looks like nothing in a diff. Derived, and asserted against
+#: LOOKUP_PROVIDERS by a test, so it cannot rot again.
+MAX_SWEEP_PROVIDERS = len(LOOKUP_PROVIDERS)
 
 #: Wall-clock the sweep may draw for priming, CARVED OUT of answer.py's existing
 #: WALL_CLOCK_BUDGET_S rather than added to it. This is the whole reason breadth

@@ -18,11 +18,30 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import type { GoogleDrivePickedFile, GoogleDrivePickerToken } from "../../../lib/api"
+import type {
+  GoogleDrivePickedFile,
+  GoogleDrivePickerToken,
+  GoogleDriveServiceAccountState,
+} from "../../../lib/api"
 
 const getGoogleDrivePickerTokenMock =
   vi.fn<() => Promise<GoogleDrivePickerToken>>()
 const saveGoogleDriveFilesMock = vi.fn<(body: unknown) => Promise<unknown>>()
+const getGoogleDriveModeMock =
+  vi.fn<() => Promise<{ mode: string; service_account_configured: boolean }>>()
+const provisionGoogleDriveServiceAccountMock =
+  vi.fn<(dataset?: string) => Promise<GoogleDriveServiceAccountState>>()
+const scanGoogleDriveServiceAccountMock =
+  vi.fn<(dataset?: string) => Promise<unknown>>()
+
+// Every test in this file renders the hooks-wired GoogleDrivePicker at least
+// once, and its mount effect always calls getGoogleDriveMode() — default it
+// to plain OAuth mode so tests that don't care about service-account mode
+// stay deterministic (no unmocked network call, no SA panel by surprise).
+getGoogleDriveModeMock.mockResolvedValue({
+  mode: "oauth",
+  service_account_configured: false,
+})
 
 vi.mock("../../../lib/api", async () => {
   const actual =
@@ -33,6 +52,11 @@ vi.mock("../../../lib/api", async () => {
       ...actual.connectorsApi,
       getGoogleDrivePickerToken: () => getGoogleDrivePickerTokenMock(),
       saveGoogleDriveFiles: (body: unknown) => saveGoogleDriveFilesMock(body),
+      getGoogleDriveMode: () => getGoogleDriveModeMock(),
+      provisionGoogleDriveServiceAccount: (dataset?: string) =>
+        provisionGoogleDriveServiceAccountMock(dataset),
+      scanGoogleDriveServiceAccount: (dataset?: string) =>
+        scanGoogleDriveServiceAccountMock(dataset),
     },
   }
 })
@@ -40,6 +64,7 @@ vi.mock("../../../lib/api", async () => {
 import {
   GoogleDrivePicker,
   GoogleDrivePickerView,
+  GoogleDriveServiceAccountView,
   mergePickedFiles,
   syncFailureMessage,
 } from "../GoogleDrivePicker"
@@ -523,11 +548,13 @@ describe("GoogleDrivePicker — folders are pickable", () => {
     }
   })
 
-  it("shows folders for browsing but does NOT let them be selected", async () => {
+  it("shows folders for browsing but does NOT let them be selected by default", async () => {
     // Both are needed and they are different settings: showing folders only
     // makes them navigable, which is the behaviour we already had. Selecting is
     // what turns a folder into a source — and into a standing one, since the
-    // sync re-expands it on every run.
+    // sync re-expands it on every run. `folderSelectEnabled` defaults to
+    // false when the caller doesn't pass it, so every existing call site
+    // (drive.file connections) behaves exactly as before this change.
     const builder = installMockPicker()
     renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
     fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
@@ -536,6 +563,30 @@ describe("GoogleDrivePicker — folders are pickable", () => {
 
     expect(docsView.setIncludeFolders).toHaveBeenCalledWith(true)
     expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it("still blocks folder selection when explicitly gated off", async () => {
+    const builder = installMockPicker()
+    renderDom(
+      <GoogleDrivePicker dataset="acme" savedFiles={[]} folderSelectEnabled={false} />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
+
+    await waitFor(() => expect(builder.build).toHaveBeenCalled())
+
+    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it("enables folder selection once the connection is gated on (post-CASA drive.readonly)", async () => {
+    const builder = installMockPicker()
+    renderDom(
+      <GoogleDrivePicker dataset="acme" savedFiles={[]} folderSelectEnabled={true} />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
+
+    await waitFor(() => expect(builder.build).toHaveBeenCalled())
+
+    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(true)
   })
 
   it("a picked folder is saved like any other entry", async () => {
@@ -619,14 +670,62 @@ describe("GoogleDrivePickerView — a connected folder shows what is inside it",
         folderContents: { folder1: [] },
       }),
     )
-    expect(html).toContain("no readable files")
-    expect(html).toContain("select the files themselves")
+    expect(html).toContain("no readable files inside it")
   })
 
   it("a plain file is not rendered as a folder", () => {
     const html = render()
     expect(html).not.toContain("conn-drive-folder")
     expect(html).toContain("Product Plan")
+  })
+
+  it("renders a nested sub-folder as its own disclosure, not hoisted flat", () => {
+    // The tree-shape regression, at the render layer: a sub-folder's files
+    // must nest UNDER the sub-folder's own <details>, not appear as direct
+    // siblings of the root folder's other children.
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDrivePickerView, {
+        savedFiles: FOLDER,
+        configured: true,
+        busy: false,
+        error: null,
+        onAddFiles: noop,
+        onRemoveFile: noop,
+        removingId: null,
+        folderContents: {
+          folder1: [
+            {
+              id: "sub1",
+              name: "Backend",
+              mimeType: "application/vnd.google-apps.folder",
+              parentId: "folder1",
+            },
+            {
+              id: "root-file",
+              name: "readme.md",
+              mimeType: "text/plain",
+              parentId: "folder1",
+            },
+            {
+              id: "sub-file",
+              name: "api.md",
+              mimeType: "text/plain",
+              parentId: "sub1",
+            },
+          ],
+        },
+      }),
+    )
+    expect(html).toContain("Backend")
+    expect(html).toContain("readme.md")
+    expect(html).toContain("api.md")
+    // The sub-folder file's <li> comes AFTER the sub-folder's own <details>
+    // opening tag — i.e. nested inside it, not a root-level sibling.
+    const backendIdx = html.indexOf("Backend")
+    const apiIdx = html.indexOf("api.md")
+    expect(apiIdx).toBeGreaterThan(backendIdx)
+    // Count only real files (2) in the summary, not the sub-folder itself.
+    expect(html).toContain("2 files, 1 folder")
   })
 
   it("a folder can still be removed", () => {
@@ -643,5 +742,253 @@ describe("GoogleDrivePickerView — a connected folder shows what is inside it",
       }),
     )
     expect(html).toContain('aria-label="Remove Specs"')
+  })
+})
+
+describe("GoogleDriveServiceAccountView", () => {
+  const noopFn = () => {}
+
+  it("shows a setup placeholder before the email is known", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: null,
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: null,
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain("Setting up a service account")
+  })
+
+  it("shows the backend error instead of spinning forever when provisioning fails", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: null,
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: "IAM permission denied",
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain("Couldn")
+    expect(html).toContain("IAM permission denied")
+  })
+
+  it("shows the SA email to share and a Scan action once provisioned", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sprntly-abc123-def456@proj.iam.gserviceaccount.com",
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: null,
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain("sprntly-abc123-def456@proj.iam.gserviceaccount.com")
+    expect(html).toContain("Scan shared folders")
+    // Same button classes as "Add Drive files" — a consistent, equally-sized
+    // sibling action, not a full-width bar.
+    expect(html).toContain('class="btn btn-sm btn-primary"')
+    expect(html).toContain("Nothing shared with this service account yet")
+  })
+
+  it("renders the scanned shared-root tree, reusing the folder tree UI", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sa@proj.iam.gserviceaccount.com",
+        sharedRoots: [
+          {
+            id: "folder1",
+            name: "Shared team folder",
+            mimeType: "application/vnd.google-apps.folder",
+          },
+        ],
+        folderContents: {
+          folder1: [
+            { id: "c1", name: "roadmap.md", mimeType: "text/plain", parentId: "folder1" },
+          ],
+        },
+        scanning: false,
+        error: null,
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain("Shared team folder")
+    expect(html).toContain("1 file")
+    expect(html).toContain("roadmap.md")
+  })
+
+  it("disables Scan and shows progress text while scanning", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sa@proj.iam.gserviceaccount.com",
+        sharedRoots: [],
+        folderContents: {},
+        scanning: true,
+        error: null,
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain("Scanning…")
+    expect(html).toContain("disabled")
+  })
+
+  it("the copy button reflects the copied state", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sa@proj.iam.gserviceaccount.com",
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: null,
+        copied: true,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    expect(html).toContain('aria-label="Copied"')
+  })
+})
+
+describe("GoogleDrivePicker — service-account mode toggle", () => {
+  const ORIGINAL_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY
+
+  beforeEach(() => {
+    process.env.NEXT_PUBLIC_GOOGLE_API_KEY = "test-google-api-key"
+    getGoogleDrivePickerTokenMock.mockReset().mockResolvedValue({
+      access_token: "ya29.mock-access-token",
+      expires_in: 3000,
+      app_id: "928374651",
+    })
+    saveGoogleDriveFilesMock.mockReset().mockResolvedValue({ errors: [] })
+    provisionGoogleDriveServiceAccountMock.mockReset()
+    scanGoogleDriveServiceAccountMock.mockReset()
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete window.google
+    delete window.gapi
+    if (ORIGINAL_API_KEY === undefined) {
+      delete process.env.NEXT_PUBLIC_GOOGLE_API_KEY
+    } else {
+      process.env.NEXT_PUBLIC_GOOGLE_API_KEY = ORIGINAL_API_KEY
+    }
+    // Restore the module-wide default so later describe blocks (which never
+    // touch service-account mode) keep behaving as plain OAuth.
+    getGoogleDriveModeMock.mockReset().mockResolvedValue({
+      mode: "oauth",
+      service_account_configured: false,
+    })
+  })
+
+  it("oauth mode: no service-account panel, Picker unchanged", async () => {
+    getGoogleDriveModeMock.mockReset().mockResolvedValue({
+      mode: "oauth",
+      service_account_configured: false,
+    })
+    renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add drive files/i })).toBeTruthy(),
+    )
+    expect(screen.queryByText(/scan shared folders/i)).toBeNull()
+    expect(provisionGoogleDriveServiceAccountMock).not.toHaveBeenCalled()
+  })
+
+  it("service_account mode: shows BOTH the OAuth Picker button and the SA panel", async () => {
+    getGoogleDriveModeMock.mockReset().mockResolvedValue({
+      mode: "service_account",
+      service_account_configured: true,
+    })
+    provisionGoogleDriveServiceAccountMock.mockResolvedValue({
+      service_account_email: "sprntly-abc123-def456@proj.iam.gserviceaccount.com",
+      shared_roots: [],
+      folder_contents: {},
+    })
+    renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
+
+    // Both routes are present as equally-sized sibling actions.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add drive files/i })).toBeTruthy(),
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByText("sprntly-abc123-def456@proj.iam.gserviceaccount.com"),
+      ).toBeTruthy(),
+    )
+    expect(screen.getByRole("button", { name: /scan shared folders/i })).toBeTruthy()
+  })
+
+  it("service_account mode: Scan calls the scan endpoint and refreshes the tree", async () => {
+    getGoogleDriveModeMock.mockReset().mockResolvedValue({
+      mode: "service_account",
+      service_account_configured: true,
+    })
+    provisionGoogleDriveServiceAccountMock.mockResolvedValue({
+      service_account_email: "sa@proj.iam.gserviceaccount.com",
+      shared_roots: [],
+      folder_contents: {},
+    })
+    scanGoogleDriveServiceAccountMock.mockResolvedValue({
+      service_account_email: "sa@proj.iam.gserviceaccount.com",
+      shared_roots: [{ id: "folder1", name: "Shared" }],
+      folder_contents: { folder1: [{ id: "c1", name: "a.txt" }] },
+      errors: [],
+    })
+    renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /scan shared folders/i })).toBeTruthy(),
+    )
+    fireEvent.click(screen.getByRole("button", { name: /scan shared folders/i }))
+
+    await waitFor(() => expect(scanGoogleDriveServiceAccountMock).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByText("Shared")).toBeTruthy())
+  })
+
+  it("service_account mode: the OAuth Picker force-disables folder selection even when gated on", async () => {
+    getGoogleDriveModeMock.mockReset().mockResolvedValue({
+      mode: "service_account",
+      service_account_configured: true,
+    })
+    provisionGoogleDriveServiceAccountMock.mockResolvedValue({
+      service_account_email: "sa@proj.iam.gserviceaccount.com",
+      shared_roots: [],
+      folder_contents: {},
+    })
+    const builder = installMockPicker()
+    renderDom(
+      <GoogleDrivePicker
+        dataset="acme"
+        savedFiles={[]}
+        folderSelectEnabled={true}
+      />,
+    )
+
+    await waitFor(() =>
+      expect(screen.getByText("sa@proj.iam.gserviceaccount.com")).toBeTruthy(),
+    )
+    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
+    await waitFor(() => expect(builder.build).toHaveBeenCalled())
+
+    // In service_account mode individual files still go through the same
+    // drive.file Picker, but folders come in via the SA share route — so
+    // folder selection stays off regardless of folderSelectEnabled.
+    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
   })
 })

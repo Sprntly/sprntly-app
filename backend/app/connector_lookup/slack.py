@@ -24,9 +24,18 @@ wrong produces a confidently wrong answer:
    their colleagues is not a feature we ship by accident; making it one would be
    a product decision about who may read whose messages.
 
-Routing is explicit-name-only for now (skill_router.is_connector_lookup): a
-question has to actually name Slack or a #channel. False positives are the
+Routing to THIS adapter is explicit-name-only (skill_router.is_connector_lookup):
+a question has to actually name Slack or a #channel. False positives are the
 biggest UX risk on this surface, so it widens later, deliberately.
+
+That is no longer the only way Slack content reaches an answer. Slack is also a
+CUSTOMER_VOICE connector (connectors/catalog.py), and its configured feedback
+channels are read WITHOUT the word "slack" appearing anywhere in the question —
+by `connector_lookup/slack_voc.py`, reached from the voice-of-customer path in
+`call_digest`. That widening is deliberately scoped to the feedback-channel
+SELECTION rather than to the workspace: the honest-limits reasoning above is
+what makes "read a named channel" safe, and reading a set an admin chose in
+Settings is the one implicit read that inherits it.
 """
 from __future__ import annotations
 
@@ -82,6 +91,56 @@ _GENERIC_QUERY_TERMS = frozenset({
     "new", "news", "recent", "update", "updates",
 })
 
+#: Input key on `slack_search_messages` that turns on the recency fallback in
+#: `_search_and_hits`. Deliberately ABSENT from SEARCH_TOOL's input_schema: the
+#: model must not reach it, because on the named path a literal miss is a true
+#: and useful answer ("no message says 'pricing'") and widening it to a week of
+#: unrelated chatter would be a worse answer, not a better one. Only the
+#: cross-connector sweep sets it, because only the sweep asks Slack about words
+#: the user never aimed at Slack.
+RECENT_FALLBACK_INPUT_KEY = "fallback_to_recent"
+
+#: Wall-clock one `slack_search_messages` call may spend, checked before each
+#: probe and used to clamp its socket timeout.
+#:
+#: This leg is the one that is NOT flag-gated — Jira/Slack/Confluence/HubSpot/
+#: ClickUp shipped before the per-provider rollout switches, so Slack is
+#: default-ON and reaches every tenant from the first deploy. The recency
+#: fallback also made it the only leg that issues TWO sequential requests, so
+#: its worst case doubled to ~30s of leaked worker thread past `sweep.BUDGET_S`
+#: (8s) — `_run_live` abandons with `shutdown(wait=False)`, which does not
+#: cancel a running thread. Same bound the Asana and Meet legs carry, for the
+#: same reason, on the leg where it matters most.
+SCAN_BUDGET_S = 6.0
+
+#: Floor on a clamped socket timeout — below this the clamp starts CAUSING the
+#: timeouts it exists to bound, so a probe this close to the deadline is
+#: skipped instead.
+_MIN_CALL_TIMEOUT_S = 0.5
+
+
+def recent_fallback_note(query: str) -> str:
+    """What the model is told when the literal search missed and the recency
+    window answered instead.
+
+    Deliberately blunt about BOTH failures it has to prevent. Without the first
+    sentence the model reads a week of unrelated Slack as topic evidence — the
+    same false-positive that produced "one stray hit from #mvp-product" in a
+    new costume. Without the second it reports the literal miss as an absence,
+    which is the false-negative the module docstring's honesty contract exists
+    to forbid.
+    """
+    return (
+        f"(NO Slack message contains the words {query!r}. Slack search matches "
+        "literal message text, so that is NOT evidence the topic was never "
+        "discussed — only that nobody phrased it this way. What follows is "
+        f"instead the most RECENT Slack activity, and it may have nothing to "
+        "do with the question: treat it as background, cite a message only if "
+        "it is genuinely on topic, and never present this list as 'what Slack "
+        "says about' the subject.)"
+    )
+
+
 SEARCH_UNAVAILABLE = (
     "(slack_search_messages is unavailable for this workspace: the Slack "
     "connection granted bot access only, with no user token carrying "
@@ -124,6 +183,12 @@ SEARCH_ORDER_NOTES = {
 
 SYSTEM = (
     "Tools:\n"
+    "- slack_voc_channels: ALL of this company's customer-feedback channels at "
+    "once (the ones configured under Settings → Connectors → \"Voice of "
+    "Customer & Support\"). Use this FIRST for any question about customer "
+    "feedback, complaints, requests or what customers are saying — one call "
+    "covers every configured channel, and answering such a question from a "
+    "single channel is the failure this tool exists to prevent.\n"
     "- slack_list_channels: the channels this connection can read.\n"
     "- slack_channel_history: recent messages in one channel (by #name or id), "
     "optionally limited to the last N days.\n"
@@ -242,7 +307,36 @@ SEARCH_TOOL = {
     },
 }
 
-TOOLS = [LIST_CHANNELS_TOOL, CHANNEL_HISTORY_TOOL, GET_THREAD_TOOL, SEARCH_TOOL]
+VOC_CHANNELS_TOOL = {
+    "name": "slack_voc_channels",
+    "description": (
+        "Read ALL of this company's customer-feedback Slack channels at once — "
+        "the ones configured in Settings → Connectors → \"Voice of Customer & "
+        "Support\" → Slack → \"Channels to pull from\" (or, when nothing is "
+        "ticked there, every channel the Sprntly bot was invited to). Returns "
+        "one section per channel plus a named list of any channel that could "
+        "NOT be read and why. Use this for ANY question about what customers "
+        "are saying, feedback, complaints or requests — it is the aggregate, "
+        "and it is what stops an answer describing one channel as if it were "
+        "the whole company. Prefer it over calling slack_channel_history once "
+        "per channel: it reads them in parallel under one time budget. `days` "
+        "limits how far back to read (default 7)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "days": {
+                "type": "integer",
+                "description": "How many days back to read (default 7, max 90).",
+            },
+        },
+    },
+}
+
+TOOLS = [
+    LIST_CHANNELS_TOOL, CHANNEL_HISTORY_TOOL, GET_THREAD_TOOL, SEARCH_TOOL,
+    VOC_CHANNELS_TOOL,
+]
 
 
 @dataclass
@@ -259,6 +353,18 @@ class SlackHandle:
     # log lines, exception context and test failure output.
     bot_token: str = field(repr=False)
     user_token: str | None = field(default=None, repr=False)
+    #: The AUTHENTICATED company this session was opened for. Set by
+    #: `open_session` from the request's own enterprise_id and never from model
+    #: input — it is here so a tool can resolve company-scoped configuration
+    #: (the voice-of-customer channel selection) without a second credential
+    #: read, not so anything can name a tenant.
+    company_id: str = ""
+    #: The Slack WORKSPACE (`team.id`) whose token this handle carries. A
+    #: company can hold rows for several workspaces, so any code pairing this
+    #: token with configuration stored on ANOTHER row must filter on it — see
+    #: `slack_voc.configured_channels`. "" means the row recorded no team, in
+    #: which case no filtering is possible and none is done.
+    team_id: str = ""
     users: dict[str, str] = field(default_factory=dict, repr=False)
     channels: list[dict] = field(default_factory=list, repr=False)
     workspace_channels: list[dict] = field(default_factory=list, repr=False)
@@ -370,6 +476,71 @@ class SlackHandle:
         return ref
 
 
+def _row_team_id(row: dict) -> str:
+    """The Slack workspace (`team.id`) a connection row belongs to, or "".
+
+    A company can hold rows for DIFFERENT workspaces — `db/connections.py`
+    already keys on this. Anything that pairs a token with configuration from
+    another row has to check it, or it reads workspace A's channel ids with
+    workspace B's token.
+    """
+    try:
+        config = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(config, dict):
+        return ""
+    team = config.get("team")
+    if isinstance(team, dict):
+        return str(team.get("id") or "").strip()
+    return ""
+
+
+def _load_session_tokens(company_id: str) -> tuple[str | None, str | None, str]:
+    """`(bot_token, user_token, team_id)` — `_load_tokens` plus the WORKSPACE
+    the chosen row belongs to.
+
+    Split from `_load_tokens` rather than widening it: that function's
+    two-tuple contract is what every existing caller and test binds to, and the
+    team id is only needed by the one caller that pairs this token with another
+    row's stored configuration (the voice-of-customer channel selection).
+    """
+    from app import db
+
+    rows: list[dict] = []
+    try:
+        rows = list(db.list_slack_connections(company_id) or [])
+    except Exception:  # noqa: BLE001 — fall back to the company-scoped row
+        logger.warning("slack-lookup: per-user row lookup failed", exc_info=True)
+    if not rows:
+        try:
+            row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
+        except Exception:  # noqa: BLE001
+            logger.warning("slack-lookup: connection lookup failed", exc_info=True)
+            row = None
+        rows = [row] if row else []
+
+    best: tuple[str | None, str | None, str] = (None, None, "")
+    for row in rows:
+        if not row:
+            continue
+        try:
+            token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        except (TokenEncryptionError, ValueError, KeyError, TypeError):
+            logger.warning("slack-lookup: could not decrypt a Slack token for %s",
+                           company_id)
+            continue
+        bot = token_json.get("access_token")
+        if not bot:
+            continue
+        user = token_json.get("user_access_token") or None
+        if user:
+            return bot, user, _row_team_id(row)
+        if best == (None, None, ""):
+            best = (bot, None, _row_team_id(row))
+    return best
+
+
 def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
     """Return `(bot_token, user_token)` for the company, or (None, None).
 
@@ -387,41 +558,39 @@ def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
 
     Tenancy: every read is keyed by the authenticated company_id — the only
     company id in scope. Nothing here is derived from model input.
+
+    Thin wrapper over `_load_session_tokens`, which additionally reports the
+    WORKSPACE the chosen row belongs to. Kept as a two-tuple because that is the
+    contract every existing caller binds to.
     """
-    from app import db
+    bot, user, _team = _load_session_tokens(company_id)
+    return bot, user
 
-    rows: list[dict] = []
-    try:
-        rows = list(db.list_slack_connections(company_id) or [])
-    except Exception:  # noqa: BLE001 — fall back to the company-scoped row
-        logger.warning("slack-lookup: per-user row lookup failed", exc_info=True)
-    if not rows:
-        try:
-            row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
-        except Exception:  # noqa: BLE001
-            logger.warning("slack-lookup: connection lookup failed", exc_info=True)
-            row = None
-        rows = [row] if row else []
 
-    best: tuple[str | None, str | None] = (None, None)
-    for row in rows:
-        if not row:
-            continue
-        try:
-            token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-        except (TokenEncryptionError, ValueError, KeyError, TypeError):
-            logger.warning("slack-lookup: could not decrypt a Slack token for %s",
-                           company_id)
-            continue
-        bot = token_json.get("access_token")
-        if not bot:
-            continue
-        user = token_json.get("user_access_token") or None
-        if user:
-            return bot, user
-        if best == (None, None):
-            best = (bot, None)
-    return best
+def is_shareable_channel(channel: dict, bot_channel_ids: set[str]) -> bool:
+    """True when a CONVERSATION's contents may be quoted into a chat answer.
+
+    The privacy rule, extracted so it has exactly one implementation. It was
+    written for `search.messages` (see `is_shareable_match`, which now delegates
+    here) and it binds identically to any other path that turns a conversation
+    into text a teammate reads — notably the voice-of-customer channel
+    aggregator (`connector_lookup/slack_voc.py`), which reads a configured
+    channel LIST rather than a search result set. Widening either caller means
+    widening this one function, which is the point: two copies of a privacy gate
+    is one copy that gets loosened without the other being re-read.
+
+      - `D…` ids and `is_im` → direct messages: never shareable.
+      - `is_mpim` (group DM) → never shareable.
+      - `G…` ids / `is_private` → private channel or legacy group: shareable ONLY
+        if the bot is a member of it.
+      - anything else (`C…`, not flagged private) → public channel: shareable.
+    """
+    channel_id = str(channel.get("id") or "")
+    if channel_id.startswith("D") or channel.get("is_im") or channel.get("is_mpim"):
+        return False
+    if channel_id.startswith("G") or channel.get("is_private"):
+        return channel_id in bot_channel_ids
+    return True
 
 
 def is_shareable_match(match: dict, bot_channel_ids: set[str]) -> bool:
@@ -447,13 +616,10 @@ def is_shareable_match(match: dict, bot_channel_ids: set[str]) -> bool:
     NOT a feature here; it would need a product decision about who may read whose
     messages, not just a code change.
     """
-    channel = match.get("channel") or {}
-    channel_id = str(channel.get("id") or match.get("channel_id") or "")
-    if channel_id.startswith("D") or channel.get("is_im") or channel.get("is_mpim"):
-        return False
-    if channel_id.startswith("G") or channel.get("is_private"):
-        return channel_id in bot_channel_ids
-    return True
+    channel = dict(match.get("channel") or {})
+    if not channel.get("id"):
+        channel["id"] = match.get("channel_id") or ""
+    return is_shareable_channel(channel, bot_channel_ids)
 
 
 def _ts_line(msg: dict, users: dict[str, str]) -> str:
@@ -470,6 +636,120 @@ def _ts_line(msg: dict, users: dict[str, str]) -> str:
     return f"[{when}] {who}: {text}{thread} (ts={msg.get('ts')})"
 
 
+#: One channel read's outcome. Kept as three named constants rather than a
+#: bool because "the bot read it and it was quiet" and "the bot could not read
+#: it" license completely different sentences in an answer — collapsing them is
+#: exactly how "nothing in Slack about it" comes to mean "Slack was unreadable".
+HISTORY_OK = "ok"
+HISTORY_EMPTY = "empty"
+HISTORY_UNREADABLE = "unreadable"
+
+
+@dataclass
+class ChannelHistory:
+    """One `conversations.history` read, BEFORE it is rendered to text.
+
+    Extracted from `_history` (which is now a renderer over it) so the
+    voice-of-customer aggregator can read the same channels through the same
+    auto-join and the same access-failure copy, while still seeing a machine
+    -readable status instead of having to sniff prose. The alternative —
+    slack_voc calling `_history` and pattern-matching its return string — makes
+    every future edit to that copy a silent behaviour change somewhere else.
+    """
+
+    ref: str                      # exactly what the caller asked for ("#demos")
+    channel_id: str
+    days: int
+    status: str = HISTORY_EMPTY
+    messages: list[dict] = field(default_factory=list)
+    #: Model-facing explanation when `status` is not ok. Never empty for
+    #: HISTORY_UNREADABLE — a channel that could not be read is always named
+    #: WITH its reason.
+    detail: str = ""
+    has_more: bool = False
+
+    @property
+    def name(self) -> str:
+        """The channel name without the sigil, for headings."""
+        return (self.ref or "").strip().lstrip("#")
+
+
+def read_channel_history(
+    handle: SlackHandle, ref: str, days: object = None, *, auto_join: bool = True
+) -> ChannelHistory:
+    """Read one channel's recent messages. Raises exactly what `_history` used
+    to raise: a non-access `HTTPException` and any `requests` error pass
+    through, so `dispatch`'s wrapper still turns them into the same copy.
+
+    `auto_join` IS A WRITE TO THE CUSTOMER'S WORKSPACE — `conversations.join`
+    adds the Sprntly bot to a channel and Slack posts a join notice into it.
+    It defaults True because this function's original caller is the
+    `slack_channel_history` TOOL, where the user named that channel and asked
+    for it; joining is then the obvious repair for the commonest failure.
+
+    It MUST be False on any implicit path — a question that named no channel,
+    or no source at all. See `slack_voc._read_one`: "what are our customers
+    saying?" is a read, and a read must not put the bot into a customer's
+    channels as a side effect. Same class as the 2026-08-05 sweep incident,
+    where `open_session` looked read-only and rotated OAuth tokens.
+    """
+    try:
+        window = int(days or _DEFAULT_DAYS)
+    except (TypeError, ValueError):
+        window = _DEFAULT_DAYS
+    window = max(1, min(window, 90))
+    channel_id = handle.resolve_channel(ref)
+    oldest = f"{int(time.time()) - window * 86400}.000000"
+    try:
+        # auto_join mirrors the delivery path (slack_oauth.post_message):
+        # "the bot was never invited" is the single most common reason a
+        # read fails, and a public channel is one idempotent
+        # conversations.join away from working. Private channels can't be
+        # self-joined, so those still fail — with copy that says why.
+        # Caller-controlled, and OFF on every implicit path (see the docstring).
+        data = slack_oauth.fetch_conversation_history(
+            handle.bot_token, channel=channel_id, limit=_MAX_MESSAGES,
+            oldest=oldest, auto_join=auto_join,
+        )
+    except HTTPException as exc:
+        access = _channel_access_text(handle, ref, str(exc.detail))
+        if access:
+            return ChannelHistory(
+                ref=ref, channel_id=channel_id, days=window,
+                status=HISTORY_UNREADABLE, detail=access,
+            )
+        raise
+    messages = list(reversed(data.get("messages") or []))  # oldest first
+    logger.info(
+        "slack-lookup: history %s (id=%s, days=%d) -> %d messages",
+        ref, channel_id, window, len(messages),
+    )
+    return ChannelHistory(
+        ref=ref, channel_id=channel_id, days=window,
+        status=HISTORY_OK if messages else HISTORY_EMPTY,
+        messages=messages, has_more=bool(data.get("has_more")),
+    )
+
+
+def render_channel_history(handle: SlackHandle, read: ChannelHistory) -> str:
+    """`read` as the `slack_channel_history` tool's text. Byte-identical to what
+    `_history` produced before the read/render split."""
+    if read.status == HISTORY_UNREADABLE:
+        return read.detail
+    if read.status == HISTORY_EMPTY:
+        return (
+            f"(no messages in {read.ref} in the last {read.days} days — or the "
+            "bot isn't in that channel)"
+        )
+    users = handle.user_map()
+    kept, marker = cap_items(read.messages, _MAX_MESSAGES)
+    head = f"{read.ref} — last {read.days} days ({len(kept)} messages):"
+    body = "\n".join(_ts_line(m, users) for m in kept)
+    tail = marker or ("(more messages exist beyond this page)"
+                      if read.has_more else "")
+    return "\n".join(p for p in (head, body, tail) if p)
+
+
 class SlackProvider:
     """LookupProvider over slack_sync / slack_oauth reads."""
 
@@ -478,7 +758,7 @@ class SlackProvider:
     keywords = ("slack", "#channel")
 
     def open_session(self, enterprise_id: str) -> LookupSession | None:
-        bot, user = _load_tokens(enterprise_id)
+        bot, user, team_id = _load_session_tokens(enterprise_id)
         if not bot:
             return None
         notes = [
@@ -496,7 +776,10 @@ class SlackProvider:
         ]
         return LookupSession(
             provider=self.provider,
-            handle=SlackHandle(bot_token=bot, user_token=user),
+            handle=SlackHandle(
+                bot_token=bot, user_token=user, company_id=enterprise_id,
+                team_id=team_id,
+            ),
             notes=notes,
         )
 
@@ -523,6 +806,8 @@ class SlackProvider:
                 return self._thread(handle, inp)
             if name == "slack_search_messages":
                 return self._search(handle, inp)
+            if name == "slack_voc_channels":
+                return self._voc_channels(handle, inp)
         except requests.Timeout:
             return f"(Slack timed out on {name} — no results from this call)"
         except HTTPException as exc:
@@ -556,45 +841,58 @@ class SlackProvider:
         ref = (inp.get("channel") or "").strip()
         if not ref:
             return "(slack_channel_history: 'channel' is required)"
-        channel_id = handle.resolve_channel(ref)
-        try:
-            days = int(inp.get("days") or _DEFAULT_DAYS)
-        except (TypeError, ValueError):
-            days = _DEFAULT_DAYS
-        days = max(1, min(days, 90))
-        oldest = f"{int(time.time()) - days * 86400}.000000"
-        try:
-            # auto_join mirrors the delivery path (slack_oauth.post_message):
-            # "the bot was never invited" is the single most common reason a
-            # read fails, and a public channel is one idempotent
-            # conversations.join away from working. Private channels can't be
-            # self-joined, so those still fail — with copy that says why.
-            data = slack_oauth.fetch_conversation_history(
-                handle.bot_token, channel=channel_id, limit=_MAX_MESSAGES,
-                oldest=oldest, auto_join=True,
-            )
-        except HTTPException as exc:
-            access = _channel_access_text(handle, ref, str(exc.detail))
-            if access:
-                return access
-            raise
-        messages = list(reversed(data.get("messages") or []))  # oldest first
-        logger.info(
-            "slack-lookup: history %s (id=%s, days=%d) -> %d messages",
-            ref, channel_id, days, len(messages),
-        )
-        if not messages:
+        read = read_channel_history(handle, ref, inp.get("days"))
+        return render_channel_history(handle, read)
+
+    def _voc_channels(self, handle: SlackHandle, inp: dict) -> str:
+        """Every configured customer-feedback channel, aggregated.
+
+        Delegates to `connector_lookup/slack_voc.py` so the named path ("what
+        are customers saying in slack?") and the source-agnostic voice-of-
+        customer path (`call_digest`) read the SAME channel set through the
+        SAME privacy gate and produce the same honesty block. Two aggregators
+        would be two places for "all the channels" to quietly become "one".
+        """
+        from app.connector_lookup import slack_voc
+
+        if not handle.company_id:
+            # Only reachable if a caller built a handle by hand; a session
+            # opened by `open_session` always carries the authenticated
+            # company. Refuse rather than guessing a tenant.
             return (
-                f"(no messages in {ref} in the last {days} days — or the bot "
-                "isn't in that channel)"
+                "(slack_voc_channels: no company is in scope for this session, "
+                "so the configured feedback channels cannot be resolved. Read "
+                "specific channels with slack_channel_history instead.)"
             )
-        users = handle.user_map()
-        kept, marker = cap_items(messages, _MAX_MESSAGES)
-        head = f"{ref} — last {days} days ({len(kept)} messages):"
-        body = "\n".join(_ts_line(m, users) for m in kept)
-        tail = marker or ("(more messages exist beyond this page)"
-                          if data.get("has_more") else "")
-        return "\n".join(p for p in (head, body, tail) if p)
+        result = slack_voc.read(
+            handle.company_id, days=inp.get("days") or slack_voc.DEFAULT_DAYS,
+            handle=handle,
+        )
+        block = result.render()
+        if block:
+            return block
+        if result.unavailable:
+            return (
+                f"(slack_voc_channels: {result.unavailable}. Do NOT report this "
+                "as \"no customer feedback\" — nothing was read.)"
+            )
+        if result.reads:
+            return (
+                "(slack_voc_channels: none of this company's configured "
+                "feedback channels could be read — "
+                + "; ".join(
+                    f"{r.channel.label}: {r.reason()}" for r in result.reads
+                )
+                + ". Do NOT report this as \"no customer feedback\"; say which "
+                "channels were unreadable and why.)"
+            )
+        return (
+            "(slack_voc_channels: no Slack channels are configured for voice of "
+            "customer and the Sprntly bot is in none, so there is nothing to "
+            "read. Tell the user to pick channels under Settings → Connectors → "
+            "\"Voice of Customer & Support\" → Slack, or to invite the bot. Do "
+            "NOT report this as \"no customer feedback\".)"
+        )
 
     def _thread(self, handle: SlackHandle, inp: dict) -> str:
         ref = (inp.get("channel") or "").strip()
@@ -623,6 +921,113 @@ class SlackProvider:
 
     def _search_and_hits(
         self, handle: SlackHandle, inp: dict
+    ) -> "tuple[str, list[dict]]":
+        """One search, plus the OPTIONAL recency fallback the cross-connector
+        sweep needs (`RECENT_FALLBACK_INPUT_KEY`). Every caller that does not
+        set that key gets `_search_once` and nothing else — byte-identical to
+        before this method existed.
+
+        WHY THE SWEEP NEEDS A SECOND PROBE AT ALL. Slack's `search.messages`
+        matches literal message TEXT, AND-ish across the words in the query.
+        The named path is fine with that: the user typed the words, so "no
+        messages match 'pricing'" is a true and useful sentence. The sweep did
+        not — it joins up to `sweep.MAX_TERMS` (8) topic words lifted out of a
+        question the user never aimed at Slack, and asks Slack to find a single
+        message containing all of them. Observed on staging 2026-08-07: a topic
+        question returned exactly ONE stray hit from a channel nobody had
+        selected, while the channels that actually held the discussion returned
+        nothing.
+
+        Three separate mechanisms make that unfixable by tuning the query, and
+        all three had to be checked before choosing this shape:
+
+        - `_GENERIC_QUERY_TERMS` (the existing mitigation for exactly this
+          class of failure) is gated on `order == "newest"` at the `generic =`
+          line below, and the sweep asks for relevance. Flipping the sweep's
+          sort looks like the fix and is not:
+        - that set is SINGLE-WORD ONLY by design (see its own comment), and the
+          sweep's query is always multi-word. So the mitigation cannot fire for
+          the sweep under any sort.
+        - Picking which words to send instead does not work either. The obvious
+          rule — keep the first N topic words — chooses "customers saying" out
+          of "what are customers saying about the onboarding flow", which is
+          precisely the query that failed. Whether a word appears literally in
+          this company's Slack is not knowable from the question.
+
+        So the trigger is EVIDENCE, not prediction: run the literal search, and
+        only when it returns nothing usable fall back to the recency window
+        (`query=""`, which the `not query` branch below turns into
+        `after:<date>` + newest — the path verified live 2026-08-03). That
+        costs one extra call ONLY in the case that is currently broken, and it
+        keeps the literal search — which is the RIGHT probe whenever the topic
+        word really is in the messages, the common case for a product or
+        customer name.
+
+        HONESTY IS THE OTHER HALF, and the fallback creates a new way to lie if
+        it is not stated: recent Slack activity is not evidence about the
+        topic. Both branches are labelled — a literal hit says it matched text,
+        a fallback says plainly that NOTHING matched and that what follows may
+        be unrelated — because "recent chatter presented as topic context" is
+        the same false-absence bug wearing a different hat.
+        """
+        deadline = time.monotonic() + SCAN_BUDGET_S
+
+        def _remaining() -> float | None:
+            left = deadline - time.monotonic()
+            return left if left >= _MIN_CALL_TIMEOUT_S else None
+
+        text, kept = self._search_once(handle, inp, timeout=_remaining())
+        if kept or not inp.get(RECENT_FALLBACK_INPUT_KEY):
+            return text, kept
+        query = (inp.get("query") or "").strip()
+        if not query or text == SEARCH_UNAVAILABLE:
+            # Nothing to fall back FROM (the first probe was already the
+            # window), or no search grant at all — retrying buys the identical
+            # answer for a second round trip.
+            return text, kept
+        budget = _remaining()
+        if budget is None:
+            # The literal probe used the whole budget. The fallback is a
+            # NICETY; spending someone else's time on it is not.
+            return text, kept
+        text, kept = self._search_once(
+            handle, {"query": "", "sort": "newest"}, timeout=budget,
+        )
+        if not kept:
+            return (
+                f"(no Slack message contains {query!r}, and there is no Slack "
+                f"activity at all in the last {_DEFAULT_DAYS} days in channels "
+                "search can see. Slack matches literal message text, so the "
+                "first half of that is NOT evidence the topic was never "
+                "discussed — only that nobody used those words.)"
+            ), []
+        # EMPTY, not `kept`, and this is the load-bearing line of the whole
+        # fallback.
+        #
+        # `dispatch_records` turns the second element into `RawRecord`s, and
+        # `sweep_persist` writes those into the tenant's knowledge graph. These
+        # particular hits were selected by RECENCY, not by relevance to
+        # anything the user asked — that is the entire premise of the fallback,
+        # and `recent_fallback_note` says so in as many words. But that note
+        # protects the MODEL and is stripped from the records, so it does not
+        # protect the GRAPH: without this line, a question whose literal search
+        # missed (the common case — it is why the fallback exists) would
+        # extract up to `_MAX_SEARCH_HITS` unrelated messages into that
+        # company's KG as sweep-origin signals, on the shared prod Supabase.
+        #
+        # It also contradicts the rule `sweep_persist.is_persistable` exists to
+        # enforce — "an absence statement is the last thing that should become
+        # evidence" — because a recency fallback IS an absence statement with
+        # unrelated content wrapped around it.
+        #
+        # The prose still reaches the model, carrying its own warning, which is
+        # exactly where content of unknown relevance belongs. Nothing here is
+        # lost for the answer; only the write is refused. `kept` has no other
+        # consumer — `_search` discards it (see the wrapper above).
+        return f"{recent_fallback_note(query)}\n{text}", []
+
+    def _search_once(
+        self, handle: SlackHandle, inp: dict, *, timeout: float | None = None,
     ) -> "tuple[str, list[dict]]":
         """`(rendered text, shareable matches actually rendered)`. Everything
         below is `_search`'s original body, unmodified, with `kept` (the
@@ -681,6 +1086,7 @@ class SlackProvider:
                 else slack_oauth.SEARCH_SORT_RELEVANCE
             ),
             sort_dir="desc",
+            timeout=timeout,
         )
         matches = result.get("matches") or []
         total = result.get("total") or 0

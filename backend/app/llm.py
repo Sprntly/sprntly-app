@@ -1,10 +1,19 @@
-"""Thin wrapper over the Anthropic SDK.
+"""Thin wrapper over the Anthropic SDK — and, for companies that choose it, over
+an OpenAI client wearing the same interface.
 
 All `messages.create` calls go through `_create_with_retries`, which adds
 exponential-backoff retries on transient failures (429 / 5xx / overloaded /
 timeouts / connection drops) and a per-request timeout. Existing callers
 (`call_json` / `call_md`) get this for free; the agent-facing gateway
 (`app.graph.gateway.llm_call`) layers tenant context + telemetry on top.
+
+`get_client()` returns whichever client the acting company's provider calls for
+— a real `anthropic.Anthropic`, or `app.openai_client.OpenAIMessagesClient`,
+which implements the same `messages.create` / `messages.stream` surface (see
+that module for the translation). Everything below this line is written against
+that shared surface and is provider-agnostic: the model id a caller passes is
+translated to the equivalent OpenAI tier inside the client, so no call site,
+prompt, or runner needs a provider conditional.
 """
 import json
 import logging
@@ -20,8 +29,14 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.llm_metering import install_metering
+from app.llm_providers import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from app.openai_client import OpenAIAPIError, OpenAIMessagesClient
 
 logger = logging.getLogger(__name__)
+
+# Either client this module may hand back. Both expose `messages.create` /
+# `messages.stream` with the same kwargs and the same response shape.
+LLMClient = Anthropic | OpenAIMessagesClient
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 # Deep-reasoning tier. Reserved for the handful of calls that are genuinely
@@ -34,6 +49,18 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # Opus tier is standardised on 4.7 (same value as the design-agent escalation
 # model) so there is a single opus version across the codebase.
 DEEP_MODEL = "claude-opus-4-7"
+
+# Classifier tier. The mirror of DEEP_MODEL at the other end: calls that are
+# HIGH-VOLUME, closed-set, and short-output — pick one of N labels, route one
+# message. `app.qa_agent.ROUTER_MODEL` has always been this value; this is the
+# same tier named where the other two live so non-router call sites can reach it
+# without importing qa_agent (which pulls in the whole skill registry).
+#
+# Sized from production: classify_goal_fit ran 5,292 times in 30 days for 99
+# output tokens a call and, on DEFAULT_MODEL, burned 15,444 model-seconds —
+# 3.3% of ALL model time in the system — to choose between "high", "med" and
+# "low". Keep in sync with the pricing row in app/llm_telemetry.py.
+FAST_MODEL = "claude-haiku-4-5"
 
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
 # Concurrent streaming model calls compete for RAM/CPU; past some point on a
@@ -196,19 +223,48 @@ def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     `api_key`, so it never actually splits the cache.
     """
     client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
-    return install_metering(client, key_mode)
+    return install_metering(client, key_mode, provider=PROVIDER_ANTHROPIC)
 
 
-def get_client() -> Anthropic:
-    # Resolve the key for the acting company (see app.llm_keys): the company's own
-    # key when configured, the platform key only when allowed (unbound / still
-    # onboarding / contracted `use_platform_key`), else raise. Embeddings go
-    # through OpenAI and never call this factory.
-    from app.llm_keys import resolve_llm_api_key_with_mode
+@lru_cache(maxsize=16)
+def _openai_client_for_key(
+    api_key: str, key_mode: str = "platform"
+) -> OpenAIMessagesClient:
+    """The OpenAI counterpart of `_client_for_key`, cached the same way.
 
-    key, key_mode = resolve_llm_api_key_with_mode(settings.anthropic_api_key or None)
+    Same contract: no client-side retry (ours is the only layer), the same
+    default read timeout, and metered before caching so an OpenAI workspace's
+    spend lands in `llm_usage_events` on exactly the same footing — tagged
+    `provider='openai'` so the usage dashboard can split the two.
+    """
+    client = OpenAIMessagesClient(api_key=api_key, timeout=_REQUEST_TIMEOUT_S)
+    return install_metering(client, key_mode, provider=PROVIDER_OPENAI)
+
+
+def get_client() -> LLMClient:
+    """The client for the acting company's provider and key (see app.llm_keys).
+
+    Provider and key are resolved in one step: the company's own key when it has
+    one for the provider it chose, that provider's platform key otherwise.
+    Unbound stacks (CLI, startup, unauthenticated) get Anthropic + the platform
+    key, exactly as before. Embeddings go through OpenAI directly and never call
+    this factory.
+    """
+    from app.llm_keys import resolve_llm_client_config
+
+    provider, key, key_mode = resolve_llm_client_config(
+        anthropic_platform_key=settings.anthropic_api_key or None,
+        openai_platform_key=settings.openai_api_key or None,
+    )
     if not key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+        raise HTTPException(
+            500,
+            "OPENAI_API_KEY not configured"
+            if provider == PROVIDER_OPENAI
+            else "ANTHROPIC_API_KEY not configured",
+        )
+    if provider == PROVIDER_OPENAI:
+        return _openai_client_for_key(key, key_mode)
     return _client_for_key(key, key_mode)
 
 
@@ -218,6 +274,11 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, anthropic.APIStatusError):
         # 429 rate limit, 5xx server errors, 529 overloaded.
         return exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, OpenAIAPIError):
+        # Same rule on the OpenAI side. `status_code is None` means the request
+        # never got a response (connection/timeout) — the transport-failure case
+        # the two anthropic exceptions above cover.
+        return exc.status_code is None or exc.status_code == 429 or exc.status_code >= 500
     return False
 
 
@@ -226,7 +287,7 @@ def _attempt_delay(attempt: int) -> float:
 
 
 def _create_with_retries(
-    client: Anthropic, *, stream: bool = False, background: bool = False,
+    client: LLMClient, *, stream: bool = False, background: bool = False,
     on_delta=None, on_json_delta=None, **kwargs
 ):
     """`messages.create` with exponential backoff on transient failures.
@@ -380,12 +441,20 @@ def _build_base_kwargs(
 
 
 def _capture_meta(meta_out: dict | None, msg, model: str) -> None:
-    """Populate caller-supplied meta_out with usage/stop info (gateway telemetry)."""
+    """Populate caller-supplied meta_out with usage/stop info (gateway telemetry).
+
+    The RESPONSE's own model wins over the one the caller asked for, matching
+    what `app.llm_metering` records. It matters on two counts: an Anthropic
+    alias resolves to a concrete id, and on OpenAI the call site's Claude id was
+    translated to an OpenAI model — so trusting the request would have the
+    gateway price real OpenAI tokens against Claude's rate card in
+    `agent_decision_log`.
+    """
     if meta_out is None:
         return
     u = getattr(msg, "usage", None)
     meta_out.update({
-        "model": model,
+        "model": getattr(msg, "model", None) or model,
         "input_tokens": getattr(u, "input_tokens", 0) or 0,
         "output_tokens": getattr(u, "output_tokens", 0) or 0,
         "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,

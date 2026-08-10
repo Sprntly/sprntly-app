@@ -70,6 +70,28 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.1 / 1_000_000,
         "output":         5.0 / 1_000_000,
     },
+    # SAME TIER, DATED ID. We REQUEST "claude-haiku-4-5" but the API echoes back
+    # the dated snapshot in `response.model`, and both the metering path
+    # (app.llm_metering, keyed on the ACTUAL returned model) and
+    # `gateway._est_cost` look up that returned string. With only the alias row
+    # above, every haiku call priced at $0: 1,769 `llm_usage unpriced
+    # model=claude-haiku-4-5-20251001` warnings across prod+staging in 14 days,
+    # and cost_usd=0.0 on every corresponding agent_decision_log row. Haiku spend
+    # was invisible, not cheap.
+    #
+    # This is only a haiku problem today because the sonnet and opus aliases
+    # happen to echo back unchanged. If a future model starts returning a dated
+    # id, it fails the same silent way — `_est_cost` returns 0.0 for an unknown
+    # model rather than raising (unlike RunUsage.est_cost_usd). The durable fix
+    # is normalising a dated id to its base before lookup; this row is the
+    # correct-now fix, and it matters immediately because classify_goal_fit —
+    # 5,292 calls in 30 days — moves onto this tier.
+    "claude-haiku-4-5-20251001": {
+        "input":          1.0 / 1_000_000,
+        "cache_write_1h": 1.25 / 1_000_000,
+        "cache_read":     0.1 / 1_000_000,
+        "output":         5.0 / 1_000_000,
+    },
     # OpenAI embeddings (KG signal/theme vectors — app.graph.embeddings). Anthropic
     # has no embeddings API, so this is the one non-Anthropic priced model. Billed
     # on prompt tokens only — no output, no prompt caching — so the other three
@@ -80,6 +102,47 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_write_1h": 0.0,
         "cache_read":     0.0,
         "output":         0.0,
+    },
+    # --- OpenAI chat models -------------------------------------------------
+    # For companies whose `llm_provider` is 'openai'. `app.openai_client` maps
+    # the repo's three Claude tiers onto these three, so a workspace switching
+    # provider produces rows here instead of in the claude-* rows above.
+    #
+    # Rates from OpenAI's published pricing (developers.openai.com/api/docs/
+    # pricing, read 2026-08-07). Unlike the sonnet/opus rows above, `cache_write_1h`
+    # here is the rate the code's OWN requests actually earn: OpenAI's prompt
+    # caching is automatic with no TTL to choose, and GPT-5.6+ bills cache writes
+    # at 1.25x the input rate. So these three are correctly rated and need none
+    # of the 1.6x caveat documented above.
+    "gpt-5.6-sol": {  # flagship — the claude-opus-4-7 tier
+        "input":          5.0 / 1_000_000,
+        "cache_write_1h": 6.25 / 1_000_000,
+        "cache_read":     0.5 / 1_000_000,
+        "output":         30.0 / 1_000_000,
+    },
+    "gpt-5.6-terra": {  # balanced — the claude-sonnet-4-6 default tier
+        "input":          2.0 / 1_000_000,
+        "cache_write_1h": 2.5 / 1_000_000,
+        "cache_read":     0.2 / 1_000_000,
+        "output":         12.0 / 1_000_000,
+    },
+    "gpt-5.6-luna": {  # low-cost — the claude-haiku-4-5 router/classifier tier
+        "input":          0.2 / 1_000_000,
+        "cache_write_1h": 0.25 / 1_000_000,
+        "cache_read":     0.02 / 1_000_000,
+        "output":         1.2 / 1_000_000,
+    },
+    # Search-model variant used for `call_with_web_search` on OpenAI — Chat
+    # Completions has no web_search TOOL, so search is a property of the model.
+    # OpenAI does not publish a separate token rate for it; priced at the gpt-5
+    # base rate it derives from, which is what the tokens are billed at. The
+    # per-search request fee is NOT captured here — like every figure in this
+    # table, `est_cost_usd` is a token estimate, not an invoice.
+    "gpt-5-search-api": {
+        "input":          1.25 / 1_000_000,
+        "cache_write_1h": 1.5625 / 1_000_000,
+        "cache_read":     0.125 / 1_000_000,
+        "output":         10.0 / 1_000_000,
     },
 }
 

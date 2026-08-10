@@ -218,13 +218,19 @@ export function Sidebar(_props: SidebarProps = {}) {
 
       {/* Main nav icons */}
       <div className="sb-rail-nav">
-        {/* Workbench — the door to your OPEN WORK on the home surface: it lands
+        {/* Workbench is HIDDEN from the rail for now (product call, 2026-08-07),
+            the same way Search is: the surface it opens is untouched. New chat
+            still lands on `/`, Top Insights still activates the pinned tab, and
+            goToWorkbench + the `/?tab=last` one-shot ChatScreen consumes are all
+            still wired — only this trigger is withheld. Uncomment to put it back.
+
+            Workbench — the door to your OPEN WORK on the home surface: it lands
             on the last chat tab you were on, never on the pinned Top Insights
             tab (which has its own item right below). Not a RailItem because it
             isn't a plain screen nav: goToWorkbench pushes the one-shot
             `/?tab=last` that ChatScreen consumes to restore that tab. Highlighted
             on the chat surface (`/`), the route it always lands on. */}
-        <button
+        {/* <button
           type="button"
           className={`sb-rail-item${currentScreen === "chat" ? " active" : ""}`}
           title="Workbench"
@@ -235,12 +241,22 @@ export function Sidebar(_props: SidebarProps = {}) {
           <IconBrowser size={18} />
           <span className="sb-rail-label">Workbench</span>
           <span className="nav-tooltip">Workbench</span>
-        </button>
+        </button> */}
         <RailItem screen="brief" icon={<IconSparkles size={18} />} label="Top Insights" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="Chat history" />
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
-        {/* <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" /> */}
+        {/* Templates is back on the rail with artifact formats — the screen now
+            decides what every PRD, ticket and engineering spec Sprntly writes
+            LOOKS like, not only which finished examples it reads for voice.
+            That is a setting a PM sets up once and returns to, so it needs a
+            door of its own; while the screen was exemplars-only there was
+            nothing on it worth navigating to and the item stayed commented
+            out. Label stays "Templates" — the route, ScreenId,
+            MAIN_CHROME_TITLE, PATH_TO_SCREEN and the command palette all say
+            it, and renaming here alone would put the rail out of sync with the
+            URL and the palette. */}
+        <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" />
         {/* Skills is back on the rail with Custom Skills (PRD 1854) — the
             library is now a real user surface (upload + invoke), not just a
             catalog. Sources stays hidden (screen/route/backends intact). */}

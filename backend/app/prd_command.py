@@ -56,6 +56,12 @@ is_prd_command = false for:
 - questions about PRDs in general ("what makes a good PRD?")
 - questions or comments about an existing PRD ("does the PRD cover mobile?",
   "the PRD for dark mode is missing metrics")
+- requests to OPEN, show or find an existing PRD ("open the PRD for
+  compliance reporting", "pull up the checkout abandonment PRD", "show me the
+  PRD about onboarding"). These name a topic and a PRD exactly like a create
+  request does, so only the VERB separates them: open / pull up / bring up /
+  show me / find / take me to means the document already exists and the user
+  wants to SEE it. Writing one instead is the worst outcome available here.
 - requests to create TICKETS/stories (even from a PRD)
 - everything else.
 

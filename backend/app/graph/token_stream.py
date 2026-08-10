@@ -33,6 +33,8 @@ and the poll carries the persisted result as before.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from typing import Any, AsyncIterator, Callable
 
 # Token deltas are far more frequent than the design-agent's coarse step events,
@@ -105,14 +107,89 @@ def publish_threadsafe(
         pass  # loop already closed
 
 
+# --- delta coalescing --------------------------------------------------------
+#
+# WHY: `on_delta` fires once per model text delta — thousands of times for a
+# ~100 KB PRD. Publishing each one individually meant thousands of
+# `call_soon_threadsafe` hops, each waking the single event loop that also
+# serves every HTTP request in the process, and each running a `publish` that
+# re-copied the whole accumulated document.
+#
+# Measured on 30 days of production telemetry: `generate_prd_part_a` is the ONLY
+# call in the system that degrades under concurrency, and it degrades ~2x
+# (18.9s -> 40.4s per 1k output tokens on prod, 19.7s -> 42.7s on staging,
+# independently). It is also the only long generation that passes an on_delta —
+# Part B is background and evidence is warmed, and both are flat at every
+# concurrency level. Buffering here is the contained fix for that.
+#
+# Coalescing also removes the quadratic accumulation in `publish` as a side
+# effect, without changing `_accum`'s representation: ~4,000 appends become ~50,
+# so the bytes copied per generation fall from ~200 MB to ~2.5 MB. Turning
+# `_accum` into a list-and-join is a further tidy-up, deliberately NOT done here
+# so the pub/sub contract and its tests stay untouched.
+#
+# NOT a UX regression: the frontend already throttles its iframe writes to 400ms
+# (web/app/.../streamGeneration.ts), so a 100ms server-side flush is invisible.
+_FLUSH_INTERVAL_S = 0.1
+_FLUSH_BYTES = 8192
+
+# channel -> drain() for the sink currently streaming it, so `close()` can flush
+# the final partial buffer. Without this the TAIL of every document — whatever
+# arrived after the last threshold crossing — would never reach a live viewer.
+# Loop-thread only, like `_subscribers`.
+_pending_drains: dict[str, Callable[[], str]] = {}
+
+
 def delta_sink(
     loop: asyncio.AbstractEventLoop, channel: str
 ) -> Callable[[str], None]:
-    """Build an `on_delta(text)` for `llm_call(on_delta=…)` that streams each
-    text delta to `channel` from the worker thread. Empty deltas are skipped."""
+    """Build an `on_delta(text)` for `llm_call(on_delta=…)` that streams text
+    deltas to `channel` from the worker thread, COALESCED.
+
+    Deltas are buffered on the calling (worker) thread and published as one
+    frame every `_FLUSH_INTERVAL_S` or `_FLUSH_BYTES`, whichever comes first —
+    see the note above for why. Empty deltas are skipped. The final partial
+    buffer is flushed by `close()`.
+    """
+    buf: list[str] = []
+    pending = [0]                    # running byte count; summing buf per delta
+                                     # would reintroduce the O(n^2) we are here
+                                     # to remove.
+    last_flush = [time.monotonic()]
+    lock = threading.Lock()
+
+    def _drain() -> str:
+        """Atomically take everything buffered. Returns "" when empty.
+
+        Deliberately does NOT publish: the caller decides how. The worker
+        thread must hop onto the loop (`publish_threadsafe`); `close()` is
+        already ON the loop and must publish directly — scheduling from there
+        would land the tail AFTER the terminal sentinel and after the replay
+        buffer had been dropped.
+        """
+        with lock:
+            if not buf:
+                return ""
+            text = "".join(buf)
+            buf.clear()
+            pending[0] = 0
+            last_flush[0] = time.monotonic()
+            return text
+
     def _on_delta(text: str) -> None:
-        if text:
-            publish_threadsafe(loop, channel, {"kind": "delta", "text": text})
+        if not text:
+            return
+        with lock:
+            buf.append(text)
+            pending[0] += len(text)
+            due = (pending[0] >= _FLUSH_BYTES
+                   or time.monotonic() - last_flush[0] >= _FLUSH_INTERVAL_S)
+        if due:
+            chunk = _drain()
+            if chunk:
+                publish_threadsafe(loop, channel, {"kind": "delta", "text": chunk})
+
+    _pending_drains[channel] = _drain
     return _on_delta
 
 
@@ -181,7 +258,21 @@ def close(channel: str, *, kind: str = "done") -> None:
     serves the persisted doc), and the next generation on this channel starts
     accumulating from empty. Call on the loop thread; from a worker thread use
     `close_threadsafe`.
+
+    Flushes the channel's coalescing buffer FIRST (see `delta_sink`): whatever
+    arrived after the last threshold crossing is the TAIL of the document, and
+    without this it would never reach a live viewer. Published directly rather
+    than via `publish_threadsafe` because we are already on the loop —
+    scheduling would run after the sentinel below, into an already-cleared
+    channel. Order matters: flush, then drop the replay buffer, then send the
+    sentinel.
     """
+    drain = _pending_drains.pop(channel, None)
+    if drain is not None:
+        tail = drain()
+        if tail:
+            publish(channel, {"kind": "delta", "text": tail})
+
     _accum.pop(channel, None)
     _accum_overflowed.discard(channel)
     queues = _subscribers.pop(channel, set())

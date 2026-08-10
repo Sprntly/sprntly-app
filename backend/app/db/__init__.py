@@ -141,15 +141,41 @@ from app.db.datasets import (
     list_datasets,
 )
 
+# Artifact format templates (company-scoped, user-uploaded PRD/ticket/spec FORMS)
+from app.db.artifact_templates import (
+    ActiveTemplateConflict,
+    activate_template,
+    deactivate_template,
+    delete_template,
+    get_active_template,
+    get_template_by_id,
+    insert_template,
+    list_templates,
+    set_compile_result,
+    update_template,
+)
+
 # Custom skills (workspace-scoped, user-uploaded — PRD 1854)
 from app.db.custom_skills import (
     DuplicateSkillSlug,
     delete_custom_skill,
+    detach_skills_from_source,
     get_custom_skill,
     get_custom_skill_by_id,
     insert_custom_skill,
     list_custom_skills,
     update_custom_skill,
+)
+
+# Synced skill folders (the GitHub folders kept live — 20260807170000)
+from app.db.skill_sources import (
+    deactivate_skill_source,
+    get_skill_source,
+    get_skill_source_for_folder,
+    list_active_skill_sources,
+    list_skill_sources,
+    record_skill_source_sync,
+    upsert_skill_source,
 )
 
 # Connections (OAuth)
@@ -167,6 +193,7 @@ from app.db.connections import (
     patch_connection_config,
     patch_slack_connection_config,
     set_connection_health,
+    update_connection_sa_key,
     update_connection_sync,
     update_connection_tokens,
     update_slack_connection_sync,
@@ -305,14 +332,34 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # artifact format templates
+    "ActiveTemplateConflict",
+    "activate_template",
+    "deactivate_template",
+    "delete_template",
+    "get_active_template",
+    "get_template_by_id",
+    "insert_template",
+    "list_templates",
+    "set_compile_result",
+    "update_template",
     # custom skills
     "DuplicateSkillSlug",
     "delete_custom_skill",
+    "detach_skills_from_source",
     "get_custom_skill",
     "get_custom_skill_by_id",
     "insert_custom_skill",
     "list_custom_skills",
     "update_custom_skill",
+    # synced skill folders
+    "deactivate_skill_source",
+    "get_skill_source",
+    "get_skill_source_for_folder",
+    "list_active_skill_sources",
+    "list_skill_sources",
+    "record_skill_source_sync",
+    "upsert_skill_source",
     # input sources
     "delete_input_source",
     "list_input_sources",
@@ -331,6 +378,7 @@ __all__ = [
     "patch_connection_config",
     "patch_slack_connection_config",
     "set_connection_health",
+    "update_connection_sa_key",
     "update_connection_sync",
     "update_connection_tokens",
     "update_slack_connection_sync",

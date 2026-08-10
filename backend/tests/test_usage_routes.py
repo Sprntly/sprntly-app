@@ -27,6 +27,7 @@ def _row(**over):
         "day": _today(),
         "feature": "prd",
         "operation": "generate",
+        "provider": "anthropic",
         "model": "claude-sonnet-4-6",
         "key_mode": "customer",
         "calls": 1,
@@ -78,6 +79,136 @@ def test_summary_aggregates_totals_and_breakdowns(tenant_client):
         "claude-sonnet-4-6", "claude-opus-4-7",
     }
     assert body["scope"] == "customer_key"
+
+
+def test_summary_splits_spend_by_provider(tenant_client):
+    """A workspace that switched providers mid-period reconciles against two
+    separate invoices, so the split has to be on the page.
+
+    This breakdown shipped as a permanently empty list until the rollup started
+    returning `provider` (migration 20260807120100) — the API key existed, the
+    data behind it did not.
+    """
+    env = tenant_client.make("usage-providers")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", model="claude-sonnet-4-6", est_cost_usd=0.30, calls=2),
+        _row(provider="openai", model="gpt-5.6-terra", est_cost_usd=0.70, calls=5),
+        _row(provider="openai", model="gpt-5.6-luna", est_cost_usd=0.01, calls=9),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30").json()
+    by_provider = {b["provider"]: b for b in body["by_provider"]}
+
+    assert set(by_provider) == {"anthropic", "openai"}
+    # Ranked by spend, and the two openai rows roll up into one bucket.
+    assert body["by_provider"][0]["provider"] == "openai"
+    assert by_provider["openai"]["est_cost_usd"] == pytest.approx(0.71)
+    assert by_provider["openai"]["calls"] == 14
+    assert by_provider["anthropic"]["est_cost_usd"] == pytest.approx(0.30)
+
+
+def test_summary_scoped_to_a_provider_covers_that_provider_alone(tenant_client):
+    """The Admin dashboard reports on the provider the workspace runs on.
+
+    Claude and OpenAI are separate accounts with separate invoices, so a blended
+    figure reconciles against neither. Scoping has to reach EVERY view — the
+    headline total, the daily series and each breakdown — because a single one
+    left un-scoped puts the other provider's spend under this provider's
+    heading.
+    """
+    env = tenant_client.make("usage-scope-openai")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", feature="prd", model="claude-sonnet-4-6",
+             est_cost_usd=0.30, calls=2, input_tokens=2000, output_tokens=100),
+        _row(provider="openai", feature="chat", model="gpt-5.6-terra",
+             est_cost_usd=0.70, calls=5, input_tokens=5000, output_tokens=400),
+        _row(provider="openai", feature="ask", model="gpt-5.6-luna",
+             est_cost_usd=0.01, calls=9, input_tokens=900, output_tokens=50),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30&provider=openai").json()
+
+    # Echoed, so the client captions the chart with the scope it was served.
+    assert body["provider"] == "openai"
+    assert body["totals"]["est_cost_usd"] == pytest.approx(0.71)
+    assert body["totals"]["calls"] == 14
+    assert body["totals"]["input_tokens"] == 5900
+    # No Anthropic row survives into any view.
+    assert {b["feature"] for b in body["by_feature"]} == {"chat", "ask"}
+    assert {b["model"] for b in body["by_model"]} == {"gpt-5.6-terra", "gpt-5.6-luna"}
+    assert [b["provider"] for b in body["by_provider"]] == ["openai"]
+    assert sum(d["est_cost_usd"] for d in body["daily"]) == pytest.approx(0.71)
+
+
+def test_summary_scoped_to_anthropic_excludes_openai(tenant_client):
+    """The mirror case — switching back must not carry OpenAI spend along."""
+    env = tenant_client.make("usage-scope-anthropic")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", model="claude-sonnet-4-6", est_cost_usd=0.30, calls=2),
+        _row(provider="openai", model="gpt-5.6-terra", est_cost_usd=99.00, calls=500),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30&provider=anthropic").json()
+
+    assert body["provider"] == "anthropic"
+    assert body["totals"]["est_cost_usd"] == pytest.approx(0.30)
+    assert body["totals"]["calls"] == 2
+    assert [b["provider"] for b in body["by_provider"]] == ["anthropic"]
+
+
+def test_summary_without_a_provider_still_covers_everything(tenant_client):
+    """Omitting the filter keeps the original un-scoped behaviour, so an
+    existing caller (and the CSV pulled by hand) is unaffected."""
+    env = tenant_client.make("usage-scope-absent")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", est_cost_usd=0.30, calls=2),
+        _row(provider="openai", model="gpt-5.6-terra", est_cost_usd=0.70, calls=5),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30").json()
+
+    assert body["provider"] is None
+    assert body["totals"]["est_cost_usd"] == pytest.approx(1.00)
+    assert {b["provider"] for b in body["by_provider"]} == {"anthropic", "openai"}
+
+
+def test_summary_scoped_to_a_provider_with_no_usage_is_empty_not_an_error(tenant_client):
+    """A workspace that has never run on OpenAI — or has run on it only using
+    Sprntly's key — sees an honest zero, not a 404 and not the other provider's
+    numbers."""
+    env = tenant_client.make("usage-scope-quiet")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", est_cost_usd=5.00, calls=10),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30&provider=openai").json()
+
+    assert body["totals"]["calls"] == 0
+    assert body["totals"]["est_cost_usd"] == 0
+    assert body["by_feature"] == []
+    assert body["by_provider"] == []
+    assert len(body["daily"]) == 30
+
+
+def test_summary_rejects_an_unknown_provider(tenant_client):
+    """A typo must not be coerced to Anthropic — that would serve real numbers
+    under the wrong heading, which on a spend page is worse than an error."""
+    env = tenant_client.make("usage-scope-bogus")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = []
+
+    resp = env.client.get("/v1/admin/usage/summary?days=30&provider=gemini")
+    assert resp.status_code == 400
+
+
+def test_summary_provider_filter_is_case_and_space_insensitive(tenant_client):
+    env = tenant_client.make("usage-scope-messy")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="openai", model="gpt-5.6-terra", est_cost_usd=0.70, calls=5),
+    ]
+
+    body = env.client.get("/v1/admin/usage/summary?days=30&provider=%20OpenAI%20").json()
+    assert body["provider"] == "openai"
+    assert body["totals"]["calls"] == 5
 
 
 def test_summary_gap_fills_days_with_no_usage(tenant_client):
@@ -154,7 +285,7 @@ def test_csv_export_has_a_header_and_one_row_per_group(tenant_client):
     assert "attachment" in resp.headers["content-disposition"]
 
     lines = [ln for ln in resp.text.splitlines() if ln.strip()]
-    assert lines[0].startswith("day,feature,operation,model,key_mode,")
+    assert lines[0].startswith("day,feature,operation,provider,model,key_mode,")
     assert len(lines) == 3  # header + 2 rows
 
 
@@ -193,6 +324,24 @@ def test_summary_is_empty_when_all_usage_is_on_the_platform_key(tenant_client):
     assert body["totals"]["calls"] == 0
     assert body["totals"]["est_cost_usd"] == 0
     assert body["by_feature"] == []
+
+
+def test_csv_export_honours_the_provider_filter(tenant_client):
+    """An export taken from a scoped dashboard contains what that dashboard
+    showed, and says which provider in its filename — two same-day exports
+    otherwise land as `foo.csv` and `foo (1).csv`."""
+    env = tenant_client.make("usage-csv-provider")
+    FakeSupabaseClient.rpc_returns["llm_usage_summary"] = [
+        _row(provider="anthropic", feature="prd"),
+        _row(provider="openai", feature="chat", model="gpt-5.6-terra"),
+    ]
+
+    resp = env.client.get("/v1/admin/usage/export.csv?days=7&provider=openai")
+    assert resp.status_code == 200
+    lines = [ln for ln in resp.text.splitlines() if ln.strip()]
+    assert len(lines) == 2  # header + the one openai row
+    assert "anthropic" not in resp.text
+    assert "openai" in resp.headers["content-disposition"]
 
 
 def test_csv_export_is_customer_key_only(tenant_client):

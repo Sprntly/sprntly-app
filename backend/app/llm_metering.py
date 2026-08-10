@@ -1,9 +1,14 @@
-"""Usage metering wrapper around the Anthropic client.
+"""Usage metering wrapper around the LLM client.
 
-Every Claude call in this codebase is issued through one of three client
+Every model call in this codebase is issued through one of three client
 factories (`app.llm`, `app.design_agent.client`, `app.routes.agent_chat`). This
 module wraps the client those factories return so that **one row is recorded per
 model call, everywhere, without touching a single call site**.
+
+Provider-agnostic by construction: it only touches `client.messages`, and
+`app.openai_client.OpenAIMessagesClient` presents the same `create` / `stream`
+surface and the same response shape as the Anthropic SDK. So a workspace running
+on OpenAI is metered by exactly this code, tagged `provider='openai'`.
 
 Instrumenting the client rather than the ~40 call sites is deliberate: call-site
 metering means a permanent drift problem where every new feature is silently
@@ -42,6 +47,7 @@ logger = logging.getLogger(__name__)
 def _record(
     *,
     key_mode: str,
+    provider: str,
     model: str | None,
     message: Any | None,
     started_at: float,
@@ -89,7 +95,7 @@ def _record(
             feature=scope.feature,
             operation=scope.operation,
             user_id=scope.user_id,
-            provider="anthropic",
+            provider=provider,
             model=actual_model,
             key_mode=key_mode,
             input_tokens=run.input_tokens,
@@ -113,9 +119,12 @@ class _MeteredStream:
     the real object and behave identically.
     """
 
-    def __init__(self, inner: Any, key_mode: str, model: str | None, started_at: float):
+    def __init__(
+        self, inner: Any, key_mode: str, provider: str, model: str | None, started_at: float
+    ):
         self._inner = inner
         self._key_mode = key_mode
+        self._provider = provider
         self._model = model
         self._started_at = started_at
         self._recorded = False
@@ -134,6 +143,7 @@ class _MeteredStream:
             self._recorded = True
             _record(
                 key_mode=self._key_mode,
+                provider=self._provider,
                 model=self._model,
                 message=msg,
                 started_at=self._started_at,
@@ -144,21 +154,27 @@ class _MeteredStream:
 class _MeteredStreamManager:
     """Proxies the SDK's `MessageStreamManager` context manager."""
 
-    def __init__(self, inner: Any, key_mode: str, model: str | None):
+    def __init__(self, inner: Any, key_mode: str, provider: str, model: str | None):
         self._inner = inner
         self._key_mode = key_mode
+        self._provider = provider
         self._model = model
         self._started_at = time.monotonic()
 
     def __enter__(self) -> _MeteredStream:
         return _MeteredStream(
-            self._inner.__enter__(), self._key_mode, self._model, self._started_at
+            self._inner.__enter__(),
+            self._key_mode,
+            self._provider,
+            self._model,
+            self._started_at,
         )
 
     def __exit__(self, exc_type, exc, tb) -> Any:
         if exc_type is not None:
             _record(
                 key_mode=self._key_mode,
+                provider=self._provider,
                 model=self._model,
                 message=None,
                 started_at=self._started_at,
@@ -174,9 +190,10 @@ class _MeteredStreamManager:
 class _MeteredMessages:
     """Proxies `client.messages`, metering `create` and `stream`."""
 
-    def __init__(self, inner: Any, key_mode: str):
+    def __init__(self, inner: Any, key_mode: str, provider: str):
         self._inner = inner
         self._key_mode = key_mode
+        self._provider = provider
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -192,6 +209,7 @@ class _MeteredMessages:
             # real, then re-raise untouched.
             _record(
                 key_mode=self._key_mode,
+                provider=self._provider,
                 model=model,
                 message=None,
                 started_at=started_at,
@@ -200,18 +218,22 @@ class _MeteredMessages:
             )
             raise
         _record(
-            key_mode=self._key_mode, model=model, message=msg, started_at=started_at
+            key_mode=self._key_mode,
+            provider=self._provider,
+            model=model,
+            message=msg,
+            started_at=started_at,
         )
         return msg
 
     def stream(self, **kwargs: Any) -> _MeteredStreamManager:
         return _MeteredStreamManager(
-            self._inner.stream(**kwargs), self._key_mode, kwargs.get("model")
+            self._inner.stream(**kwargs), self._key_mode, self._provider, kwargs.get("model")
         )
 
 
-def install_metering(client: Any, key_mode: str) -> Any:
-    """Instrument an Anthropic client in place; returns the same client.
+def install_metering(client: Any, key_mode: str, provider: str = "anthropic") -> Any:
+    """Instrument an LLM client in place; returns the same client.
 
     Swaps `client.messages` for a metering proxy. The client object ITSELF is
     left alone — deliberately, rather than returning a wrapper object: callers
@@ -220,16 +242,18 @@ def install_metering(client: Any, key_mode: str) -> Any:
     cache returning the identical instance across calls. `messages` is a
     `cached_property` on the SDK class, so assigning to the instance shadows it
     cleanly (verified against anthropic 0.117.0); every other attribute of the
-    client is untouched.
+    client is untouched. `OpenAIMessagesClient.messages` is a plain instance
+    attribute for the same reason — so this assignment works on both.
 
-    `key_mode` is fixed per client because the clients are cached per API key,
-    and whose key it is follows from the key itself — so the label can never
-    drift from the credential that was actually billed.
+    `key_mode` and `provider` are both fixed per client because the clients are
+    cached per API key, and both facts follow from the key itself — so neither
+    label can drift from the credential that was actually billed. `provider`
+    defaults to Anthropic to keep the pre-OpenAI call shape working.
 
     Idempotent: re-installing on an already-metered client is a no-op, so a
     double-wrap can never double-count.
     """
     if isinstance(getattr(client, "messages", None), _MeteredMessages):
         return client
-    client.messages = _MeteredMessages(client.messages, key_mode)
+    client.messages = _MeteredMessages(client.messages, key_mode, provider)
     return client

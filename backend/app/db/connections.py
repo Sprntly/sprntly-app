@@ -226,6 +226,24 @@ def update_connection_tokens(
     )
 
 
+def update_connection_sa_key(
+    company_id: str, provider: str, sa_key_encrypted: str
+) -> None:
+    """Store the Fernet-encrypted service-account private key in its DEDICATED
+    column, separate from the OAuth user token (token_json_encrypted) so both
+    coexist. Never returned by the connectors serializer (explicit allowlist)."""
+    c = require_client()
+    (
+        c.table("connections")
+        .update(
+            {"sa_key_encrypted": sa_key_encrypted, "updated_at": utc_now()}
+        )
+        .eq(_owner_column(), company_id)
+        .eq("provider", provider)
+        .execute()
+    )
+
+
 def update_connection_sync(
     company_id: str,
     provider: str,

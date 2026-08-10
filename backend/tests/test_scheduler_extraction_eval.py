@@ -29,7 +29,11 @@ def _run_start_scheduler(monkeypatch):
     monkeypatch.setattr(sched_mod.settings, "pipeline_interval_hours", 6)
     monkeypatch.setattr(sched_mod.settings, "extraction_eval_interval_hours", 24)
     fake = _FakeScheduler()
-    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda: fake)
+    # `**_` so this fake tolerates whatever construction kwargs start_scheduler
+    # passes. It now passes `job_defaults` (misfire grace + coalesce — the fix
+    # this branch carries); a zero-arg lambda made every such addition a
+    # TypeError in a test that is not about scheduler construction at all.
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda **_: fake)
     sched_mod.start_scheduler()
     sched_mod.shutdown_scheduler()
     return fake

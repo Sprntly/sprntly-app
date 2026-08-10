@@ -12,6 +12,11 @@ on:
       - 'backend/data/sprntly_*_template.md'
       - 'backend/data/sprntly_*_sample.md'
       - 'backend/skills/prd-author/templates/prd-template.md'
+      # The evidence render contract (app/lib/__tests__/evidence-render-contract
+      # .test.ts) reads the SAME golden brief the backend asserts against, so an
+      # edit to the fixture or to the evidence skill must run the web suite too.
+      - 'backend/tests/fixtures/evidence/*.html'
+      - 'backend/skills/evidence-brief/**'
   pull_request:
     paths:
       - 'web/**'
@@ -19,6 +24,11 @@ on:
       - 'backend/data/sprntly_*_template.md'
       - 'backend/data/sprntly_*_sample.md'
       - 'backend/skills/prd-author/templates/prd-template.md'
+      # The evidence render contract (app/lib/__tests__/evidence-render-contract
+      # .test.ts) reads the SAME golden brief the backend asserts against, so an
+      # edit to the fixture or to the evidence skill must run the web suite too.
+      - 'backend/tests/fixtures/evidence/*.html'
+      - 'backend/skills/evidence-brief/**'
 
 jobs:
   vitest:

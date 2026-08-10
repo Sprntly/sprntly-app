@@ -93,6 +93,10 @@ def test_llm_call_returns_result_and_logs_telemetry(isolated_settings, monkeypat
     assert rows[0]["decision_type"] == "llm_call"
     assert rows[0]["factors"]["purpose"] == "test"
     assert rows[0]["prompt_version"] == "v1"
+    # Cache accounting rides in factors — BOTH sides. cache_creation makes a
+    # fleet racing one shared prefix visible (all cache_read=0 + creation>0).
+    assert "cache_read_input_tokens" in rows[0]["factors"]
+    assert "cache_creation_input_tokens" in rows[0]["factors"]
 
 
 def test_llm_call_log_failure_does_not_break_call(isolated_settings, monkeypatch):
