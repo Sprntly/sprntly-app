@@ -31,7 +31,7 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+import { ChatSuggestionIcon, IconDocument, IconMic, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
@@ -40,6 +40,7 @@ import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type 
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
+import { useSpeechInput } from "../../../lib/useSpeechInput"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
@@ -848,6 +849,9 @@ function ChatComposer({
   onRemoveAttachment,
   onRemoveSkill,
   onFileSelect,
+  voiceSupported,
+  voiceListening,
+  onToggleVoice,
 }: {
   home?: boolean
   busy: boolean
@@ -871,6 +875,12 @@ function ChatComposer({
   onRemoveAttachment: (index: number) => void
   onRemoveSkill: () => void
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void
+  /** The browser has the Web Speech API. False renders NO microphone at all —
+   *  Firefox ships it behind a flag, and a button that silently does nothing is
+   *  worse than an affordance that was never offered. */
+  voiceSupported: boolean
+  voiceListening: boolean
+  onToggleVoice: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
   // Opening the menu moves focus into it, so it is operable from the keyboard at
@@ -972,6 +982,27 @@ function ChatComposer({
             <span className="cx-count">
               {draft.length.toLocaleString()} / {DRAFT_MAX_CHARS.toLocaleString()}
             </span>
+          ) : null}
+          {/* Dictation, immediately left of Send — the two ways to finish a
+              question sit together on the right of the box.
+
+              It fills the draft and stops there. A transcript is close, not
+              correct: names and product nouns come back mangled often enough
+              that auto-sending would spend a whole ask run on a question nobody
+              asked. So the words land in the box, the box stays editable, and
+              Enter stays the user's. Deliberately NOT swapped out while busy —
+              dictating the next question during a wait is the point. */}
+          {voiceSupported ? (
+            <button
+              type="button"
+              className={`cx-mic${voiceListening ? " is-recording" : ""}`}
+              aria-label={voiceListening ? "Stop dictating" : "Dictate your question"}
+              aria-pressed={voiceListening}
+              title={voiceListening ? "Stop dictating" : "Dictate your question"}
+              onClick={onToggleVoice}
+            >
+              <IconMic size={17} />
+            </button>
           ) : null}
           {/* Send and Stop occupy the SAME slot at the SAME size, so the footer
               never reflows at the moment of sending. There is deliberately no
@@ -1614,6 +1645,40 @@ export function ChatScreen() {
     requestAnimationFrame(() => composerRef.current?.focus())
   }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // ── Dictation ────────────────────────────────────────────────────────────
+  // Whatever was already typed when the mic was switched on. Speech APPENDS to
+  // a draft rather than replacing it, so half a typed question plus a spoken
+  // finish is one question — and the hook hands back a cumulative transcript,
+  // so this base is what makes assigning (rather than appending) safe as the
+  // interim phrase rewrites itself word by word.
+  const voiceBaseRef = useRef("")
+  const handleVoiceTranscript = useCallback((text: string) => {
+    if (!text) return
+    setDraft((voiceBaseRef.current + text).slice(0, DRAFT_MAX_CHARS))
+    // The textarea's auto-grow lives in the `change` handler, which speech never
+    // fires — without this the box stays one line tall while the words pile up
+    // out of sight.
+    const ta = composerRef.current
+    if (ta) {
+      ta.style.height = "auto"
+      ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+    }
+  }, [])
+  const voice = useSpeechInput(handleVoiceTranscript)
+  const handleToggleVoice = useCallback(() => {
+    if (voice.listening) {
+      voice.stop()
+      composerRef.current?.focus()
+      return
+    }
+    // Start speaking mid-sentence and the words join the sentence, with one
+    // space between what was typed and what was said.
+    const typed = draft.trimEnd()
+    voiceBaseRef.current = typed ? `${typed} ` : ""
+    voice.start()
+  }, [voice, draft])
+
   // The scrolling thread viewport, so a new question (and the assistant's
   // thinking/answer under it) is scrolled into view instead of staying hidden
   // below the fold in a long conversation.
@@ -5197,6 +5262,13 @@ export function ChatScreen() {
     // protocol. The trigger stays visible on the sent turn, which is what makes
     // the wait's skill chip verifiable from the thread itself.
     const sent = pinnedSkill ? `${pinnedSkill.trigger} ${q}` : q
+    // Sending ends the dictation that produced the question — and CANCELS it
+    // rather than stopping it. A graceful stop still delivers the phrase the
+    // engine was finalising, and the hook's transcript is cumulative, so that
+    // trailing result would write the whole sent question back into the draft
+    // this send is about to clear.
+    if (voice.listening) voice.cancel()
+    voiceBaseRef.current = ""
     setDraft("")
     setPinnedSkill(null)
     setPlusMenuOpen(false)
@@ -5359,6 +5431,16 @@ export function ChatScreen() {
     return skills.find((s) => s.trigger.toLowerCase() === wanted) ?? null
   }, [skills])
 
+  /** The composer's one status line. A dictation problem outranks the busy hint:
+   *  the busy hint answers a key you just pressed and expires on its own, while
+   *  a blocked microphone is a state you stay stuck in until you go and change a
+   *  browser setting. */
+  const composerHintNode: React.ReactNode = voice.error
+    ? voice.error
+    : composerHint === "busy"
+      ? <>{BUSY_ENTER_HINT_LEAD}<b>Stop</b>{BUSY_ENTER_HINT_TAIL}</>
+      : null
+
   /** ONE composer, rendered on the landing and in the thread dock. `home` is the
    *  only difference between the two calls — everything else is shared state, so
    *  the pair cannot drift again the way `.chat-home-composer` and
@@ -5370,11 +5452,7 @@ export function ChatScreen() {
       draft={draft}
       pinnedSkill={pinnedSkill}
       attachments={attachments}
-      hint={composerHint === "busy" ? (
-        <>
-          {BUSY_ENTER_HINT_LEAD}<b>Stop</b>{BUSY_ENTER_HINT_TAIL}
-        </>
-      ) : null}
+      hint={composerHintNode}
       menuOpen={plusMenuOpen}
       menuActiveIndex={plusMenuActive}
       slashMenu={slashOpen ? (
@@ -5398,6 +5476,9 @@ export function ChatScreen() {
       onRemoveAttachment={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))}
       onRemoveSkill={() => setPinnedSkill(null)}
       onFileSelect={handleFileSelect}
+      voiceSupported={voice.supported}
+      voiceListening={voice.listening}
+      onToggleVoice={handleToggleVoice}
     />
   )
 
