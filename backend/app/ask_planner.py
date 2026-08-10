@@ -1178,10 +1178,7 @@ def plan(
     # a refusal, junk output — is exactly the prompt you most need to have seen.
     _log_prompt(enterprise_id=enterprise_id, input_text=input_text)
 
-<<<<<<< Updated upstream
-=======
     print("LLM for planner starts here ::: ")
->>>>>>> Stashed changes
 
     result = llm_call(
         enterprise_id=enterprise_id,
