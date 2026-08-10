@@ -636,6 +636,9 @@ export interface PrdState extends PrdContent {
    *  record behind it (a streaming draft), which read as "no timestamp" rather
    *  than as oldest. */
   generatedAt?: string
+  /** Canonical artifact-share token for this PRD's Share link; read, never
+   *  minted on open. Absent-safe. */
+  shareToken?: string | null
 }
 
 export interface AppContentState {
