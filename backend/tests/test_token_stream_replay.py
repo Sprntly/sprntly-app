@@ -22,10 +22,12 @@ def _clear_state():
     token_stream._subscribers.clear()
     token_stream._accum.clear()
     token_stream._accum_overflowed.clear()
+    token_stream._pending_drains.clear()
     yield
     token_stream._subscribers.clear()
     token_stream._accum.clear()
     token_stream._accum_overflowed.clear()
+    token_stream._pending_drains.clear()
 
 
 def _delta(text: str) -> dict:

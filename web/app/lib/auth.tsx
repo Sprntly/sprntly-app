@@ -208,9 +208,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // The TOKEN is taken unconditionally, whatever the state machine below
+      // decides. `setAccessTokenProvider` above reads THIS module-level value,
+      // never React state, so every subsequent request carries the freshest
+      // bearer regardless. Nothing here can leave a call authenticated with a
+      // stale token — the two concerns are genuinely independent.
       cachedSession = session
-      setState(sessionToState(session))
+
+      setState((prev) => {
+        // A real sign-out is honoured immediately and unconditionally. This is
+        // the branch that must never be softened: it is what tears the app
+        // down when someone signs out, here or in another tab.
+        if (event === "SIGNED_OUT") return { kind: "anonymous" }
+
+        // Any event carrying a user is taken as-is. That keeps a DIFFERENT
+        // user's sign-in landing correctly (never a stale identity), and keeps
+        // USER_UPDATED — e.g. the moment an email is confirmed, which
+        // isUserEmailVerified reads off `user` — flowing through.
+        if (session?.user) return sessionToState(session)
+
+        // No session, on an event that is NOT a sign-out.
+        //
+        // Supabase re-emits around the token-refresh window, and a transient
+        // null here used to drop us straight to `anonymous`. That is not a
+        // cosmetic problem: AuthGate renders a full-viewport white "Loading…"
+        // for any non-authed state, and it sits ABOVE every provider in the
+        // (app) layout — so the whole tree unmounted and remounted, blanking
+        // the screen for seconds and refetching everything. It reads exactly
+        // like a page refresh, which is how it was reported. It landed most
+        // often during a long PRD generation, whose minutes-long poll is the
+        // likeliest window for a refresh to land, and whose 401 retry
+        // (`withAuthRetry`) deliberately forces a pending refresh to settle.
+        //
+        // WorkspaceContext already defends its own half of this (see its
+        // `hasLoadedRef` note — "flashed the whole app to a loading shell"),
+        // but that guard is disarmed the moment auth reports non-authed, so
+        // the fix has to be here, upstream of it.
+        //
+        // Staying put costs no access: the client is not the security
+        // boundary. Every backend route re-derives the caller's company from
+        // the JWT on the request, so a session that is genuinely dead simply
+        // 401s each call — the user sees errors, not somebody else's data. A
+        // genuine expiry that cannot be refreshed arrives as SIGNED_OUT above.
+        if (prev.kind === "authed") return prev
+
+        // Not authed to begin with (mount, signed-out, still loading) — no
+        // session really does mean anonymous. Unchanged from before.
+        return sessionToState(session)
+      })
     })
 
     return () => subscription.unsubscribe()

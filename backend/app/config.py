@@ -69,6 +69,21 @@ class Settings(BaseSettings):
     ticket_gen_fanout: bool = True
     ticket_gen_batch_size: int = 4
     ticket_gen_max_parallel: int = 4
+    # Fast first batch: the leading enrich batch is carved down to this many
+    # stubs so the FIRST tickets reach the UI in roughly half a full batch's
+    # time (a batch's latency is dominated by its output tokens) and the
+    # Tickets tab visibly streams batch-by-batch instead of everything landing
+    # at once. 0 disables (uniform batches). Env: TICKET_GEN_FIRST_BATCH_SIZE.
+    ticket_gen_first_batch_size: int = 2
+    # Prime-then-fanout: sibling batches launch this many seconds after the
+    # first (or as soon as it finishes, whichever comes first), so the first
+    # batch's prompt-cache WRITE of the shared PRD prefix lands before the
+    # siblings prefill — measured live (2026-07-20): simultaneous shards all
+    # miss the cache and each re-pays the full ~15K-token PRD prefill. The
+    # stagger costs nothing end-to-end (siblings are larger and finish last
+    # anyway) and staggers batch completions for progressive rendering.
+    # 0 disables. Env: TICKET_GEN_PRIME_STAGGER_SECONDS.
+    ticket_gen_prime_stagger_seconds: float = 12.0
     # Tier 1 — process-wide cap on how many Design Agent generations may run
     # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
     # Default 1: on the 2-vCPU prod box, one generation already pins both cores
@@ -177,6 +192,23 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = ""
+    # Drive access mode TOGGLE. "oauth" (DEFAULT) = the existing per-user OAuth
+    # Picker route (drive.file), unchanged. "service_account" = mint a
+    # per-company service account, the customer shares a folder with its email
+    # out-of-band, and Sprntly enumerates + ingests what the SA can see.
+    # "oauth_folder" = the per-user OAuth Picker with folder selection enabled,
+    # which requires requesting the RESTRICTED drive.readonly scope instead of
+    # drive.file — Google gates that scope behind CASA Tier 2 app verification,
+    # so this value stays dormant (not set anywhere) until that approval lands.
+    # The Drive connector branches on this one value.
+    google_drive_access_mode: str = "oauth"
+    # Bootstrap credential for service_account mode: a GCP project with the IAM
+    # API enabled and a bootstrap SA holding iam.serviceAccountAdmin +
+    # iam.serviceAccountKeyAdmin. Used ONLY to mint per-company SAs. Unset →
+    # service_account mode reports "not configured" rather than half-working.
+    gcp_sa_bootstrap_project: str = ""
+    # Path to the bootstrap SA key JSON on disk, OR the inline JSON itself.
+    gcp_sa_bootstrap_key_json: str = ""
     # Google Meet connector (OAuth) — its OWN client, NOT the Drive one above.
     #
     # Sharing was the original design (one Cloud project, one client, a second

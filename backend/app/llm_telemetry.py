@@ -70,6 +70,28 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.1 / 1_000_000,
         "output":         5.0 / 1_000_000,
     },
+    # SAME TIER, DATED ID. We REQUEST "claude-haiku-4-5" but the API echoes back
+    # the dated snapshot in `response.model`, and both the metering path
+    # (app.llm_metering, keyed on the ACTUAL returned model) and
+    # `gateway._est_cost` look up that returned string. With only the alias row
+    # above, every haiku call priced at $0: 1,769 `llm_usage unpriced
+    # model=claude-haiku-4-5-20251001` warnings across prod+staging in 14 days,
+    # and cost_usd=0.0 on every corresponding agent_decision_log row. Haiku spend
+    # was invisible, not cheap.
+    #
+    # This is only a haiku problem today because the sonnet and opus aliases
+    # happen to echo back unchanged. If a future model starts returning a dated
+    # id, it fails the same silent way — `_est_cost` returns 0.0 for an unknown
+    # model rather than raising (unlike RunUsage.est_cost_usd). The durable fix
+    # is normalising a dated id to its base before lookup; this row is the
+    # correct-now fix, and it matters immediately because classify_goal_fit —
+    # 5,292 calls in 30 days — moves onto this tier.
+    "claude-haiku-4-5-20251001": {
+        "input":          1.0 / 1_000_000,
+        "cache_write_1h": 1.25 / 1_000_000,
+        "cache_read":     0.1 / 1_000_000,
+        "output":         5.0 / 1_000_000,
+    },
     # OpenAI embeddings (KG signal/theme vectors — app.graph.embeddings). Anthropic
     # has no embeddings API, so this is the one non-Anthropic priced model. Billed
     # on prompt tokens only — no output, no prompt caching — so the other three

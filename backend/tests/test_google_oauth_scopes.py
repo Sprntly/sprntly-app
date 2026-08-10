@@ -12,10 +12,16 @@ These tests assert:
   - The scope-change scenario (Google returns the superset) no longer raises.
   - Email flows from the ID token, falling back to the Drive about() lookup.
   - OAUTHLIB_RELAX_TOKEN_SCOPE defaults to "1" after importing the app.
+  - `drive_scopes()` is mode-aware and single-sourced: every mode except the
+    dormant "oauth_folder" requests drive.file; "oauth_folder" requests the
+    restricted drive.readonly scope. Both OAuth call sites (build_flow,
+    credentials_from_token_json) go through it, so they can't drift apart.
+  - The default path never requests drive.readonly (mutation-proof).
 """
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -31,6 +37,13 @@ from tests._company_helpers import company_client
 
 EXPECTED_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+
+FOLDER_MODE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
@@ -63,6 +76,24 @@ def google_env(isolated_settings, monkeypatch):
     yield
 
 
+@pytest.fixture
+def oauth_folder_env(google_env, monkeypatch):
+    """GOOGLE_DRIVE_ACCESS_MODE=oauth_folder — the dormant, CASA-gated mode
+    that requests drive.readonly instead of drive.file. Nothing sets this in
+    production; it exists so the mode-aware scope selection can be exercised
+    before CASA approval lands."""
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "oauth_folder")
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.google_oauth",
+        "app.routes.connectors",
+        "app.main",
+    ):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+
+
 # ───────────────────────── the scope list ─────────────────────────
 
 
@@ -72,11 +103,11 @@ def test_drive_scopes_contains_all_four():
 
 def test_drive_scope_is_drive_file_not_readonly():
     """The Picker re-platform uses the narrow drive.file scope, never the old
-    full-Drive drive.readonly grant."""
+    full-Drive drive.readonly grant, for every mode except the dormant
+    "oauth_folder" mode (see the mode-aware tests below)."""
     assert google_oauth.DRIVE_FILE_SCOPE == "https://www.googleapis.com/auth/drive.file"
     assert google_oauth.DRIVE_FILE_SCOPE in google_oauth.DRIVE_SCOPES
     assert not any("drive.readonly" in s for s in google_oauth.DRIVE_SCOPES)
-    assert not hasattr(google_oauth, "DRIVE_READONLY_SCOPE")
 
 
 def test_build_flow_requests_all_four_scopes(google_env):
@@ -265,3 +296,127 @@ def test_callback_stores_full_scope_set(google_env, monkeypatch):
     conn = ctx.client.get("/v1/connectors").json()["connections"][0]
     for scope in EXPECTED_SCOPES:
         assert scope in conn["scopes"]
+
+
+# ───────────── drive_scopes(): mode-aware, single source of truth ─────────────
+
+
+def test_drive_scopes_default_mode_requests_drive_file(google_env):
+    assert set(google_oauth.drive_scopes()) == set(EXPECTED_SCOPES)
+
+
+def test_drive_scopes_service_account_mode_stays_drive_file(google_env, monkeypatch):
+    """service_account mode is unaffected by the new mode value — it still
+    requests drive.file, exactly like default oauth mode."""
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "service_account")
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.google_oauth"):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+    assert set(google_oauth.drive_scopes()) == set(EXPECTED_SCOPES)
+
+
+def test_drive_scopes_oauth_folder_mode_requests_drive_readonly(oauth_folder_env):
+    scopes = google_oauth.drive_scopes()
+    assert set(scopes) == set(FOLDER_MODE_SCOPES)
+    assert "https://www.googleapis.com/auth/drive.file" not in scopes
+
+
+def test_build_flow_scope_follows_mode_call_site_one(oauth_folder_env):
+    """Call site 1 (google_oauth.py ~:70): build_flow(), shared by both the
+    /authorize and /callback routes."""
+    flow = google_oauth.build_flow()
+    assert set(flow.oauth2session.scope) == set(FOLDER_MODE_SCOPES)
+
+
+def test_credentials_from_token_json_scope_follows_mode_call_site_two(oauth_folder_env):
+    """Call site 2 (google_oauth.py ~:116): credentials_from_token_json(),
+    used to rebuild credentials from a stored token for background sync."""
+    token_json = json.dumps(
+        {
+            "token": "access",
+            "refresh_token": "refresh",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "test-client-id",
+            "client_secret": "test-client-secret",
+            "scopes": FOLDER_MODE_SCOPES,
+        }
+    )
+    creds = google_oauth.credentials_from_token_json(token_json)
+    assert set(creds.scopes) == set(FOLDER_MODE_SCOPES)
+
+
+def test_callback_stores_readonly_scope_in_oauth_folder_mode(oauth_folder_env, monkeypatch):
+    """The connection row's stored `scopes` (read by the frontend's
+    driveFolderSelectEnabled gate) reflects the mode active at connect time,
+    not a frozen drive.file-only list."""
+    ctx = company_client(monkeypatch)
+    state = google_oauth.sign_oauth_state(company_id=ctx.company_id, dataset="acme")
+    creds = Credentials(
+        token="access",
+        refresh_token="refresh",
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id="test-client-id",
+        client_secret="test-client-secret",
+        scopes=list(FOLDER_MODE_SCOPES),
+    )
+    mock_flow = MagicMock()
+    mock_flow.credentials = creds
+    with (
+        patch("app.routes.connectors.google_oauth.build_flow", return_value=mock_flow),
+        patch(
+            "app.routes.connectors.google_oauth.fetch_google_account_email",
+            return_value="pm@company.com",
+        ),
+    ):
+        r = ctx.client.get(
+            "/v1/connectors/google-drive/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+    assert r.status_code == 307
+    conn = ctx.client.get("/v1/connectors").json()["connections"][0]
+    assert "https://www.googleapis.com/auth/drive.readonly" in conn["scopes"]
+
+
+# ───────────── mutation-proof: default path never leaks drive.readonly ─────────────
+
+
+def test_default_mode_never_requests_drive_readonly(google_env, monkeypatch):
+    """Fails if drive.readonly ever becomes reachable without an explicit
+    GOOGLE_DRIVE_ACCESS_MODE=oauth_folder — the regression AC4 guards
+    against. Checks the setting, the derived scope list, the Flow's requested
+    scope, AND the actual consent URL string."""
+    monkeypatch.delenv("GOOGLE_DRIVE_ACCESS_MODE", raising=False)
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.google_oauth"):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+    from app.config import settings as live_settings
+
+    assert live_settings.google_drive_access_mode == "oauth"
+
+    scopes = google_oauth.drive_scopes()
+    assert "https://www.googleapis.com/auth/drive.readonly" not in scopes
+
+    flow = google_oauth.build_flow()
+    assert "drive.readonly" not in " ".join(flow.oauth2session.scope)
+
+    consent_url, _ = flow.authorization_url()
+    assert "drive.readonly" not in consent_url
+    assert "drive.file" in consent_url
+
+
+# ───────────────────────── config: mode accepts the third value ─────────────────────────
+
+
+def test_config_default_access_mode_is_oauth(monkeypatch):
+    monkeypatch.delenv("GOOGLE_DRIVE_ACCESS_MODE", raising=False)
+    from app.config import Settings
+
+    assert Settings().google_drive_access_mode == "oauth"
+
+
+def test_config_accepts_oauth_folder_value(monkeypatch):
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "oauth_folder")
+    from app.config import Settings
+
+    assert Settings().google_drive_access_mode == "oauth_folder"

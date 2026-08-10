@@ -19,24 +19,52 @@ logger = logging.getLogger(__name__)
 
 # drive.file is the narrow per-file scope: it grants access ONLY to files the
 # user explicitly picks via the Google Picker (or that this app creates), never
-# the whole Drive. This replaces the old drive.readonly full-Drive grant —
-# folder browsing is gone; the frontend Picker hands us specific file IDs which
-# the connection stores and sync downloads.
+# the whole Drive. This is the scope requested by every mode except
+# "oauth_folder" below.
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# drive.readonly is Google's RESTRICTED full-Drive read scope, needed to let
+# the Picker offer folder selection (drive.file only grants what's explicitly
+# picked, never a folder's contents). Google gates restricted scopes behind
+# CASA Tier 2 app verification, so this is requested ONLY when
+# settings.google_drive_access_mode == "oauth_folder" — a mode nothing sets by
+# default (see app/config.py). Every other mode keeps requesting drive.file,
+# byte-identical to before this scope existed.
+DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 # Google auto-adds openid / userinfo.email / userinfo.profile to the granted
 # set whenever the OAuth client is also a sign-in client (ours is). If we only
-# REQUEST drive.file, google-auth-oauthlib raises a "Scope has changed"
+# REQUEST the Drive scope, google-auth-oauthlib raises a "Scope has changed"
 # error at token exchange because the returned set is a superset of what we
 # asked for. Requesting the full set up front makes the requested and granted
 # scopes match, so the exchange succeeds without relying on a relax flag. We
 # also gain the user's verified email straight from the ID token. (The relax
 # env default in app.main is kept as belt-and-suspenders for openid reordering.)
-DRIVE_SCOPES = [
-    DRIVE_FILE_SCOPE,
+_OPENID_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+# Static default-mode scope list, kept for existing call sites/tests that read
+# it directly. Represents exactly what every mode except "oauth_folder"
+# requests; see `drive_scopes()` for the single mode-aware source of truth
+# used by the actual OAuth call sites.
+DRIVE_SCOPES = [DRIVE_FILE_SCOPE, *_OPENID_SCOPES]
+
+
+def drive_scopes() -> list[str]:
+    """The scope list to request for the CURRENT `google_drive_access_mode`.
+    Single source of truth for both the authorize Flow (`build_flow`) and the
+    token-reconstruction path (`credentials_from_token_json`) — one mode
+    branch here, not duplicated at each call site. Only "oauth_folder" ever
+    requests the restricted drive.readonly scope; every other mode (including
+    the default and any unrecognized value) requests drive.file."""
+    base = (
+        DRIVE_READONLY_SCOPE
+        if settings.google_drive_access_mode == "oauth_folder"
+        else DRIVE_FILE_SCOPE
+    )
+    return [base, *_OPENID_SCOPES]
+
+
 GOOGLE_DRIVE_PROVIDER = "google_drive"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
@@ -67,7 +95,7 @@ def build_flow() -> Flow:
         raise HTTPException(500, "Google OAuth is not configured on the server")
     return Flow.from_client_config(
         _client_config(),
-        scopes=DRIVE_SCOPES,
+        scopes=drive_scopes(),
         redirect_uri=settings.google_oauth_redirect_uri,
     )
 
@@ -113,7 +141,7 @@ def verify_oauth_state(state: str) -> dict:
 def credentials_from_token_json(token_json: str) -> Credentials:
     return Credentials.from_authorized_user_info(
         json.loads(token_json),
-        scopes=DRIVE_SCOPES,
+        scopes=drive_scopes(),
     )
 
 

@@ -18,7 +18,7 @@
  * auto-skip must NOT call locate (no regression on those paths).
  */
 import * as React from "react"
-import { render, waitFor, act } from "@testing-library/react"
+import { cleanup, render, waitFor, act } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // Sprntly components use the classic JSX runtime; expose React globally so the
@@ -191,6 +191,18 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Unmount every modal this file rendered. `vitest.config` leaves `globals`
+  // off and nothing installs @testing-library's auto-cleanup, so without this
+  // each `render()` above stays MOUNTED for the rest of the file — and
+  // GenerateModal's saved-source window schedules `setTimeout(…, 300)` on mount
+  // that only its unmount clears (GenerateModal.tsx's `open` effect). The last
+  // one outlived this file's jsdom teardown and fired setState into a dead
+  // environment: "ReferenceError: window is not defined", reported as an
+  // unhandled error that failed the whole run while all 4,439 tests passed.
+  //
+  // Called BEFORE resetAllMocks so unmount still sees the mocks its effects
+  // were built against. Safe under fake timers — unmount is synchronous.
+  cleanup()
   vi.resetAllMocks()
 })
 

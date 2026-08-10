@@ -18,8 +18,12 @@
 //       button wired (onClick) to open it; firing a `change` on the input with a
 //       fake File reflects the attachment — it rides the outgoing query on send
 //       (and the preview chip appears in the thread dock).
-//   A2. NO Voice affordance in EITHER composer — no aria-label "Voice input" and
-//       no "Voice"/"Stop" tool button anywhere in the rendered chat composer.
+//   A2. NO microphone in EITHER composer WHERE THE BROWSER HAS NO WEB SPEECH
+//       API — which is jsdom's situation here, and Firefox's in the wild. This
+//       used to assert no microphone unconditionally; dictation is wired now
+//       (see ChatScreen.voice.dom.test.tsx for the supported-browser half), and
+//       what survives from that rule is the part still true: an unsupported
+//       browser is offered nothing rather than a button that does nothing.
 //   A3. The THREAD composer also has a working Attach (hidden file input present
 //       + an Attach button wired to it).
 //   A4. An attached file's content is appended to the outgoing query on send
@@ -416,21 +420,22 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     expect(sent).toContain("hello world")
   })
 
-  // A2: NO Voice affordance on the landing composer.
-  it("renders NO Voice affordance on the landing composer", () => {
+  // A2: no microphone on the landing composer in a browser without the API.
+  // jsdom implements neither `SpeechRecognition` nor `webkitSpeechRecognition`,
+  // so this render stands in for Firefox — the feature detection must resolve to
+  // "not supported" and render nothing, not a dead button.
+  it("renders NO microphone on the landing composer without the Web Speech API", () => {
+    expect((window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition).toBeUndefined()
     searchString = "new=1"
     renderScreen()
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
-    // No aria-labelled voice control…
-    expect(screen.queryByLabelText("Voice input")).toBeNull()
-    // …and no "Voice"/"Stop" tool button text anywhere on the chat surface.
-    expect(screen.queryByText(/^Voice$/)).toBeNull()
-    expect(screen.queryByText(/^Stop$/)).toBeNull()
-    // (The brief tab's BriefChat HAS a "Voice" tool button, so this guards that
-    // the CHAT composer specifically does not — the brief surface isn't mounted
-    // in the ?new=1 landing state.) Match the BriefChat <section class="briefx">
-    // by class rather than by its "Top Insights" accessible name, which is not a
-    // label the UI surfaces anywhere anymore.
+    expect(screen.queryByLabelText("Dictate your question")).toBeNull()
+    expect(screen.queryByLabelText("Stop dictating")).toBeNull()
+    expect(document.querySelector(".cx-mic")).toBeNull()
+    // (The brief surface isn't mounted in the ?new=1 landing state.) Match the
+    // BriefChat <section class="briefx"> by class rather than by its "Top
+    // Insights" accessible name, which is not a label the UI surfaces anywhere
+    // anymore.
     expect(document.querySelector("section.briefx")).toBeNull()
   })
 })
@@ -502,16 +507,18 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     expect((document.querySelector(".cx--home") as HTMLElement).querySelector(".cx-kbd")).toBeTruthy()
   })
 
-  // A2: NO Voice affordance on the thread composer either.
-  it("renders NO Voice affordance on the thread composer", () => {
+  // A2: the same on the thread composer. One component, two mount points — this
+  // is here so a future change that renders the mic unconditionally fails on
+  // BOTH surfaces rather than only the one someone happened to test.
+  it("renders NO microphone on the thread composer without the Web Speech API", () => {
     seedThreadTab()
     renderScreen()
     expect(screen.getByText("first question")).toBeTruthy()
     const dock = document.querySelector(".bc-dock") as HTMLElement
     expect(dock).toBeTruthy()
-    expect(within(dock).queryByLabelText("Voice input")).toBeNull()
-    expect(within(dock).queryByText(/^Voice$/)).toBeNull()
-    expect(within(dock).queryByText(/^Stop$/)).toBeNull()
+    expect(within(dock).queryByLabelText("Dictate your question")).toBeNull()
+    expect(within(dock).queryByLabelText("Stop dictating")).toBeNull()
+    expect(dock.querySelector(".cx-mic")).toBeNull()
   })
 
   // A1/A3: firing a change on the thread file input renders the attachment

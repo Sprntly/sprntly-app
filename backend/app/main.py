@@ -92,6 +92,16 @@ from app.routes import (
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# httpx logs one INFO line per outbound request, carrying the FULL Supabase
+# REST URL. Measured on prod 2026-08-09: 12,195 of 16,022 log lines in a day —
+# 76% of everything — were these, several exceeding 8 KB because a filter like
+# `id=in.(...)` inlines a hundred UUIDs. They bury every real signal (finding
+# the actual error classes for the latency audit needed regex archaeology) and
+# they are pure duplication: what the call was for is already logged by the
+# caller, and failures still surface because WARNING and above still pass.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -374,6 +384,14 @@ app.add_middleware(
 from app.middleware_llm_key import CompanyLLMKeyMiddleware  # noqa: E402
 
 app.add_middleware(CompanyLLMKeyMiddleware)
+
+# Added LAST so it is the OUTERMOST middleware: `add_middleware` builds the
+# stack in reverse, so this one wraps CORS and the key binding too and its
+# duration is the whole server-side cost of the request, which is the number
+# that should be comparable to nginx's $upstream_response_time.
+from app.middleware_timing import RequestTimingMiddleware  # noqa: E402
+
+app.add_middleware(RequestTimingMiddleware)
 
 app.include_router(health.router)
 app.include_router(auth.router)

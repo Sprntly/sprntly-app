@@ -50,6 +50,18 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # model) so there is a single opus version across the codebase.
 DEEP_MODEL = "claude-opus-4-7"
 
+# Classifier tier. The mirror of DEEP_MODEL at the other end: calls that are
+# HIGH-VOLUME, closed-set, and short-output — pick one of N labels, route one
+# message. `app.qa_agent.ROUTER_MODEL` has always been this value; this is the
+# same tier named where the other two live so non-router call sites can reach it
+# without importing qa_agent (which pulls in the whole skill registry).
+#
+# Sized from production: classify_goal_fit ran 5,292 times in 30 days for 99
+# output tokens a call and, on DEFAULT_MODEL, burned 15,444 model-seconds —
+# 3.3% of ALL model time in the system — to choose between "high", "med" and
+# "low". Keep in sync with the pricing row in app/llm_telemetry.py.
+FAST_MODEL = "claude-haiku-4-5"
+
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
 # Concurrent streaming model calls compete for RAM/CPU; past some point on a
 # given box, streaming slows to a crawl, requests stall, and the gateway's retry

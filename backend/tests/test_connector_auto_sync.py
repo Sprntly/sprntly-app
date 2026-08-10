@@ -128,6 +128,216 @@ def test_run_drive_sync_quiet_noop_when_unconfigured(monkeypatch):
     assert stamped == {}
 
 
+# ─────────── _run_drive_sync: mode-aware dispatch (service_account) ───────────
+#
+# settings.google_drive_access_mode gates which sync function the periodic
+# cycle calls, the same way the connector routes do (routes/connectors.py's
+# `google_drive_mode` / SA-scan endpoints). oauth/oauth_folder keep the
+# original picked-file gate + sync_google_drive dispatch unchanged (covered
+# by the three tests above, which never touch access_mode); service_account
+# gets its own gate (dataset only — no Picker selection exists in that mode)
+# and dispatches to sync_service_account instead.
+
+
+def _set_drive_access_mode(monkeypatch, mode: str) -> None:
+    import app.config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "google_drive_access_mode", mode)
+
+
+_SA_ROW_CONFIGURED = {
+    "config_json": '{"dataset": "acme"}',
+    "sa_key_encrypted": "encrypted-sa-key-blob",
+}
+
+
+def test_run_drive_sync_dispatches_to_service_account_in_sa_mode(monkeypatch):
+    """AC5: service_account mode reaches sync_service_account, never
+    sync_google_drive — and the SA gate does NOT require config["files"]
+    (there is no Picker selection in this mode)."""
+    _set_drive_access_mode(monkeypatch, "service_account")
+    import app.connectors.google_drive_sync as gds
+    import app.connectors.google_service_account as gsa
+
+    calls = {}
+
+    def fake_sync_sa(company_id):
+        calls["company_id"] = company_id
+
+        class R:
+            synced = ["a"]
+            kg_queued = ["a"]
+
+        return R()
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_SA_ROW_CONFIGURED))
+    monkeypatch.setattr(gsa, "sync_service_account", fake_sync_sa)
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not sync via OAuth path")),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert calls["company_id"] == "co-9"
+
+
+def test_run_drive_sync_oauth_mode_never_calls_sync_service_account(monkeypatch):
+    """AC6, mutation-proof: default (oauth) mode dispatches to
+    sync_google_drive exactly as before — sync_service_account is NEVER
+    called."""
+    _set_drive_access_mode(monkeypatch, "oauth")
+    import app.connectors.google_drive_sync as gds
+    import app.connectors.google_service_account as gsa
+
+    calls = {}
+
+    def fake_sync(*, company_id):
+        calls["company_id"] = company_id
+
+        class R:
+            synced = ["a"]
+            kg_queued = ["a"]
+
+        return R()
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_DRIVE_ROW_CONFIGURED))
+    monkeypatch.setattr(gds, "sync_google_drive", fake_sync)
+    monkeypatch.setattr(
+        gsa, "sync_service_account",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("must not call sync_service_account in oauth mode")),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert calls["company_id"] == "co-9"
+
+
+def test_run_drive_sync_oauth_folder_mode_still_uses_the_original_files_gate(
+    monkeypatch,
+):
+    """AC5: `oauth_folder` (the other non-SA mode) keeps the original gate
+    (dataset AND picked files/folders) and the sync_google_drive dispatch —
+    a connected-but-unconfigured row is still a quiet no-op."""
+    _set_drive_access_mode(monkeypatch, "oauth_folder")
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"config_json": "{}"})
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not sync")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update(kw),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert stamped == {}
+
+
+def test_run_drive_sync_sa_mode_quiet_noop_without_dataset(monkeypatch):
+    """AC8: service_account mode with no dataset configured yet is a quiet
+    no-op — no sync attempted, no error stamped."""
+    _set_drive_access_mode(monkeypatch, "service_account")
+    import app.connectors.google_service_account as gsa
+
+    monkeypatch.setattr(
+        auto_sync.db, "get_connection",
+        lambda cid, prov: {"config_json": "{}", "sa_key_encrypted": "blob"},
+    )
+    monkeypatch.setattr(
+        gsa, "sync_service_account",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not sync")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update(kw),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert stamped == {}
+
+
+def test_run_drive_sync_sa_mode_quiet_noop_without_provisioned_sa(monkeypatch):
+    """AC8: service_account mode with a dataset but NO provisioned SA
+    (sa_key_encrypted absent) is a quiet no-op — the customer hasn't hit
+    "provision" yet, which is expected, not an error."""
+    _set_drive_access_mode(monkeypatch, "service_account")
+    import app.connectors.google_service_account as gsa
+
+    monkeypatch.setattr(
+        auto_sync.db, "get_connection",
+        lambda cid, prov: {"config_json": '{"dataset": "acme"}',
+                           "sa_key_encrypted": ""},
+    )
+    monkeypatch.setattr(
+        gsa, "sync_service_account",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not sync")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update(kw),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert stamped == {}
+
+
+def test_run_drive_sync_sa_mode_stamps_error_on_failure(monkeypatch):
+    """AC7: an SA-branch failure is caught, logged, and stamped — never
+    propagates out of the daemon-thread body."""
+    _set_drive_access_mode(monkeypatch, "service_account")
+    import app.connectors.google_service_account as gsa
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_SA_ROW_CONFIGURED))
+    monkeypatch.setattr(
+        gsa, "sync_service_account",
+        lambda company_id: (_ for _ in ()).throw(RuntimeError("SA drive down")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update({"provider": prov, **kw}),
+    )
+    auto_sync._run_drive_sync("co-9")  # must not raise
+    assert stamped["provider"] == "google_drive"
+    assert "SA drive down" in stamped["last_sync_error"]
+
+
+def test_run_drive_sync_sa_mode_is_scoped_to_the_given_company(monkeypatch):
+    """AC9: a run for company A operates only on A — the company_id passed
+    into get_connection and sync_service_account is the one given to
+    _run_drive_sync, never a different tenant's."""
+    _set_drive_access_mode(monkeypatch, "service_account")
+    import app.connectors.google_service_account as gsa
+
+    seen_get_connection = []
+    seen_sync = []
+
+    def fake_get_connection(cid, prov):
+        seen_get_connection.append(cid)
+        return dict(_SA_ROW_CONFIGURED)
+
+    def fake_sync_sa(company_id):
+        seen_sync.append(company_id)
+
+        class R:
+            synced = []
+            kg_queued = []
+
+        return R()
+
+    monkeypatch.setattr(auto_sync.db, "get_connection", fake_get_connection)
+    monkeypatch.setattr(gsa, "sync_service_account", fake_sync_sa)
+
+    auto_sync._run_drive_sync("co-tenant-A")
+
+    assert seen_get_connection == ["co-tenant-A"]
+    assert seen_sync == ["co-tenant-A"]
+
+
 def test_run_sync_stamps_success(monkeypatch):
     monkeypatch.setattr(auto_sync.db, "get_connection",
                         lambda cid, prov: {"token_json_encrypted": "enc"})
