@@ -9,12 +9,14 @@ slug — this router deliberately does not take a `?dataset=` query param
 and does not call `require_owned_dataset`.
 
 Scope boundary: no LLM calls (memory synthesis + promotion are Phase 2),
-no group-chat turn endpoints, no artifact fan-out — each is a separate
-ticket.
+no group-chat turn endpoints — each is a separate ticket. Artifact fan-out
+(GET/POST `.../artifacts`) reuses `db/artifacts.py`'s existing five-table
+fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
 """
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -22,6 +24,9 @@ from pydantic import BaseModel, Field
 from app.auth import WorkspaceContext, require_workspace
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
+from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
+from app.deps.ownership import require_owned_evidence, require_owned_prd
+from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,11 @@ class AddMemoryEntryRequest(BaseModel):
 
 class UpdateMemoryEntryRequest(BaseModel):
     body: str = Field(min_length=1)
+
+
+class AddArtifactRequest(BaseModel):
+    artifact_type: Literal["prd", "evidence", "prototype", "report", "ticket_set"]
+    artifact_id: int = Field(..., ge=1)
 
 
 def _require_project(project_id: int, ctx: WorkspaceContext) -> dict:
@@ -148,6 +158,65 @@ def add_member(
     member = projects_db.add_member(project_id, user_id)
     logger.info("project_member_added project_id=%s user_id=%s", project_id, user_id)
     return member
+
+
+@router.get("/{project_id}/artifacts")
+def list_project_artifacts(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
+    """The project's artifacts, app-faithfully — the SAME unified shape
+    `GET /v1/artifacts` returns, filtered to this project's refs (AD-P1/
+    AD-P12, build spec §5.2). Membership-gated (403 for a same-tenant
+    non-member, 404 for a foreign-tenant project, via
+    `_require_project_member`)."""
+    _require_project_member(project_id, ctx)
+    items = list_artifacts_for_project(
+        project_id=project_id, dataset=_dataset_for(ctx), company_id=ctx.company_id
+    )
+    return {"artifacts": items}
+
+
+@router.post("/{project_id}/artifacts")
+def add_project_artifact(
+    project_id: int,
+    payload: AddArtifactRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Add an artifact ref to the project. Membership-gated, THEN write-time
+    access validation (AD-P12 — the IDOR guard, R3): the caller must
+    actually reach the artifact through their OWN company before the ref is
+    written — the client-supplied `(artifact_type, artifact_id)` pair is
+    never trusted alone.
+
+    `prd`/`evidence` go through their dedicated ownership dep
+    (`deps/ownership.py`). `prototype`/`report`/`ticket_set` have no
+    dedicated dep — there is no `require_owned_prototype/report/ticket_set`
+    — so they're validated by presence in the caller's own company fan-out
+    (`list_artifacts_for_company`), reusing the existing scoping rather than
+    inventing a new tenancy convention. On any validation failure: 404, no
+    ref written (no cross-tenant existence leak — same posture as every
+    other ownership gate in this codebase)."""
+    _require_project_member(project_id, ctx)
+
+    if payload.artifact_type == "prd":
+        require_owned_prd(payload.artifact_id, ctx.company_id, ctx.workspace_id)
+    elif payload.artifact_type == "evidence":
+        require_owned_evidence(payload.artifact_id, ctx.company_id, ctx.workspace_id)
+    else:
+        owned_ids = {
+            item["id"]
+            for item in list_artifacts_for_company(
+                dataset=_dataset_for(ctx), company_id=ctx.company_id
+            )
+            if item["type"] == payload.artifact_type
+        }
+        if payload.artifact_id not in owned_ids:
+            raise HTTPException(404, f"{payload.artifact_type.capitalize()} not found")
+
+    ref = projects_db.add_artifact(project_id, payload.artifact_type, payload.artifact_id)
+    logger.info(
+        "project_artifact_added project_id=%s type=%s artifact_id=%s",
+        project_id, payload.artifact_type, payload.artifact_id,
+    )
+    return ref
 
 
 @router.get("/{project_id}/memory/summary")

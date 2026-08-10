@@ -451,3 +451,37 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     # last via an empty-string fallback.
     items.sort(key=lambda it: it.get("created_at") or "", reverse=True)
     return items[:_LIST_CAP]
+
+
+def list_artifacts_for_project(*, project_id: int, dataset: str, company_id: str) -> list[dict]:
+    """A project's artifacts — the existing five-table fan-out, filtered.
+
+    Reuses `list_artifacts_for_company` verbatim (AD-P1/AD-P12, build spec
+    §5.2): fetches the project's `(artifact_type, artifact_id)` refs from
+    `project_artifacts`, runs the caller's own company-wide unified list,
+    then narrows it to the ref set. Zero new per-table scoping query is
+    introduced here — every tenancy check already lives in
+    `list_artifacts_for_company` / `list_document_artifacts`.
+
+    Output shape is identical to `list_artifacts_for_company`'s:
+    `{type, id, title, status, created_at, source, open}` (plus each type's
+    extra fields), already recency-sorted.
+
+    Tolerated-stale (AD-P1/§4.3): a ref whose underlying artifact is gone —
+    or was never in the CALLER's own fan-out (e.g. a foreign-tenant row a
+    write-time check should have rejected) — simply has no match in `items`
+    and drops out silently, no error. This also means a project can never
+    surface an artifact the caller's own company doesn't own, even if a ref
+    somehow got written for one: the filter only keeps rows that are ALSO in
+    the caller's own tenant-scoped fan-out.
+    """
+    from app.db.projects import list_project_artifact_refs
+
+    refs = {
+        (r["artifact_type"], r["artifact_id"])
+        for r in list_project_artifact_refs(project_id)
+    }
+    if not refs:
+        return []
+    items = list_artifacts_for_company(dataset=dataset, company_id=company_id)
+    return [it for it in items if (it["type"], it["id"]) in refs]

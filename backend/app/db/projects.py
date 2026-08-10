@@ -306,6 +306,59 @@ def get_group_chat_id(project_id: int) -> int | None:
 
 
 @retry_on_disconnect
+def add_artifact(project_id: int, artifact_type: str, artifact_id: int) -> dict:
+    """Upsert a `(project_id, artifact_type, artifact_id)` ref into
+    `project_artifacts` (the PK dedupes a repeat add into a no-op, same
+    posture as `add_member`) and touch the project's `updated_at`.
+
+    Write-time access validation — that the caller actually reaches this
+    artifact (AD-P12, the IDOR guard) — is the ROUTE's job, before this is
+    ever called; this helper only writes the ref once that gate has
+    passed."""
+    client = require_client()
+    row = (
+        client.table("project_artifacts")
+        .upsert(
+            {
+                "project_id": project_id,
+                "artifact_type": artifact_type,
+                "artifact_id": artifact_id,
+            },
+            on_conflict="project_id,artifact_type,artifact_id",
+        )
+        .execute()
+        .data
+    )
+    client.table("projects").update({"updated_at": utc_now()}).eq("id", project_id).execute()
+    return (
+        row[0]
+        if row
+        else {
+            "project_id": project_id,
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+        }
+    )
+
+
+@retry_on_disconnect
+def list_project_artifact_refs(project_id: int) -> list[dict]:
+    """Raw `project_artifacts` refs for this project — unresolved
+    `{artifact_type, artifact_id}` pairs. `list_artifacts_for_project`
+    (`db/artifacts.py`) is what turns these into full artifact rows via the
+    existing five-table fan-out; this helper only reads the join table."""
+    return (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_type, artifact_id")
+        .eq("project_id", project_id)
+        .execute()
+        .data
+        or []
+    )
+
+
+@retry_on_disconnect
 def user_id_for_email(email: str) -> str | None:
     """Resolve an existing user's id from their profile email
     (case-insensitive, mirrors `app.db.team.member_exists_for_email`).
