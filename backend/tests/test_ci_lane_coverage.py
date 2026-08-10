@@ -92,6 +92,16 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "SQL; psycopg is deliberately absent from requirements. Run locally "
         "against a scratch database when touching the ranking migration."
     ),
+    ("test_projects_schema_roundtrip.py", "RUN_PROJECTS_SCHEMA_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "projects/chat/memory migration set's CHECK constraints and partial "
+        "unique index — the fake Supabase client has no SQL engine behind it "
+        "and cannot enforce either. This is a schema-only ticket (no route/"
+        "helper code shipped alongside it), so there is no deterministic unit "
+        "coverage to stand in; the migration files themselves are reviewed in "
+        "the PR, and this suite is the real-DB proof, run locally against the "
+        "dev rig when touching this migration set."
+    ),
 }
 
 
