@@ -1418,12 +1418,22 @@ CREATE TABLE conversations (
     -- 20260731090000: Evidence half of the conversation<->artifact binding
     -- (mirrors prd_id above).
     evidence_id INTEGER,
+    -- Additive group-chat columns (mirrors
+    -- 20260811120100_conversations_project_columns.sql). Every pre-existing
+    -- + future per-user chat keeps project_id NULL / kind='individual' by
+    -- default, so the untouched per-user ownership path is unaffected.
+    project_id  INTEGER REFERENCES projects (id) ON DELETE SET NULL,
+    kind        TEXT NOT NULL DEFAULT 'individual'
+                  CHECK (kind IN ('individual', 'group')),
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
 CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
 CREATE INDEX conversations_evidence_idx ON conversations (evidence_id);
+CREATE INDEX idx_conversations_project ON conversations (project_id, kind, updated_at);
+CREATE UNIQUE INDEX uq_one_group_chat_per_project
+    ON conversations (project_id) WHERE kind = 'group';
 
 CREATE TABLE conversation_turns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1433,6 +1443,10 @@ CREATE TABLE conversation_turns (
     -- Extracted attachment texts [{name, content}] persisted with the turn
     -- (20260723170000_conversation_turn_attachments.sql).
     attachments     TEXT,
+    -- Which human posted this turn (mirrors
+    -- 20260811120100_conversations_project_columns.sql). NULL for
+    -- assistant turns and every pre-existing single-owner-chat turn.
+    author_user_id  TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
@@ -1487,6 +1501,72 @@ CREATE TABLE artifact_share_joins (
     joined_workspace_id TEXT NOT NULL,
     joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (share_id, joined_user_id)
+);
+
+-- Projects + collaboration layer (mirrors 20260811120000_projects.sql,
+-- 20260811120100_conversations_project_columns.sql [conversations/
+-- conversation_turns columns are ALTERed onto those tables above],
+-- 20260811120200_project_memory.sql). No FK on company_id/workspace_id
+-- here — same reasoning as the `workspaces` table comment above: route
+-- tests routinely fabricate tenant ids that have no `companies`/
+-- `workspaces` row, and require_workspace's self-heal must be able to
+-- insert for them.
+CREATE TABLE projects (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    origin       TEXT NOT NULL DEFAULT 'manual'
+                   CHECK (origin IN ('manual', 'prd_auto', 'artifact')),
+    created_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_projects_company_ws ON projects (company_id, workspace_id, updated_at);
+
+CREATE TABLE project_members (
+    project_id INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE project_artifacts (
+    project_id    INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    artifact_type TEXT NOT NULL
+                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set')),
+    artifact_id   INTEGER NOT NULL,
+    added_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, artifact_type, artifact_id)
+);
+CREATE INDEX idx_project_artifacts_lookup ON project_artifacts (project_id, added_at);
+
+CREATE TABLE project_chat_members (
+    conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    user_id         TEXT NOT NULL,
+    joined_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE TABLE project_memory_entries (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id             INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    body                   TEXT NOT NULL,
+    author_user_id         TEXT,
+    promoted_by            TEXT CHECK (promoted_by IN ('agent')),
+    source_conversation_id INTEGER REFERENCES conversations (id),
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK ((author_user_id IS NOT NULL) <> (promoted_by IS NOT NULL))
+);
+CREATE INDEX idx_pme_project ON project_memory_entries (project_id, updated_at);
+
+CREATE TABLE project_memory_summary (
+    project_id   INTEGER PRIMARY KEY REFERENCES projects (id) ON DELETE CASCADE,
+    summary_md   TEXT NOT NULL,
+    entry_count  INTEGER NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    stale        INTEGER NOT NULL DEFAULT 0
 );
 """
 

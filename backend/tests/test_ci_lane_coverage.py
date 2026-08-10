@@ -102,6 +102,17 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "the PR, and this suite is the real-DB proof, run locally against the "
         "dev rig when touching this migration set."
     ),
+    ("test_projects_crud_live.py", "RUN_PROJECTS_CRUD_LIVE"): (
+        "Real local-Supabase round-trip for the projects CRUD + memory-entry "
+        "routes/helpers (tenant-gate 404 parity, project_belongs_to_company "
+        "against a genuine second company/workspace row, memory CRUD, the "
+        "cached-summary read) — proves the real supabase-py client path a "
+        "fake in-memory SQLite store cannot. Deterministic backstop: "
+        "test_projects_routes.py and test_project_memory_entries.py cover "
+        "the same behaviour against FakeSupabaseClient and run in the fast "
+        "lane on every PR; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching these routes/helpers."
+    ),
 }
 
 
