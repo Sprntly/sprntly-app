@@ -93,6 +93,26 @@ def _to_legacy_shape(row: dict) -> dict:
     return row
 
 
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company is stale.
+
+    The planner memoises the connected-provider list in-process and keeps it
+    until something says otherwise (`ask_planner.invalidate_catalog_cache`), so
+    a connection written without this leaves it planning against providers the
+    company no longer has — or blind to one just connected.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db layer,
+    so a module-level import here would close a cycle. Never allowed to break a
+    write — a cache that failed to clear is a stale plan, which is recoverable;
+    a connection that failed to save is not."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
 def upsert_connection(
     *,
     company_id: str,
@@ -145,6 +165,7 @@ def upsert_connection(
         c.table("connections").insert(payload).execute()
     row = get_connection(company_id, provider)
     assert row is not None
+    _drop_planner_cache(company_id)
     return row
 
 
@@ -184,6 +205,7 @@ def delete_connection(company_id: str, provider: str) -> bool:
         .eq("provider", provider)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return bool(resp.count) if resp.count is not None else True
 
 

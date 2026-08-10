@@ -1031,12 +1031,22 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
-def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
+def apply_gates(
+    out: dict,
+    *,
+    enterprise_id: str,
+    connected: list[str],
+    known_documents: Optional[set[str]] = None,
+) -> Plan:
     """Turn one raw model payload into a gated `Plan`. Never raises.
 
     Split out from `plan()` so the gates are testable without a stubbed LLM
     call, and so slice 2 can reuse them unchanged when the planner starts
-    actually deciding."""
+    actually deciding.
+
+    `known_documents` is passed through to `_gate_documents` — see there. It is
+    optional so every existing caller and test keeps its exact behaviour; only
+    `plan()`, which has already read the catalog, supplies it."""
     action, task, instruction = _gate_action(
         out.get("action"), out.get("task"), out.get("instruction")
     )
@@ -1103,7 +1113,9 @@ def apply_gates(out: dict, *, enterprise_id: str, connected: list[str]) -> Plan:
         # scope gate: partial output must never produce a canned refusal.
         artifact_type=_artifact_type,
         artifact_query=_artifact_query,
-        documents=_gate_documents(out.get("documents"), enterprise_id),
+        documents=_gate_documents(
+            out.get("documents"), enterprise_id, known_documents
+        ),
         in_scope=out.get("in_scope") is not False,
     )
 
@@ -1128,15 +1140,12 @@ def plan(
     must fall back to today's `route()`, and a function that swallowed its own
     failures would make that fallback impossible to write. `shadow_plan_async`
     catches everything today."""
-    from app.qa_agent import (
-        _REGEX_ROUTE_THRESHOLD,
-        _custom_skill_block,
-        _keyword_prior,
-    )
-    from app.connector_lookup.registry import connected_providers
+    from app.qa_agent import _REGEX_ROUTE_THRESHOLD, _keyword_prior
     from app.skill_router import detect_intent
 
-    custom_block = _custom_skill_block(enterprise_id)
+    # All three catalog reads are memoised per company — see `_CATALOG_TTL_S`.
+    # They were 2.3s of a measured 17.4s turn, re-paid on every single message.
+    custom_block = _cached_custom_block(enterprise_id)
 
     # The keyword prior is offered under exactly `route()`'s condition: a regex
     # hit AND a company library to override it with. Without uploads the regex
@@ -1148,10 +1157,14 @@ def plan(
     if custom_block and hit and hit.confidence >= _REGEX_ROUTE_THRESHOLD:
         keyword_prior = _keyword_prior(hit)
 
-    connected = connected_providers(enterprise_id)
+    connected = _cached_connected(enterprise_id)
 
     # Per-company document rows — uncached `input` only. See `_document_block`.
-    document_block = _document_block(enterprise_id)
+    # Read ONCE here: the same rows build the prompt block below and validate the
+    # model's `documents` picks in `apply_gates`, which used to fetch them again.
+    documents = _cached_documents(enterprise_id)
+    document_block = _document_block(documents)
+    known_documents = {d.external_id for d in documents}
 
     input_text = _build_input(
         question,
@@ -1164,6 +1177,7 @@ def plan(
     # BEFORE the call, deliberately: a prompt that made the model fail — a 400,
     # a refusal, junk output — is exactly the prompt you most need to have seen.
     _log_prompt(enterprise_id=enterprise_id, input_text=input_text)
+
 
     result = llm_call(
         enterprise_id=enterprise_id,
@@ -1187,7 +1201,12 @@ def plan(
     )
     out = result.output if isinstance(result.output, dict) else {}
     _log_raw_response(enterprise_id=enterprise_id, question=question, raw=out)
-    return apply_gates(out, enterprise_id=enterprise_id, connected=connected)
+    return apply_gates(
+        out,
+        enterprise_id=enterprise_id,
+        connected=connected,
+        known_documents=known_documents,
+    )
 
 
 #: Cap on the question text in a shadow log line. A chat question can carry an
@@ -1267,13 +1286,160 @@ _PLANNER_DOC_TITLE_CHARS = 120
 _PLANNER_DOC_SUMMARY_CHARS = 180
 
 
-def _document_block(
-    enterprise_id: Optional[str],
+# ── the planner's per-company catalog reads, cached ──────────────────────────
+#
+# Building the prompt costs three independent DB reads — the custom-skill block,
+# the connected-provider list and the document catalog — and every one of them
+# runs again on the very next message. Measured on a live turn they were 2.3s of
+# a 17.4s `POST /v1/chat/intent`, with a further ~2s in the gates re-reading the
+# catalog a second time to validate what the model picked.
+#
+# KEYED BY COMPANY, ALWAYS. This is the one thing that must not be got wrong: an
+# unkeyed process-global cache of any of these puts one tenant's skill names or
+# document TITLES where another tenant's call can read them. It is the same rule
+# `_router_menu` carries in qa_agent (CLAUDE.md names it explicitly) and the same
+# one `_document_block` states below — the difference between a cache and a leak
+# here is entirely the key.
+#
+# In-process for the same reason `_plan_memo` above is: the deployment is a
+# single uvicorn worker. On a multi-worker box this degrades to a miss and a
+# fresh read, never to another company's data.
+#
+# INVALIDATION IS THE MECHANISM; THE TTL IS ONLY A FLOOR UNDER A BUG.
+#
+# The first cut used 60s/15s and was measured never to hit once: a turn takes
+# 60-90s to answer, the user reads it, then types — two minutes between messages
+# is ordinary, so every read was still cold. A cache that expires faster than
+# the conversation it serves is not a conservative cache, it is a no-op with
+# extra code. Expiry was the wrong lever entirely.
+#
+# So these entries live until the process restarts, and correctness comes from
+# the WRITE side instead: every function that changes one of these three things
+# calls `invalidate_catalog_cache`, and there are only seven of them, all in
+# `db/` modules that every writer already goes through —
+#   db/connections.py      upsert_connection, delete_connection
+#   db/custom_skills.py    insert_, update_, delete_custom_skill,
+#                          detach_skills_from_source
+#   document_catalog.py    register_document, deregister_document
+# The nominal TTL below is a week: long enough to be "until restart" in practice
+# (nothing runs a week without a deploy), short enough that a write path added
+# later without an invalidate call self-heals instead of being wrong forever.
+#
+# THE CACHE IS PER COMPANY AND KEYED BY COMPANY. That is the whole safety
+# argument: an unkeyed process-global cache of any of these puts one tenant's
+# skill names or document TITLES where another tenant's call reads them. Same
+# rule `_router_menu` carries in qa_agent, which CLAUDE.md names explicitly.
+#
+# In-process, so it is per uvicorn worker. The deployment is single-worker
+# (`backend/deploy/sprintly.service` has no `--workers`, same fact `_plan_memo`
+# above relies on). On a multi-worker box a write invalidates only the worker
+# that served it and the others keep serving their copy until the TTL — which is
+# the reason the TTL is a week and not infinity.
+_CACHE_TTL_S = 7 * 24 * 3600.0
+
+_connected_cache = TTLMap(_CACHE_TTL_S)
+_custom_block_cache = TTLMap(_CACHE_TTL_S)
+_documents_cache = TTLMap(_CACHE_TTL_S)
+
+
+def _cached_connected(enterprise_id: str) -> list[str]:
+    """`connected_providers`, memoised per company."""
+    hit = _connected_cache.get(enterprise_id)
+    if hit is not None:
+        return hit
+    from app.connector_lookup.registry import connected_providers
+
+    value = connected_providers(enterprise_id)
+    _connected_cache.set(enterprise_id, value)
+    return value
+
+
+def _cached_custom_block(enterprise_id: str) -> str:
+    """`qa_agent._custom_skill_block`, memoised per company.
+
+    The block is cached, not the rows, because the sanitiser inside it is a
+    prompt-injection defence and caching its OUTPUT means the defence cannot be
+    skipped by a cache hit."""
+    hit = _custom_block_cache.get(enterprise_id)
+    if hit is not None:
+        return hit
+    from app.qa_agent import _custom_skill_block
+
+    value = _custom_skill_block(enterprise_id)
+    _custom_block_cache.set(enterprise_id, value)
+    return value
+
+
+def _cached_documents(
+    enterprise_id: str,
     *,
     conversation_id: Optional[int] = None,
     user_id: Optional[str] = None,
-) -> str:
+) -> list:
+    """The company's catalog rows, memoised per company.
+
+    ONLY the company-wide read is cached. `list_documents` widens its result to
+    conversation-scoped rows when the full triple is supplied and ownership
+    verifies, and those rows belong to one conversation — caching them would
+    need a per-conversation key, which nothing would ever invalidate (the write
+    paths know a company, not a conversation) and which would therefore live for
+    the whole TTL. A scoped read passes straight through instead: it is not on
+    the hot path (`plan()` asks for the company-wide catalog and nothing else),
+    so there is no latency to win and a correctness trap to avoid.
+
+    Returns [] on any read failure, exactly as the callers already treat an
+    unavailable catalog."""
+    scoped = conversation_id is not None or user_id is not None
+    if not scoped:
+        hit = _documents_cache.get(enterprise_id)
+        if hit is not None:
+            return hit
+    try:
+        from app.document_catalog import list_documents
+
+        value = list_documents(
+            enterprise_id, conversation_id=conversation_id, user_id=user_id,
+            limit=_MAX_PLANNER_DOCUMENTS,
+        )
+    except Exception:  # noqa: BLE001 — the catalog must never break a plan
+        logger.info("ask-planner: document catalog unavailable for %s", enterprise_id)
+        value = []
+    if not scoped:
+        _documents_cache.set(enterprise_id, value)
+    return value
+
+
+def invalidate_catalog_cache(enterprise_id: Optional[str]) -> None:
+    """Drop this company's cached planner catalogs. THE CORRECTNESS MECHANISM.
+
+    Entries live until the process restarts (see `_CACHE_TTL_S`), so this is not
+    an optimisation for impatient callers — it is what makes the cache right. It
+    is called from every write that changes a connection, a custom skill or a
+    catalogued document, and a write path that forgets it leaves that company
+    planning against data that no longer exists.
+
+    Deliberately total rather than surgical: all three drop together. A connector
+    write changes which documents exist, a skill write can change what the
+    connector block should say, and the cost of being wrong is far higher than
+    three dictionary pops and one re-read on the next message.
+
+    Cheap, thread-safe (TTLMap holds a lock), never raises, and a no-op for a
+    company that was never cached — so it is always safe to call, including from
+    a bulk sync that registers hundreds of documents in a loop."""
+    if not enterprise_id:
+        return
+    _connected_cache.invalidate(enterprise_id)
+    _custom_block_cache.invalidate(enterprise_id)
+    _documents_cache.invalidate(enterprise_id)
+
+
+def _document_block(docs: list) -> str:
     """The company's document catalog, as lines the planner can choose from.
+
+    Takes the ROWS rather than fetching them, so one read serves both this block
+    and the `documents` gate that validates what the model picked back — those
+    were two separate `list_documents` calls for the same rows on every plan.
+    `_cached_documents` is the fetch.
 
     THIS IS PER-COMPANY DATA AND IT RIDES THE UNCACHED `input`, never
     `_PLANNER_SYSTEM`. The system block is deliberately tenant-invariant so one
@@ -1284,20 +1450,8 @@ def _document_block(
     qa_agent, which CLAUDE.md calls out explicitly).
 
     Newest first, so a truncated list drops the least likely candidates. Never
-    raises: a catalog that cannot be read yields '' and the planner simply names
-    no documents, which is exactly the pre-existing behaviour."""
-    if not enterprise_id:
-        return ""
-    try:
-        from app.document_catalog import list_documents
-
-        docs = list_documents(
-            enterprise_id, conversation_id=conversation_id, user_id=user_id,
-            limit=_MAX_PLANNER_DOCUMENTS,
-        )
-    except Exception:  # noqa: BLE001 — the catalog must never break a plan
-        logger.info("ask-planner: document catalog unavailable for %s", enterprise_id)
-        return ""
+    raises: an empty catalog yields '' and the planner simply names no
+    documents, which is exactly the pre-existing behaviour."""
     if not docs:
         return ""
 
@@ -1326,7 +1480,11 @@ def _document_block(
     )
 
 
-def _gate_documents(raw: Any, enterprise_id: Optional[str]) -> list[str]:
+def _gate_documents(
+    raw: Any,
+    enterprise_id: Optional[str],
+    known_documents: Optional[set[str]] = None,
+) -> list[str]:
     """The document picks, reduced to ids this company actually has.
 
     Validated against the catalog rather than trusted, for the same reason every
@@ -1334,18 +1492,28 @@ def _gate_documents(raw: Any, enterprise_id: Optional[str]) -> list[str]:
     external_id, and an unvalidated one would reach document selection as an
     explicit, high-confidence request for a document that does not exist.
 
+    `known_documents` lets a caller that has ALREADY read the catalog — `plan()`
+    read it to build the prompt — hand the ids over instead of paying for a
+    second read of the same rows. Omitted, this reads them itself, which is what
+    every caller outside `plan()` (and every gate test) still does. The
+    validation is identical either way: this is where the ids get checked, and
+    passing them in changes only who did the fetching.
+
     Order is preserved (the model's own ranking) and duplicates collapse."""
     if not raw or not isinstance(raw, list) or not enterprise_id:
         return []
     wanted = [str(x).strip() for x in raw if str(x or "").strip()]
     if not wanted:
         return []
-    try:
-        from app.document_catalog import list_documents
+    if known_documents is not None:
+        known = known_documents
+    else:
+        try:
+            from app.document_catalog import list_documents
 
-        known = {d.external_id for d in list_documents(enterprise_id, limit=500)}
-    except Exception:  # noqa: BLE001
-        return []
+            known = {d.external_id for d in list_documents(enterprise_id, limit=500)}
+        except Exception:  # noqa: BLE001
+            return []
     out: list[str] = []
     for eid in dict.fromkeys(wanted):
         if eid in known:

@@ -548,6 +548,9 @@ def register_document(
         _spawn_enrichment(company_id, document_id, enrich_args)
     else:
         _enrich(company_id, document_id, **enrich_args)
+    # The catalog changed, so the planner's memoised copy is stale. Deliberately
+    # NOT on the unchanged-content early return above — that path wrote nothing.
+    _drop_planner_cache(company_id)
     return document_id
 
 
@@ -588,6 +591,28 @@ def deregister_document(company_id: str, provider: str, external_id: str) -> Non
         .eq("external_id", external_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
+
+
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company is stale.
+
+    The planner renders the document catalog into every prompt and validates the
+    model's picks against it, memoising it in-process until something says
+    otherwise (`ask_planner.invalidate_catalog_cache`). A document registered
+    without this stays unnameable — and a deregistered one stays offerable — for
+    the life of the process.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db layer,
+    so a module-level import here would close a cycle. Never allowed to break a
+    write, and cheap enough to call from a sync registering hundreds of rows in a
+    loop (three dict pops under a lock)."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────
