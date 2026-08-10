@@ -86,6 +86,47 @@ def bind_conversation_to_prd(
         return False
 
 
+def bind_conversation_to_project(
+    conversation_id: int,
+    project_id: int,
+    company_id: str,
+    user_id: str | None,
+) -> bool:
+    """Point `conversation_id` at `project_id`. True if a row was updated.
+
+    Mirrors `bind_conversation_to_prd` exactly — same ownership scoping (a
+    caller can never bind someone else's conversation by guessing an id),
+    same fill-only-NULL semantics (a conversation already bound to a
+    project is left alone — first-write-wins, so a re-issued ask can't
+    silently repoint an existing chat at a different project), same
+    best-effort contract (this runs inside `/v1/ask`, where the answer
+    itself is what the caller is waiting on; a failure here is logged and
+    swallowed rather than failing the ask).
+    """
+    try:
+        c = require_client()
+        q = (
+            c.table("conversations")
+            .update({"project_id": project_id})
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .is_("project_id", "null")
+        )
+        # Legacy rows predate user stamping (user_id IS NULL) and are hidden
+        # from everyone, so there is nothing to bind when the caller has no
+        # user id.
+        if user_id:
+            q = q.eq("user_id", user_id)
+        resp: Any = q.execute()
+        return bool(resp.data)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to bind conversation %s to project %s", conversation_id, project_id,
+            exc_info=True,
+        )
+        return False
+
+
 def get_conversation_prd_id(
     conversation_id: int,
     company_id: str,
