@@ -289,6 +289,13 @@ async def test_late_joiner_replays_no_phase_by_design(monkeypatch):
     may already be over would be a claim with no signal behind it, so the client
     falls back to its generic resumed copy."""
     loop = asyncio.get_running_loop()
+    # delta_sink coalesces (see token_stream), so text reaches the replay buffer
+    # on a flush rather than instantly. A real generation runs for seconds and
+    # crosses the interval many times before anyone reloads; this test would
+    # otherwise be asserting against an instantaneous generation that cannot
+    # happen. Force the interval to 0 so the first delta flushes, which is what
+    # production does for anything lasting longer than _FLUSH_INTERVAL_S.
+    monkeypatch.setattr(token_stream, "_FLUSH_INTERVAL_S", 0.0)
     token_stream.phase_sink(loop, "ask:4")("Searching your connected sources…")
     token_stream.delta_sink(loop, "ask:4")("Partial answer")
     await asyncio.sleep(0)
