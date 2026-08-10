@@ -20,9 +20,32 @@ those two implementations apart.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.kg_ingest.pullers import confluence
+
+
+def _iso_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _stub_pull(monkeypatch, pages):
+    """Wire the puller's fetch seams so pull() walks one space returning
+    `pages`. Leaves register_document alone so the `registered` fixture (or a
+    test's own patch) captures what the walk catalogues."""
+    monkeypatch.setattr(confluence, "sync_context", lambda cid: _Ctx())
+    monkeypatch.setattr(confluence, "list_spaces", lambda tok, cloud, **kw: [_SPACE])
+
+    def fake_api_get(token, url, params=None, *, what="read"):
+        if url.endswith("/api/v2/pages"):
+            return {"results": list(pages)}
+        return {}
+
+    monkeypatch.setattr(confluence, "api_get", fake_api_get)
 
 
 class _Ctx:
@@ -205,3 +228,73 @@ def test_no_page_body_is_stored_at_rest(registered):
     # ...while the summary and hash still come from the whole page.
     assert len(call["get_text"]()) > confluence._TEXT_CHARS
     assert call["content_hash"]
+
+
+# ────────────── Decoupling: catalog coverage vs extraction coverage ──────────
+
+
+def test_old_page_is_catalogued_but_not_yielded(registered, monkeypatch):
+    """AC5/AC6/AC7, the load-bearing decouple: a space holding one in-window and
+    one out-of-window page must catalog BOTH (findable forever) yet yield only
+    the in-window one for KG extraction.
+
+    This is what unblocks answering from an old page that was never extracted:
+    the catalog row exists regardless of age; the graph only carries the recent
+    facts."""
+    recent = _page("Recent decision.", page_id="recent")
+    recent["version"]["createdAt"] = _iso_ago(15)
+    old = _page("Old decision.", page_id="old")
+    old["version"]["createdAt"] = "2020-01-01T00:00:00Z"
+    _stub_pull(monkeypatch, [recent, old])
+
+    recs = list(confluence.pull("co-conf"))
+
+    # BOTH pages are catalogued — coverage does not depend on the window.
+    assert {c["external_id"] for c in registered} == {"recent", "old"}
+    # Only the in-window page is yielded for extraction.
+    assert [r.external_id for r in recs] == ["recent"]
+
+
+def test_registration_uses_version_modified_date(registered):
+    """AC5: the catalog doc_date is the page's MODIFIED date —
+    version.createdAt — falling back to item.createdAt only when the version
+    carries none (the same value the window keys off, so catalog and window can
+    never disagree about a page's age)."""
+    page = _page("Body.", page_id="p-mod")
+    page["version"]["createdAt"] = "2026-05-01T00:00:00Z"
+    page["createdAt"] = "2020-01-01T00:00:00Z"        # the CREATED date — ignored
+    confluence._to_record(_Ctx(), _SPACE, "page", page)
+    assert registered[-1]["doc_date"] == "2026-05-01T00:00:00Z"
+
+    # version present but without createdAt → fall back to the item's createdAt.
+    fallback = _page("Body.", page_id="p-fallback")
+    fallback["version"] = {"number": 1}
+    fallback["createdAt"] = "2026-06-01T00:00:00Z"
+    confluence._to_record(_Ctx(), _SPACE, "page", fallback)
+    assert registered[-1]["doc_date"] == "2026-06-01T00:00:00Z"
+
+
+def test_registration_failure_still_continues_pull(monkeypatch, caplog):
+    """AC15 through pull(): a catalog write that raises for one page logs a
+    WARNING naming the page id and the pull keeps going — the in-window record
+    is still yielded. (Extends test_registration_failure_does_not_break_the_pull,
+    which pins the same guarantee at the _to_record seam.)"""
+    import logging as _logging
+
+    def _boom(company_id, **kw):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(confluence.document_catalog, "register_document", _boom)
+    page = _page("Body.", page_id="still-here")
+    page["version"]["createdAt"] = _iso_ago(10)
+    _stub_pull(monkeypatch, [page])
+
+    with caplog.at_level(_logging.WARNING, logger="app.kg_ingest.pullers.confluence"):
+        recs = list(confluence.pull("co-conf"))
+
+    assert [r.external_id for r in recs] == ["still-here"]
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == _logging.WARNING and "still-here" in r.getMessage()
+    ]
+    assert len(warnings) == 1

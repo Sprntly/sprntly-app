@@ -573,6 +573,16 @@ class Settings(BaseSettings):
     # samples.
     extraction_eval_sample_size: int = 25
 
+    # KG-extraction recency window, in months. Sweep connectors (Confluence
+    # first; Jira / Drive / Slack are the intended future adopters) catalog
+    # EVERY walked document so it stays findable forever, but only yield
+    # documents modified within this window for KG extraction — the graph is a
+    # current-state store, not an archive. The initial deep scan uses this as
+    # its "everything recent" boundary; the 6-hour periodic sync stays free via
+    # the content-hash ledger. <= 0 disables the window (extract everything).
+    # Env-overridable via KG_EXTRACTION_WINDOW_MONTHS.
+    kg_extraction_window_months: int = 18
+
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
