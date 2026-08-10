@@ -39,7 +39,6 @@ import {
 import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
 import { buildCombinedHtml } from "../../lib/combinedExport"
 import { documentsApi } from "../../lib/api"
-import { artifactShareApi } from "../../lib/artifactShareApi"
 import { saveBlob } from "../../lib/saveBlob"
 import type {
   PrdState, PrdContent, PrdDesignBlock, AppContentState, TicketSetFailureKind,
@@ -95,8 +94,21 @@ function ShareMenu({
   disabledReason?: string
 }) {
   const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd && !disabledReason
+  // Built from the pre-existing canonical token attached to the PRD record —
+  // NO network call on open. public_id (never the raw sequential prd_id) is
+  // what this link must carry — see the prds.public_id migration's own
+  // comment for why. Fallback to prd_id only covers a PrdState with no
+  // public_id at all (not currently reachable — every load path sets it),
+  // matching the same defensive-fallback shape used elsewhere. Nullish when
+  // the token hasn't landed yet (e.g. the exact stream-completion instant
+  // before a refetch) — the control renders disabled rather than minting.
+  const shareUrl =
+    prd?.shareToken && typeof window !== "undefined"
+      ? `${window.location.origin}/?prd=${encodeURIComponent(prd.public_id ?? String(prd.prd_id))}&share=${prd.shareToken}`
+      : null
   // An HTML PRD generated from a brief insight almost always has an Evidence
   // brief, so we offer the combined Evidence + PRD download. The evidence may
   // not be loaded into context yet (it's populated by the Evidence tab), so the
@@ -153,21 +165,14 @@ function ShareMenu({
   }
 
   const handleCopyLink = async () => {
-    if (!prd) return
-    setOpen(false)
+    if (!shareUrl) return
     try {
-      const { token } = await artifactShareApi.mint("prd", prd.prd_id)
-      // public_id (never the raw sequential prd_id) is what this copyable
-      // link must carry — see the prds.public_id migration's own comment
-      // for why. Fallback to prd_id only covers a PrdState with no
-      // public_id at all (not currently reachable — every load path sets
-      // it), matching the same defensive-fallback shape used elsewhere.
-      const prdParam = prd.public_id ?? String(prd.prd_id)
-      const url = `${window.location.origin}/?prd=${encodeURIComponent(prdParam)}&share=${token}`
-      await navigator.clipboard.writeText(url)
-      onToast("Share link copied", "Anyone with the link can view this PRD.")
+      await navigator.clipboard.writeText(shareUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     } catch {
-      onToast("Copy link failed", "Could not create a share link. Please try again.")
+      // Copy failures are non-fatal — the link stays visible to copy manually
+      // (mirrors the design-agent ShareMenu's identical catch).
     }
   }
 
@@ -187,11 +192,29 @@ function ShareMenu({
       </button>
       {open && enabled && (
         <div className="share-menu share-menu--down open" role="menu">
-          <div className="share-menu-item" role="menuitem" onClick={handleCopyLink}>
+          <div className="share-menu-item" role="menuitem" style={{ cursor: "default" }}>
             <div className="share-menu-item-icon"><IconLink size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Copy share link</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Invite a teammate to view this PRD</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontWeight: 600 }}>Share link</div>
+              {shareUrl ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                  <code
+                    style={{
+                      fontSize: 11, color: "var(--muted)", overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+                    }}
+                  >
+                    {shareUrl}
+                  </code>
+                  <button type="button" className="btn" onClick={handleCopyLink}>
+                    {copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
+                  <button type="button" className="btn" disabled>Preparing link…</button>
+                </div>
+              )}
             </div>
           </div>
           <div className="share-menu-item" role="menuitem" onClick={handlePdf}>

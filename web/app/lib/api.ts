@@ -1062,6 +1062,11 @@ export type PrdRecord = {
    *  practice — the chat-task PRD command runs outside the ask pipeline — kept
    *  for shape parity with db/reports.py's identical column. */
   ask_id?: number | null
+  /** The canonical, pre-existing `artifact_shares` token for this PRD
+   *  (attached by the GET routes' get-or-create — never minted by this
+   *  read). Optional: absent on any response shape that predates this
+   *  field. */
+  share_token?: string | null
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable

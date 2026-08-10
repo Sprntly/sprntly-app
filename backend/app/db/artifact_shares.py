@@ -106,6 +106,48 @@ def mint_share(
 
 
 @retry_on_disconnect
+def get_or_mint_canonical_share(
+    *,
+    artifact_type: str,
+    artifact_id: int,
+    owner_company_id: str,
+    owner_workspace_id: str,
+    created_by_user_id: str,
+) -> dict:
+    """The CANONICAL share for an artifact: return its earliest non-revoked
+    artifact_shares row if one exists, else mint exactly one via mint_share.
+    Idempotent by construction — repeat calls return the SAME token, never a
+    new one. This is the get-or-create primitive the copy-link UX reads;
+    mint_share (which ALWAYS inserts) stays for any explicit multi-link path.
+    Filters by owner_company_id as a tenant belt: a share owned by another
+    company is never returned. Performs NO .update() — ships no revocation."""
+    client = require_client()
+    existing = (
+        client.table("artifact_shares")
+        .select("*")
+        .eq("artifact_type", artifact_type)
+        .eq("artifact_id", artifact_id)
+        .eq("owner_company_id", owner_company_id)
+        .is_("revoked_at", "null")
+        .order("created_at", desc=False)
+        .order("id", desc=False)          # deterministic tiebreak on created_at collision
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if existing:
+        return existing[0]
+    return mint_share(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        owner_company_id=owner_company_id,
+        owner_workspace_id=owner_workspace_id,
+        created_by_user_id=created_by_user_id,
+    )
+
+
+@retry_on_disconnect
 def get_share_by_token(token: str) -> dict | None:
     """The raw artifact_shares row for `token` (revoked or not — callers that
     need the identical-404-shape non-disclosure guarantee check
