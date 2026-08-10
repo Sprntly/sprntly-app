@@ -299,7 +299,10 @@ def llm_call(
                     # alone can't yield a hit rate from the audit spine —
                     # `LLMResult` has carried it all along, it just never landed
                     # in `factors`. Needed to measure whether the router's
-                    # cacheable menu prefix is actually being hit.
+                    # cacheable menu prefix is actually being hit, and to see a
+                    # cache RACE: a fleet of concurrent calls that should share
+                    # one cached prefix but each shows cache_read=0 +
+                    # cache_creation>0 is prefilling before any write lands.
                     "cache_creation_input_tokens": result.cache_creation_input_tokens,
                     "cost_usd": result.cost_usd,
                     "latency_ms": result.latency_ms,
