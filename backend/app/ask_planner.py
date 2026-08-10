@@ -1178,8 +1178,6 @@ def plan(
     # a refusal, junk output — is exactly the prompt you most need to have seen.
     _log_prompt(enterprise_id=enterprise_id, input_text=input_text)
 
-    print("LLM for planner starts here ::: ")
-
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="ask-planner",
@@ -1200,7 +1198,6 @@ def plan(
         # data measure sampling spread as well as capability.
         temperature=0,
     )
-    print("LLM for planner ends here ::: ", result.output)
     out = result.output if isinstance(result.output, dict) else {}
     _log_raw_response(enterprise_id=enterprise_id, question=question, raw=out)
     return apply_gates(

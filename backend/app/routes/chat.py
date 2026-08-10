@@ -102,7 +102,6 @@ def chat_intent(
     artifact, candidates} — the LOOKUP result. Still read-only: naming a
     document is not opening it, and nothing here generates anything.
     """
-    print("[chat_intent] body::: ", body)
     prd_id = body.prd_id
     prd_row: dict | None = None
     if prd_id is not None:
@@ -127,7 +126,6 @@ def chat_intent(
 
     history = _load_history(body.conversation_id, company.company_id, company.user_id)
     prd_title = (prd_row or {}).get("title") or None
-    print("[chat_intent] before the resolver: ")
 
     envelope = resolve_chat_intent(
         company.company_id,
