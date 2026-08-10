@@ -30,12 +30,18 @@ def list_company_members(company_id: str) -> list[dict]:
     Each row carries:
       id, user_id, role, created_at,
       display_name (full_name → first+last fallback → None),
-      email, avatar_url
+      email, avatar_url, job_role
 
     The profile fields default to None when no `profiles` row exists for
     the user (brand-new auth.users without a profile, test fixtures
     that skip the profile seed, etc.). Routes pass these through to the
     Settings → Team & roles page (mockup needs name + email + avatar).
+
+    `job_role` is sourced from `profiles.role` — the free-text job
+    designation captured at onboarding (ROLE_OPTIONS: Founder / PM /
+    Engineer / Data Scientist / Designer / Other). Named `job_role` here
+    to avoid colliding with the permission `role` above (company_members
+    role: owner/admin/member/viewer).
     """
     client = require_client()
     members = (
@@ -52,7 +58,7 @@ def list_company_members(company_id: str) -> list[dict]:
     user_ids = [m["user_id"] for m in members]
     profiles_resp = (
         client.table("profiles")
-        .select("id, email, full_name, first_name, last_name, avatar_url")
+        .select("id, email, full_name, first_name, last_name, avatar_url, role")
         .in_("id", user_ids)
         .execute()
     )
@@ -74,6 +80,7 @@ def list_company_members(company_id: str) -> list[dict]:
                 "display_name": display,
                 "email": prof.get("email"),
                 "avatar_url": prof.get("avatar_url"),
+                "job_role": prof.get("role"),
             }
         )
     return enriched
@@ -269,6 +276,21 @@ def update_member_role(*, company_id: str, user_id: str, role: str) -> dict | No
     # not only the invalidating routes — sees the fresh role on the next read.
     invalidate_user(user_id)
     return get_member(company_id=company_id, user_id=user_id)
+
+
+def update_own_job_role(*, user_id: str, role: str | None) -> str | None:
+    """Set `profiles.role` (the free-text job designation) for `user_id`.
+
+    Self-edit only — callers must resolve `user_id` from the authenticated
+    session, never from a client-supplied id. Free text, nullable, no DB
+    CHECK (matches the existing column); the ROLE_OPTIONS taxonomy is
+    client-validated only.
+    """
+    require_client().table("profiles").update({"role": role}).eq(
+        "id", user_id
+    ).execute()
+    invalidate_user(user_id)
+    return role
 
 
 def delete_member(*, company_id: str, user_id: str) -> None:

@@ -725,6 +725,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     avatar_url   TEXT,
     -- Registration-spec v5 (mirrors 20260716120000_account_type_onboarding_v5.sql).
     account_type TEXT,
+    -- Free-text job designation captured at onboarding (mirrors
+    -- 20260525150000_onboarding_workspace.sql's `profiles.role` column).
+    role         TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
