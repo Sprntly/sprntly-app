@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from app.graph.gateway import llm_call
+from app.llm import FAST_MODEL
 
 if TYPE_CHECKING:
     from app.graph.facade import GraphFacade
@@ -229,6 +230,14 @@ def classify_theme_fit(
         input=_fit_payload(theme.theme_label, theme.evidence,
                            kpi_tree.render_for_prompt()),
         json_schema=_FIT_SCHEMA,
+        # FAST_MODEL, not the sonnet default: this is a three-way choice over a
+        # closed set ("high" | "med" | "low") emitting ~99 output tokens, and it
+        # is the highest-VOLUME call in the system — 5,292 runs in 30 days,
+        # 15,444 model-seconds, 3.3% of all model time, purely to pick a label.
+        # That is the definition of the classifier tier. The cache above already
+        # keeps a steady-state run from calling at all; this makes the calls that
+        # DO happen (a genuinely new theme, or a bumped KPI-tree version) cheap.
+        model=FAST_MODEL,
         background=background,
     )
     fit = (result.output or {}).get("fit", "med")
