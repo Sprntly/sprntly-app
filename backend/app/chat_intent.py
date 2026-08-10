@@ -599,7 +599,9 @@ def resolve_chat_intent(
             enterprise_id, message, history, prd_id=prd_id
         )
         if planned is not None:
+            print("[planner] resolved : ", planned)
             return planned
+        
     except Exception:  # noqa: BLE001 — fall through to the resolver below
         logger.exception("planner-backed intent failed; using the intent resolver")
 
@@ -616,6 +618,7 @@ def resolve_chat_intent(
     # are the contexts where a question can carry an action ("what should we
     # change here?" against an open PRD is an edit), and the model is the only
     # thing that can tell. See `is_plain_question` for why the gate is narrow.
+    print("Planner do not resolve ", prd_id, "has_attachments: ", has_attachments, "is_plain_question: ", is_plain_question(message))
     if prd_id is None and not has_attachments and is_plain_question(message):
         return _pre_gated()
     try:
