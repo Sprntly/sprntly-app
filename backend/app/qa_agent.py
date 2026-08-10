@@ -2277,15 +2277,24 @@ def answer(
         # planned, however many that is. Without one, the sweep still derives
         # its own terms and probes everything connected — every caller that has
         # not been migrated keeps today's behaviour exactly.
-        if prd_context:
-            live_context = ""
-        elif plan is not None:
-            live_context = _planned_live_context(enterprise_id, plan, question)
-        else:
-            live_context = _sweep_context(enterprise_id, question)
+        #
+        # Handed over as a THUNK rather than a computed string so the connector
+        # read runs inside `compose_ask_answer`'s wave 1, concurrently with the
+        # embedding and the corpus load, instead of ahead of all of them. It was
+        # ~4s of a ~21s serial gather; nothing downstream of it needs it before
+        # the prompt is composed. The PRD branch passes nothing at all — it
+        # skips live reads by design.
+        live_context_fn = None
+        if not prd_context:
+            if plan is not None:
+                live_context_fn = lambda: _planned_live_context(  # noqa: E731
+                    enterprise_id, plan, question
+                )
+            else:
+                live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
-            history=history, live_context=live_context, on_delta=on_delta,
+            history=history, live_context_fn=live_context_fn, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic
