@@ -2,7 +2,7 @@
 resolution for the internal-link entry gate.
 
 An `artifact_shares` row is a persistent, non-expiring, opaque-uuid4 token
-bound to one artifact (currently only 'prd'). `resolve_share_access` is the
+bound to one artifact ('prd' or standalone 'evidence'). `resolve_share_access` is the
 SINGLE decision function every route (`/resolve`, `/join`, `/content`) calls
 to answer "what can this signed-in user do with this token" — it is always
 re-run server-side, never trusted from a client.
@@ -353,6 +353,32 @@ def require_shared_prd(prd_id: int, owner_company_id: str) -> dict:
     if owner is None or owner != owner_company_id:
         raise HTTPException(status_code=404, detail="PRD not found")
     return prd
+
+
+def require_shared_evidence(evidence_id: int, owner_company_id: str) -> dict:
+    """Like `require_shared_prd` but for a STANDALONE evidence document — the
+    same company-scoped guest-read exception, no workspace check. Callers
+    MUST have already proven the grant via `resolve_share_access`'s
+    `guest_view`/`member` outcome; this function performs NO grant check
+    itself — 404 (never 403) on a missing/foreign evidence doc, matching
+    require_shared_prd's non-disclosure convention. Resolution walk is
+    evidence -> brief -> dataset -> company (NOT find_prd_evidence, which is
+    the PRD-sibling lookup for a different case entirely)."""
+    from fastapi import HTTPException
+
+    from app.db import get_brief_by_id, get_evidence
+    from app.deps.ownership import company_id_for_dataset
+
+    evidence = get_evidence(evidence_id)
+    if not evidence:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    brief = get_brief_by_id(evidence["brief_id"])
+    if not brief:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    owner = company_id_for_dataset(brief.get("dataset") or "")
+    if owner is None or owner != owner_company_id:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    return evidence
 
 
 def find_prd_evidence(prd_row: dict) -> dict | None:

@@ -103,6 +103,16 @@ function memberAppUrl(
   return `/?prd=${encodeURIComponent(param)}`
 }
 
+/** Where a `member` outcome for an EVIDENCE token hands the visitor over to
+ *  the real app. Evidence has no public_id (see artifactShareApi.ts's
+ *  URL-keying note) — this is a same-origin authed redirect the gate
+ *  performs after `/resolve`, NEVER the copyable link (which stays
+ *  token-only, `/?share=<token>`), so the raw sequential id is acceptable
+ *  here, same posture as memberAppUrl's own raw-id fallback. */
+function memberEvidenceUrl(artifactId: number): string {
+  return `/?evidence=${encodeURIComponent(String(artifactId))}`
+}
+
 export function ArtifactShareGate({ token, publicId }: ArtifactShareGateProps) {
   const auth = useAuth()
   const [resolveState, setResolveState] = useState<ResolveState>({ kind: "idle" })
@@ -120,7 +130,12 @@ export function ArtifactShareGate({ token, publicId }: ArtifactShareGateProps) {
     if (auth.kind === "authed") {
       presetActiveWorkspace(auth.user.id, resolveState.outcome.owner_workspace_id)
     }
-    window.location.assign(memberAppUrl(resolveState.outcome, publicId ?? null))
+    const outcome = resolveState.outcome
+    const url =
+      outcome.artifact_type === "evidence"
+        ? memberEvidenceUrl(outcome.artifact_id)
+        : memberAppUrl(outcome, publicId ?? null)
+    window.location.assign(url)
   }, [resolveState, auth, publicId])
 
   useEffect(() => {
@@ -174,6 +189,7 @@ export function ArtifactShareGate({ token, publicId }: ArtifactShareGateProps) {
     <GuestArtifactViewer
       token={token ?? null}
       artifactId={outcome.artifact_id}
+      artifactType={outcome.artifact_type}
       publicId={token ? null : publicId!}
       sharerName={"sharer_name" in outcome ? outcome.sharer_name : null}
       owningCompanyName={outcome.owning_company_name}

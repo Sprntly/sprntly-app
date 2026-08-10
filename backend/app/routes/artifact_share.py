@@ -53,12 +53,15 @@ from app.db.artifact_shares import (
     mint_share,
     owning_company_domain,
     record_join,
+    require_shared_evidence,
     require_shared_prd,
     resolve_share_access,
 )
 from app.db.companies import display_name_for_company_id, profile_name_for_user
 from app.db.prds import get_prd, get_prd_rendered
-from app.deps.ownership import require_owned_prd
+from app.deps.ownership import require_owned_evidence, require_owned_prd
+
+_SHAREABLE_ARTIFACT_TYPES = {"prd", "evidence"}
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +101,14 @@ def mint(
     "Who can share" is intentionally NOT restricted to admins (deferred
     decision) — any workspace member who can already see the artifact can
     share it, matching today's un-gated Share behaviour on other surfaces."""
-    if body.artifact_type != "prd":
-        raise HTTPException(400, "Only 'prd' artifacts are shareable")
-    # Never mint a token for an artifact the caller can't already see.
-    require_owned_prd(body.artifact_id, workspace.company_id, workspace.workspace_id)
+    if body.artifact_type not in _SHAREABLE_ARTIFACT_TYPES:
+        raise HTTPException(400, "Only 'prd'/'evidence' artifacts are shareable")
+    # Never mint a token for an artifact the caller can't already see —
+    # dispatched per type, same ownership-gate posture either way.
+    if body.artifact_type == "prd":
+        require_owned_prd(body.artifact_id, workspace.company_id, workspace.workspace_id)
+    else:
+        require_owned_evidence(body.artifact_id, workspace.company_id, workspace.workspace_id)
     share = mint_share(
         artifact_type=body.artifact_type,
         artifact_id=body.artifact_id,
@@ -154,7 +161,15 @@ def resolve(token: str, session: dict = Depends(require_session)) -> dict:
         )
         return {"outcome": "blocked", "reason": result["reason"]}
     share = result["share"]
-    prd = get_prd(share["artifact_id"])
+    # public_id is a PRD-only column (see the prds.public_id migration) — an
+    # evidence share never has one and must not attempt a get_prd() lookup
+    # keyed by an evidence_id (prds.id and evidences.id are independent
+    # sequences, so that lookup could accidentally hit an unrelated PRD row).
+    if share["artifact_type"] == "evidence":
+        public_id = None
+    else:
+        prd = get_prd(share["artifact_id"])
+        public_id = (prd or {}).get("public_id")
     return {
         # "member" (caller can act in the owning workspace — the gate sends
         # them into the real, editable app) or "guest_view" (read-only shell
@@ -169,7 +184,7 @@ def resolve(token: str, session: dict = Depends(require_session)) -> dict:
         # the "Copy share link" mint action put in the URL instead of
         # artifact_id — see the prds.public_id migration's own comment for
         # why the raw sequential id must never land in a copyable link.
-        "public_id": (prd or {}).get("public_id"),
+        "public_id": public_id,
         "artifact_type": share["artifact_type"],
         "owning_company_name": result["owning_company_name"],
         "sharer_name": result["sharer_name"],
@@ -297,9 +312,14 @@ def content(token: str, session: dict = Depends(require_session)) -> dict:
         raise _not_found()
 
     share = result["share"]
+    if share["artifact_type"] == "evidence":
+        evidence = require_shared_evidence(share["artifact_id"], share["owner_company_id"])
+        return {"artifact_type": "evidence", "evidence": evidence}
+
     prd = require_shared_prd(share["artifact_id"], share["owner_company_id"])
     rendered = get_prd_rendered(prd["id"]) or prd
     return {
+        "artifact_type": "prd",
         "prd": rendered,
         "evidence": find_prd_evidence(rendered),
         "tickets": get_tickets(share["owner_company_id"], prd["id"]),

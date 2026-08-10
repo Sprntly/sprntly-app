@@ -36,6 +36,15 @@ def _seed_prd(db, dataset: str, *, title: str = "t") -> int:
     )
 
 
+def _seed_evidence(db, dataset: str, *, md: str = "# body") -> int:
+    brief_id = db.save_brief(dataset, "W", {"insights": []}, schema_version=1)
+    evidence_id = db.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v3",
+    )
+    db.complete_evidence(evidence_id, title="t", md=md)
+    return evidence_id
+
+
 # ── Mint (AC1, AC2) ─────────────────────────────────────────────────────
 
 
@@ -77,6 +86,66 @@ def test_mint_route_denies_non_owned_prd(isolated_settings, monkeypatch):
         .eq("artifact_id", foreign_prd_id)
         .execute()
         .data
+    )
+    assert rows == []
+
+
+def test_mint_accepts_evidence_for_owned_evidence(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    db = isolated_settings["db"]
+    evidence_id = _seed_evidence(db, "acme")
+
+    r = ctx.client.post(
+        "/v1/artifact-share", json={"artifact_type": "evidence", "artifact_id": evidence_id}
+    )
+
+    assert r.status_code == 201
+    token = r.json()["token"]
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("token", token).execute().data
+    )
+    assert len(rows) == 1
+    assert rows[0]["artifact_type"] == "evidence"
+    assert rows[0]["artifact_id"] == evidence_id
+
+
+def test_mint_evidence_foreign_id_404s_and_mints_nothing(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    db = isolated_settings["db"]
+    seed_company(user_id="other-" + uuid.uuid4().hex[:8], slug="rival-ev")
+    foreign_evidence_id = _seed_evidence(db, "rival-ev")
+
+    r = ctx.client.post(
+        "/v1/artifact-share",
+        json={"artifact_type": "evidence", "artifact_id": foreign_evidence_id},
+    )
+
+    assert r.status_code == 404
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_id", foreign_evidence_id).execute().data
+    )
+    assert rows == []
+
+
+def test_mint_unknown_artifact_type_still_400s(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/artifact-share", json={"artifact_type": "brief", "artifact_id": 1}
+    )
+
+    assert r.status_code == 400
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "brief").execute().data
     )
     assert rows == []
 
@@ -181,6 +250,113 @@ def test_resolve_route_returns_public_id_never_the_raw_id_alone(isolated_setting
     assert body["outcome"] == "guest_view"
     assert body["artifact_id"] == prd_id
     assert body["public_id"] == public_id
+
+
+def test_resolve_evidence_token_shape(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    evidence_id = _seed_evidence(db, "acme")
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="evidence", artifact_id=evidence_id, owner_company_id=ctx.company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=ctx.user_id,
+    )
+
+    r = ctx.client.get(f"/v1/artifact-share/{share['token']}/resolve")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["artifact_type"] == "evidence"
+    assert body["artifact_id"] == evidence_id
+    assert body["public_id"] is None
+    assert body["outcome"] in ("member", "guest_view")
+
+
+def test_resolve_prd_token_unchanged(isolated_settings, monkeypatch):
+    """Byte-identical HEAD behaviour for a 'prd' token, including the
+    non-null public_id — the evidence branch must not disturb this arm."""
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    from app.db.client import require_client
+    import uuid as _uuid
+
+    prd_id = _seed_prd(db, "acme")
+    public_id = str(_uuid.uuid4())
+    require_client().table("prds").update({"public_id": public_id}).eq("id", prd_id).execute()
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="prd", artifact_id=prd_id, owner_company_id=ctx.company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=ctx.user_id,
+    )
+
+    r = ctx.client.get(f"/v1/artifact-share/{share['token']}/resolve")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["artifact_type"] == "prd"
+    assert body["artifact_id"] == prd_id
+    assert body["public_id"] == public_id
+    assert set(body.keys()) == {
+        "outcome", "artifact_id", "owner_workspace_id", "public_id",
+        "artifact_type", "owning_company_name", "sharer_name",
+    }
+
+
+def test_content_evidence_returns_evidence_only(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    default_ws = ctx.client.get("/v1/workspaces").json()["workspaces"][0]
+    db = isolated_settings["db"]
+    evidence_id = _seed_evidence(db, "acme", md="# Evidence body")
+    from app.db.artifact_shares import mint_share
+
+    share = mint_share(
+        artifact_type="evidence", artifact_id=evidence_id, owner_company_id=ctx.company_id,
+        owner_workspace_id=default_ws["id"], created_by_user_id=ctx.user_id,
+    )
+
+    import app.routes.artifact_share as artifact_share_mod
+
+    def _spy(*a, **kw):
+        raise AssertionError("find_prd_evidence must not be called for an evidence token")
+
+    monkeypatch.setattr(artifact_share_mod, "find_prd_evidence", _spy)
+
+    r = ctx.client.get(f"/v1/artifact-share/{share['token']}/content")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["artifact_type"] == "evidence"
+    assert body["evidence"]["payload_md"] == "# Evidence body"
+    assert "prd" not in body
+    assert "tickets" not in body
+
+
+def test_evidence_get_carries_stable_canonical_share_token(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    db = isolated_settings["db"]
+    evidence_id = _seed_evidence(db, "acme")
+
+    r1 = ctx.client.get(f"/v1/evidence/{evidence_id}")
+    r2 = ctx.client.get(f"/v1/evidence/{evidence_id}")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    token1 = r1.json()["share_token"]
+    token2 = r2.json()["share_token"]
+    assert token1
+    assert token1 == token2
+
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "evidence").eq("artifact_id", evidence_id).execute().data
+    )
+    assert len(rows) == 1
 
 
 def test_resolve_route_different_company_blocked(isolated_settings, monkeypatch):
@@ -754,3 +930,27 @@ def test_content_endpoint_denies_blocked_caller(isolated_settings, monkeypatch):
     r = ctx.client.get(f"/v1/artifact-share/{share['token']}/content")
 
     assert r.status_code == 404
+
+
+def test_content_blocked_caller_404s_for_evidence_and_prd(isolated_settings, monkeypatch):
+    """A non-same-company caller gets the identical 404 body regardless of
+    the underlying artifact type — no existence disclosure either way."""
+    ctx = company_client(monkeypatch)
+    other_company = seed_company(user_id="other-" + uuid.uuid4().hex[:8], slug="rival16")
+    from app.db.artifact_shares import mint_share
+
+    evidence_share = mint_share(
+        artifact_type="evidence", artifact_id=1, owner_company_id=other_company,
+        owner_workspace_id="ws-1", created_by_user_id="creator",
+    )
+    prd_share = mint_share(
+        artifact_type="prd", artifact_id=1, owner_company_id=other_company,
+        owner_workspace_id="ws-1", created_by_user_id="creator",
+    )
+
+    r_evidence = ctx.client.get(f"/v1/artifact-share/{evidence_share['token']}/content")
+    r_prd = ctx.client.get(f"/v1/artifact-share/{prd_share['token']}/content")
+
+    assert r_evidence.status_code == 404
+    assert r_prd.status_code == 404
+    assert r_evidence.json() == r_prd.json()

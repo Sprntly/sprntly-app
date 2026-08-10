@@ -24,6 +24,7 @@ import {
 } from "../../lib/api"
 import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { EvidenceShareControl } from "./EvidenceShareControl"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { EVIDENCE_GEN, STANDALONE_TICKET_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
@@ -685,6 +686,7 @@ function EvidenceBottomBar() {
 
   return (
     <div className="cpanel-bottom-bar">
+      <EvidenceShareControl />
       {prd ? (
         <button type="button" className="btn btn-primary btn-sm cpanel-next-btn" onClick={() => openContentPanel("prd")}>
           View PRD

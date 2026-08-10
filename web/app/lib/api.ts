@@ -1105,6 +1105,11 @@ export type EvidenceRecord = {
   question?: string | null
   /** Kept for shape parity with PrdRecord.ask_id — currently always null. */
   ask_id?: number | null
+  /** The canonical, pre-existing `artifact_shares` token for this evidence
+   *  doc (attached by GET /v1/evidence/{id}'s get-or-create — never minted
+   *  by this read). Optional: absent on any response shape that predates
+   *  this field. */
+  share_token?: string | null
 }
 
 export const evidenceApi = {

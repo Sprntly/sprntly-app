@@ -22,7 +22,11 @@ import { artifactShareApi } from "../../lib/artifactShareApi"
 import { prdAccessApi } from "../../lib/prdAccessApi"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { markdownToEvidenceState } from "../../lib/evidence-adapter"
-import { conversationsApi, type ConversationTurn } from "../../lib/api"
+import {
+  conversationsApi, type ConversationTurn, type EvidenceRecord,
+  type GeneratedStory, type PrdRecord,
+} from "../../lib/api"
+import type { ArtifactShareContentResponse } from "../../lib/artifactShareApi"
 import { IconLock } from "@tabler/icons-react"
 import { GuestRail } from "./GuestRail"
 import { ContentPanel } from "./ContentPanel"
@@ -45,6 +49,11 @@ export type GuestArtifactViewerProps = {
    *  sessions). */
   sharerName: string | null
   owningCompanyName: string
+  /** Which kind of artifact this session is viewing — threaded from the
+   *  gate's `/resolve` outcome. Defaults to "prd" for the bare-link path
+   *  (evidence has no public_id, so it is never reachable there) and for
+   *  any pre-existing call site that predates the evidence arm. */
+  artifactType?: "prd" | "evidence"
 }
 
 function GuestArtifactViewerInner({
@@ -53,6 +62,7 @@ function GuestArtifactViewerInner({
   publicId,
   sharerName,
   owningCompanyName,
+  artifactType = "prd",
 }: GuestArtifactViewerProps) {
   const { setContent } = useContent()
   const { openContentPanel } = useNavigation()
@@ -84,11 +94,17 @@ function GuestArtifactViewerInner({
   useEffect(() => {
     if (historyFetchedRef.current) return
     historyFetchedRef.current = true
-    conversationsApi
-      .byPrd(artifactId)
+    // Load-bearing type dispatch, not cosmetic: prds.id and evidences.id are
+    // independent identity sequences, so feeding an evidence_id to byPrd
+    // would collide with a real (unrelated) PRD id in the normal case and
+    // silently render that PRD's conversation here — a content-integrity
+    // leak, not merely a wrong-tab bug.
+    const historyFetch =
+      artifactType === "evidence" ? conversationsApi.byEvidence(artifactId) : conversationsApi.byPrd(artifactId)
+    historyFetch
       .then((res) => setHistoryTurns(res.turns))
       .catch(() => setHistoryTurns([])) // best-effort — an empty history reads the same as "none yet"
-  }, [artifactId])
+  }, [artifactId, artifactType])
 
   useEffect(() => {
     if (fetchedRef.current) return
@@ -96,32 +112,61 @@ function GuestArtifactViewerInner({
     const fetcher = token ? artifactShareApi.content(token) : prdAccessApi.content(publicId!)
     fetcher
       .then((res) => {
-        const prdReady = res.prd.status === "ready" && !!res.prd.payload_md
+        if (artifactType === "evidence") {
+          // Evidence shares are token-only (no public_id fallback exists for
+          // evidence — see artifactShareApi.ts's URL-keying note), so `res`
+          // here is always the discriminated evidence member of
+          // ArtifactShareContentResponse; the bare-link (prdAccessApi) path
+          // never reaches this branch. Driven off `artifactType`, not
+          // `content.prd` presence.
+          const evRes = res as Extract<ArtifactShareContentResponse, { artifact_type: "evidence" }>
+          const ev = evRes.evidence
+          const evReady = !!ev && ev.status === "ready" && !!ev.payload_md
+          if (!evReady) return // best-effort: leave the empty pane up
+          setContent({
+            prd: null,
+            prdMeta: null,
+            evidence: { ...markdownToEvidenceState(ev.payload_md), question: ev.question },
+            guestTickets: null,
+          })
+          openContentPanel("evidence")
+          return
+        }
+
+        // PRD arm — unchanged. `res` here is the fixed {prd, evidence,
+        // tickets} shape shared by PrdAccessContentResponse and the "prd"
+        // member of ArtifactShareContentResponse.
+        const prdRes = res as {
+          prd: PrdRecord
+          evidence: EvidenceRecord | null
+          tickets: { stories: GeneratedStory[] } | null
+        }
+        const prdReady = prdRes.prd.status === "ready" && !!prdRes.prd.payload_md
         if (!prdReady) return // best-effort: leave the empty pane up
         const evidenceReady =
-          !!res.evidence && res.evidence.status === "ready" && !!res.evidence.payload_md
+          !!prdRes.evidence && prdRes.evidence.status === "ready" && !!prdRes.evidence.payload_md
 
         setContent({
           prd: {
-            ...markdownToPrdState(res.prd.payload_md),
-            prd_id: res.prd.id,
-            public_id: res.prd.public_id,
+            ...markdownToPrdState(prdRes.prd.payload_md),
+            prd_id: prdRes.prd.id,
+            public_id: prdRes.prd.public_id,
             figma_file_key: undefined,
-            llmPart: res.prd.llm_part,
-            briefId: res.prd.brief_id,
-            insightIndex: res.prd.insight_index,
-            source: res.prd.source,
-            generatedAt: res.prd.generated_at,
-            question: res.prd.question,
+            llmPart: prdRes.prd.llm_part,
+            briefId: prdRes.prd.brief_id,
+            insightIndex: prdRes.prd.insight_index,
+            source: prdRes.prd.source,
+            generatedAt: prdRes.prd.generated_at,
+            question: prdRes.prd.question,
           },
           prdMeta:
-            res.prd.brief_id != null && res.prd.insight_index != null
-              ? { briefId: res.prd.brief_id, insightIndex: res.prd.insight_index }
+            prdRes.prd.brief_id != null && prdRes.prd.insight_index != null
+              ? { briefId: prdRes.prd.brief_id, insightIndex: prdRes.prd.insight_index }
               : null,
           evidence: evidenceReady
-            ? { ...markdownToEvidenceState(res.evidence!.payload_md), question: res.evidence!.question }
+            ? { ...markdownToEvidenceState(prdRes.evidence!.payload_md), question: prdRes.evidence!.question }
             : null,
-          guestTickets: res.tickets?.stories ?? null,
+          guestTickets: prdRes.tickets?.stories ?? null,
         })
         openContentPanel("prd")
       })
@@ -129,7 +174,7 @@ function GuestArtifactViewerInner({
         // Best-effort — the empty pane stays up rather than an error toast; a
         // guest whose content read fails simply sees "Shared with you".
       })
-  }, [token, artifactId, publicId, setContent, openContentPanel])
+  }, [token, artifactId, publicId, artifactType, setContent, openContentPanel])
 
   return (
     <div className="app">

@@ -703,6 +703,13 @@ export interface AppContentState {
    *  through), so a null here while `evidence` is set just means the URL
    *  won't carry `?evidence=` for that particular open — never an error. */
   evidenceId: number | null
+  /** Canonical artifact-share token for a STANDALONE evidence doc's Share
+   *  link (`content.evidence` with no sibling PRD); read, never minted on
+   *  open — mirrors `PrdState.shareToken`. Absent-safe: only the Artifacts
+   *  library's evidence-open path threads it today (see `evidenceId`'s own
+   *  comment for the same not-every-path caveat). `null` while the token
+   *  hasn't landed yet; `EvidenceShareControl` renders disabled meanwhile. */
+  evidenceShareToken?: string | null
   /** True while evidence is being generated from the chat flow (ChatScreen),
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */

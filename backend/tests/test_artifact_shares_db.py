@@ -487,6 +487,34 @@ def test_canonical_helper_never_writes_revoked_at():
                     )
 
 
+def test_canonical_gate_never_writes_revoked_at():
+    """Mutation-proofed guard, scoped to `require_shared_evidence` itself —
+    same isolation pattern as `test_canonical_helper_never_writes_revoked_at`
+    above. `test_revoked_at_never_written` below already whole-file-scans
+    both touched modules (so it already covers this function AND the new
+    evidence route arms); this test isolates the assertion to the new gate
+    function so the mutation-proof holds even as the module grows further."""
+    backend_app = pathlib.Path(__file__).resolve().parent.parent / "app"
+    tree = ast.parse((backend_app / "db" / "artifact_shares.py").read_text())
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "require_shared_evidence"
+    )
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+        ):
+            for arg in node.args:
+                if isinstance(arg, ast.Dict):
+                    keys = [k.value for k in arg.keys if isinstance(k, ast.Constant)]
+                    assert "revoked_at" not in keys, (
+                        "require_shared_evidence contains an .update() call "
+                        "setting revoked_at"
+                    )
+
+
 # ── Non-disclosure guard (AC17) ──────────────────────────────────────────
 
 
@@ -558,3 +586,75 @@ def test_require_shared_prd_denies_different_company(isolated_settings):
     with pytest.raises(Exception) as ei:
         require_shared_prd(prd_id, "some-other-company")
     assert getattr(ei.value, "status_code", None) == 404
+
+
+# ── require_shared_evidence (standalone evidence guest-read gate) ────────
+
+
+def _seed_evidence(dataset: str, *, md: str = "# body") -> int:
+    from app.db import save_brief, start_evidence
+    from app.db.evidences import complete_evidence
+
+    brief_id = save_brief(dataset, "W", {"insights": []}, schema_version=1)
+    evidence_id = start_evidence(
+        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v3",
+    )
+    complete_evidence(evidence_id, title="t", md=md)
+    return evidence_id
+
+
+def test_require_shared_evidence_returns_row_for_owning_company(isolated_settings):
+    from app.db.artifact_shares import require_shared_evidence
+
+    owner_company = _seed_company_row("evi-acme1")
+    evidence_id = _seed_evidence("evi-acme1")
+
+    row = require_shared_evidence(evidence_id, owner_company)
+
+    assert row["id"] == evidence_id
+    assert row["payload_md"] == "# body"
+
+
+def test_require_shared_evidence_404s_for_foreign_company(isolated_settings):
+    from app.db.artifact_shares import require_shared_evidence
+
+    _seed_company_row("evi-acme2")
+    evidence_id = _seed_evidence("evi-acme2")
+    other_company = _seed_company_row("evi-rival2")
+
+    with pytest.raises(Exception) as ei:
+        require_shared_evidence(evidence_id, other_company)
+    assert getattr(ei.value, "status_code", None) == 404
+
+
+def test_require_shared_evidence_404s_for_missing(isolated_settings):
+    from app.db.artifact_shares import require_shared_evidence
+
+    owner_company = _seed_company_row("evi-acme3")
+
+    with pytest.raises(Exception) as ei:
+        require_shared_evidence(999999, owner_company)
+    assert getattr(ei.value, "status_code", None) == 404
+
+
+def test_require_shared_evidence_ignores_workspace(isolated_settings):
+    """Same shape as require_shared_prd's own company-only contract: the
+    function signature takes no workspace argument at all, so a same-company
+    caller resolves regardless of which specific workspace the dataset is
+    bound to — the deliberate guest-read exception this primitive exists to
+    provide."""
+    from app.db.artifact_shares import require_shared_evidence
+    from app.db.datasets import insert_dataset
+    from app.db.workspaces import ensure_default_workspace
+
+    owner_company = _seed_company_row("evi-acme4")
+    # Bind the dataset to a REAL (but specific, non-obvious) workspace —
+    # require_shared_evidence takes no workspace param, so this must not
+    # matter at all; only the resolved company_id does.
+    other_ws = ensure_default_workspace(owner_company)
+    insert_dataset("evi-acme4", "Evi Acme4", workspace_id=other_ws["id"])
+    evidence_id = _seed_evidence("evi-acme4")
+
+    row = require_shared_evidence(evidence_id, owner_company)
+
+    assert row["id"] == evidence_id
