@@ -8,27 +8,64 @@ Projects scope by `company_id`/`workspace_id` UUID, NOT by a dataset
 slug — this router deliberately does not take a `?dataset=` query param
 and does not call `require_owned_dataset`.
 
-Scope boundary: no LLM calls (memory synthesis + promotion are Phase 2),
-no group-chat turn endpoints — each is a separate ticket. Artifact fan-out
+Scope boundary: memory synthesis + promotion are Phase 2. Artifact fan-out
 (GET/POST `.../artifacts`) reuses `db/artifacts.py`'s existing five-table
 fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
+
+Group-chat turn endpoints (build spec §5.3, AD-P2/AD-P4/AD-P10): a
+human-to-human group turn is a cheap DB write — no LLM call. Only a turn
+that deterministically `@Sprntly`-mentions the agent triggers ONE LLM call
+(best-effort, AD-P7) producing an assistant turn. The smart-interjection
+should-respond classifier (AD-P10's broader gate) is a later phase — v1
+is mention-only, deterministic, no classifier call at all.
 """
 from __future__ import annotations
 
 import logging
+import re
+import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext, require_workspace
+from app.db import conversations as conversations_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
 from app.deps.ownership import require_owned_evidence, require_owned_prd
+from app.llm import DEFAULT_MODEL, call_md
+from app.llm_telemetry import RunUsage, log_llm_run
 from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
+
+# Deterministic v1 trigger (AD-P10 — the smart-interjection classifier is a
+# later phase). Word-boundary so "@Sprntly" and "@sprntly" both match but a
+# longer handle sharing the prefix would not.
+_MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
+
+# How many of the most recent group turns are folded into the agent's
+# context on a mention reply — bounded so a long-running group chat can't
+# grow the prompt unboundedly (mirrors the per-turn history clamp posture
+# `_load_history`/`app.prompt_history` already apply to individual chats).
+_GROUP_CONTEXT_TURNS = 30
+
+_GROUP_AGENT_SYSTEM_PROMPT = """\
+You are Sprntly, a project teammate embedded in this team's group chat.
+You were tagged with @Sprntly in the transcript below. Read the recent
+conversation (each line is "Name (job role): message" or "Sprntly: message"
+for your own prior turns) and reply helpfully and concisely to whoever
+tagged you, as one more voice in the thread — not a formal report.
+
+Rules:
+- Address the request that mentioned you; use the surrounding turns only
+  as context for who is asking and why.
+- Keep it conversational and short — a few sentences, not a document.
+- If the ask is unclear or out of scope, say so plainly rather than
+  guessing.
+"""
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"])
 
@@ -65,6 +102,10 @@ class UpdateMemoryEntryRequest(BaseModel):
 class AddArtifactRequest(BaseModel):
     artifact_type: Literal["prd", "evidence", "prototype", "report", "ticket_set"]
     artifact_id: int = Field(..., ge=1)
+
+
+class PostGroupTurnRequest(BaseModel):
+    content: str = Field(min_length=1)
 
 
 def _require_project(project_id: int, ctx: WorkspaceContext) -> dict:
@@ -281,3 +322,116 @@ def delete_memory(
     if not deleted:
         raise HTTPException(404, "Memory entry not found")
     return {"deleted": True}
+
+
+# ── Group chat ────────────────────────────────────────────────────────
+# One `kind='group'` conversation per project, open to every project member
+# (AD-P2 — additive, never touches the per-user chat path). Every route here
+# is membership-gated via `_require_project_member` (AD-P11 WAVE INVARIANT):
+# a same-tenant non-member gets 403, a foreign-tenant project 404s.
+
+
+@router.post("/{project_id}/group")
+def create_group_chat_route(
+    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
+):
+    """Create-if-absent the project's one group chat and return it.
+    Idempotent — a second call returns the SAME conversation (AC1)."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    logger.info(
+        "group_chat_created project_id=%s conversation_id=%s",
+        project_id, conversation["id"],
+    )
+    return conversation
+
+
+@router.get("/{project_id}/group/turns")
+def list_group_turns_route(
+    project_id: int,
+    since: int | None = None,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Poll read (AD-P4 — no realtime in v1): turns after `since` (a turn
+    id cursor), ascending, each carrying `author_name`/`author_job_role`.
+    Empty (not 404) when the group chat hasn't been created yet — nothing
+    has been posted, which is a legitimate poll state, not an error."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_group_chat(project_id)
+    if not conversation:
+        return {"turns": []}
+    return {"turns": conversations_db.list_group_turns(conversation["id"], since=since)}
+
+
+@router.post("/{project_id}/group/turns")
+def post_group_turn_route(
+    project_id: int,
+    payload: PostGroupTurnRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Post a human turn to the group chat (create-if-absent, same as
+    `POST /group`, so a client can post without a separate prior create
+    call). A human-to-human turn is a cheap DB write — no LLM call. Only a
+    turn containing a deterministic `@Sprntly` mention triggers ONE
+    best-effort agent reply (AD-P7/AD-P10 — v1 is mention-only; the
+    smart-interjection classifier is Phase 2)."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
+    logger.info(
+        "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
+        project_id, conversation["id"], turn.get("id") if turn else None,
+    )
+    if _MENTION_RE.search(payload.content):
+        _respond_as_group_agent(project_id, conversation["id"])
+    return turn
+
+
+def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
+    """On an `@Sprntly` mention: assemble recent group-turn context (each
+    speaker tagged with their `author_name`/`author_job_role`) and produce
+    ONE assistant turn (`role='assistant', author_user_id=NULL`). Never
+    raises (AD-P7 best-effort contract) — a failure yields no assistant
+    turn and the human turn that triggered this already persisted, so the
+    chat is never blocked. Meters ONLY this call (the structured
+    cost-summary log line — never emitted for a human-to-human turn,
+    because none is made for one)."""
+    start = time.monotonic()
+    try:
+        recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
+        transcript_lines = []
+        for turn in recent:
+            label = turn["author_name"] or "Someone"
+            job_role = turn.get("author_job_role")
+            if job_role:
+                label = f"{label} ({job_role})"
+            transcript_lines.append(f"{label}: {turn['content']}")
+        transcript = "\n".join(transcript_lines)
+        meta: dict = {}
+        reply = call_md(
+            system=_GROUP_AGENT_SYSTEM_PROMPT,
+            user=transcript,
+            model=DEFAULT_MODEL,
+            meta_out=meta,
+        )
+        conversations_db.post_group_turn(conversation_id, None, reply, role="assistant")
+        usage = RunUsage(
+            cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
+            input_tokens=meta.get("input_tokens", 0),
+            output_tokens=meta.get("output_tokens", 0),
+        )
+        log_llm_run(
+            operation="projects.group_chat.mention_reply",
+            identifier={"project_id": project_id, "conversation_id": conversation_id},
+            usage=usage,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            status="complete",
+            model=meta.get("model") or DEFAULT_MODEL,
+            mode="group",
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the chat
+        logger.warning(
+            "group_chat_mention_reply_failed project_id=%s conversation_id=%s error=%s",
+            project_id, conversation_id, type(exc).__name__,
+        )
