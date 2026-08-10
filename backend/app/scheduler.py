@@ -725,7 +725,18 @@ def start_scheduler() -> None:
     interval_hours = getattr(settings, "pipeline_interval_hours", 6)
     tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
-    _scheduler = AsyncIOScheduler()
+    # APScheduler's DEFAULT misfire_grace_time is 1 SECOND: a firing that lands
+    # even 2s late — routine here, since connector syncs and LLM calls block the
+    # event loop — is DISCARDED, not run late. Measured on prod over 14 days:
+    # the 6h connector refresh ran 19 times and was dropped 22 (`was missed by
+    # 0:00:03`), including 7 consecutive misses that left Fireflies unsynced for
+    # ~41h. Frequent jobs hide this (a 5m job recovers on the next tick); a 6h
+    # job loses the whole cycle. An hour of grace + coalesce=True means a late
+    # firing still runs, and a backlog collapses to ONE run rather than replaying
+    # every missed interval.
+    _scheduler = AsyncIOScheduler(
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True}
+    )
     # Top Insights: tick frequently; per company, START GENERATION when the
     # (configured fire time − GENERATION_LEAD) window opens and DELIVER exactly
     # at the fire time via a one-shot DateTrigger (plus a post-fire catch-up

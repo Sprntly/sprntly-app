@@ -698,7 +698,7 @@ def _run_start_scheduler(monkeypatch, *, drip_enabled):
     monkeypatch.setattr(sched_mod.settings, "drip_emails_enabled", drip_enabled)
     monkeypatch.setattr(sched_mod.settings, "drip_interval_hours", 6)
     fake = _FakeScheduler()
-    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda: fake)
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler", lambda **kw: fake)
     sched_mod.start_scheduler()
     sched_mod.shutdown_scheduler()
     return fake
