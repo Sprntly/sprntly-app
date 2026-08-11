@@ -87,6 +87,15 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const [draft, setDraft] = useState("")
   const [error, setError] = useState<string | null>(null)
 
+  // "Save as artifact" (agent turns only, v1 — see the ticket's scope
+  // decision). Local, per-turn state only: no `sourceConversationId` is
+  // threaded (the group conversation id isn't available in this component,
+  // by design), and no rail/screen refetch happens on success — the
+  // artifacts rail already refetches on its own `open` transition.
+  const [savingTurnId, setSavingTurnId] = useState<number | null>(null)
+  const [savedTurnIds, setSavedTurnIds] = useState<Set<number>>(new Set())
+  const [saveError, setSaveError] = useState<string | null>(null)
+
   const cursorRef = useRef<number | undefined>(undefined)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -184,6 +193,28 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       })
   }, [draft, posting, projectId, applyTurns])
 
+  // Idempotent per-turn save (UI-side guard — the backend does not dedupe
+  // this endpoint). A turn already saved or already in flight is a no-op.
+  const handleSaveArtifact = useCallback(
+    (turnId: number, content: string) => {
+      if (savingTurnId === turnId || savedTurnIds.has(turnId)) return
+      setSavingTurnId(turnId)
+      setSaveError(null)
+      projectsApi
+        .saveChatArtifact(projectId, { content })
+        .then(() => {
+          setSavedTurnIds((prev) => new Set(prev).add(turnId))
+        })
+        .catch(() => {
+          setSaveError("Couldn't save that as an artifact. Try again.")
+        })
+        .finally(() => {
+          setSavingTurnId(null)
+        })
+    },
+    [projectId, savingTurnId, savedTurnIds],
+  )
+
   const lastTurn = turns[turns.length - 1]
   // "Sprntly stayed out" (design-spec AC8): the most recent turn is a human
   // one still awaiting whatever comes next — v1 has no should-respond
@@ -233,6 +264,21 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                         candidates={turn.open_candidates ?? []}
                         onOpen={(c) => onOpenArtifact?.(c)}
                       />
+                      {savedTurnIds.has(turn.id) ? (
+                        <span className={styles.savedTag} data-testid="gc-saved-artifact">
+                          Saved to artifacts
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className={styles.saveBtn}
+                          data-testid="gc-save-artifact"
+                          disabled={savingTurnId === turn.id}
+                          onClick={() => handleSaveArtifact(turn.id, turn.content)}
+                        >
+                          {savingTurnId === turn.id ? "Saving…" : "Save as artifact"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 )
@@ -290,6 +336,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       {error ? (
         <div className={styles.error} role="alert" data-testid="gc-error">
           {error}
+        </div>
+      ) : null}
+
+      {saveError ? (
+        <div className={styles.error} role="alert" data-testid="gc-save-error">
+          {saveError}
         </div>
       ) : null}
 
