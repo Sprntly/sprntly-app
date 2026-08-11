@@ -21,6 +21,8 @@ const memorySummaryMock = vi.fn()
 const memoryInsightMock = vi.fn()
 const openModalMock = vi.fn()
 const removeMemberMock = vi.fn()
+const individualUnreadMock = vi.fn()
+const markIndividualReadMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
 // listed human member — lets the container-level tests exercise the
 // "removable" branch (u2/Shristi) without also tripping the self-removal
@@ -54,6 +56,8 @@ vi.mock("../../../../../lib/api", () => {
       memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
       memoryInsight: (...a: unknown[]) => memoryInsightMock(...a),
       removeMember: (...a: unknown[]) => removeMemberMock(...a),
+      individualUnread: (...a: unknown[]) => individualUnreadMock(...a),
+      markIndividualRead: (...a: unknown[]) => markIndividualReadMock(...a),
     },
   }
 })
@@ -204,6 +208,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onToggleRail: noop,
     activeChat: "group",
     onSelectChat: noop,
+    individualUnread: false,
     onOpenArtifacts: noop,
     onCreateArtifact: noop,
     onOpenMemory: noop,
@@ -224,6 +229,10 @@ afterEach(() => {
   memoryInsightMock.mockReset()
   openModalMock.mockReset()
   removeMemberMock.mockReset()
+  individualUnreadMock.mockReset()
+  individualUnreadMock.mockResolvedValue({ unread: false, latest_turn_id: null, last_read_turn_id: 0 })
+  markIndividualReadMock.mockReset()
+  markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 0 })
   authMock.mockReset()
   authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })
@@ -390,6 +399,17 @@ describe("ProjectDetailView — state", () => {
     expect(screen.getByTestId("chat-row-group").getAttribute("aria-pressed")).toBe("false")
   })
 
+  it("test_rail_badge_shows_and_clears — the individual row renders an unread dot when individualUnread is true, and none when false", () => {
+    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ individualUnread: false })))
+    expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ individualUnread: true })))
+    expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy()
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ individualUnread: false })))
+    expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
+  })
+
   it("the chat note bar swaps group ⇆ individual copy", () => {
     const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
     expect(screen.getByTestId("chat-note").textContent).toContain("smart interjection")
@@ -463,11 +483,17 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
 
   it("test_no_new_state_for_status — no new useState/fetch is introduced for the agent status (source-scan guard against accidental activity-wiring)", () => {
     const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
-    // Baseline pre-ticket declaration count (state/rail/activeChat/railModal/
-    // removeTarget/removeBusy/removeError) — this ticket is markup + CSS
-    // only, so the count must not grow.
+    // Baseline pre-ticket declaration count was 7 (state/rail/activeChat/
+    // railModal/removeTarget/removeBusy/removeError). The assignee-
+    // awareness ticket adds exactly ONE more, legitimately in its own
+    // declared scope — `individualUnread` (the derived rail-badge flag,
+    // never a stored boolean upstream; this is client-side UI state
+    // mirroring the server's derived value, not new derived-state
+    // persistence). The guard this test protects — no NEW state for the
+    // AGENT STATUS pulse specifically — still holds: `posting` (the ask-
+    // composer wiring this guard was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(7)
+    expect(useStateDeclarations).toHaveLength(8)
     expect(src).not.toContain("posting")
   })
 })
@@ -650,6 +676,66 @@ describe("ProjectDetailScreen — data fetch", () => {
       expect(getMock).toHaveBeenCalledTimes(1)
       expect(screen.getAllByTestId("member-row-human")).toHaveLength(2)
     })
+  })
+})
+
+// ── ProjectDetailScreen — assignee-awareness unread badge (AD-P3/AD-P20) ──
+describe("ProjectDetailScreen — individual chat unread badge", () => {
+  it("test_rail_badge_shows_and_clears — fetches unread on mount, renders the dot, and clears it (via POST /individual/read) once the individual row is selected", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    individualUnreadMock.mockResolvedValue({ unread: true, latest_turn_id: 7, last_read_turn_id: 0 })
+    markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 7 })
+
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(individualUnreadMock).toHaveBeenCalledWith("101"))
+    await waitFor(() => expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy())
+    expect(markIndividualReadMock).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTestId("chat-row-individual"))
+
+    await waitFor(() => expect(markIndividualReadMock).toHaveBeenCalledWith("101"))
+    await waitFor(() => expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull())
+    // Selecting the row still switches the active thread — the badge-clear
+    // is additive to the existing swap, not a replacement for it.
+    expect(screen.getByTestId("main-thread-stub").getAttribute("data-active-chat")).toBe("individual")
+  })
+
+  it("selecting the GROUP row does not call markIndividualRead", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    individualUnreadMock.mockResolvedValue({ unread: true, latest_turn_id: 3, last_read_turn_id: 0 })
+
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("chat-row-group"))
+    expect(markIndividualReadMock).not.toHaveBeenCalled()
+    // The badge is untouched by a group-row click.
+    expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy()
+  })
+
+  it("a failed unread fetch leaves the badge unset (best-effort), with no error surfaced", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    individualUnreadMock.mockRejectedValue(new ApiError(500, "unread backend down"))
+
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
+    expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
+    expect(screen.queryByTestId("project-detail-error")).toBeNull()
   })
 })
 

@@ -379,6 +379,15 @@
   box-shadow: 0 0 0 2px var(--accent-alpha-18);
 }
 
+.chatRowUnreadDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--accent-alpha-18);
+}
+
 .chatRowPrivate {
   font-size: 9.5px;
   font-weight: 700;

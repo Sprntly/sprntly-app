@@ -202,6 +202,19 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "real-DB proof, run locally against the dev rig when touching this "
         "migration or `db/project_delegations.py`."
     ),
+    ("test_conversation_read_cursors.py", "RUN_CONVERSATION_READ_CURSORS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove the "
+        "conversation_read_cursors migration's composite PK and RLS/policy "
+        "catalog entries, plus a real set_cursor/get_cursor upsert round "
+        "trip — the fake Supabase client has no SQL engine behind it and "
+        "cannot enforce a composite primary key or an RLS-policy lookup. "
+        "Deterministic backstop: the rest of this file drives unread "
+        "derivation, read-clears-unread, advance-only clamping, per-user "
+        "cursor isolation (RED->GREEN mutation proof), and the membership + "
+        "client-supplied-id gates against FakeSupabaseClient in the fast "
+        "lane; this suite is the real-DB proof, run locally against the dev "
+        "rig when touching this migration or `db/conversation_read_cursors.py`."
+    ),
     ("test_project_delegation.py", "RUN_DELEGATE_TASK_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the "
         "delegate_task tool: proves the REAL model actually calls the tool "

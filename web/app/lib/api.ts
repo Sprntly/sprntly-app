@@ -5272,6 +5272,20 @@ export type IndividualTurn = {
   created_at: string
 }
 
+/** Response from `GET /v1/projects/{id}/individual/unread` and
+ *  `POST /v1/projects/{id}/individual/read` — the caller's OWN derived
+ *  unread signal for their individual project chat (AD-P3/AD-P20: `unread`
+ *  is derived server-side at read time from a stored read cursor, never a
+ *  stored boolean). `latest_turn_id` is `null` when the chat has no turns
+ *  yet; `last_read_turn_id` is `0` when the caller has never read it. The
+ *  `/read` route omits `unread`/`latest_turn_id` (it only reports the
+ *  cursor it just advanced to), so those two fields are optional here. */
+export type IndividualUnreadStatus = {
+  unread?: boolean
+  latest_turn_id?: number | null
+  last_read_turn_id: number
+}
+
 /** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
  *  minted `report` artifact ref (item-14 substrate, build spec §2). Always
  *  `artifact_type: "report"` in v1 — a saved chat output is captured as a
@@ -5421,5 +5435,21 @@ export const projectsApi = {
   removeMember: (id: number | string, userId: string) =>
     api.delete<{ removed: true }>(
       `/v1/projects/${encodeURIComponent(String(id))}/members/${encodeURIComponent(userId)}`,
+    ),
+  /** The caller's OWN derived unread signal for their individual project
+   *  chat (`GET /v1/projects/{id}/individual/unread`, AD-P3/AD-P20 — no
+   *  stored boolean; derived server-side from the read cursor). Never
+   *  throws on "chat not opened yet" — the route returns the zero-state
+   *  `{unread: false, latest_turn_id: null, last_read_turn_id: 0}`. */
+  individualUnread: (id: number | string) =>
+    api.get<IndividualUnreadStatus>(`/v1/projects/${encodeURIComponent(String(id))}/individual/unread`),
+  /** Advance the caller's OWN read cursor to the latest turn in their
+   *  individual project chat (`POST /v1/projects/{id}/individual/read`) —
+   *  clears the rail badge. Advance-only server-side (a stale re-post can
+   *  never move the cursor backward); safe to call every time the
+   *  individual chat is opened, not just the first time. */
+  markIndividualRead: (id: number | string) =>
+    api.post<{ last_read_turn_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/individual/read`,
     ),
 }

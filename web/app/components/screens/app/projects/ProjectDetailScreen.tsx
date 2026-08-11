@@ -50,6 +50,11 @@ import { ArtifactsModal } from "./ArtifactsModal"
 import { TaskModal } from "./TaskModal"
 import styles from "./ProjectDetailScreen.module.css"
 
+// Focus-gated poll interval for the unread badge — same cadence
+// `ProjectGroupChat.tsx`'s own `POLL_MS` uses (AD-P4), duplicated locally
+// per this file's existing precedent (TYPE_BADGE, relativeTime, etc.).
+const UNREAD_POLL_MS = 4000
+
 type HumanMember = Extract<ProjectMember, { kind: "human" }>
 
 /** Copied verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same
@@ -231,6 +236,12 @@ export type ProjectDetailViewProps = {
   onToggleRail: () => void
   activeChat: ActiveChat
   onSelectChat: (chat: ActiveChat) => void
+  /** Derived (AD-P3/AD-P20 — never a stored boolean upstream, this is the
+   *  server's `unread` field passed straight through): true when the
+   *  caller's individual chat has a turn beyond their read cursor. Renders
+   *  a dot on the "My chat with Sprntly" rail row; clears when the row is
+   *  selected (the container POSTs `/individual/read` on that transition). */
+  individualUnread: boolean
   onOpenArtifacts: (type?: ProjectArtifactType) => void
   onCreateArtifact: () => void
   onOpenMemory: () => void
@@ -267,6 +278,7 @@ export function ProjectDetailView({
   onToggleRail,
   activeChat,
   onSelectChat,
+  individualUnread,
   onOpenArtifacts,
   onCreateArtifact,
   onOpenMemory,
@@ -378,6 +390,14 @@ export function ProjectDetailView({
                 <LockIcon />
               </span>
               <span className={styles.chatRowTitle}>My chat with Sprntly</span>
+              {individualUnread ? (
+                <span
+                  className={styles.chatRowUnreadDot}
+                  title="unread"
+                  aria-label="unread"
+                  data-testid="individual-chat-unread-dot"
+                />
+              ) : null}
               <span className={styles.chatRowPrivate}>private</span>
             </button>
 
@@ -578,6 +598,10 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
+  // Derived unread signal for the caller's OWN individual chat
+  // (AD-P3/AD-P20 — never stored client-side either, just mirrored from the
+  // server's derived `unread` field on each fetch/poll tick).
+  const [individualUnread, setIndividualUnread] = useState(false)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -608,6 +632,68 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   useEffect(() => {
     load()
   }, [load])
+
+  // Unread badge: fetch on mount, then a focus-gated poll while the tab has
+  // focus — same cadence + focus-gate posture `ProjectGroupChat.tsx`'s own
+  // poll uses (AD-P4, no realtime). Best-effort: a failed fetch/poll tick
+  // just leaves the badge in its last-known state, never an error surface.
+  useEffect(() => {
+    let cancelled = false
+    const fetchUnread = () => {
+      projectsApi
+        .individualUnread(projectId)
+        .then((status) => {
+          if (!cancelled) setIndividualUnread(Boolean(status.unread))
+        })
+        .catch(() => {
+          /* best-effort — a dropped tick leaves the badge as-is */
+        })
+    }
+
+    fetchUnread()
+
+    let intervalId: ReturnType<typeof setInterval> | null = null
+    const start = () => {
+      if (intervalId != null) return
+      intervalId = setInterval(fetchUnread, UNREAD_POLL_MS)
+    }
+    const stop = () => {
+      if (intervalId == null) return
+      clearInterval(intervalId)
+      intervalId = null
+    }
+
+    if (typeof document !== "undefined" && document.hasFocus()) start()
+    const onFocus = () => start()
+    const onBlur = () => stop()
+    window.addEventListener("focus", onFocus)
+    window.addEventListener("blur", onBlur)
+
+    return () => {
+      cancelled = true
+      stop()
+      window.removeEventListener("focus", onFocus)
+      window.removeEventListener("blur", onBlur)
+    }
+  }, [projectId])
+
+  // Selecting the individual row clears the badge: POST /individual/read
+  // advances the caller's own cursor server-side, then the local dot state
+  // is cleared to match (best-effort — a failed POST just leaves the badge
+  // showing until the next successful poll tick re-derives it).
+  const onSelectChat = useCallback(
+    (chat: ActiveChat) => {
+      setActiveChat(chat)
+      if (chat !== "individual") return
+      projectsApi
+        .markIndividualRead(projectId)
+        .then(() => setIndividualUnread(false))
+        .catch(() => {
+          /* best-effort — badge stays until the next poll tick */
+        })
+    },
+    [projectId],
+  )
 
   // Re-fetches ONLY the project row (members + count) after a roster
   // mutation — deliberately not `load()`: that flashes the whole shell back
@@ -726,7 +812,8 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         railCollapsed={railCollapsed}
         onToggleRail={onToggleRail}
         activeChat={activeChat}
-        onSelectChat={setActiveChat}
+        onSelectChat={onSelectChat}
+        individualUnread={individualUnread}
         onOpenArtifacts={onOpenArtifacts}
         onCreateArtifact={onCreateArtifact}
         onOpenMemory={onOpenMemory}

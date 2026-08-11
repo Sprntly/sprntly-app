@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext, require_workspace
+from app.db import conversation_read_cursors as read_cursors_db
 from app.db import conversations as conversations_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
@@ -546,6 +547,50 @@ def list_individual_turns_route(
             conversation["id"], ctx.user_id, since=since
         )
     }
+
+
+@router.get("/{project_id}/individual/unread")
+def get_individual_unread_route(
+    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
+):
+    """Derived unread signal for the CALLER'S OWN individual project chat
+    (AD-P3/AD-P20 — inputs-only + derive-at-read; no stored `unread`
+    boolean anywhere). Resolves `ctx.user_id`'s own conversation
+    server-side; the client never supplies a `conversation_id`/`user_id` —
+    same own-conversation posture as `list_individual_turns_route` one
+    handler up. No conversation yet (caller hasn't opened this chat) is a
+    legitimate, unread-false read state, not an error."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
+    if not conversation:
+        return {"unread": False, "latest_turn_id": None, "last_read_turn_id": 0}
+    conv_id = conversation["id"]
+    return {
+        "unread": read_cursors_db.unread_for(conv_id, ctx.user_id),
+        "latest_turn_id": read_cursors_db.latest_individual_turn_id(conv_id),
+        "last_read_turn_id": read_cursors_db.get_cursor(conv_id, ctx.user_id),
+    }
+
+
+@router.post("/{project_id}/individual/read")
+def mark_individual_read_route(
+    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
+):
+    """Advance the CALLER'S OWN read cursor to the latest turn in their own
+    individual project chat — clears the rail badge. Advance-only
+    (`set_cursor`'s own `max(existing, new)` clamp, AC5): calling this
+    twice, or calling it when nothing new has arrived, is a no-op past the
+    first advance. No conversation yet → nothing to advance; returns the
+    same zero-state shape as the unread route above rather than 404ing (not
+    having opened the chat yet is not an error)."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
+    if not conversation:
+        return {"last_read_turn_id": 0}
+    conv_id = conversation["id"]
+    latest = read_cursors_db.latest_individual_turn_id(conv_id) or 0
+    updated = read_cursors_db.set_cursor(conv_id, ctx.user_id, latest)
+    return {"last_read_turn_id": updated["last_read_turn_id"]}
 
 
 @router.get("/{project_id}/group/turns")

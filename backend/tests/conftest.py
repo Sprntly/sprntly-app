@@ -1587,6 +1587,19 @@ CREATE TABLE project_delegations (
 CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id, created_at);
 CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
 CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
+
+-- Mirrors 20260811120400_conversation_read_cursors.sql. Inputs-only read
+-- cursor (AD-P3/AD-P20) — no `unread` boolean/count column anywhere;
+-- unread is derived at read time by the db helper. No FK on user_id —
+-- same reasoning as project_delegations above (auth.users ids the fake
+-- DB never seeds a row for).
+CREATE TABLE conversation_read_cursors (
+    conversation_id   INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    user_id           TEXT NOT NULL,
+    last_read_turn_id INTEGER NOT NULL DEFAULT 0,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, user_id)
+);
 """
 
 
