@@ -126,19 +126,40 @@ class _Gateway:
     generations that were handed a LIVE sink — the quantity the turn-level
     invariant is about.
 
-    `raises_on(purpose)` makes that generation stream its fragments and THEN
-    fail. Streaming first is the point: a model that dies after publishing
-    half an answer is the case where a non-terminal streamed path does damage,
-    and a stub that failed before streaming would hide it.
+    A generation can be made to go wrong in the THREE shapes that make a turn
+    continue — and all three are needed, because each is invisible to the
+    others' tests:
+
+      * `raises_on`   — it throws.
+      * `returns_none_on` is not a stub setting; it is what
+        `_answer_voc_report` does with a failed generation, reached via
+        `raises_on("voc_from_kg")`.
+      * `returns_empty_on` — it returns NORMALLY with a schema-valid but
+        DEGENERATE payload (empty `answer`). No exception, no None. This is
+        the shape that survives an assertion battery built only around the
+        first two: a caller that retries on a blank synthesis, or treats a
+        blank one as "declined" and falls through, runs a second generation
+        without anything ever raising.
+
+    In every case the fragments are published BEFORE the failure. That is the
+    point: a model that dies (or comes back empty) after publishing half an
+    answer is the case where a non-terminal streamed path does damage, and a
+    stub that failed before streaming would hide exactly the defect.
     """
 
     def __init__(self):
         self.purposes: list[str | None] = []
         self.streamed: list[str | None] = []
         self._failing: set[str] = set()
+        self._empty: set[str] = set()
 
     def raises_on(self, purpose: str) -> None:
         self._failing.add(purpose)
+
+    def returns_empty_on(self, purpose: str) -> None:
+        """Come back schema-valid but with nothing in `answer` — the model
+        produced tokens and none of them survived extraction."""
+        self._empty.add(purpose)
 
     def __call__(self, **kw):
         purpose = kw.get("purpose")
@@ -150,6 +171,8 @@ class _Gateway:
                 sink(fragment)
         if purpose in self._failing:
             raise RuntimeError(f"{purpose}: model died mid-generation")
+        if purpose in self._empty:
+            return _Result(dict(_payload(), answer=""))
         return _Result(_payload())
 
 
@@ -170,6 +193,17 @@ def gateway(monkeypatch):
 
     A test that legitimately drives more than one TURN must reset
     `gw.streamed` between them — the budget is per turn, not per test.
+
+    KNOWN BLIND SPOT, RECORDED SO THE NEXT PERSON DOES NOT WALK INTO IT. This
+    budget observes `app.graph.gateway.llm_call` and nothing else. The
+    skill-less DIRECT answer path does not generate through the gateway at
+    all: `app.ask_runner` (line ~1741) calls `app.llm.call_json(...,
+    on_json_delta=on_delta)`, imported at its module top and never patched
+    here. A full answer's worth of text can therefore reach a sink on that
+    path while `gw.streamed` stays empty. That is OUT OF SCOPE for this file,
+    which is about the voice-of-customer routes — but anyone extending the
+    budget to cover the direct path must patch `app.llm.call_json` and count
+    `on_json_delta` too, or they will get a green run that proves nothing.
     """
     gw = _Gateway()
     monkeypatch.setattr(gateway_mod, "llm_call", gw)
@@ -524,6 +558,52 @@ def test_a_failure_before_any_generation_still_answers_once(gateway, monkeypatch
     )
 
 
+def test_an_empty_synthesis_does_not_start_a_second_generation(gateway, monkeypatch):
+    """THE GENERATION SUCCEEDS AND SAYS NOTHING — the third failure shape.
+
+    No exception and no None: a schema-valid payload whose `answer` is empty.
+    Nothing above this test ever produces that input, and two plausible
+    hardenings survive everything else in this file because of it:
+
+      * retry the synthesis once when `answer` comes back blank, forwarding
+        the same sink — two streaming calls in one turn;
+      * treat a blank synthesis as "this route declined" and fall through to
+        the generic answer — a streamed route made non-terminal.
+
+    Both publish the abandoned attempt's fragments and then a second
+    generation's on top, into the same never-reset extractor. Traced with the
+    real `AnswerFieldExtractor`, the client ends up reading the first
+    attempt's partial text with a stray brace from the second attempt's JSON
+    stuck to it, never converging on the answer that was actually stored.
+
+    An empty answer is a legitimate terminal outcome. It must be RETURNED, not
+    retried into the same sink.
+    """
+    gateway.returns_empty_on("voc_report")
+    _stub_live_calls(monkeypatch)
+    _route_voc(monkeypatch)
+    sink = _RecordingSink()
+
+    out = qa.answer(
+        enterprise_id="ent", question=_UNPINNED_REPORT_Q, dataset="acme",
+        on_delta=sink,
+    )
+
+    assert gateway.purposes == ["voc_report"], (
+        f"a blank synthesis started a SECOND generation ({gateway.purposes}). "
+        "Whether it retried the same call or fell through to another answer "
+        "path, the fragments already published are now the prefix of a "
+        "different generation's text and the client never sees either answer "
+        "whole."
+    )
+    assert out["_skill_source"] == "call-digest"
+    assert out["answer"] == "", (
+        "the empty synthesis must come back as the answer it is, not be "
+        "papered over by a second run"
+    )
+    assert sink.text == _STREAMED
+
+
 # ── callers that pass no sink at all ─────────────────────────────────────────
 
 
@@ -543,20 +623,25 @@ def test_a_caller_without_a_sink_still_gets_the_answer(gateway, monkeypatch):
     assert gateway.streamed == []
 
 
-def test_call_digest_answer_without_a_sink_is_unchanged(monkeypatch):
+def test_call_digest_answer_without_a_sink_is_unchanged(gateway, monkeypatch):
     """The callee's own contract, one level below the routes above: no sink in,
-    no sink out, and the payload is still authoritative."""
-    seen: dict = {}
+    no sink out, and the payload is still authoritative.
 
-    def fake_llm_call(**kw):
-        seen.setdefault(kw.get("purpose"), kw)
-        return _Result(_payload())
-
-    monkeypatch.setattr(gateway_mod, "llm_call", fake_llm_call)
+    ON THE `gateway` FIXTURE DELIBERATELY. This test used to build its own
+    stub, which made it the one test in the file not covered by the turn-level
+    budget — harmless in itself (it passes no sink) but a working template for
+    opting out of the invariant without saying so. There is now no stub in
+    this file that the budget does not see. `gateway.streamed == []` is also a
+    stricter statement of what the bespoke stub checked: not "the kwarg was
+    None" but "nothing was ever published".
+    """
     _stub_live_calls(monkeypatch)
 
     out = cd.answer(enterprise_id="co", question="summarize customer calls")
 
-    assert "voc_report" in seen, f"report call never ran; saw {list(seen)}"
-    assert seen["voc_report"].get("on_delta") is None
+    assert gateway.purposes == ["voc_report"], (
+        f"report call never ran; saw {gateway.purposes}"
+    )
+    assert gateway.streamed == []
     assert out["_skill_source"] == "call-digest"
+    assert out["answer"]
