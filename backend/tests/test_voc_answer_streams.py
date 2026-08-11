@@ -1,15 +1,25 @@
 """The voice-of-customer answers publish tokens as they generate.
 
 These are the SLOWEST answers the product produces — a `max_tokens=12000`
-synthesis over a full window — and until 2026-08-11 they were the only ones
-with no live preview: `qa_agent.answer` accepted `on_delta` and simply did not
-pass it on to `call_digest.answer` or `_answer_voc_report`. Measured on
-staging, 76.8s of an 83.6s turn was spent in that call with a static spinner
-on screen the whole time.
+synthesis over a full window — and until 2026-08-11 they had no live preview:
+`qa_agent.answer` accepted `on_delta` and never passed it to
+`call_digest.answer`. Measured on staging, 76.8s of an 83.6s turn was spent in
+that call with a static spinner on screen the whole time.
 
-What these tests pin is the WIRING — that the sink reaches the `llm_call` —
-plus the one path we deliberately left unstreamed. Decoding the fragments is
-`app.ask_stream`'s own suite; the transport is the gateway's.
+What these tests pin is the WIRING — that the sink reaches the `llm_call` on
+the route that streams — and, just as importantly, that the TWO routes which
+must NOT stream stay that way. Both (`call_digest._answer_query` and
+`qa_agent._answer_voc_report`) fall through to a second full generation on
+failure, into the same never-reset extractor; streaming either publishes an
+abandoned attempt and then goes quiet for the run that actually answers.
+
+Those two are pinned at the CALL SITE. An earlier version inspected only the
+callee's source, which let the caller stop handing the sink over with the
+whole suite still green — mutation-proven, and the same false-green shape as
+the counting guard this file replaced.
+
+Decoding fragments is `app.ask_stream`'s own suite; the transport is the
+gateway's.
 """
 from __future__ import annotations
 
@@ -147,12 +157,45 @@ def test_every_qa_agent_digest_call_site_forwards_the_sink():
     )
 
 
-def test_voc_from_kg_forwards_the_sink():
-    """The PINNED voice-of-customer route streams too (`max_tokens=12000`)."""
+def test_voc_from_kg_is_deliberately_not_streamed():
+    """The PINNED voice-of-customer route must NOT receive a sink.
+
+    `_answer_voc_report` returns None on failure, and None does not end the
+    turn — control falls through to `_answer_single_shot`, a SECOND full
+    generation into the SAME never-reset extractor. Streaming it publishes the
+    abandoned attempt's text and then freezes for the run that actually
+    answers. Same shape as `call_digest._answer_query`.
+
+    Checked at the CALL SITE, not in the callee. Inspecting only the callee's
+    source let the caller stop handing the sink over with every test still
+    green — a mutation-proven hole in the first version of this guard.
+    """
+    import ast
+
     from app import qa_agent
 
-    src = inspect.getsource(qa_agent._answer_voc_report)
-    assert "on_delta=on_delta" in src, (
-        "_answer_voc_report accepts a sink but does not pass it to its "
-        "llm_call — the pinned VoC route would stay spinner-only"
+    tree = ast.parse(inspect.getsource(qa_agent))
+    streamed: list[int] = []
+    sites = 0
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_answer_voc_report"
+        ):
+            sites += 1
+            if any(kw.arg == "on_delta" for kw in node.keywords):
+                streamed.append(node.lineno)
+
+    assert sites >= 1, "the _answer_voc_report call site moved — update this guard"
+    assert not streamed, (
+        f"_answer_voc_report was handed a sink at qa_agent.py line(s) "
+        f"{streamed} — on failure it returns None and a second generation "
+        "streams into the same extractor. Read the call-site comment first."
+    )
+
+    # And the callee must not have regrown a sink parameter behind the guard.
+    callee = inspect.getsource(qa_agent._answer_voc_report)
+    assert "on_delta" not in callee, (
+        "_answer_voc_report reintroduced an on_delta parameter"
     )

@@ -1055,9 +1055,7 @@ _VOC_KG_SYSTEM = (
 )
 
 
-def _answer_voc_report(
-    decision: RouteDecision, enterprise_id, question, history, on_delta=None,
-) -> Optional[dict]:
+def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
@@ -1113,13 +1111,6 @@ def _answer_voc_report(
             json_schema=_ASK_RESPONSE_SCHEMA,
             skill=decision.skill_id,
             max_tokens=12000,
-            # Publish the answer as it generates. This is a `max_tokens=12000`
-            # grounded synthesis — the longest thing chat produces — so without
-            # this the user watches a spinner for the whole run. The schema is
-            # `_ASK_RESPONSE_SCHEMA`, which is exactly what
-            # `app.ask_stream.AnswerFieldExtractor` decodes, so no new
-            # machinery is involved: passing the sink is the whole change.
-            on_delta=on_delta,
         )
     except Exception:  # noqa: BLE001 — fall back to the generic answer
         logger.exception("voc answer from KG failed for %s", enterprise_id)
@@ -2008,9 +1999,21 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
             )
-        voc = _answer_voc_report(
-            decision, enterprise_id, question, history, on_delta=on_delta,
-        )
+        # DELIBERATELY NOT STREAMED, for the same reason as
+        # `call_digest._answer_query` (see the comment at its call site).
+        #
+        # `_answer_voc_report` returns None on failure, and None does NOT end
+        # the turn: control falls out of this block into `_answer_single_shot`
+        # below — a SECOND full generation into the SAME AnswerFieldExtractor,
+        # which is never reset between the two. Streaming it would publish the
+        # abandoned attempt's text, then freeze for the whole run that actually
+        # answers, and `token_stream._accum` would replay the abandoned text to
+        # anyone who reloaded. Strictly worse than the spinner it replaced.
+        #
+        # The unpinned VoC route — `call_digest.answer` just above — is the
+        # common one and DOES stream: it swallows its own exception and returns
+        # a payload, so it is terminal and cannot fall through.
+        voc = _answer_voc_report(decision, enterprise_id, question, history)
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 
