@@ -1136,8 +1136,12 @@ def test_a_chat_ticket_gets_the_companys_active_format(isolated_settings, monkey
 
     seen: dict = {}
 
-    def _fake_resolve(company_id):
+    def _fake_resolve(company_id, override_id=None):
+        # `override_id` is the uploaded ticket format a run was ASKED for (the
+        # user naming one in chat). None here, which is the normal case and
+        # means the company's active format — the behaviour this test is about.
         seen["company_id"] = company_id
+        seen["override_id"] = override_id
         return _M6_CUSTOM_LAYOUT, "tpl-1"
 
     monkeypatch.setattr(gen, "resolve_ticket_layout", _fake_resolve)

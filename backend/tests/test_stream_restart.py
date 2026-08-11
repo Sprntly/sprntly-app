@@ -372,6 +372,16 @@ async def test_run_ask_job_streams_only_the_surviving_attempt(monkeypatch):
     monkeypatch.setattr(ajr.qa_agent, "answer", fake_answer)
     monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: completed.setdefault(i, p))
     monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    # The worker plans every unpinned turn before `answer()` runs. Stubbed out
+    # like the other `_run_sync` seams above, and not only for isolation: the
+    # planner sits between the delta sink's creation and the first delta, and
+    # the sink's first flush is TIME-based (_FLUSH_INTERVAL_S since creation).
+    # An unstubbed planner burning >100ms on dead-DB probes makes attempt 1
+    # flush to the wire before reset() can discard it — at which point this
+    # test would be measuring the planner's latency, not the retry chain.
+    import app.ask_planner as ap
+
+    monkeypatch.setattr(ap, "plan_for_answer", lambda **k: None)
 
     received: list[dict] = []
     task = asyncio.create_task(_collect(ajr.ask_channel(42), received))

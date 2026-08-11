@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app import llm_keys
 from app import team_email as team_email_mod
+from app.db import authcache
 from app.auth import (
     STAFF_TOKEN_TTL_HOURS,
     CompanyContext,
@@ -179,6 +180,11 @@ def staff_patch_company(
             # The LLM-key resolver caches per-company posture (app.llm_keys);
             # flush so the key-mode change takes effect immediately.
             llm_keys.invalidate(company_id)
+        if "feature_flags" in patch:
+            # Same reason, for the module gates: the flags are TTL-cached in
+            # authcache, so without this an operator turning a module off would
+            # watch it stay on for the rest of the TTL.
+            authcache.invalidate_feature_flags(company_id)
     return get_company_entitlements(company_id)
 
 
@@ -268,6 +274,9 @@ def claim_org_invite(company: CompanyContext = Depends(require_company)):
         },
     )
     llm_keys.invalidate(company.company_id)
+    # This write sets feature_flags too, so the module gates must be flushed
+    # with the key posture — an accepted invite grants modules immediately.
+    authcache.invalidate_feature_flags(company.company_id)
     mark_org_invite_accepted(invite["id"], company_id=company.company_id)
     return {
         "applied": True,

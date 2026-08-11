@@ -457,25 +457,94 @@ class GraphFacade:
         return [self._row_to_signal(r) for r in rows]
 
     def edges_from_many(
-        self, enterprise_id: str, source_ids: list[str]
+        self, enterprise_id: str, source_ids: list[str],
+        type: Optional[str] = None,
     ) -> list[Relationship]:
         """Every relationship whose `source_id` is in `source_ids`, over a few
         chunked `.in_()` queries instead of one-per-source. This is what lets
         convergence fetch all signal→theme edges in a handful of round-trips
         rather than a query per theme (the old N+1 that made a first-time brief
-        over a large theme set take minutes). De-dups ids; empty → []."""
+        over a large theme set take minutes). De-dups ids; empty → [].
+
+        `type` mirrors `edges_from`'s filter so a caller batching a typed walk
+        (the ledger's RESULTED_IN / VALIDATES chains) gets the same narrowing
+        it had per-entity, rather than pulling every edge and filtering in
+        Python."""
         unique = list(dict.fromkeys(source_ids))
         out: list[Relationship] = []
         chunk = 150  # keep the `.in_()` URL well under server limits
         for i in range(0, len(unique), chunk):
             batch = unique[i:i + chunk]
-            rows = (
+            q = (
                 self._tbl("kg_relationship").select("*")
                 .eq("enterprise_id", enterprise_id)
                 .in_("source_id", batch)
+            )
+            if type:
+                q = q.eq("type", type)
+            out.extend(self._row_to_relationship(r) for r in (q.execute().data or []))
+        return out
+
+    def edges_to_many(
+        self, enterprise_id: str, target_ids: list[str],
+        type: Optional[str] = None,
+    ) -> list[Relationship]:
+        """The inbound mirror of `edges_from_many`: every relationship whose
+        `target_id` is in `target_ids`, in chunked `.in_()` queries.
+
+        Exists for the same reason its outbound twin does. Ask's KG retrieval
+        walked `edges_to` once per matched theme — twelve serial round trips on
+        a default `k=12` — and the ledger walked it again per decision and per
+        hypothesis. Both collapse to one query here.
+
+        `(enterprise_id, target_id, type)` is indexed (`kg_rel_to_idx`), so the
+        batched form uses the same index the per-id form did; no migration is
+        involved. De-dups ids; empty → [].
+
+        Returns a flat list, like `edges_from_many` — callers that need
+        per-target grouping do it in Python, which keeps the two symmetrical
+        and avoids inventing a second return shape on the facade."""
+        unique = list(dict.fromkeys(target_ids))
+        out: list[Relationship] = []
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(unique), chunk):
+            batch = unique[i:i + chunk]
+            q = (
+                self._tbl("kg_relationship").select("*")
+                .eq("enterprise_id", enterprise_id)
+                .in_("target_id", batch)
+            )
+            if type:
+                q = q.eq("type", type)
+            out.extend(self._row_to_relationship(r) for r in (q.execute().data or []))
+        return out
+
+    def get_entities(
+        self, enterprise_id: str, ids: list[str]
+    ) -> dict[str, Entity]:
+        """Batched, tenant-scoped fetch of many entities in ONE query per chunk.
+
+        The entity twin of `get_signals`, and it exists for the same reason:
+        `find_candidates` hydrated each kNN hit with its own `get_entity`, and
+        the ledger resolved each referenced label the same way, so a single ask
+        spent ~23 round trips fetching rows it could have asked for at once.
+
+        Returns `{id: Entity}`; ids that don't resolve in this enterprise are
+        simply absent, which is what lets callers preserve `get_entity`'s
+        "missing row → skip" semantics with a plain `.get()`."""
+        unique = list(dict.fromkeys(ids))  # de-dup, preserve order
+        out: dict[str, Entity] = {}
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(unique), chunk):
+            batch = unique[i:i + chunk]
+            rows = (
+                self._tbl("kg_entity").select("*")
+                .eq("enterprise_id", enterprise_id)
+                .in_("id", batch)
                 .execute().data or []
             )
-            out.extend(self._row_to_relationship(r) for r in rows)
+            for r in rows:
+                out[r["id"]] = self._row_to_entity(r)
         return out
 
     def active_signals(
@@ -507,7 +576,12 @@ class GraphFacade:
             .limit(limit)
             .execute().data or []
         )
-        if len(rows) == limit:
+        # Only meaningful for the DEFAULT width. This line exists to say "this
+        # tenant has more signals than we fetch", which is a genuine diagnostic
+        # at 1000 — but a caller that deliberately narrows the window (Ask asks
+        # for 250 to read the newest 8) hits the cap by design on every single
+        # call, and warning there turns a real signal into constant noise.
+        if len(rows) == limit == _ACTIVE_SIGNALS_LIMIT:
             logger.info(
                 "active_signals hit the fetch limit (enterprise_id=%s, limit=%d); "
                 "some non-stale signals older than the returned page may be omitted",
@@ -621,11 +695,32 @@ class GraphFacade:
             "p_embedding": embedding,
             "p_k": k,
         }).execute()
+        # Hydrate every candidate in ONE query rather than a `get_entity` per
+        # row. The RPC returns `id, canonical_label, type, score`, but callers
+        # need the whole Entity — `graph.extractor` reads `ent.aliases` to
+        # decide whether a matched theme already carries the incoming label —
+        # so the hydration stays; only its round-trip count changes.
+        #
+        # ORDER IS PRESERVED STRUCTURALLY, and that is load-bearing. The RPC
+        # orders by `embedding <=> p_embedding`, and three callers
+        # (`graph/extractor.py`, `research/competitor.py`,
+        # `research/business_context_projection.py`) treat `candidates[0]` as
+        # "the nearest match" to gate a find-or-create. Iterating `rows` and
+        # looking each id up in the batch keeps that order exactly.
+        #
+        # Do NOT re-sort by `score` to recover the order: `score` is float4
+        # (`real` in the migration), cast down from the float8 distance the
+        # ordering was computed on, so near-identical embeddings tie and
+        # reorder arbitrarily. A wrong `candidates[0]` silently wires a signal
+        # to the wrong theme or creates a duplicate one, in a forward-only
+        # graph with no cleanup path.
+        rows = r.data or []
+        hydrated = self.get_entities(enterprise_id, [row["id"] for row in rows])
         out: list[tuple[Entity, float]] = []
-        for row in (r.data or []):
-            ent = self.get_entity(enterprise_id, row["id"])
-            if ent:
-                out.append((ent, float(row["score"])))
+        for row in rows:
+            ent = hydrated.get(row["id"])
+            if ent:  # a row deleted between the kNN and the fetch is skipped,
+                out.append((ent, float(row["score"])))  # exactly as before
         return out
 
     # ---- row mappers ----------------------------------------------------

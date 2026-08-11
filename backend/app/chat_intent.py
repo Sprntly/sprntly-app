@@ -125,6 +125,82 @@ _AUTHORING_VERB_RE = re.compile(
 )
 
 
+# ── Plain-question pre-gate ──────────────────────────────────────────────────
+# This module's call is not free and it is not off the answer path: the
+# frontend AWAITS `POST /v1/chat/intent` before `POST /v1/ask` is even sent, so
+# its sonnet call is serial dead time in front of every message (5.3s on the
+# trace that motivated this, ~3s of it the model). On a message that is plainly
+# a question the verdict is `answer` — the identical envelope the fail-open
+# path below already produces — so the call bought nothing but the wait.
+#
+# Same design rule as `looks_like_open_request`: narrow, because its job is to
+# be RIGHT rather than complete. Everything it declines still goes to the model
+# with its verdict unchanged, so a false negative costs only the latency we pay
+# today; a false positive would resurrect the exact failure this module was
+# built to fix, where "break this into work items" gets answered as prose
+# instead of dispatched. Hence conditions that a command cannot satisfy by
+# accident, all required:
+#
+#   1. opens with an interrogative — the shape a question actually has;
+#   2. ends with "?" — so the gate only touches what the user PUNCTUATED as a
+#      question, never an imperative phrased politely ("could you draft this");
+#   3. no authoring verb ANYWHERE — the same vocabulary the open-vs-generate
+#      backstop vetoes on, so a compound "how should we price this, and write
+#      it up?" is left entirely to the model;
+#   4. not a retrieval request, which is its own intent (`open_artifact`);
+#   5. short — a long message is where a buried instruction hides.
+#
+# The caller adds a sixth: the gate is not consulted at all when a PRD is open
+# or a file is attached, because those are precisely the contexts where a
+# question IS an action ("what should we change here?" on an open PRD).
+_QUESTION_OPENERS_RE = re.compile(
+    r"^\s*(?:what|why|how|when|who|whom|whose|where|which|"
+    r"is|are|was|were|do|does|did|has|have|had|"
+    r"can|could|should|would|will|any|tell\s+me)\b",
+    re.I,
+)
+_PRE_GATE_MAX_CHARS = 200
+
+
+def is_plain_question(message: str) -> bool:
+    """True when `message` is UNAMBIGUOUSLY a question and nothing else.
+
+    Pure and deterministic. Used only to skip the envelope's model call in
+    favour of the `answer` verdict that call would have returned anyway; it
+    never dispatches anything, so its failure mode is "we paid for the model
+    call we already pay for today", not "the wrong thing happened".
+    """
+    text = (message or "").strip()
+    if not text or len(text) > _PRE_GATE_MAX_CHARS:
+        return False
+    if not text.endswith("?"):
+        return False
+    if not _QUESTION_OPENERS_RE.search(text):
+        return False
+    if _AUTHORING_VERB_RE.search(text):
+        return False
+    if looks_like_open_request(text):
+        return False
+    return True
+
+
+def _pre_gated() -> dict:
+    """The `answer` envelope for a message the pre-gate resolved without the
+    model. Shaped exactly like `_fallback`'s, but `source` distinguishes the
+    two: this is a deliberate skip, not a failure, and the two must not be
+    indistinguishable in telemetry."""
+    return {
+        "intent": "answer",
+        "confidence": 1.0,
+        "task": None,
+        "instruction": None,
+        "artifact_type": None,
+        "artifact_query": None,
+        "reason": "plain question — resolved without the model",
+        "source": "pre_gate",
+    }
+
+
 def _subject_of(task: Optional[str]) -> Optional[str]:
     """A generation BRIEF reduced to something you can search titles with.
 
@@ -366,6 +442,166 @@ def _fallback(reason: str) -> dict:
     }
 
 
+# ── planner-backed resolution ────────────────────────────────────────────────
+#
+# When the Ask Planner is deciding for this company, the action verdict comes
+# from IT rather than from the call below, and this module becomes an adapter
+# onto the envelope the client reducer already consumes.
+#
+# WHY FOLD THEM. Today a chat message costs two independent model calls that
+# cannot see each other: this one picks the action, `qa_agent.route` picks the
+# skill. Neither knows what the other decided, and neither knows what the
+# company has connected — so "write a PRD about what competitors are doing" is
+# judged twice, from different context, and the two verdicts can disagree with
+# nothing to reconcile them. The planner makes it one decision, and one call:
+# planner (sonnet) replaces this call (sonnet) PLUS the router (haiku), so the
+# fold is strictly cheaper per message than what it replaces.
+#
+# The ENVELOPE SHAPE IS UNCHANGED, deliberately. `ChatIntentEnvelope` in
+# web/app/lib/api.ts and the reducers in ChatScreen/BriefChat keep working
+# untouched — this is a swap of what is behind the endpoint, not a new contract.
+
+
+#: Intents a CLIENT can be handed. `INTENTS` is this module's own resolver
+#: vocabulary (unchanged, so its fallback path behaves exactly as before);
+#: this is the wider set the planner can produce and a surface may act on.
+#: Kept as its own name rather than widening `INTENTS`, because the resolver
+#: below cannot produce these and asserting that is worth a constant.
+_CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {"multi_agent"}
+
+
+def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
+    """A gated `ask_planner.Plan` in this module's envelope vocabulary.
+
+    Three of this module's own downgrade rules are re-applied HERE rather than
+    trusted to the planner, because each needs something the planner does not
+    have:
+
+      * the ACTION CONFIDENCE FLOOR. `_gate_action` validates that an action is
+        known and carries its argument; it does not judge conviction. Acting on a
+        0.2-confidence `generate_prd` is disruptive in a way that a 0.2-confidence
+        answer is not, so the floor stays exactly where it was and at the same
+        value.
+      * `_NEEDS_PRD`. Whether a target PRD exists is a tenant-scoped DB fact; the
+        planner runs with no `prd_id` and could not check it if it wanted to.
+      * the empty-instruction guard, for the same reason it exists here: an edit
+        with nothing to apply at least gets answered.
+
+    `update_ticket` maps to `answer`: it is not a client dispatch — the
+    ticket-update executor runs server-side off the answer path — so the client
+    has nothing to do with it beyond showing the reply.
+
+    Every OTHER action passes straight through, including ones only some
+    surfaces can act on. `multi_agent` is the case that makes this the right
+    shape: the AI bar runs it, ChatScreen does not, and a surface that cannot
+    handle an intent simply falls through to its ask path. Collapsing it here
+    instead would take the capability away from the surface that HAS it, to
+    protect one that never asked.
+    """
+    intent = plan.action
+    if intent == "update_ticket":
+        intent = "answer"
+    if intent not in _CLIENT_INTENTS:
+        return _fallback("unknown action")
+
+    envelope = {
+        "intent": intent,
+        # THE ACTION'S confidence, not the pipeline's. `plan.confidence` sits
+        # under `pipeline_id` in the planner's schema and answers "how sure are
+        # you about this PIPELINE" — for which the normal answer is "there isn't
+        # one". Reading it here vetoed real commands with a number that was
+        # never about them: "generate prd for me and please use the template 1
+        # template" arrived as generate_prd at pipeline-confidence 0.5 and was
+        # downgraded to a plain answer, repeatedly, including one plan at 0.0.
+        "confidence": plan.action_confidence,
+        "task": plan.task or None,
+        "instruction": plan.instruction or None,
+        "artifact_type": (
+            plan.artifact_type
+            if plan.artifact_type in NAMEABLE_ARTIFACT_TYPES else None
+        ),
+        "artifact_query": plan.artifact_query,
+        # The uploaded format this build must be written into, when the user
+        # named one. The client forwards the id to the executor; the NAME is for
+        # the client to say which format it is using, so an honoured request is
+        # visible to the person who made it rather than something they have to
+        # take on trust.
+        "artifact_template_id": plan.artifact_template_id,
+        "artifact_template_name": plan.artifact_template_name,
+        "reason": plan.reason or "",
+        "source": "planner",
+    }
+    # A FORMAT WE COULD NOT FIND STOPS THE BUILD (owner's decision, 2026-08-10).
+    # `template_query` is only ever set when the user named a format and nothing
+    # in their library matched it, and the alternative — building in the ACTIVE
+    # format instead — is the silent substitution this whole feature exists to
+    # end: they asked for one format, got another, and nothing on screen says so.
+    #
+    # Downgrading to `answer` is what turns it into a question, and it costs
+    # nothing else: the planner has already forced `include_library` on this
+    # plan, so the answer that runs has the company's real format list in front
+    # of it and can ask WHICH ONE by name instead of apologising in the abstract.
+    #
+    # ORDERED AFTER the confidence floor on purpose. Both read the ORIGINAL
+    # `intent` rather than the envelope (the floor check always has), so the
+    # later of the two wins the `source` when both apply — and when a build both
+    # named an unknown format and scored low, the format is the reason the user
+    # can act on. Everything below reads `envelope["intent"]` and so cannot
+    # overwrite it once this has landed on `answer`.
+    if intent != "answer" and plan.action_confidence < _ACTION_CONFIDENCE_FLOOR:
+        envelope.update(intent="answer", source="low_confidence")
+    if intent != "answer" and plan.template_query:
+        envelope.update(intent="answer", source="template_not_found")
+    if envelope["intent"] in _NEEDS_PRD and not prd_id:
+        envelope.update(intent="answer", source="no_target_prd")
+    if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
+        envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "open_artifact" and not envelope["artifact_query"]:
+        # The planner already gates this, but the rule is re-applied here for
+        # the same reason the other three are: this function owns what the
+        # CLIENT is told to do, and an open request with nothing to look up
+        # must reach it as `answer`, never as an open of nothing.
+        envelope.update(intent="answer", source="no_artifact_query")
+    return envelope
+
+
+def _resolve_via_planner(
+    enterprise_id: str,
+    message: str,
+    history: Optional[list[dict]],
+    *,
+    prd_id: Optional[int],
+) -> Optional[dict]:
+    """The planner's verdict as an envelope, or None to use the call below.
+
+    None on every reason not to plan — decide mode off, no tenant, a planner
+    failure — so a planner outage degrades this endpoint to exactly the
+    behaviour it had before, which is a working product. `plan_for_answer`
+    already swallows and logs; this only has to handle "it declined"."""
+    from app import ask_planner
+
+    plan = ask_planner.plan_for_answer(
+        enterprise_id=enterprise_id, question=message, history=history
+    )
+    if plan is None:
+        return None
+    envelope = _plan_to_envelope(plan, prd_id=prd_id)
+    # The full gated plan rides along under `plan`, for the browser console.
+    # Everything on it was already decided server-side and is already visible in
+    # the backend log; this only saves someone testing from having to watch
+    # `docker logs` in another window to see WHY a message went where it did.
+    #
+    # Diagnostic only — no client branches on it, and it carries no secret: the
+    # sources are provider KEYS the caller's own company connected, and the
+    # reason is one clause the model wrote about the user's own message.
+    envelope["plan"] = plan.as_log_dict()
+    logger.info(
+        "[planner] intent company=%s intent=%s source=%s",
+        enterprise_id, envelope["intent"], envelope["source"],
+    )
+    return envelope
+
+
 def resolve_chat_intent(
     enterprise_id: str,
     message: str,
@@ -378,14 +614,43 @@ def resolve_chat_intent(
     """Decide the action envelope for one chat message, in context.
 
     Returns {intent, confidence, task, instruction, artifact_type,
-    artifact_query, reason, source} where source is "llm" for a model verdict,
-    "low_confidence" for a verdict downgraded to answer, or "fallback" on any
-    failure. Never raises.
+    artifact_query, reason, source} where source is "planner" when the Ask
+    Planner decided, "pre_gate" when a plainly-question-shaped message resolved
+    without any model, "llm" for this module's own model verdict,
+    "low_confidence" / "no_target_prd" / "no_instruction" for a verdict
+    downgraded to answer, or "fallback" on any failure. Never raises.
 
     This function does NOT resolve an `open_artifact` request to a document —
     it only names the subject. The lookup (and its 0/1/many verdict) belongs to
     app.artifact_open, called by the route where the tenant scope lives.
     """
+    # The planner decides for enrolled companies; everyone else takes the path
+    # below, unchanged. Wrapped rather than trusted: this endpoint is on the
+    # send path, and a planner import or flag read must never break a send.
+    try:
+        planned = _resolve_via_planner(
+            enterprise_id, message, history, prd_id=prd_id
+        )
+        if planned is not None:
+            return planned
+    except Exception:  # noqa: BLE001 — fall through to the resolver below
+        logger.exception("planner-backed intent failed; using the intent resolver")
+
+    # Not planner-backed. Skip the model entirely on a message that is plainly a
+    # question and nothing else — the verdict would be `answer`, which is what
+    # this returns.
+    #
+    # Ordered AFTER the planner deliberately, and it must stay there: for an
+    # enrolled company the planner decides every message, and a gate that
+    # resolved first would be precisely the second guesser this branch exists to
+    # remove. It only ever runs for companies the planner has not been given.
+    #
+    # Deliberately NOT applied when a PRD is open or a file is attached: those
+    # are the contexts where a question can carry an action ("what should we
+    # change here?" against an open PRD is an edit), and the model is the only
+    # thing that can tell. See `is_plain_question` for why the gate is narrow.
+    if prd_id is None and not has_attachments and is_plain_question(message):
+        return _pre_gated()
     try:
         result = llm_call(
             enterprise_id=enterprise_id,

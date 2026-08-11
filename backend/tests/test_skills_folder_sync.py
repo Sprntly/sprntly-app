@@ -379,6 +379,116 @@ async def test_one_bad_source_does_not_stop_the_sweep(tenant_client):
     assert a.client.get("/v1/skills").json()["skills"]
 
 
+# ─── the push trigger ────────────────────────────────────────────────────────
+#
+# The sweep bounds staleness at 30 minutes; a push webhook removes most of it.
+# These pin the matching rules — the wrong match either spends a rate-limited
+# API call on a folder whose head did not move, or (worse) syncs on the timer
+# when the webhook already said the folder changed.
+
+
+async def test_a_push_to_the_synced_branch_syncs_the_folder_immediately(tenant_client):
+    """The point of the trigger: commit a skill, and it is in the library on
+    the webhook's clock, not the sweep's."""
+    from app.skills.github_sync import sync_sources_for_push
+
+    t = tenant_client.make(slug="acme")
+    _connect_repo(t.company_id)
+    with _Github():
+        _import_synced(t.client)
+
+    tree = [*_TREE, _blob("skills/retro-runner/SKILL.md")]
+    bodies = {
+        **_BODIES,
+        "skills/retro-runner/SKILL.md": _skill_md("retro-runner", "Runs a retro."),
+    }
+    # The source's ref is "" (default branch), so a push to what GitHub calls
+    # the default branch is a match. Repo names compare case-insensitively —
+    # GitHub treats full names that way, and the webhook payload's casing is
+    # GitHub's, not necessarily the casing the user typed at import time.
+    with _Github(tree=tree, bodies=bodies, sha="beefbeef"):
+        results = await sync_sources_for_push(
+            installation_id=4242,
+            repo_full_name="Octocat/Methods",
+            pushed_branch="main",
+            default_branch="main",
+        )
+
+    assert len(results) == 1 and results[0].error == ""
+    slugs = {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]}
+    assert slugs == {"sprint-planner", "pricing-review", "retro-runner"}
+
+
+async def test_a_push_elsewhere_syncs_nothing_and_reads_nothing(tenant_client):
+    """A push to another repo, another branch, or another installation must not
+    even resolve a commit — the matched-nothing path costs zero GitHub calls,
+    which is what makes it safe to run on every push a busy org sends."""
+    from app.skills.github_sync import sync_sources_for_push
+
+    t = tenant_client.make(slug="acme")
+    _connect_repo(t.company_id)
+    with _Github():
+        _import_synced(t.client)
+
+    misses = [
+        # Another repo under the same installation.
+        {"installation_id": 4242, "repo_full_name": "octocat/other",
+         "pushed_branch": "main", "default_branch": "main"},
+        # A feature branch: the source tracks the default branch, whose head
+        # did not move.
+        {"installation_id": 4242, "repo_full_name": "octocat/methods",
+         "pushed_branch": "feature-x", "default_branch": "main"},
+        # Another installation entirely (another tenant's app install).
+        {"installation_id": 999, "repo_full_name": "octocat/methods",
+         "pushed_branch": "main", "default_branch": "main"},
+    ]
+    with patch(
+        "app.skills.github_source.resolve_commit",
+        side_effect=AssertionError("a non-matching push must not call GitHub"),
+    ):
+        for kwargs in misses:
+            assert await sync_sources_for_push(**kwargs) == []
+
+
+async def test_a_push_matches_a_source_pinned_to_that_branch(tenant_client):
+    """A source with an explicit ref syncs on ITS branch's pushes — including
+    when that branch is not the repo default."""
+    from app import db
+    from app.skills.github_sync import sync_sources_for_push
+
+    t = tenant_client.make(slug="acme")
+    _connect_repo(t.company_id)
+    db.upsert_skill_source(
+        company_id=t.company_id,
+        workspace_id=None,
+        installation_id=4242,
+        repo="octocat/methods",
+        ref="methods-wip",
+        path="skills",
+        created_by=None,
+    )
+
+    with _Github():
+        results = await sync_sources_for_push(
+            installation_id=4242,
+            repo_full_name="octocat/methods",
+            pushed_branch="methods-wip",
+            default_branch="main",
+        )
+    assert len(results) == 1 and results[0].error == ""
+    # …and a default-branch push does NOT touch the pinned source.
+    with patch(
+        "app.skills.github_source.resolve_commit",
+        side_effect=AssertionError("the pinned branch's head did not move"),
+    ):
+        assert await sync_sources_for_push(
+            installation_id=4242,
+            repo_full_name="octocat/methods",
+            pushed_branch="main",
+            default_branch="main",
+        ) == []
+
+
 # ─── managing a folder ───────────────────────────────────────────────────────
 
 

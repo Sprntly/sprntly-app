@@ -7,7 +7,7 @@ import time
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.ask_job_runner import ask_channel, run_ask_job
 from app.auth import (  # noqa: F401 — require_company re-exported for tests' dependency_overrides
@@ -112,6 +112,23 @@ class AskIn(BaseModel):
     # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
     # tickets, prototype). Ownership-gated in the route.
     prd_id: int | None = Field(default=None, ge=1)
+
+    # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
+    # NUL; this one stops one ARRIVING — the client inlines attachment text it
+    # extracted (or replays text from a turn stored before that fix) into the
+    # question, and a single NUL anywhere in it makes `start_ask_job`'s insert
+    # fail with SQLSTATE 22P05 and 500 the whole send. Observed live, twelve
+    # times in one session.
+    #
+    # STRIPS rather than refuses: the character is never meaningful in a
+    # question, and rejecting the message would turn a stray byte into a
+    # user-visible failure — which is the thing being fixed.
+    @field_validator("question")
+    @classmethod
+    def _drop_nul(cls, v: str) -> str:
+        from app.ingest import strip_nul
+
+        return strip_nul(v)
 
 
 def _strip_citations(payload: dict) -> dict:

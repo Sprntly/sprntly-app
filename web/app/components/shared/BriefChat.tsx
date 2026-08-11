@@ -531,7 +531,6 @@ export function BriefChat() {
   // this file's JSX reaches submitAsk today. Kept in lockstep with ChatScreen
   // via the shared gate so the two can't drift while this path sleeps; the
   // three-state semantics are pinned by chatIntentEnvelopeOn's own tests.
-  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
   // Keep the pipeline-status poll mounted (other surfaces rely on its side
   // effects); the brief header no longer reads its result directly.
   usePipelineStatus(activeCompany)
@@ -912,28 +911,16 @@ export function BriefChat() {
       // Hand it to the host ChatScreen, which opens a fresh chat tab seeded with
       // the query (one new tab per chat started here). PRD / prototype / tickets
       // are COMMANDS that drive the right rail in place, so they stay on the brief.
-      const legacyDispatch = () => {
-        const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
-        if (!isCommand) {
-          setPendingChatHandoff({ query: q })
-          return
-        }
-        // A PRD command opens its work in the right rail (no chat turn), so don't
-        // echo it as a chat message either — it's a command, not a conversation.
-        if (!isPrdCommand(q)) appendUser(q)
-        void runGate(() => {
-          if (isPrdCommand(q)) return prdFlow(q)
-          if (isPrototypeCommand(q)) return prototypeFlow()
-          return ticketsFlow()
-        })
-      }
-      if (!envelopeDispatchEnabled) {
-        legacyDispatch()
-        return
-      }
-      // Action-envelope dispatch: the backend decides, grounded on the open
-      // PRD (the brief tab threads no conversation, so no conversation_id).
-      // Fail-open: any failure → the legacy regex triage above.
+      // THE PLANNER DECIDES. This rail used to trip its own regexes
+      // (`isPrdCommand` / `isPrototypeCommand` / `isTicketsCommand`) over the
+      // newest message — a second, drifting copy of the cascade ChatScreen ran.
+      // Both are gone: a regex deciding to GENERATE a PRD spends minutes and
+      // real money on an oddly-phrased question, and two copies of that rule
+      // meant the same sentence could behave differently depending on which
+      // surface it was typed into.
+      //
+      // FAILURE MODE ON PURPOSE: a failed call hands the message to a chat tab,
+      // where it gets ANSWERED. It never falls back to guessing.
       void (async () => {
         const envelope = await import("../../lib/api")
           .then(({ chatIntentApi }) =>
@@ -941,7 +928,7 @@ export function BriefChat() {
           )
           .catch(() => null)
         if (!envelope) {
-          legacyDispatch()
+          setPendingChatHandoff({ query: q })
           return
         }
         switch (envelope.intent) {
@@ -964,7 +951,7 @@ export function BriefChat() {
         }
       })()
     },
-    [appendUser, content.prd, envelopeDispatchEnabled, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
+    [appendUser, content.prd, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
   )
 
   const onAction = useCallback(

@@ -20,7 +20,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app import attachments_storage
 from app.auth import (
@@ -326,11 +326,36 @@ class TurnAttachment(BaseModel):
     mime: str | None = Field(default=None, max_length=200)
     size: int | None = Field(default=None, ge=0)
 
+    # This field is THE extracted document text, so it is the likeliest place a
+    # NUL enters the system at all — and it lands in a JSON column, which
+    # refuses U+0000 exactly as a `text` column does. Same strip, and the same
+    # reasoning, as TurnIn.content below.
+    @field_validator("content")
+    @classmethod
+    def _drop_nul(cls, v: str) -> str:
+        from app.ingest import strip_nul
+
+        return strip_nul(v)
+
 
 class TurnIn(BaseModel):
     role: str = "user"  # "user" or "assistant"
     content: str = Field(..., min_length=1)
     attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
+
+    # The same NUL guard `AskIn.question` carries, and this model needs it for
+    # the same reason: a turn's content is the message the composer built, which
+    # for an attached document includes its extracted text. Postgres `text`
+    # cannot store `U+0000` (SQLSTATE 22P05), and `add_turn` was observed dying
+    # on exactly that alongside the ask. See `ingest.strip_nul` for why a
+    # character-level check never catches it and why the SQLite test fake
+    # cannot reproduce it.
+    @field_validator("content")
+    @classmethod
+    def _drop_nul(cls, v: str) -> str:
+        from app.ingest import strip_nul
+
+        return strip_nul(v)
 
 
 @router.get("/{conversation_id}/turns")

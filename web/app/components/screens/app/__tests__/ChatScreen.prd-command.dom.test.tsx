@@ -22,7 +22,10 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, resolveIntent } = vi.hoisted(() => ({
+  // The planner's verdict. Defaulted inside the api mock from the old
+  // extraction helpers; individual tests override it per-case.
+  resolveIntent: vi.fn(),
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
   // Tier-2 LLM fallback (POST /v1/prd/classify-command). Default: not a command
   // — individual tests override per-case.
@@ -31,12 +34,48 @@ const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
   // individual tests override to exercise the question loop.
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  const { isPrdCommand, isTicketsCommand, prdCommandTask } = await import(
+    "../../../../lib/prd-commands"
+  )
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    // The PLANNER decides what a message asks for; this screen only executes the
+    // verdict. These tests stub the verdict with the SAME extraction the client
+    // used to run inline (`lib/prd-commands`), which is what their expectations
+    // were written against — so what they assert is the FLOW ("given
+    // generate_prd with this task, a PRD is generated with it"), unchanged.
+    //
+    // Whether a sentence IS a PRD command, and what its subject is, is now the
+    // planner's judgement and is tested in backend/tests/test_ask_planner.py.
+    // Reusing the old helper here is a test double standing in for a model, not
+    // a rule the product still applies.
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string, ...rest: unknown[]) => {
+        const override = await resolveIntent(q, ...rest)
+        if (override) return override
+        return {
+          intent: isTicketsCommand(q)
+            ? "generate_tickets"
+            : isPrdCommand(q)
+            ? "generate_prd"
+            : "answer",
+          confidence: 0.95,
+        // null for a pointer-not-a-name phrasing ("our top product
+        // opportunity") — the planner leaves `task` empty there too, and the
+        // screen asks what the PRD should cover.
+          task: prdCommandTask(q),
+          instruction: null,
+          reason: "test stub",
+          source: "planner",
+          prd_id: null,
+          prd_title: null,
+        }
+      }),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
@@ -204,7 +243,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -221,28 +260,37 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(classifyCommand).not.toHaveBeenCalled()
   })
 
-  it("LLM fallback: a novel command phrasing the regex can't parse still generates", async () => {
-    // No verb from the tier-1 list, not noun-first — regex says "not a command".
-    // The message names a PRD, so tier 2 asks the classifier, which says yes.
-    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "checkout revamp", confidence: 0.92 })
+  it("a novel command phrasing generates — with no second classifier call", async () => {
+    // There used to be a TIER 2 here: when the client's regexes could not parse
+    // a phrasing but the message mentioned a PRD, it spent an extra haiku call
+    // (POST /v1/prd/classify-command) asking whether it was a command after all.
+    // That tier existed only to paper over the regexes, and both are gone — the
+    // planner reads the whole message and does not need a second opinion on it.
+    //
+    // The behaviour it protected is unchanged: a phrasing no pattern would have
+    // caught still generates, and generates from the SUBJECT, not the sentence.
+    resolveIntent.mockResolvedValueOnce({
+      intent: "generate_prd", confidence: 0.92, task: "checkout revamp",
+      instruction: null, reason: "asked for a spec", source: "planner",
+      prd_id: null, prd_title: null,
+    })
     renderChat()
     await typeAndSend("let's get a PRD going for the checkout revamp")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
-    // The classifier-extracted task drives generation (the regex extractor
-    // can't parse this phrasing by definition).
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, NO_CONV_ID, undefined)
     expect(runAskGeneration).not.toHaveBeenCalled()
+    // The extra round trip is gone, not merely unused.
+    expect(classifyCommand).not.toHaveBeenCalled()
   })
 
-  it("LLM fallback: a PRD mention that is NOT a command falls through to the ask agent", async () => {
-    renderChat() // default classifyCommand mock: not a command
+  it("a PRD mention that is NOT a command falls through to the ask agent", async () => {
+    renderChat()
     await typeAndSend("the requirements doc needs another pass from legal")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    expect(classifyCommand).toHaveBeenCalledTimes(1)
     expect(generateFromTask).not.toHaveBeenCalled()
+    expect(classifyCommand).not.toHaveBeenCalled()
   })
 
   it("LLM fallback: low confidence is not enough to hijack the message", async () => {
@@ -275,7 +323,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // The generate POST is in flight (called with the parsed task) but NOT
     // resolved…
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
     // …yet the user's command, the acknowledgment, and the generating PRD card
     // are already on screen.
     expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
@@ -308,7 +356,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     // keeps the PRD about what was discussed instead of the workspace at large.
     expect(generateFromTask).toHaveBeenCalledWith(
       "our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID,
-    )
+     undefined,)
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
@@ -495,6 +543,6 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
   })
 })

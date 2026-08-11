@@ -200,16 +200,24 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
-  it("an envelope fetch failure falls back to the legacy regex ladder (fail-open floor)", async () => {
+  it("a planner failure ANSWERS the message — it never falls back to guessing", async () => {
+    // This used to fall back to the client's regex ladder, so a dead intent
+    // endpoint still generated a PRD off a pattern match. That fallback is
+    // deliberately gone.
+    //
+    // The failure mode is now: answer the question. Chosen on purpose — the
+    // cost of being wrong here is that a genuine "write me a PRD" gets a reply
+    // instead of a document and the user asks again, which is recoverable in
+    // one turn. The cost of the old fallback was an oddly-phrased question
+    // silently spending minutes and real money generating a document nobody
+    // asked for, which is not.
     resolveIntent.mockRejectedValue(new Error("network down"))
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
 
-    // The regex ladder still catches the classic phrasing — dispatch never
-    // degrades below flag-off behavior when the intent endpoint is down.
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")
-    expect(runAskGeneration).not.toHaveBeenCalled()
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(generateFromTask).not.toHaveBeenCalled()
+    expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
   it("a /slash message skips the envelope entirely (explicit intent, backend fast-path)", async () => {

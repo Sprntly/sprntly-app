@@ -12,6 +12,7 @@ failure marks the row `error` and never crashes the task (the asyncio loop
 holds a strong ref via routes/ask.py's `_inflight_tasks`).
 """
 import asyncio
+import json
 import logging
 
 from app import ask_runner, qa_agent
@@ -119,26 +120,52 @@ def _run_sync(
     # whose documents share the workspace's own name, is nothing. Ranking was
     # then decided by recency and still reported as a topic match.
     #
-    # Computed HERE, once, before `answer()` picks a path, so both paths get
-    # the same vector and the ask pays for exactly one embedding:
-    # `compose_ask_answer` reuses this instead of computing its own.
+    # SCOPED here, once, before `answer()` picks a path, so that whichever path
+    # runs shares one vector and the ask pays for at most one embedding.
     #
-    # Computed BEFORE either setter, deliberately: this is the only step here
-    # that does real work (an HTTP call), and nothing between a `set_` and the
-    # `try` is covered by the `finally`. This worker runs on a pooled thread,
-    # and a ContextVar left set outlives the request into whatever ask reuses
-    # that thread next — a stale conversation id would then scope another
-    # user's document lookup. `_question_embedding` swallows its own failures
-    # and returns `(None, True)` rather than raising, so today that window is
-    # already closed; ordering it this way is what keeps it closed if that
-    # ever stops being true.
-    embedding, embedding_degraded = ask_runner._question_embedding(
-        enterprise_id, question
-    )
+    # Scoped rather than COMPUTED: the vector is only ever read by Stage T of
+    # document grounding and by KG retrieval, and there are two common shapes
+    # where neither runs. A workspace with no documents returns from
+    # `document_grounding` before Stage T, and a PRD-grounded ask skips KG
+    # retrieval entirely — both used to pay a full embedding round trip
+    # (measured at 2.8s) for a vector nothing then read. Deferring it to first
+    # use keeps the exactly-once guarantee (the resolver memoises back into
+    # this slot) while dropping that cost to zero on the paths that need
+    # nothing. See `ask_runner._EMBED_PENDING` for the three slot states.
+    #
+    # This also closes, rather than merely orders around, the hazard the eager
+    # call had to be careful about: nothing between a `set_` and the `try` is
+    # covered by the `finally`, and this worker runs on a POOLED thread where a
+    # ContextVar left set outlives the request into whatever ask reuses that
+    # thread next — a stale conversation id would then scope another user's
+    # document lookup. The eager embed was ordered before both setters to keep
+    # that window shut; scoping does no I/O at all, so there is no window.
+    #
+    # THE PLANNER RUNS FIRST, before `answer()` picks a path. It ran here
+    # originally to get ahead of the eager embedding call — a live HTTP round
+    # trip the plan did not depend on. That call is gone (the embedding is now
+    # resolved lazily by whichever consumer needs it, and on a planned turn that
+    # may be none at all), so the ordering is no longer load-bearing for
+    # latency; what keeps the planner here is the separation of concerns below.
+    #
+    # It runs HERE rather than inside `answer()` so that function stays a pure
+    # executor of a plan it is handed, rather than something that both decides
+    # and executes. `plan_for_answer` returns None on any planner failure, and
+    # `answer(plan=None)` is byte-identical to the pre-planner behaviour, so an
+    # outage degrades this path rather than breaking it.
+    #
+    # A pinned turn is never planned: the user already named the skill, so there
+    # is nothing to decide and no reason to bill them for a decision.
+    ask_plan = None
+    if not pinned_skill:
+        from app import ask_planner
+
+        ask_plan = ask_planner.plan_for_answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
-    embedding_token = ask_runner.set_active_question_embedding(
-        embedding, embedding_degraded
-    )
+    embedding_token = ask_runner.set_active_question_embedding_pending()
     # The prior turns, by the same route and for the same reason: document
     # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
     # is without them, and the skill-routed path reaches document grounding
@@ -146,9 +173,16 @@ def _run_sync(
     # `history` is already loaded and already this function's parameter —
     # `routes.ask._load_history` fetched it, ownership-checked, before the job
     # started — so this publishes what is in hand rather than reading again.
+    # The documents the plan named, on the same request-scoped route and with
+    # the same finally-cleared discipline. Empty when nothing planned one, which
+    # is the normal outcome and leaves document selection exactly as it was.
+    planned_docs_token = ask_runner.set_active_planned_documents(
+        getattr(ask_plan, "documents", None) if ask_plan is not None else None
+    )
     history_token = ask_runner.set_active_history(history)
     try:
         payload = qa_agent.answer(
+            plan=ask_plan,
             enterprise_id=enterprise_id,
             question=question,
             dataset=dataset,
@@ -174,6 +208,7 @@ def _run_sync(
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
+        ask_runner.reset_active_planned_documents(planned_docs_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask
@@ -185,6 +220,37 @@ def _run_sync(
         )
     except Exception:  # noqa: BLE001 — analytics logging must never fail the answer
         logger.exception("log_ask failed for ask_id=%s", ask_id)
+    # The other half of the planner-first shadow (backend/docs/ASK_PLANNER.md):
+    # the plan was logged at the TOP of qa_agent.answer, before anything
+    # decided; this line records what the ladder ACTUALLY did, read off the
+    # finished payload (`_skill`/`_skill_action` are set by whichever
+    # interceptor, pipeline or skill answered — both None on the direct path).
+    # The two lines join on `question`. Logged here because this is the one
+    # exit point where the outcome is known — answer() returns from a dozen
+    # places, and instrumenting each was the invasive option.
+    #
+    # Same flag as the shadow itself, checked cheaply: this whole function is
+    # already on a background worker, and `shadow_enabled` fails closed, so an
+    # unenrolled company logs nothing and a broken flag read costs one line.
+    try:
+        from app import ask_planner
+
+        if ask_planner.shadow_enabled(enterprise_id):
+            logger.info(
+                "ask-planner actual: %s",
+                json.dumps(
+                    {
+                        "enterprise_id": enterprise_id,
+                        "question": ask_planner._clamp_for_log(question),
+                        "skill": payload.get("_skill"),
+                        "action": payload.get("_skill_action"),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+    except Exception:  # noqa: BLE001 — shadow telemetry must never fail the answer
+        logger.exception("ask-planner actual line failed for ask_id=%s", ask_id)
     complete_ask_job(ask_id, _strip_citations(payload))
     # A report skill answers with a self-contained HTML document rather than
     # markdown. Capture it as a durable `reports` artifact so it survives the
