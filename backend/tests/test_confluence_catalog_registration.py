@@ -490,3 +490,53 @@ def test_a_writer_with_no_container_never_blanks_a_stored_one(
     assert db.table("document_catalog").select("*").execute().data[0][
         "container_id"
     ] == "s1", "a container-less re-registration blanked the stored space id"
+
+
+def test_a_page_moved_to_another_space_follows_the_move(
+    isolated_settings, monkeypatch
+):
+    """The repair overwrites a CHANGED container, not only a blank one — and
+    that is the half a blank-only rule would get wrong.
+
+    Confluence lets a page be moved between spaces, and moving it changes
+    nothing about its body, so the content hash is identical and registration
+    takes the short-circuit. A repair that only filled blanks would leave the
+    row pointing at the space the page LEFT. Two failures follow, both silent:
+    unticking the old space deletes a page that is still connected, and
+    unticking the new one leaves it catalogued.
+
+    A sibling column may legitimately want the opposite rule — a
+    provider-workspace id cannot change for a given (company, provider,
+    external_id), so overwriting one there would destroy evidence rather than
+    record a move. The rules differ because the identifiers differ; see the
+    comment at the repair site before unifying them."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
+    ).execute()
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: type("R", (), {"output": {"summary": "A summary.",
+                                              "topics": ["t"]}})(),
+    )
+    monkeypatch.setattr(document_catalog, "embed_texts",
+                        lambda texts, **k: [[0.1] * 1536])
+
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body."))
+    assert db.table("document_catalog").select("*").execute().data[0][
+        "container_id"
+    ] == "s1"
+
+    # The SAME page, same body, now walked as part of a different space.
+    moved_to = {"id": "s2", "key": "PROD", "name": "Product"}
+    confluence._to_record(_Ctx(), moved_to, "page", _page("Body."))
+
+    rows = db.table("document_catalog").select("*").execute().data
+    assert len(rows) == 1, "the move created a second row"
+    assert rows[0]["container_id"] == "s2", (
+        "a page moved to another space still points at the space it left — "
+        "unticking the old space would delete a connected page, and "
+        "unticking the new one would leave it catalogued"
+    )

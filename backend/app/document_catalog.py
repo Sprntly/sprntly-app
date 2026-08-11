@@ -592,6 +592,18 @@ def register_document(
         # that never changes would otherwise never acquire one. Kept off the
         # common path by the inequality test: a row already carrying the right
         # container costs the same nothing it costs today.
+        #
+        # REPAIRS NULL *AND* A CHANGED VALUE, and if a sibling column's repair
+        # is only-fill-if-blank, THAT DIFFERENCE IS DELIBERATE — do not tidy
+        # the two into one rule. A Confluence page can genuinely be MOVED
+        # between spaces, so a container that disagrees with the pull is new
+        # information and the row must follow it, or the page stays attached
+        # to a space it has left and is deleted when that space is unticked.
+        # A provider-workspace id is the opposite case: the same
+        # (company, provider, external_id) cannot legitimately move to another
+        # workspace, so there an overwrite would destroy evidence rather than
+        # record a move. Same mechanism, opposite correct behaviour, because
+        # the two identifiers differ in whether they can legitimately change.
         if container and existing.get("container_id") != container:
             _set_container(company_id, existing["id"], container)
         return existing["id"]
