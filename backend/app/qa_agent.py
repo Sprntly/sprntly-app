@@ -1566,7 +1566,8 @@ def answer(
                 has_calls = True
             if has_calls:
                 return call_digest.answer(
-                    enterprise_id=enterprise_id, question=question, history=history
+                    enterprise_id=enterprise_id, question=question, history=history,
+                    on_delta=on_delta,
                 )
             # No corpus to digest: a declined precondition falls through to
             # normal routing — never a canned refusal the user never asked for.
@@ -1586,7 +1587,8 @@ def answer(
 
         if call_digest.has_call_source(enterprise_id) and _custom_beats_digest() is None:
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
 
     # "Analyze my data" is a COMMAND to run a DS engine over the company's
@@ -1674,7 +1676,8 @@ def answer(
             from app import call_digest
 
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
 
     # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
@@ -1993,8 +1996,23 @@ def answer(
 
         if not pinned_skill:
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
+        # DELIBERATELY NOT STREAMED, for the same reason as
+        # `call_digest._answer_query` (see the comment at its call site).
+        #
+        # `_answer_voc_report` returns None on failure, and None does NOT end
+        # the turn: control falls out of this block into `_answer_single_shot`
+        # below — a SECOND full generation into the SAME AnswerFieldExtractor,
+        # which is never reset between the two. Streaming it would publish the
+        # abandoned attempt's text, then freeze for the whole run that actually
+        # answers, and `token_stream._accum` would replay the abandoned text to
+        # anyone who reloaded. Strictly worse than the spinner it replaced.
+        #
+        # The unpinned VoC route — `call_digest.answer` just above — is the
+        # common one and DOES stream: it swallows its own exception and returns
+        # a payload, so it is terminal and cannot fall through.
         voc = _answer_voc_report(decision, enterprise_id, question, history)
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
