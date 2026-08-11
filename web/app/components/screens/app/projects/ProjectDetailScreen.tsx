@@ -41,6 +41,7 @@ import {
   type ProjectArtifactType,
   type ProjectDetail,
   type ProjectMember,
+  type ProjectMemoryInsight,
   type ProjectMemorySummary,
 } from "../../../../lib/api"
 import { ProjectMainThread } from "./ProjectMainThread"
@@ -236,6 +237,12 @@ export type ProjectDetailViewProps = {
   onAddMemory: () => void
   onOpenTasks: () => void
   onInvite: () => void
+  /** The cross-chat INSIGHT turn (design-spec AC7), fed from
+   *  `GET /v1/projects/{id}/memory/insight` — `null` when the project has
+   *  no agent-promoted memory entry yet, or the fetch failed (best-effort,
+   *  AC5). Passed straight through to `ProjectMainThread`'s existing,
+   *  unmodified prop chain. */
+  insightNote?: ProjectMemoryInsight | null
   /** The signed-in caller's user id (`null` when unresolved) — used ONLY to
    *  withhold the Remove control on the caller's OWN member row (self-
    *  removal/"leave project" is out of scope for this ticket; the backend
@@ -266,6 +273,7 @@ export function ProjectDetailView({
   onAddMemory,
   onOpenTasks,
   onInvite,
+  insightNote,
   currentUserId,
   onRemoveMember,
 }: ProjectDetailViewProps) {
@@ -336,6 +344,7 @@ export function ProjectDetailView({
               projectId={project.id}
               activeChat={activeChat}
               onOpenArtifact={(c) => onOpenArtifacts(c.type)}
+              insightNote={insightNote}
             />
           </div>
         </main>
@@ -535,7 +544,15 @@ type LoadState =
   | { status: "forbidden" }
   | { status: "not_found" }
   | { status: "error" }
-  | { status: "ready"; project: ProjectDetail; artifacts: ArtifactItem[]; memory: ProjectMemorySummary }
+  | {
+      status: "ready"
+      project: ProjectDetail
+      artifacts: ArtifactItem[]
+      memory: ProjectMemorySummary
+      /** Best-effort — a failed/absent insight fetch never blocks or
+       *  errors the shell (AC5); `null` renders no insight turn. */
+      insight: ProjectMemoryInsight | null
+    }
 
 /** Which of this ticket's rail-triggered modals is open, if any. `artifacts`
  *  carries the type the rail card/inline chip was opened FOR (or `undefined`
@@ -561,9 +578,14 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       projectsApi.get(projectId),
       projectsApi.artifacts(projectId),
       projectsApi.memorySummary(projectId),
+      // Best-effort (AC5): a failed insight fetch must never fail the
+      // whole shell load — caught locally to `null`, same posture as an
+      // absent insight, rather than propagating into the outer `.catch`
+      // below (which drives the 403/404/error gate states).
+      Promise.resolve(projectsApi.memoryInsight(projectId)).catch(() => null),
     ])
-      .then(([project, artifacts, memory]) => {
-        setState({ status: "ready", project, artifacts, memory })
+      .then(([project, artifacts, memory, insight]) => {
+        setState({ status: "ready", project, artifacts, memory, insight })
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 403) {
@@ -682,6 +704,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         project={state.project}
         artifacts={state.artifacts}
         memory={state.memory}
+        insightNote={state.insight}
         railCollapsed={railCollapsed}
         onToggleRail={onToggleRail}
         activeChat={activeChat}

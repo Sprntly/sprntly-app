@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const getMock = vi.fn()
 const artifactsMock = vi.fn()
 const memorySummaryMock = vi.fn()
+const memoryInsightMock = vi.fn()
 const openModalMock = vi.fn()
 const removeMemberMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
@@ -51,6 +52,7 @@ vi.mock("../../../../../lib/api", () => {
       get: (...a: unknown[]) => getMock(...a),
       artifacts: (...a: unknown[]) => artifactsMock(...a),
       memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
+      memoryInsight: (...a: unknown[]) => memoryInsightMock(...a),
       removeMember: (...a: unknown[]) => removeMemberMock(...a),
     },
   }
@@ -83,11 +85,21 @@ vi.mock("next/link", () => ({
 // real thread/composer/swap behaviour is `ProjectMainThread.test.tsx`,
 // `ProjectGroupChat.test.tsx`, and `ProjectIndividualChat.test.tsx`'s job.
 vi.mock("../ProjectMainThread", () => ({
-  ProjectMainThread: (props: { projectId: number | string; activeChat: string }) =>
+  ProjectMainThread: (props: {
+    projectId: number | string
+    activeChat: string
+    insightNote?: { by: string; text: string } | null
+  }) =>
     React.createElement("div", {
       "data-testid": "main-thread-stub",
       "data-project-id": String(props.projectId),
       "data-active-chat": props.activeChat,
+      // Reflects whether/what insightNote this container passed through —
+      // ProjectMainThread's OWN rendering of it is out of this file's scope
+      // (ProjectMainThread.test.tsx/ProjectIndividualChat.test.tsx's job);
+      // this file only proves the container fed the right value in.
+      "data-has-insight": props.insightNote ? "true" : "false",
+      "data-insight-text": props.insightNote?.text ?? "",
     }),
 }))
 
@@ -96,7 +108,7 @@ import { ProjectDetailView, ProjectDetailScreen, type ProjectDetailViewProps } f
 // the SAME class reference the component's `instanceof` checks compare
 // against — required for the 403/404 container tests below.
 import { ApiError } from "../../../../../lib/api"
-import type { ArtifactItem, ProjectDetail, ProjectMemorySummary } from "../../../../../lib/api"
+import type { ArtifactItem, ProjectDetail, ProjectMemoryInsight, ProjectMemorySummary } from "../../../../../lib/api"
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
 
@@ -176,6 +188,11 @@ const MEMORY: ProjectMemorySummary = {
   stale: false,
 }
 
+const INSIGHT: ProjectMemoryInsight = {
+  by: "Sprntly",
+  text: "The pricing model changed last week — flat rate, not tiered.",
+}
+
 const noop = () => {}
 
 function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDetailViewProps {
@@ -204,6 +221,7 @@ afterEach(() => {
   getMock.mockReset()
   artifactsMock.mockReset()
   memorySummaryMock.mockReset()
+  memoryInsightMock.mockReset()
   openModalMock.mockReset()
   removeMemberMock.mockReset()
   authMock.mockReset()
@@ -421,6 +439,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -428,12 +447,14 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(getMock).toHaveBeenCalledWith("101")
     expect(artifactsMock).toHaveBeenCalledWith("101")
     expect(memorySummaryMock).toHaveBeenCalledWith("101")
+    expect(memoryInsightMock).toHaveBeenCalledWith("101")
   })
 
   it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
     getMock.mockRejectedValue(new ApiError(403, "Not a member of this project"))
     artifactsMock.mockResolvedValue([])
     memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -445,6 +466,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     getMock.mockRejectedValue(new ApiError(404, "Project not found"))
     artifactsMock.mockResolvedValue([])
     memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "999" }))
     })
@@ -456,6 +478,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -472,6 +495,7 @@ describe("ProjectDetailScreen — data fetch", () => {
       getMock.mockResolvedValueOnce(PROJECT).mockResolvedValueOnce(PROJECT_AFTER_REMOVE)
       artifactsMock.mockResolvedValue(ARTIFACTS)
       memorySummaryMock.mockResolvedValue(MEMORY)
+      memoryInsightMock.mockResolvedValue(null)
       removeMemberMock.mockResolvedValue({ removed: true })
       await act(async () => {
         render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
@@ -502,6 +526,7 @@ describe("ProjectDetailScreen — data fetch", () => {
       getMock.mockResolvedValue(PROJECT)
       artifactsMock.mockResolvedValue(ARTIFACTS)
       memorySummaryMock.mockResolvedValue(MEMORY)
+      memoryInsightMock.mockResolvedValue(null)
       await act(async () => {
         render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
       })
@@ -519,6 +544,7 @@ describe("ProjectDetailScreen — data fetch", () => {
       getMock.mockResolvedValue(PROJECT)
       artifactsMock.mockResolvedValue(ARTIFACTS)
       memorySummaryMock.mockResolvedValue(MEMORY)
+      memoryInsightMock.mockResolvedValue(null)
       removeMemberMock.mockRejectedValue(
         new ApiError(409, { detail: "The project creator can't be removed" }, "The project creator can't be removed"),
       )
@@ -536,5 +562,51 @@ describe("ProjectDetailScreen — data fetch", () => {
       expect(getMock).toHaveBeenCalledTimes(1)
       expect(screen.getAllByTestId("member-row-human")).toHaveLength(2)
     })
+  })
+})
+
+// ── ProjectDetailScreen — cross-chat insight fetch (top-of-chain wiring) ───
+describe("ProjectDetailScreen — cross-chat insight fetch", () => {
+  it("fetches the insight on load and passes a non-null result through as insightNote", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(INSIGHT)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("main-thread-stub")).toBeTruthy())
+    expect(memoryInsightMock).toHaveBeenCalledWith("101")
+    const host = screen.getByTestId("main-thread-stub")
+    expect(host.getAttribute("data-has-insight")).toBe("true")
+    expect(host.getAttribute("data-insight-text")).toBe(INSIGHT.text)
+  })
+
+  it("a null insight response renders no insight turn, with no error surfaced", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
+    expect(screen.getByTestId("main-thread-stub").getAttribute("data-has-insight")).toBe("false")
+    expect(screen.queryByTestId("project-detail-error")).toBeNull()
+    expect(screen.queryByTestId("project-detail-forbidden")).toBeNull()
+    expect(screen.queryByTestId("project-detail-not_found")).toBeNull()
+  })
+
+  it("a failed insight fetch (best-effort) renders no insight turn, with no error surfaced", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockRejectedValue(new ApiError(500, "insight backend down"))
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
+    expect(screen.getByTestId("main-thread-stub").getAttribute("data-has-insight")).toBe("false")
+    expect(screen.queryByTestId("project-detail-error")).toBeNull()
   })
 })

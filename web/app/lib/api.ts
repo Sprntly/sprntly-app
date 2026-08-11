@@ -5168,6 +5168,19 @@ export type ProjectMemorySummary = {
   stale: boolean
 }
 
+/** `GET /v1/projects/{id}/memory/insight` — the single most-recently-
+ *  updated agent-promoted `project_memory_entries` row, shaped for the
+ *  individual chat's cross-chat INSIGHT turn (`bc-turn--insight`,
+ *  design-spec AC7). `null` when the project has no agent-promoted entry
+ *  yet — user-authored entries alone never produce an insight. `by` is
+ *  fixed at `"Sprntly"` in v1 (per-teammate attribution is a flagged
+ *  follow-on); `text` is the stored, already-summarized entry body, never
+ *  a verbatim transcript turn. */
+export type ProjectMemoryInsight = {
+  by: string
+  text: string
+}
+
 /** One `project_memory_entries` row (`GET/POST/PATCH/DELETE
  *  /v1/projects/{id}/memory*` — `supabase/migrations/*_project_memory.sql`).
  *  Provenance is a STORED FACT, never inferred client-side: the schema's
@@ -5258,6 +5271,11 @@ export const projectsApi = {
   /** The cached project-memory summary — read-only, no LLM call. */
   memorySummary: (id: number | string) =>
     api.get<ProjectMemorySummary>(`/v1/projects/${encodeURIComponent(String(id))}/memory/summary`),
+  /** The single latest agent-promoted memory entry, for the individual
+   *  chat's cross-chat INSIGHT turn — read-only, no LLM call, `null` when
+   *  none exists yet. */
+  memoryInsight: (id: number | string) =>
+    api.get<ProjectMemoryInsight | null>(`/v1/projects/${encodeURIComponent(String(id))}/memory/insight`),
   /** Poll read (AD-P4 — no realtime in v1): group turns after the `since`
    *  cursor (a turn id), ascending. `since` omitted fetches the whole
    *  history. Empty (never a crash) when the group chat hasn't been

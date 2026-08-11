@@ -348,6 +348,91 @@ def test_get_summary_fallback_when_absent(fake_llm, monkeypatch):
     assert fake_llm["calls"] == []
 
 
+# ── Cross-chat insight (GET /memory/insight, read-only, no LLM) ─────────
+
+
+def test_memory_insight_returns_latest_agent_entry(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db_mod
+
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    memory_db_mod.add_agent_promoted_entry(
+        project["id"], body="Older insight.", source_conversation_id=conv["id"]
+    )
+    memory_db_mod.add_agent_promoted_entry(
+        project["id"],
+        body="Newest insight — flat pricing, not tiered.",
+        source_conversation_id=conv["id"],
+    )
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
+    assert r.status_code == 200
+    assert r.json() == {"by": "Sprntly", "text": "Newest insight — flat pricing, not tiered."}
+
+
+def test_memory_insight_null_when_no_agent_entries(fake_llm, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    ctx.client.post(f"/v1/projects/{project['id']}/memory", json={"body": "User-authored only."})
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
+    assert r.status_code == 200
+    assert r.json() is None
+    assert fake_llm["calls"] == []
+
+
+def test_memory_insight_ignores_user_entries(isolated_settings, monkeypatch):
+    """A NEWER user-authored entry must never override an OLDER
+    agent-promoted entry as the insight source — the insight is scoped to
+    `promoted_by='agent'` regardless of recency among user entries."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db_mod
+
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    memory_db_mod.add_agent_promoted_entry(
+        project["id"], body="Older agent insight.", source_conversation_id=conv["id"]
+    )
+    ctx.client.post(
+        f"/v1/projects/{project['id']}/memory", json={"body": "Newer, but user-authored."}
+    )
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
+    assert r.status_code == 200
+    assert r.json() == {"by": "Sprntly", "text": "Older agent insight."}
+
+
+def test_memory_insight_non_member_403(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    _, non_member_headers = seed_same_tenant_non_member(ctx)
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight", headers=non_member_headers)
+    assert r.status_code == 403
+
+
+def test_memory_insight_foreign_tenant_404(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+
+    from app.db import projects as projects_db
+    from app.db.workspaces import ensure_default_workspace
+
+    foreign = projects_db.create_project(
+        company_id="foreign-co",
+        workspace_id=ensure_default_workspace("foreign-co")["id"],
+        name="Not mine",
+        created_by="someone-else",
+    )
+
+    r = ctx.client.get(f"/v1/projects/{foreign['id']}/memory/insight")
+    assert r.status_code == 404
+
+
 # ── Observability — no memory body text ever reaches a log line ─────────
 
 

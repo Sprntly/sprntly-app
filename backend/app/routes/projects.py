@@ -310,6 +310,19 @@ def get_memory_summary(project_id: int, ctx: WorkspaceContext = Depends(require_
     return memory_db.get_summary(project_id)
 
 
+@router.get("/{project_id}/memory/insight")
+def get_memory_insight(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
+    """The single latest agent-promoted memory entry, shaped for the
+    individual chat's cross-chat INSIGHT turn (design-spec AC7) — a
+    distilled note, never a verbatim transcript. `null` when the project
+    has no agent-promoted entry yet. Read-only, no LLM call. Membership-
+    gated, same as every other memory read. A static subpath declared
+    alongside `/memory/summary` — no parametric catch-all in this router
+    shadows it."""
+    _require_project_member(project_id, ctx)
+    return memory_db.get_latest_insight(project_id)
+
+
 @router.get("/{project_id}/memory")
 def list_memory(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
     _require_project_member(project_id, ctx)

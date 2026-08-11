@@ -162,6 +162,23 @@ def get_summary(project_id: int) -> dict:
     return {"summary_md": None, "entry_count": len(count), "stale": False}
 
 
+@retry_on_disconnect
+def get_latest_insight(project_id: int) -> dict | None:
+    """The single most-recently-updated agent-promoted entry, shaped for
+    the individual chat's cross-chat INSIGHT turn — `{"by": "Sprntly",
+    "text": <body>}`, or `None` when the project has no agent-promoted
+    entry yet (user-authored entries alone never produce an insight,
+    build spec AD-P3). Reuses `list_entries`'s existing updated_at-desc
+    ordering rather than adding a second ordering convention. Attribution
+    is fixed at "Sprntly" (v1) — the schema records `source_conversation_id`,
+    not the seeding human, so per-teammate attribution is a flagged
+    follow-on, not guessed here. Never calls an LLM."""
+    for entry in list_entries(project_id):
+        if entry.get("promoted_by") == "agent":
+            return {"by": "Sprntly", "text": entry["body"]}
+    return None
+
+
 def _flip_summary_stale(client, project_id: int) -> None:
     """Set `stale=true` on the project's summary row if one exists. A
     plain `UPDATE ... WHERE project_id = ?` is a no-op when no row is
