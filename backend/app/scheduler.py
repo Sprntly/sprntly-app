@@ -16,7 +16,8 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
                        module; this job is the thin shell that ticks a clock and
                        drives it per company.
   refresh_connectors — re-pulls connector data into the KG every
-                       PIPELINE_INTERVAL_HOURS so the brief reads fresh data.
+                       CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
+                       and KG read near-live data.
 """
 from __future__ import annotations
 
@@ -107,7 +108,7 @@ def _refresh_all_company_connectors() -> None:
       - when a user manually clicks Sync in Settings
     Briefs would be generated off whatever data was current at install
     time + manual syncs. This job closes that gap by re-running the
-    pullers every `pipeline_interval_hours` so the home chat / brief /
+    pullers every `connector_refresh_interval_minutes` so the home chat / brief /
     KG synthesis always read recent connector data.
 
     Per-company isolated: a db.list_connections raise for one tenant is
@@ -722,7 +723,6 @@ def start_scheduler() -> None:
         logger.info("Scheduler disabled (SCHEDULER_ENABLED=false)")
         return
 
-    interval_hours = getattr(settings, "pipeline_interval_hours", 6)
     tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
     # APScheduler's DEFAULT misfire_grace_time is 1 SECOND: a firing that lands
@@ -754,13 +754,22 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     # Second job: refresh the KG from upstream connectors so the corpus stays
-    # fresh. Keeps the existing ~6h cadence — connector freshness is decoupled
-    # from the once-a-week brief send time.
+    # fresh. Every 10 minutes (owner decision 2026-08-11, down from 6h): the
+    # brief/chat/KG should read near-live connector data, not this morning's.
+    # What makes a 10-minute cadence affordable is that the whole fan-out is
+    # incremental and fire-and-forget — kickoff_sync spawns per-provider daemon
+    # threads and returns, providers dedup already-seen records on ingest, and
+    # coalesce=True collapses any backlog to one run. The cost that DOES scale
+    # with cadence is third-party API traffic (×36 vs 6h), which is why the
+    # value stays an env knob rather than a constant.
+    refresh_minutes = (
+        getattr(settings, "connector_refresh_interval_minutes", 10) or 10
+    )
     _scheduler.add_job(
         _refresh_all_company_connectors,
-        trigger=IntervalTrigger(hours=interval_hours),
+        trigger=IntervalTrigger(minutes=refresh_minutes),
         id="refresh_connectors",
-        name=f"Refresh connector data (every {interval_hours}h)",
+        name=f"Refresh connector data (every {refresh_minutes}m)",
         replace_existing=True,
     )
     # Synced skill folders: re-read every registered GitHub folder so a skill
@@ -911,8 +920,8 @@ def start_scheduler() -> None:
     logger.info(
         "Scheduler started: Top Insights brief tick every %dm "
         "(generate 3h ahead, deliver at each company's configured time) "
-        "+ connector refresh every %dh%s%s",
-        tick_minutes, interval_hours,
+        "+ connector refresh every %dm%s%s",
+        tick_minutes, refresh_minutes,
         " + drip emails" if settings.drip_emails_enabled else "",
         (
             f" + ticket sync every {getattr(settings, 'ticket_sync_interval_minutes', 15) or 15}m"
