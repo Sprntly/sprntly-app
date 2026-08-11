@@ -5084,3 +5084,39 @@ export const mcpTokensApi = {
   revoke: (id: string) =>
     api.delete<{ ok: true }>(`/v1/mcp-tokens/${encodeURIComponent(id)}`),
 }
+
+// ── Projects (shared container + collaboration context, build spec §5) ──
+
+/** Artifact type keys a project can hold (`project_artifacts.artifact_type`). */
+export type ProjectArtifactType = "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+
+/** One row from `GET /v1/projects` — recency-ordered, MEMBER-scoped by the
+ *  backend (AD-P11: a workspace project the caller isn't a member of never
+ *  appears here). Counts are derived at read time, never stored. Note: this
+ *  list row carries `member_count` only (no per-member identity/avatar data —
+ *  that lives on `GET /v1/projects/{id}`), so a project card cannot render
+ *  real member initials from this endpoint alone. */
+export type ProjectListItem = {
+  id: number
+  company_id: string
+  workspace_id: string
+  name: string
+  origin: "manual" | "prd_auto" | "artifact"
+  created_by: string
+  created_at: string
+  updated_at: string
+  artifact_counts: Partial<Record<ProjectArtifactType, number>>
+  member_count: number
+  has_group_chat: boolean
+  memory_count: number
+}
+
+export const projectsApi = {
+  /** Projects in the caller's active workspace, recency-ordered, scoped to
+   *  the caller's memberships by the backend — no `dataset`/company arg
+   *  (tenancy rides the `X-Workspace-Id` header, `ask.py`'s pattern). */
+  list: () => api.get<{ projects: ProjectListItem[] }>("/v1/projects").then((r) => r.projects),
+  /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`). */
+  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact" }) =>
+    api.post<ProjectListItem>("/v1/projects", payload),
+}

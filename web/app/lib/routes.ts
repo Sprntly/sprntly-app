@@ -42,6 +42,19 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
+/** Base path for the flat Projects surface (AD-P14 — `?id=<id>` query param,
+ *  no `[id]` dynamic segment; mirrors `PROTOTYPE_PATH`). */
+export const PROJECTS_PATH = "/projects"
+
+/** Build the projects path, threading a project id as `?id=<id>` when
+ *  present (opens the detail view, a follow-up ticket). With no id it
+ *  returns the bare `/projects` list route. Pure → unit-testable. */
+export function projectPath(projectId?: number | string | null): string {
+  return projectId == null || projectId === ""
+    ? PROJECTS_PATH
+    : `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+}
+
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
@@ -77,6 +90,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   ideation: "/ideation",
   templates: "/templates",
   skills: "/skills",
+  // Flat route + `?id=<id>` (AD-P14) — no per-id dynamic segment, exactly the
+  // `/prototype?prd=<id>` pattern above. `ProjectsScreen` (list) renders when
+  // there is no `id`; the `?id=<id>` → detail branch lands with a follow-up ticket.
+  projects: "/projects",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -98,6 +115,9 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/ideation": "ideation",
   "/templates": "templates",
   "/skills": "skills",
+  // The `?id=` query param rides on top of this same path — pathname-based
+  // screen derivation ignores it, same as `/prototype`'s `?prd=`.
+  "/projects": "projects",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).
