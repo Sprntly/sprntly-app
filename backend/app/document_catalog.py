@@ -614,6 +614,16 @@ def register_document(
         # _move` dies if this becomes fill-if-blank, and
         # `test_the_no_op_fill_never_overwrites_a_different_workspace_id` dies
         # if the one above becomes overwrite-always.
+        #
+        # NOTE FOR THE PLANNER-CACHE RULE BELOW: this early return is described
+        # elsewhere as a path that "wrote nothing", and since this repair landed
+        # that is no longer literally true — `_set_container` writes a column.
+        # It still needs no cache invalidation, and for a checkable reason
+        # rather than an assumption: the planner caches `list_documents`, which
+        # selects `_INDEX_COLUMNS`, and `container_id` is deliberately NOT in
+        # that list (it is written and deleted on, never read back). So this
+        # write cannot change the planner's rendered view. Add `container_id`
+        # to `_INDEX_COLUMNS` and that stops being true — invalidate here then.
         if container and existing.get("container_id") != container:
             _set_container(company_id, existing["id"], container)
         return existing["id"]
@@ -792,6 +802,20 @@ def deregister_documents(
         .in_("external_id", ids)
         .execute()
     )
+    # WITHOUT THIS THE DELETE IS INVISIBLE TO THE PART THAT OFFERS DOCUMENTS.
+    # The Ask Planner memoises this company's catalog in-process and validates
+    # the model's picks against it, so a row deleted here keeps being offered
+    # by name until the process restarts — the body fetch then fails and the
+    # user is told the contents could not be loaded, which is the EXACT symptom
+    # this function exists to remove, reappearing one layer up.
+    #
+    # `deregister_document` (singular) already does this; both BULK paths were
+    # missed, so every connector deselection — Slack's included — was landing
+    # in the database and not in the planner. Placed after the empty-id guard
+    # on purpose, mirroring the same reasoning that keeps it off
+    # `register_document`'s unchanged-content early return: that path writes
+    # nothing, so there is nothing to invalidate.
+    _drop_planner_cache(company_id)
     return len(ids)
 
 
@@ -840,6 +864,10 @@ def deregister_documents_in_containers(
         .in_("container_id", ids)
         .execute()
     )
+    # See `deregister_documents` — the planner's memoised catalog must be
+    # dropped or a deselected space's pages stay offerable by name for the
+    # life of the process, which is this function's own bug one layer up.
+    _drop_planner_cache(company_id)
     return len(ids)
 
 

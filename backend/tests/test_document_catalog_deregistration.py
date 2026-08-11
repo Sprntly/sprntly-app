@@ -493,3 +493,90 @@ def test_registration_still_has_exactly_one_deletion_counterpart(isolated_settin
         "Registration happens from seven places; if you added an eighth, it "
         "needs a removal path too, or its rows become immortal."
     )
+
+
+# ═════════ the delete has to reach the thing that OFFERS documents ═════════
+#
+# Deleting the row is only half of it. The Ask Planner memoises each company's
+# catalog in-process and validates the model's picks against that copy, so a
+# row deleted here keeps being offered BY NAME until the process restarts —
+# and the body fetch then fails with "the contents could not be loaded", which
+# is precisely the symptom this whole change exists to remove, reappearing one
+# layer up. `deregister_document` (singular) already invalidated; both BULK
+# paths did not, so every connector deselection landed in the database and not
+# in the planner.
+
+
+def _capture_invalidations(monkeypatch):
+    """Record company ids whose planner cache got dropped.
+
+    Patched at `app.ask_planner.invalidate_catalog_cache` — the seam
+    `_drop_planner_cache` imports lazily — rather than patching
+    `_drop_planner_cache` itself, so the test still fails if someone deletes
+    the call, replaces it with a direct import, or spells the company id
+    wrongly on the way through."""
+    import app.ask_planner as planner
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        planner, "invalidate_catalog_cache", lambda cid: seen.append(cid)
+    )
+    return seen
+
+
+def test_a_bulk_deregistration_invalidates_the_planner_cache(
+    isolated_settings, monkeypatch
+):
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_row(db, provider="slack", external_id="C1", title="#general")
+    seen = _capture_invalidations(monkeypatch)
+
+    document_catalog.deregister_documents(_CID, "slack", ["C1"])
+
+    assert seen == [_CID], (
+        "the row went but the planner kept its cached copy — the channel is "
+        "still offerable by name until the process restarts"
+    )
+
+
+def test_a_container_deregistration_invalidates_the_planner_cache(
+    isolated_settings, monkeypatch
+):
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    _seed_row(db, provider="confluence", external_id="p1", title="p1",
+              container_id="s-eng")
+    seen = _capture_invalidations(monkeypatch)
+
+    document_catalog.deregister_documents_in_containers(
+        _CID, "confluence", ["s-eng"]
+    )
+
+    assert seen == [_CID]
+
+
+@pytest.mark.parametrize(
+    "call",
+    ["deregister_documents", "deregister_documents_in_containers"],
+)
+def test_a_no_op_deregistration_does_not_invalidate(
+    isolated_settings, monkeypatch, call
+):
+    """The invalidation sits AFTER the empty-id guard, for the same reason it
+    is kept off `register_document`'s unchanged-content early return: that path
+    writes nothing, so there is nothing to invalidate. Dropping the cache on
+    every no-op save would throw away a whole company's memoised catalog on the
+    common path where the user changed nothing."""
+    from app import document_catalog
+
+    seen = _capture_invalidations(monkeypatch)
+
+    assert getattr(document_catalog, call)(_CID, "confluence", []) == 0
+
+    assert seen == [], (
+        "a no-op deregistration dropped the planner cache — the common save, "
+        "where nothing was removed, now costs a full catalog re-read"
+    )
