@@ -576,14 +576,15 @@ working", that state is almost always the answer.
 # plain chats (no prd_id) keep the unmodified prompt.
 ASK_SYSTEM_PRD_ADDENDUM = """\
 
-You also have a "CURRENT … CONTEXT" section: the artifact the user has open \
-beside this chat — a PRD (plus the insight it came from and its related \
-evidence, tickets, and prototype), an evidence report, or a set of tickets. \
-When the user says "this PRD" / "this evidence" / "these tickets" / "this \
-document" — or asks about requirements, metrics, scope, findings, tickets, \
-or the prototype without naming a document — answer from that section first. \
-The same grounding rules apply: quote the document's own content, never \
-invent, and say so when it doesn't cover what was asked."""
+You also have a "CURRENT PRD CONTEXT", "CURRENT EVIDENCE CONTEXT", or \
+"CURRENT TICKET SET CONTEXT" section: the artifact the user has open beside \
+this chat — a PRD (plus the insight it came from and its related evidence, \
+tickets, and prototype), an evidence report, or a set of tickets. When the \
+user says "this PRD" / "this evidence" / "these tickets" / "this document" — \
+or asks about requirements, metrics, scope, findings, tickets, or the \
+prototype without naming a document — answer from that section first. The \
+same grounding rules apply: quote the document's own content, never invent, \
+and say so when it doesn't cover what was asked."""
 
 
 # ── Ask × custom skills (PRD 1854 — company-uploaded method text) ───────────
