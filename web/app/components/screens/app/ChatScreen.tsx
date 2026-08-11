@@ -5185,6 +5185,17 @@ export function ChatScreen() {
               ))
             },
           )
+          // Same reason as the onResult path above, on the route a user reaches
+          // by reloading mid-answer: if this turn streamed, mark it animated
+          // BEFORE the reply lands. `hasFreshReply` reads this set during
+          // render, and without the mark the simulated typewriter would collapse
+          // a long answer back to its first paragraph and re-reveal it at
+          // ~600-800ms per paragraph — re-typing text already read.
+          //
+          // It has to be this durable, id-keyed marker and not a check on the
+          // turn itself: the setTabs below clears `partial` in the SAME update
+          // that sets `reply`, so by render time `turn.partial` is always
+          // undefined and any predicate based on it would be dead code.
           const streamedTurn = tabsRef.current
             .find((t) => t.id === targetTabId)?.thread.find((turn) => turn.id === turnId)
           if (streamedTurn?.partial) animatedTurnIds.current.add(turnId)
