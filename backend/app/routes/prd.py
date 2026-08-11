@@ -37,6 +37,7 @@ from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
 from app.db.conversations import bind_conversation_to_prd
 from app.db.evidences import find_existing_evidence_for_theme
+from app.project_from_prd import maybe_auto_create_project_for_prd
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
@@ -364,6 +365,11 @@ async def generate_from_task(
                     body.conversation_id, existing["id"],
                     company.company_id, company.user_id,
                 )
+                maybe_auto_create_project_for_prd(
+                    company_id=company.company_id, workspace_id=company.workspace_id,
+                    user_id=company.user_id, prd_id=existing["id"],
+                    prd_title=existing["title"], conversation_id=body.conversation_id,
+                )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
@@ -404,6 +410,11 @@ async def generate_from_task(
     if body.conversation_id is not None:
         bind_conversation_to_prd(
             body.conversation_id, prd_id, company.company_id, company.user_id
+        )
+        maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=body.conversation_id,
         )
 
     # Documents attached earlier in the chat thread ride along as authoritative
@@ -586,6 +597,11 @@ async def import_prd(
     if conversation_id is not None:
         bind_conversation_to_prd(
             conversation_id, prd_id, company.company_id, company.user_id
+        )
+        maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=conversation_id,
         )
 
     task = asyncio.create_task(

@@ -6,9 +6,14 @@
 // Three tabs (AC1): **Start manual** (name + optional invite rows), **From
 // an artifact** (pick an existing artifact as the project's first item —
 // AC3, a PRD is one selectable artifact among the five types, never the
-// project's identity), and **Auto · from PRD** — a labelled Phase-2
-// placeholder (AD-P9) that issues no create/fork call (AC9). Do NOT build
-// the auto-from-PRD fork here.
+// project's identity), and **Auto · from PRD** (AD-P9) — fork an existing
+// PRD into its own project: pick one of the caller's PRDs, create with
+// `origin: "prd_auto"`, then add it as the project's first artifact — the
+// exact two-call shape the "From an artifact" tab already uses. This is the
+// explicit "fork a project from a PRD I already have" entry point; the
+// server-side hook at PRD-generation time (`maybe_auto_create_project_for_prd`,
+// `backend/app/project_from_prd.py`) covers the other one (forking at
+// generation time). Both converge on `origin: "prd_auto"`.
 //
 // Invite rows (AD-P5, AC4/AC5): email + ACCESS level ONLY — no title/role
 // field. A person's job title comes from their OWN onboarding
@@ -70,14 +75,6 @@ function artifactTitle(a: ArtifactItem): string {
   return a.title
 }
 
-function PlusIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  )
-}
-
 // ── Presentational view ──
 
 export type CreateProjectModalViewProps = {
@@ -95,6 +92,8 @@ export type CreateProjectModalViewProps = {
   artifacts: ArtifactItem[]
   selectedArtifact: ArtifactItem | null
   onSelectArtifact: (a: ArtifactItem) => void
+  selectedPrd: ArtifactItem | null
+  onSelectPrd: (a: ArtifactItem) => void
   creating: boolean
   error: string | null
   onCancel: () => void
@@ -116,6 +115,8 @@ export function CreateProjectModalView({
   artifacts,
   selectedArtifact,
   onSelectArtifact,
+  selectedPrd,
+  onSelectPrd,
   creating,
   error,
   onCancel,
@@ -169,6 +170,8 @@ export function CreateProjectModalView({
 
   const canCreateManual = name.trim().length > 0
   const canCreateArtifact = selectedArtifact != null
+  const canCreateAuto = selectedPrd != null
+  const prdArtifacts = artifacts.filter((a) => a.type === "prd")
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onCancel()}>
@@ -227,7 +230,7 @@ export function CreateProjectModalView({
             onClick={() => onTabChange("auto")}
             data-testid="create-project-tab-auto"
           >
-            Auto · from PRD <span className={styles.comingTag}>coming</span>
+            Auto · from PRD
           </button>
         </div>
 
@@ -365,42 +368,77 @@ export function CreateProjectModalView({
           ) : null}
 
           {tab === "auto" ? (
-            <div className={styles.autoPlaceholder} data-testid="create-project-panel-auto">
-              <div className={styles.autoMark}>
-                <PlusIcon />
-              </div>
-              <h4>Auto · from PRD — coming</h4>
-              <p>
-                In a future release, generating a PRD from a brief or insight will auto-create its project — no
-                &ldquo;create project&rdquo; step. This tab is a placeholder; it does not generate anything and
-                creates no project.
+            <div data-testid="create-project-panel-auto">
+              <p className={styles.pickNote}>
+                Pick a PRD you already have — it forks into its own project, with that PRD carried over as the
+                first artifact and this thread bound to it.
               </p>
+              {artifactsStatus === "loading" ? (
+                <div className={styles.stateWrap} aria-busy="true" data-testid="create-project-auto-loading">
+                  Loading your PRDs…
+                </div>
+              ) : artifactsStatus === "error" ? (
+                <div className={styles.stateWrap} data-testid="create-project-auto-error">
+                  Couldn&apos;t load your PRDs. Try again.
+                </div>
+              ) : prdArtifacts.length === 0 ? (
+                <div className={styles.stateWrap} data-testid="create-project-auto-empty">
+                  No PRDs yet — generate one first, or start manually instead.
+                </div>
+              ) : (
+                <div className={styles.artPick} data-testid="create-project-auto-prd-list">
+                  {prdArtifacts.map((a) => {
+                    const cfg = BADGE[a.type]
+                    const isSel = selectedPrd != null && artifactKey(selectedPrd) === artifactKey(a)
+                    return (
+                      <div
+                        key={artifactKey(a)}
+                        role="button"
+                        tabIndex={0}
+                        className={`${styles.artRow} ${isSel ? styles.artRowSel : ""}`}
+                        onClick={() => onSelectPrd(a)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") onSelectPrd(a)
+                        }}
+                        data-testid={`create-project-auto-prd-row-${a.id}`}
+                        aria-current={isSel ? "true" : undefined}
+                      >
+                        <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
+                          {cfg.label}
+                        </span>
+                        <span className={styles.artTitle}>{artifactTitle(a)}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              {selectedPrd ? (
+                <p className={styles.pickNote} data-testid="create-project-auto-selected">
+                  <b>Forked context:</b> &ldquo;{artifactTitle(selectedPrd)}&rdquo; carries over as this project&apos;s
+                  first artifact.
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>
 
-        {tab !== "auto" ? (
-          <div className="modal-foot">
-            <button type="button" className="btn btn-ghost" onClick={onCancel} data-testid="create-project-cancel">
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={onCreate}
-              disabled={creating || (tab === "manual" ? !canCreateManual : !canCreateArtifact)}
-              data-testid="create-project-submit"
-            >
-              {creating ? "Creating…" : "Create & open chat"}
-            </button>
-          </div>
-        ) : (
-          <div className="modal-foot">
-            <button type="button" className="btn btn-ghost" onClick={onCancel} data-testid="create-project-cancel">
-              Close
-            </button>
-          </div>
-        )}
+        <div className="modal-foot">
+          <button type="button" className="btn btn-ghost" onClick={onCancel} data-testid="create-project-cancel">
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onCreate}
+            disabled={
+              creating ||
+              (tab === "manual" ? !canCreateManual : tab === "artifact" ? !canCreateArtifact : !canCreateAuto)
+            }
+            data-testid="create-project-submit"
+          >
+            {creating ? "Creating…" : "Create & open chat"}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -418,6 +456,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
   const [artifactsStatus, setArtifactsStatus] = useState<ArtifactsLoadState>("loading")
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactItem | null>(null)
+  const [selectedPrd, setSelectedPrd] = useState<ArtifactItem | null>(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -430,6 +469,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setName("")
     setRows([{ email: "", role: "member" }])
     setSelectedArtifact(null)
+    setSelectedPrd(null)
     setCreating(false)
     setError(null)
     setArtifactsStatus("loading")
@@ -520,10 +560,35 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
         })
         .catch(() => setError("Couldn't create the project. Try again."))
         .finally(() => setCreating(false))
+      return
     }
-    // tab === "auto": no create/fork call (AC9) — the footer renders no
-    // submit control for this tab, so onCreate is never reachable from it.
-  }, [creating, tab, name, rows, selectedArtifact, router, onClose])
+
+    if (tab === "auto") {
+      if (!selectedPrd) {
+        setError("Pick a PRD to fork.")
+        return
+      }
+      setCreating(true)
+      const prd = selectedPrd
+      projectsApi
+        .create({ name: artifactTitle(prd), origin: "prd_auto" })
+        .then((project) =>
+          projectsApi
+            .addArtifact(project.id, prd.type, prd.id)
+            // Same best-effort follow-up posture as the "From an artifact"
+            // tab: the project exists either way, even if the artifact ref
+            // add fails.
+            .catch(() => {})
+            .then(() => project),
+        )
+        .then((project) => {
+          router.push(projectPath(project.id))
+          onClose()
+        })
+        .catch(() => setError("Couldn't create the project. Try again."))
+        .finally(() => setCreating(false))
+    }
+  }, [creating, tab, name, rows, selectedArtifact, selectedPrd, router, onClose])
 
   return (
     <CreateProjectModalView
@@ -541,6 +606,8 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       artifacts={artifacts}
       selectedArtifact={selectedArtifact}
       onSelectArtifact={setSelectedArtifact}
+      selectedPrd={selectedPrd}
+      onSelectPrd={setSelectedPrd}
       creating={creating}
       error={error}
       onCancel={onClose}

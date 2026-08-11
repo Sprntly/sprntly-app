@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 //
 // CreateProjectModal — the "New project" flow: three tabs (Start manually /
-// From an artifact / Auto · from PRD placeholder), invite rows that carry
-// ONLY email + the app's real permission vocabulary (AD-P5), and a create
-// path that always navigates to the flat `/projects?id=<new_id>` route
-// (AD-P14). Tests cover both the pure `CreateProjectModalView` (tabs,
+// From an artifact / Auto · from PRD — fork an existing PRD, AD-P9), invite
+// rows that carry ONLY email + the app's real permission vocabulary (AD-P5),
+// and a create path that always navigates to the flat `/projects?id=<new_id>`
+// route (AD-P14). Tests cover both the pure `CreateProjectModalView` (tabs,
 // invite-row shape/vocab, a11y, tokens) and the `CreateProjectModal`
 // container's create + navigate wiring against a mocked `projectsApi`/
 // `artifactsApi`, mirroring the sibling test files' View/Screen split.
@@ -88,6 +88,8 @@ function viewProps(overrides: Partial<CreateProjectModalViewProps> = {}): Create
     artifacts: ARTIFACTS,
     selectedArtifact: null,
     onSelectArtifact: noop,
+    selectedPrd: null,
+    onSelectPrd: noop,
     creating: false,
     error: null,
     onCancel: noop,
@@ -105,23 +107,26 @@ afterEach(() => {
   pushMock.mockReset()
 })
 
-// ── AC1 — three tabs, Auto is a non-wired placeholder ──
+// ── AC1 — three tabs, Auto is a working fork-from-PRD panel ──
 describe("CreateProjectModalView — tabs (AC1)", () => {
-  it("renders exactly three tabs: Start manually, From an artifact, Auto · from PRD (coming)", () => {
+  it("renders exactly three tabs: Start manually, From an artifact, Auto · from PRD", () => {
     render(React.createElement(CreateProjectModalView, viewProps()))
     expect(screen.getByTestId("create-project-tab-manual").textContent).toContain("Start manually")
     expect(screen.getByTestId("create-project-tab-artifact").textContent).toContain("From an artifact")
     const auto = screen.getByTestId("create-project-tab-auto")
     expect(auto.textContent).toContain("Auto · from PRD")
-    expect(auto.textContent).toContain("coming")
+    // The Phase-2 "coming" placeholder tag is gone — this tab is wired now.
+    expect(auto.textContent).not.toContain("coming")
   })
 
-  it("the Auto tab's panel is a labelled placeholder, not wired to generation", () => {
+  it("test_auto_tab_no_coming_placeholder — the Auto tab's panel is no longer a placeholder; it renders selectable PRDs", () => {
     render(React.createElement(CreateProjectModalView, viewProps({ tab: "auto" })))
     const panel = screen.getByTestId("create-project-panel-auto")
-    expect(panel.textContent).toContain("coming")
-    // No submit control exists at all on the Auto tab (AC9).
-    expect(screen.queryByTestId("create-project-submit")).toBeNull()
+    expect(panel.textContent).not.toContain("coming")
+    expect(screen.getByTestId("create-project-auto-prd-list")).toBeTruthy()
+    expect(screen.getByTestId("create-project-auto-prd-row-1").textContent).toContain(PRD_ARTIFACT.title)
+    // A real submit control exists on the Auto tab now.
+    expect(screen.getByTestId("create-project-submit")).toBeTruthy()
   })
 
   it("switching tabs calls onTabChange with the clicked tab id", () => {
@@ -134,13 +139,37 @@ describe("CreateProjectModalView — tabs (AC1)", () => {
   })
 })
 
-// ── AC9 — Auto placeholder issues no create/fork call ──
-describe("CreateProjectModalView — Auto tab issues no generation call (AC9)", () => {
-  it("has no clickable create/submit affordance while on the Auto tab", () => {
-    const onCreate = vi.fn()
-    render(React.createElement(CreateProjectModalView, viewProps({ tab: "auto", onCreate })))
-    expect(screen.queryByTestId("create-project-submit")).toBeNull()
-    expect(onCreate).not.toHaveBeenCalled()
+// ── AD-P9 — Auto tab: fork-from-PRD picker ──
+describe("CreateProjectModalView — Auto tab fork-from-PRD picker (AD-P9)", () => {
+  it("lists only PRD artifacts — a prototype in the same artifacts list is excluded", () => {
+    render(React.createElement(CreateProjectModalView, viewProps({ tab: "auto" })))
+    expect(screen.getByTestId("create-project-auto-prd-row-1")).toBeTruthy()
+    expect(screen.queryByTestId("create-project-auto-prd-row-2")).toBeNull()
+  })
+
+  it("clicking a PRD row calls onSelectPrd with that artifact", () => {
+    const onSelectPrd = vi.fn()
+    render(React.createElement(CreateProjectModalView, viewProps({ tab: "auto", onSelectPrd })))
+    fireEvent.click(screen.getByTestId("create-project-auto-prd-row-1"))
+    expect(onSelectPrd).toHaveBeenCalledWith(PRD_ARTIFACT)
+  })
+
+  it("Create is disabled with no PRD selected, and enabled once one is", () => {
+    const { rerender } = render(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "auto", selectedPrd: null })),
+    )
+    expect((screen.getByTestId("create-project-submit") as HTMLButtonElement).disabled).toBe(true)
+    rerender(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "auto", selectedPrd: PRD_ARTIFACT })),
+    )
+    expect((screen.getByTestId("create-project-submit") as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it("shows no PRDs empty state when the caller has none", () => {
+    render(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "auto", artifacts: [PROTOTYPE_ARTIFACT] })),
+    )
+    expect(screen.getByTestId("create-project-auto-empty")).toBeTruthy()
   })
 })
 
@@ -429,6 +458,45 @@ describe("CreateProjectModal — from an artifact creates with origin=artifact a
     )
     await waitFor(() => expect(addArtifactMock).toHaveBeenCalledWith(88, "prd", 1))
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=88"))
+  })
+})
+
+describe("CreateProjectModal — Auto tab forks from a PRD (AD-P9)", () => {
+  it("test_auto_tab_lists_prds_and_forks — selecting a PRD and creating calls projectsApi.create with origin=prd_auto, then addArtifact with the PRD, then navigates", async () => {
+    artifactsListMock.mockResolvedValue(ARTIFACTS)
+    createMock.mockResolvedValue({ id: 99, name: PRD_ARTIFACT.title, origin: "prd_auto" })
+    addArtifactMock.mockResolvedValue({ project_id: 99, artifact_type: "prd", artifact_id: 1 })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("create-project-tab-auto"))
+    await waitFor(() => expect(screen.getByTestId("create-project-auto-prd-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("create-project-auto-prd-row-1"))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith({ name: PRD_ARTIFACT.title, origin: "prd_auto" }),
+    )
+    await waitFor(() => expect(addArtifactMock).toHaveBeenCalledWith(99, "prd", 1))
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=99"))
+  })
+
+  it("no PRD selected shows an inline error and never calls create", async () => {
+    artifactsListMock.mockResolvedValue(ARTIFACTS)
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("create-project-tab-auto"))
+    await waitFor(() => expect(screen.getByTestId("create-project-auto-prd-list")).toBeTruthy())
+    expect((screen.getByTestId("create-project-submit") as HTMLButtonElement).disabled).toBe(true)
+    expect(createMock).not.toHaveBeenCalled()
   })
 })
 
