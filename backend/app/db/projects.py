@@ -314,6 +314,73 @@ def list_members(project_id: int) -> list[dict]:
     return out
 
 
+def _match_keys(member: dict) -> set[str]:
+    """The casefolded set of strings this member matches on: full name,
+    the first whitespace token of name (so "Fortune" matches "Fortune
+    Adeyemi"), and job_role. A member with `name`/`job_role` NULL
+    contributes only its non-null keys."""
+    keys: set[str] = set()
+    name = (member.get("name") or "").strip()
+    if name:
+        keys.add(name.casefold())
+        first_token = name.split()[0]
+        keys.add(first_token.casefold())
+    job_role = (member.get("job_role") or "").strip()
+    if job_role:
+        keys.add(job_role.casefold())
+    return keys
+
+
+def resolve_member(project_id: int, needle: str) -> dict:
+    """Resolve a free-text assignee reference to exactly one project member.
+    Roster-constrained: candidates come ONLY from list_members(project_id),
+    so a non-member / cross-project / cross-tenant user can never be
+    returned. Deterministic — NO LLM call (AD-P18 fast-path). Fail-closed
+    on no-match / ambiguity.
+
+    Returns one of:
+      {"status": "resolved",  "member": {<list_members row>}}
+      {"status": "no_match",  "roster": [<members>]}      # caller asks who they mean
+      {"status": "ambiguous", "candidates": [<members>]}  # caller asks which one
+    """
+    roster = list_members(project_id)
+
+    raw = needle.strip()
+    if raw.startswith("@"):
+        raw = raw[1:]
+    n = raw.casefold()
+
+    if not n:
+        return {"status": "no_match", "roster": roster}
+
+    exact = [m for m in roster if n in _match_keys(m)]
+    if len(exact) == 1:
+        candidates = exact
+    elif len(exact) > 1:
+        return {"status": "ambiguous", "candidates": exact}
+    else:
+        # Prefix tier only fires when the exact tier found nothing, and
+        # only for needles of length >= 2 (a single character is too
+        # broad to prefix-match safely).
+        if len(n) < 2:
+            return {"status": "no_match", "roster": roster}
+        prefix = [m for m in roster if any(k.startswith(n) for k in _match_keys(m))]
+        if len(prefix) == 0:
+            return {"status": "no_match", "roster": roster}
+        if len(prefix) > 1:
+            return {"status": "ambiguous", "candidates": prefix}
+        candidates = prefix
+
+    member = candidates[0]
+    # Fail-closed membership re-check (AD-P18): even though the candidate
+    # came from list_members(project_id), re-assert membership before
+    # returning `resolved` — never trust a match set as a substitute for
+    # the live authz check on the exact id about to be handed back.
+    if not is_project_member(project_id, member["user_id"]):
+        return {"status": "no_match", "roster": roster}
+    return {"status": "resolved", "member": member}
+
+
 @retry_on_disconnect
 def get_group_chat_id(project_id: int) -> int | None:
     """The project's single group-chat `conversations.id`, or None if it
