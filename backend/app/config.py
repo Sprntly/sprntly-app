@@ -466,6 +466,12 @@ class Settings(BaseSettings):
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
+    # Connector-refresh cadence, in MINUTES (owner decision 2026-08-11: 10, down
+    # from riding the 6h pipeline interval). Split from pipeline_interval_hours
+    # deliberately — that setting also scopes the connector-sweep persist dedup
+    # window (connector_lookup/sweep_persist.py), which must NOT shrink to
+    # minutes just because the refresh cadence did.
+    connector_refresh_interval_minutes: int = 10
     # Top-Insights brief scheduler (v0 checklist 2.4): the brief fires Monday
     # 09:00 in each company's configured timezone
     # (companies.notification_settings.timezone, default UTC). The scheduler
