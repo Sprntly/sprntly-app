@@ -5,8 +5,11 @@ Layering (build spec AD-P3): `project_memory_entries` rows are either
 user-authored (`author_user_id` set, `promoted_by` NULL — "Added by
 David") or agent-promoted (`author_user_id` NULL, `promoted_by='agent'` —
 "Promoted by Sprntly"); the schema's XOR check enforces exactly one is
-set. This ticket only ever writes the user-authored shape — agent
-promotion is a Phase 2 writer (`project_memory.py`, not built here).
+set. `add_entry` writes the user-authored shape; `add_agent_promoted_entry`
+(the agent-promotion writer's own insert, called from `project_memory.py`'s
+`maybe_promote_turn`) writes the agent-promoted shape — the two stay
+separate functions deliberately, so neither can accidentally set both
+provenance fields.
 
 `project_memory_summary` is a cached materialization, never written by
 this module beyond flipping its `stale` flag on entry mutation (AD-P7):
@@ -48,6 +51,38 @@ def add_entry(project_id: int, *, body: str, author_user_id: str) -> dict:
                 "project_id": project_id,
                 "body": body,
                 "author_user_id": author_user_id,
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    _flip_summary_stale(client, project_id)
+    return row
+
+
+@retry_on_disconnect
+def add_agent_promoted_entry(
+    project_id: int, *, body: str, source_conversation_id: int
+) -> dict:
+    """Insert an agent-promoted entry (`promoted_by='agent'`, `author_user_id`
+    left unset/NULL by omission) — the ONLY caller of this shape; `add_entry`
+    above stays the user-authored shape, kept as two separate functions so
+    neither can accidentally set both provenance fields and trip the
+    `pme_one_provenance` XOR check. Flips an existing summary's `stale` flag,
+    same as `add_entry` — but, unlike `add_entry`, this write happens OUTSIDE
+    an HTTP route handler (from `app/project_memory.py::maybe_promote_turn`),
+    so the caller is responsible for calling `schedule_regen(project_id)`
+    itself; flipping `stale` alone never regenerates the summary. Never calls
+    an LLM."""
+    client = require_client()
+    row = (
+        client.table("project_memory_entries")
+        .insert(
+            {
+                "project_id": project_id,
+                "body": body,
+                "promoted_by": "agent",
+                "source_conversation_id": source_conversation_id,
             }
         )
         .execute()

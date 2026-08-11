@@ -37,7 +37,7 @@ from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_proj
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
-from app.project_memory import schedule_regen
+from app.project_memory import maybe_promote_turn, schedule_regen
 from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
@@ -439,7 +439,14 @@ def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
     turn and the human turn that triggered this already persisted, so the
     chat is never blocked. Meters ONLY this call (the structured
     cost-summary log line — never emitted for a human-to-human turn,
-    because none is made for one)."""
+    because none is made for one).
+
+    After a reply is actually produced, runs the best-effort memory-
+    promotion classifier (`maybe_promote_turn`) over the same clamped
+    transcript — reusing it rather than re-querying. `maybe_promote_turn`
+    is itself never-raising, so this call cannot turn a successful reply
+    into a failure; it only ever runs on the agent-reply path, never on a
+    human-to-human turn."""
     start = time.monotonic()
     try:
         recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
@@ -474,6 +481,7 @@ def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
             model=meta.get("model") or DEFAULT_MODEL,
             mode="group",
         )
+        maybe_promote_turn(project_id, conversation_id, transcript)
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the chat
         logger.warning(
             "group_chat_mention_reply_failed project_id=%s conversation_id=%s error=%s",
