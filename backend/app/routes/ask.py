@@ -26,7 +26,11 @@ from app.db import (
     get_ask_job,
     start_ask_job,
 )
-from app.deps.ownership import require_owned_dataset, require_owned_prd
+from app.deps.ownership import (
+    require_owned_dataset,
+    require_owned_evidence,
+    require_owned_prd,
+)
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 
@@ -112,6 +116,14 @@ class AskIn(BaseModel):
     # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
     # tickets, prototype). Ownership-gated in the route.
     prd_id: int | None = Field(default=None, ge=1)
+    # Standalone-artifact grounding, same idea for the tabs that hold an
+    # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
+    # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
+    # to the document actually on screen. Ownership-gated in the route, and
+    # prd_id wins when several arrive — a tab has ONE primary artifact, and a
+    # PRD tab's context already carries its evidence and tickets.
+    evidence_id: int | None = Field(default=None, ge=1)
+    ticket_set_id: int | None = Field(default=None, ge=1)
 
     # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
     # NUL; this one stops one ARRIVING — the client inlines attachment text it
@@ -265,6 +277,18 @@ async def ask(
     # into the answer context. 404 on mismatch, same as the dataset gate.
     if body.prd_id is not None:
         require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
+    # Standalone-artifact asks, same posture: a crafted id must 404 here, never
+    # leak a foreign document into this tenant's prompt. (The context builders
+    # re-check ownership too — route gate AND builder gate, deliberately.)
+    if body.evidence_id is not None:
+        require_owned_evidence(body.evidence_id, company.company_id, company.workspace_id)
+    if body.ticket_set_id is not None:
+        from app.db.ticket_sets import get_set
+
+        # get_set filters company_id in the query — None means missing OR
+        # foreign, indistinguishable on purpose.
+        if get_set(company.company_id, body.ticket_set_id) is None:
+            raise HTTPException(404, "Ticket set not found")
 
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already
@@ -290,7 +314,14 @@ async def ask(
     mid_thread = any(turn.get("role") == "assistant" for turn in history)
     cached_payload = (
         await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
-        if (body.prd_id is None and not mid_thread)
+        if (
+            body.prd_id is None
+            # An artifact-tab ask is context-bound for the same reason a
+            # PRD-tab one is: the cache never read the open document.
+            and body.evidence_id is None
+            and body.ticket_set_id is None
+            and not mid_thread
+        )
         else None
     )
     if cached_payload is not None:
@@ -330,6 +361,8 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            evidence_id=body.evidence_id,
+            ticket_set_id=body.ticket_set_id,
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
@@ -354,6 +387,8 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            evidence_id=body.evidence_id,
+            ticket_set_id=body.ticket_set_id,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
             # The caller's own identity — see above.

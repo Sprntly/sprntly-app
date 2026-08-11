@@ -306,6 +306,10 @@ export async function runAskGeneration(
     conversation_id?: number
     pinned_skill?: string
     prd_id?: number
+    /** Standalone-artifact grounding — the open evidence report / ticket set,
+     *  mutually exclusive with prd_id (the tab has one primary artifact). */
+    evidence_id?: number
+    ticket_set_id?: number
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial

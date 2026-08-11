@@ -85,6 +85,11 @@ def _run_sync(
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    # Keyword-only with defaults so the suite's positional direct calls keep
+    # working; the one production caller (run_ask_job) passes them by name.
+    *,
+    evidence_id: int | None = None,
+    ticket_set_id: int | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -189,6 +194,8 @@ def _run_sync(
             history=history,
             pinned_skill=pinned_skill,
             prd_id=prd_id,
+            evidence_id=evidence_id,
+            ticket_set_id=ticket_set_id,
             # Cooperative cancellation: the user's Stop flips the job row to
             # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
             # steps and raises AskCancelled to abort before the expensive answer call.
@@ -285,6 +292,8 @@ async def run_ask_job(
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
     prd_id: int | None = None,
+    evidence_id: int | None = None,
+    ticket_set_id: int | None = None,
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
@@ -312,6 +321,8 @@ async def run_ask_job(
             conversation_id,
             user_id,
             workspace_id,
+            evidence_id=evidence_id,
+            ticket_set_id=ticket_set_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
         # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a
