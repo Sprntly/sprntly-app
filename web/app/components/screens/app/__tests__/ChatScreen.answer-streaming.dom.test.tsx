@@ -216,7 +216,7 @@ describe("ChatScreen — live answer streaming", () => {
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
     await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
     // Rung 1's line is the one thing that is always true while a job generates.
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Working on your question")
 
     // First delta: the skeleton yields to live markdown, the phase line moves to
     // "Writing the answer" (a delta provably arrived), and the status row STAYS
@@ -225,7 +225,7 @@ describe("ChatScreen — live answer streaming", () => {
     const streaming = document.querySelector('[data-testid="ask-streaming-partial"]')
     expect(streaming).toBeTruthy()
     expect(streaming!.textContent).toContain("top churn driver")
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Writing the answer")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Writing the answer")
 
     // More text accumulates in place.
     await ask.partial("The **top churn driver** is onboarding")
@@ -321,7 +321,7 @@ describe("ChatScreen — live answer streaming", () => {
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
     // A stream that publishes nothing must NOT be reported as a dropped preview:
     // it is indistinguishable from a skill that simply doesn't stream.
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Working on your question")
 
     await ask.release(FINAL_REPLY)
     await waitFor(() =>
