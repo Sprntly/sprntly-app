@@ -5168,6 +5168,26 @@ export type ProjectMemorySummary = {
   stale: boolean
 }
 
+/** One `project_memory_entries` row (`GET/POST/PATCH/DELETE
+ *  /v1/projects/{id}/memory*` — `supabase/migrations/*_project_memory.sql`).
+ *  Provenance is a STORED FACT, never inferred client-side: the schema's
+ *  XOR check guarantees exactly one of `author_user_id`/`promoted_by` is
+ *  set — `author_user_id` set = user-authored ("Manual"/"Added by
+ *  <name>"), `promoted_by === "agent"` = agent-promoted ("Promoted by
+ *  Sprntly"). Agent promotion itself is a Phase 2 writer; this ticket only
+ *  ever produces the user-authored shape, but the type covers both so the
+ *  UI renders whatever the API returns. */
+export type ProjectMemoryEntry = {
+  id: number
+  project_id: number
+  body: string
+  author_user_id: string | null
+  promoted_by: "agent" | null
+  source_conversation_id: number | null
+  created_at: string
+  updated_at: string
+}
+
 /** One row from `GET/POST /v1/projects/{id}/group/turns`
  *  (`backend/app/db/conversations.py`'s `list_group_turns`/`post_group_turn`).
  *  A human turn carries `author_user_id`/`author_name`/`author_job_role`; an
@@ -5234,4 +5254,27 @@ export const projectsApi = {
    *  busy state should span the whole request, not just the network hop. */
   postGroupTurn: (id: number | string, content: string) =>
     api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, { content }),
+  /** The discrete, provenance-tagged memory entries — the source of truth
+   *  behind the cached `memorySummary` above (AD-P3). Most-recently-updated
+   *  first, server-side. */
+  memoryEntries: (id: number | string) =>
+    api
+      .get<{ entries: ProjectMemoryEntry[] }>(`/v1/projects/${encodeURIComponent(String(id))}/memory`)
+      .then((r) => r.entries),
+  /** Add a user-authored memory entry. `author_user_id` is set server-side
+   *  from the session — never sent by the client. */
+  addMemory: (id: number | string, body: string) =>
+    api.post<ProjectMemoryEntry>(`/v1/projects/${encodeURIComponent(String(id))}/memory`, { body }),
+  /** Edit an entry's body. 404s (`ApiError.status`) when `entryId` isn't in
+   *  this project — callers must handle it without crashing. */
+  patchMemory: (id: number | string, entryId: number, body: string) =>
+    api.patch<ProjectMemoryEntry>(
+      `/v1/projects/${encodeURIComponent(String(id))}/memory/${encodeURIComponent(String(entryId))}`,
+      { body },
+    ),
+  /** Remove an entry. Same 404 posture as `patchMemory`. */
+  deleteMemory: (id: number | string, entryId: number) =>
+    api.delete<{ deleted: true }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/memory/${encodeURIComponent(String(entryId))}`,
+    ),
 }

@@ -1,0 +1,95 @@
+/* TaskModal — component-scoped styles (globals.css is never edited for
+ * this ticket, per BUILD.md §6 hot-file rule). Every value below resolves
+ * to an existing `web/app/globals.css` custom property — no new palette. */
+
+.panel {
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel :global(.modal-body) {
+  overflow-y: auto;
+}
+
+.ffBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  vertical-align: middle;
+}
+
+.sec {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin: 14px 0 4px;
+}
+
+.sec:first-child {
+  margin-top: 2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.box {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface-2);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.boxDone {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+.text {
+  font-size: 12.5px;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.rowDone .text {
+  color: var(--ink-3);
+  text-decoration: line-through;
+  text-decoration-color: var(--ink-4);
+}
+
+.sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}

@@ -42,6 +42,9 @@ import {
   type ProjectMemorySummary,
 } from "../../../../lib/api"
 import { ProjectMainThread } from "./ProjectMainThread"
+import { MemoryModal } from "./MemoryModal"
+import { ArtifactsModal } from "./ArtifactsModal"
+import { TaskModal } from "./TaskModal"
 import styles from "./ProjectDetailScreen.module.css"
 
 /** Copied verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same
@@ -489,11 +492,18 @@ type LoadState =
   | { status: "error" }
   | { status: "ready"; project: ProjectDetail; artifacts: ArtifactItem[]; memory: ProjectMemorySummary }
 
+/** Which of this ticket's rail-triggered modals is open, if any. `artifacts`
+ *  carries the type the rail card/inline chip was opened FOR (or `undefined`
+ *  for the generic "View all"/chip-less opens) — the modal itself owns the
+ *  filter-chip state from there. */
+type OpenModal = { kind: "memory" } | { kind: "artifacts"; type?: ProjectArtifactType } | { kind: "tasks" } | null
+
 export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const { openModal } = useNavigation()
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railCollapsed, setRailCollapsed] = useState(false)
   const [activeChat, setActiveChat] = useState<ActiveChat>("group")
+  const [railModal, setRailModal] = useState<OpenModal>(null)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -522,15 +532,16 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
 
   const onToggleRail = useCallback(() => setRailCollapsed((v) => !v), [])
   const onInvite = useCallback(() => openModal("invite"), [openModal])
-  // Open-affordances below (artifacts modal, memory modal, task modal,
-  // create-artifact flow) are follow-up-ticket modal bodies — this ticket
-  // wires the callback surface only, per its scope boundary. No-ops until
-  // those modals land.
-  const onOpenArtifacts = useCallback((_type?: ProjectArtifactType) => {}, [])
+  // The memory/artifacts/task modals below are this ticket's bodies for
+  // these rail-card triggers. `onCreateArtifact` ("+ Create new artifact")
+  // stays a no-op — that flow routes into the app's EXISTING generation
+  // surfaces (per the ticket's explicit scope boundary), not a new modal.
+  const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
   const onCreateArtifact = useCallback(() => {}, [])
-  const onOpenMemory = useCallback(() => {}, [])
-  const onAddMemory = useCallback(() => {}, [])
-  const onOpenTasks = useCallback(() => {}, [])
+  const onOpenMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
+  const onAddMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
+  const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
+  const onCloseRailModal = useCallback(() => setRailModal(null), [])
 
   if (state.status === "loading") {
     return (
@@ -586,6 +597,19 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         onOpenTasks={onOpenTasks}
         onInvite={onInvite}
       />
+      <MemoryModal
+        projectId={projectId}
+        members={state.project.members}
+        open={railModal?.kind === "memory"}
+        onClose={onCloseRailModal}
+      />
+      <ArtifactsModal
+        projectId={projectId}
+        open={railModal?.kind === "artifacts"}
+        initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
+        onClose={onCloseRailModal}
+      />
+      <TaskModal open={railModal?.kind === "tasks"} onClose={onCloseRailModal} />
     </AppLayout>
   )
 }

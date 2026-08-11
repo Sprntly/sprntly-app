@@ -1,0 +1,263 @@
+/* ArtifactsModal — component-scoped styles (globals.css is never edited
+ * for this ticket, per BUILD.md §6 hot-file rule). Every value below
+ * resolves to an existing `web/app/globals.css` custom property except the
+ * artifact-type badge hexes, which live in `ArtifactsModal.tsx` (copied
+ * VERBATIM from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE`, not this file —
+ * same exception `ProjectDetailScreen.module.css` already documents). */
+
+.panel {
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel :global(.modal-body) {
+  overflow-y: auto;
+}
+
+.count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.stateWrap {
+  padding: 24px 4px;
+  font-size: 13px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+/* ── Filter chips ── */
+
+.chips {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0 16px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 13px;
+  border-radius: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  border-color: var(--ink-4);
+}
+
+.chipOn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.chipN {
+  font-size: 10.5px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.chip:not(.chipOn) .chipN {
+  color: var(--ink-4);
+}
+
+/* ── List + canvas grid ── */
+
+.canvasGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 780px) {
+  .canvasGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+
+.row:hover {
+  background: var(--surface-3);
+}
+
+.rowSel {
+  background: var(--accent-alpha-10);
+  box-shadow: inset 0 0 0 1px var(--accent-alpha-18);
+}
+
+.icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.rowTitle {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.rowSrc {
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+/* ── Preview/Spec canvas ── */
+
+.canvas {
+  position: sticky;
+  top: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.canvasBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.canvasTabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.canvasTab {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  padding: 5px 11px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.canvasTabOn {
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+
+.canvasVers {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.vchip {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 3px 9px;
+  font-family: var(--font-mono);
+}
+
+.vchipOn {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--accent-ink);
+}
+
+.canvasTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.canvasTitle b {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.canvasBody {
+  padding: 16px;
+  min-height: 220px;
+  background: var(--surface-3);
+}
+
+.pane {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.paneMuted {
+  color: var(--ink-4);
+}

@@ -1,0 +1,333 @@
+// @vitest-environment jsdom
+//
+// MemoryModal — the layered project-memory modal: a read-only synthesized
+// "What this project knows" block (AC1/AC2) above an add-composer + the
+// discrete, provenance-tagged entries list (AC3/AC4/AC5/AC6). Tests cover
+// both the pure `MemoryModalView` (rendering/provenance/a11y) and the
+// `MemoryModal` container's fetch + mutate wiring against a mocked
+// `projectsApi`, mirroring `ProjectDetailScreen.test.tsx`'s View/Screen
+// split posture.
+import * as React from "react"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+;(globalThis as typeof globalThis & { React?: typeof React }).React = React
+
+const memorySummaryMock = vi.fn()
+const memoryEntriesMock = vi.fn()
+const addMemoryMock = vi.fn()
+const patchMemoryMock = vi.fn()
+const deleteMemoryMock = vi.fn()
+
+vi.mock("../../../../../lib/api", () => {
+  class ApiError extends Error {
+    status: number
+    body: unknown
+    constructor(status: number, body: unknown, message?: string) {
+      super(message ?? String(status))
+      this.status = status
+      this.body = body
+    }
+  }
+  return {
+    ApiError,
+    projectsApi: {
+      memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
+      memoryEntries: (...a: unknown[]) => memoryEntriesMock(...a),
+      addMemory: (...a: unknown[]) => addMemoryMock(...a),
+      patchMemory: (...a: unknown[]) => patchMemoryMock(...a),
+      deleteMemory: (...a: unknown[]) => deleteMemoryMock(...a),
+    },
+  }
+})
+
+import { MemoryModalView, MemoryModal, type MemoryModalViewProps } from "../MemoryModal"
+import { ApiError } from "../../../../../lib/api"
+import type { ProjectMember, ProjectMemoryEntry, ProjectMemorySummary } from "../../../../../lib/api"
+
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
+
+const MEMBERS: ProjectMember[] = [
+  { kind: "agent", user_id: null, name: "Sprntly", role_label: "Agent coworker", status: "working" },
+  { kind: "human", user_id: "u1", name: "David M.", email: "d@example.com", avatar_url: null, job_role: "PM", added_at: hoursAgo(48) },
+]
+
+const SUMMARY: ProjectMemorySummary = {
+  summary_md: "A Xometry-driven redesign of on-demand quoting.",
+  entry_count: 2,
+  stale: false,
+}
+
+const USER_ENTRY: ProjectMemoryEntry = {
+  id: 1,
+  project_id: 101,
+  body: "Guardrail: never quote below cost + 12% margin.",
+  author_user_id: "u1",
+  promoted_by: null,
+  source_conversation_id: null,
+  created_at: hoursAgo(2),
+  updated_at: hoursAgo(1),
+}
+
+const AGENT_ENTRY: ProjectMemoryEntry = {
+  id: 2,
+  project_id: 101,
+  body: "Upload is the drop-off point, not the summary screen.",
+  author_user_id: null,
+  promoted_by: "agent",
+  source_conversation_id: 55,
+  created_at: hoursAgo(5),
+  updated_at: hoursAgo(2),
+}
+
+const noop = () => {}
+
+function viewProps(overrides: Partial<MemoryModalViewProps> = {}): MemoryModalViewProps {
+  return {
+    open: true,
+    members: MEMBERS,
+    state: { status: "ready", summary: SUMMARY, entries: [USER_ENTRY, AGENT_ENTRY] },
+    addValue: "",
+    onAddValueChange: noop,
+    onAdd: noop,
+    adding: false,
+    editingId: null,
+    editValue: "",
+    onEditValueChange: noop,
+    onStartEdit: noop,
+    onSaveEdit: noop,
+    onCancelEdit: noop,
+    onRemove: noop,
+    onClose: noop,
+    ...overrides,
+  }
+}
+
+afterEach(() => {
+  cleanup()
+  memorySummaryMock.mockReset()
+  memoryEntriesMock.mockReset()
+  addMemoryMock.mockReset()
+  patchMemoryMock.mockReset()
+  deleteMemoryMock.mockReset()
+})
+
+describe("MemoryModalView — synthesized summary block (AC1/AC2)", () => {
+  it("renders the read-only block with the lock tag, narrative, and entry-count foot — no edit/remove controls on it", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    const block = screen.getByTestId("memory-synth-block")
+    expect(within(block).getByTestId("memory-synth-readonly-tag").textContent).toContain("Read-only")
+    expect(within(block).getByTestId("memory-synth-body").textContent).toContain("Xometry-driven redesign")
+    expect(block.textContent).toContain("Synthesized from 2 memories")
+    expect(within(block).queryByRole("button")).toBeNull()
+  })
+
+  it("renders a muted 'Synthesis pending' placeholder when summary_md is null, without crashing", () => {
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: { ...SUMMARY, summary_md: null }, entries: [] } }),
+      ),
+    )
+    expect(screen.getByTestId("memory-synth-pending").textContent).toContain("Synthesis pending")
+    expect(screen.queryByTestId("memory-synth-body")).toBeNull()
+  })
+})
+
+describe("MemoryModalView — provenance differentiation (AC3/AC4)", () => {
+  it("renders user-authored entries with a Manual pill, 'Added by <name> · <role>', and the accent user treatment", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    const row = screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)
+    expect(row.getAttribute("data-provenance")).toBe("user")
+    expect(row.textContent).toContain("Manual")
+    expect(row.textContent).toContain("Added by David M. · PM")
+  })
+
+  it("renders agent-promoted entries as muted 'Promoted by Sprntly', never a guessed author", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    const row = screen.getByTestId(`memory-entry-${AGENT_ENTRY.id}`)
+    expect(row.getAttribute("data-provenance")).toBe("agent")
+    expect(row.textContent).toContain("Promoted by Sprntly")
+    expect(row.textContent).not.toContain("Manual")
+    expect(row.textContent).not.toContain("David")
+  })
+})
+
+describe("MemoryModalView — privacy + reversibility (AC6)", () => {
+  it("renders both the privacy-boundary strip and the reversibility note", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    expect(screen.getByTestId("memory-privacy-strip").textContent).toContain("never feed project memory")
+    expect(screen.getByTestId("memory-reversibility-note").textContent).toContain("reversible")
+  })
+})
+
+describe("MemoryModalView — edit/remove controls wired (AC5)", () => {
+  it("every entry (regardless of provenance) exposes edit + remove, calling the passed callbacks", () => {
+    const onStartEdit = vi.fn()
+    const onRemove = vi.fn()
+    render(React.createElement(MemoryModalView, viewProps({ onStartEdit, onRemove })))
+    fireEvent.click(screen.getByTestId(`memory-edit-${USER_ENTRY.id}`))
+    expect(onStartEdit).toHaveBeenCalledWith(USER_ENTRY)
+    fireEvent.click(screen.getByTestId(`memory-remove-${AGENT_ENTRY.id}`))
+    expect(onRemove).toHaveBeenCalledWith(AGENT_ENTRY.id)
+  })
+
+  it("editing mode renders a Save/Cancel pair wired to the passed callbacks", () => {
+    const onSaveEdit = vi.fn()
+    const onCancelEdit = vi.fn()
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ editingId: USER_ENTRY.id, editValue: "Edited body", onSaveEdit, onCancelEdit }),
+      ),
+    )
+    fireEvent.click(screen.getByTestId(`memory-edit-save-${USER_ENTRY.id}`))
+    expect(onSaveEdit).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByTestId(`memory-edit-cancel-${USER_ENTRY.id}`))
+    expect(onCancelEdit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("MemoryModalView — add composer", () => {
+  it("Add is disabled on empty input and calls onAdd with content typed", () => {
+    const onAdd = vi.fn()
+    const onAddValueChange = vi.fn()
+    const { rerender } = render(React.createElement(MemoryModalView, viewProps({ addValue: "", onAdd, onAddValueChange })))
+    expect((screen.getByTestId("memory-add-submit") as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.change(screen.getByTestId("memory-add-input"), { target: { value: "New guardrail" } })
+    expect(onAddValueChange).toHaveBeenCalledWith("New guardrail")
+
+    rerender(React.createElement(MemoryModalView, viewProps({ addValue: "New guardrail", onAdd, onAddValueChange })))
+    expect((screen.getByTestId("memory-add-submit") as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByTestId("memory-add-submit"))
+    expect(onAdd).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("MemoryModalView — a11y mechanics", () => {
+  it("closes on Escape and on backdrop click", () => {
+    const onClose = vi.fn()
+    render(React.createElement(MemoryModalView, viewProps({ onClose })))
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    onClose.mockClear()
+    fireEvent.click(document.querySelector(".modal-overlay") as Element)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("focus lands inside the dialog on open, and the close button is keyboard-reachable", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    expect(document.activeElement).not.toBe(document.body)
+    expect(screen.getByTestId("memory-modal-close").tagName).toBe("BUTTON")
+  })
+
+  it("renders nothing when closed", () => {
+    render(React.createElement(MemoryModalView, viewProps({ open: false })))
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+})
+
+describe("MemoryModal.module.css — tokens only", () => {
+  it("resolves every color to a globals.css custom property — no new palette", () => {
+    const css = readFileSync(join(__dirname, "../MemoryModal.module.css"), "utf8")
+    const found = css.match(/#[0-9A-Fa-f]{3,8}/g) ?? []
+    const disallowed = found.filter((hex) => hex.toLowerCase() !== "#fff")
+    expect(disallowed).toEqual([])
+  })
+})
+
+// ── MemoryModal container — fetch + mutate against the real endpoints ──
+describe("MemoryModal — data fetch + mutations (AC1/AC3/AC5)", () => {
+  it("fetches summary + entries from GET .../memory/summary and GET .../memory on open", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([USER_ENTRY, AGENT_ENTRY])
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-synth-block")).toBeTruthy())
+    expect(memorySummaryMock).toHaveBeenCalledWith("101")
+    expect(memoryEntriesMock).toHaveBeenCalledWith("101")
+    expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeTruthy()
+  })
+
+  it("fetches nothing while closed", () => {
+    render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: false, onClose: noop }))
+    expect(memorySummaryMock).not.toHaveBeenCalled()
+    expect(memoryEntriesMock).not.toHaveBeenCalled()
+  })
+
+  it("the add composer POSTs to addMemory and the new Manual entry appears in the list (AC3)", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([])
+    const newEntry: ProjectMemoryEntry = {
+      id: 9,
+      project_id: 101,
+      body: "New team guardrail",
+      author_user_id: "u1",
+      promoted_by: null,
+      source_conversation_id: null,
+      created_at: hoursAgo(0),
+      updated_at: hoursAgo(0),
+    }
+    addMemoryMock.mockResolvedValue(newEntry)
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-add-input")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("memory-add-input"), { target: { value: "New team guardrail" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("memory-add-submit"))
+    })
+    await waitFor(() => expect(addMemoryMock).toHaveBeenCalledWith("101", "New team guardrail"))
+    await waitFor(() => expect(screen.getByTestId(`memory-entry-${newEntry.id}`)).toBeTruthy())
+    const row = screen.getByTestId(`memory-entry-${newEntry.id}`)
+    expect(row.textContent).toContain("Manual")
+  })
+
+  it("edit calls PATCH and remove calls DELETE, updating the list on success (AC5)", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([USER_ENTRY])
+    patchMemoryMock.mockResolvedValue({ ...USER_ENTRY, body: "Edited guardrail" })
+    deleteMemoryMock.mockResolvedValue({ deleted: true })
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId(`memory-edit-${USER_ENTRY.id}`))
+    fireEvent.change(screen.getByTestId(`memory-edit-input-${USER_ENTRY.id}`), { target: { value: "Edited guardrail" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`memory-edit-save-${USER_ENTRY.id}`))
+    })
+    await waitFor(() => expect(patchMemoryMock).toHaveBeenCalledWith("101", USER_ENTRY.id, "Edited guardrail"))
+    await waitFor(() => expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`).textContent).toContain("Edited guardrail"))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`memory-remove-${USER_ENTRY.id}`))
+    })
+    await waitFor(() => expect(deleteMemoryMock).toHaveBeenCalledWith("101", USER_ENTRY.id))
+    await waitFor(() => expect(screen.queryByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeNull())
+  })
+
+  it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
+    memorySummaryMock.mockRejectedValue(new ApiError(403, "Not a member"))
+    memoryEntriesMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-modal-forbidden")).toBeTruthy())
+  })
+
+  it("renders a graceful 'not found' state on a 404, never a crash", async () => {
+    memorySummaryMock.mockRejectedValue(new ApiError(404, "Not found"))
+    memoryEntriesMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "999", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-modal-not-found")).toBeTruthy())
+  })
+})
