@@ -1,0 +1,184 @@
+/* CreateProjectModal — component-scoped styles (globals.css is never edited
+ * for this ticket, per BUILD.md §6 hot-file rule). Every value below
+ * resolves to an existing `web/app/globals.css` custom property — no new
+ * palette. Class names mirror the approved mockup's `.cp-*` set
+ * (`design-mockups/projects-feature-v2/create-project.html`) so the two
+ * stay easy to diff against each other. */
+
+.panel {
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel :global(.modal-body) {
+  overflow-y: auto;
+}
+
+/* ── Tabs ── */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  padding: 9px 13px;
+  border-radius: 9px 9px 0 0;
+  cursor: pointer;
+  position: relative;
+  top: 1px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: none;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tabOn {
+  color: var(--ink);
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+
+.comingTag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: 5px;
+  padding: 2px 6px;
+  margin-left: 4px;
+}
+
+/* ── Fields ── */
+
+.field {
+  margin-bottom: 16px;
+}
+
+.hint {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
+.errorBanner {
+  font-size: 12.5px;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  margin-bottom: 14px;
+}
+
+.stateWrap {
+  padding: 20px 4px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+/* ── From-an-artifact picker ── */
+
+.pickNote {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.pickNote b {
+  color: var(--accent-ink);
+}
+
+.artPick {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.artRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+
+.artRow:last-child {
+  border-bottom: none;
+}
+
+.artRow:hover {
+  background: var(--surface-3);
+}
+
+.artRowSel {
+  background: var(--accent-muted);
+}
+
+.artTitle {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 3px 7px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+/* ── Auto-from-PRD placeholder ── */
+
+.autoPlaceholder {
+  text-align: center;
+  padding: 24px 12px;
+  color: var(--ink-2);
+}
+
+.autoMark {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 12px;
+}
+
+.autoPlaceholder h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.autoPlaceholder p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-3);
+  max-width: 420px;
+  margin: 0 auto;
+}

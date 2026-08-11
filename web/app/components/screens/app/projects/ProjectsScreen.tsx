@@ -38,6 +38,7 @@ import { AppLayout } from "../AppLayout"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { projectPath } from "../../../../lib/routes"
 import { projectsApi, type ProjectArtifactType, type ProjectListItem } from "../../../../lib/api"
+import { CreateProjectModal } from "./CreateProjectModal"
 import styles from "./ProjectsScreen.module.css"
 
 /** Mirrors `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (line 56) exactly — same
@@ -248,6 +249,7 @@ export function ProjectsScreen() {
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState("")
+  const [createOpen, setCreateOpen] = useState(false)
 
   const refresh = useCallback(() => {
     setLoading(true)
@@ -269,13 +271,17 @@ export function ProjectsScreen() {
     [router],
   )
 
-  // "New project" opens the create flow — the modal itself is a follow-up
-  // ticket. This is the placeholder/nav stub the ticket calls for: a wired
-  // affordance with no create surface behind it yet, rather than a dead
-  // button.
+  // "New project" opens the create-project flow (tabs + invite rows).
   const onNewProject = useCallback(() => {
-    router.push(projectPath())
-  }, [router])
+    setCreateOpen(true)
+  }, [])
+
+  // A successful create navigates away from this screen before onClose
+  // fires (CreateProjectModal calls router.push then closes itself), and a
+  // cancel changes nothing — so closing never needs a re-fetch here.
+  const onCloseCreate = useCallback(() => {
+    setCreateOpen(false)
+  }, [])
 
   return (
     <AppLayout>
@@ -289,6 +295,7 @@ export function ProjectsScreen() {
           onNewProject={onNewProject}
         />
       </div>
+      <CreateProjectModal open={createOpen} onClose={onCloseCreate} />
     </AppLayout>
   )
 }

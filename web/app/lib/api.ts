@@ -5221,6 +5221,28 @@ export const projectsApi = {
   /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`). */
   create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact" }) =>
     api.post<ProjectListItem>("/v1/projects", payload),
+  /** Add an existing user to the project by email
+   *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`
+   *  404 when no account exists for that email — inviting a
+   *  non-existing user is `org_invites`-based and a fast-follow (out of
+   *  scope); callers must handle the 404 without crashing. There is no
+   *  per-project permission role on `project_members` (v1 membership is
+   *  all-or-nothing, AD-P11) — this call carries only the email. */
+  addMember: (id: number | string, email: string) =>
+    api.post<{ project_id: number; user_id: string }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/members`,
+      { email },
+    ),
+  /** Add an artifact ref to the project
+   *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
+   *  ownership validation happens server-side; a foreign/absent artifact
+   *  404s. Used as the "from an artifact" create flow's follow-up call to
+   *  seed a freshly-created project's first item. */
+  addArtifact: (id: number | string, artifactType: ProjectArtifactType, artifactId: number) =>
+    api.post<{ project_id: number; artifact_type: string; artifact_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/artifacts`,
+      { artifact_type: artifactType, artifact_id: artifactId },
+    ),
   /** Project detail: members (incl. the virtual agent member) + group-chat
    *  id. Throws `ApiError` with `.status` 403 (same-tenant non-member) or
    *  404 (foreign-tenant/absent) — callers must handle both without
