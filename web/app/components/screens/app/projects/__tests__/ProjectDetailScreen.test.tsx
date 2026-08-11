@@ -62,6 +62,23 @@ vi.mock("next/link", () => ({
   }: React.PropsWithChildren<{ href: string } & Record<string, unknown>>) =>
     React.createElement("a", { href, ...rest }, children),
 }))
+// `ProjectMainThread` pulls in `ProjectIndividualChat`'s ask/poll wiring on
+// its individual-chat branch plus `ProjectGroupChat`'s network wiring on the
+// group branch. Both drag in a dependency graph (CompanyContext, the shared
+// ask lib, projectsApi network calls…) this file has no reason to boot just
+// to test the SHELL (top bar, rail, cards, state machine) — the same
+// isolation reason `AppLayout`/`NavigationContext` are mocked above. The
+// mount itself (which props it receives) is what THIS file verifies; the
+// real thread/composer/swap behaviour is `ProjectMainThread.test.tsx`,
+// `ProjectGroupChat.test.tsx`, and `ProjectIndividualChat.test.tsx`'s job.
+vi.mock("../ProjectMainThread", () => ({
+  ProjectMainThread: (props: { projectId: number | string; activeChat: string }) =>
+    React.createElement("div", {
+      "data-testid": "main-thread-stub",
+      "data-project-id": String(props.projectId),
+      "data-active-chat": props.activeChat,
+    }),
+}))
 
 import { ProjectDetailView, ProjectDetailScreen, type ProjectDetailViewProps } from "../ProjectDetailScreen"
 // Regular (non-type-only) import: resolves to the mocked `ApiError` above,
@@ -290,14 +307,26 @@ describe("ProjectDetailView — state", () => {
     expect(screen.getByTestId("chat-row-group").getAttribute("aria-pressed")).toBe("false")
   })
 
-  it("composer placeholder and note bar swap group ⇆ individual copy", () => {
+  it("the chat note bar swaps group ⇆ individual copy", () => {
     const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
-    expect(screen.getByTestId("composer-placeholder").textContent).toContain("Message the team, or @Sprntly to hand it a task")
     expect(screen.getByTestId("chat-note").textContent).toContain("smart interjection")
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    expect(screen.getByTestId("composer-placeholder").textContent).toBe("Message Sprntly…")
     expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
+  })
+
+  // ProjectMainThread OWNS the composer for whichever chat is active — the
+  // SAME extracted composer on both sides — this shell mounts it once, per
+  // `activeChat`, and stops there (its own composer/thread behaviour is out
+  // of THIS file's scope, per the isolation mock above).
+  it("mounts ProjectMainThread once, keyed on activeChat and the project id", () => {
+    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
+    const host = screen.getByTestId("main-thread-stub")
+    expect(host.getAttribute("data-active-chat")).toBe("group")
+    expect(host.getAttribute("data-project-id")).toBe("101")
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
+    expect(screen.getByTestId("main-thread-stub").getAttribute("data-active-chat")).toBe("individual")
   })
 })
 
@@ -309,9 +338,6 @@ describe("ProjectDetailView — accessibility", () => {
     expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
     expect(screen.getByTestId("artifact-card-prd").tagName).toBe("BUTTON")
     expect(screen.getByLabelText("Open PRD artifacts")).toBeTruthy()
-    expect(screen.getByLabelText("Voice message")).toBeTruthy()
-    expect(screen.getByLabelText("Attach file")).toBeTruthy()
-    expect(screen.getByLabelText("Send message")).toBeTruthy()
     expect(screen.getByLabelText("Invite by email")).toBeTruthy()
   })
 

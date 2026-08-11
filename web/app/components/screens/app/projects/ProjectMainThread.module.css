@@ -1,0 +1,9 @@
+/* ProjectMainThread — component-scoped CSS. Tokens only (AD-P13 §3). */
+
+.host {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  height: 100%;
+}

@@ -41,6 +41,7 @@ import {
   type ProjectMember,
   type ProjectMemorySummary,
 } from "../../../../lib/api"
+import { ProjectMainThread } from "./ProjectMainThread"
 import styles from "./ProjectDetailScreen.module.css"
 
 /** Copied verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same
@@ -243,9 +244,6 @@ export function ProjectDetailView({
   const byType = useMemo(() => groupArtifactsByType(artifacts), [artifacts])
   const presentTypes = TYPE_ORDER.filter((t) => (byType[t]?.length ?? 0) > 0)
 
-  const composerPlaceholder =
-    activeChat === "group" ? "Message the team, or @Sprntly to hand it a task…" : "Message Sprntly…"
-
   return (
     <div className={styles.shell}>
       <header className={styles.topBar}>
@@ -298,35 +296,17 @@ export function ProjectDetailView({
             )}
           </div>
 
-          {/* Chat thread HOST (AD-P13): a follow-up ticket mounts
-              <ProjectMainThread> here, keyed on `activeChat` +
-              `project.group_chat_id`. This ticket renders no bespoke
-              bubbles/markdown of its own. */}
+          {/* Chat thread HOST (AD-P13): ProjectMainThread swaps group ⇆
+              individual per `activeChat`; BOTH sides are thin containers
+              over the SAME extracted composer — no second composer lives
+              at this shell level, and no chat-monolith container is
+              imported anywhere in this swap. */}
           <div className={styles.threadHost} data-testid="project-main-thread-host">
-            <div className={styles.threadPlaceholder}>
-              {activeChat === "group"
-                ? "Group chat thread — lands with the next ticket."
-                : "Your chat with Sprntly — lands with the next ticket."}
-            </div>
-          </div>
-
-          <div className={styles.composer}>
-            <div className={styles.composerBox}>
-              <div className={styles.composerInput} data-testid="composer-placeholder">
-                {composerPlaceholder}
-              </div>
-              <div className={styles.composerTools}>
-                <button type="button" className={styles.composerPill} aria-label="Voice message">
-                  Voice
-                </button>
-                <button type="button" className={styles.composerPill} aria-label="Attach file">
-                  Attach
-                </button>
-                <button type="button" className={styles.composerSend} aria-label="Send message">
-                  Send
-                </button>
-              </div>
-            </div>
+            <ProjectMainThread
+              projectId={project.id}
+              activeChat={activeChat}
+              onOpenArtifact={(c) => onOpenArtifacts(c.type)}
+            />
           </div>
         </main>
 

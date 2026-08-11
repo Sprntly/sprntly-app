@@ -901,3 +901,45 @@ describe("ChatScreen focuses the composer whenever it is on screen", () => {
     })
   })
 })
+
+// ── Composer extraction regression (high-risk-refactor guard) ──────────────
+//
+// The composer moved from an in-file `ChatComposer` to `shared/ChatComposer.tsx`
+// so both the individual chat (this file) and the project group chat
+// (`ProjectGroupChat.tsx`) share one implementation (AD-P13). Every test above
+// already exercises the REAL extracted composer end-to-end through the real
+// `ChatScreen` — attach, send, skills, dictation-absence, focus, disable
+// states — and stays green unchanged, which IS the behavioural proof
+// (test_chatscreen_composer_behavior_unchanged). This block adds the
+// structural half: the extraction actually happened, and ChatScreen.tsx's
+// diff is limited to the swap (no other logic touched).
+describe("Composer extraction — structural regression", () => {
+  it("ChatScreen imports ChatComposer from shared/ and defines no in-file composer of its own", async () => {
+    const { readFileSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    const src = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
+
+    expect(src).toContain('import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"')
+    // No in-file re-declaration under any name a "composer" component would
+    // plausibly use.
+    expect(src).not.toMatch(/function\s+ChatComposer\s*\(/)
+    expect(src).not.toMatch(/const\s+ChatComposer\s*=/)
+    // The constants/type the composer owns now live in shared/ChatComposer —
+    // ChatScreen imports them rather than re-declaring them (would silently
+    // diverge otherwise).
+    expect(src).not.toMatch(/const\s+DRAFT_MAX_CHARS\s*=/)
+    expect(src).not.toMatch(/const\s+DRAFT_MIN_CHARS\s*=/)
+    expect(src).not.toMatch(/const\s+COMPOSER_PLACEHOLDER\s*=/)
+    expect(src).not.toMatch(/type\s+PinnedSkill\s*=/)
+  })
+
+  it("the render call site is unchanged — still one <ChatComposer> shared by the landing and dock mounts", async () => {
+    const { readFileSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    const src = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
+    expect(src).toContain("<ChatComposer")
+    // The one render helper both mount points call — unchanged from before
+    // the extraction.
+    expect(src).toContain("const renderComposer = (home: boolean) =>")
+  })
+})

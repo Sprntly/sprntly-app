@@ -586,7 +586,7 @@ export const askApi = {
   start: (
     question: string,
     company: string = "asurion",
-    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number },
+    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number; project_id?: number },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
       question,
@@ -596,6 +596,10 @@ export const askApi = {
       // PRD-tab chat: ground the answer on the PRD open beside this chat
       // (+ its insight, evidence, tickets, prototype).
       ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
+      // Individual project chat: fold this project's memory (summary + top-N
+      // entries) + the caller's job_role into the turn (backend/app/routes/
+      // ask.py's `project_id` field, AD-P8) — membership-gated server-side.
+      ...(opts?.project_id != null ? { project_id: opts.project_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
@@ -5164,6 +5168,31 @@ export type ProjectMemorySummary = {
   stale: boolean
 }
 
+/** One row from `GET/POST /v1/projects/{id}/group/turns`
+ *  (`backend/app/db/conversations.py`'s `list_group_turns`/`post_group_turn`).
+ *  A human turn carries `author_user_id`/`author_name`/`author_job_role`; an
+ *  agent turn (the `@Sprntly`-mention reply) carries `author_user_id: null`
+ *  and `role: "assistant"` — the only conversation_turns rows with a
+ *  `role`/author split at all, since single-owner individual chats never
+ *  needed one. */
+export type GroupTurn = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  author_user_id: string | null
+  author_name: string | null
+  author_job_role: string | null
+  created_at: string
+  /** Artifact-open candidates for this turn (the same disambiguation shape
+   *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by
+   *  `list_group_turns`/`post_group_turn` today — group turns carry no
+   *  artifact-resolution envelope yet (that's a `/v1/ask`-only mechanism).
+   *  Optional and wired here so `ProjectGroupChat` composes the real
+   *  `OpenArtifactChips` primitive rather than a bespoke one the day the
+   *  backend starts sending this. */
+  open_candidates?: OpenArtifactCandidate[]
+}
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -5187,4 +5216,22 @@ export const projectsApi = {
   /** The cached project-memory summary — read-only, no LLM call. */
   memorySummary: (id: number | string) =>
     api.get<ProjectMemorySummary>(`/v1/projects/${encodeURIComponent(String(id))}/memory/summary`),
+  /** Poll read (AD-P4 — no realtime in v1): group turns after the `since`
+   *  cursor (a turn id), ascending. `since` omitted fetches the whole
+   *  history. Empty (never a crash) when the group chat hasn't been
+   *  created yet — `backend/app/routes/projects.py`'s
+   *  `list_group_turns_route` returns `{turns: []}` in that case. */
+  groupTurns: (id: number | string, since?: number) =>
+    api
+      .get<{ turns: GroupTurn[] }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/group/turns${since != null ? `?since=${since}` : ""}`,
+      )
+      .then((r) => r.turns),
+  /** Post a human turn to the project's group chat (create-if-absent
+   *  server-side). An `@Sprntly` mention in `content` triggers ONE
+   *  best-effort agent reply — the POST resolves only after that reply
+   *  attempt completes (or is skipped for a non-mention), so the caller's
+   *  busy state should span the whole request, not just the network hop. */
+  postGroupTurn: (id: number | string, content: string) =>
+    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, { content }),
 }

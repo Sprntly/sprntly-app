@@ -278,6 +278,10 @@ export async function runAskGeneration(
     conversation_id?: number
     pinned_skill?: string
     prd_id?: number
+    /** Individual project chat (build spec AD-P8): folds the project's
+     *  memory into this turn server-side. Passed straight through to
+     *  `askApi.start` — see its own doc for the membership-gate contract. */
+    project_id?: number
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial
