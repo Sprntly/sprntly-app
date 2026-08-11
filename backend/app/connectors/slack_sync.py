@@ -460,6 +460,35 @@ def channels_summary_to_markdown(
 # ───── Sync orchestrator ─────
 
 
+def team_id_from_config(config: dict[str, Any]) -> str | None:
+    """The workspace IDENTITY (`T…`) off a stored Slack connection config.
+
+    Deliberately reads `config["team"]["id"]` and NOTHING ELSE. Three other
+    values in reach are also "the workspace" in casual speech and all three
+    are wrong here:
+
+      `team.name`     the display name ("Acme Corp"), renameable
+      `team.domain`   the subdomain, renameable, and what the permalink uses
+      `fetch_team_info()`  the same id via a live API call
+
+    This value is stored on every Slack catalog row so a later disconnect
+    check can ask "does any active connection for this company still carry
+    this workspace id?" against `connections.config.team.id` — the very field
+    it was read from (`db/connections.py:list_slack_connections_by_team`
+    matches on exactly that path). Reading a display name instead yields a
+    column that is populated, plausible, and matches NOTHING, so that check
+    would classify every catalogued Slack document as an orphan and delete an
+    entire tenant's Slack catalog. Reading it from a live call would make the
+    column unwritable whenever Slack is unreachable, for a fact already on
+    disk.
+
+    Takes `row_config()` output, which is always a dict — no isinstance guard,
+    because a branch that cannot execute is not a safeguard. Returns None for
+    a missing/blank id so the caller stores NULL (UNKNOWN) rather than "".
+    """
+    return str((config.get("team") or {}).get("id") or "").strip() or None
+
+
 def _slack_team_domain(access_token: str) -> str | None:
     """The workspace's Slack subdomain, for building a channel permalink —
     resolved ONCE PER SYNC, never once per channel: `fetch_team_info` is a
@@ -659,8 +688,12 @@ def sync_slack(
     # below, for catalog permalinks — made ONCE per sync, not once per
     # channel.
     team_domain = _slack_team_domain(access_token)
+    team_id = team_id_from_config(config)
     try:
-        kickoff_slack_extract(company_id, slack_channel_docs, team_domain=team_domain)
+        kickoff_slack_extract(
+            company_id, slack_channel_docs,
+            team_domain=team_domain, team_id=team_id,
+        )
     except Exception:  # noqa: BLE001 — extraction must never fail the sync
         logger.exception(
             "slack sync: KG extraction kick failed for %s", company_id

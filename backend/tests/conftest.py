@@ -1199,6 +1199,11 @@ CREATE TABLE document_catalog (
     topics          TEXT NOT NULL DEFAULT '[]',
     summary_model   TEXT,
     summary_version TEXT,
+    -- Mirrors 20260811120000_document_catalog_provider_workspace.sql. NULLABLE
+    -- and NULL-by-default on purpose: NULL means UNKNOWN, never "belongs to no
+    -- workspace", and the tests below pin that a caller who does not know the
+    -- workspace can neither clear nor invent one.
+    provider_workspace_id TEXT,
     embedding       TEXT,
     body_text       TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),

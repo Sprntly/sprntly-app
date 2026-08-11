@@ -85,7 +85,7 @@ PROVIDER_SLACK = "slack"
 _INDEX_COLUMNS = (
     "id,company_id,workspace_id,conversation_id,user_id,provider,external_id,"
     "title,source_name,url,doc_date,content_hash,summary,topics,summary_model,"
-    "summary_version,created_at,updated_at"
+    "summary_version,provider_workspace_id,created_at,updated_at"
 )
 
 #: Cap on `body_text` IF it is ever written. No writer populates it today —
@@ -133,6 +133,10 @@ class CatalogDocument(BaseModel):
     topics: list[str] = []
     summary_model: Optional[str] = None
     summary_version: Optional[str] = None
+    #: Provider-side workspace this document came from (Slack team id). NULL
+    #: means UNKNOWN — see `register_document` and the column's own comment.
+    #: Never read a None here as "belongs to no workspace".
+    provider_workspace_id: Optional[str] = None
     workspace_id: Optional[str] = None
     conversation_id: Optional[int] = None
     user_id: Optional[str] = None
@@ -360,7 +364,7 @@ def _summary_embedding(
 def _existing(company_id: str, provider: str, external_id: str) -> Optional[dict]:
     r = (
         require_client().table(_TABLE)
-        .select("id,content_hash,summary")
+        .select("id,content_hash,summary,provider_workspace_id")
         .eq("company_id", company_id)
         .eq("provider", provider)
         .eq("external_id", external_id)
@@ -440,6 +444,7 @@ def register_document(
     url: Optional[str] = None,
     doc_date: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    provider_workspace_id: Optional[str] = None,
     conversation_id: Optional[int] = None,
     user_id: Optional[str] = None,
     body_text: Optional[str] = None,
@@ -457,6 +462,15 @@ def register_document(
     landed, so the retry is allowed rather than being permanently skipped by
     its own hash. A CHANGED hash clears summary, topics and embedding and
     regenerates them from the new text.
+
+    `provider_workspace_id` is the provider-side workspace the document came
+    from (for Slack, the team id). It must come from STORED CONNECTION STATE,
+    never from a display name and never from a fresh API call: its whole
+    purpose is to be compared against the workspace ids on this company's
+    connection rows, and a value taken from anywhere else makes that
+    comparison a guess. Passing None leaves an existing value ALONE rather
+    than clearing it — a caller that does not know the workspace must not be
+    able to erase what a caller that did know recorded.
 
     `body_text` is NOT populated by any current writer and should stay that
     way: the catalog records what a document is about and where to find it,
@@ -492,6 +506,37 @@ def register_document(
         and existing.get("content_hash") == content_hash
         and (existing.get("summary") or "").strip()
     ):
+        # Unchanged document — no rewrite, no model call. But fill in a
+        # MISSING provider_workspace_id before returning, because otherwise
+        # this branch is exactly why the column would never converge: a row
+        # only rewrites when its document CHANGES, so a channel nobody posts
+        # in again would keep NULL forever — and the quiet tenants are
+        # precisely the ones whose catalogs go stale. One cheap column
+        # update, no summary churn, no embedding regeneration.
+        #
+        # Only ever fills a blank. It never overwrites a stored id with a
+        # different one: a workspace id that genuinely changed for the same
+        # (company, provider, external_id) is not a fact this path can
+        # establish, and quietly rewriting it would destroy the evidence the
+        # disconnect rule depends on.
+        if provider_workspace_id and not existing.get("provider_workspace_id"):
+            try:
+                (
+                    require_client().table(_TABLE)
+                    .update({"provider_workspace_id": provider_workspace_id})
+                    .eq("id", existing["id"])
+                    # Redundant by provenance — `existing` came from a
+                    # company-scoped read — and kept anyway, because every
+                    # other write in this module carries the tenant filter and
+                    # a lone `.eq("id", …)` is the shape a later edit copies.
+                    .eq("company_id", company_id)
+                    .execute()
+                )
+            except Exception:  # noqa: BLE001 — a backfill is never worth a sync
+                logger.warning(
+                    "document catalog: could not fill provider_workspace_id "
+                    "for %s/%s", provider, external_id, exc_info=True,
+                )
         return existing["id"]
 
     now = utc_now()
@@ -516,6 +561,15 @@ def register_document(
     }
     if workspace_id:
         row["workspace_id"] = workspace_id
+    # OMITTED, not set to None, when the caller does not know it — same idiom
+    # as `workspace_id` above and the difference that matters: the conflict
+    # update writes only the keys present here, so leaving it out preserves
+    # what an informed caller already recorded, whereas writing None would
+    # CLEAR it on every re-registration by a caller that happens not to know.
+    # A cleared value reads as UNKNOWN forever, which permanently hides a
+    # genuine orphan (`test_a_caller_without_a_team_id_cannot_clear_a_known_one`).
+    if provider_workspace_id:
+        row["provider_workspace_id"] = provider_workspace_id
     if conversation_id is not None:
         row["conversation_id"] = conversation_id
         row["user_id"] = user_id
