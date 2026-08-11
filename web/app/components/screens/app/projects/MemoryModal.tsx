@@ -142,7 +142,18 @@ function MemoryEntryRow({
       data-provenance={isUser ? "user" : "agent"}
     >
       <div className={styles.itemHead}>
-        <span className={styles.itemSrc}>{isUser ? <span className={styles.srcTagUser}>Manual</span> : null}</span>
+        <span className={styles.itemSrc}>
+          {isUser ? (
+            <span className={styles.srcTagUser} data-testid="memory-src-user">
+              Manual
+            </span>
+          ) : (
+            <span className={styles.srcTagAgent} data-testid="memory-src-agent">
+              <SparkleIcon />
+              Promoted by Sprntly
+            </span>
+          )}
+        </span>
         <span className={styles.itemActions}>
           <button
             type="button"
@@ -191,7 +202,9 @@ function MemoryEntryRow({
           <div className={`${styles.itemHow} ${isUser ? styles.itemHowUser : ""}`}>
             {isUser
               ? `Added by ${author?.name ?? "a project member"}${author?.role ? ` · ${author.role}` : ""} · updated ${relativeTime(entry.updated_at)}`
-              : `Promoted by Sprntly · ${relativeTime(entry.updated_at)}`}
+              : `Promoted by Sprntly · ${relativeTime(entry.updated_at)}${
+                  entry.source_conversation_id != null ? " · from the group chat" : ""
+                }`}
           </div>
         </>
       )}
@@ -345,9 +358,17 @@ export function MemoryModalView({
                     <SparkleIcon />
                     What this project knows
                   </span>
-                  <span className={styles.synthTag} data-testid="memory-synth-readonly-tag">
-                    <LockIcon />
-                    Read-only · synthesized
+                  <span className={styles.synthTagGroup}>
+                    <span className={styles.synthTag} data-testid="memory-synth-readonly-tag">
+                      <LockIcon />
+                      Read-only · synthesized
+                    </span>
+                    {state.summary.stale ? (
+                      <span className={styles.synthRefreshing} data-testid="memory-synth-refreshing">
+                        <RefreshIcon />
+                        Updating…
+                      </span>
+                    ) : null}
                   </span>
                 </div>
                 {state.summary.summary_md ? (

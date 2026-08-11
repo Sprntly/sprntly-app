@@ -137,21 +137,117 @@ describe("MemoryModalView — synthesized summary block (AC1/AC2)", () => {
 })
 
 describe("MemoryModalView — provenance differentiation (AC3/AC4)", () => {
-  it("renders user-authored entries with a Manual pill, 'Added by <name> · <role>', and the accent user treatment", () => {
+  it("test_user_entry_renders_manual_chip — renders user-authored entries with a Manual pill, 'Added by <name> · <role>', and the accent user treatment", () => {
     render(React.createElement(MemoryModalView, viewProps()))
     const row = screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)
     expect(row.getAttribute("data-provenance")).toBe("user")
     expect(row.textContent).toContain("Manual")
     expect(row.textContent).toContain("Added by David M. · PM")
+    expect(within(row).getByTestId("memory-src-user").textContent).toContain("Manual")
+    expect(within(row).queryByTestId("memory-src-agent")).toBeNull()
   })
 
-  it("renders agent-promoted entries as muted 'Promoted by Sprntly', never a guessed author", () => {
+  it("test_agent_entry_renders_promoted_chip — renders agent-promoted entries as muted 'Promoted by Sprntly' with a header chip, never a guessed author", () => {
     render(React.createElement(MemoryModalView, viewProps()))
     const row = screen.getByTestId(`memory-entry-${AGENT_ENTRY.id}`)
     expect(row.getAttribute("data-provenance")).toBe("agent")
     expect(row.textContent).toContain("Promoted by Sprntly")
     expect(row.textContent).not.toContain("Manual")
     expect(row.textContent).not.toContain("David")
+    // NEW: header chip, visually parallel to the Manual chip on user rows.
+    const chip = within(row).getByTestId("memory-src-agent")
+    expect(chip.textContent).toContain("Promoted by Sprntly")
+    expect(within(row).queryByTestId("memory-src-user")).toBeNull()
+  })
+
+  it("test_agent_entry_source_hint — an agent entry with source_conversation_id shows the group-chat hint; without it, no hint", () => {
+    const { rerender } = render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: SUMMARY, entries: [AGENT_ENTRY] } }),
+      ),
+    )
+    const withSource = screen.getByTestId(`memory-entry-${AGENT_ENTRY.id}`)
+    expect(withSource.textContent).toContain("from the group chat")
+
+    const noSourceEntry: ProjectMemoryEntry = { ...AGENT_ENTRY, source_conversation_id: null }
+    rerender(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: SUMMARY, entries: [noSourceEntry] } }),
+      ),
+    )
+    const withoutSource = screen.getByTestId(`memory-entry-${noSourceEntry.id}`)
+    expect(withoutSource.textContent).not.toContain("from the group chat")
+  })
+})
+
+describe("MemoryModalView — stale/refreshing affordance (AD-P3 honesty)", () => {
+  it("test_summary_stale_shows_refreshing — summary.stale === true renders the Updating… indicator", () => {
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: { ...SUMMARY, stale: true }, entries: [] } }),
+      ),
+    )
+    const indicator = screen.getByTestId("memory-synth-refreshing")
+    expect(indicator.textContent).toContain("Updating")
+  })
+
+  it("test_summary_not_stale_hides_refreshing — summary.stale === false hides the indicator; the summary body still renders", () => {
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: { ...SUMMARY, stale: false }, entries: [] } }),
+      ),
+    )
+    expect(screen.queryByTestId("memory-synth-refreshing")).toBeNull()
+    expect(screen.getByTestId("memory-synth-body").textContent).toContain("Xometry-driven redesign")
+  })
+
+  it("test_summary_block_never_shows_edit_controls — no edit/remove controls in the synth block regardless of stale", () => {
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: { ...SUMMARY, stale: true }, entries: [] } }),
+      ),
+    )
+    const block = screen.getByTestId("memory-synth-block")
+    expect(within(block).queryByRole("button")).toBeNull()
+    expect(within(block).queryByTestId("memory-edit-1")).toBeNull()
+    expect(within(block).queryByTestId("memory-remove-1")).toBeNull()
+  })
+})
+
+describe("MemoryModalView — edit/remove regression across provenance", () => {
+  it("test_edit_remove_present_on_agent_row — pencil/trash controls render and fire for an agent entry", () => {
+    const onStartEdit = vi.fn()
+    const onRemove = vi.fn()
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: SUMMARY, entries: [AGENT_ENTRY] }, onStartEdit, onRemove }),
+      ),
+    )
+    fireEvent.click(screen.getByTestId(`memory-edit-${AGENT_ENTRY.id}`))
+    expect(onStartEdit).toHaveBeenCalledWith(AGENT_ENTRY)
+    fireEvent.click(screen.getByTestId(`memory-remove-${AGENT_ENTRY.id}`))
+    expect(onRemove).toHaveBeenCalledWith(AGENT_ENTRY.id)
+  })
+
+  it("test_edit_remove_present_on_user_row — pencil/trash controls render and fire for a user entry (unchanged P1 behavior)", () => {
+    const onStartEdit = vi.fn()
+    const onRemove = vi.fn()
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: SUMMARY, entries: [USER_ENTRY] }, onStartEdit, onRemove }),
+      ),
+    )
+    fireEvent.click(screen.getByTestId(`memory-edit-${USER_ENTRY.id}`))
+    expect(onStartEdit).toHaveBeenCalledWith(USER_ENTRY)
+    fireEvent.click(screen.getByTestId(`memory-remove-${USER_ENTRY.id}`))
+    expect(onRemove).toHaveBeenCalledWith(USER_ENTRY.id)
   })
 })
 
