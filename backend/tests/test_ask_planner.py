@@ -132,6 +132,33 @@ def _answer_result():
     return _R()
 
 
+@pytest.fixture(autouse=True)
+def _clear_catalog_caches():
+    """The planner's per-company catalog caches are module-level and outlive a
+    test — they live until the process restarts BY DESIGN (`_CACHE_TTL_S` is a
+    week; invalidation, not expiry, is what keeps them correct).
+
+    Nothing here is testing the cache, and that is exactly why this is needed:
+    a hit written by an earlier test silently satisfies a later test's read, so
+    a `_connected(monkeypatch, [])` or a `_no_custom_skills(monkeypatch)` set up
+    two lines above can be ignored entirely and the assertion fails against
+    ANOTHER test's fixture data. Two tests in this file were failing for that
+    reason and neither was about caching.
+
+    The same fixture, for the same reason, as
+    test_ask_planner_catalog_cache.py — where it was written first because a
+    file about the caches could not have passed without it."""
+    caches = (
+        ap._connected_cache, ap._custom_block_cache,
+        ap._documents_cache, ap._templates_cache,
+    )
+    for cache in caches:
+        cache.clear()
+    yield
+    for cache in caches:
+        cache.clear()
+
+
 # ── gate: sources ────────────────────────────────────────────────────────────
 
 def test_a_source_the_company_has_not_connected_is_dropped():
@@ -537,6 +564,12 @@ def test_the_keyword_prior_appears_only_when_a_library_can_override_it(monkeypat
     assert "Keyword match:" not in calls[0]["input"]
 
     _seed_custom_skill(monkeypatch)
+    # The library just changed, so the planner's cached view of it is stale —
+    # exactly as it would be in production, where the write paths in
+    # `db/custom_skills.py` call this for us. Without it the second half of this
+    # test plans against the EMPTY library the first half cached, and asserts a
+    # keyword prior that could never appear.
+    ap.invalidate_catalog_cache(COMPANY)
     calls = _stub_planner(monkeypatch)
     ap.plan(question, enterprise_id=COMPANY)
     assert "Keyword match:" in calls[0]["input"]
@@ -555,7 +588,10 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v3"
+    # v4 since the planner learned about the company's uploaded FORMATS. The
+    # version is pinned here rather than merely compared to itself because
+    # pooling v3 and v4 rows would pool two different menus.
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v5"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -575,17 +611,28 @@ def test_the_schema_property_order_is_load_bearing():
       * `action` second, because it is the TOP-LEVEL fork — deciding "build
         something" vs "answer something" before choosing a pipeline stops
         "write me a PRD about competitors" reaching a research pipeline;
-      * the company's own library before the pipeline list is considered at all.
+      * the company's own library before the pipeline list is considered at all;
+      * the FORM after the SUBJECT — `artifact_template_id` follows `task`, so a
+        format is chosen for something already described rather than a format
+        name in the message steering what gets built.
     """
     assert list(ap._PLANNER_SCHEMA["properties"]) == [
         "reason",
-        "action", "task", "instruction",
+        # `action_confidence` immediately after the action it describes, and
+        # deliberately NOT next to `confidence` further down — that one belongs
+        # to `pipeline_id`. Reading the pipeline's number as the action's is the
+        # bug this field exists to end.
+        "action", "action_confidence", "task", "instruction",
+        # The uploaded format this build writes into, and — when we could not
+        # find the one they named — the words they used, so the answer can ask.
+        "artifact_template_id", "template_query",
         # `open_artifact`'s two arguments sit with the action's other arguments,
         # before any choice of skill or pipeline — same rule as task/instruction.
         "artifact_type", "artifact_query",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
-        "sources", "include_knowledge_graph", "web_search", "documents",
+        "sources", "include_knowledge_graph", "include_library",
+        "web_search", "documents",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
@@ -597,10 +644,21 @@ def test_the_schema_property_order_is_load_bearing():
     # reason matters more here: naming no document is the NORMAL outcome, and a
     # required field is an invitation to fill it. A document named wrongly makes
     # the assistant answer as that document — see app/document_referent.py.
+    #
+    # The two format fields are optional for the sharpest version of that
+    # reason: naming NO format is the normal, correct outcome and means the
+    # company's active format is used. A required `artifact_template_id` would
+    # invite the model to pick one on every single build.
     for optional in ("constraints", "task", "instruction", "documents",
-                     "artifact_type", "artifact_query"):
+                     "artifact_type", "artifact_query",
+                     "artifact_template_id", "template_query"):
         assert optional not in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 10
+    # `include_library` IS required, like `include_knowledge_graph` beside it:
+    # both are booleans with a real default answer, and an omitted boolean is
+    # indistinguishable from a considered `false`.
+    assert "include_library" in ap._PLANNER_SCHEMA["required"]
+    assert "action_confidence" in ap._PLANNER_SCHEMA["required"]
+    assert len(ap._PLANNER_SCHEMA["required"]) == 12
 
 
 # ── the action fork (v3) ─────────────────────────────────────────────────────

@@ -66,6 +66,37 @@ def _is_unique_violation(exc: Exception) -> bool:
     return "unique" in text or _UNIQUE_VIOLATION in text
 
 
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company's formats is stale.
+
+    Lifted verbatim from db/custom_skills.py:70, because it is the same
+    mechanism guarding the same failure: the planner lists this company's
+    formats in every prompt and validates the id it picks against that list,
+    memoising both in-process until something says otherwise
+    (`ask_planner.invalidate_catalog_cache`). Entries live until the process
+    restarts by design, so a write that skips this leaves the planner offering a
+    deleted format — or blind to one just uploaded — for the life of the
+    process, and a nominal week-long TTL is the only thing that eventually
+    heals it.
+
+    ACTIVATION MATTERS MOST. It is the write that changes what every future
+    document is written into while changing no row a user is looking at, so a
+    stale cache there means the planner keeps describing the OLD active format
+    as the one in use — a wrong answer to "which format am I using" delivered
+    with complete confidence.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db
+    layer, so a module-level import here would close a cycle. Never allowed to
+    break a write — a cache that failed to clear is a stale prompt, which the
+    next write or a restart fixes; a format that failed to save is not."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
 def _decode(row: dict) -> dict:
     """DB row → caller shape: JSON text columns decoded, is_active a real bool.
 
@@ -140,6 +171,7 @@ def insert_template(
         "updated_at": now,
     }
     resp = c.table("artifact_templates").insert(row).execute()
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else row)
 
 
@@ -252,6 +284,7 @@ def update_template(
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     # PostgREST returns the updated representation; fall back to the row we
     # already read merged with the patch rather than reporting a failed update
     # (the caller reads None as "the row is gone" and would 404 a template that
@@ -299,6 +332,10 @@ def set_compile_result(
         .eq("id", template_id)
         .execute()
     )
+    # A compile is what turns an uploaded format into a usable one, so the
+    # planner's cached `compile_status` is exactly what decides whether it may
+    # be named — stale here means refusing a format that just became ready.
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, **patch})
 
 
@@ -364,9 +401,14 @@ def activate_template(
         )
     except Exception as exc:  # noqa: BLE001 — narrowed to unique-violation below
         _restore_active(c, company_id, prior_id)
+        # Dropped on the FAILURE path too: the deactivate above already landed,
+        # so whatever the restore managed, the planner's cached copy no longer
+        # describes the rows in the table.
+        _drop_planner_cache(company_id)
         if _is_unique_violation(exc):
             raise ActiveTemplateConflict(artifact_type) from exc
         raise
+    _drop_planner_cache(company_id)
     logger.info(
         "artifact_template_activated company_present=%s type=%s",
         bool(company_id), artifact_type,
@@ -414,6 +456,7 @@ def deactivate_template(company_id: str, template_id: str) -> dict | None:
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, "is_active": False})
 
 
@@ -434,6 +477,7 @@ def delete_template(company_id: str, template_id: str) -> dict | None:
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return row
 
 

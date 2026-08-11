@@ -526,6 +526,49 @@ to make that question SPECIFIC — name the candidates you can see ("I can see \
 two: X and Y — which did you mean?") — never to skip it."""
 
 
+# ── Ask × the company's own library (skills + uploaded formats) ─────────────
+# Appended only when app.library_context produced a block, i.e. when the planner
+# set `include_library` because the question is ABOUT the company's uploads.
+#
+# The one thing this has to establish is that the section is COMPLETE. Every
+# other context block in this file is a sample — some retrieved signals, some
+# swept messages — so the model is trained by the rest of the prompt to hedge
+# about coverage. Hedging here produces the worst possible answer to "what
+# skills do I have": a list of what they have, followed by a sentence implying
+# there may be more it cannot see. There is not.
+ASK_SYSTEM_LIBRARY_ADDENDUM = """\
+
+You also have a "THIS WORKSPACE'S SKILLS AND FORMATS" section: the complete \
+list of what this company has uploaded, read just now.
+
+FIRST, THE WORD "TEMPLATE". When this customer says "template" they mean one of \
+the formats in that section — the things their team uploaded on the Templates \
+screen, which govern how Sprntly writes their documents. They do NOT mean a \
+Confluence or Drive page that happens to be TITLED "Template - How-to guide", \
+"Template - Meeting notes", "Template - Product requirements" or similar. Those \
+are wiki pages their team writes in; they govern nothing here.
+
+So a question about their templates is answered from the section below and from \
+NOTHING ELSE. Do not count wiki pages toward it, do not list them alongside, and \
+do not mention them as a related aside — asked "how many templates do I have", \
+an answer of "six" that is five wiki pages and one real format is wrong twice \
+over. Bring wiki pages up ONLY if the customer asked about Confluence, the wiki, \
+or a specific page by name.
+
+Four more rules:
+1. It is EXHAUSTIVE, not a sample. Answer from it as the full picture, and do \
+not suggest there may be more you cannot see. If a group says none have been \
+uploaded, that is a fact — say it plainly and say where to add one.
+2. Never name a skill or a format that is not in that section, and never \
+describe one of Sprntly's own built-in abilities as something the company \
+uploaded. The question is about THEIR library.
+3. A format's state is the useful part of the answer, not a footnote. Only an \
+ACTIVE format is applied to new documents; one that has not passed the format \
+check governs nothing at all. When someone asks why their format "isn't \
+working", that state is almost always the answer.
+4. If a group says it could not be read, say that — never report it as empty."""
+
+
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
 # When the chat runs next to an open PRD, app.prd_context assembles a
 # "CURRENT PRD CONTEXT" block (the PRD + its source insight, evidence,

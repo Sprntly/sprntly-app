@@ -1506,6 +1506,39 @@ def _planned_live_context(
         return ""
 
 
+def _planned_library_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """The company's own skills and formats, when the PLAN asked for them.
+
+    The counterpart of `_planned_live_context` for a question about the library
+    rather than about the product — "what skills do I have", "which PRD format
+    is active", "why isn't my format being used". One deterministic read of two
+    tables, not a model call and not a search: the answer to "what have I
+    uploaded" is a list, and the only thing that can get it wrong is not having
+    it.
+
+    Handed to `compose_ask_answer` as a THUNK so it runs in wave 1 beside the
+    embedding and the corpus load, rather than serially ahead of them.
+
+    Never raises — `library_block` already swallows its own read failures and
+    returns "" — but wrapped anyway, on the same rule every other gather leg
+    here follows: no context block is worth an answer."""
+    if not enterprise_id or not plan.include_library:
+        return ""
+    try:
+        from app.library_context import library_block
+
+        block = library_block(enterprise_id)
+        logger.info(
+            "[planner] exec library company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a library read degrades, it never breaks chat
+        logger.exception("[planner] library block failed for %s", enterprise_id)
+        return ""
+
+
 def _persist_live_records(enterprise_id: str, result) -> None:
     """Hand what a live read produced to the KG persister.
 
@@ -2285,16 +2318,26 @@ def answer(
         # the prompt is composed. The PRD branch passes nothing at all — it
         # skips live reads by design.
         live_context_fn = None
+        # The company's own library, on the same terms: a second thunk rather
+        # than a second serial read, and only ever when the plan asked for it —
+        # so a company that never asks about its uploads never pays for a row.
+        # Separate from the live one because the two get opposite instructions
+        # downstream (`compose_ask_answer`'s `library_context_fn` says why).
+        library_context_fn = None
         if not prd_context:
             if plan is not None:
                 live_context_fn = lambda: _planned_live_context(  # noqa: E731
                     enterprise_id, plan, question
                 )
+                library_context_fn = lambda: _planned_library_context(  # noqa: E731
+                    enterprise_id, plan
+                )
             else:
                 live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
-            history=history, live_context_fn=live_context_fn, on_delta=on_delta,
+            history=history, live_context_fn=live_context_fn,
+            library_context_fn=library_context_fn, on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic

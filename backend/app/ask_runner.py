@@ -42,6 +42,7 @@ from app.prompts import (
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_LIBRARY_ADDENDUM,
     ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
     connected_sources_line,
     today_line,
@@ -1769,6 +1770,7 @@ def compose_ask_answer(
     history: list[dict] | None = None,
     live_context: str = "",
     live_context_fn=None,
+    library_context_fn=None,
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1819,6 +1821,16 @@ def compose_ask_answer(
     exists for — and it never reaches the PRD-grounded branch, which skips
     corpus and KG retrieval by design and would lose that saving.
 
+    `library_context_fn`, when given, is a thunk producing the company's own
+    SKILLS AND FORMATS block (app/library_context.py), asked for by the planner
+    when the question is about that library rather than about the product. It is
+    a separate parameter from `live_context` rather than folded into it because
+    the two need OPPOSITE instructions: the live-sweep addendum tells the model
+    its section is a keyword probe whose silence proves nothing, and attaching
+    that hedge to an exhaustive list of the company's own uploads is precisely
+    the wrong answer to "what skills do I have". Same slot, same wave, its own
+    section and its own addendum — the shape every other block here already has.
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -1865,6 +1877,8 @@ def compose_ask_answer(
     wave1: dict = {"facts": lambda: company_facts_block(enterprise_id)}
     if live_context_fn is not None:
         wave1["live"] = live_context_fn
+    if library_context_fn is not None:
+        wave1["library"] = library_context_fn
     if wants_corpus_and_kg:
         wave1["corpus"] = lambda: load_corpus(dataset)
 
@@ -1905,6 +1919,7 @@ def compose_ask_answer(
     # A caller that pre-computed the block still wins; `live_context_fn` is the
     # concurrent route and only qa_agent's planned path uses it.
     live_context = live_context or (gathered.get("live") or "")
+    library_context = gathered.get("library") or ""
     corpus = gathered.get("corpus") if wants_corpus_and_kg else None
 
     # WAVE 2 — the two consumers of the vector, which do not feed each other.
@@ -1973,6 +1988,11 @@ def compose_ask_answer(
             context_sections.append(render_context_section(bundle))
         if live_context:
             context_sections.append(live_context)
+        # LAST, deliberately. A question about the company's own library is
+        # answered from this section and usually from nothing else, and the
+        # nearest section to the question is the one a model weighs hardest.
+        if library_context:
+            context_sections.append(library_context)
 
         if context_sections:
             # Each addendum is gated on ITS OWN section being present. The KG
@@ -1983,6 +2003,7 @@ def compose_ask_answer(
             system = (ASK_SYSTEM
                       + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
                       + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
+                      + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
                       + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question
