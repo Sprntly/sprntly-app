@@ -5256,6 +5256,22 @@ export type IndividualChatConversation = {
   updated_at: string
 }
 
+/** One row from `GET /v1/projects/{id}/individual/turns`
+ *  (`backend/app/db/conversations.py`'s `list_individual_turns`) — the
+ *  caller's OWN individual project chat, never another member's (own-
+ *  conversation read gate, the read-side counterpart of the delegate-tool's
+ *  cross-user write). No `author_user_id`/`author_name` split like
+ *  `GroupTurn`: an individual chat is single-owner, so a `role: "user"` row
+ *  is always the caller and a `role: "assistant"` row is always the agent
+ *  (either a normal reply or a delegated brief delivered with no paired
+ *  question). */
+export type IndividualTurn = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  created_at: string
+}
+
 /** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
  *  minted `report` artifact ref (item-14 substrate, build spec §2). Always
  *  `artifact_type: "report"` in v1 — a saved chat output is captured as a
@@ -5362,6 +5378,17 @@ export const projectsApi = {
    *  reuses the SAME `conversation_id`. */
   individualChat: (id: number | string) =>
     api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
+  /** Load-on-open read of the caller's own individual project chat (create-if-
+   *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
+   *  `since` omitted fetches the whole history. Empty (never a crash) when
+   *  the caller hasn't opened this chat yet — `list_individual_turns_route`
+   *  returns `{turns: []}` in that case, same as the group-chat route. */
+  individualTurns: (id: number | string, since?: number) =>
+    api
+      .get<{ turns: IndividualTurn[] }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/individual/turns${since != null ? `?since=${since}` : ""}`,
+      )
+      .then((r) => r.turns),
   /** The discrete, provenance-tagged memory entries — the source of truth
    *  behind the cached `memorySummary` above (AD-P3). Most-recently-updated
    *  first, server-side. */

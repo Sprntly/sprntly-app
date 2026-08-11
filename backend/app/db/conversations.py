@@ -600,3 +600,37 @@ def post_individual_turn(conversation_id: int, role: str, content: str) -> dict[
         "id", conversation_id
     ).execute()
     return resp.data[0]
+
+
+def list_individual_turns(
+    conversation_id: int, user_id: str, since: int | None = None
+) -> list[dict[str, Any]]:
+    """Turns in an INDIVIDUAL project chat the CALLER OWNS, ascending, after
+    the `since` id cursor (poll-cursor parity with `list_group_turns`).
+    Returns `[]` (never another user's turns) when the conversation is not
+    `kind='individual'` OR its `user_id` != the caller — the read-side
+    counterpart of the delegation cross-user write gate (`post_individual_turn`
+    is reachable cross-user by design; this reader never is). Single-owner
+    individual chats don't need `author_user_id` in the payload (the owner is
+    implied), so the row shape is `{id, role, content, created_at}` — no
+    `profiles` join, unlike `list_group_turns`."""
+    client = require_client()
+    conv = (
+        client.table("conversations")
+        .select("id, user_id, kind")
+        .eq("id", conversation_id)
+        .eq("kind", "individual")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not conv:
+        return []
+
+    q = client.table("conversation_turns").select("id, role, content, created_at").eq(
+        "conversation_id", conversation_id
+    )
+    if since is not None:
+        q = q.gt("id", since)
+    return q.order("id").execute().data or []

@@ -32,6 +32,12 @@ const runAskGenerationMock = vi.fn()
 const resumeAskGenerationMock = vi.fn()
 const getPendingAskMock = vi.fn(() => null as { id: string } | null)
 const individualChatMock = vi.fn()
+// New on this ticket: the component now loads persisted history on mount
+// (`ProjectIndividualChat.history.dom.test.tsx` covers that surface in
+// depth) — every test in THIS file must still mock it too, otherwise mount
+// fires a real, unmocked `fetch` in jsdom. Defaults to an empty history so
+// the pre-existing session-flow assertions below are unaffected.
+const individualTurnsMock = vi.fn()
 
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
@@ -52,6 +58,7 @@ vi.mock("../../../../../lib/api", async () => {
     projectsApi: {
       ...actual.projectsApi,
       individualChat: (...a: unknown[]) => individualChatMock(...a),
+      individualTurns: (...a: unknown[]) => individualTurnsMock(...a),
     },
   }
 })
@@ -81,6 +88,8 @@ beforeEach(() => {
   getPendingAskMock.mockReturnValue(null)
   individualChatMock.mockReset()
   individualChatMock.mockImplementation((id: number) => Promise.resolve(individualChatRecord(9001, id)))
+  individualTurnsMock.mockReset()
+  individualTurnsMock.mockResolvedValue([])
 })
 afterEach(() => cleanup())
 

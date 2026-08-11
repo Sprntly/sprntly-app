@@ -522,6 +522,32 @@ def create_individual_chat_route(
     return conversation
 
 
+@router.get("/{project_id}/individual/turns")
+def list_individual_turns_route(
+    project_id: int,
+    since: int | None = None,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Poll/load read of the CALLER'S OWN individual project chat (read-side
+    counterpart of the delegate-tool's cross-user delivery write) — this is
+    what makes a delegated brief actually visible to the assignee, not just durably
+    written. Resolves `ctx.user_id`'s own conversation server-side; the
+    client never supplies a `conversation_id` (defense in depth — the reader
+    itself re-checks ownership too, `list_individual_turns`'s own-conversation
+    gate). Empty (not 404) when the caller hasn't opened this chat yet —
+    nothing has been posted, which is a legitimate read state, not an error,
+    mirroring `list_group_turns_route`'s own not-created posture."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
+    if not conversation:
+        return {"turns": []}
+    return {
+        "turns": conversations_db.list_individual_turns(
+            conversation["id"], ctx.user_id, since=since
+        )
+    }
+
+
 @router.get("/{project_id}/group/turns")
 def list_group_turns_route(
     project_id: int,

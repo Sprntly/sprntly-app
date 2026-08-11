@@ -50,7 +50,7 @@ import {
   AskCancelledError,
   AskTimeoutError,
 } from "../../../../lib/runAskGeneration"
-import { projectsApi, type AskResponse, type OpenArtifactCandidate } from "../../../../lib/api"
+import { projectsApi, type AskResponse, type IndividualTurn, type OpenArtifactCandidate } from "../../../../lib/api"
 import styles from "./ProjectIndividualChat.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
@@ -103,6 +103,16 @@ function formatTime(d: number): string {
 export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }: ProjectIndividualChatProps) {
   const { activeCompany } = useCompany()
   const [turns, setTurns] = useState<LocalTurn[]>([])
+  // Persisted history, loaded on open — this is what makes a delegated
+  // brief (a standalone `role: "assistant"` turn, no paired question)
+  // actually visible: before this, the thread rendered only turns produced
+  // in the CURRENT browser session and started empty on every reload, so a
+  // brief delivered into this conversation landed durably but invisibly.
+  // Rendered ABOVE the session's optimistic `turns` (below); loaded ONCE on
+  // mount, not re-synced mid-session — the current send flow stays fully
+  // optimistic and the persisted view catches up on the NEXT open. `since`
+  // is not used here — this always loads the whole thread.
+  const [history, setHistory] = useState<IndividualTurn[]>([])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
 
@@ -140,6 +150,34 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       console.warn("[project-individual-chat] failed to bind a conversation", err)
       return undefined
     })
+  }, [projectId])
+
+  // Load persisted history on open — mirrors `ProjectGroupChat`'s own
+  // initial-load effect one level down (no polling here, AD-P4: the group
+  // chat polls, the individual thread loads on open and re-syncs on the
+  // NEXT open, live polling is a later polish). Deliberately does NOT wait
+  // on `ensureConversationId()` first: the read endpoint resolves the
+  // caller's OWN conversation server-side and needs no client-supplied
+  // conversation_id, so gating this on the get-or-create call would create a
+  // conversation row just from OPENING the chat — the opposite of
+  // `ensureConversationId`'s documented "costs nothing until an actual
+  // send" contract above. Best-effort: a failed fetch degrades to an empty
+  // history and never blocks the composer.
+  useEffect(() => {
+    let cancelled = false
+    projectsApi
+      .individualTurns(projectId)
+      .then((loaded) => {
+        if (!cancelled) setHistory(loaded)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        // eslint-disable-next-line no-console
+        console.warn("[project-individual-chat] failed to load history", err)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [projectId])
 
   // A reload/remount mid-answer must not orphan the job (the same resume
@@ -224,13 +262,31 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           </div>
         ) : null}
 
+        {history.map((h) => (
+          <div key={`history-${h.id}`} className={styles.pair}>
+            {h.role === "assistant" ? (
+              <div className={styles.agentTurn} data-testid="ic-history-agent">
+                <div className={styles.agentHead}>
+                  <span className={styles.agentName}>{AGENT_NAME}</span>
+                  <span className={styles.time}>{formatTime(new Date(h.created_at).getTime())}</span>
+                </div>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>
+              </div>
+            ) : (
+              <div className={styles.userTurn} data-testid="ic-history-you">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>
+              </div>
+            )}
+          </div>
+        ))}
+
         {resuming ? (
           <div data-testid="ic-resuming">
             <AssistantThinkingSkeleton phase="Picking up where you left off…" />
           </div>
         ) : null}
 
-        {!resuming && turns.length === 0 ? (
+        {!resuming && history.length === 0 && turns.length === 0 ? (
           <div className={styles.empty} data-testid="individual-chat-empty">
             Ask Sprntly anything about this project — it already knows what the team has covered.
           </div>
