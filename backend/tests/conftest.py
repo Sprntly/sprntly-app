@@ -1843,6 +1843,55 @@ def _no_background_memory_synthesis(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_background_interjection_gate(request, monkeypatch):
+    """Keep a non-mention group turn from firing a REAL Anthropic request.
+
+    `post_group_turn_route` consults `project_group_gate.should_respond` on
+    EVERY non-mention group turn that clears the gate's own cheap
+    pre-filter — not just the tests that mean to exercise the gate.
+    Without this guard, an existing group-chat/memory-CRUD test that posts
+    a non-trivial non-mention turn (e.g. `test_group_chat_turns.py`'s "a
+    turn nobody should log verbatim", or `test_project_memory_promotion.py`'s
+    "morning team, nothing to see here") would fire a real `call_json`
+    request against Anthropic using the suite's fake API key — the same
+    hazard class `_no_background_memory_synthesis` above exists for.
+
+    Defaults to `{"respond": False}` — the gate's own conservative
+    default — so the stub can never manufacture a spurious interjection in
+    an unrelated test. A test that means to drive the gate itself
+    (`test_project_group_gate.py`) patches `app.project_group_gate.call_json`
+    directly; that patch runs AFTER this autouse fixture and wins for that
+    test (same ordering `_no_background_memory_synthesis` relies on). Opt
+    out with `@pytest.mark.real_interjection_gate` — the dedicated
+    real-LLM live tier drives an UNSTUBBED `call_json` instead."""
+    if request.node.get_closest_marker("real_interjection_gate"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_json(*, system, user, model, schema=None, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return {"respond": False}
+
+    try:
+        mod = importlib.import_module("app.project_group_gate")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_iterate_limiter():
     """Per-test isolation for the Design Agent rate limiters.
 

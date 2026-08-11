@@ -13,11 +13,13 @@ Scope boundary: memory synthesis + promotion are Phase 2. Artifact fan-out
 fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
 
 Group-chat turn endpoints (build spec §5.3, AD-P2/AD-P4/AD-P10): a
-human-to-human group turn is a cheap DB write — no LLM call. Only a turn
-that deterministically `@Sprntly`-mentions the agent triggers ONE LLM call
-(best-effort, AD-P7) producing an assistant turn. The smart-interjection
-should-respond classifier (AD-P10's broader gate) is a later phase — v1
-is mention-only, deterministic, no classifier call at all.
+human-to-human group turn is a cheap DB write — no LLM call, UNLESS it
+clears the cheap pre-filter in `project_group_gate` and the should-respond
+classifier decides the turn is clearly for the agent. Either an explicit
+`@Sprntly` mention (deterministic, no classifier call) OR a smart-
+interjection `respond=true` decision triggers ONE best-effort LLM call
+(AD-P7) producing an assistant turn. There is no user-facing toggle for
+this — the agent decides (v3.4 retired the Auto/mention-only setting).
 """
 from __future__ import annotations
 
@@ -37,14 +39,17 @@ from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_proj
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
+from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
 
-# Deterministic v1 trigger (AD-P10 — the smart-interjection classifier is a
-# later phase). Word-boundary so "@Sprntly" and "@sprntly" both match but a
-# longer handle sharing the prefix would not.
+# Deterministic trigger — checked FIRST, unconditionally, no classifier
+# call (AD-P10). Word-boundary so "@Sprntly" and "@sprntly" both match but
+# a longer handle sharing the prefix would not. A turn that does NOT match
+# this falls through to the smart-interjection gate (`project_group_gate.
+# should_respond`) below.
 _MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
 
 # How many of the most recent group turns are folded into the agent's
@@ -415,10 +420,17 @@ def post_group_turn_route(
 ):
     """Post a human turn to the group chat (create-if-absent, same as
     `POST /group`, so a client can post without a separate prior create
-    call). A human-to-human turn is a cheap DB write — no LLM call. Only a
-    turn containing a deterministic `@Sprntly` mention triggers ONE
-    best-effort agent reply (AD-P7/AD-P10 — v1 is mention-only; the
-    smart-interjection classifier is Phase 2)."""
+    call). A human-to-human turn is a cheap DB write by default. Decision
+    order (AD-P7/AD-P10), evaluated only AFTER the human turn has already
+    persisted so a gate/reply failure can never block the post:
+
+      1. `@Sprntly` mention → reply, deterministic, no classifier call.
+      2. No mention → consult `project_group_gate.should_respond` over the
+         recent clamped transcript; `True` replies, `False` leaves the
+         human turn standing (the UI's existing "stayed out" affordance
+         shows).
+
+    Either path triggers AT MOST one best-effort agent reply."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
     turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
@@ -428,13 +440,20 @@ def post_group_turn_route(
     )
     if _MENTION_RE.search(payload.content):
         _respond_as_group_agent(project_id, conversation["id"])
+    else:
+        recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
+        if should_respond(project_id, conversation["id"], recent, payload.content):
+            _respond_as_group_agent(project_id, conversation["id"])
     return turn
 
 
 def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
-    """On an `@Sprntly` mention: assemble recent group-turn context (each
-    speaker tagged with their `author_name`/`author_job_role`) and produce
-    ONE assistant turn (`role='assistant', author_user_id=NULL`). Never
+    """Called on an `@Sprntly` mention OR a `should_respond=True`
+    smart-interjection decision (`post_group_turn_route` decides which;
+    this function's own body is unchanged either way): assemble recent
+    group-turn context (each speaker tagged with their
+    `author_name`/`author_job_role`) and produce ONE assistant turn
+    (`role='assistant', author_user_id=NULL`). Never
     raises (AD-P7 best-effort contract) — a failure yields no assistant
     turn and the human turn that triggered this already persisted, so the
     chat is never blocked. Meters ONLY this call (the structured
@@ -450,14 +469,7 @@ def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
     start = time.monotonic()
     try:
         recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
-        transcript_lines = []
-        for turn in recent:
-            label = turn["author_name"] or "Someone"
-            job_role = turn.get("author_job_role")
-            if job_role:
-                label = f"{label} ({job_role})"
-            transcript_lines.append(f"{label}: {turn['content']}")
-        transcript = "\n".join(transcript_lines)
+        transcript = render_group_transcript(recent)
         meta: dict = {}
         reply = call_md(
             system=_GROUP_AGENT_SYSTEM_PROMPT,

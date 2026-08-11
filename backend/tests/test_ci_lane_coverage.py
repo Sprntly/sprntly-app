@@ -151,6 +151,26 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
     ),
+    ("test_project_group_gate.py", "RUN_INTERJECTION_GATE_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the smart-"
+        "interjection should-respond gate: proves the REAL classifier "
+        "decision on an agent-directed question (respond=true, one real "
+        "reply) and on an ordinary human-to-human exchange (respond=false, "
+        "no reply) — a stubbed classifier cannot prove the gate's actual "
+        "judgment, only its wiring. Deterministic backstop: the rest of "
+        "this file mocks the classifier (app.project_group_gate.call_json) "
+        "against FakeSupabaseClient and covers the pre-filter bound, the "
+        "cost-line shape, the never-raises/mutation-proofed failure "
+        "default, and the mention-bypasses-gate path in the fast lane; "
+        "this suite is the real-DB/real-LLM proof, run locally against the "
+        "dev rig when touching this gate."
+    ),
+    ("test_project_group_gate.py", "ANTHROPIC_API_KEY"): (
+        "Same two live tests as RUN_INTERJECTION_GATE_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
 }
 
 
