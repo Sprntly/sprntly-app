@@ -392,6 +392,10 @@ async def ask(
             # ownership (see app.ask_runner.set_active_conversation).
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook (project_memory
+            # build spec §5.3) — None on every non-project ask, so the hook
+            # never fires for them.
+            project_id=body.project_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -410,6 +414,8 @@ async def ask(
             # The caller's own identity — see above.
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook — see above.
+            project_id=body.project_id,
         )
     )
     _inflight_tasks.add(task)

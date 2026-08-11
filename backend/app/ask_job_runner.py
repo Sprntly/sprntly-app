@@ -84,6 +84,7 @@ def _run_sync(
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    project_id: int | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -202,6 +203,19 @@ def _run_sync(
         prd_id=prd_id,
         is_cancelled=lambda: is_ask_cancelled(ask_id),
     )
+    # Individual project chat (build spec §5.3): after the answer is the
+    # authoritative stored reply, best-effort promote a durable insight into
+    # project memory — gated on a project-scoped ask, so a non-project ask is
+    # byte-for-byte unaffected. Self-swallowing (maybe_promote_turn never
+    # raises), so it can only ADD a memory entry, never delay/break the
+    # answer. Reuses the existing group-chat promotion writer verbatim (no
+    # re-implementation) — it already schedules its own summary regen, so
+    # nothing else is added here.
+    if project_id is not None and conversation_id is not None:
+        from app.project_memory import maybe_promote_turn
+
+        transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
+        maybe_promote_turn(project_id, conversation_id, transcript)
 
 
 async def run_ask_job(
@@ -215,6 +229,7 @@ async def run_ask_job(
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    project_id: int | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -239,6 +254,7 @@ async def run_ask_job(
             conversation_id,
             user_id,
             workspace_id,
+            project_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
         # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a
