@@ -1055,7 +1055,9 @@ _VOC_KG_SYSTEM = (
 )
 
 
-def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
+def _answer_voc_report(
+    decision: RouteDecision, enterprise_id, question, history, on_delta=None,
+) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
@@ -1111,6 +1113,13 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
             json_schema=_ASK_RESPONSE_SCHEMA,
             skill=decision.skill_id,
             max_tokens=12000,
+            # Publish the answer as it generates. This is a `max_tokens=12000`
+            # grounded synthesis — the longest thing chat produces — so without
+            # this the user watches a spinner for the whole run. The schema is
+            # `_ASK_RESPONSE_SCHEMA`, which is exactly what
+            # `app.ask_stream.AnswerFieldExtractor` decodes, so no new
+            # machinery is involved: passing the sink is the whole change.
+            on_delta=on_delta,
         )
     except Exception:  # noqa: BLE001 — fall back to the generic answer
         logger.exception("voc answer from KG failed for %s", enterprise_id)
@@ -1566,7 +1575,8 @@ def answer(
                 has_calls = True
             if has_calls:
                 return call_digest.answer(
-                    enterprise_id=enterprise_id, question=question, history=history
+                    enterprise_id=enterprise_id, question=question, history=history,
+                    on_delta=on_delta,
                 )
             # No corpus to digest: a declined precondition falls through to
             # normal routing — never a canned refusal the user never asked for.
@@ -1586,7 +1596,8 @@ def answer(
 
         if call_digest.has_call_source(enterprise_id) and _custom_beats_digest() is None:
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
 
     # "Analyze my data" is a COMMAND to run a DS engine over the company's
@@ -1674,7 +1685,8 @@ def answer(
             from app import call_digest
 
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
 
     # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
@@ -1993,9 +2005,12 @@ def answer(
 
         if not pinned_skill:
             return call_digest.answer(
-                enterprise_id=enterprise_id, question=question, history=history
+                enterprise_id=enterprise_id, question=question, history=history,
+                on_delta=on_delta,
             )
-        voc = _answer_voc_report(decision, enterprise_id, question, history)
+        voc = _answer_voc_report(
+            decision, enterprise_id, question, history, on_delta=on_delta,
+        )
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 

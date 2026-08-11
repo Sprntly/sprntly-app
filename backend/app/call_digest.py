@@ -1381,8 +1381,20 @@ def _slack_voc_read(enterprise_id: str, window: Window) -> "slack_voc.VocRead":
         return slack_voc.VocRead(unavailable="the Slack read could not be run")
 
 
-def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict:
+def answer(
+    *,
+    enterprise_id: str,
+    question: str,
+    history: list[dict] | None = None,
+    on_delta=None,
+) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
+
+    `on_delta`, when given, is the Ask worker's token sink (see
+    `app.ask_stream.AnswerFieldExtractor`): the report call below publishes its
+    answer text as it generates instead of landing all at once. Optional and
+    advisory — every caller that omits it behaves exactly as before, and the
+    returned payload is the authoritative answer either way.
 
     Parses the window, fetches the calls live, retrieves the knowledge graph's
     stored signal for the same question, MERGES the two, and then either runs
@@ -1536,6 +1548,18 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # rule — so a merge wired only into the report pass would have left the
     # reported bug exactly where it was.
     if query_mode:
+        # DELIBERATELY NOT STREAMED, unlike the report path below.
+        #
+        # This call is followed by `except -> fall through to the report`, so a
+        # mid-generation failure here runs a SECOND full generation. Streaming
+        # both would publish the abandoned attempt's partial text and then
+        # append the report's text to it — one garbled preview out of two
+        # coherent answers. The extractor's `reset()` covers the gateway's own
+        # retry, not an outer fallback that changes prompt AND schema budget.
+        #
+        # The trade is cheap: this path is `max_tokens=3000` and pointed, while
+        # the report below is 12000 and is where the measured 76.8s sits. We
+        # stream the answer that needs it and leave the fast one alone.
         try:
             return _answer_query(
                 enterprise_id=enterprise_id, question=question,
@@ -1580,6 +1604,12 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             # answer exceeds the default per-request timeout — stream on the
             # long read timeout, as the template build did.
             long_output=True,
+            # This call ALREADY streams from the transport (`long_output=True`);
+            # until now nothing forwarded the fragments to the client, so the
+            # slowest answer in the product was also the only one with no live
+            # preview. Measured on staging 2026-08-11: 76.8s of an 83.6s turn
+            # spent here with the UI showing a static spinner throughout.
+            on_delta=on_delta,
         )
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("call-digest: VoC run failed for %s", enterprise_id)
