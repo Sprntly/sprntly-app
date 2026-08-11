@@ -119,7 +119,7 @@ def test_the_workspace_id_is_never_the_permalink_subdomain(catalog):
 #: a careless read could mistake for "the workspace", which is the whole point
 #: — a fixture carrying only the right key cannot catch the wrong read.
 _REAL_CONFIG = {
-    "team": {"id": "T123", "name": "Acme", "domain": "acme"},
+    "team": {"id": _TEAM_ID, "name": "Acme", "domain": "acme"},
     "bot_user_id": "U999",
     "channel_id": "C777",
     "channel_name": "general",
@@ -146,7 +146,7 @@ def test_team_id_from_config_reads_the_id_and_not_a_display_name():
     """
     from app.connectors.slack_sync import team_id_from_config
 
-    assert team_id_from_config(_REAL_CONFIG) == "T123"
+    assert team_id_from_config(_REAL_CONFIG) == _TEAM_ID
 
 
 @pytest.mark.parametrize("wrong", ["Acme", "acme", "U999", "C777", "general"])
@@ -177,25 +177,70 @@ def test_team_id_from_config_yields_none_rather_than_a_wrong_value(config):
     assert team_id_from_config(config) is None
 
 
-def test_sync_slack_hands_the_extractor_the_stored_team_id(catalog, monkeypatch):
-    """END TO END THROUGH THE REAL `sync_slack`, because nothing else crosses it.
+#: A config that carries NO `team` key at all. This shape demonstrably exists
+#: in production — `db/connections.py:list_slack_connections_by_team` guards
+#: with `(cfg.get("team") or {})` and `row_config` returns `{}` on any parse
+#: failure — and it is the population a "better than nothing" fallback would
+#: silently corrupt, because it is exactly where the fallback executes.
+_CONFIG_WITHOUT_TEAM = {
+    "bot_user_id": "U999", "channel_id": "C777", "channel_name": "general",
+}
+
+
+@pytest.mark.parametrize("config,domain,expected", [
+    # Happy path: id present, domain resolved.
+    (_REAL_CONFIG, "acme", _TEAM_ID),
+    # THE DOMAIN LOOKUP FAILED. `_slack_team_domain` returns None on ANY
+    # failure by design (its own docstring says so, and `team.info` needs a
+    # scope that can be absent), so this is a routine sync, not an edge case.
+    # The workspace id is on disk and must still be recorded — gating it on
+    # the domain would silently stop populating the column for every tenant
+    # whose team.info call is unreachable.
+    (_REAL_CONFIG, None, _TEAM_ID),
+    # NO `team` KEY. There is no id to record, so the column must stay NULL
+    # (UNKNOWN). It must NOT fall back to the domain: a renameable subdomain
+    # in a column whose only job is to match `connections.config.team.id`
+    # matches nothing, and the disconnect rule would read every document on
+    # this tenant as an orphan.
+    (_CONFIG_WITHOUT_TEAM, "acme", None),
+    # Neither available.
+    (_CONFIG_WITHOUT_TEAM, None, None),
+])
+def test_sync_slack_stores_the_right_workspace_id_for_every_input_shape(
+    catalog, monkeypatch, config, domain, expected
+):
+    """END TO END THROUGH THE REAL `sync_slack`, across the input shapes.
 
     Every other test here injects `team_id=` into `register_slack_catalog`
     directly, so the expression that DERIVES it was never executed under test
-    — which is precisely how the source-string guard went unnoticed. This
-    drives the actual function and asserts on what arrives at the extractor.
+    — which is how the original source-string guard went unnoticed.
 
-    `_slack_team_domain` returns a DIFFERENT string from the stored id, and
-    the config's own `team.name`/`team.domain` differ from it too, so a
-    regression that forwards any neighbour cannot be masked by two values
-    coincidentally agreeing.
+    PARAMETRISED, and that is the point rather than tidiness. With one config
+    shape and an always-successful domain lookup, any caller-side edit that
+    only misbehaves on a DIFFERENT input is invisible. Three such edits
+    survived an earlier battery, all of them plausible enough to pass human
+    review:
+
+        team_id = team_id_from_config(config) or team_domain
+        team_id = team_id_from_config(config) if team_domain else None
+        team_id = team_id_from_config(config)[:4]
+
+    The first is the original bug in disguise — it writes a renameable
+    subdomain into the column on precisely the tenants whose config lacks a
+    `team` key. The second silently stops recording whenever `team.info` is
+    unreachable. The third is caught only because the fixture now uses a
+    realistic id rather than a 4-character one.
+
+    The stub runs the REAL `register_slack_catalog` synchronously so the
+    assertion lands on the STORED COLUMN, not on the kwargs in between —
+    stopping at the kwargs would leave the last hop uncrossed.
     """
     from app.connectors import slack_sync
 
     seen: dict = {}
     monkeypatch.setattr(
         slack_sync, "_get_company_token_and_config",
-        lambda cid: ("xoxb-token", _REAL_CONFIG, {"user_id": "u1"}),
+        lambda cid: ("xoxb-token", config, {"user_id": "u1"}),
     )
     monkeypatch.setattr(slack_sync, "fetch_users", lambda _t: {})
     monkeypatch.setattr(
@@ -206,18 +251,11 @@ def test_sync_slack_hands_the_extractor_the_stored_team_id(catalog, monkeypatch)
             {"ts": "1754000000.000100", "user": "U1", "text": "hello"}
         ],
     )
-    monkeypatch.setattr(slack_sync, "_slack_team_domain", lambda _t: "acme")
+    monkeypatch.setattr(slack_sync, "_slack_team_domain", lambda _t: domain)
     monkeypatch.setattr(slack_sync, "_update_sync_status", lambda *a, **k: None)
 
-    # The seam. `sync_slack` imports this INSIDE the function, so patching the
-    # module attribute is what the local import resolves at call time.
-    #
-    # The stub runs the REAL `register_slack_catalog` synchronously instead of
-    # merely capturing the kwargs. Stopping at the kwargs would leave the last
-    # hop — kickoff -> registration -> stored column — uncrossed, which is the
-    # same "the gap moved one function to the left" mistake this test exists
-    # to avoid. Synchronous, not the daemon thread, so the assertion cannot
-    # race the write.
+    # `sync_slack` imports this INSIDE the function, so patching the module
+    # attribute is what the local import resolves at call time.
     import app.kg_ingest.slack_extract as se
 
     monkeypatch.setattr(
@@ -232,18 +270,21 @@ def test_sync_slack_hands_the_extractor_the_stored_team_id(catalog, monkeypatch)
     assert seen, "sync_slack never reached the extraction kickoff"
 
     stored = _row(catalog, "C1")["provider_workspace_id"]
-    assert stored == "T123", (
-        f"the workspace id STORED ON THE CATALOG ROW was {stored!r}. It must "
-        "be config['team']['id'] — not team.name ('Acme'), not team.domain / "
-        "the permalink subdomain ('acme'), not a fetch_team_info result. A "
+    assert stored == expected, (
+        f"with config team={config.get('team')!r} and resolved domain "
+        f"{domain!r}, the workspace id STORED ON THE CATALOG ROW was "
+        f"{stored!r}, expected {expected!r}. It must be config['team']['id'] "
+        "in full — never team.name, never the permalink subdomain, never a "
+        "truncation, and never a domain fallback when the id is absent. A "
         "display name here matches nothing in connections.config.team.id, so "
         "the disconnect rule would treat every Slack document as an orphan."
     )
-    # The distractors were genuinely present and genuinely different, so the
-    # assertion above cannot have passed by two values coinciding.
-    assert _REAL_CONFIG["team"]["name"] != "T123"
-    assert _REAL_CONFIG["team"]["domain"] != "T123"
-    assert seen["team_domain"] == "acme" != stored
+    # The distractors were genuinely present and genuinely different, so a
+    # pass cannot come from two values coinciding.
+    if expected is not None:
+        assert _REAL_CONFIG["team"]["name"] != expected
+        assert _REAL_CONFIG["team"]["domain"] != expected
+        assert domain != expected
 
 
 # ═════════════ 2. A promoted personal install keeps its catalog ════════════
