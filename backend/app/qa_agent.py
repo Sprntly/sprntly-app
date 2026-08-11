@@ -2327,16 +2327,37 @@ def answer(
         # Separate from the live one because the two get opposite instructions
         # downstream (`compose_ask_answer`'s `library_context_fn` says why).
         library_context_fn = None
-        if not prd_context:
+        # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
+        # With the connector refresh on a 10-minute cadence, the knowledge
+        # graph already holds near-live connector data — so the per-question
+        # live fan-out (planned sources AND the keyword sweep) re-read what the
+        # sync just wrote, at up to 8s of third-party I/O per answer. The
+        # planner still names its sources (nothing about planning changed);
+        # they are simply not executed live while the flag is off. Everything
+        # here — _planned_live_context, _sweep_context, live_read.py, their
+        # tests — is deliberately kept working so LIVE_CONNECTOR_READS_ENABLED
+        # =true restores the old behaviour without a revert. The document
+        # catalog's targeted pulls and the named-tool interceptors above are
+        # NOT behind this flag: picking three documents the catalog indexed is
+        # the cheap read this decision trades the fan-out for.
+        from app.config import settings as _settings
+
+        live_reads_on = bool(
+            getattr(_settings, "live_connector_reads_enabled", False)
+        )
+        if not prd_context and live_reads_on:
             if plan is not None:
                 live_context_fn = lambda: _planned_live_context(  # noqa: E731
                     enterprise_id, plan, question
                 )
-                library_context_fn = lambda: _planned_library_context(  # noqa: E731
-                    enterprise_id, plan
-                )
             else:
                 live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
+        if not prd_context and plan is not None:
+            # The library read is a Postgres SELECT, not a connector call — it
+            # stays on regardless of the live-read flag.
+            library_context_fn = lambda: _planned_library_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
