@@ -73,12 +73,92 @@ def test_create_project_origin_defaults_manual(isolated_settings, monkeypatch):
 # ── PRD-auto dedup (create-modal "Auto · from PRD" tab, AD-P9) ────────────
 #
 # FIX: re-selecting an already-forked PRD in the create-modal used to call
-# `projectsApi.create` unconditionally, bypassing the generation-time hook's
-# (`maybe_auto_create_project_for_prd`) first-write-wins guard and minting a
-# SECOND identical `prd_auto` project. The route now reuses that SAME dedup
-# fact server-side (`find_existing_prd_auto_project`,
-# `app/project_from_prd.py`) whenever `origin="prd_auto"` + `prd_id` are
-# both sent.
+# `projectsApi.create` unconditionally, minting a SECOND identical
+# `prd_auto` project. The route now dedupes server-side
+# (`find_existing_prd_auto_project`, `app/project_from_prd.py`) whenever
+# `origin="prd_auto"` + `prd_id` are both sent — keyed on the
+# `project_artifacts` ref (`artifact_type='prd', artifact_id=prd_id`) scoped
+# to `origin='prd_auto'` projects, which is the ONE fact BOTH fork paths
+# (the generation-time hook and the create-modal's own follow-up
+# `POST .../artifacts` call) always write — so it catches a re-fork via
+# EITHER path, not just a hook-then-modal sequence.
+
+
+def _seed_owned_prd(*, dataset: str, title: str = "Dark mode PRD") -> int:
+    """A real `prds` row `require_owned_prd` (AD-P12) will accept for a
+    caller whose company slug is `dataset` — mirrors the ownership chain
+    `deps/ownership.py` walks (prd -> brief -> dataset (slug) -> company),
+    same helper shape as `test_project_artifacts_fanout.py`'s `_seed_prd`.
+    `company_client` seeds its company with slug "acme" by default."""
+    from app.db.client import require_client
+
+    brief = (
+        require_client()
+        .table("briefs")
+        .insert({"dataset": dataset, "week_label": "wk", "payload": {}, "is_current": True})
+        .execute()
+        .data[0]
+    )
+    prd = (
+        require_client()
+        .table("prds")
+        .insert({"brief_id": brief["id"], "insight_index": 0, "title": title, "status": "ready"})
+        .execute()
+        .data[0]
+    )
+    return prd["id"]
+
+
+def test_create_prd_auto_two_consecutive_modal_forks_dedupe(isolated_settings, monkeypatch):
+    """THE exact repro: two consecutive create-modal forks of the SAME PRD
+    — `POST /v1/projects {origin:'prd_auto', prd_id:X}` then the client's
+    follow-up `POST .../artifacts`, TWICE in a row. Neither call ever binds
+    a conversation (the modal path never does). The second create must
+    return the FIRST's project — one project, one artifact ref, total."""
+    ctx = company_client(monkeypatch)
+    prd_id = _seed_owned_prd(dataset="acme")
+
+    first = ctx.client.post(
+        "/v1/projects", json={"name": "Dark mode PRD", "origin": "prd_auto", "prd_id": prd_id}
+    )
+    assert first.status_code == 200
+    first_project_id = first.json()["id"]
+    add_ref = ctx.client.post(
+        f"/v1/projects/{first_project_id}/artifacts",
+        json={"artifact_type": "prd", "artifact_id": prd_id},
+    )
+    assert add_ref.status_code == 200
+
+    # Second modal-path fork of the SAME PRD — the repro.
+    second = ctx.client.post(
+        "/v1/projects", json={"name": "Dark mode PRD", "origin": "prd_auto", "prd_id": prd_id}
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == first_project_id
+
+    from app.db.client import require_client
+
+    projects = (
+        require_client()
+        .table("projects")
+        .select("id")
+        .eq("company_id", ctx.company_id)
+        .execute()
+        .data
+    )
+    assert len(projects) == 1
+
+    artifact_refs = (
+        require_client()
+        .table("project_artifacts")
+        .select("project_id, artifact_type, artifact_id")
+        .eq("artifact_type", "prd")
+        .eq("artifact_id", prd_id)
+        .execute()
+        .data
+    )
+    assert len(artifact_refs) == 1
+    assert artifact_refs[0]["project_id"] == first_project_id
 
 
 def test_create_prd_auto_reuses_project_already_forked_by_generation_hook(
@@ -105,14 +185,9 @@ def test_create_prd_auto_reuses_project_already_forked_by_generation_hook(
         .data[0]["id"]
     )
 
-    # `maybe_auto_create_project_for_prd` never sets `conversations.prd_id`
-    # itself — `bind_conversation_to_prd` does, called immediately before
-    # it at every real call site (`routes/prd.py`). Reproduce that ordering.
-    from app.db.conversations import bind_conversation_to_prd
     from app.project_from_prd import maybe_auto_create_project_for_prd
 
     prd_id = 909
-    bind_conversation_to_prd(conv_id, prd_id, ctx.company_id, ctx.user_id)
     forked_id = maybe_auto_create_project_for_prd(
         company_id=ctx.company_id,
         workspace_id=ws_id,
@@ -143,9 +218,9 @@ def test_create_prd_auto_reuses_project_already_forked_by_generation_hook(
 
 
 def test_create_prd_auto_no_existing_fork_creates_normally(isolated_settings, monkeypatch):
-    """No `conversations` row binds this `prd_id` to a project yet — the
-    dedup check finds nothing, so a real project is created (the
-    not-a-duplicate control for the test above)."""
+    """No `project_artifacts` ref for this `prd_id` exists yet — the dedup
+    check finds nothing, so a real project is created (the
+    not-a-duplicate control for the tests above)."""
     ctx = company_client(monkeypatch)
 
     r = ctx.client.post(
@@ -194,6 +269,31 @@ def test_create_manual_and_artifact_origins_ignore_prd_id(isolated_settings, mon
     assert r.json()["origin"] == "manual"
 
 
+def test_create_prd_auto_ignores_manual_project_with_same_prd_artifact(
+    isolated_settings, monkeypatch
+):
+    """A MANUAL project that happens to hold this PRD as an artifact must
+    NOT be treated as an existing fork — only `origin='prd_auto'` projects
+    dedupe against each other."""
+    ctx = company_client(monkeypatch)
+
+    from app.db import projects as projects_db
+
+    manual = projects_db.create_project(
+        company_id=ctx.company_id, workspace_id=_default_workspace_id(ctx.company_id),
+        name="Manual project", created_by=ctx.user_id, origin="manual",
+    )
+    projects_db.add_artifact(manual["id"], "prd", 7777)
+
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Dark mode PRD", "origin": "prd_auto", "prd_id": 7777},
+    )
+    assert r.status_code == 200
+    assert r.json()["id"] != manual["id"]
+    assert r.json()["origin"] == "prd_auto"
+
+
 def test_create_prd_auto_dedup_is_company_scoped(isolated_settings, monkeypatch):
     """A same-numbered `prd_id` forked in a DIFFERENT company must never
     dedupe across tenants — the lookup is company-scoped, same as every
@@ -204,34 +304,31 @@ def test_create_prd_auto_dedup_is_company_scoped(isolated_settings, monkeypatch)
     from app.db.workspaces import ensure_default_workspace
 
     foreign_ws = ensure_default_workspace("foreign-co")["id"]
-    foreign_conv_id = (
-        require_client()
-        .table("conversations")
-        .insert(
-            {
-                "company_id": "foreign-co",
-                "user_id": "someone-else",
-                "title": "generate prd",
-                "query": "generate prd",
-                "agent_type": "ask",
-            }
-        )
-        .execute()
-        .data[0]["id"]
-    )
 
-    from app.db.conversations import bind_conversation_to_prd
     from app.project_from_prd import maybe_auto_create_project_for_prd
 
     prd_id = 606
-    bind_conversation_to_prd(foreign_conv_id, prd_id, "foreign-co", "someone-else")
     foreign_project_id = maybe_auto_create_project_for_prd(
         company_id="foreign-co",
         workspace_id=foreign_ws,
         user_id="someone-else",
         prd_id=prd_id,
         prd_title="Foreign PRD",
-        conversation_id=foreign_conv_id,
+        conversation_id=(
+            require_client()
+            .table("conversations")
+            .insert(
+                {
+                    "company_id": "foreign-co",
+                    "user_id": "someone-else",
+                    "title": "generate prd",
+                    "query": "generate prd",
+                    "agent_type": "ask",
+                }
+            )
+            .execute()
+            .data[0]["id"]
+        ),
     )
     assert foreign_project_id is not None
 

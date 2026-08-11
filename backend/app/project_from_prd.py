@@ -19,10 +19,18 @@ turn a successful generation into a failed request.
 (not a conversation), has it already been forked into a project? The
 create-modal's "Auto · from PRD" tab calls `POST /v1/projects` directly —
 it never resolves a `conversation_id`, only the PRD the user picked — so it
-cannot reuse `_conversation_project_id` as-is. Both directions key off the
-SAME fact (a `conversations` row binding both a PRD and a project), so this
-stays the one dedup mechanism for `origin='prd_auto'` projects rather than a
-second, divergent one.
+cannot reuse `_conversation_project_id` (which needs one) as-is.
+
+Keyed on `project_artifacts` (`artifact_type='prd', artifact_id=<prd_id>`)
+scoped to `origin='prd_auto'` projects only — NOT on the `conversations`
+binding `_conversation_project_id` reads. That's deliberate: BOTH fork
+paths (this module's own hook, AND the create-modal's follow-up
+`POST .../artifacts` call) always attach the PRD as a `project_artifacts`
+row, but only the hook's path ever binds a conversation — two consecutive
+create-modal forks of the same PRD never touch `conversations` at all, so
+a conversation-keyed lookup can't dedupe them. The artifact-ref fact is the
+one both paths share, so it's the single dedup mechanism for
+`origin='prd_auto'` projects.
 """
 from __future__ import annotations
 
@@ -61,34 +69,50 @@ def _conversation_project_id(conversation_id: int, company_id: str) -> int | Non
 
 
 def find_existing_prd_auto_project(prd_id: int, company_id: str) -> int | None:
-    """The project already forked for `prd_id`, if any — the dedup check
-    behind the create-modal's "Auto · from PRD" tab (`POST /v1/projects`,
-    `origin=prd_auto`). Company-scoped only (mirrors
-    `_conversation_project_id`'s scoping rationale): first-write-wins must
-    hold regardless of which of the caller's own conversations originally
-    forked the PRD.
+    """The `origin='prd_auto'` project already forked for `prd_id`, if any —
+    the dedup check behind the create-modal's "Auto · from PRD" tab
+    (`POST /v1/projects`, `origin=prd_auto`) AND (transitively, since it
+    always writes the same `project_artifacts` fact) this module's own
+    generation-time hook.
 
-    Reads `conversations` rows bound to this PRD (`prd_id` — set by
-    `bind_conversation_to_prd`) and returns the first one that is ALSO
-    bound to a project (`project_id` — set by `bind_conversation_to_project`,
-    including by this module's own `maybe_auto_create_project_for_prd`).
-    None when no such row exists — the caller creates a fresh project, same
-    as always."""
-    rows = (
-        require_client()
-        .table("conversations")
+    Two-step lookup: find every project holding this PRD as an artifact ref
+    (`project_artifacts.artifact_type='prd', artifact_id=prd_id` — written
+    by BOTH `maybe_auto_create_project_for_prd` below AND the create-modal's
+    follow-up `POST .../artifacts` call), then narrow to the caller's own
+    company AND `origin='prd_auto'` specifically — a MANUAL project that
+    happens to reference the same PRD as one of its artifacts must NEVER be
+    matched here; only an auto-created fork dedupes against another
+    auto-created fork. Company-scoped so first-write-wins holds regardless
+    of who/which conversation originally forked the PRD, same rationale as
+    `_conversation_project_id`. None when no such project exists — the
+    caller creates a fresh one, same as always."""
+    client = require_client()
+    artifact_rows = (
+        client.table("project_artifacts")
         .select("project_id")
-        .eq("prd_id", prd_id)
+        .eq("artifact_type", "prd")
+        .eq("artifact_id", prd_id)
+        .execute()
+        .data
+        or []
+    )
+    candidate_project_ids = {row["project_id"] for row in artifact_rows}
+    if not candidate_project_ids:
+        return None
+
+    project_rows = (
+        client.table("projects")
+        .select("id")
+        .in_("id", list(candidate_project_ids))
         .eq("company_id", company_id)
-        .not_.is_("project_id", "null")
+        .eq("origin", "prd_auto")
+        .order("id")
         .limit(1)
         .execute()
         .data
         or []
     )
-    if rows:
-        return rows[0].get("project_id")
-    return None
+    return project_rows[0]["id"] if project_rows else None
 
 
 def maybe_auto_create_project_for_prd(

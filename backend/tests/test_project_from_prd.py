@@ -346,28 +346,23 @@ def test_generate_from_task_existing_prd_branch_creates_prd_auto_project(tenant_
 # ── Reverse dedup lookup — find_existing_prd_auto_project ───────────────────
 # Backs the create-modal's "Auto · from PRD" tab (POST /v1/projects,
 # origin=prd_auto), which never resolves a conversation_id — only the PRD
-# the user picked. Reuses the SAME dedup fact `_conversation_project_id`
-# reads, just entered from the other direction.
-#
-# `maybe_auto_create_project_for_prd` itself never sets `conversations.
-# prd_id` — that's `bind_conversation_to_prd`'s job, called separately
-# immediately BEFORE the hook at every real call site in `routes/prd.py`.
-# These tests reproduce that same ordering explicitly, rather than relying
-# on the hook alone to produce a PRD-bound conversation.
+# the user picked. Keyed on the `project_artifacts` ref (artifact_type=
+# 'prd', artifact_id=prd_id) — the ONE fact both fork paths (this module's
+# hook AND the create-modal's follow-up POST .../artifacts call) always
+# write, scoped to origin='prd_auto' so a manual project with the same
+# artifact is never matched.
 
 
 def _fork_via_hook(company_id: str, user_id: str, workspace_id: str, prd_id: int, conv_id: int) -> int | None:
-    from app.db.conversations import bind_conversation_to_prd
     from app.project_from_prd import maybe_auto_create_project_for_prd
 
-    bind_conversation_to_prd(conv_id, prd_id, company_id, user_id)
     return maybe_auto_create_project_for_prd(
         company_id=company_id, workspace_id=workspace_id, user_id=user_id,
         prd_id=prd_id, prd_title="Dark mode PRD", conversation_id=conv_id,
     )
 
 
-def test_find_existing_prd_auto_project_finds_the_bound_project(tenant_client, isolated_settings):
+def test_find_existing_prd_auto_project_finds_the_hook_forked_project(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
     conv_id = _new_conversation(t.company_id, t.user_id)
@@ -381,6 +376,25 @@ def test_find_existing_prd_auto_project_finds_the_bound_project(tenant_client, i
     assert found == project_id
 
 
+def test_find_existing_prd_auto_project_finds_the_modal_forked_project(tenant_client, isolated_settings):
+    """The create-modal's own fork path (create, then a follow-up
+    POST .../artifacts — no conversation ever bound) must dedupe too, not
+    just the hook's."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+
+    from app.db.projects import add_artifact, create_project
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    project = create_project(
+        company_id=t.company_id, workspace_id="ws-1", name="Dark mode PRD",
+        created_by=t.user_id, origin="prd_auto",
+    )
+    add_artifact(project["id"], "prd", prd_id)
+
+    assert find_existing_prd_auto_project(prd_id, t.company_id) == project["id"]
+
+
 def test_find_existing_prd_auto_project_none_when_unbound(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
@@ -390,20 +404,44 @@ def test_find_existing_prd_auto_project_none_when_unbound(tenant_client, isolate
     assert find_existing_prd_auto_project(prd_id, t.company_id) is None
 
 
-def test_find_existing_prd_auto_project_ignores_conversations_with_no_project(
+def test_find_existing_prd_auto_project_ignores_manual_projects_with_same_artifact(
     tenant_client, isolated_settings
 ):
-    """A conversation bound to the PRD but with NO project (e.g. a plain
-    generate with no auto-fork) must not be mistaken for an existing
-    fork."""
+    """A MANUAL project that happens to include this PRD as one of its
+    artifacts must NEVER be matched — only an `origin='prd_auto'` project
+    dedupes against another auto-created fork."""
     t = tenant_client.make(slug="acme")
     prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
 
-    from app.db.conversations import bind_conversation_to_prd
+    from app.db.projects import add_artifact, create_project
     from app.project_from_prd import find_existing_prd_auto_project
 
-    conv_id = _new_conversation(t.company_id, t.user_id)
-    bind_conversation_to_prd(conv_id, prd_id, t.company_id, t.user_id)
+    manual_project = create_project(
+        company_id=t.company_id, workspace_id="ws-1", name="Manual project",
+        created_by=t.user_id, origin="manual",
+    )
+    add_artifact(manual_project["id"], "prd", prd_id)
+
+    assert find_existing_prd_auto_project(prd_id, t.company_id) is None
+
+
+def test_find_existing_prd_auto_project_ignores_different_artifact_type_same_id(
+    tenant_client, isolated_settings
+):
+    """A `prd_auto` project holding an EVIDENCE artifact that happens to
+    share the numeric id with this PRD must not false-positive — the match
+    is scoped to `artifact_type='prd'`."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+
+    from app.db.projects import add_artifact, create_project
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    other_project = create_project(
+        company_id=t.company_id, workspace_id="ws-1", name="Different artifact",
+        created_by=t.user_id, origin="prd_auto",
+    )
+    add_artifact(other_project["id"], "evidence", prd_id)
 
     assert find_existing_prd_auto_project(prd_id, t.company_id) is None
 
