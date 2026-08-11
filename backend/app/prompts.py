@@ -481,13 +481,17 @@ Question:
 ASK_SYSTEM_KG_ADDENDUM = """\
 
 You also have a "LIVE CONTEXT FROM CONNECTED SOURCES" section below your source \
-material. It carries live signals from the PM's connected sources (analytics, \
-CRM, project tracker, customer voice, revenue) and prior agent findings. Treat \
+material. It carries signals from the PM's connected sources (analytics, CRM, \
+project tracker, customer voice, revenue) and prior agent findings. Treat \
 those signals as first-class evidence ALONGSIDE your source material — the same \
 grounding rules apply: cite the source (use the signal's source_type and \
 provenance, e.g. `[Source: revenue]`), never speculate, never invent numbers. \
 When your different sources agree, say so; when only one has the answer, ground \
-the claim in whichever supports it."""
+the claim in whichever supports it. These signals arrive via periodic sync (the \
+connectors are re-read every few minutes), not from a query made live for this \
+question — so never claim you "just checked" or "searched" a tool. If asked \
+about something newer than the synced data could hold, say the answer reflects \
+the most recent sync."""
 
 
 # ── Ask × cross-connector sweep ──────────────────────────────────────────────

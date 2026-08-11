@@ -463,6 +463,21 @@ class Settings(BaseSettings):
     # scheduler cycle; the UI read path (/current,/status,/{id}) is unchanged.
     brief_engine: str = "synthesis"
 
+    # Live connector reads on the ANSWER path — the planner-directed
+    # live_read fan-out and the keyword sweep that runs when no plan exists.
+    # OFF by owner decision (2026-08-11): with the connector refresh at a
+    # 10-minute cadence, connector data is near-live in the knowledge graph
+    # already, so paying per-question third-party I/O (up to 8s wall-clock)
+    # re-reads what the sync just wrote. NOT dead code: the whole execution
+    # layer (app/live_read.py, connector_lookup/sweep.py, their tests) is kept
+    # intact and this flag is the only thing standing it down — flip
+    # LIVE_CONNECTOR_READS_ENABLED=true to bring it back without a revert.
+    # What this flag does NOT touch: explicitly-named tool lookups ("show me
+    # PR #42", tracker reads), the document catalog's targeted per-document
+    # pulls, and the dedicated report pipelines (VoC calls, competitive
+    # intel's web sweep) — those stay live.
+    live_connector_reads_enabled: bool = False
+
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
