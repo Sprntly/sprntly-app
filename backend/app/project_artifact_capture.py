@@ -13,35 +13,40 @@ writer), but a DIFFERENT trigger and a DIFFERENT failure contract:
     insert yielded no row) is surfaced as an explicit 502 — the button
     that triggered this needs to know the save failed.
 
-Chat outputs are markdown, and there is no server-side markdown→HTML
-renderer in this codebase (no `markdown`/`markdown-it`/`bleach` dependency).
-`_wrap_as_report_html` is v1's bridge: the raw content, HTML-escaped and
-preserved in a `<pre>`, inside a minimal self-contained document so it
-satisfies `report_capture._HTML_DOC_RE` / `looks_like_html_report()` and
-renders app-faithfully in the existing `HtmlReportView` iframe — byte
-faithful, XSS-safe, zero new dependency. Rich markdown rendering (headings,
-lists, ...) is a deliberately deferred follow-up, not this ticket.
+Chat outputs are markdown, and `reports.html` is stored and read RAW —
+verbatim `content`, no wrapping, no escaping. This capture writes the ONE
+skill id (`_SAVED_CHAT_SKILL`) every reader routes on to render it
+correctly:
+
+  - `web/app/components/shared/ReportsTab.tsx` and
+    `web/app/r/PublicReportViewer.tsx` (the in-app and the public `/r/<token>`
+    viewers) both check `skill == "saved-chat"` and, when true, render the
+    stored text as markdown via `SavedChatMarkdown`
+    (`<ReactMarkdown remarkPlugins={[remarkGfm]}>`, no `rehype-raw`) instead
+    of handing it to `HtmlReportView`'s sandboxed iframe, which expects a
+    real HTML document.
+  - XSS safety lives at that render boundary, not here: react-markdown
+    without `rehype-raw` never executes embedded HTML — a `<script>` in the
+    stored markdown prints as inert text — so storage does not need to
+    escape or wrap anything (v1's `_wrap_as_report_html` HTML-escaped-`<pre>`
+    bridge is retired; this module now writes exactly what the user saved).
+
+Every OTHER report (VoC, competitive-intelligence, ...) is still a
+self-contained HTML document from `report_capture.capture_report`, and
+still renders through `HtmlReportView` unchanged — this module only ever
+writes the one `saved-chat` skill.
 """
 from __future__ import annotations
-
-import html
 
 _TITLE_MAX = 200  # matches report_capture._TITLE_MAX
 
 # The skill id this capture path badges every saved chat output with —
 # `humanize_label("saved-chat")` renders it as the "Saved chat" badge on
 # the artifacts list, distinguishing a user-saved item from a
-# pipeline-generated report (voice-of-customer-report, etc).
+# pipeline-generated report (voice-of-customer-report, etc), and is the
+# discriminator every reader (`ReportsTab.tsx`, `PublicReportViewer.tsx`)
+# checks to render markdown instead of the HTML-document iframe.
 _SAVED_CHAT_SKILL = "saved-chat"
-
-_SAVED_CHAT_STYLE = (
-    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
-    "margin:0;padding:2rem;color:#1a1a1a;background:#fff}"
-    ".saved-chat{max-width:760px;margin:0 auto}"
-    ".saved-chat h1{font-size:1.5rem;margin:0 0 1rem}"
-    ".saved-chat-body{white-space:pre-wrap;word-wrap:break-word;"
-    "font-family:inherit;font-size:1rem;line-height:1.6}"
-)
 
 
 def _derive_title(content: str, explicit: str | None) -> str:
@@ -57,26 +62,6 @@ def _derive_title(content: str, explicit: str | None) -> str:
     return "Saved from chat"
 
 
-def _wrap_as_report_html(title: str, body: str) -> str:
-    """A self-contained HTML document wrapping `body` — starts with
-    `<!doctype html` so `report_capture.looks_like_html_report()` matches
-    and `HtmlReportView` renders it. `title` and `body` are both
-    `html.escape`'d: `body` is preserved verbatim (byte-faithful, no
-    markdown rendering) inside a `<pre>`, so a `<script>` in the saved
-    content is stored and rendered as inert escaped text, never a live
-    tag."""
-    escaped_title = html.escape(title)
-    escaped_body = html.escape(body)
-    return (
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        f"<title>{escaped_title}</title>"
-        f"<style>{_SAVED_CHAT_STYLE}</style></head><body>"
-        f'<article class="saved-chat"><h1>{escaped_title}</h1>'
-        f'<pre class="saved-chat-body">{escaped_body}</pre></article>'
-        "</body></html>"
-    )
-
-
 def save_chat_output_as_report(
     *,
     content: str,
@@ -88,11 +73,14 @@ def save_chat_output_as_report(
     """Persist `content` (a chat output) as a `reports` row and return its
     id, or `None` when the insert yielded no row.
 
-    NOT best-effort: this is a user-initiated save, so a raised DB error
-    is left to propagate (the route surfaces it as a 500) rather than
-    swallowed. `ask_id` is deliberately never set — this capture has no
-    originating ask — so the `reports_ask_id_uniq` partial unique index
-    (which excludes NULL `ask_id`) never collides across saved-chat rows.
+    `content` is stored VERBATIM in `reports.html` — raw markdown, not an
+    HTML document (see the module docstring for why that's safe: rendering,
+    not storage, is where XSS is prevented for this skill). NOT best-effort:
+    this is a user-initiated save, so a raised DB error is left to propagate
+    (the route surfaces it as a 500) rather than swallowed. `ask_id` is
+    deliberately never set — this capture has no originating ask — so the
+    `reports_ask_id_uniq` partial unique index (which excludes NULL `ask_id`)
+    never collides across saved-chat rows.
     """
     doc_title = _derive_title(content, title)
 
@@ -102,7 +90,7 @@ def save_chat_output_as_report(
         company_id,
         skill=_SAVED_CHAT_SKILL,
         title=doc_title,
-        html=_wrap_as_report_html(doc_title, content),
+        html=content,
         workspace_id=workspace_id,
         conversation_id=conversation_id,
     )

@@ -5,6 +5,11 @@ Sibling of `test_report_capture.py`, but a DIFFERENT failure contract: this
 capture is user-initiated (not best-effort), so nothing here is swallowed —
 `save_chat_output_as_report` lets a DB error propagate and returns whatever
 `save_report` returns (including `None`) rather than catching and hiding it.
+
+Storage is RAW markdown (`reports.html` holds `content` verbatim) — no
+HTML-escaped-`<pre>` wrapper. XSS safety for this skill lives at the
+FRONTEND render boundary (`SavedChatMarkdown`, react-markdown without
+rehype-raw), not here; see the module docstring.
 """
 from __future__ import annotations
 
@@ -45,10 +50,20 @@ def test_save_chat_output_persists_report(monkeypatch):
     assert seen["conversation_id"] == 9
     assert seen["skill"] == "saved-chat"
     assert seen.get("ask_id") is None
-    assert seen["html"].startswith("<!doctype html")
-    # Escaped, not a live tag.
-    assert "<script>" not in seen["html"]
-    assert "Prioritization" in seen["html"]
+    # Stored VERBATIM — raw markdown, not an HTML document.
+    assert seen["html"] == "## Prioritization\n\n- Ship A first\n- Then B"
+
+
+def test_save_chat_output_stores_content_verbatim_including_raw_tags(monkeypatch):
+    """No escaping, no wrapping — storage is a pass-through. A `<script>` in
+    the saved content survives byte-for-byte; the frontend's react-markdown
+    render (without rehype-raw) is what keeps it inert, not this module."""
+    seen = _patch_save(monkeypatch, result=1)
+    content = "before <script>alert(1)</script> after"
+
+    pac.save_chat_output_as_report(content=content, company_id="c1")
+
+    assert seen["html"] == content
 
 
 def test_save_chat_output_returns_none_when_save_yields_no_row(monkeypatch):
@@ -87,18 +102,3 @@ def test_derive_title_explicit_then_firstline_then_fallback():
 
     long_first_line = "#" + ("y" * 250)
     assert len(pac._derive_title(long_first_line, None)) == 200
-
-
-# ─── _wrap_as_report_html ──────────────────────────────────────────────────
-
-
-def test_wrapped_html_is_self_contained_and_escaped():
-    from app.report_capture import looks_like_html_report
-
-    html_doc = pac._wrap_as_report_html("A title", "before <script>x</script> after")
-
-    assert html_doc.startswith("<!doctype html")
-    assert looks_like_html_report(html_doc) is True
-    assert "<script>x</script>" not in html_doc
-    assert "&lt;script&gt;x&lt;/script&gt;" in html_doc
-    assert "A title" in html_doc

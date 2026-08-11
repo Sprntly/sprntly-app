@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useContent } from "../../context/ContentContext"
 import { useNavigation } from "../../context/NavigationContext"
 import { HtmlReportView } from "./HtmlReportView"
+import { SavedChatMarkdown } from "./SavedChatMarkdown"
 import { ReportShareMenu } from "./ReportShareMenu"
 import { EmptyPane } from "./EmptyPane"
 import { IconArrowLeft } from "@tabler/icons-react"
@@ -218,7 +219,15 @@ export function ReportsTab({
             />
           </div>
         )}
-        {doc && <HtmlReportView html={doc.html} title={title} fitPanel />}
+        {doc && (
+          // "saved-chat" is the ONE skill whose `html` column holds raw
+          // markdown rather than a self-contained document — see
+          // `project_artifact_capture.py`. Every other report keeps
+          // rendering exactly as before, in the sandboxed iframe.
+          doc.skill === "saved-chat"
+            ? <SavedChatMarkdown markdown={doc.html} />
+            : <HtmlReportView html={doc.html} title={title} fitPanel />
+        )}
       </div>
     )
   }

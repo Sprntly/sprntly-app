@@ -5001,6 +5001,10 @@ export type PublicReport = {
   title: string
   /** Humanised report kind, e.g. "Voice of customer report". */
   kind: string
+  /** Raw skill id — the render-mode discriminator: `"saved-chat"` means
+   *  `html` is raw markdown (render with SavedChatMarkdown); anything else
+   *  is a self-contained HTML document (render with HtmlReportView). */
+  skill: string
   html: string
   created_at: string | null
 }

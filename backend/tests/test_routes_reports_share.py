@@ -232,11 +232,32 @@ def test_public_projection_leaks_nothing_internal(isolated_settings, monkeypatch
     token = _share(ctx, rid, "public")
 
     body = ctx.client.get(f"/v1/public/reports/{token}").json()
-    # Exactly four fields — widening this set widens what a stranger can see.
-    assert set(body) == {"title", "kind", "html", "created_at"}
+    # Exactly five fields — widening this set widens what a stranger can see.
+    # `skill` (added alongside `kind`) is the raw skill id, not a secret: the
+    # viewer needs it as a render-mode DISCRIMINATOR (saved-chat markdown vs.
+    # HTML-document iframe), and `kind` already discloses its humanised form.
+    assert set(body) == {"title", "kind", "skill", "html", "created_at"}
     for leaked in ("id", "company_id", "workspace_id", "question",
                    "conversation_id", "prd_id", "share_token", "share_passcode_hash"):
         assert leaked not in body
+
+
+def test_public_projection_carries_the_saved_chat_discriminator(isolated_settings, monkeypatch):
+    """A saved-chat report's `html` holds raw markdown, not a document — the
+    public viewer needs `skill` to know to render it that way."""
+    ctx = company_client(monkeypatch)
+    rid = _seed_report(
+        company_id=ctx.company_id,
+        html="## Prioritization\n\n- Ship A first",
+    )
+    from app.db.client import require_client
+    require_client().table("reports").update({"skill": "saved-chat"}).eq("id", rid).execute()
+    token = _share(ctx, rid, "public")
+
+    body = ctx.client.get(f"/v1/public/reports/{token}").json()
+    assert body["skill"] == "saved-chat"
+    assert body["kind"] == "Saved chat"
+    assert body["html"] == "## Prioritization\n\n- Ship A first"
 
 
 def test_unknown_token_404s(isolated_settings, monkeypatch):

@@ -796,7 +796,9 @@ def test_from_chat_creates_report_and_ref(isolated_settings, monkeypatch):
     assert reports[0]["company_id"] == ctx.company_id
     assert reports[0]["workspace_id"] == ws_id
     assert reports[0]["ask_id"] is None
-    assert reports[0]["html"].startswith("<!doctype html")
+    # Stored verbatim — raw markdown, not an HTML document (rendered by the
+    # frontend's SavedChatMarkdown, routed on skill=="saved-chat").
+    assert reports[0]["html"] == "## Prioritization\n\n- Ship A first"
 
     refs = _artifact_refs(project["id"])
     assert [(ref["artifact_type"], ref["artifact_id"]) for ref in refs] == [("report", report_id)]
