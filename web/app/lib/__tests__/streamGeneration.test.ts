@@ -176,6 +176,60 @@ describe("subscribeToGenerationStream", () => {
     expect(seen).toEqual(["live text", "live text continues"])
   })
 
+  it("drops the accumulator on a restart frame (markdown has no doctype to spot)", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "The top theme is per" })
+    // Gateway retry mid-answer: attempt 2 re-emits the answer from zero. A chat
+    // answer is plain markdown, so the doctype heuristic can never see this —
+    // without the restart frame the preview reads "…per" + the whole answer.
+    es.emit({ kind: "restart" })
+    es.emit({ kind: "delta", text: "The top theme is " })
+    es.emit({ kind: "delta", text: "performance." })
+    expect(seen[seen.length - 1]).toBe("The top theme is performance.")
+    // No snapshot ever shows the two attempts glued together.
+    expect(seen.filter((s) => s.includes("perThe top theme"))).toEqual([])
+  })
+
+  it("renders no blank frame on restart — the preview holds until attempt 2 lands", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "partial" })
+    es.emit({ kind: "restart" })
+    // A restart is not itself display-worthy: blanking the panel for the gap
+    // before attempt 2's first delta would be a visible flash.
+    expect(seen).toEqual(["partial"])
+  })
+
+  it("ignores an unknown frame kind without throwing or disturbing the accumulator", async () => {
+    const seen: string[] = []
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    subscribeToGenerationStream(() => "http://api.test/s", {
+      onDelta: (f) => seen.push(f),
+      onDone,
+      onError,
+    })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "one " })
+    // Backend and frontend do not deploy together: a frame kind this build has
+    // never heard of must be a no-op, never an error and never a lost stream.
+    es.emit({ kind: "some-future-kind", text: "ignore me" })
+    es.emit({ kind: "phase", label: "writing" })
+    es.emit({ kind: "delta", text: "two" })
+    expect(seen).toEqual(["one ", "one two"])
+    expect(onError).not.toHaveBeenCalled()
+    expect(onDone).not.toHaveBeenCalled()
+  })
+
   it("cleanup before the token resolves never opens a stream", async () => {
     const stop = subscribeToGenerationStream(() => "http://api.test/s", { onDelta: () => {} })
     stop() // closed while getAccessToken() is still pending

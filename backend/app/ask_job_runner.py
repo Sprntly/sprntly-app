@@ -91,9 +91,16 @@ def _run_sync(
     # by GET /v1/ask/{id}/stream). Display only — the persisted job row the
     # client polls stays the authoritative answer, so the non-streamable paths
     # (reports, tool loops) simply publish nothing.
-    extractor = AnswerFieldExtractor(
-        token_stream.delta_sink(loop, ask_channel(ask_id))
-    )
+    #
+    # The extractor's `on_restart` is the sink's own `reset`: when the gateway
+    # retries mid-stream the answer is re-emitted from zero, and rewinding only
+    # the JSON parse state would leave attempt 1's markdown sitting in the
+    # channel's replay buffer and in the browser's accumulator for attempt 2 to
+    # be appended to. Chat answers are plain markdown, so the frontend's
+    # `<!doctype` restart heuristic — which covers the HTML generations — never
+    # fires for them; this is the explicit signal that does.
+    sink = token_stream.delta_sink(loop, ask_channel(ask_id))
+    extractor = AnswerFieldExtractor(sink, on_restart=getattr(sink, "reset", None))
     # `qa_agent.answer()` has no conversation_id/user_id parameter — and
     # keeping it that way is the point (see app.ask_runner.set_active_conversation
     # for the full rationale: threading either through answer() ->

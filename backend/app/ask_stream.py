@@ -43,17 +43,45 @@ class AnswerFieldExtractor:
     retry layer calls it when a transient mid-stream failure restarts the
     generation from zero (the re-emitted text is advisory; the client's poll
     renders the authoritative final answer either way).
+
+    `on_restart` (optional) is called by `reset()` — NOT by construction — so
+    the sink's owner learns that everything emitted so far is about to be
+    superseded. Rewinding only the parse state is not enough: whoever is
+    accumulating the decoded text downstream (the token_stream replay buffer,
+    the browser's accumulator) would otherwise glue attempt 2 onto attempt 1
+    and show both. Callback failures are swallowed — this whole path is
+    advisory display.
     """
 
-    def __init__(self, sink: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        sink: Callable[[str], None],
+        on_restart: Callable[[], None] | None = None,
+    ) -> None:
         self._sink = sink
-        self.reset()
+        self._on_restart = on_restart
+        self._reset_state()
 
-    def reset(self) -> None:
+    def _reset_state(self) -> None:
         self._seek_buf = ""      # accumulated prefix while hunting for the key
         self._state = "seek"     # seek | in_string | done
         self._carry = ""         # incomplete escape tail (starts with "\")
         self._pending_high = 0   # decoded high surrogate awaiting its pair
+
+    def reset(self) -> None:
+        """Rewind the parse state and announce the restart downstream.
+
+        Split from `_reset_state` so construction sets up the initial state
+        WITHOUT firing `on_restart`: a restart frame published before the
+        generation has emitted anything would be a claim about text that never
+        existed.
+        """
+        self._reset_state()
+        if self._on_restart is not None:
+            try:
+                self._on_restart()
+            except Exception:  # noqa: BLE001 — display only, never break the answer
+                pass
 
     # The extractor object IS the stream callback (passed as `on_delta`), so the
     # retry layer can reach `reset()` on it when a transient failure restarts
