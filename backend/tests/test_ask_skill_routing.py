@@ -105,11 +105,23 @@ def test_ask_company_research_reaches_the_dedicated_pipeline(
     answer — the generic path would answer from a KG that, for a company this
     ask is typically made by, is still empty. Pins the whole wire: the regex
     fast-path in skill_router → qa_agent's dispatch branch → company_research.
+
+    The wire pinned here is the UNPLANNED one. Every unpinned ask is now
+    planned first (`ask_planner.plan_for_answer` in the job runner), and on a
+    planned turn the plan — not this ladder — names the pipeline; the planned
+    company-research dispatch is locked by test_ask_planner.py. This ladder is
+    what a planner outage degrades to, so the planner is stubbed to decline
+    (None), exactly its contract on any failure. Without that stub the
+    router-shaped gateway patch below double-books as the PLANNER's reply,
+    which tolerant parsing reads as "generic answer" — and the turn never
+    reaches routing at all.
     """
+    import app.ask_planner as ap
     import app.company_research as cr
 
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    monkeypatch.setattr(ap, "plan_for_answer", lambda **k: None)
 
     calls: list[dict] = []
 

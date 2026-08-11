@@ -1034,6 +1034,14 @@ def test_the_planner_never_reaches_routes_own_decision(monkeypatch):
         qa, "compose_ask_answer",
         lambda *a, **k: {"answer": "the direct answer", "citations": []},
     )
+    # The question below reads as voice-of-customer, and `answer` now intercepts
+    # VoC phrasings BEFORE routing when the company has a call source
+    # (deb84013 — "customer feedback" goes to our own customers, not Reddit).
+    # That gate probes the connections table for a Fireflies key, which this
+    # unit test has no fake DB for. No call source → the interception declines
+    # and the question reaches `route()`, which is the subject under test.
+    import app.call_digest as cd
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: False)
     calls: list = []
     real_route = qa.route
     monkeypatch.setattr(
