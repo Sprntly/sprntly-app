@@ -19,7 +19,7 @@ exists yet — it never calls an LLM.
 """
 from __future__ import annotations
 
-from app.db.client import require_client, retry_on_disconnect
+from app.db.client import require_client, retry_on_disconnect, utc_now
 
 
 @retry_on_disconnect
@@ -90,6 +90,47 @@ def add_agent_promoted_entry(
     )
     _flip_summary_stale(client, project_id)
     return row
+
+
+@retry_on_disconnect
+def update_agent_promoted_entry(
+    project_id: int, entry_id: int, *, body: str, source_conversation_id: int
+) -> dict | None:
+    """Revise an EXISTING agent-promoted entry in place — the semantic-dedup
+    "update" branch's own write (`app/project_memory.py::maybe_promote_turn`'s
+    third outcome, alongside the unchanged skip/new paths). Scoped to
+    `(id, project_id, promoted_by='agent')` in the WHERE clause itself, so
+    this can NEVER touch a user-authored row (`author_user_id` set,
+    `promoted_by` NULL) even if the caller mis-targets one — the guardrail
+    lives in the query, not only in the caller's own check. Touches
+    `updated_at` explicitly (this table has no update trigger for it, unlike
+    `connections`/`workspaces`) so the revised entry surfaces first in
+    `list_entries`'s recency order and in `get_latest_insight`. Flips
+    summary `stale`, same as the other writers below. Never calls an LLM.
+    Returns None (no raise) when no row matched the scoped WHERE — the
+    caller treats that as a fail-safe skip rather than trusting an
+    unvalidated target_entry_id."""
+    client = require_client()
+    rows = (
+        client.table("project_memory_entries")
+        .update(
+            {
+                "body": body,
+                "source_conversation_id": source_conversation_id,
+                "updated_at": utc_now(),
+            }
+        )
+        .eq("id", entry_id)
+        .eq("project_id", project_id)
+        .eq("promoted_by", "agent")
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return None
+    _flip_summary_stale(client, project_id)
+    return rows[0]
 
 
 @retry_on_disconnect

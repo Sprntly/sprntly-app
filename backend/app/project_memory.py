@@ -221,38 +221,93 @@ def schedule_regen(project_id: int) -> None:
 #
 # After the group agent replies (`routes/projects.py::_respond_as_group_agent`),
 # `maybe_promote_turn` runs ONE bounded classifier call over the clamped
-# transcript the caller already built and decides whether the exchange holds
-# a durable, project-relevant insight worth persisting. A promotion failure
-# — classifier or DB — must never affect the chat turn that triggered it,
-# which already persisted before this runs; every path below returns None
-# rather than raising.
+# transcript the caller already built PLUS the project's existing memory
+# entries, and decides whether the exchange holds a durable, project-relevant
+# insight worth persisting — and, if so, whether it is genuinely new or a
+# semantic near-duplicate/revision of something already recorded. A
+# promotion failure — classifier or DB — must never affect the chat turn
+# that triggered it, which already persisted before this runs; every path
+# below returns None rather than raising.
+#
+# v1 dedup was case-insensitive EXACT-STRING match against existing entry
+# bodies (`_is_duplicate_insight`, since removed). That bar missed
+# near-duplicates by construction: a trivial follow-up turn ("thanks!")
+# about a fact still inside the classifier's OWN clamped transcript window
+# got re-summarized in slightly different words and re-promoted as a new
+# row, because the classifier never saw what memory already held. This
+# feeds the existing entries into the SAME call the classifier already
+# makes (still one LLM call) so the model can compare candidate-vs-memory
+# by MEANING, not by string equality.
 
 _PROMOTE_SYSTEM = """You read a short excerpt of a project team's group \
-chat — including Sprntly's own last reply — and decide whether it contains \
-a DURABLE, project-relevant insight worth remembering for teammates who \
-were not in this conversation.
+chat — including Sprntly's own last reply — plus the project's EXISTING \
+memory entries recorded so far. Decide whether the exchange holds a \
+DURABLE, project-relevant insight worth remembering for teammates who were \
+not in this conversation, and if so, how it relates to what is already \
+recorded.
 
 Promote ONLY a decision, guardrail, constraint, or durable fact the team \
 has actually settled on. Never promote small talk, greetings, \
 acknowledgements ("thanks", "sounds good", "got it"), plain questions with \
 no answer yet, or ephemeral status updates ("still looking into it", \
-"will check tomorrow").
+"will check tomorrow") — for these, set action to "none".
 
-When `should_promote` is true, write `insight` as a SUMMARIZED one-to-two \
+Each existing entry is tagged with its source: "agent" (something Sprntly \
+itself recorded previously) or "user" (something a teammate typed by \
+hand). Choose exactly one action:
+
+- "none": nothing durable is present in this excerpt at all.
+- "duplicate": the excerpt holds a durable insight, but it is ALREADY \
+substantively captured by an existing entry — same meaning, even if worded \
+differently — whether that entry's source is "agent" or "user". Do not \
+create or touch anything.
+- "update": the excerpt REVISES or EXTENDS an entry Sprntly itself \
+previously recorded (source="agent") — set target_entry_id to that \
+entry's id and write the FULL revised body. You may only target an \
+"agent" entry; if the excerpt instead relates to a "user" entry, treat \
+that as "duplicate" — a teammate already captured it in their own words, \
+and the agent must never overwrite a teammate's entry.
+- "new": the excerpt is a genuinely new durable fact not covered by \
+anything above.
+
+When action is "new" or "update", write `body` as a SUMMARIZED one-to-two \
 sentence statement of the durable fact in your own words — never copy a \
-transcript line verbatim. When nothing durable is present, set \
-`should_promote` to false and leave `insight` empty.
+transcript line verbatim. For "none" or "duplicate", leave `body` empty \
+and `target_entry_id` null. For "new", leave `target_entry_id` null.
 """
 
 _PROMOTE_SCHEMA = {
     "type": "object",
     "properties": {
-        "should_promote": {"type": "boolean"},
-        "insight": {"type": "string"},
+        "action": {"type": "string", "enum": ["new", "duplicate", "update", "none"]},
+        "target_entry_id": {"type": ["integer", "null"]},
+        "body": {"type": "string"},
     },
-    "required": ["should_promote", "insight"],
+    "required": ["action", "target_entry_id", "body"],
     "additionalProperties": False,
 }
+
+
+def _render_existing_entries(entries: list[dict]) -> str:
+    """Existing project memory, tagged with id + provenance, fed alongside
+    the candidate transcript so the classifier can compare by MEANING
+    against real rows — the fix for the exact-string dedup gap. Clipped to
+    the same content cap as `_render_entries` above."""
+    if not entries:
+        return "(none)"
+    lines = [
+        f"- id={entry['id']} source={'agent' if entry.get('promoted_by') == 'agent' else 'user'}: "
+        f"{entry.get('body', '')}"
+        for entry in entries
+    ]
+    return _clip("\n".join(lines))
+
+
+def _render_promotion_user(transcript: str, entries: list[dict]) -> str:
+    return (
+        f"Existing project memory entries:\n{_render_existing_entries(entries)}\n\n"
+        f"New excerpt to consider:\n{transcript}"
+    )
 
 
 def _log_promotion_run(*, project_id: int, conversation_id: int, meta: dict,
@@ -274,32 +329,38 @@ def _log_promotion_run(*, project_id: int, conversation_id: int, meta: dict,
         logger.warning("memory_promotion_cost_log_failed project_id=%s", project_id)
 
 
-def _is_duplicate_insight(project_id: int, insight: str) -> bool:
-    """Case-insensitive exact-body match against the project's existing
-    entries — the chosen v1 idempotency bar (no embeddings, no new deps), so
-    a repeated theme across turns doesn't stack duplicate rows."""
-    normalized = insight.strip().casefold()
-    return any(
-        str(entry.get("body", "")).strip().casefold() == normalized
-        for entry in memory_db.list_entries(project_id)
-    )
-
-
 def maybe_promote_turn(project_id: int, conversation_id: int, transcript: str) -> dict | None:
     """Best-effort classifier writer, called at the end of a group agent
     reply. Never raises (AD-P7): on ANY classifier or DB failure this
-    promotes nothing and returns None. On a genuine promotion, writes one
-    `promoted_by='agent'` entry via `add_agent_promoted_entry`, schedules a
-    summary regen (`schedule_regen` — the `stale` flip alone never
-    regenerates, since this write happens outside the HTTP memory
-    handlers), and returns the new row.
+    promotes nothing and returns None.
+
+    The classifier makes ONE bounded call that sees both the candidate
+    transcript AND the project's existing memory entries, and returns a
+    three-way decision (`action`):
+
+      - "none" / "duplicate": no row is created or touched — a semantic
+        near-duplicate of ANY existing entry (agent- or user-authored) is
+        treated the same as "nothing new to say" (AC: the "thanks!"
+        regression this replaces).
+      - "update": revises an existing AGENT-promoted entry in place via
+        `update_agent_promoted_entry` (never a user-authored one — the
+        classifier is instructed not to target one, and the DB helper's
+        own WHERE clause enforces it regardless of what the classifier
+        returns), then schedules a regen.
+      - "new": writes a fresh `promoted_by='agent'` entry via
+        `add_agent_promoted_entry`, then schedules a regen.
+
+    `schedule_regen` fires on both "update" and "new" — the `stale` flip
+    alone never regenerates, since this write happens outside the HTTP
+    memory handlers.
     """
     start = time.monotonic()
     meta: dict = {}
     try:
+        existing_entries = memory_db.list_entries(project_id)
         out = call_json(
             system=_PROMOTE_SYSTEM,
-            user=transcript,
+            user=_render_promotion_user(transcript, existing_entries),
             model=DEFAULT_MODEL,
             schema=_PROMOTE_SCHEMA,
             meta_out=meta,
@@ -315,22 +376,58 @@ def maybe_promote_turn(project_id: int, conversation_id: int, transcript: str) -
         )
         return None
 
-    # One cost line per classifier call, whether or not it decided to
-    # promote (AC9) — a decision not to promote still spent the tokens.
+    # One cost line per classifier call, whatever the decision (AC9) — a
+    # decision not to promote/update still spent the tokens.
     _log_promotion_run(
         project_id=project_id, conversation_id=conversation_id, meta=meta,
         start=start, status="complete",
     )
 
     try:
-        should_promote = bool(out.get("should_promote"))
-        insight = str(out.get("insight") or "").strip()
-        if not should_promote or not insight:
-            return None
-        if _is_duplicate_insight(project_id, insight):
-            return None
+        action = str(out.get("action") or "").strip().lower()
+        body = str(out.get("body") or "").strip()
+        target_entry_id = out.get("target_entry_id")
+
+        if action == "update":
+            if not body or target_entry_id is None:
+                return None  # malformed response — fail safe, skip
+            target = next(
+                (
+                    entry
+                    for entry in existing_entries
+                    if entry.get("id") == target_entry_id
+                    and entry.get("promoted_by") == "agent"
+                ),
+                None,
+            )
+            if target is None:
+                # Guardrail: never trust target_entry_id blindly — a
+                # hallucinated id or (despite the prompt) a user-authored
+                # one fails safe to skip rather than silently promoting.
+                logger.warning(
+                    "memory_promotion_update_target_invalid project_id=%s "
+                    "conversation_id=%s target_entry_id=%s",
+                    project_id, conversation_id, target_entry_id,
+                )
+                return None
+            updated = memory_db.update_agent_promoted_entry(
+                project_id, target_entry_id, body=body,
+                source_conversation_id=conversation_id,
+            )
+            if updated is None:
+                return None
+            logger.info(
+                "memory_entry_updated project_id=%s entry_id=%s source_conversation_id=%s",
+                project_id, updated["id"], conversation_id,
+            )
+            schedule_regen(project_id)
+            return updated
+
+        if action != "new" or not body:
+            return None  # "none" / "duplicate" / malformed — no row change
+
         entry = memory_db.add_agent_promoted_entry(
-            project_id, body=insight, source_conversation_id=conversation_id
+            project_id, body=body, source_conversation_id=conversation_id
         )
         logger.info(
             "memory_entry_promoted project_id=%s entry_id=%s source_conversation_id=%s",

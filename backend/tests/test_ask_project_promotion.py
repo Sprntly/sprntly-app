@@ -292,8 +292,9 @@ def test_individual_promoted_entry_editable(tenant_client, isolated_settings, mo
                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
             })
         return {
-            "should_promote": True,
-            "insight": "The team locked the API rate limit at 100 req/min per tenant.",
+            "action": "new",
+            "target_entry_id": None,
+            "body": "The team locked the API rate limit at 100 req/min per tenant.",
         }
 
     monkeypatch.setattr(pm, "call_json", fake_call_json)
@@ -561,8 +562,8 @@ def test_individual_project_ask_smalltalk_no_promotion(
     sb, fixture_ids, project_ids, conversation_ids, monkeypatch
 ):
     """(c) A completed individual project-chat ask whose exchange is
-    trivial/small-talk (real classifier decides should_promote=false)
-    writes no memory row."""
+    trivial/small-talk (real classifier decides action="none") writes no
+    memory row."""
     project = _make_project(sb, fixture_ids, project_ids, name="Live individual smalltalk")
     conv_id = _make_conversation(sb, fixture_ids, conversation_ids)
 

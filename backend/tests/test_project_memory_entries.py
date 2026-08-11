@@ -82,6 +82,140 @@ def test_delete_memory_entry_removes_row(isolated_settings, monkeypatch):
     assert rows == []
 
 
+# ── Agent-promoted entry update helper (the semantic-dedup "update"
+# branch's own write — direct unit coverage of `update_agent_promoted_
+# entry`, independent of the classifier wiring exercised in
+# `test_project_memory_promotion.py`) ─────────────────────────────────────
+
+
+def test_update_agent_promoted_entry_revises_body_and_touches_updated_at(
+    isolated_settings, monkeypatch
+):
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db
+
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+
+    entry = memory_db.add_agent_promoted_entry(
+        project["id"], body="Original agent fact.", source_conversation_id=conv["id"]
+    )
+
+    conv2 = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    updated = memory_db.update_agent_promoted_entry(
+        project["id"], entry["id"], body="Revised agent fact.",
+        source_conversation_id=conv2["id"],
+    )
+    assert updated is not None
+    assert updated["id"] == entry["id"]
+    assert updated["body"] == "Revised agent fact."
+    assert updated["promoted_by"] == "agent"
+    assert updated["source_conversation_id"] == conv2["id"]
+    assert updated["updated_at"] != entry["updated_at"], (
+        "updated_at must actually change — this table has no DB trigger for "
+        "it, so the helper itself must set it explicitly"
+    )
+
+    rows = memory_db.list_entries(project["id"])
+    assert len(rows) == 1, "update must never create a second row"
+
+
+def test_update_agent_promoted_entry_never_touches_user_entry(
+    isolated_settings, monkeypatch
+):
+    """The WHERE-clause guard itself (`promoted_by='agent'`), independent
+    of any caller-side check: calling the helper directly against a
+    user-authored entry's id must be a no-op, never a write."""
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db
+
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+
+    user_entry = memory_db.add_entry(
+        project["id"], body="Human-written guardrail.", author_user_id=ctx.user_id
+    )
+
+    result = memory_db.update_agent_promoted_entry(
+        project["id"], user_entry["id"], body="Agent tries to overwrite this.",
+        source_conversation_id=conv["id"],
+    )
+    assert result is None
+
+    row = (
+        memory_db.list_entries(project["id"])[0]
+    )
+    assert row["body"] == "Human-written guardrail."
+    assert row["author_user_id"] == ctx.user_id
+    assert row["promoted_by"] is None
+
+
+def test_update_agent_promoted_entry_scoped_to_project(isolated_settings, monkeypatch):
+    """Same isolation shape as `update_entry`/`delete_entry`: an entry_id
+    from another project must never be reachable through a different
+    project's id."""
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db
+
+    ctx = company_client(monkeypatch)
+    project_a = _create_project(ctx, name="Project A")
+    project_b = _create_project(ctx, name="Project B")
+    conv = conversations_db.create_group_chat(project_a["id"], ctx.user_id)
+
+    entry = memory_db.add_agent_promoted_entry(
+        project_a["id"], body="Belongs to A.", source_conversation_id=conv["id"]
+    )
+
+    result = memory_db.update_agent_promoted_entry(
+        project_b["id"], entry["id"], body="Hijacked from B.",
+        source_conversation_id=conv["id"],
+    )
+    assert result is None
+
+    row = memory_db.list_entries(project_a["id"])[0]
+    assert row["body"] == "Belongs to A."
+
+
+def test_update_agent_promoted_entry_flips_stale(isolated_settings, monkeypatch):
+    from app.db import conversations as conversations_db
+    from app.db import project_memory_entries as memory_db
+    from app.db.client import require_client
+
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    entry = memory_db.add_agent_promoted_entry(
+        project["id"], body="Original.", source_conversation_id=conv["id"]
+    )
+    # Seed an existing (non-stale) summary row, then confirm the update
+    # flips it back — mirrors `test_add_agent_promoted_entry_flips_stale`'s
+    # own seed-then-assert shape.
+    require_client().table("project_memory_summary").insert(
+        {
+            "project_id": project["id"],
+            "summary_md": "Existing summary.",
+            "entry_count": 1,
+            "stale": False,
+        }
+    ).execute()
+
+    memory_db.update_agent_promoted_entry(
+        project["id"], entry["id"], body="Revised.", source_conversation_id=conv["id"]
+    )
+
+    row = (
+        require_client()
+        .table("project_memory_summary")
+        .select("*")
+        .eq("project_id", project["id"])
+        .execute()
+        .data[0]
+    )
+    assert row["stale"] is True
+
+
 # ── Isolation (mutation-proofed: an entry from another project must never
 # be reachable through a different project's id) ────────────────────────
 
