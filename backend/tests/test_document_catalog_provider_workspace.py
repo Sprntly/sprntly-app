@@ -177,9 +177,7 @@ def test_team_id_from_config_yields_none_rather_than_a_wrong_value(config):
     assert team_id_from_config(config) is None
 
 
-def test_sync_slack_hands_the_extractor_the_stored_team_id(
-    isolated_settings, monkeypatch
-):
+def test_sync_slack_hands_the_extractor_the_stored_team_id(catalog, monkeypatch):
     """END TO END THROUGH THE REAL `sync_slack`, because nothing else crosses it.
 
     Every other test here injects `team_id=` into `register_slack_catalog`
@@ -212,59 +210,129 @@ def test_sync_slack_hands_the_extractor_the_stored_team_id(
     monkeypatch.setattr(slack_sync, "_update_sync_status", lambda *a, **k: None)
 
     # The seam. `sync_slack` imports this INSIDE the function, so patching the
-    # module attribute is what the local import will resolve at call time.
+    # module attribute is what the local import resolves at call time.
+    #
+    # The stub runs the REAL `register_slack_catalog` synchronously instead of
+    # merely capturing the kwargs. Stopping at the kwargs would leave the last
+    # hop — kickoff -> registration -> stored column — uncrossed, which is the
+    # same "the gap moved one function to the left" mistake this test exists
+    # to avoid. Synchronous, not the daemon thread, so the assertion cannot
+    # race the write.
     import app.kg_ingest.slack_extract as se
 
     monkeypatch.setattr(
         se, "kickoff_slack_extract",
-        lambda cid, docs, **kw: (seen.update(kw), True)[1],
+        lambda cid, docs, **kw: (
+            seen.update(kw), se.register_slack_catalog(cid, docs, **kw), True
+        )[-1],
     )
 
-    slack_sync.sync_slack("ds-team-id", company_id="co-sync")
+    slack_sync.sync_slack("ds-team-id", company_id=catalog["cid"])
 
     assert seen, "sync_slack never reached the extraction kickoff"
-    assert seen["team_id"] == "T123", (
-        f"the workspace id reaching the extractor was {seen['team_id']!r}. It "
-        "must be config['team']['id'] — not team.name ('Acme'), not "
-        "team.domain / the permalink subdomain ('acme'), not an API result"
+
+    stored = _row(catalog, "C1")["provider_workspace_id"]
+    assert stored == "T123", (
+        f"the workspace id STORED ON THE CATALOG ROW was {stored!r}. It must "
+        "be config['team']['id'] — not team.name ('Acme'), not team.domain / "
+        "the permalink subdomain ('acme'), not a fetch_team_info result. A "
+        "display name here matches nothing in connections.config.team.id, so "
+        "the disconnect rule would treat every Slack document as an orphan."
     )
-    assert seen["team_domain"] == "acme"
-    assert seen["team_id"] != seen["team_domain"]
+    # The distractors were genuinely present and genuinely different, so the
+    # assertion above cannot have passed by two values coinciding.
+    assert _REAL_CONFIG["team"]["name"] != "T123"
+    assert _REAL_CONFIG["team"]["domain"] != "T123"
+    assert seen["team_domain"] == "acme" != stored
 
 
 # ═════════════ 2. A promoted personal install keeps its catalog ════════════
 
 
+def _seed_slack_connection(db, company_id, *, user_id, config, created_at):
+    db.table("connections").insert({
+        "id": f"conn-{user_id}",
+        "company_id": company_id,
+        "user_id": user_id,
+        "provider": "slack",
+        "status": "active",
+        "scopes": "",
+        "token_json_encrypted": "enc",
+        "config": config,
+        "created_at": created_at,
+        "updated_at": created_at,
+    }).execute()
+
+
 def test_a_promoted_personal_install_keeps_the_same_workspace_id(catalog):
     """THE HAZARD #1119 REFUSED TO GUESS AT.
 
-    A Slack row can be a personal install that is later promoted to serve the
-    whole company, so purging a catalog when "the" connection goes away could
-    delete one that is still live. Keying on the WORKSPACE rather than on the
-    connection row makes that safe by construction: both installs into one
-    workspace carry the same team id, so a company that still has any active
-    connection to that workspace still matches every row it wrote.
+    A Slack row can be a personal install later promoted to serve the whole
+    company, so purging a catalog when "the" connection goes away could delete
+    one that is still live. Keying on the WORKSPACE rather than on the
+    connection row makes that safe by construction.
 
-    Registration under the promoted install must therefore be a no-op on this
-    column, not a rewrite to some connection-specific value.
+    THIS TEST BUILDS THE SCENARIO ITS NAME CLAIMS. An earlier version did not:
+    it called `register_slack_catalog` twice with the same `team_id` and
+    asserted the value had not changed, which constructs no second install, no
+    promotion, and no connection rows at all — it re-pinned "the argument I
+    passed is the value I got back", and it survived every mutation only by
+    hiding behind siblings that did the real work.
+
+    So: TWO active per-user installs into ONE workspace, exactly as the
+    promotion case has, with different selections so `resolve_company_slack_row`
+    genuinely has to choose. The invariant the disconnect rule depends on is
+    that the workspace id derived from EITHER row is the same — which is what
+    makes "does any active connection still serve this workspace?" answerable
+    without caring which connection was resolved.
     """
-    company = catalog["cid"]
-    slack_extract.register_slack_catalog(
-        company, [_doc(text="v1")], team_domain=_TEAM_DOMAIN, team_id=_TEAM_ID,
-    )
-    first = _row(catalog)["provider_workspace_id"]
+    from app.connectors.slack_company import resolve_company_slack_row, row_config
+    from app.connectors.slack_sync import team_id_from_config
 
-    # Same workspace, different connection row (a different user's install,
-    # now the one serving the company) — and a changed document, so this is a
-    # full re-registration rather than the no-op path.
-    slack_extract.register_slack_catalog(
-        company, [_doc(text="v2")], team_domain="renamed-domain", team_id=_TEAM_ID,
+    db, company = catalog["db"], catalog["cid"]
+    workspace = {"id": "T123", "name": "Acme", "domain": "acme"}
+
+    # The original personal install, no selection saved.
+    _seed_slack_connection(
+        db, company, user_id="u-first",
+        config={"team": dict(workspace)},
+        created_at="2026-08-01T00:00:00+00:00",
+    )
+    # A second member's install into the SAME workspace, later promoted by
+    # having the company's pull-channel selection saved against it.
+    _seed_slack_connection(
+        db, company, user_id="u-promoted",
+        config={"team": dict(workspace), "sync_channel_ids": ["C1"]},
+        created_at="2026-08-05T00:00:00+00:00",
     )
 
-    assert _row(catalog)["provider_workspace_id"] == first == _TEAM_ID, (
-        "a promoted install changed the row's workspace id — a disconnect rule "
-        "keyed on it would then delete a catalog that is still being served"
+    resolved = resolve_company_slack_row(company)
+    assert resolved is not None, "no company Slack row resolved"
+    assert resolved.get("user_id") == "u-promoted", (
+        "resolution did not pick the install carrying the selection — this "
+        "test is no longer exercising the promotion case"
     )
+
+    # The load-bearing property: whichever row is resolved, the workspace id
+    # is identical, so a disconnect of either install leaves the other still
+    # matching every catalog row written under it.
+    # Read through `db.list_slack_connections`, the same accessor
+    # `resolve_company_slack_row` uses — a raw select returns the jsonb
+    # `config` column without the legacy `config_json` key `row_config`
+    # reads, so it would silently yield {} for every row and the assertion
+    # would pass on two Nones being equal.
+    from app import db as app_db
+
+    derived = {
+        r["user_id"]: team_id_from_config(row_config(r))
+        for r in app_db.list_slack_connections(company)
+    }
+    assert derived == {"u-first": "T123", "u-promoted": "T123"}, (
+        f"the two installs derived different workspace ids ({derived}) — a "
+        "disconnect rule keyed on this would delete a catalog still served by "
+        "the surviving install"
+    )
+    assert team_id_from_config(row_config(resolved)) == "T123"
 
 
 def test_rows_from_two_workspaces_are_distinguishable(catalog):
@@ -303,6 +371,11 @@ def test_a_caller_without_a_team_id_cannot_clear_a_known_one(catalog):
     slack_extract.register_slack_catalog(
         company, [_doc(text="v1")], team_id=_TEAM_ID,
     )
+    # PRECONDITION, asserted rather than assumed: there is a known value to
+    # clear. Without this the test could pass on NULL == NULL if the first
+    # registration never stored anything.
+    assert _row(catalog)["provider_workspace_id"] == _TEAM_ID
+
     slack_extract.register_slack_catalog(
         company, [_doc(text="v2")], team_id=None,
     )
@@ -344,6 +417,10 @@ def test_the_no_op_fill_never_overwrites_a_different_workspace_id(catalog):
     slack_extract.register_slack_catalog(
         company, [_doc(text="same")], team_id="T_ORIGINAL",
     )
+    # PRECONDITION: a DIFFERENT value is already stored, so the second call is
+    # genuinely an overwrite attempt and not a fill.
+    assert _row(catalog)["provider_workspace_id"] == "T_ORIGINAL"
+
     slack_extract.register_slack_catalog(
         company, [_doc(text="same")], team_id="T_DIFFERENT",
     )
