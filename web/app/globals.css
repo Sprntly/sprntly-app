@@ -9706,15 +9706,16 @@
 
   /* Assistant “thinking” placeholder (POST in flight — skeleton + indeterminate bar) */
   /* ── The wait (`.cw-*`) ───────────────────────────────────────────────────
-     The chat waiting surface: status line, indeterminate bar, skeleton, pacing
-     notes and the terminal stopped/timed-out/failed states. Replaces
-     `.assistant-thinking*`, whose label line existed to type out one of ten
-     randomly-picked sentences. `.assistant-skel-line` below is deliberately
-     KEPT and reused — the onboarding ReviewStep shares its nth-child widths. */
+     The chat waiting surface: one typed status line, pacing notes and the
+     terminal stopped/timed-out/failed states. The indeterminate bar and the
+     skeleton lines are gone (owner redesign 2026-08-11) — the status line IS
+     the indicator now, typing each phrase out, holding it with a soft shimmer,
+     erasing and typing the next. `.assistant-skel-line` below is deliberately
+     KEPT — the onboarding ReviewStep shares its nth-child widths. */
   .cw {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     min-width: 0;
   }
 
@@ -9722,12 +9723,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 20px;
+    min-height: 18px;
   }
 
   .cw-orb {
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
     flex-shrink: 0;
     background: conic-gradient(from 0deg, var(--accent-2), var(--accent), var(--accent-2));
@@ -9738,7 +9739,7 @@
   .cw-orb::after {
     content: "";
     position: absolute;
-    inset: 3px;
+    inset: 2.5px;
     border-radius: 50%;
     background: var(--surface-2);
   }
@@ -9753,6 +9754,77 @@
     font-size: 12.5px;
     color: var(--ink-2);
     font-weight: 500;
+    min-width: 0;
+  }
+
+  .cw-phase-typed {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+  }
+
+  /* The caret rides the typed text: visible while a word is being typed or
+     erased, gone once the word settles (the shimmer takes over as the "alive"
+     signal — a caret parked on a finished word reads as a stall). */
+  .cw-caret {
+    width: 1.5px;
+    height: 13px;
+    margin-left: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+    animation: cw-caret-blink 0.9s steps(2, start) infinite;
+  }
+
+  .cw-phase-held .cw-caret {
+    opacity: 0;
+    animation: none;
+  }
+
+  @keyframes cw-caret-blink {
+    to {
+      opacity: 0;
+    }
+  }
+
+  /* A settled phrase shimmers softly — the same "still working" signal the bar
+     used to carry, now the width of the words instead of the panel. */
+  .cw-phase-held {
+    background: linear-gradient(
+      100deg,
+      var(--ink-2) 38%,
+      var(--accent-ink) 50%,
+      var(--ink-2) 62%
+    );
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: cw-shimmer 2s ease-in-out infinite;
+  }
+
+  @keyframes cw-shimmer {
+    0% {
+      background-position: 130% 0;
+    }
+
+    100% {
+      background-position: -70% 0;
+    }
+  }
+
+  /* The live region + what the tests read: the stable STATE line, visually
+     hidden. Standard clip pattern rather than display:none so screen readers
+     still announce it. */
+  .cw-phase-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .cw-skill {
@@ -9824,6 +9896,16 @@
     color: var(--ink);
   }
 
+  /* The inline Stop rides the status row itself now — small, quiet, and only
+     from rung 2, exactly as before. AFTER the base rule so its tighter metrics
+     win the cascade. */
+  .cw-btn--stop {
+    margin-left: 4px;
+    padding: 2.5px 9px;
+    font-size: 11.5px;
+    border-radius: 999px;
+  }
+
   .cw-btn--primary {
     border-color: var(--accent);
     background: var(--accent);
@@ -9867,52 +9949,6 @@
     padding-left: 12px;
   }
 
-  .cw-bar {
-    position: relative;
-    height: 3px;
-    border-radius: 999px;
-    background: var(--line);
-    overflow: hidden;
-  }
-
-  .cw-bar-pill {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: min(36%, 160px);
-    height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent-2), var(--accent));
-    animation: cw-bar-sweep 1.35s ease-in-out infinite;
-  }
-
-  @keyframes cw-bar-sweep {
-    0% {
-      left: -36%;
-      opacity: 0.85;
-    }
-
-    55% {
-      opacity: 1;
-    }
-
-    100% {
-      left: 100%;
-      opacity: 0.85;
-    }
-  }
-
-  .cw-skel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .cw--compact .cw-skel {
-    gap: 8px;
-  }
-
   .assistant-skel-line {
     position: relative;
     display: block;
@@ -9933,10 +9969,6 @@
         transparent 88%);
     transform: translateX(-55%);
     animation: assistant-skel-glide 1.2s ease-in-out infinite;
-  }
-
-  .cw--compact .assistant-skel-line {
-    height: 9px;
   }
 
   .assistant-skel-line:nth-child(1) {
@@ -10021,17 +10053,23 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    /* The orb stops, the cursor stops, and the bar parks mid-track rather than
-       sweeping — the wait still READS as indeterminate without any motion. */
-    .cw-bar-pill {
-      animation: none;
-      left: 12%;
-      width: 28%;
-      opacity: 1;
-    }
-
+    /* The orb stops, both carets stop, the shimmer stops. The typing itself is
+       already off — the component renders each line whole under this media
+       query — so what remains is a static, honest status line. */
     .cw-orb {
       animation: none;
+    }
+
+    .cw-caret {
+      animation: none;
+      opacity: 0.75;
+    }
+
+    .cw-phase-held {
+      animation: none;
+      background: none;
+      -webkit-text-fill-color: currentColor;
+      color: var(--ink-2);
     }
 
     .cw-cursor {

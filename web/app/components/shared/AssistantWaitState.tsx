@@ -3,45 +3,76 @@
 // The chat wait surface — everything a person sees between hitting send and
 // reading an answer.
 //
-// It replaces a 10-message pool that was picked at `Math.floor(Math.random() *
-// 10)` and rotated every 15s, so one user's 3-second answer opened on "Almost
-// there — shaping the answer…" while another's opened on "Double-checking the
-// facts…" when nothing had been checked. That violated the rule stated at the
-// top of `generationPhases.ts`: phase copy must describe work the job REALLY
-// does.
+// SHAPE (owner redesign, 2026-08-11): one small line — orb, a phase that TYPES
+// itself out, holds with a soft shimmer, erases, and types the next — plus the
+// pacing note and Stop from 10s. The indeterminate bar and the skeleton lines
+// that used to sit under the status are gone: they made the wait read as a
+// heavy block when the whole point of the status line is that ONE line carries
+// the state. (The bar's CSS went with it; `.assistant-skel-line` survives — the
+// onboarding ReviewStep shares it.)
 //
-// So every line below is defensible against an event we can observe:
+// The typed cycle is visual pacing, not new claims. The rotating lines are all
+// generically true of a job that is `generating` — which is the only state this
+// component mounts in — and the moment a REAL signal exists it takes over as a
+// fixed line and the cycle stops:
 //
 //   rung 0  0–400ms   nothing at all — under Cloudscape's 1s floor a spinner
 //                     only flickers, so the user bubble + agent head stand alone
-//   rung 1  0.4–10s   "Working on your question" — the job is `generating`,
-//                     which is always true while this component is mounted
-//   rung 2  10–30s    + note + inline Stop. NN/g's 10-second limit is where
-//                     attention leaves the task; that is where an escape hatch
-//                     earns its place, not before
-//   rung 3  30s+      + "you can leave" — the job genuinely survives navigation
-//                     and reload (jobResume persists ask_id per tab)
-//   rung 4  streaming "Writing the answer" — a `delta` frame provably arrived,
-//                     so the model is emitting answer text right now
-//   rung 5  dropped   "Finishing the answer" — the SSE preview errored while the
-//                     poll still reports `generating`
-//   rung 6  resumed   "Picking up where this left off" — resumeAskGeneration
-//                     re-attached to a persisted ask_id instead of POSTing
+//   rung 1  0.4–10s   the typed cycle, opening on "Working on your question"
+//   rung 2  10–30s    + pacing note + inline Stop. NN/g's 10-second limit is
+//                     where attention leaves the task; that is where an escape
+//                     hatch earns its place, not before
+//   fixed   streaming "Writing the answer" — a `delta` frame provably arrived
+//   fixed   dropped   "Finishing the answer" — SSE died, poll still `generating`
+//   fixed   resumed   "Picking up where this left off" — re-attached, not POSTed
+//   fixed   phase     the caller's own copy ("Summarizing what got built…")
 //
-// Where a line would need a signal we do not have — which leg of the agent is
-// running, or which skill the ROUTER picked — it degrades to the weaker line
-// that is still true rather than inventing one. Naming the router's skill and
-// naming the live leg both need backend work (a `routed_skill` column and SSE
-// phase frames); until that lands, the skill chip appears only for a
-// slash-invoked ask, where the trigger deterministically selects the skill.
+// Accessibility: the typed characters are aria-hidden garnish. A visually
+// hidden `.cw-phase-sr` span is the ONE live region, and it announces the
+// stable STATE line (the fixed phrase, or "Working on your question" while the
+// cycle plays) — per state change, never per keystroke and never per cycle
+// word. Tests read the same span, so they assert state, not animation frames.
+// Reduced motion: no typing, no shimmer — the current line renders whole.
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 // ── Copy ────────────────────────────────────────────────────────────────────
 export const WAIT_PHASE_WORKING = "Working on your question"
 export const WAIT_PHASE_WRITING = "Writing the answer"
 export const WAIT_PHASE_FINISHING = "Finishing the answer"
 export const WAIT_PHASE_RESUMED = "Picking up where this left off"
+
+/** The typed rotation while the only known state is "generating". It always
+ *  OPENS on the honest state line, then wanders through Claude-style spinner
+ *  words (owner request, 2026-08-11). The whimsy is deliberate honesty: a
+ *  single gerund claims nothing about which step is running, where the old
+ *  ten-sentence pool claimed steps that weren't. The pool is shuffled per ask
+ *  (see `cyclePool` below) so repeat askers don't watch the same loop. */
+export const WAIT_CYCLE_PHRASES: readonly string[] = [
+  WAIT_PHASE_WORKING,
+  "Thinking…",
+  "Processing…",
+  "Pondering…",
+  "Brewing…",
+  "Percolating…",
+  "Noodling…",
+  "Musing…",
+  "Simmering…",
+  "Frolicking…",
+  "Ruminating…",
+  "Connecting dots…",
+  "Synthesizing…",
+]
+
+/** The honest opener, then the whimsy in a fresh order each mount. */
+function shuffledCycle(): string[] {
+  const [opener, ...rest] = WAIT_CYCLE_PHRASES
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[rest[i], rest[j]] = [rest[j], rest[i]]
+  }
+  return [opener, ...rest]
+}
 
 export const WAIT_NOTE_GENERIC = "This one usually takes under a minute."
 export const WAIT_NOTE_LONG_SKILL =
@@ -68,6 +99,15 @@ export const WAIT_RUNG2_MS = 10_000
 export const WAIT_RUNG3_MS = 30_000
 const TICK_MS = 1000
 
+// Typewriter pacing. Erase runs ~2× type speed — the eye reads deletion as one
+// gesture, and a slow erase makes the cycle feel stuck rather than alive. The
+// hold is the pace that actually registers: 2.4s read as flickery in review
+// ("switching too fast" — owner, 2026-08-11), so a settled word now stays for
+// ~4.8s before it makes way.
+const TYPE_MS = 28
+const ERASE_MS = 14
+const HOLD_MS = 4800
+
 /** Skills whose slash-pinned ask legitimately runs for minutes, so the 10s note
  *  must not promise "under a minute". The competitive-intelligence report kicks
  *  off a staged web-research sweep (see `app/skill_router.py`, which narrows its
@@ -79,6 +119,73 @@ const LONG_RUNNING_SKILL_IDS: ReadonlySet<string> = new Set([
 /** True when a slash-pinned skill is one of the multi-minute research skills. */
 export function isLongRunningSkill(skillId: string | null | undefined): boolean {
   return !!skillId && LONG_RUNNING_SKILL_IDS.has(skillId)
+}
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+  )
+}
+
+/** Types `target` character by character; when `cycle` is on, holds the
+ *  finished line, erases it and advances `onAdvance` so the caller can hand
+ *  over the next one. A `target` change mid-word erases back to the shared
+ *  prefix and types forward — the same motion a person correcting themselves
+ *  makes, and it means a fixed phrase (streaming, dropped) takes the stage
+ *  without a hard cut. Reduced motion renders `target` whole immediately. */
+function useTypedPhrase(target: string, cycle: boolean, onAdvance: () => void) {
+  const [reduced] = useState(prefersReducedMotion)
+  const [typed, setTyped] = useState(() => (reduced ? target : ""))
+  const typedRef = useRef(typed)
+  const advanceRef = useRef(onAdvance)
+  advanceRef.current = onAdvance
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    if (reduced) {
+      typedRef.current = target
+      setTyped(target)
+      // The words still rotate — content change without motion is fine — the
+      // hold is just longer, since there is no typing time to absorb.
+      if (cycle) timer = setTimeout(() => advanceRef.current(), HOLD_MS + 1400)
+      return () => clearTimeout(timer)
+    }
+    let mode: "type" | "erase" = "type"
+    const tick = () => {
+      const cur = typedRef.current
+      if (mode === "type") {
+        if (cur === target) {
+          if (cycle) {
+            timer = setTimeout(() => {
+              mode = "erase"
+              tick()
+            }, HOLD_MS)
+          }
+          return
+        }
+        const forward = target.startsWith(cur)
+        const next = forward ? target.slice(0, cur.length + 1) : cur.slice(0, -1)
+        typedRef.current = next
+        setTyped(next)
+        timer = setTimeout(tick, forward ? TYPE_MS : ERASE_MS)
+        return
+      }
+      // erase to empty, then hand over
+      if (cur.length === 0) {
+        advanceRef.current()
+        return
+      }
+      const next = cur.slice(0, -1)
+      typedRef.current = next
+      setTyped(next)
+      timer = setTimeout(tick, ERASE_MS)
+    }
+    tick()
+    return () => clearTimeout(timer)
+  }, [target, cycle, reduced])
+
+  return { typed, settled: typed === target }
 }
 
 type Props = {
@@ -143,57 +250,74 @@ export function AssistantWaitState({
     return () => clearTimeout(id)
   }, [gatePassed, gateMs, start])
 
+  // A real signal fixes the line and stops the cycle; otherwise the cycle owns
+  // the stage. Priority mirrors the old phase resolution exactly.
+  const fixedPhrase = phase
+    ? phase
+    : streamDropped
+      ? WAIT_PHASE_FINISHING
+      : streaming
+        ? WAIT_PHASE_WRITING
+        : resumed
+          ? WAIT_PHASE_RESUMED
+          : null
+  const [cyclePool] = useState(shuffledCycle)
+  const [cycleIdx, setCycleIdx] = useState(0)
+  const targetPhrase = fixedPhrase ?? cyclePool[cycleIdx % cyclePool.length]
+  const { typed, settled } = useTypedPhrase(
+    targetPhrase,
+    fixedPhrase === null,
+    () => setCycleIdx((i) => i + 1),
+  )
+  // What the live region (and the tests) read: the STATE, not the animation.
+  const srLine = fixedPhrase ?? WAIT_PHASE_WORKING
+
   const elapsed = Math.max(0, now - start)
-  const phaseLine = useMemo(() => {
-    if (phase) return phase
-    if (streamDropped) return WAIT_PHASE_FINISHING
-    if (streaming) return WAIT_PHASE_WRITING
-    if (resumed) return WAIT_PHASE_RESUMED
-    return WAIT_PHASE_WORKING
-  }, [phase, resumed, streamDropped, streaming])
 
   // Rung 0 — nothing at all. The turn still carries aria-busy, so a screen
   // reader knows the surface is working even with no visible indicator.
   if (!gatePassed && !streaming && !children) return null
 
-  // Rung 2 onward: the pacing note, the third skeleton line and the inline Stop
-  // all start here. Once shown they STAY — including through the first streamed
-  // token, which is where the old surface yanked the whole status row away the
-  // instant `partial` arrived.
+  // Rung 2 onward: the pacing note and the inline Stop start here. Once shown
+  // they STAY — including through the first streamed token, which is where the
+  // old surface yanked the whole status row away the instant `partial` arrived.
   const pastRung2 = elapsed >= WAIT_RUNG2_MS
   const showStop = pastRung2 && !!onStop
-  const runningLong = elapsed >= WAIT_RUNG3_MS
 
   return (
     <div className={`cw${compact ? " cw--compact" : ""}`}>
       <div className="cw-status">
         <span className="cw-orb" aria-hidden />
-        {/* The single announcement point. Its text changes ONLY when the phase
-            changes, so a polite live region here announces per phase, not per
-            token. */}
-        <span className="cw-phase" role="status" aria-live="polite" aria-atomic="true">
-          {phaseLine}
+        <span className="cw-phase">
+          <span
+            className={`cw-phase-typed${settled ? " cw-phase-held" : ""}`}
+            aria-hidden
+          >
+            {typed}
+            <span className="cw-caret" />
+          </span>
+          {/* The single announcement point. Its text changes ONLY when the
+              STATE changes — never per keystroke, never per cycle word. */}
+          <span className="cw-phase-sr" role="status" aria-live="polite" aria-atomic="true">
+            {srLine}
+          </span>
         </span>
         {skillLabel ? <span className="cw-skill">{skillLabel}</span> : null}
+        {showStop ? (
+          <button
+            type="button"
+            className="cw-btn cw-btn--stop"
+            aria-label="Stop generating"
+            onClick={onStop}
+          >
+            Stop
+          </button>
+        ) : null}
       </div>
 
       {children ? (
         <div className={streamDropped ? "cw-partial" : undefined}>{children}</div>
-      ) : (
-        <>
-          {/* Indeterminate bar. It carries no role and no accessible name: the
-              status line above owns the announcement, and an unnamed
-              role="progressbar" (what shipped here before) is worse than none. */}
-          <div className="cw-bar" aria-hidden>
-            <div className="cw-bar-pill" />
-          </div>
-          <div className="cw-skel" aria-hidden>
-            <span className="assistant-skel-line" />
-            <span className="assistant-skel-line" />
-            {pastRung2 && !compact ? <span className="assistant-skel-line" /> : null}
-          </div>
-        </>
-      )}
+      ) : null}
 
       {/* A dropped live preview is NOT a failure — the poll is still authoritative
           and will deliver the finished answer — so it degrades to a note, never
@@ -203,30 +327,11 @@ export function AssistantWaitState({
           <span className="cw-long-mark" aria-hidden>◐</span>
           <div>{WAIT_NOTE_STREAM_DROPPED}</div>
         </div>
-      ) : /* Rung 3's "you can leave and it keeps generating" note is switched
-             off for now. The logic behind it is deliberately left intact —
-             `runningLong`, WAIT_RUNG3_MS and WAIT_NOTE_RUNNING_LONG are all
-             still computed and exported — so restoring it is a matter of
-             deleting this comment, not rebuilding the rung. Past 30s the wait
-             now falls through to the rung-2 pacing note instead.
-        runningLong ? (
-        <div className="cw-long">
-          <span className="cw-long-mark" aria-hidden>↻</span>
-          <div>{WAIT_NOTE_RUNNING_LONG}</div>
-        </div>
-      ) : */ pastRung2 ? (
+      ) : pastRung2 ? (
         <div className="cw-note">{longSkill ? WAIT_NOTE_LONG_SKILL : WAIT_NOTE_GENERIC}</div>
       ) : null}
 
       {resumed && !streamDropped ? <div className="cw-note">{WAIT_NOTE_RESUMED}</div> : null}
-
-      {showStop ? (
-        <div className="cw-actions">
-          <button type="button" className="cw-btn" aria-label="Stop generating" onClick={onStop}>
-            Stop
-          </button>
-        </div>
-      ) : null}
     </div>
   )
 }
