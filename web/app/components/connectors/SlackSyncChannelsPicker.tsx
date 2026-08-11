@@ -22,7 +22,7 @@
  */
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ApiError,
   apiErrorMessage,
@@ -49,6 +49,34 @@ export type SlackSyncChannelsPickerViewProps = {
 function channelLabel(c: SlackChannel): string {
   // 🔒 for private, # for public — mirrors Slack's own UI conventions.
   return `${c.is_private ? "🔒" : "#"} ${c.name}`
+}
+
+/**
+ * Put the channels the workspace is ACTUALLY pulling from at the top of the
+ * list, keeping the source order within each group.
+ *
+ * `.conn-slack-checklist` is a 240px scroll box — about five rows. Slack
+ * returns channels in its own order, so on a workspace with more channels
+ * than that the ticked ones can sit entirely below the fold: the panel says
+ * "Pulling from 1 channel" while every visible checkbox is empty, and the
+ * only way to find out WHICH is to discover that an unlabelled region
+ * scrolls. Observed on the `Sprntly` workspace (7 channels, `#product-feedback`
+ * ticked and off-screen).
+ *
+ * PINNED ON THE PERSISTED SELECTION, NOT THE LIVE ONE. Ordering by the live
+ * `selectedIds` would re-sort the list under the cursor on every tick, moving
+ * the next row the user was aiming at. `savedIds` only changes on save/reload,
+ * so within an editing session the order is stable and ticking is safe.
+ */
+export function orderBySavedFirst(
+  channels: SlackChannel[],
+  savedIds: ReadonlySet<string>,
+): SlackChannel[] {
+  if (savedIds.size === 0) return channels
+  const saved: SlackChannel[] = []
+  const rest: SlackChannel[] = []
+  for (const c of channels) (savedIds.has(c.id) ? saved : rest).push(c)
+  return [...saved, ...rest]
 }
 
 export function SlackSyncChannelsPickerView({
@@ -143,6 +171,12 @@ type Props = {
 
 export function SlackSyncChannelsPicker({ savedChannelIds, onSaved }: Props) {
   const [channels, setChannels] = useState<SlackChannel[]>([])
+  // The PERSISTED selection, held apart from the live `selectedIds` below so
+  // list order stays put while the user ticks. See `orderBySavedFirst`.
+  const savedIdSet = useMemo(
+    () => new Set(savedChannelIds ?? []),
+    [savedChannelIds],
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Start from the persisted selection so the user sees their choices.
@@ -214,11 +248,11 @@ export function SlackSyncChannelsPicker({ savedChannelIds, onSaved }: Props) {
 
   return (
     <SlackSyncChannelsPickerView
-      channels={channels}
+      channels={orderBySavedFirst(channels, savedIdSet)}
       loading={loading}
       error={error}
       selectedIds={selectedIds}
-      savedCount={(savedChannelIds ?? []).length}
+      savedCount={savedIdSet.size}
       isSaving={isSaving}
       onToggle={handleToggle}
       onSave={() => void handleSave()}
