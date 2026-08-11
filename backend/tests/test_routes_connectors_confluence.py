@@ -870,3 +870,171 @@ def test_save_spaces_rejects_a_blank_id(confluence_env, monkeypatch):
         "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "  "}]}
     )
     assert r.status_code == 422
+
+
+# ───────── deselecting a space drops its pages from the catalog ─────────
+#
+# The puller catalogues EVERY page it walks and nothing removed one, so a
+# space the admin unticked stayed catalogued forever: still offered to the
+# model as a document the workspace has, still rankable, still eligible to be
+# asserted as the subject of a question — after which the body fetch fails and
+# the user is told the contents "could not be loaded", which reads as a
+# transient glitch rather than "that space is not connected any more".
+
+
+def _seed_pages(company_id: str, pages: list[tuple[str, str]]) -> None:
+    """(page_id, space_id) rows, written straight to the table so no model
+    call or embedding is involved."""
+    from app.db.client import require_client
+
+    for page_id, space_id in pages:
+        require_client().table("document_catalog").insert({
+            "company_id": company_id,
+            "provider": "confluence",
+            "external_id": page_id,
+            "container_id": space_id,
+            "title": page_id,
+            "source_name": "Engineering",
+            "content_hash": f"h-{page_id}",
+            "summary": "s",
+            "topics": [],
+        }).execute()
+
+
+def _catalogued(company_id: str) -> set[str]:
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("document_catalog").select("external_id")
+        .eq("company_id", company_id).eq("provider", "confluence")
+        .execute().data
+    )
+    return {r["external_id"] for r in rows}
+
+
+def _seed_selection(company_id: str, space_ids: list[str]) -> None:
+    import time
+
+    _seed_confluence_row(
+        company_id,
+        {"access_token": "live", "obtained_at": int(time.time()),
+         "expires_in": 3600},
+        {"cloud_id": "cloud-9",
+         "sync_space_ids": space_ids,
+         "sync_space_keys": {sid: sid.upper() for sid in space_ids}},
+    )
+
+
+def test_unticking_a_space_drops_its_pages_and_keeps_the_others(
+    confluence_env, monkeypatch
+):
+    ctx = company_client(monkeypatch)
+    _seed_selection(ctx.company_id, ["1", "2"])
+    _seed_pages(ctx.company_id, [("p1", "1"), ("p2", "1"), ("p3", "2")])
+
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "2"}]}
+    )
+
+    assert r.status_code == 200, r.text
+    assert _catalogued(ctx.company_id) == {"p3"}, (
+        "the deselected space's pages are still catalogued — they will keep "
+        "being offered as documents this workspace has"
+    )
+
+
+def test_clearing_the_selection_deletes_nothing(confluence_env, monkeypatch):
+    """THE EDGE THAT WOULD HAVE COST THE MOST, and the reason the diff is
+    guarded rather than unconditional.
+
+    An empty selection is not "no spaces" — it is the backwards-compatible
+    default meaning EVERY READABLE SPACE (see the route's docstring). So
+    clearing the picker WIDENS what is synced. A naive `previous - incoming`
+    reads that widening as the removal of every space the admin had listed and
+    deletes the entire Confluence catalog for the tenant, at the exact moment
+    they asked for more of it."""
+    ctx = company_client(monkeypatch)
+    _seed_selection(ctx.company_id, ["1", "2"])
+    _seed_pages(ctx.company_id, [("p1", "1"), ("p3", "2")])
+
+    r = ctx.client.post("/v1/connectors/confluence/spaces", json={"spaces": []})
+
+    assert r.status_code == 200, r.text
+    assert _catalogued(ctx.company_id) == {"p1", "p3"}, (
+        "clearing the selection deleted catalogued pages — an empty list "
+        "means every readable space, so this widened the sync and then "
+        "deleted the catalog for it"
+    )
+
+
+def test_adding_a_space_deletes_nothing(confluence_env, monkeypatch):
+    """The common save. Nothing left the selection, so nothing may leave the
+    catalog — including the pages of the space that was already there."""
+    ctx = company_client(monkeypatch)
+    _seed_selection(ctx.company_id, ["1"])
+    _seed_pages(ctx.company_id, [("p1", "1")])
+
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces",
+        json={"spaces": [{"id": "1"}, {"id": "2"}]},
+    )
+
+    assert r.status_code == 200, r.text
+    assert _catalogued(ctx.company_id) == {"p1"}
+
+
+def test_a_first_ever_selection_deletes_nothing(confluence_env, monkeypatch):
+    """No stored selection means the connection was syncing every readable
+    space, so the admin's first narrowing DOES strand pages — but which spaces
+    those were is not recorded anywhere, and the only way to name them is
+    "every container not in the incoming list".
+
+    That is a sweep on a client-supplied set, and this route will not do it: a
+    picker that renders a subset (#1134 was exactly that bug for Slack
+    channels) or a half-loaded settings page would post a short list and take
+    the rest of the catalog with it. Under-cleaning leaves a stale row; the
+    sweep loses summaries, topics and embeddings that cost model calls to
+    rebuild. Left as a known gap rather than guessed at."""
+    ctx = company_client(monkeypatch)
+    _seed_selection(ctx.company_id, [])
+    _seed_pages(ctx.company_id, [("p1", "1"), ("p3", "2")])
+
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "2"}]}
+    )
+
+    assert r.status_code == 200, r.text
+    assert _catalogued(ctx.company_id) == {"p1", "p3"}
+
+
+def test_a_catalog_deregistration_failure_never_fails_the_save(
+    confluence_env, monkeypatch
+):
+    """Cleanup behind a save that has already committed. If the delete throws,
+    the admin's selection must still persist and the response must still be a
+    success — a stale catalog row is a far smaller problem than a selection
+    that silently did not save."""
+    import json as _json
+
+    from app import db, document_catalog
+
+    ctx = company_client(monkeypatch)
+    _seed_selection(ctx.company_id, ["1", "2"])
+    _seed_pages(ctx.company_id, [("p1", "1")])
+
+    def _boom(*a, **kw):
+        raise RuntimeError("postgrest down")
+
+    monkeypatch.setattr(
+        document_catalog, "deregister_documents_in_containers", _boom
+    )
+
+    r = ctx.client.post(
+        "/v1/connectors/confluence/spaces", json={"spaces": [{"id": "2"}]}
+    )
+
+    assert r.status_code == 200, r.text
+    config = _json.loads(
+        db.get_connection(ctx.company_id, "confluence").get("config_json") or "{}"
+    )
+    assert config["sync_space_ids"] == ["2"]

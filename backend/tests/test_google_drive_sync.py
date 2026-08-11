@@ -1192,3 +1192,50 @@ def test_sync_tells_the_extractor_where_it_wrote_the_markdown(
     finally:
         for p in patches:
             p.stop()
+
+
+# ───────────── what a picked selection actually covers ─────────────────────
+#
+# `reachable_file_ids` is the read side of the two-part Drive selection:
+# `config["files"]` is what the Picker returned, `config["folder_contents"]`
+# is what a picked folder expanded to at the last sync. Anything asking "which
+# documents does this selection cover" needs both, and it must answer from
+# STORED state — a live walk would make a transient Drive failure look like a
+# folder that shrank.
+
+
+def test_reachable_ids_include_a_picked_folders_stored_subtree():
+    from app.connectors.google_drive_sync import reachable_file_ids
+
+    contents = {"folderA": [
+        {"id": "f1", "parentId": "folderA"},
+        {"id": "sub1", "mimeType": GOOGLE_FOLDER, "parentId": "folderA"},
+        # Nested descendants live in the SAME flat list under the picked root
+        # (expand_folder stores one node list per root), so no recursion is
+        # needed here and none is written.
+        {"id": "f2", "parentId": "sub1"},
+    ]}
+
+    assert reachable_file_ids(["folderA"], contents) == {
+        "folderA", "sub1", "f1", "f2"
+    }
+
+
+def test_reachable_ids_of_a_plain_file_are_just_itself():
+    from app.connectors.google_drive_sync import reachable_file_ids
+
+    assert reachable_file_ids(["file1"], {"folderA": [{"id": "f1"}]}) == {"file1"}
+
+
+def test_reachable_ids_tolerate_a_missing_or_junk_expansion():
+    """`folder_contents` is whatever the last sync wrote, including `{}` for a
+    folder whose walk failed. A cleanup keyed on this must degrade to "just
+    the picked ids" rather than raise inside a settings save."""
+    from app.connectors.google_drive_sync import reachable_file_ids
+
+    assert reachable_file_ids(["folderA"], None) == {"folderA"}
+    assert reachable_file_ids(["folderA"], {"folderA": []}) == {"folderA"}
+    assert reachable_file_ids(
+        ["folderA"], {"folderA": ["not-a-dict", {"name": "no id"}, {"id": ""}]}
+    ) == {"folderA"}
+    assert reachable_file_ids(["", "  ", None], {}) == set()

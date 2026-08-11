@@ -34,6 +34,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -146,6 +147,47 @@ def normalize_picked_files(files: list[dict] | None) -> list[dict]:
         name = entry.get("name")
         out[fid] = {"id": fid, "name": (name.strip() if isinstance(name, str) and name.strip() else None)}
     return list(out.values())
+
+
+def reachable_file_ids(
+    picked_ids: Iterable[str], folder_contents: dict | None
+) -> set[str]:
+    """Every Drive file id a given set of PICKED entries covers, per the
+    connection's own stored state — the picked ids themselves plus, for any
+    that is a folder we have already walked, every id in its stored subtree.
+
+    The two halves of a Drive selection are stored separately and both are
+    needed: `config["files"]` is what the user clicked in the Picker, and
+    `config["folder_contents"]` is what a picked FOLDER turned out to contain
+    at the last sync. A file inside a picked folder has a catalog row and is
+    named nowhere in `config["files"]`, so a cleanup that read only the picked
+    list would leave every folder-sourced document behind — the majority of
+    them, for anyone who connected a folder rather than files.
+
+    Reads STORED state only and calls no Drive API. That is deliberate: the
+    caller uses this to work out what a user's selection change removed, and
+    a live enumeration would make a transient API failure look like a
+    shrunken folder. A stale stored subtree can only make this set too SMALL,
+    which under-cleans; a live one could make it too small too, and there the
+    same shortfall would delete rows for files that are still connected.
+
+    Sub-folders need no recursion here: `expand_folder` stores one FLAT node
+    list per picked root covering its whole subtree, so a nested folder
+    appears as a node under its root rather than as another key."""
+    contents = folder_contents or {}
+    out: set[str] = set()
+    for pid in picked_ids:
+        pid = str(pid or "").strip()
+        if not pid:
+            continue
+        out.add(pid)
+        for node in contents.get(pid) or []:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id") or "").strip()
+            if nid:
+                out.add(nid)
+    return out
 
 
 def load_config(row: dict) -> dict:

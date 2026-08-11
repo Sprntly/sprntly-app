@@ -460,3 +460,294 @@ def test_picker_token_app_id_empty_when_client_id_malformed(google_env, monkeypa
 
     assert r.status_code == 200, r.text
     assert r.json()["app_id"] == ""
+
+
+# ─── unpicking a Drive file drops it from the document catalog ───────────────
+#
+# `drive_extract` upserts a catalog row per synced file and nothing ever
+# removed one, so a file the user unpicked stayed catalogued forever: still
+# listed to the model as a document this workspace has, still rankable, and —
+# since document resolution shipped — still eligible to be asserted as the
+# subject of a question, whereupon the body fetch fails and the user is told
+# the contents "could not be loaded".
+#
+# The reachable set is BOTH halves of the stored selection: `config["files"]`
+# (what the Picker returned) UNION `config["folder_contents"]` (what a picked
+# folder expanded to at the last sync). Reading only the first would leave
+# every folder-sourced document behind.
+
+
+def _seed_drive_docs(company_id: str, file_ids: list[str]) -> None:
+    from app.db.client import require_client
+
+    for fid in file_ids:
+        require_client().table("document_catalog").insert({
+            "company_id": company_id,
+            "provider": "google_drive",
+            "external_id": fid,
+            "title": fid,
+            "source_name": "Google Drive",
+            "content_hash": f"h-{fid}",
+            "summary": "s",
+            "topics": [],
+        }).execute()
+
+
+def _drive_catalogued(company_id: str) -> set[str]:
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("document_catalog").select("external_id")
+        .eq("company_id", company_id).eq("provider", "google_drive")
+        .execute().data
+    )
+    return {r["external_id"] for r in rows}
+
+
+def _fake_drive_sync(folder_contents=None):
+    """Stand-in for sync_google_drive that persists the new picked list the
+    way the real one does. `folder_contents` is what the walk WOULD have
+    found — passed so a test can make the walk return less than the stored
+    expansion and prove that cannot widen a deletion."""
+    def _sync(*, company_id, dataset, files=None, **kw):
+        from app import db as _db
+        from app.connectors.google_drive_sync import (
+            merge_config,
+            normalize_picked_files,
+        )
+
+        row = _db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+        patch = {"dataset": dataset or "acme"}
+        if files is not None:
+            patch["files"] = normalize_picked_files(files)
+        if folder_contents is not None:
+            patch["folder_contents"] = folder_contents
+        merge_config(row, patch)
+        result = MagicMock()
+        result.to_dict.return_value = {"dataset": "acme", "synced": [],
+                                       "skipped": [], "errors": []}
+        return result
+
+    return _sync
+
+
+def _post_files(ctx, ids, monkeypatch_target, sync=None):
+    import app.routes.connectors as routes_mod
+
+    with (
+        patch.object(routes_mod, "sync_google_drive",
+                     side_effect=sync or _fake_drive_sync()),
+        patch.object(routes_mod.db, "upsert_input_source", return_value={}),
+        patch.object(routes_mod, "_seed_corpus_after_sync", return_value=None),
+    ):
+        return ctx.client.post(
+            "/v1/connectors/google-drive/files",
+            json={"files": [{"id": i} for i in ids], "dataset": "acme"},
+        )
+
+
+def test_unpicking_a_file_drops_it_from_the_catalog(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme","files":['
+                    '{"id":"file0001","name":"a"},{"id":"file0002","name":"b"}]}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002"])
+
+    r = _post_files(ctx, ["file0002"], monkeypatch)
+
+    assert r.status_code == 200, r.text
+    assert _drive_catalogued(ctx.company_id) == {"file0002"}, (
+        "the unpicked file is still catalogued — it will keep being offered "
+        "as a document this workspace has"
+    )
+
+
+def test_unpicking_a_folder_drops_the_files_it_had_expanded_to(
+    google_env, monkeypatch
+):
+    """The half a naive fix misses. A file inside a picked FOLDER has a
+    catalog row and is named nowhere in `config["files"]` — only in the
+    folder's stored expansion. For anyone who connected a folder rather than
+    individual files, that is every document they have."""
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme",'
+                    '"files":[{"id":"folder0001","name":"Specs"},'
+                    '{"id":"file0009","name":"keep"}],'
+                    '"folder_contents":{"folder0001":['
+                    '{"id":"file0001","name":"a","parentId":"folder0001"},'
+                    '{"id":"file0002","name":"b","parentId":"folder0001"}]}}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002", "file0009"])
+
+    r = _post_files(ctx, ["file0009"], monkeypatch)
+
+    assert r.status_code == 200, r.text
+    assert _drive_catalogued(ctx.company_id) == {"file0009"}, (
+        "unpicking the folder left its descendants catalogued — the picked "
+        "list never named them, so only the stored expansion can"
+    )
+
+
+def test_a_file_still_reachable_from_a_kept_folder_survives(
+    google_env, monkeypatch
+):
+    """Drive lets one file sit in two folders. Removing one of them is not
+    removing the file, so the retained selection is subtracted from the
+    removed one rather than the removals being taken at face value."""
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme",'
+                    '"files":[{"id":"folder0001"},{"id":"folder0002"}],'
+                    '"folder_contents":{'
+                    '"folder0001":[{"id":"file0001","parentId":"folder0001"},'
+                    '{"id":"file0002","parentId":"folder0001"}],'
+                    '"folder0002":[{"id":"file0001","parentId":"folder0002"}]}}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002"])
+
+    r = _post_files(ctx, ["folder0002"], monkeypatch)
+
+    assert r.status_code == 200, r.text
+    assert _drive_catalogued(ctx.company_id) == {"file0001"}, (
+        "a file reachable from a folder the user KEPT was deleted because "
+        "another folder holding it was removed"
+    )
+
+
+def test_re_saving_the_same_selection_deletes_nothing(google_env, monkeypatch):
+    """The common save — the Picker re-posts what is already stored. Nothing
+    left the selection, so nothing may leave the catalog."""
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme","files":[{"id":"file0001"},'
+                    '{"id":"file0002"}]}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002"])
+
+    r = _post_files(ctx, ["file0001", "file0002"], monkeypatch)
+
+    assert r.status_code == 200, r.text
+    assert _drive_catalogued(ctx.company_id) == {"file0001", "file0002"}
+
+
+def test_a_short_folder_walk_cannot_widen_the_deletion(google_env, monkeypatch):
+    """THE SAFETY PROPERTY, at the Drive call site.
+
+    A folder walk that comes back with two of a folder's three files is what a
+    `files.list` 403, a rate limit or an expired token mid-pagination looks
+    like — and it is indistinguishable from a folder that genuinely shrank.
+    So the removal set is computed BEFORE the sync, from the stored selection
+    against the posted one, and the sync's own walk never contributes to it:
+    here the selection did not change at all, so a walk that returned almost
+    nothing must delete nothing.
+
+    Get this wrong and one transient Drive error deletes a tenant's catalog.
+    """
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme","files":[{"id":"folder0001"}],'
+                    '"folder_contents":{"folder0001":['
+                    '{"id":"file0001","parentId":"folder0001"},'
+                    '{"id":"file0002","parentId":"folder0001"},'
+                    '{"id":"file0003","parentId":"folder0001"}]}}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002", "file0003"])
+
+    # Same selection; the walk this time reaches one file out of three.
+    r = _post_files(
+        ctx, ["folder0001"], monkeypatch,
+        sync=_fake_drive_sync(folder_contents={
+            "folder0001": [{"id": "file0001", "parentId": "folder0001"}]
+        }),
+    )
+
+    assert r.status_code == 200, r.text
+
+    # PROVE THE SCENARIO WAS BUILT. Everything below is only meaningful if the
+    # stored expansion really did shrink — that IS the partial walk. If the
+    # fake sync stopped persisting `folder_contents`, the config would keep
+    # its full three-file expansion, nothing would look removed under ANY
+    # implementation, and this test would pass while asserting nothing. It
+    # would also stop killing the reconcile-against-the-walk mutation, and
+    # nothing would report that it had gone quiet.
+    import json as _json
+
+    from app import db as _db
+
+    cfg = _json.loads(
+        _db.get_connection(
+            ctx.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER
+        )["config_json"]
+    )
+    assert [n["id"] for n in cfg["folder_contents"]["folder0001"]] == [
+        "file0001"
+    ], (
+        "the stored expansion did not shrink, so no partial walk happened — "
+        "this test is not exercising what its name claims"
+    )
+
+    assert _drive_catalogued(ctx.company_id) == {
+        "file0001", "file0002", "file0003"
+    }, (
+        "a partial folder walk deleted catalog rows — the deletion is reading "
+        "a sync result, which makes a transient Drive failure destructive"
+    )
+
+
+def test_a_rejected_save_deletes_nothing(google_env, monkeypatch):
+    """The cleanup runs only after the save actually happened. A malformed id
+    400s before anything persists, so the stored selection is unchanged — and
+    a user whose selection did not change must not lose documents from it."""
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme","files":[{"id":"file0001"},'
+                    '{"id":"file0002"}]}',
+    )
+    _seed_drive_docs(ctx.company_id, ["file0001", "file0002"])
+
+    r = ctx.client.post(
+        "/v1/connectors/google-drive/files",
+        json={"files": [{"id": "bad id!"}], "dataset": "acme"},
+    )
+
+    assert r.status_code == 400, r.text
+    assert _drive_catalogued(ctx.company_id) == {"file0001", "file0002"}
+
+
+def test_a_drive_catalog_failure_never_fails_the_save(google_env, monkeypatch):
+    """Cleanup behind a save that has already committed. If the delete throws,
+    the user's picked files must still persist and the response must still be
+    a success."""
+    import json as _json
+
+    from app import db as _db, document_catalog
+
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(
+        ctx.company_id,
+        config_json='{"dataset":"acme","files":[{"id":"file0001"},'
+                    '{"id":"file0002"}]}',
+    )
+
+    def _boom(*a, **kw):
+        raise RuntimeError("postgrest down")
+
+    monkeypatch.setattr(document_catalog, "deregister_documents", _boom)
+
+    r = _post_files(ctx, ["file0002"], monkeypatch)
+
+    assert r.status_code == 200, r.text
+    cfg = _json.loads(
+        _db.get_connection(
+            ctx.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER
+        )["config_json"]
+    )
+    assert [f["id"] for f in cfg["files"]] == ["file0002"]

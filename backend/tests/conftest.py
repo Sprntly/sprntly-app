@@ -1190,6 +1190,12 @@ CREATE TABLE document_catalog (
     user_id         TEXT,
     provider        TEXT NOT NULL,
     external_id     TEXT NOT NULL,
+    -- The provider-side CONTAINER (Confluence space id today). Nullable, and
+    -- the null-ness carries meaning that tests depend on: `IN` never matches
+    -- NULL in either engine, so a row registered before this column existed
+    -- is skipped by the container-keyed deregistration rather than swept up
+    -- by it.
+    container_id    TEXT,
     title           TEXT NOT NULL,
     source_name     TEXT NOT NULL DEFAULT '',
     url             TEXT,
