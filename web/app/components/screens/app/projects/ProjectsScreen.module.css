@@ -252,3 +252,33 @@
   background: var(--surface-3);
   border: 1px solid var(--line);
 }
+
+.retryRow {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.retryBtn {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.retryBtn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.retryBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

@@ -665,7 +665,18 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     return (
       <AppLayout hideChromeStrip mainStyle={{ padding: 0, display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 auto" }}>
         <div className={styles.stateWrap} style={{ padding: 24 }} aria-busy="true" data-testid="project-detail-loading">
-          Loading…
+          {/* Skeleton, not a bare "Loading…" string — same skeleton-card
+           *  language `ProjectsScreen.tsx` already ships (duplicated
+           *  locally per this file's existing precedent: TYPE_BADGE,
+           *  relativeTime, etc. are all copied verbatim rather than
+           *  imported across Projects surfaces). */}
+          <div className={styles.loadingSkeleton} data-testid="project-detail-loading-skeleton">
+            <div className={styles.skeletonTopBar} />
+            <div className={styles.skeletonBody}>
+              <div className={styles.skeletonMain} />
+              <div className={styles.skeletonRail} />
+            </div>
+          </div>
         </div>
       </AppLayout>
     )

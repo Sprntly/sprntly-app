@@ -247,6 +247,11 @@ export type MemoryModalViewProps = {
   onCancelEdit: () => void
   onRemove: (entryId: number) => void
   onClose: () => void
+  /** Set when the most recent add/edit/delete mutation rejected — cleared on
+   *  the next successful mutation or the next attempt (see `MemoryModal`'s
+   *  container). `null` renders nothing; the load-time `state` machine
+   *  (loading/forbidden/not_found/error) is untouched by this. */
+  mutationError: string | null
 }
 
 export function MemoryModalView({
@@ -265,6 +270,7 @@ export function MemoryModalView({
   onCancelEdit,
   onRemove,
   onClose,
+  mutationError,
 }: MemoryModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
@@ -429,6 +435,17 @@ export function MemoryModalView({
                 </div>
               </div>
 
+              {/* ── Mutation-failure surface — a failed add/edit/delete,
+                  mirroring the `role="alert"` inline-banner pattern
+                  `ProjectGroupChat.tsx`'s `gc-error` / `ProjectIndividualChat.tsx`'s
+                  `ic-msg-error` already use. Never touches the load-time
+                  `state` machine above. ── */}
+              {mutationError ? (
+                <div className={styles.mutationError} role="alert" data-testid="memory-mutation-error">
+                  {mutationError}
+                </div>
+              ) : null}
+
               {/* ── Privacy boundary (AC6) ── */}
               <div className={styles.privacy} data-testid="memory-privacy-strip">
                 <LockIcon />
@@ -493,6 +510,11 @@ export function MemoryModal({
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editValue, setEditValue] = useState("")
+  // Add/edit/delete mutation failures (surfaced — was a silent swallowed
+  // `.catch` before this ticket). Cleared at the start of the next mutation
+  // attempt and on a successful mutation; the load-time `state` machine
+  // above is untouched by this.
+  const [mutationError, setMutationError] = useState<string | null>(null)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -509,6 +531,7 @@ export function MemoryModal({
     if (!open) return
     setAddValue("")
     setEditingId(null)
+    setMutationError(null)
     load()
   }, [open, load])
 
@@ -516,15 +539,18 @@ export function MemoryModal({
     const body = addValue.trim()
     if (!body || adding) return
     setAdding(true)
+    setMutationError(null)
     projectsApi
       .addMemory(projectId, body)
       .then((entry) => {
         setState((s) => (s.status === "ready" ? { ...s, entries: [entry, ...s.entries] } : s))
         setAddValue("")
+        setMutationError(null)
       })
       .catch(() => {
-        // Best-effort inline retry surface — the composer text is preserved
-        // so nothing typed is lost on a failed submit.
+        // The composer text is preserved so nothing typed is lost on a
+        // failed submit — the alert (not a silent swallow) is the fix.
+        setMutationError("Couldn't save that change. Try again.")
       })
       .finally(() => setAdding(false))
   }, [addValue, adding, projectId])
@@ -544,6 +570,7 @@ export function MemoryModal({
     const body = editValue.trim()
     if (!body) return
     const id = editingId
+    setMutationError(null)
     projectsApi
       .patchMemory(projectId, id, body)
       .then((updated) => {
@@ -552,23 +579,28 @@ export function MemoryModal({
         )
         setEditingId(null)
         setEditValue("")
+        setMutationError(null)
       })
       .catch(() => {
         // Leaves the row in edit mode with the attempted text on failure —
-        // no silent data loss.
+        // no silent data loss; the alert is the fix, not a new behavior.
+        setMutationError("Couldn't save that change. Try again.")
       })
   }, [editValue, editingId, projectId])
 
   const onRemove = useCallback(
     (entryId: number) => {
+      setMutationError(null)
       projectsApi
         .deleteMemory(projectId, entryId)
         .then(() => {
           setState((s) => (s.status === "ready" ? { ...s, entries: s.entries.filter((e) => e.id !== entryId) } : s))
+          setMutationError(null)
         })
         .catch(() => {
           // Row stays visible on failure — nothing removed client-side
-          // unless the server confirmed it.
+          // unless the server confirmed it; the alert is the fix.
+          setMutationError("Couldn't save that change. Try again.")
         })
     },
     [projectId],
@@ -591,6 +623,7 @@ export function MemoryModal({
       onCancelEdit={onCancelEdit}
       onRemove={onRemove}
       onClose={onClose}
+      mutationError={mutationError}
     />
   )
 }

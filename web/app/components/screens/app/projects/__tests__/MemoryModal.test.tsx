@@ -102,6 +102,7 @@ function viewProps(overrides: Partial<MemoryModalViewProps> = {}): MemoryModalVi
     onCancelEdit: noop,
     onRemove: noop,
     onClose: noop,
+    mutationError: null,
     ...overrides,
   }
 }
@@ -331,6 +332,27 @@ describe("MemoryModalView — add composer", () => {
   })
 })
 
+describe("MemoryModalView — mutation-failure alert", () => {
+  it("renders a role=alert banner when mutationError is set", () => {
+    render(React.createElement(MemoryModalView, viewProps({ mutationError: "Couldn't save that change. Try again." })))
+    const alert = screen.getByTestId("memory-mutation-error")
+    expect(alert.getAttribute("role")).toBe("alert")
+    expect(alert.textContent).toContain("Couldn't save that change. Try again.")
+  })
+
+  it("renders nothing when mutationError is null", () => {
+    render(React.createElement(MemoryModalView, viewProps({ mutationError: null })))
+    expect(screen.queryByTestId("memory-mutation-error")).toBeNull()
+  })
+
+  it("test_summary_and_entries_unchanged_on_mutation_error — the summary block and entries list still render normally alongside the alert", () => {
+    render(React.createElement(MemoryModalView, viewProps({ mutationError: "Couldn't save that change. Try again." })))
+    expect(screen.getByTestId("memory-synth-block")).toBeTruthy()
+    expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeTruthy()
+    expect(screen.getByTestId(`memory-entry-${AGENT_ENTRY.id}`)).toBeTruthy()
+  })
+})
+
 describe("MemoryModalView — a11y mechanics", () => {
   it("closes on Escape and on backdrop click", () => {
     const onClose = vi.fn()
@@ -506,5 +528,83 @@ describe("MemoryModal — data fetch + mutations (AC1/AC3/AC5)", () => {
       render(React.createElement(MemoryModal, { projectId: "999", members: MEMBERS, open: true, onClose: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("memory-modal-not-found")).toBeTruthy())
+  })
+})
+
+// ── MemoryModal container — mutation-failure surfacing (this ticket) ──
+describe("MemoryModal — mutation-failure surfacing", () => {
+  it("test_failed_add_shows_mutation_error — a rejected addMemory renders the alert, and the composer text is preserved", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([])
+    addMemoryMock.mockRejectedValue(new Error("network down"))
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-add-input")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("memory-add-input"), { target: { value: "New guardrail" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("memory-add-submit"))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-mutation-error")).toBeTruthy())
+    expect((screen.getByTestId("memory-add-input") as HTMLTextAreaElement).value).toBe("New guardrail")
+  })
+
+  it("test_failed_edit_and_delete_show_error — a rejected patchMemory / deleteMemory each render the alert", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([USER_ENTRY])
+    patchMemoryMock.mockRejectedValue(new Error("network down"))
+    deleteMemoryMock.mockRejectedValue(new Error("network down"))
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId(`memory-edit-${USER_ENTRY.id}`))
+    fireEvent.change(screen.getByTestId(`memory-edit-input-${USER_ENTRY.id}`), { target: { value: "Edited" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`memory-edit-save-${USER_ENTRY.id}`))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-mutation-error")).toBeTruthy())
+    // Failed edit leaves the row in edit mode — no silent data loss.
+    expect(screen.getByTestId(`memory-edit-input-${USER_ENTRY.id}`)).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`memory-remove-${USER_ENTRY.id}`))
+    })
+    await waitFor(() => expect(deleteMemoryMock).toHaveBeenCalled())
+    expect(screen.getByTestId("memory-mutation-error")).toBeTruthy()
+    // Row stays visible on a failed delete.
+    expect(screen.getByTestId(`memory-entry-${USER_ENTRY.id}`)).toBeTruthy()
+  })
+
+  it("test_successful_mutation_clears_error — a following successful mutation removes the alert", async () => {
+    memorySummaryMock.mockResolvedValue(SUMMARY)
+    memoryEntriesMock.mockResolvedValue([])
+    const newEntry: ProjectMemoryEntry = {
+      id: 9,
+      project_id: 101,
+      body: "New team guardrail",
+      author_user_id: "u1",
+      promoted_by: null,
+      source_conversation_id: null,
+      created_at: hoursAgo(0),
+      updated_at: hoursAgo(0),
+    }
+    addMemoryMock.mockRejectedValueOnce(new Error("network down")).mockResolvedValueOnce(newEntry)
+    await act(async () => {
+      render(React.createElement(MemoryModal, { projectId: "101", members: MEMBERS, open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-add-input")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("memory-add-input"), { target: { value: "New team guardrail" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("memory-add-submit"))
+    })
+    await waitFor(() => expect(screen.getByTestId("memory-mutation-error")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("memory-add-submit"))
+    })
+    await waitFor(() => expect(screen.getByTestId(`memory-entry-${newEntry.id}`)).toBeTruthy())
+    expect(screen.queryByTestId("memory-mutation-error")).toBeNull()
   })
 })

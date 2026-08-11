@@ -433,6 +433,48 @@ describe("ProjectDetailScreen source — never touches ChatScreen.tsx", () => {
   })
 })
 
+// ── ProjectDetailScreen — loading state (skeleton, not bare text) ──
+describe("ProjectDetailScreen — loading state", () => {
+  it("test_loading_renders_skeleton_not_text — the loading branch renders a skeleton node under project-detail-loading, not the literal 'Loading…' string", async () => {
+    // A never-resolving fetch keeps the container in the "loading" branch
+    // for the duration of this assertion.
+    getMock.mockReturnValue(new Promise(() => {}))
+    artifactsMock.mockReturnValue(new Promise(() => {}))
+    memorySummaryMock.mockReturnValue(new Promise(() => {}))
+    memoryInsightMock.mockReturnValue(new Promise(() => {}))
+    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    const wrap = screen.getByTestId("project-detail-loading")
+    expect(wrap.getAttribute("aria-busy")).toBe("true")
+    expect(screen.getByTestId("project-detail-loading-skeleton")).toBeTruthy()
+    expect(wrap.textContent).not.toContain("Loading…")
+  })
+
+  it("test_detail_error_branches_unchanged — 403 -> forbidden, 404 -> not_found, else -> error still render their existing EmptyPane copy (regression)", async () => {
+    getMock.mockRejectedValue(new ApiError(403, "Not a member of this project"))
+    artifactsMock.mockResolvedValue([])
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-detail-forbidden")).toBeTruthy())
+    expect(screen.getByText("You're not a member of this project")).toBeTruthy()
+    expect(screen.getByText("Ask a project member to add you, then come back.")).toBeTruthy()
+  })
+
+  it("a non-ApiError / generic rejection renders the generic error branch, unchanged", async () => {
+    getMock.mockRejectedValue(new Error("boom"))
+    artifactsMock.mockResolvedValue([])
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-detail-error")).toBeTruthy())
+    expect(screen.getByText("Couldn't load this project")).toBeTruthy()
+  })
+})
+
 // ── ProjectDetailScreen — container fetch + membership-gate state machine ──
 describe("ProjectDetailScreen — data fetch", () => {
   it("fetches project/artifacts/memory for the given id and renders the shell", async () => {

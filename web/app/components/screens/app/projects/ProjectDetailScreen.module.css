@@ -843,3 +843,45 @@
   margin: 0 auto;
   padding: 0 4px;
 }
+
+/* ── Loading skeleton — same skeleton-card language as ProjectsScreen's
+ * `.skeletonGrid`/`.skeletonCard`, duplicated locally per this file's
+ * existing precedent (see the module comment at the top). ── */
+
+.loadingSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 1220px;
+  margin: 0 auto;
+}
+
+.skeletonTopBar {
+  height: 32px;
+  width: 40%;
+  min-width: 220px;
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+
+.skeletonBody {
+  display: flex;
+  gap: 18px;
+}
+
+.skeletonMain {
+  flex: 1 1 auto;
+  height: 360px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+
+.skeletonRail {
+  flex: 0 0 300px;
+  height: 360px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}

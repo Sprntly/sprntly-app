@@ -99,6 +99,8 @@ function viewProps(overrides: Partial<ViewProps> = {}): ViewProps {
   return {
     projects: [MANUAL_PROJECT, AUTO_PROJECT],
     loading: false,
+    error: false,
+    onRetry: noop,
     search: "",
     onSearchChange: noop,
     onOpen: noop,
@@ -168,6 +170,29 @@ describe("ProjectsView — states", () => {
     ).toBeTruthy()
   })
 
+  it("test_list_error_shows_error_not_empty — error=true renders the error surface with a retry control, not the empty state", () => {
+    render(React.createElement(ProjectsView, viewProps({ projects: [], error: true })))
+    expect(screen.getByTestId("projects-error")).toBeTruthy()
+    expect(screen.getByTestId("projects-retry")).toBeTruthy()
+    expect(screen.getByText("Couldn't load your projects")).toBeTruthy()
+    expect(screen.queryByText("No projects yet — your first PRD will start one automatically.")).toBeNull()
+  })
+
+  it("test_empty_list_still_shows_empty_pane — error=false and an empty list renders the existing empty EmptyPane, not the error surface (regression)", () => {
+    render(React.createElement(ProjectsView, viewProps({ projects: [], error: false })))
+    expect(
+      screen.getByText("No projects yet — your first PRD will start one automatically."),
+    ).toBeTruthy()
+    expect(screen.queryByTestId("projects-error")).toBeNull()
+  })
+
+  it("clicking projects-retry invokes onRetry", () => {
+    const onRetry = vi.fn()
+    render(React.createElement(ProjectsView, viewProps({ projects: [], error: true, onRetry })))
+    fireEvent.click(screen.getByTestId("projects-retry"))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
   it("renders no status filter tabs", () => {
     const { container } = render(React.createElement(ProjectsView, viewProps()))
     expect(container.querySelectorAll('[role="tab"]').length).toBe(0)
@@ -233,6 +258,31 @@ describe("ProjectsScreen — data + nav wiring", () => {
     fireEvent.click(screen.getByTestId("project-card"))
     expect(pushMock).toHaveBeenCalledWith("/projects?id=101")
     expect(pushMock).not.toHaveBeenCalledWith("/projects/101")
+  })
+
+  it("a rejected list() renders the error surface, not the empty state", async () => {
+    listMock.mockRejectedValue(new Error("network down"))
+    await act(async () => {
+      render(React.createElement(ProjectsScreen))
+    })
+    await waitFor(() => expect(screen.getByTestId("projects-error")).toBeTruthy())
+    expect(screen.queryByText("No projects yet — your first PRD will start one automatically.")).toBeNull()
+  })
+
+  it("test_retry_refetches — clicking projects-retry re-calls list(); a subsequent success renders the list and clears the error", async () => {
+    listMock.mockRejectedValueOnce(new Error("network down")).mockResolvedValueOnce([MANUAL_PROJECT])
+    await act(async () => {
+      render(React.createElement(ProjectsScreen))
+    })
+    await waitFor(() => expect(screen.getByTestId("projects-error")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("projects-retry"))
+    })
+
+    await waitFor(() => expect(screen.getByText("Instant-quote flow")).toBeTruthy())
+    expect(listMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId("projects-error")).toBeNull()
   })
 })
 

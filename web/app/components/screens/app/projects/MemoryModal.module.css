@@ -212,6 +212,19 @@
   cursor: default;
 }
 
+/* ── Mutation-failure alert — mirrors ProjectGroupChat.module.css's
+ * `.error` (same tokens, same role="alert" pattern), duplicated locally
+ * per this file's existing precedent. ── */
+
+.mutationError {
+  font-size: 12px;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  margin: 0 0 10px;
+}
+
 /* ── Privacy strip ── */
 
 .privacy {

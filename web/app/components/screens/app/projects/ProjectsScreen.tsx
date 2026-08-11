@@ -171,6 +171,14 @@ function ProjectCard({ project, onOpen }: { project: ProjectListItem; onOpen: (i
 export type ProjectsViewProps = {
   projects: ProjectListItem[]
   loading: boolean
+  /** True when the most recent `projectsApi.list()` call rejected — kept
+   *  distinct from `projects.length === 0` (a genuinely empty workspace) so
+   *  a fetch failure never renders as indistinguishable from "no projects
+   *  yet" (the gap this ticket closes). */
+  error: boolean
+  /** Re-runs the list fetch — wired to the `projects-retry` control on the
+   *  error surface below. */
+  onRetry: () => void
   search: string
   onSearchChange: (value: string) => void
   onOpen: (id: number) => void
@@ -179,7 +187,7 @@ export type ProjectsViewProps = {
 
 /** Pure presentational list — the surface a test/screenshot renders, same
  *  container/view split as `ArtifactsView`/`ArtifactsScreen`. */
-export function ProjectsView({ projects, loading, search, onSearchChange, onOpen, onNewProject }: ProjectsViewProps) {
+export function ProjectsView({ projects, loading, error, onRetry, search, onSearchChange, onOpen, onNewProject }: ProjectsViewProps) {
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase()
     if (!needle) return projects
@@ -205,6 +213,18 @@ export function ProjectsView({ projects, loading, search, onSearchChange, onOpen
           {Array.from({ length: 3 }, (_, i) => (
             <div key={i} className={styles.skeletonCard} />
           ))}
+        </div>
+      ) : error ? (
+        <div data-testid="projects-error">
+          <EmptyPane
+            title="Couldn't load your projects"
+            hint="Something went wrong. Retry."
+          />
+          <div className={styles.retryRow}>
+            <button type="button" className={styles.retryBtn} onClick={onRetry} data-testid="projects-retry">
+              Retry
+            </button>
+          </div>
         </div>
       ) : projects.length === 0 ? (
         <EmptyPane title="No projects yet — your first PRD will start one automatically." placeholders={2} />
@@ -248,15 +268,24 @@ export function ProjectsScreen() {
   const router = useRouter()
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [loading, setLoading] = useState(false)
+  // Distinct from `projects.length === 0` — a rejected fetch must never
+  // render identically to a genuinely empty workspace (the load-bearing fix
+  // this ticket makes). `projects` is left untouched on failure so a retry
+  // that also fails doesn't wipe a previously-successful list from view.
+  const [error, setError] = useState(false)
   const [search, setSearch] = useState("")
   const [createOpen, setCreateOpen] = useState(false)
 
   const refresh = useCallback(() => {
     setLoading(true)
+    setError(false)
     projectsApi
       .list()
-      .then(setProjects)
-      .catch(() => setProjects([]))
+      .then((data) => {
+        setProjects(data)
+        setError(false)
+      })
+      .catch(() => setError(true))
       .finally(() => setLoading(false))
   }, [])
 
@@ -289,6 +318,8 @@ export function ProjectsScreen() {
         <ProjectsView
           projects={projects}
           loading={loading}
+          error={error}
+          onRetry={refresh}
           search={search}
           onSearchChange={setSearch}
           onOpen={onOpen}
