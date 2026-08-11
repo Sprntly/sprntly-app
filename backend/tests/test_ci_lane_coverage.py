@@ -131,6 +131,26 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "of that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_ask_project_promotion.py", "RUN_ASK_PROJECT_PROMOTION_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the individual-"
+        "chat memory-promotion hook wired into ask_job_runner.run_ask_job: "
+        "proves a project-scoped ask's completed answer reaches the real "
+        "classifier and writes a correctly-provenanced project_memory_entries "
+        "row, that the scheduled regen loop actually updates summary_md (not "
+        "merely flips stale), and that a small-talk exchange promotes "
+        "nothing. Deterministic backstop: the rest of this file mocks the "
+        "classifier and qa_agent.answer against FakeSupabaseClient and covers "
+        "project_id threading, the non-project no-op (no call/row/cost-line), "
+        "the per-user _load_history regression guard, best-effort failure "
+        "swallowing, and editable/removable provenance in the fast lane; this "
+        "suite is the real-DB/real-LLM proof, run locally against the dev rig "
+        "when touching this hook."
+    ),
+    ("test_ask_project_promotion.py", "ANTHROPIC_API_KEY"): (
+        "Same three live tests as RUN_ASK_PROJECT_PROMOTION_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
 }
 
 
