@@ -101,25 +101,49 @@ def test_query_path_is_deliberately_not_streamed():
 
 
 def test_every_qa_agent_digest_call_site_forwards_the_sink():
-    """`qa_agent` is where the sink was dropped; pin ALL the call sites.
+    """`qa_agent` is where the sink was dropped; pin EVERY call site.
 
-    Counting rather than naming one: the bug was a route that simply did not
-    pass it, so a NEW route added later without the sink is the same defect
-    and must fail here.
+    The bug was a route that simply did not pass the sink, so a NEW route added
+    later without it is the same defect and must fail here.
+
+    PARSED, NOT COUNTED. The first version of this test compared
+    `src.count("call_digest.answer(")` against `src.count("on_delta=on_delta,")`
+    and was VACUOUS: the module has 4 call sites but 10 `on_delta=on_delta,`
+    forwards (most at unrelated routes), so deleting a sink from a call_digest
+    site left 9 >= 4 and the guard still passed. It could not fail on the
+    defect it exists for. Walking the AST names the actual call sites, so a
+    bare one is unmissable.
     """
+    import ast
+
     from app import qa_agent
 
-    src = inspect.getsource(qa_agent)
-    call_sites = src.count("call_digest.answer(")
-    forwards = src.count("on_delta=on_delta,")
+    tree = ast.parse(inspect.getsource(qa_agent))
+    bare: list[int] = []
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (
+            isinstance(fn, ast.Attribute)
+            and fn.attr == "answer"
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == "call_digest"
+        ):
+            continue
+        sites += 1
+        if not any(kw.arg == "on_delta" for kw in node.keywords):
+            bare.append(node.lineno)
 
-    assert call_sites >= 4, (
-        f"expected the known call_digest.answer call sites, found "
-        f"{call_sites} — they moved; update this guard, do not delete it"
+    assert sites >= 4, (
+        f"expected at least the 4 known call_digest.answer call sites, found "
+        f"{sites} — they moved; update this guard rather than deleting it"
     )
-    assert forwards >= call_sites, (
-        f"{call_sites} call_digest.answer call site(s) but only {forwards} "
-        "on_delta forward(s) in the module — a route is dropping the sink"
+    assert not bare, (
+        f"call_digest.answer called without on_delta at qa_agent.py line(s) "
+        f"{bare} — that route publishes no tokens and its answer will land in "
+        "one lump after a minute of spinner"
     )
 
 
